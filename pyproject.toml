@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mgc-v05l-automation"
+version = "0.1.0"
+description = "MGC v0.5l external automation engine scaffold."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.12.0,<3.0.0",
+  "SQLAlchemy>=2.0.0,<3.0.0",
+]
+
+[project.scripts]
+mgc-v05l = "mgc_v05l.app.main:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.0,<9.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mgc_automation", "src/mgc_v05l"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/README.md",
+  "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

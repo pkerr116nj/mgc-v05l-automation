@@ -1,0 +1,2 @@
+mode: "live"
+database_url: "sqlite:///./mgc_v05l.live.sqlite3"

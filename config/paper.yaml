@@ -1,0 +1,2 @@
+mode: "paper"
+database_url: "sqlite:///./mgc_v05l.paper.sqlite3"

@@ -1,0 +1,92 @@
+"""Deterministic paper broker for replay-first execution."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from typing import Optional
+
+from ..domain.enums import OrderIntentType, OrderStatus
+from .order_models import FillEvent, OrderIntent
+
+
+@dataclass(frozen=True)
+class PaperPosition:
+    quantity: int = 0
+    average_price: Optional[Decimal] = None
+
+
+class PaperBroker:
+    """Deterministic paper broker with explicit fill-price inputs."""
+
+    def __init__(self) -> None:
+        self._connected = False
+        self._position = PaperPosition()
+        self._open_order_ids: list[str] = []
+        self._order_status: dict[str, OrderStatus] = {}
+
+    def connect(self) -> None:
+        self._connected = True
+
+    def disconnect(self) -> None:
+        self._connected = False
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def submit_order(self, order_intent: OrderIntent) -> str:
+        broker_order_id = f"paper-{order_intent.order_intent_id}"
+        self._open_order_ids.append(broker_order_id)
+        self._order_status[broker_order_id] = OrderStatus.ACKNOWLEDGED
+        return broker_order_id
+
+    def cancel_order(self, broker_order_id: str) -> None:
+        if broker_order_id in self._open_order_ids:
+            self._open_order_ids.remove(broker_order_id)
+            self._order_status[broker_order_id] = OrderStatus.CANCELLED
+
+    def get_order_status(self, broker_order_id: str) -> dict[str, str]:
+        status = self._order_status.get(broker_order_id, OrderStatus.REJECTED)
+        return {"broker_order_id": broker_order_id, "status": status.value}
+
+    def get_open_orders(self) -> list[str]:
+        return list(self._open_order_ids)
+
+    def get_position(self) -> PaperPosition:
+        return self._position
+
+    def get_account_health(self) -> dict[str, str]:
+        return {"status": "HEALTHY" if self._connected else "DISCONNECTED"}
+
+    def fill_order(self, order_intent: OrderIntent, fill_price: Decimal, fill_timestamp: datetime) -> FillEvent:
+        """Create a deterministic fill event and update the simple paper position."""
+        broker_order_id = f"paper-{order_intent.order_intent_id}"
+        if broker_order_id in self._open_order_ids:
+            self._open_order_ids.remove(broker_order_id)
+        self._order_status[broker_order_id] = OrderStatus.FILLED
+
+        next_quantity = self._next_quantity(order_intent)
+        average_price = fill_price if next_quantity != 0 else None
+        self._position = PaperPosition(quantity=next_quantity, average_price=average_price)
+
+        return FillEvent(
+            order_intent_id=order_intent.order_intent_id,
+            intent_type=order_intent.intent_type,
+            order_status=OrderStatus.FILLED,
+            fill_timestamp=fill_timestamp,
+            fill_price=fill_price,
+            broker_order_id=broker_order_id,
+        )
+
+    def _next_quantity(self, order_intent: OrderIntent) -> int:
+        current_quantity = self._position.quantity
+        if order_intent.intent_type == OrderIntentType.BUY_TO_OPEN:
+            return current_quantity + order_intent.quantity
+        if order_intent.intent_type == OrderIntentType.SELL_TO_OPEN:
+            return current_quantity - order_intent.quantity
+        if order_intent.intent_type == OrderIntentType.SELL_TO_CLOSE:
+            return current_quantity - order_intent.quantity
+        if order_intent.intent_type == OrderIntentType.BUY_TO_CLOSE:
+            return current_quantity + order_intent.quantity
+        raise ValueError(f"Unsupported order intent type: {order_intent.intent_type}")
