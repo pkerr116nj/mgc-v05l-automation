@@ -1,0 +1,14 @@
+{
+  "MGC_QUOTE_EXTERNAL": {
+    "assetMainType": "FUTURE",
+    "assetSubType": "FUTURE",
+    "quote": {
+      "lastPrice": 3125.4,
+      "netChange": 4.2
+    },
+    "reference": {
+      "symbol": "MGC_QUOTE_EXTERNAL",
+      "description": "Micro Gold Futures"
+    }
+  }
+}

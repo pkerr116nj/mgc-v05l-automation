@@ -36,9 +36,8 @@ class LivePollingService:
                 "Fill in the SchwabLivePollingClient once docs are confirmed."
             )
 
-        external_symbol = self._adapter.map_symbol(request.internal_symbol)
-        external_timeframe = self._adapter.map_timeframe(internal_timeframe)
-        raw_records = self._client.poll_live_bars(external_symbol, external_timeframe, request)
+        external_symbol = self._adapter.map_historical_symbol(request.internal_symbol)
+        raw_records = self._client.poll_live_bars(external_symbol, internal_timeframe, request)
         bars = self._adapter.normalize_live_records(
             raw_records,
             request.internal_symbol,
@@ -73,7 +72,6 @@ class LiveStreamService:
                 "Fill in the SchwabLiveStreamClient once docs are confirmed."
             )
 
-        external_symbol = self._adapter.map_symbol(internal_symbol)
-        external_timeframe = self._adapter.map_timeframe(internal_timeframe)
-        raw_records = self._client.subscribe_live_bars(external_symbol, external_timeframe)
+        external_symbol = self._adapter.map_historical_symbol(internal_symbol)
+        raw_records = self._client.subscribe_live_bars(external_symbol, internal_timeframe)
         return self._adapter.normalize_live_records(raw_records, internal_symbol, internal_timeframe, default_is_final=False)

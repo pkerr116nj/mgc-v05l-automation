@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.27.0"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "mgc-v05l-automation"
@@ -21,17 +21,12 @@ dev = [
   "pytest>=8.4.0,<9.0.0",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/mgc_automation", "src/mgc_v05l"]
+[tool.setuptools]
+package-dir = {"" = "src"}
 
-[tool.hatch.build.targets.sdist]
-include = [
-  "/src",
-  "/tests",
-  "/docs",
-  "/README.md",
-  "/pyproject.toml",
-]
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mgc_automation", "mgc_automation.*", "mgc_v05l", "mgc_v05l.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

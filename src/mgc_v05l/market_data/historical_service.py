@@ -1,4 +1,4 @@
-"""Historical backfill scaffolding for Schwab market data."""
+"""Historical backfill service for confirmed Schwab /pricehistory access."""
 
 from __future__ import annotations
 
@@ -25,15 +25,12 @@ class HistoricalBackfillService:
 
     def fetch_bars(self, request: SchwabHistoricalRequest, internal_timeframe: str) -> list[Bar]:
         if self._client is None:
-            raise NotImplementedError(
-                "Schwab historical endpoint integration is pending official API confirmation. "
-                "Fill in the SchwabHistoricalClient once docs are confirmed."
-            )
+            raise NotImplementedError("No Schwab historical client is configured.")
 
-        external_symbol = self._adapter.map_symbol(request.internal_symbol)
-        external_timeframe = self._adapter.map_timeframe(internal_timeframe)
-        raw_records = self._client.fetch_historical_bars(external_symbol, external_timeframe, request)
-        bars = self._adapter.normalize_historical_records(raw_records, request.internal_symbol, internal_timeframe)
+        external_symbol = self._adapter.map_historical_symbol(request.internal_symbol)
+        frequency = self._adapter.resolve_history_frequency(request, internal_timeframe)
+        payload = self._client.fetch_price_history(external_symbol, request, frequency)
+        bars = self._adapter.normalize_pricehistory_response(payload, request.internal_symbol, internal_timeframe)
         self._persist_bars(bars)
         return bars
 

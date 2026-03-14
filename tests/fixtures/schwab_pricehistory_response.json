@@ -1,0 +1,24 @@
+{
+  "symbol": "MGC_EXTERNAL",
+  "empty": false,
+  "previousClose": 100.25,
+  "previousCloseDate": 1741902000000,
+  "candles": [
+    {
+      "open": 100.0,
+      "high": 101.0,
+      "low": 99.5,
+      "close": 100.75,
+      "volume": 120,
+      "datetime": 1741903500000
+    },
+    {
+      "open": 100.75,
+      "high": 101.25,
+      "low": 100.25,
+      "close": 101.0,
+      "volume": 135,
+      "datetime": 1741903800000
+    }
+  ]
+}

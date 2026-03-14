@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The goal of this layer is to add Schwab market-data ingestion without changing the replay-first strategy core or creating a separate internal market-data model.
+This layer adds a real Schwab auth and historical market-data path without changing the replay-first strategy core or introducing a separate strategy-specific market-data model.
 
 Replay remains intact and continues to serve as:
 - deterministic test mode
@@ -13,61 +13,70 @@ Replay remains intact and continues to serve as:
 
 The shared ingestion shape is:
 1. external data source
-2. symbol/timeframe mapping
+2. explicit symbol mapping
 3. raw-response normalization
 4. shared internal `Bar` model
 5. session classification and validation
-6. strategy engine or persistence consumers
+6. persistence and strategy consumers
 
 This means:
-- historical backfill and live ingestion both target the same internal `Bar`
-- replay bars and Schwab bars are intended to look the same once normalized
-- strategy logic does not need a different interface for Schwab data
+- replay bars and Schwab historical bars target the same internal `Bar`
+- the strategy core does not need a separate Schwab-facing interface
+- historical backfill can feed the same persistence and downstream consumers used by replay
 
-## Current Modules
+## Implemented in This Stage
 
-- `src/mgc_v05l/market_data/schwab_models.py`
-  - auth/config placeholders
-  - symbol/timeframe mapping config
-  - raw field mapping config
-  - request and client protocol scaffolding
+- OAuth authorization-code support
+  - auth URL construction
+  - auth-code exchange
+  - refresh-token flow
+  - local token persistence for development
+- confirmed Schwab `GET /pricehistory`
+  - configurable request parameters
+  - epoch-millisecond handling
+  - candle normalization into internal `Bar`
+  - ordering and missing-field validation
+- confirmed Schwab `GET /quotes`
+  - normalized quote results kept outside strategy decisions
+- explicit symbol mapping
+  - internal symbol -> Schwab historical symbol
+  - internal symbol -> Schwab quote symbol
+
+## Key Modules
+
+- `src/mgc_v05l/market_data/schwab_auth.py`
+  - OAuth client
+  - local token store
+  - env-backed auth config loading
+
+- `src/mgc_v05l/market_data/schwab_http.py`
+  - stdlib JSON transport
+  - real `/pricehistory` client
+  - real `/quotes` client
 
 - `src/mgc_v05l/market_data/schwab_adapter.py`
-  - symbol mapping
-  - timeframe mapping
-  - raw payload normalization into internal `Bar` objects
+  - explicit symbol mapping
+  - time normalization
+  - `/pricehistory` candle normalization into internal bars
+  - quote-response normalization
 
 - `src/mgc_v05l/market_data/historical_service.py`
-  - historical backfill service scaffold
+  - historical fetch service with optional bar persistence
 
-- `src/mgc_v05l/market_data/live_feed.py`
-  - live polling service scaffold
-  - live streaming service interface scaffold
+- `src/mgc_v05l/market_data/quote_service.py`
+  - quote inspection path separated from strategy logic
 
-- `src/mgc_v05l/market_data/gateway.py`
-  - shared gateway across replay, historical backfill, and live ingestion
+## Still Placeholder
 
-## Complete vs Placeholder
+- live Schwab polling
+- live Schwab streaming
+- live order execution
+- reconciliation workflow expansion
+- final confirmed MGC futures symbol formatting on Schwab
 
-Complete in this stage:
-- internal adapter boundary
-- mapping layer
-- normalization layer
-- shared `Bar` model targeting
-- historical/live service scaffolding
-- optional persistence hookup for normalized incoming bars
+## Important Constraints
 
-Placeholder pending official Schwab API confirmation:
-- exact auth/token flow
-- exact endpoint names
-- exact raw payload field names
-- exact polling/stream mechanics
-- any transport/client implementation details
-
-## Important Constraint
-
-This stage does not:
-- implement live order execution
-- change strategy entry/exit behavior
-- remove replay support
-- guess undocumented Schwab API specifics
+- strategy entry and exit behavior are unchanged
+- replay support is unchanged
+- experimental causal momentum research is unchanged and still isolated
+- secrets and token files must remain local and uncommitted
