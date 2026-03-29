@@ -1,0 +1,59 @@
+# ATP companion benchmark posture.
+# This file is documentation-oriented and intentionally not wired into legacy
+# settings validation or live runtime behavior.
+#
+# Legacy v0.5l locked baseline remains authoritative for the parity path.
+# This file names and freezes the current replay/paper ATP companion benchmark.
+
+benchmark_name: "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only"
+benchmark_label: "ATP_COMPANION_V1_ASIA_US"
+benchmark_status: "PROMOTED_REPLAY_PAPER_BENCHMARK"
+benchmark_branch: "codex/atp-benchmark-asia-us-london-disabled"
+benchmark_artifacts_dir: "outputs/reports/atp_companion_baseline_v1_asia_us_benchmark"
+tracked_paper_strategy:
+  strategy_id: "atp_companion_v1_asia_us"
+  display_name: "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only"
+  internal_label: "ATP_COMPANION_V1_ASIA_US"
+  environment: "paper"
+  benchmark_designation: "CURRENT_ATP_COMPANION_BENCHMARK"
+  app_visibility: "tracked_strategy"
+  execution_scope: "paper_only"
+  london_runtime_role: "diagnostic_only"
+  runtime_overlay_config: "config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml"
+  runtime_launch_script: "scripts/run_atp_companion_v1_paper_runtime.sh"
+  runtime_stop_script: "scripts/stop_atp_companion_v1_paper_runtime.sh"
+
+baseline_contract: "ATP_V1_OVERLAY"
+scope: "replay_paper_only"
+instrument_scope: "MGC"
+
+retained_legacy_assumptions:
+  replay_first: true
+  sqlite: true
+  vwap_policy: "SESSION_RESET"
+  deterministic_sequential_processing: true
+  fill_driven_state_transitions: true
+  one_position_at_a_time: true
+  legacy_replay_fill_policy_preserved: "NEXT_BAR_OPEN"
+
+atp_overlay_assumptions:
+  context_timeframe: "5m"
+  timing_timeframe: "1m"
+  context_source_of_truth: "completed_5m_bars"
+  executable_timing_scope: "1m_after_5m_entry_eligible"
+  executable_allowed_sessions:
+    - "ASIA"
+    - "US"
+  executable_disabled_sessions:
+    - "LONDON"
+  london_diagnostic_only: true
+  preferred_vwap_price_quality: "VWAP_FAVORABLE"
+  constrained_vwap_price_quality: "VWAP_NEUTRAL"
+  blocked_vwap_price_quality: "VWAP_CHASE_RISK"
+
+not_yet_baseline:
+  promotion_add_logic: false
+  london_re_enable_with_new_model: false
+  exit_redesign: false
+  clustering_controls: false
+  live_submit_expansion: false

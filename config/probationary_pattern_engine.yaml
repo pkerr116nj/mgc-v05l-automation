@@ -1,0 +1,66 @@
+# Probationary live-shadow environment for the currently promoted Pattern Engine v1 branches only.
+mode: "live"
+database_url: "sqlite:///./mgc_v05l.probationary.sqlite3"
+
+max_bars_long: 8
+max_bars_short: 6
+vwap_long_max_bars: 6
+
+enable_bull_snap_longs: false
+enable_first_bull_snap_us_london: false
+enable_us_midday_pause_resume_longs: false
+enable_us_late_pause_resume_longs: true
+enable_us_late_failed_move_reversal_longs: false
+enable_us_late_breakout_retest_hold_longs: false
+enable_asia_early_breakout_retest_hold_longs: false
+enable_asia_early_normal_breakout_retest_hold_longs: true
+enable_asia_late_pause_resume_longs: false
+enable_asia_late_flat_pullback_pause_resume_longs: false
+enable_asia_late_compressed_flat_pullback_pause_resume_longs: false
+
+enable_bear_snap_shorts: false
+enable_us_derivative_bear_shorts: false
+enable_us_derivative_bear_additive_shorts: false
+enable_us_midday_pause_resume_shorts: false
+enable_us_midday_expanded_pause_resume_shorts: false
+enable_us_midday_compressed_pause_resume_shorts: false
+enable_us_midday_compressed_failed_move_reversal_shorts: false
+enable_us_midday_compressed_rebound_failed_move_reversal_shorts: false
+enable_london_late_pause_resume_shorts: false
+enable_asia_early_pause_resume_shorts: true
+enable_asia_early_compressed_pause_resume_shorts: false
+enable_asia_early_expanded_breakout_retest_hold_shorts: false
+
+enable_asia_vwap_longs: false
+
+asia_early_pause_resume_short_max_normalized_curvature: -0.15
+asia_early_pause_resume_short_setup_curvature_flat_threshold: 0.15
+asia_early_pause_resume_short_max_range_expansion_ratio: 1.25
+asia_early_pause_resume_short_require_one_bar_rebound: true
+asia_early_pause_resume_short_require_break_below_prior_1_low: true
+asia_early_pause_resume_short_require_close_below_fast_ema: true
+
+us_late_pause_resume_long_setup_curvature_min: 0.15
+us_late_pause_resume_long_min_resumption_curvature: 0.15
+us_late_pause_resume_long_max_range_expansion_ratio: 1.25
+us_late_pause_resume_long_exclude_1755_carryover: true
+
+asia_early_breakout_retest_hold_breakout_abs_slope_max: 0.20
+asia_early_breakout_retest_hold_breakout_min_range_expansion_ratio: 0.85
+asia_early_breakout_retest_hold_breakout_max_range_expansion_ratio: 1.25
+
+probationary_enforce_approved_branches: true
+probationary_artifacts_dir: "./outputs/probationary_pattern_engine"
+live_poll_interval_seconds: 30
+reconciliation_heartbeat_interval_seconds: 60
+order_lifecycle_watchdog_interval_seconds: 15
+order_ack_timeout_seconds: 30
+order_fill_timeout_seconds: 180
+order_timeout_reconcile_grace_seconds: 30
+order_timeout_retry_limit: 0
+runtime_supervisor_restart_window_seconds: 900
+runtime_supervisor_max_auto_restarts_per_window: 3
+runtime_supervisor_restart_backoff_seconds: 60
+runtime_supervisor_restart_suppression_seconds: 900
+runtime_supervisor_failure_cooldown_seconds: 180
+live_poll_lookback_minutes: 180

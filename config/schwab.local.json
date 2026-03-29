@@ -1,0 +1,225 @@
+{
+  "historical_symbol_map": {
+    "ABBV": "ABBV",
+    "ABT": "ABT",
+    "AVGO  260618P00310000": "AVGO  260618P00310000",
+    "AVGO  260618P00340000": "AVGO  260618P00340000",
+    "MGC": "/MGC",
+    "GC": "/GC",
+    "MES": "/MES",
+    "ES": "/ES",
+    "MNQ": "/MNQ",
+    "NQ": "/NQ",
+    "SPY": "SPY",
+    "QQQ": "QQQ",
+    "TQQQ": "TQQQ",
+    "SQQQ": "SQQQ",
+    "ZT": "/ZT",
+    "ZF": "/ZF",
+    "ZN": "/ZN",
+    "ZB": "/ZB",
+    "ZQ": "/ZQ",
+    "6E": "/6E",
+    "6J": "/6J",
+    "6B": "/6B",
+    "6A": "/6A",
+    "HG": "/HG",
+    "QC": "/QC",
+    "PL": "/PL",
+    "CL": "/CL",
+    "NG": "/NG",
+    "MBT": "/MBT",
+    "NFLX": "NFLX",
+    "SPX   260417P05890000": "SPX   260417P05890000",
+    "SPX   260417P05925000": "SPX   260417P05925000",
+    "SPXW  260325P06525000": "SPXW  260325P06525000",
+    "SPXW  260325P06530000": "SPXW  260325P06530000",
+    "SPXW  260325P06535000": "SPXW  260325P06535000",
+    "SPXW  260325P06545000": "SPXW  260325P06545000",
+    "SPXW  260325P06555000": "SPXW  260325P06555000",
+    "SPY   260402P00635000": "SPY   260402P00635000",
+    "TQQQ  260417P00042000": "TQQQ  260417P00042000",
+    "TQQQ  260417P00044000": "TQQQ  260417P00044000",
+    "YM": "/YM"
+  },
+  "quote_symbol_map": {
+    "ABBV": "ABBV",
+    "ABT": "ABT",
+    "AVGO  260618P00310000": "AVGO  260618P00310000",
+    "AVGO  260618P00340000": "AVGO  260618P00340000",
+    "MGC": "/MGC",
+    "GC": "/GC",
+    "MES": "/MES",
+    "ES": "/ES",
+    "MNQ": "/MNQ",
+    "NQ": "/NQ",
+    "SPY": "SPY",
+    "QQQ": "QQQ",
+    "TQQQ": "TQQQ",
+    "SQQQ": "SQQQ",
+    "ZT": "/ZT",
+    "ZF": "/ZF",
+    "ZN": "/ZN",
+    "ZB": "/ZB",
+    "ZQ": "/ZQ",
+    "6E": "/6E",
+    "6J": "/6J",
+    "6B": "/6B",
+    "6A": "/6A",
+    "HG": "/HG",
+    "QC": "/QC",
+    "PL": "/PL",
+    "CL": "/CL",
+    "NG": "/NG",
+    "MBT": "/MBT",
+    "NFLX": "NFLX",
+    "SPX   260417P05890000": "SPX   260417P05890000",
+    "SPX   260417P05925000": "SPX   260417P05925000",
+    "SPXW  260325P06525000": "SPXW  260325P06525000",
+    "SPXW  260325P06530000": "SPXW  260325P06530000",
+    "SPXW  260325P06535000": "SPXW  260325P06535000",
+    "SPXW  260325P06545000": "SPXW  260325P06545000",
+    "SPXW  260325P06555000": "SPXW  260325P06555000",
+    "SPY   260402P00635000": "SPY   260402P00635000",
+    "TQQQ  260417P00042000": "TQQQ  260417P00042000",
+    "TQQQ  260417P00044000": "TQQQ  260417P00044000",
+    "YM": "/YM"
+  },
+  "market_context_quote_symbols": {
+    "DJIA": "$DJI",
+    "SPX": "$SPX",
+    "NDX": "$NDX",
+    "RUT": "$RUT",
+    "GOLD": "/GC",
+    "VIX": "$VIX"
+  },
+  "treasury_context_quote_symbols": {
+    "3M": "$IRX",
+    "5Y": "$FVX",
+    "10Y": "$TNX",
+    "30Y": "$TYX"
+  },
+  "symbol_metadata": {
+    "MGC": {
+      "symbol_role": "execution",
+      "reference_symbol": "GC",
+      "contract_family": "gold"
+    },
+    "GC": {
+      "symbol_role": "reference",
+      "execution_symbol": "MGC",
+      "contract_family": "gold"
+    },
+    "MES": {
+      "symbol_role": "execution",
+      "reference_symbol": "ES",
+      "contract_family": "equity_index_sp500"
+    },
+    "ES": {
+      "symbol_role": "reference",
+      "execution_symbol": "MES",
+      "contract_family": "equity_index_sp500"
+    },
+    "MNQ": {
+      "symbol_role": "execution",
+      "reference_symbol": "NQ",
+      "contract_family": "equity_index_nasdaq"
+    },
+    "NQ": {
+      "symbol_role": "reference",
+      "execution_symbol": "MNQ",
+      "contract_family": "equity_index_nasdaq"
+    },
+    "ZT": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_2y"
+    },
+    "ZF": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_5y"
+    },
+    "ZN": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_10y"
+    },
+    "ZB": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_30y"
+    },
+    "ZQ": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_fed_funds"
+    },
+    "6E": {
+      "symbol_role": "standalone",
+      "contract_family": "fx_eur_usd"
+    },
+    "6J": {
+      "symbol_role": "standalone",
+      "contract_family": "fx_jpy_usd"
+    },
+    "6B": {
+      "symbol_role": "standalone",
+      "contract_family": "fx_gbp_usd"
+    },
+    "6A": {
+      "symbol_role": "standalone",
+      "contract_family": "fx_aud_usd"
+    },
+    "HG": {
+      "symbol_role": "standalone",
+      "contract_family": "metals_copper"
+    },
+    "QC": {
+      "symbol_role": "standalone",
+      "contract_family": "metals_copper"
+    },
+    "PL": {
+      "symbol_role": "standalone",
+      "contract_family": "metals_platinum"
+    },
+    "CL": {
+      "symbol_role": "standalone",
+      "contract_family": "energy_crude_oil"
+    },
+    "NG": {
+      "symbol_role": "standalone",
+      "contract_family": "energy_natural_gas"
+    },
+    "MBT": {
+      "symbol_role": "standalone",
+      "contract_family": "crypto_bitcoin"
+    },
+    "YM": {
+      "symbol_role": "standalone",
+      "contract_family": "equity_index_dow"
+    }
+  },
+  "timeframe_map": {
+    "1m": {
+      "frequency_type": "minute",
+      "frequency": 1
+    },
+    "5m": {
+      "frequency_type": "minute",
+      "frequency": 5
+    },
+    "10m": {
+      "frequency_type": "minute",
+      "frequency": 10
+    },
+    "15m": {
+      "frequency_type": "minute",
+      "frequency": 15
+    },
+    "30m": {
+      "frequency_type": "minute",
+      "frequency": 30
+    },
+    "1440m": {
+      "frequency_type": "daily",
+      "frequency": 1
+    }
+  },
+  "quotes_symbol_query_param": "symbols"
+}

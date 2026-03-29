@@ -1,0 +1,9 @@
+pydantic<3.0.0,>=2.12.0
+SQLAlchemy<3.0.0,>=2.0.0
+
+[dev]
+pytest<9.0.0,>=8.4.0
+
+[research]
+duckdb<2.0.0,>=1.1.0
+pyarrow<20.0.0,>=15.0.0

@@ -1,0 +1,4 @@
+use_long_fast_ema_exit: true
+use_short_fast_ema_exit: true
+use_long_time_exit: false
+use_short_time_exit: false
