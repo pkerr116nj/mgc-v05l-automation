@@ -17,6 +17,7 @@ from .schwab_models import (
     SchwabQuoteResult,
     TimestampSemantics,
 )
+from .timeframes import normalize_timeframe_label, timeframe_minutes
 
 
 class SchwabMarketDataAdapter:
@@ -45,6 +46,7 @@ class SchwabMarketDataAdapter:
             raise ValueError(f"No Schwab quote symbol mapping configured for {internal_symbol!r}.") from exc
 
     def map_timeframe(self, internal_timeframe: str) -> SchwabPriceHistoryFrequency:
+        internal_timeframe = normalize_timeframe_label(internal_timeframe)
         try:
             return self._config.timeframe_map[internal_timeframe]
         except KeyError as exc:
@@ -60,7 +62,7 @@ class SchwabMarketDataAdapter:
                 frequency_type=request.frequency_type,
                 frequency=request.frequency,
             )
-        return self._config.timeframe_map.get(internal_timeframe)
+        return self._config.timeframe_map.get(normalize_timeframe_label(internal_timeframe))
 
     def normalize_pricehistory_response(
         self,
@@ -105,6 +107,7 @@ class SchwabMarketDataAdapter:
             for record in records
         ]
         bars = sorted(bars, key=lambda bar: bar.end_ts)
+        bars = self._dedupe_exact_live_bars(bars)
         self._validate_bar_sequence(bars)
         return bars
 
@@ -116,7 +119,7 @@ class SchwabMarketDataAdapter:
         results: list[SchwabQuoteResult] = []
         for internal_symbol in internal_symbols:
             external_symbol = self.map_quote_symbol(internal_symbol)
-            raw_payload = payload.get(external_symbol)
+            raw_payload = _resolve_quote_payload(payload, external_symbol)
             if not isinstance(raw_payload, dict):
                 raise ValueError(f"Schwab /quotes response did not include payload for {external_symbol!r}.")
             results.append(
@@ -162,16 +165,23 @@ class SchwabMarketDataAdapter:
         if field_map.is_final_field is not None and field_map.is_final_field in record:
             is_final = _coerce_bool(record[field_map.is_final_field])
 
+        open_price = Decimal(str(record[field_map.open_field]))
+        high_price = Decimal(str(record[field_map.high_field]))
+        low_price = Decimal(str(record[field_map.low_field]))
+        close_price = Decimal(str(record[field_map.close_field]))
+        envelope_high = max(open_price, high_price, low_price, close_price)
+        envelope_low = min(open_price, high_price, low_price, close_price)
+
         bar = Bar(
             bar_id=build_bar_id(internal_symbol, internal_timeframe, end_ts),
             symbol=internal_symbol,
             timeframe=internal_timeframe,
             start_ts=start_ts,
             end_ts=end_ts,
-            open=Decimal(str(record[field_map.open_field])),
-            high=Decimal(str(record[field_map.high_field])),
-            low=Decimal(str(record[field_map.low_field])),
-            close=Decimal(str(record[field_map.close_field])),
+            open=open_price,
+            high=envelope_high,
+            low=envelope_low,
+            close=close_price,
             volume=int(record[field_map.volume_field]),
             is_final=is_final,
             session_asia=False,
@@ -205,11 +215,20 @@ class SchwabMarketDataAdapter:
                 raise ValueError("Normalized Schwab bars must be strictly increasing by end timestamp.")
             previous_end_ts = bar.end_ts
 
+    @staticmethod
+    def _dedupe_exact_live_bars(bars: Sequence[Bar]) -> list[Bar]:
+        deduped: list[Bar] = []
+        for bar in bars:
+            if deduped and bar.bar_id == deduped[-1].bar_id:
+                if bar == deduped[-1]:
+                    continue
+                raise ValueError("Normalized Schwab live bars contained conflicting duplicate end timestamps.")
+            deduped.append(bar)
+        return deduped
+
 
 def _timeframe_duration(internal_timeframe: str) -> timedelta:
-    if internal_timeframe != "5m":
-        raise ValueError(f"Unsupported internal timeframe for this build: {internal_timeframe}")
-    return timedelta(minutes=5)
+    return timedelta(minutes=timeframe_minutes(internal_timeframe))
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -231,6 +250,45 @@ def _extract_dict(payload: dict[str, Any], key: str) -> Optional[dict[str, Any]]
     if not isinstance(value, dict):
         raise ValueError(f"Expected Schwab quote field {key!r} to be an object.")
     return value
+
+
+def _resolve_quote_payload(payload: dict[str, Any], external_symbol: str) -> dict[str, Any] | None:
+    if external_symbol in payload and isinstance(payload[external_symbol], dict):
+        return payload[external_symbol]
+
+    candidate_keys = _quote_symbol_aliases(external_symbol)
+    for candidate in candidate_keys:
+        if candidate in payload and isinstance(payload[candidate], dict):
+            return payload[candidate]
+
+    for key, value in payload.items():
+        if not isinstance(value, dict):
+            continue
+        reference = value.get("reference")
+        if not isinstance(reference, dict):
+            reference = {}
+        reference_symbol = reference.get("symbol")
+        reference_product = reference.get("product")
+        payload_symbol = value.get("symbol")
+        if isinstance(reference_symbol, str) and reference_symbol in candidate_keys:
+            return value
+        if isinstance(reference_product, str) and reference_product in candidate_keys:
+            return value
+        if isinstance(payload_symbol, str) and payload_symbol in candidate_keys:
+            return value
+        if isinstance(key, str) and key in candidate_keys:
+            return value
+    return None
+
+
+def _quote_symbol_aliases(external_symbol: str) -> set[str]:
+    aliases = {external_symbol}
+    stripped = external_symbol.lstrip("/")
+    if stripped:
+        aliases.add(stripped)
+        aliases.add(f"/{stripped}")
+    aliases.add(external_symbol.replace("/", ""))
+    return {alias for alias in aliases if alias}
 
 
 def _require_fields(record: dict[str, Any], required_fields: Sequence[str]) -> None:

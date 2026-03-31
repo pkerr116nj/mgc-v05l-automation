@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -136,6 +136,8 @@ class SchwabMarketDataConfig:
     quote_symbol_map: dict[str, str]
     timeframe_map: dict[str, SchwabPriceHistoryFrequency]
     field_map: SchwabBarFieldMap
+    market_context_quote_symbols: dict[str, str] = field(default_factory=dict)
+    treasury_context_quote_symbols: dict[str, str] = field(default_factory=dict)
     market_data_base_url: str = "https://api.schwabapi.com/marketdata/v1"
     quotes_symbol_query_param: str = "symbols"
 

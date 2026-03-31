@@ -1,8 +1,9 @@
 """Trade-state helpers."""
 
 from datetime import datetime
+from decimal import Decimal
 
-from ..domain.enums import LongEntryFamily, PositionSide, StrategyStatus
+from ..domain.enums import LongEntryFamily, PositionSide, ShortEntryFamily, StrategyStatus
 from ..domain.models import StrategyState
 
 
@@ -37,7 +38,14 @@ def build_initial_state(now: datetime) -> StrategyState:
         entries_enabled=True,
         exits_enabled=True,
         operator_halt=False,
+        same_underlying_entry_hold=False,
+        same_underlying_hold_reason=None,
         reconcile_required=False,
         fault_code=None,
         updated_at=now,
+        short_entry_family=ShortEntryFamily.NONE,
+        short_entry_source=None,
+        additive_short_max_favorable_excursion=Decimal("0"),
+        additive_short_peak_threshold_reached=False,
+        additive_short_giveback_from_peak=Decimal("0"),
     )

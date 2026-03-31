@@ -13,6 +13,7 @@ from .schwab_models import (
     SchwabPriceHistoryFrequency,
     TimestampSemantics,
 )
+from .timeframes import normalize_timeframe_label
 
 
 def load_schwab_market_data_config(path: str | Path | None = None) -> SchwabMarketDataConfig:
@@ -22,7 +23,7 @@ def load_schwab_market_data_config(path: str | Path | None = None) -> SchwabMark
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
 
     timeframe_map = {
-        internal_timeframe: SchwabPriceHistoryFrequency(
+        normalize_timeframe_label(internal_timeframe): SchwabPriceHistoryFrequency(
             frequency_type=str(spec["frequency_type"]),
             frequency=int(spec["frequency"]),
         )
@@ -46,5 +47,11 @@ def load_schwab_market_data_config(path: str | Path | None = None) -> SchwabMark
             is_final_field=None,
             timestamp_semantics=TimestampSemantics.END,
         ),
+        market_context_quote_symbols={
+            str(key): str(value) for key, value in payload.get("market_context_quote_symbols", {}).items()
+        },
+        treasury_context_quote_symbols={
+            str(key): str(value) for key, value in payload.get("treasury_context_quote_symbols", {}).items()
+        },
         quotes_symbol_query_param=str(payload.get("quotes_symbol_query_param", "symbols")),
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -30,13 +31,28 @@ class SchwabTokenStore:
     def load(self) -> Optional[SchwabTokenSet]:
         if not self._path.exists():
             return None
-        payload = json.loads(self._path.read_text(encoding="utf-8"))
+        payload = self.load_payload()
         return SchwabTokenSet.from_json_dict(payload)
 
-    def save(self, token_set: SchwabTokenSet) -> None:
+    def load_payload(self) -> dict:
+        if not self._path.exists():
+            raise FileNotFoundError(self._path)
+        return json.loads(self._path.read_text(encoding="utf-8"))
+
+    def load_metadata(self) -> Optional[dict]:
+        if not self._path.exists():
+            return None
+        payload = self.load_payload()
+        metadata = payload.get("_meta")
+        return metadata if isinstance(metadata, dict) else None
+
+    def save(self, token_set: SchwabTokenSet, auth_metadata: dict | None = None) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        payload = token_set.to_json_dict()
+        if auth_metadata:
+            payload["_meta"] = auth_metadata
         self._path.write_text(
-            json.dumps(token_set.to_json_dict(), indent=2, sort_keys=True),
+            json.dumps(payload, indent=2, sort_keys=True),
             encoding="utf-8",
         )
 
@@ -71,11 +87,12 @@ class SchwabOAuthClient:
                     "grant_type": "authorization_code",
                     "code": normalized_code,
                     "redirect_uri": self.config.callback_url,
+                    "client_id": self.config.app_key,
                 },
             )
         )
         token_set = SchwabTokenSet.from_token_response(payload)
-        self.token_store.save(token_set)
+        self.token_store.save(token_set, auth_metadata=build_auth_metadata(self.config))
         return token_set
 
     def refresh_token(self, refresh_token: Optional[str] = None) -> SchwabTokenSet:
@@ -94,6 +111,7 @@ class SchwabOAuthClient:
                 form={
                     "grant_type": "refresh_token",
                     "refresh_token": token_to_refresh,
+                    "client_id": self.config.app_key,
                 },
             )
         )
@@ -107,7 +125,7 @@ class SchwabOAuthClient:
                 scope=token_set.scope,
                 issued_at=token_set.issued_at,
             )
-        self.token_store.save(token_set)
+        self.token_store.save(token_set, auth_metadata=build_auth_metadata(self.config))
         return token_set
 
     def get_access_token(self) -> str:
@@ -139,6 +157,20 @@ def _normalize_authorization_code(code: str) -> str:
     return unquote(normalized)
 
 
+def build_auth_metadata(config: SchwabAuthConfig) -> dict[str, str]:
+    return {
+        "client_key_fingerprint": _fingerprint_value(config.app_key),
+        "client_secret_fingerprint": _fingerprint_value(config.app_secret),
+        "callback_url": config.callback_url,
+        "token_store_path": str(config.token_store_path),
+    }
+
+
+def _fingerprint_value(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
 def load_schwab_auth_config_from_env(token_file: str | Path | None = None) -> SchwabAuthConfig:
     """Load required Schwab auth fields from environment variables."""
     app_key = os.environ.get("SCHWAB_APP_KEY")
@@ -151,10 +183,15 @@ def load_schwab_auth_config_from_env(token_file: str | Path | None = None) -> Sc
 
     if token_file is None:
         token_file = os.environ.get("SCHWAB_TOKEN_FILE", ".local/schwab/tokens.json")
+    token_path = Path(token_file).expanduser()
+    if not token_path.is_absolute():
+        repo_root = Path(os.environ.get("REPO_ROOT", os.getcwd()))
+        token_path = repo_root / token_path
+    resolved_token_file = token_path.resolve(strict=False)
 
     return SchwabAuthConfig(
         app_key=app_key,
         app_secret=app_secret,
         callback_url=callback_url,
-        token_store_path=Path(token_file),
+        token_store_path=resolved_token_file,
     )

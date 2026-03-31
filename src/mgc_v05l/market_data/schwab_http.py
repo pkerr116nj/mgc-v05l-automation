@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from typing import Any, Optional, Sequence
 from urllib.error import HTTPError, URLError
@@ -45,8 +46,22 @@ class UrllibJsonTransport(JsonHttpTransport):
             ) as response:
                 payload = response.read().decode("utf-8")
         except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise SchwabHttpError(f"Schwab HTTP error {exc.code}: {detail}") from exc
+            raw = exc.read()
+            headers = dict(exc.headers.items())
+            body_bytes = raw
+            encoding = headers.get("Content-Encoding", "")
+            if "gzip" in encoding.lower():
+                try:
+                    body_bytes = gzip.decompress(raw)
+                except Exception:
+                    body_bytes = raw
+            try:
+                detail = body_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                detail = repr(body_bytes[:500])
+            raise SchwabHttpError(
+                f"Schwab HTTP error {exc.code}. Headers={headers}. Body={detail}"
+            ) from exc
         except URLError as exc:
             raise SchwabHttpError(f"Schwab transport error: {exc}") from exc
 
