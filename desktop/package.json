@@ -1,0 +1,68 @@
+{
+  "name": "mgc-operator-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Electron operator console for the MGC trading runtime.",
+  "main": "dist/main/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "typecheck:renderer": "tsc -p tsconfig.json --noEmit",
+    "typecheck:main": "tsc -p tsconfig.node.json --noEmit",
+    "typecheck": "npm run typecheck:renderer && npm run typecheck:main",
+    "lint": "npm run typecheck",
+    "build:main": "tsc -p tsconfig.node.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "validate": "npm run lint && npm run build",
+    "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.node.json --watch\" \"wait-on http://127.0.0.1:5173 && electron dist/main/main.js\"",
+    "dev:launch": "npm run build && npm start",
+    "start": "electron dist/main/main.js",
+    "dist": "npm run build && electron-builder",
+    "package:local": "npm run build && node scripts/package_local_app.js",
+    "package:dir": "npm run build && electron-builder --dir",
+    "package:mac": "npm run build && electron-builder --mac dir",
+    "package:open": "node scripts/open_packaged_app.js"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "concurrently": "^9.1.2",
+    "electron": "^35.1.4",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.2",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.mgc.operator.desktop",
+    "productName": "MGC Operator",
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "extraMetadata": {
+      "main": "dist/main/main.js"
+    },
+    "mac": {
+      "category": "public.app-category.finance"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
+  }
+}

@@ -13,8 +13,33 @@ def resolve_entries(signal_packet: SignalPacket, state: StrategyState, settings:
         settings.anti_churn_bars
     )
 
-    long_entry_raw = signal_packet.first_bull_snap_turn or signal_packet.asia_vwap_long_signal
-    short_entry_raw = signal_packet.first_bear_snap_turn
+    long_entry_raw = (
+        signal_packet.first_bull_snap_turn
+        or signal_packet.asia_vwap_long_signal
+        or signal_packet.midday_pause_resume_long_turn_candidate
+        or signal_packet.us_late_breakout_retest_hold_long_turn_candidate
+        or signal_packet.us_late_failed_move_reversal_long_turn_candidate
+        or signal_packet.us_late_pause_resume_long_turn_candidate
+        or signal_packet.asia_early_breakout_retest_hold_long_turn_candidate
+        or signal_packet.asia_early_normal_breakout_retest_hold_long_turn_candidate
+        or signal_packet.asia_late_pause_resume_long_turn_candidate
+        or signal_packet.asia_late_flat_pullback_pause_resume_long_turn_candidate
+        or signal_packet.asia_late_compressed_flat_pullback_pause_resume_long_turn_candidate
+    )
+    short_entry_raw = (
+        signal_packet.first_bear_snap_turn
+        or signal_packet.derivative_bear_turn_candidate
+        or signal_packet.derivative_bear_additive_turn_candidate
+        or signal_packet.midday_compressed_rebound_failed_move_reversal_short_turn_candidate
+        or signal_packet.midday_compressed_failed_move_reversal_short_turn_candidate
+        or signal_packet.midday_expanded_pause_resume_short_turn_candidate
+        or signal_packet.midday_compressed_pause_resume_short_turn_candidate
+        or signal_packet.midday_pause_resume_short_turn_candidate
+        or signal_packet.london_late_pause_resume_short_turn_candidate
+        or signal_packet.asia_early_expanded_breakout_retest_hold_short_turn_candidate
+        or signal_packet.asia_early_compressed_pause_resume_short_turn_candidate
+        or signal_packet.asia_early_pause_resume_short_turn_candidate
+    )
 
     long_entry = long_entry_raw and (
         (not recent_long_setup) or signal_packet.first_bull_snap_turn or signal_packet.asia_vwap_long_signal
@@ -27,8 +52,51 @@ def resolve_entries(signal_packet: SignalPacket, state: StrategyState, settings:
             long_entry_source = "asiaVWAPLongSignal"
         elif signal_packet.first_bull_snap_turn:
             long_entry_source = "firstBullSnapTurn"
+        elif signal_packet.midday_pause_resume_long_turn_candidate:
+            long_entry_source = "usMiddayPauseResumeLongTurn"
+        elif signal_packet.us_late_breakout_retest_hold_long_turn_candidate:
+            long_entry_source = "usLateBreakoutRetestHoldTurn"
+        elif signal_packet.us_late_failed_move_reversal_long_turn_candidate:
+            long_entry_source = "usLateFailedMoveReversalLongTurn"
+        elif signal_packet.us_late_pause_resume_long_turn_candidate:
+            long_entry_source = "usLatePauseResumeLongTurn"
+        elif signal_packet.asia_early_normal_breakout_retest_hold_long_turn_candidate:
+            long_entry_source = "asiaEarlyNormalBreakoutRetestHoldTurn"
+        elif signal_packet.asia_early_breakout_retest_hold_long_turn_candidate:
+            long_entry_source = "asiaEarlyBreakoutRetestHoldTurn"
+        elif signal_packet.asia_late_compressed_flat_pullback_pause_resume_long_turn_candidate:
+            long_entry_source = "asiaLateCompressedFlatPullbackPauseResumeLongTurn"
+        elif signal_packet.asia_late_flat_pullback_pause_resume_long_turn_candidate:
+            long_entry_source = "asiaLateFlatPullbackPauseResumeLongTurn"
+        elif signal_packet.asia_late_pause_resume_long_turn_candidate:
+            long_entry_source = "asiaLatePauseResumeLongTurn"
 
-    short_entry_source = "firstBearSnapTurn" if short_entry else None
+    short_entry_source = None
+    if short_entry:
+        if signal_packet.first_bear_snap_turn:
+            short_entry_source = "firstBearSnapTurn"
+        elif signal_packet.derivative_bear_turn_candidate:
+            short_entry_source = "usDerivativeBearTurn"
+        elif signal_packet.derivative_bear_additive_turn_candidate:
+            short_entry_source = "usDerivativeBearAdditiveTurn"
+        elif signal_packet.midday_compressed_rebound_failed_move_reversal_short_turn_candidate:
+            short_entry_source = "usMiddayCompressedReboundFailedMoveReversalShortTurn"
+        elif signal_packet.midday_compressed_failed_move_reversal_short_turn_candidate:
+            short_entry_source = "usMiddayCompressedFailedMoveReversalShortTurn"
+        elif signal_packet.midday_expanded_pause_resume_short_turn_candidate:
+            short_entry_source = "usMiddayExpandedPauseResumeShortTurn"
+        elif signal_packet.midday_compressed_pause_resume_short_turn_candidate:
+            short_entry_source = "usMiddayCompressedPauseResumeShortTurn"
+        elif signal_packet.midday_pause_resume_short_turn_candidate:
+            short_entry_source = "usMiddayPauseResumeShortTurn"
+        elif signal_packet.london_late_pause_resume_short_turn_candidate:
+            short_entry_source = "londonLatePauseResumeShortTurn"
+        elif signal_packet.asia_early_expanded_breakout_retest_hold_short_turn_candidate:
+            short_entry_source = "asiaEarlyExpandedBreakoutRetestHoldShortTurn"
+        elif signal_packet.asia_early_compressed_pause_resume_short_turn_candidate:
+            short_entry_source = "asiaEarlyCompressedPauseResumeShortTurn"
+        elif signal_packet.asia_early_pause_resume_short_turn_candidate:
+            short_entry_source = "asiaEarlyPauseResumeShortTurn"
 
     return SignalPacket(
         bar_id=signal_packet.bar_id,
@@ -57,6 +125,15 @@ def resolve_entries(signal_packet: SignalPacket, state: StrategyState, settings:
         asia_acceptance_close_vwap_ok=signal_packet.asia_acceptance_close_vwap_ok,
         asia_acceptance_bar_ok=signal_packet.asia_acceptance_bar_ok,
         asia_vwap_long_signal=signal_packet.asia_vwap_long_signal,
+        midday_pause_resume_long_turn_candidate=signal_packet.midday_pause_resume_long_turn_candidate,
+        us_late_breakout_retest_hold_long_turn_candidate=signal_packet.us_late_breakout_retest_hold_long_turn_candidate,
+        us_late_failed_move_reversal_long_turn_candidate=signal_packet.us_late_failed_move_reversal_long_turn_candidate,
+        us_late_pause_resume_long_turn_candidate=signal_packet.us_late_pause_resume_long_turn_candidate,
+        asia_early_breakout_retest_hold_long_turn_candidate=signal_packet.asia_early_breakout_retest_hold_long_turn_candidate,
+        asia_early_normal_breakout_retest_hold_long_turn_candidate=signal_packet.asia_early_normal_breakout_retest_hold_long_turn_candidate,
+        asia_late_pause_resume_long_turn_candidate=signal_packet.asia_late_pause_resume_long_turn_candidate,
+        asia_late_flat_pullback_pause_resume_long_turn_candidate=signal_packet.asia_late_flat_pullback_pause_resume_long_turn_candidate,
+        asia_late_compressed_flat_pullback_pause_resume_long_turn_candidate=signal_packet.asia_late_compressed_flat_pullback_pause_resume_long_turn_candidate,
         bear_snap_up_stretch_ok=signal_packet.bear_snap_up_stretch_ok,
         bear_snap_range_ok=signal_packet.bear_snap_range_ok,
         bear_snap_body_ok=signal_packet.bear_snap_body_ok,
@@ -67,6 +144,23 @@ def resolve_entries(signal_packet: SignalPacket, state: StrategyState, settings:
         bear_snap_raw=signal_packet.bear_snap_raw,
         bear_snap_turn_candidate=signal_packet.bear_snap_turn_candidate,
         first_bear_snap_turn=signal_packet.first_bear_snap_turn,
+        derivative_bear_slope_ok=signal_packet.derivative_bear_slope_ok,
+        derivative_bear_curvature_ok=signal_packet.derivative_bear_curvature_ok,
+        derivative_bear_turn_candidate=signal_packet.derivative_bear_turn_candidate,
+        derivative_bear_additive_turn_candidate=signal_packet.derivative_bear_additive_turn_candidate,
+        midday_compressed_failed_move_reversal_short_turn_candidate=(
+            signal_packet.midday_compressed_failed_move_reversal_short_turn_candidate
+        ),
+        midday_compressed_rebound_failed_move_reversal_short_turn_candidate=(
+            signal_packet.midday_compressed_rebound_failed_move_reversal_short_turn_candidate
+        ),
+        midday_expanded_pause_resume_short_turn_candidate=signal_packet.midday_expanded_pause_resume_short_turn_candidate,
+        midday_compressed_pause_resume_short_turn_candidate=signal_packet.midday_compressed_pause_resume_short_turn_candidate,
+        midday_pause_resume_short_turn_candidate=signal_packet.midday_pause_resume_short_turn_candidate,
+        london_late_pause_resume_short_turn_candidate=signal_packet.london_late_pause_resume_short_turn_candidate,
+        asia_early_expanded_breakout_retest_hold_short_turn_candidate=signal_packet.asia_early_expanded_breakout_retest_hold_short_turn_candidate,
+        asia_early_compressed_pause_resume_short_turn_candidate=signal_packet.asia_early_compressed_pause_resume_short_turn_candidate,
+        asia_early_pause_resume_short_turn_candidate=signal_packet.asia_early_pause_resume_short_turn_candidate,
         long_entry_raw=long_entry_raw,
         short_entry_raw=short_entry_raw,
         recent_long_setup=recent_long_setup,

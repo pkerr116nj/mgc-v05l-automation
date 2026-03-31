@@ -25,6 +25,7 @@ class PaperBroker:
         self._position = PaperPosition()
         self._open_order_ids: list[str] = []
         self._order_status: dict[str, OrderStatus] = {}
+        self._last_fill_timestamp: Optional[datetime] = None
 
     def connect(self) -> None:
         self._connected = True
@@ -59,12 +60,38 @@ class PaperBroker:
     def get_account_health(self) -> dict[str, str]:
         return {"status": "HEALTHY" if self._connected else "DISCONNECTED"}
 
+    def restore_state(
+        self,
+        *,
+        position: PaperPosition,
+        open_order_ids: list[str],
+        order_status: dict[str, OrderStatus],
+        last_fill_timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Restore deterministic broker state from persisted runtime artifacts."""
+        self._position = position
+        self._open_order_ids = list(open_order_ids)
+        self._order_status = dict(order_status)
+        self._last_fill_timestamp = last_fill_timestamp
+
+    def snapshot_state(self) -> dict[str, object]:
+        """Return a serializable broker snapshot for reconciliation."""
+        return {
+            "connected": self._connected,
+            "position_quantity": self._position.quantity,
+            "average_price": str(self._position.average_price) if self._position.average_price is not None else None,
+            "open_order_ids": list(self._open_order_ids),
+            "order_status": {key: status.value for key, status in self._order_status.items()},
+            "last_fill_timestamp": self._last_fill_timestamp.isoformat() if self._last_fill_timestamp is not None else None,
+        }
+
     def fill_order(self, order_intent: OrderIntent, fill_price: Decimal, fill_timestamp: datetime) -> FillEvent:
         """Create a deterministic fill event and update the simple paper position."""
         broker_order_id = f"paper-{order_intent.order_intent_id}"
         if broker_order_id in self._open_order_ids:
             self._open_order_ids.remove(broker_order_id)
         self._order_status[broker_order_id] = OrderStatus.FILLED
+        self._last_fill_timestamp = fill_timestamp
 
         next_quantity = self._next_quantity(order_intent)
         average_price = fill_price if next_quantity != 0 else None

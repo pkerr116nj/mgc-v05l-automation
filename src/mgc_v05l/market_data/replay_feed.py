@@ -13,6 +13,17 @@ from ..domain.models import Bar
 from .bar_models import build_bar_id
 
 REPLAY_DATA_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
+REPLAY_DATA_COLUMNS_WITH_SYMBOL = ("symbol", "timestamp", "open", "high", "low", "close", "volume")
+REPLAY_DATA_COLUMNS_WITH_SYMBOL_AND_TIMEFRAME = (
+    "symbol",
+    "timeframe",
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+)
 
 
 class ReplayFeed:
@@ -25,12 +36,20 @@ class ReplayFeed:
         path = Path(csv_path)
         with path.open("r", newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
-            if reader.fieldnames != list(REPLAY_DATA_COLUMNS):
+            fieldnames = tuple(reader.fieldnames or ())
+            if fieldnames not in (
+                REPLAY_DATA_COLUMNS,
+                REPLAY_DATA_COLUMNS_WITH_SYMBOL,
+                REPLAY_DATA_COLUMNS_WITH_SYMBOL_AND_TIMEFRAME,
+            ):
                 raise ValueError(
-                    "Replay CSV columns must exactly match: timestamp,open,high,low,close,volume"
+                    "Replay CSV columns must exactly match one of: "
+                    "timestamp,open,high,low,close,volume | "
+                    "symbol,timestamp,open,high,low,close,volume | "
+                    "symbol,timeframe,timestamp,open,high,low,close,volume"
                 )
             bars = [self._row_to_bar(row) for row in reader]
-        bars.sort(key=lambda bar: bar.end_ts)
+        bars.sort(key=lambda bar: (bar.end_ts, bar.symbol, bar.timeframe, bar.bar_id))
         return bars
 
     def iter_csv(self, csv_path: str | Path) -> Iterable[Bar]:
@@ -38,12 +57,15 @@ class ReplayFeed:
             yield bar
 
     def _row_to_bar(self, row: dict[str, str]) -> Bar:
+        symbol = str(row.get("symbol") or self._settings.symbol).strip().upper()
+        timeframe = str(row.get("timeframe") or self._settings.timeframe).strip()
         end_ts = self._parse_timestamp(row["timestamp"])
-        start_ts = end_ts - timedelta(minutes=5)
+        minutes = int(timeframe.removesuffix("m"))
+        start_ts = end_ts - timedelta(minutes=minutes)
         return Bar(
-            bar_id=build_bar_id(self._settings.symbol, self._settings.timeframe, end_ts),
-            symbol=self._settings.symbol,
-            timeframe=self._settings.timeframe,
+            bar_id=build_bar_id(symbol, timeframe, end_ts),
+            symbol=symbol,
+            timeframe=timeframe,
             start_ts=start_ts,
             end_ts=end_ts,
             open=Decimal(row["open"]),

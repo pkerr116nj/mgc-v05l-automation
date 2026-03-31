@@ -158,6 +158,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Strategy config file path. Used for internal timezone and internal symbol validation.",
     )
+
+    dashboard_parser = subparsers.add_parser(
+        "operator-dashboard",
+        help="Run the local operator dashboard for shadow and paper environments.",
+    )
+    dashboard_parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host.")
+    dashboard_parser.add_argument("--port", type=int, default=8790, help="Preferred dashboard port.")
+    dashboard_parser.add_argument(
+        "--info-file",
+        default=None,
+        help="Optional JSON file to write the final bound dashboard URL.",
+    )
+    dashboard_parser.add_argument(
+        "--allow-port-fallback",
+        action="store_true",
+        help="If the preferred port is unavailable, search upward for the next open port.",
+    )
     return parser
 
 
@@ -292,6 +309,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"quotes": _json_ready(quotes)}, sort_keys=True))
         return 0
 
+    if args.command == "operator-dashboard":
+        from .operator_dashboard import run_operator_dashboard_server
+
+        run_operator_dashboard_server(
+            host=args.host,
+            port=args.port,
+            info_file=args.info_file,
+            allow_port_fallback=args.allow_port_fallback,
+        )
+        return 0
+
     parser.error(f"Unsupported command: {args.command}")
     return 2
 
@@ -346,3 +374,7 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

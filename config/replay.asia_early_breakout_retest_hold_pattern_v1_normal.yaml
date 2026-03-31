@@ -1,0 +1,51 @@
+max_bars_long: 8
+max_bars_short: 6
+vwap_long_max_bars: 6
+# Pattern Engine v1 probationary promotion:
+# asiaEarlyPauseResumeShortTurn is included in the baseline with setup curvature = CURVATURE_FLAT.
+# Known arbitration note: on 2025-12-01 18:50 ET this branch held the active short slot and
+# prevented an overlapping firstBullSnapTurn long from opening. That displaced long was a
+# losing LONG_INTEGRITY_FAIL trade (-21.0), so this is treated as an intentional same-position
+# precedence outcome rather than unexplained replay drift.
+# Pattern Engine v1 probationary promotion:
+# usLatePauseResumeLongTurn is included in the baseline with setup curvature = CURVATURE_POS.
+# Operator rule: exclude US_LATE signals whose replay fill would occur on the 17:55 ET
+# post-break next-bar open. After removing those carryover cases, the branch remained
+# economically strong, all added value stayed in the US session, and no existing family
+# displacement or collision effect appeared.
+us_derivative_bear_max_normalized_curvature: -0.30
+us_derivative_bear_window_start: "09:00"
+us_derivative_bear_window_end: "10:30"
+us_derivative_bear_max_distance_below_vwap_atr: 1.80
+enable_us_derivative_bear_additive_shorts: true
+us_derivative_bear_additive_min_normalized_slope: -0.50
+us_derivative_bear_additive_max_normalized_slope: 0.10
+us_derivative_bear_additive_min_normalized_curvature: -0.50
+us_derivative_bear_additive_max_normalized_curvature: -0.10
+us_derivative_bear_additive_allow_phase_cash_open_impulse: false
+us_derivative_bear_additive_allow_phase_open_late: true
+enable_us_midday_pause_resume_shorts: true
+us_midday_pause_resume_short_min_normalized_slope: -0.10
+us_midday_pause_resume_short_max_normalized_slope: 0.10
+us_midday_pause_resume_short_min_normalized_curvature: -0.50
+us_midday_pause_resume_short_max_normalized_curvature: -0.10
+us_midday_pause_resume_short_max_range_expansion_ratio: 1.25
+us_midday_pause_resume_short_require_one_bar_rebound: true
+us_midday_pause_resume_short_require_prior_3_any_positive_curvature: true
+us_midday_pause_resume_short_require_break_below_prior_1_low: true
+enable_asia_early_pause_resume_shorts: true
+asia_early_pause_resume_short_max_normalized_curvature: -0.15
+asia_early_pause_resume_short_setup_curvature_flat_threshold: 0.15
+asia_early_pause_resume_short_max_range_expansion_ratio: 1.25
+asia_early_pause_resume_short_require_one_bar_rebound: true
+asia_early_pause_resume_short_require_break_below_prior_1_low: true
+asia_early_pause_resume_short_require_close_below_fast_ema: true
+enable_us_late_pause_resume_longs: true
+us_late_pause_resume_long_setup_curvature_min: 0.15
+us_late_pause_resume_long_min_resumption_curvature: 0.15
+us_late_pause_resume_long_max_range_expansion_ratio: 1.25
+us_late_pause_resume_long_exclude_1755_carryover: true
+enable_asia_early_normal_breakout_retest_hold_longs: true
+asia_early_breakout_retest_hold_breakout_abs_slope_max: 0.20
+asia_early_breakout_retest_hold_breakout_min_range_expansion_ratio: 0.85
+asia_early_breakout_retest_hold_breakout_max_range_expansion_ratio: 1.25

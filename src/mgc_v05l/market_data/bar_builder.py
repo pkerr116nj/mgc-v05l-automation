@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
-from ..config_models import StrategySettings
 from ..domain.models import Bar
 from .session_clock import classify_sessions
+
+if TYPE_CHECKING:
+    from ..config_models import StrategySettings
 
 
 class BarBuilder:

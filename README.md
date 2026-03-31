@@ -1,14 +1,28 @@
 # mgc-v05l-automation
 
-External automation engine for MGC v0.5l with a replay-first strategy core, SQLite persistence, and a Schwab market-data integration path that normalizes into the same internal bar model used by replay.
+Research-first trading strategy platform with legacy v0.5l benchmark support, SQLite-backed evidence storage, and a Schwab market-data integration path that normalizes into the same internal bar model used by replay and research flows.
+
+Governing framework:
+- new strategy work follows the research-first platform charter in `docs/specs/RESEARCH_FIRST_STRATEGY_PLATFORM_CHARTER.md`
+- Thinkorswim parity remains available as a benchmark lane, not as the platform's global objective
+
+Current legacy benchmark lane:
+- replay-first and completed-bar only remain locked for benchmark reproduction
+- replay fills remain `NEXT_BAR_OPEN` for the legacy benchmark lane
+- each `strategy_identity_root + instrument` pair is a standalone strategy identity
+- concurrent different-instrument standalone strategies are supported
+- same-underlying position arbitration remains explicitly constrained unless implemented
 
 ## Current Architecture
 
-- `replay` remains the deterministic test and debug path
+- `replay` remains the deterministic benchmark and debug path
+- replay/backtest now coordinates multiple standalone strategy identities through the shared runtime registry instead of a single-engine harness
 - Schwab historical data flows through explicit symbol mapping and normalization into the same internal `Bar` type
 - strategy logic stays broker-agnostic and unchanged by the market-data adapter
-- live order execution is still not implemented
+- live broker functionality remains staged and bounded
+- research modules can challenge session, timeframe, and execution assumptions as long as provenance stays explicit
 - experimental causal momentum research remains isolated from production signals
+- EMA momentum evaluation reporting remains research-only and additive
 
 ## Install
 
@@ -18,6 +32,12 @@ python3.11 -m venv .venv
 pip install -e ".[dev]"
 ```
 
+Active Trend Participation Engine research storage needs the optional research extras:
+
+```bash
+pip install -e ".[dev,research]"
+```
+
 ## Required Environment Variables
 
 Schwab auth uses environment variables and local token storage. Do not commit secrets.
@@ -25,7 +45,7 @@ Schwab auth uses environment variables and local token storage. Do not commit se
 ```bash
 export SCHWAB_APP_KEY="your-app-key"
 export SCHWAB_APP_SECRET="your-app-secret"
-export SCHWAB_CALLBACK_URL="http://127.0.0.1:8182/callback"
+export SCHWAB_CALLBACK_URL="https://127.0.0.1:8182/callback"
 export SCHWAB_TOKEN_FILE=".local/schwab/tokens.json"
 ```
 
@@ -40,25 +60,112 @@ mgc-v05l replay \
   --csv /path/to/mgc_replay.csv
 ```
 
-Replay uses the locked fill policy `NEXT_BAR_OPEN` and prints a JSON summary.
+Replay uses the legacy benchmark fill policy `NEXT_BAR_OPEN` and prints:
+- aggregate replay summary
+- one per-standalone-strategy summary
+- backward-compatible top-level totals for legacy tooling
+
+Replay CSV input remains backward compatible with the legacy single-symbol format:
+- `timestamp,open,high,low,close,volume`
+
+It also supports standalone multi-strategy replay input with explicit symbols:
+- `symbol,timestamp,open,high,low,close,volume`
+- `symbol,timeframe,timestamp,open,high,low,close,volume`
+
+Example multi-symbol replay:
+
+```bash
+mgc-v05l replay \
+  --config config/base.yaml \
+  --config config/replay.yaml \
+  --csv /path/to/multi_strategy_replay.csv \
+  --output /tmp/replay_summary.json \
+  --markdown-output /tmp/replay_summary.md
+```
+
+Replay output contract:
+- top-level totals stay present for legacy compatibility
+- `primary_standalone_strategy_id` identifies the primary runtime row used for backward-compatible final state fields
+- `per_strategy_summaries` contains one summary per standalone strategy identity
+- `aggregate_portfolio_summary` rolls the included standalone strategies into one combined replay summary
+
+## EMA Momentum Research Report
+
+The persisted EMA momentum research evaluator results can be summarized and exported without affecting production behavior:
+
+```bash
+mgc-v05l research-ema-eval-report \
+  --config config/base.yaml \
+  --config config/replay.yaml \
+  --experiment-run-id 1 \
+  --output /tmp/ema_eval_report.csv
+```
+
+This command prints a JSON summary and optionally writes a per-bar CSV export for comparing:
+- baseline raw context
+- filter-track labels
+- math-trigger labels
+
+The report/export path is research-only. It is not a backtest and does not alter strategy decisions or execution.
+
+## EMA Momentum Research Visualization
+
+Persisted EMA momentum research rows can also be rendered into a lightweight local HTML chart:
+
+```bash
+mgc-v05l research-ema-viz \
+  --config config/base.yaml \
+  --config config/replay.yaml \
+  --experiment-run-id 1 \
+  --ticker MGC \
+  --timeframe 5m \
+  --output /tmp/mgc_ema_viz.html
+```
+
+This produces a research-only historical artifact showing:
+- candles
+- VWAP and smoothed-close overlays
+- math-trigger markers
+- structure-label markers
+- lower feature panes for momentum and impulse context
+
+## Active Trend Participation Engine
+
+The Active Trend Participation Engine is a research-first intraday directional module that uses `5m` structure and `1m` timing for active, bounded long/short trend participation on `MES` and `MNQ`.
+
+```bash
+mgc-v05l research-trend-participation \
+  --source-sqlite /path/to/bars.sqlite3 \
+  --output-dir outputs/reports/trend_participation_engine \
+  --instruments MES MNQ
+```
+
+Wrapper scripts are available for backfill, update, and full research runs:
+- `scripts/backfill_trend_participation_engine.sh`
+- `scripts/update_trend_participation_engine.sh`
+- `scripts/run_trend_participation_engine.sh`
+
+Module notes and schema details live in `docs/TREND_PARTICIPATION_ENGINE.md`.
 
 ## Schwab Local Auth Flow
 
-1. Create and export the required env vars above.
-2. Generate the authorization URL:
+The local helper supports the existing approved HTTPS loopback callback:
 
 ```bash
-mgc-v05l schwab-auth-url
+https://127.0.0.1:8182/callback
 ```
 
-3. Open the printed URL in a browser and complete the Schwab authorization-code flow.
-4. Exchange the returned code:
+Then run the local helper:
 
 ```bash
-mgc-v05l schwab-exchange-code --code "<returned-auth-code>"
+mgc-v05l schwab-authorize-local
 ```
 
-5. Refresh the local token later if needed:
+It starts a temporary HTTPS callback listener on `127.0.0.1:8182`, opens the Schwab authorization URL in the browser, exchanges the returned code immediately, and stores the token set in `SCHWAB_TOKEN_FILE`.
+
+On first use, the helper generates a local self-signed loopback certificate in `.local/schwab/loopback-cert.pem` and `.local/schwab/loopback-key.pem`. The browser may show a one-time local certificate warning for `https://127.0.0.1:8182/callback`; continue through that prompt so the redirect can complete.
+
+Refresh the local token later if needed:
 
 ```bash
 mgc-v05l schwab-refresh-token
@@ -100,13 +207,64 @@ mgc-v05l schwab-fetch-history \
   --config config/replay.yaml \
   --schwab-config config/schwab.local.json \
   --internal-symbol MGC \
+  --internal-timeframe 1m \
   --period-type day \
   --period 1 \
   --frequency-type minute \
-  --frequency 5
+  --frequency 1
 ```
 
 Add `--persist` to save normalized bars into the configured SQLite database.
+
+The historical foundation path now treats `1m` as the high-resolution base layer, while preserving deeper native Schwab surfaces where they extend farther back. Use the helper script to backfill chunked minute history:
+
+```bash
+bash scripts/backfill_schwab_1m_history.sh
+```
+
+Run the daily incremental sync to append the newest `1m` bars:
+
+```bash
+bash scripts/sync_schwab_1m_daily.sh
+```
+
+Then derive research surfaces from stored `1m` data:
+
+```bash
+bash scripts/resample_research_surfaces.sh
+```
+
+Backfill the broader native Schwab ladder:
+
+```bash
+bash scripts/backfill_schwab_native_timeframe_stack.sh
+```
+
+Daily-sync the broader native Schwab ladder:
+
+```bash
+bash scripts/sync_schwab_native_timeframe_stack.sh
+```
+
+Then derive the higher timeframe ladder:
+
+```bash
+bash scripts/resample_timeframe_stack.sh
+```
+
+Write a compact operator status report at any time:
+
+```bash
+bash scripts/report_market_data_status.sh
+```
+
+Canonical timeframe labels:
+- `1h` is normalized to stored `60m`
+- `2h` is normalized to stored `120m`
+- `4h` is normalized to stored `240m`
+- `6h` is normalized to stored `360m`
+- `12h` is normalized to stored `720m`
+- `24h` is normalized to stored `1440m`
 
 ## Fetch Quotes
 
@@ -150,3 +308,9 @@ PYTHONPYCACHEPREFIX=.pycache python3 -m compileall src tests docs
 Additional docs:
 - [Developer Runbook](/Users/patrick/Documents/MGC-v05l-automation/docs/DEVELOPER_RUNBOOK.md)
 - [Schwab Market Data Adapter Notes](/Users/patrick/Documents/MGC-v05l-automation/docs/SCHWAB_MARKET_DATA_ADAPTER.md)
+- [Research Schema Extension](/Users/patrick/Documents/MGC-v05l-automation/docs/RESEARCH_SCHEMA_EXTENSION.md)
+- [EMA Momentum Research Features](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_RESEARCH_FEATURES.md)
+- [EMA Momentum Research Evaluator](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_RESEARCH_EVALUATOR.md)
+- [EMA Momentum Research Report](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_RESEARCH_REPORT.md)
+- [EMA Momentum Structure Labels](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_STRUCTURE_LABELS.md)
+- [EMA Momentum Research Visualization](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_RESEARCH_VISUALIZATION.md)

@@ -1,0 +1,5 @@
+use_long_integrity_exit: false
+use_short_integrity_exit: false
+use_long_time_exit: false
+use_short_time_exit: false
+take_profit_at_r: 0.0

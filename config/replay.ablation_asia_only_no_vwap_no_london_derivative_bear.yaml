@@ -1,0 +1,7 @@
+enable_first_bull_snap_us_london: false
+enable_asia_vwap_longs: false
+allow_london: false
+enable_us_derivative_bear_shorts: true
+us_derivative_bear_min_normalized_slope: -0.50
+us_derivative_bear_max_normalized_slope: 0.10
+us_derivative_bear_max_normalized_curvature: -0.10

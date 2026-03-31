@@ -1,0 +1,23 @@
+mode: "paper"
+database_url: "sqlite:///./mgc_v05l.probationary.paper.sqlite3"
+probationary_artifacts_dir: "./outputs/probationary_pattern_engine/paper_session"
+# Each lane must declare:
+# - explicit session_restriction
+# - explicit catastrophic_open_loss
+# Current MGC catastrophic caps are temporary conservative probationary defaults
+# to satisfy the paper-risk constitution and keep existing MGC lanes governed
+# under the same explicit lane-risk model as newly admitted lanes. They are not
+# promoted research-derived sizing decisions.
+probationary_paper_lanes_json: '[{"lane_id":"mgc_us_late_pause_resume_long","display_name":"MGC / usLatePauseResumeLongTurn","symbol":"MGC","long_sources":["usLatePauseResumeLongTurn"],"short_sources":[],"session_restriction":"US_LATE","point_value":"10","catastrophic_open_loss":"-500"},{"lane_id":"mgc_asia_early_normal_breakout_retest_hold_long","display_name":"MGC / asiaEarlyNormalBreakoutRetestHoldTurn","symbol":"MGC","long_sources":["asiaEarlyNormalBreakoutRetestHoldTurn"],"short_sources":[],"session_restriction":"ASIA_EARLY","point_value":"10","catastrophic_open_loss":"-500"},{"lane_id":"mgc_asia_early_pause_resume_short","display_name":"MGC / asiaEarlyPauseResumeShortTurn","symbol":"MGC","long_sources":[],"short_sources":["asiaEarlyPauseResumeShortTurn"],"session_restriction":"ASIA_EARLY","point_value":"10","catastrophic_open_loss":"-500"},{"lane_id":"pl_us_late_pause_resume_long","display_name":"PL / usLatePauseResumeLongTurn","symbol":"PL","long_sources":["usLatePauseResumeLongTurn"],"short_sources":[],"session_restriction":"US_LATE","point_value":"50","catastrophic_open_loss":"-1000"},{"lane_id":"gc_asia_early_normal_breakout_retest_hold_long","display_name":"GC / asiaEarlyNormalBreakoutRetestHoldTurn","symbol":"GC","long_sources":["asiaEarlyNormalBreakoutRetestHoldTurn"],"short_sources":[],"session_restriction":"ASIA_EARLY","point_value":"100","catastrophic_open_loss":"-750"}]'
+probationary_paper_execution_canary_enabled: false
+probationary_paper_execution_canary_json: '{"lane_id":"canary_gc_us_early_execution_once","display_name":"CANARY / GC / paperExecutionLifecycleOnce / US_EARLY","symbol":"GC","long_sources":[],"short_sources":[],"session_restriction":"US_EARLY_OBSERVATION","point_value":"100","catastrophic_open_loss":"-250","trade_size":1,"lane_mode":"PAPER_EXECUTION_CANARY","canary_entry_not_before_et":"10:35:00","canary_entry_window_end_et":"12:00:00","canary_exit_not_before_et":"15:45:00","canary_max_entries_per_session":2,"canary_one_shot_per_session":true}'
+probationary_paper_execution_canary_force_fire_once_token: ""
+# probationary_paper_lane_warning_open_loss_json is a lane-level HALT-only warning
+# threshold for outsized open loss before the catastrophic cap. It does NOT
+# flatten. On breach, the lane is halted, persisted as HALTED_DEGRADATION, and
+# requires explicit manual review / re-enable. Catastrophic cap still takes
+# precedence when the worse threshold is breached.
+probationary_paper_lane_warning_open_loss_json: '{"pl_us_late_pause_resume_long":"-750","gc_asia_early_normal_breakout_retest_hold_long":"-500"}'
+probationary_paper_desk_halt_new_entries_loss: -1500
+probationary_paper_desk_flatten_and_halt_loss: -2500
+probationary_paper_lane_realized_loser_limit_per_session: 2
