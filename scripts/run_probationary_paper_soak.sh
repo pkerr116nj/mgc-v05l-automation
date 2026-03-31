@@ -26,6 +26,7 @@ ARGS=()
 CONFIG_SET=0
 SCHWAB_CONFIG_SET=0
 BACKGROUND=0
+NETWORK_PREFLIGHT_ONLY=0
 INCLUDE_ATPE_CANARY=0
 INCLUDE_ATP_COMPANION_V1=0
 INCLUDE_GC_MGC_ACCEPTANCE=0
@@ -36,6 +37,10 @@ while (($# > 0)); do
   case "$1" in
     --background)
       BACKGROUND=1
+      shift
+      ;;
+    --network-preflight-only)
+      NETWORK_PREFLIGHT_ONLY=1
       shift
       ;;
     --include-atpe-canary)
@@ -133,6 +138,13 @@ if [[ ${CONFIG_SET} -eq 0 ]]; then
   fi
 else
   echo "  - custom --config args supplied"
+fi
+
+runtime_network_resolution_preflight "${DEFAULT_SCHWAB_CONFIG}" "probationary-paper-soak-launch"
+
+if [[ ${NETWORK_PREFLIGHT_ONLY} -eq 1 ]]; then
+  echo "Runtime network preflight completed; skipping probationary paper soak launch."
+  exit 0
 fi
 
 if [[ ${BACKGROUND} -eq 1 ]]; then
