@@ -139,3 +139,91 @@ symbols = [str(symbol).strip() for symbol in payload.get("historical_symbol_map"
 print(",".join(symbols))
 PY
 }
+
+runtime_network_resolution_preflight() {
+  local schwab_config_path="$1"
+  local label="${2:-runtime}"
+  "${PYTHON_BIN}" - "${schwab_config_path}" "${label}" <<'PY'
+import json
+import os
+import socket
+import sys
+from urllib.parse import urlparse
+
+from mgc_v05l.market_data import load_schwab_market_data_config
+
+config_path = sys.argv[1]
+label = sys.argv[2]
+config = load_schwab_market_data_config(config_path)
+base_url = str(config.market_data_base_url or "").strip()
+parsed = urlparse(base_url)
+scheme = parsed.scheme or ""
+hostname = parsed.hostname or ""
+port = parsed.port or (443 if scheme == "https" else 80)
+endpoint = f"{base_url.rstrip('/')}/pricehistory" if base_url else ""
+env_names = (
+    "CODEX_SANDBOX",
+    "CODEX_SHELL",
+    "PATH",
+    "PYTHONPATH",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "RES_OPTIONS",
+    "HOSTALIASES",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+)
+payload = {
+    "label": label,
+    "python_executable": sys.executable,
+    "python_version": sys.version.split()[0],
+    "market_data_base_url": base_url,
+    "hostname": hostname,
+    "port": port,
+    "endpoint": endpoint,
+    "env": {name: os.environ.get(name, "<unset>") for name in env_names},
+}
+print("Runtime network preflight:", json.dumps(payload, sort_keys=True))
+if not hostname:
+    print(
+        "Runtime network preflight failed: "
+        f"invalid market_data_base_url={base_url!r}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+try:
+    resolved = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+except socket.gaierror as exc:
+    sandbox_hint = ""
+    if os.environ.get("CODEX_SANDBOX"):
+        sandbox_hint = (
+            " The current launcher is running inside a sandboxed parent process; "
+            "repo code cannot remove that launch context."
+        )
+    print(
+        "Runtime network preflight failed: "
+        f"hostname={hostname!r} "
+        f"base_url={base_url!r} "
+        f"endpoint={endpoint!r} "
+        f"python={sys.executable!r} "
+        f"error={exc!r}."
+        f"{sandbox_hint}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+resolved_addresses = sorted({entry[4][0] for entry in resolved if entry[4]})
+print(
+    "Runtime network preflight passed: "
+    f"hostname={hostname!r} "
+    f"resolved_addresses={resolved_addresses} "
+    f"endpoint={endpoint!r}"
+)
+PY
+}
