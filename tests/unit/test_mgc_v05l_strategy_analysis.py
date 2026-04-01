@@ -207,7 +207,7 @@ def test_strategy_analysis_builds_unified_lanes_and_comparison_presets() -> None
                         "cumulative_pnl": "45",
                         "realized_pnl": "40",
                         "benchmark_designation": "CURRENT_ATP_COMPANION_BENCHMARK",
-                        "config_source": "config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml",
+                        "config_source": "config/probationary_pattern_engine_paper.yaml",
                         "observed_instruments": ["MGC"],
                         "current_session_segment": "US",
                         "last_trade_summary": {"exit_timestamp": "2026-03-22T18:02:00+00:00", "realized_pnl": "25"},

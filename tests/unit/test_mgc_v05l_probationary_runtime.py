@@ -1075,12 +1075,38 @@ def test_build_probationary_paper_runner_includes_atp_companion_benchmark_lane(
 
 
 def test_atp_companion_exclusive_runtime_config_ignores_stale_paper_config_in_force(tmp_path: Path) -> None:
+    lane_spec = {
+        "shared_strategy_identity": "ATP_COMPANION_V1_ASIA_US",
+        "lane_id": "atp_companion_v1_asia_us",
+        "display_name": "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only",
+        "symbol": "MGC",
+        "long_sources": ["trend_participation.pullback_continuation.long.conservative"],
+        "short_sources": [],
+        "session_restriction": "ASIA/US",
+        "allowed_sessions": ["ASIA", "US"],
+        "point_value": "10",
+        "trade_size": 1,
+        "catastrophic_open_loss": "-500",
+        "lane_mode": "ATP_COMPANION_BENCHMARK",
+        "strategy_family": "active_trend_participation_engine",
+        "strategy_identity_root": "ATP_COMPANION_V1_ASIA_US",
+        "runtime_kind": ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
+        "live_poll_lookback_minutes": 1440,
+        "observed_instruments": ["MGC"],
+        "quality_bucket_policy": "MEDIUM_HIGH_ONLY",
+        "observer_variant_id": "trend_participation.pullback_continuation.long.conservative",
+        "observer_side": "LONG",
+        "artifacts_dir": str(tmp_path / "paper_artifacts" / "lanes" / "atp_companion_v1_asia_us"),
+        "database_url": f"sqlite:///{tmp_path / 'probationary.paper__atp_companion_v1_asia_us.sqlite3'}",
+    }
     override_path = tmp_path / "override.yaml"
     override_path.write_text(
         "\n".join(
             [
                 f'database_url: "sqlite:///{tmp_path / "probationary.paper.sqlite3"}"',
                 f'probationary_artifacts_dir: "{tmp_path / "paper_artifacts"}"',
+                "probationary_paper_runtime_exclusive_config: true",
+                f"probationary_paper_lanes_json: '{json.dumps([lane_spec])}'",
             ]
         )
         + "\n",
@@ -1092,7 +1118,6 @@ def test_atp_companion_exclusive_runtime_config_ignores_stale_paper_config_in_fo
             Path("config/live.yaml"),
             Path("config/probationary_pattern_engine.yaml"),
             Path("config/probationary_pattern_engine_paper.yaml"),
-            Path("config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml"),
             override_path,
         ]
     )
@@ -1129,7 +1154,6 @@ def test_atp_companion_exclusive_runtime_config_ignores_stale_paper_config_in_fo
 
 def test_atp_companion_operator_control_queues_shared_lane_target(tmp_path: Path) -> None:
     control_path = tmp_path / "paper_artifacts" / "runtime" / "operator_control.json"
-    legacy_control_path = tmp_path / "paper_artifacts" / "runtime" / "atp_companion_operator_control.json"
     override_path = tmp_path / "paper_atp_companion_control_override.yaml"
     override_path.write_text(
         "\n".join(
@@ -1137,7 +1161,6 @@ def test_atp_companion_operator_control_queues_shared_lane_target(tmp_path: Path
                 f'database_url: "sqlite:///{tmp_path / "probationary.paper.sqlite3"}"',
                 f'probationary_artifacts_dir: "{tmp_path / "paper_artifacts"}"',
                 "probationary_paper_runtime_exclusive_config: true",
-                f'probationary_operator_control_path: "{legacy_control_path}"',
             ]
         )
         + "\n",
@@ -1148,14 +1171,17 @@ def test_atp_companion_operator_control_queues_shared_lane_target(tmp_path: Path
         Path("config/live.yaml"),
         Path("config/probationary_pattern_engine.yaml"),
         Path("config/probationary_pattern_engine_paper.yaml"),
-        Path("config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml"),
         override_path,
     ]
 
     settings = load_settings_from_files(config_paths)
-    result = submit_probationary_operator_control(config_paths, action="resume_entries")
+    result = submit_probationary_operator_control(
+        config_paths,
+        action="resume_entries",
+        shared_strategy_identity="ATP_COMPANION_V1_ASIA_US",
+    )
 
-    assert settings.resolved_probationary_operator_control_path == legacy_control_path
+    assert settings.resolved_probationary_operator_control_path == control_path
     assert result.control_path == str(control_path)
     assert control_path.exists()
     payload = json.loads(control_path.read_text(encoding="utf-8"))
@@ -1164,7 +1190,6 @@ def test_atp_companion_operator_control_queues_shared_lane_target(tmp_path: Path
     assert payload["control_scope"] == "lane"
     assert payload["lane_id"] == "atp_companion_v1_asia_us"
     assert payload["shared_strategy_identity"] == "ATP_COMPANION_V1_ASIA_US"
-    assert not legacy_control_path.exists()
 
 def test_atp_companion_benchmark_runtime_processes_live_1m_bars_and_suppresses_duplicates(
     tmp_path: Path,

@@ -90,11 +90,11 @@ It is not:
 ## Runtime Entry Point
 
 The tracked strategy becomes live-attached in paper mode through the benchmark runtime overlay:
-- config overlay: `config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml`
-- start script: `scripts/run_atp_companion_v1_paper_runtime.sh`
-- stop script: `scripts/stop_atp_companion_v1_paper_runtime.sh`
-- operator control wrapper: `scripts/run_atp_companion_v1_operator_control.sh`
-- benchmark operator-control file: `outputs/probationary_pattern_engine/paper_session/runtime/atp_companion_v1_operator_control.json`
+- shared paper config: `config/probationary_pattern_engine_paper.yaml`
+- start script: `scripts/run_probationary_paper_soak.sh`
+- stop script: `scripts/stop_probationary_paper_soak.sh`
+- operator control path: `scripts/run_probationary_operator_control.sh --shared-strategy-identity ATP_COMPANION_V1_ASIA_US`
+- shared operator-control file: `outputs/probationary_pattern_engine/paper_session/runtime/operator_control.json`
 
 ## Connected Environment Bootstrap
 

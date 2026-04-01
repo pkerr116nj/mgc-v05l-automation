@@ -410,7 +410,7 @@ function renderPaperFillAlerts() {
 
 async function runAction(action) {
   if (state.actionInFlight) return;
-  if (action === "paper-flatten-and-halt" || action === "atp-companion-paper-flatten-and-halt") {
+  if (action === "paper-flatten-and-halt") {
     const confirmed = window.confirm(
       "Confirm PAPER-ONLY Flatten And Halt?\n\nThis will halt new entries immediately and, if safe, submit a deterministic paper flatten request. Live routing remains disabled."
     );
@@ -418,7 +418,7 @@ async function runAction(action) {
       return;
     }
   }
-  if (action === "paper-stop-after-cycle" || action === "atp-companion-paper-stop-after-cycle") {
+  if (action === "paper-stop-after-cycle") {
     const confirmed = window.confirm(
       "Confirm PAPER-ONLY Stop After Current Cycle?\n\nThis will halt new entries and stop the paper runtime at the next safe flat point. Live routing remains disabled."
     );
@@ -565,7 +565,6 @@ function render() {
   renderPaperActivityProof(paper.activity_proof || {});
   renderApprovedModels(paper.approved_models || {}, paper.entry_eligibility || {}, paper.temporary_paper_strategies || {});
   renderTemporaryPaperStrategies(paper.temporary_paper_strategies || {});
-  renderTrackedPaperStrategies(paper.tracked_strategies || {});
   renderPaperNonApprovedLanes(paper.non_approved_lanes || {});
   renderPaperLaneActivity(paper.lane_activity || {}, paper.temporary_paper_strategies || {});
   renderPaperExceptions(paper.exceptions || {});
@@ -2279,132 +2278,6 @@ function renderSummaryChips(values) {
     return '<span class="subnote">No attribution summary available yet.</span>';
   }
   return rows.map((value) => `<span class="lane-surface-chip">${escapeHtml(value)}</span>`).join("");
-}
-
-function renderTrackedPaperStrategies(payload) {
-  const rows = Array.isArray(payload.rows) ? payload.rows : [];
-  const defaultStrategyId = payload.default_strategy_id || (rows[0] && rows[0].strategy_id) || null;
-  const detail = (payload.details_by_strategy_id || {})[defaultStrategyId] || rows[0] || {};
-  text("tracked-paper-strategies-count", String(payload.total_count ?? rows.length));
-  text("tracked-paper-strategies-enabled", String(payload.enabled_count ?? rows.filter((row) => row.enabled).length));
-  text("tracked-paper-strategies-active", String(payload.active_count ?? rows.filter((row) => ["READY", "IN_POSITION", "RECONCILING"].includes(String(row.status || "").toUpperCase())).length));
-  text("tracked-paper-strategy-label", detail.internal_label || "-");
-  text("tracked-paper-strategy-status", detail.status || "DISABLED");
-  text("tracked-paper-strategy-session", detail.current_session_segment || "-");
-  const trackedPrimaryNote = "Primary operator path: use Lane Operator Detail / Evidence and shared paper runtime controls.";
-  text(
-    "tracked-paper-strategies-note",
-    [payload.note || payload.scope_label || "No tracked paper strategies are registered.", trackedPrimaryNote]
-      .filter(Boolean)
-      .join(" "),
-  );
-  setLink("tracked-paper-strategies-link", "/api/operator-artifact/paper-tracked-strategies");
-  setLink("tracked-paper-strategy-details-link", "/api/operator-artifact/paper-tracked-strategy-details");
-
-  const table = document.getElementById("tracked-paper-strategies-table");
-  if (table) {
-    table.className = "approved-models-table-compact";
-    if (!rows.length) {
-      table.innerHTML = "<tr><td>No tracked paper strategies are registered.</td></tr>";
-    } else {
-      table.innerHTML = `
-        <thead>
-          <tr>
-            <th>strategy</th>
-            <th>env</th>
-            <th>status</th>
-            <th>enabled</th>
-            <th>session</th>
-            <th>side</th>
-            <th>realized</th>
-            <th>open</th>
-            <th>last update</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((row) => `
-            <tr>
-              <td class="approved-lane-family">
-                <div class="approved-lane-family-wrap">
-                  <span class="approved-lane-family-name">${escapeHtml(row.display_name || row.strategy_id || "-")}</span>
-                  <span class="approved-lane-label subnote mono">${escapeHtml(row.internal_label || row.strategy_id || "-")}</span>
-                </div>
-              </td>
-              <td>${escapeHtml(row.environment || "-")}</td>
-              <td><span class="${badgeClass(String(row.status || "").toUpperCase() === "FAULT" ? "danger" : (String(row.status || "").toUpperCase() === "IN_POSITION" ? "accent" : (String(row.status || "").toUpperCase() === "READY" ? "ok" : "muted")))}">${escapeHtml(row.status || "-")}</span></td>
-              <td>${escapeHtml(row.enabled ? "YES" : "NO")}</td>
-              <td>${escapeHtml(row.current_session_segment || "-")}</td>
-              <td>${escapeHtml(row.current_position_side || "-")}</td>
-              <td>${escapeHtml(row.realized_pnl || "-")}</td>
-              <td>${escapeHtml(row.open_pnl || "-")}</td>
-              <td>${escapeHtml(row.last_update_timestamp || "-")}</td>
-            </tr>
-          `).join("")}
-        </tbody>
-      `;
-    }
-  }
-
-  text("tracked-paper-detail-name", detail.display_name || "-");
-  text("tracked-paper-detail-env", detail.environment || "-");
-  text("tracked-paper-detail-runtime-attached", detail.runtime_attached ? "ATTACHED" : "DETACHED");
-  text(
-    "tracked-paper-detail-heartbeat-age",
-    detail.runtime_heartbeat_age_seconds == null ? "-" : `${Math.round(detail.runtime_heartbeat_age_seconds)}s`,
-  );
-  text("tracked-paper-detail-data-stale", detail.data_stale ? "YES" : "NO");
-  text("tracked-paper-detail-entries", detail.entries_enabled ? "ENABLED" : "DISABLED");
-  text("tracked-paper-detail-halt", detail.operator_halt ? "HALTED" : "CLEAR");
-  text("tracked-paper-detail-warmup", detail.warmup_complete == null ? "UNKNOWN" : (detail.warmup_complete ? "COMPLETE" : "INCOMPLETE"));
-  text("tracked-paper-detail-position", detail.current_position_side || "-");
-  text("tracked-paper-detail-qty", detail.current_quantity == null ? "-" : String(detail.current_quantity));
-  text("tracked-paper-detail-family", detail.current_entry_family || "-");
-  text("tracked-paper-detail-bars-in-trade", detail.bars_in_trade == null ? "-" : String(detail.bars_in_trade));
-  text("tracked-paper-detail-bar-ts", detail.latest_processed_bar_timestamp || "-");
-  setPnlValue("tracked-paper-detail-realized", detail.realized_pnl, "-");
-  setPnlValue("tracked-paper-detail-open-pnl", detail.open_pnl, "N/A");
-  text("tracked-paper-detail-win-rate", detail.win_rate ? `${detail.win_rate}%` : "-");
-  text("tracked-paper-detail-profit-factor", detail.profit_factor || "-");
-  text("tracked-paper-detail-max-drawdown", detail.max_drawdown || "-");
-  setPnlValue("tracked-paper-detail-day-pnl", detail.current_day_pnl, "-");
-  setPnlValue("tracked-paper-detail-cumulative-pnl", detail.cumulative_pnl, "-");
-  text("tracked-paper-detail-signal", detail.latest_signal_summary || "-");
-  text("tracked-paper-detail-intent", summarizeTrackedPaperEvent(detail.latest_order_intent, ["created_at", "intent_type", "reason_code", "order_status"]));
-  text("tracked-paper-detail-fill", summarizeTrackedPaperEvent(detail.latest_fill, ["fill_timestamp", "intent_type", "fill_price", "order_status"]));
-  text("tracked-paper-detail-exit", detail.latest_exit_reason || (detail.last_trade_summary && detail.last_trade_summary.exit_reason) || "-");
-  text("tracked-paper-detail-risk", summarizeTrackedPaperRisk(detail.latest_stop_risk_context));
-  text("tracked-paper-detail-status-reason", detail.status_reason || "-");
-  text(
-    "tracked-paper-detail-audit-summary",
-    [
-      `${(detail.recent_bars || []).length} bars`,
-      `${(detail.recent_signals || []).length} signals`,
-      `${(detail.recent_order_intents || []).length} intents`,
-      `${(detail.recent_fills || []).length} fills`,
-      `${(detail.recent_state_snapshots || []).length} state snapshots`,
-      `${(detail.recent_faults || []).length} faults`,
-      `${(detail.recent_reconciliation_events || []).length} reconciliation events`,
-      `duplicate bars ${(detail.health_flags && detail.health_flags.duplicate_bar_suppression_count) ?? 0}`,
-    ].join(" | "),
-  );
-
-}
-
-function summarizeTrackedPaperEvent(payload, fields) {
-  if (!payload || typeof payload !== "object") return "-";
-  const parts = (Array.isArray(fields) ? fields : [])
-    .map((field) => payload[field])
-    .filter((value) => value !== undefined && value !== null && value !== "");
-  return parts.length ? parts.join(" | ") : "-";
-}
-
-function summarizeTrackedPaperRisk(payload) {
-  if (!payload || typeof payload !== "object") return "-";
-  const preferredKeys = ["bias_state", "pullback_state", "entry_state", "timing_state", "vwap_price_quality_state", "exit_reason", "status", "entry_price"];
-  const parts = preferredKeys
-    .map((key) => payload[key] != null && payload[key] !== "" ? `${key}=${payload[key]}` : null)
-    .filter(Boolean);
-  return parts.length ? parts.join(" | ") : "-";
 }
 
 function normalizeTemporaryPaperStrategyForRoster(row) {

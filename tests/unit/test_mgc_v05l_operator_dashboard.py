@@ -1919,15 +1919,10 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert 'id="operator-readiness-cards"' in html
     assert 'id="operator-canary-cards"' in html
     assert 'id="temporary-paper-strategies-table"' in html
-    assert 'id="tracked-paper-strategies-table"' in html
-    assert 'id="tracked-paper-detail-name"' in html
-    assert 'id="tracked-paper-detail-runtime-attached"' in html
-    assert "Tracked Paper Audit / Secondary Read Model" in html
     assert 'data-action="start-atp-companion-paper"' not in html
     assert 'data-action="atp-companion-paper-flatten-and-halt"' not in html
     assert "renderOperatorCanarySummary" in js
     assert "renderTemporaryPaperStrategies" in js
-    assert "renderTrackedPaperStrategies" in js
     assert "tracked-paper-start" not in js
     assert ".operator-canary-panel" in css
     assert 'id="operator-risk-cards"' in html
@@ -6737,7 +6732,7 @@ def test_dashboard_non_approved_payload_merges_experimental_canary_snapshot(tmp_
     assert integrity_payload["start_flags"] == ["--include-atpe-canary"]
 
 
-def test_dashboard_approved_models_surface_includes_attached_temporary_paper_lane(tmp_path: Path) -> None:
+def test_dashboard_approved_models_surface_includes_atp_as_shared_paper_lane(tmp_path: Path) -> None:
     repo_root = tmp_path
     paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
     paper_artifacts.mkdir(parents=True)
@@ -6759,9 +6754,6 @@ def test_dashboard_approved_models_surface_includes_attached_temporary_paper_lan
                     "entries_enabled": True,
                     "position_side": "FLAT",
                     "session_restriction": "ASIA/US",
-                    "experimental_status": "experimental_temp_paper",
-                    "paper_only": True,
-                    "non_approved": True,
                     "approved_long_entry_sources": ["trend_participation.pullback_continuation.long.conservative"],
                     "database_url": f"sqlite:///{repo_root / 'paper__atp.sqlite3'}",
                 }
@@ -6776,9 +6768,6 @@ def test_dashboard_approved_models_surface_includes_attached_temporary_paper_lan
                     "runtime_kind": "atp_companion_benchmark_paper",
                     "strategy_family": "active_trend_participation_engine",
                     "session_restriction": "ASIA/US",
-                    "experimental_status": "experimental_temp_paper",
-                    "paper_only": True,
-                    "non_approved": True,
                     "long_sources": ["trend_participation.pullback_continuation.long.conservative"],
                     "artifacts_dir": str(lane_dir),
                 }
@@ -6796,15 +6785,15 @@ def test_dashboard_approved_models_surface_includes_attached_temporary_paper_lan
 
     payload = service._paper_approved_models_payload(paper)
 
-    assert payload["temporary_paper_count"] == 1
+    assert payload["temporary_paper_count"] == 0
     assert payload["scope_label"] == "Shared paper lane operator detail"
     row = payload["rows"][0]
     assert row["lane_id"] == "atp_companion_v1_asia_us"
-    assert row["temporary_paper_strategy"] is True
-    assert row["paper_strategy_class"] == "temporary_paper_strategy"
+    assert row["temporary_paper_strategy"] is False
+    assert row["paper_strategy_class"] == "approved_or_admitted_paper_strategy"
     detail = payload["details_by_branch"][row["branch"]]
-    assert detail["temporary_paper_strategy"] is True
-    assert detail["paper_strategy_class"] == "temporary_paper_strategy"
+    assert detail["temporary_paper_strategy"] is False
+    assert detail["paper_strategy_class"] == "approved_or_admitted_paper_strategy"
 
 
 def test_tracked_paper_strategy_payload_registers_live_attached_atp_benchmark_from_persisted_runtime_truth(tmp_path: Path) -> None:
@@ -6960,7 +6949,7 @@ def test_tracked_paper_strategy_payload_registers_live_attached_atp_benchmark_fr
         "artifacts_dir": str((repo_root / "outputs" / "probationary_pattern_engine" / "paper_session").resolve()),
         "running": True,
         "status": {"session_date": "2026-03-23", "current_detected_session": "US_LATE"},
-        "temporary_paper_strategies": {
+        "approved_models": {
             "rows": [
                 {
                     "lane_id": "atp_companion_v1_asia_us",
@@ -6968,7 +6957,7 @@ def test_tracked_paper_strategy_payload_registers_live_attached_atp_benchmark_fr
                     "instrument": "MGC",
                     "runtime_kind": "atp_companion_benchmark_paper",
                     "strategy_family": "active_trend_participation_engine",
-                    "temporary_paper_strategy": True,
+                    "paper_strategy_class": "approved_or_admitted_paper_strategy",
                     "entries_enabled": True,
                     "state": "ENABLED",
                     "runtime_instance_present": True,
@@ -7050,7 +7039,7 @@ def test_tracked_paper_strategy_payload_registers_live_attached_atp_benchmark_fr
     assert detail["recent_fills"][0]["fill_price"] == "100.25"
     assert detail["recent_trades"][0]["primary_exit_reason"] == "atpe_target"
     assert [lane["lane_id"] for lane in detail["constituent_lanes"]] == ["atp_companion_v1_asia_us"]
-    assert detail["config_identity"]["config_source"].endswith("probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml")
+    assert detail["config_identity"]["config_source"].endswith("probationary_pattern_engine_paper.yaml")
     assert detail["config_identity"]["allowed_sessions"] == ["ASIA", "US"]
     assert detail["config_identity"]["diagnostic_only_sessions"] == ["LONDON"]
 
@@ -7086,7 +7075,7 @@ def test_tracked_paper_strategy_payload_marks_atp_benchmark_reconciling_when_run
         "artifacts_dir": str((repo_root / "outputs" / "probationary_pattern_engine" / "paper_session").resolve()),
         "running": False,
         "status": {"session_date": "2026-03-23", "current_detected_session": "US_LATE"},
-        "temporary_paper_strategies": {
+        "approved_models": {
             "rows": [
                 {
                     "lane_id": "atp_companion_v1_asia_us",
@@ -7094,7 +7083,7 @@ def test_tracked_paper_strategy_payload_marks_atp_benchmark_reconciling_when_run
                     "instrument": "MGC",
                     "runtime_kind": "atp_companion_benchmark_paper",
                     "strategy_family": "active_trend_participation_engine",
-                    "temporary_paper_strategy": True,
+                    "paper_strategy_class": "approved_or_admitted_paper_strategy",
                     "entries_enabled": True,
                     "state": "ENABLED",
                     "runtime_instance_present": False,
@@ -7146,7 +7135,7 @@ def test_tracked_paper_strategy_payload_marks_open_pnl_unavailable_without_trust
         "artifacts_dir": str((repo_root / "outputs" / "probationary_pattern_engine" / "paper_session").resolve()),
         "running": False,
         "status": {"session_date": "2026-03-23", "current_detected_session": "US_LATE"},
-        "temporary_paper_strategies": {
+        "approved_models": {
             "rows": [
                 {
                     "lane_id": "atp_companion_v1_asia_us",
@@ -7154,7 +7143,7 @@ def test_tracked_paper_strategy_payload_marks_open_pnl_unavailable_without_trust
                     "instrument": "MGC",
                     "runtime_kind": "atp_companion_benchmark_paper",
                     "strategy_family": "active_trend_participation_engine",
-                    "temporary_paper_strategy": True,
+                    "paper_strategy_class": "approved_or_admitted_paper_strategy",
                     "entries_enabled": True,
                     "state": "ENABLED",
                     "runtime_instance_present": True,
@@ -7214,7 +7203,7 @@ def test_tracked_paper_strategy_payload_treats_lane_local_runtime_instance_as_at
         "artifacts_dir": str((repo_root / "outputs" / "probationary_pattern_engine" / "paper_session").resolve()),
         "running": False,
         "status": {"session_date": "2026-03-23", "current_detected_session": "US_LATE"},
-        "temporary_paper_strategies": {
+        "approved_models": {
             "rows": [
                 {
                     "lane_id": "atp_companion_v1_asia_us",
@@ -7222,7 +7211,7 @@ def test_tracked_paper_strategy_payload_treats_lane_local_runtime_instance_as_at
                     "instrument": "MGC",
                     "runtime_kind": "atp_companion_benchmark_paper",
                     "strategy_family": "active_trend_participation_engine",
-                    "temporary_paper_strategy": True,
+                    "paper_strategy_class": "approved_or_admitted_paper_strategy",
                     "entries_enabled": True,
                     "state": "ENABLED",
                     "runtime_instance_present": True,
@@ -7277,7 +7266,7 @@ def test_tracked_paper_strategy_payload_prefers_operator_status_entries_enabled_
         "artifacts_dir": str((repo_root / "outputs" / "probationary_pattern_engine" / "paper_session").resolve()),
         "running": False,
         "status": {"session_date": "2026-03-23", "current_detected_session": "US_LATE"},
-        "temporary_paper_strategies": {
+        "approved_models": {
             "rows": [
                 {
                     "lane_id": "atp_companion_v1_asia_us",
@@ -7285,7 +7274,7 @@ def test_tracked_paper_strategy_payload_prefers_operator_status_entries_enabled_
                     "instrument": "MGC",
                     "runtime_kind": "atp_companion_benchmark_paper",
                     "strategy_family": "active_trend_participation_engine",
-                    "temporary_paper_strategy": True,
+                    "paper_strategy_class": "approved_or_admitted_paper_strategy",
                     "entries_enabled": True,
                     "state": "ENABLED",
                     "runtime_instance_present": True,
