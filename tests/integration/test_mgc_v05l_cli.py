@@ -46,3 +46,45 @@ def test_research_causal_report_cli_writes_output(tmp_path: Path, capsys) -> Non
     assert payload["rows"] == 3
     assert payload["research_only"] is True
     assert report_csv.exists()
+
+
+def test_probationary_operator_control_cli_queues_resume_entries(tmp_path: Path, capsys) -> None:
+    control_path = tmp_path / "paper_artifacts" / "operator_control.json"
+    override_config = tmp_path / "override.yaml"
+    override_config.write_text(
+        (
+            f'database_url: "sqlite:///{tmp_path / "probationary.paper.sqlite3"}"\n'
+            f'probationary_artifacts_dir: "{tmp_path / "paper_artifacts"}"\n'
+            "probationary_paper_runtime_exclusive_config: true\n"
+            f'probationary_operator_control_path: "{control_path}"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "probationary-operator-control",
+            "--config",
+            "config/base.yaml",
+            "--config",
+            "config/live.yaml",
+            "--config",
+            "config/probationary_pattern_engine.yaml",
+            "--config",
+            "config/probationary_pattern_engine_paper.yaml",
+            "--config",
+            str(override_config),
+            "--action",
+            "resume_entries",
+        ]
+    )
+    stdout = capsys.readouterr().out
+    payload = json.loads(stdout)
+    control_payload = json.loads(control_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["action"] == "resume_entries"
+    assert payload["status"] == "pending"
+    assert payload["control_path"] == str(control_path)
+    assert control_payload["action"] == "resume_entries"
+    assert control_payload["status"] == "pending"
