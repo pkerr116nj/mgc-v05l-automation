@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +24,7 @@ from mgc_v05l.app.probationary_runtime import (
     PAPER_EXECUTION_CANARY_MODE,
     PAPER_EXECUTION_CANARY_ENTRY_REASON,
     PAPER_EXECUTION_CANARY_EXIT_REASON,
+    ProbationaryAdaptedPaperLaneRuntime,
     ProbationaryLaneStructuredLogger,
     ProbationaryPaperLaneRuntime,
     ProbationaryPaperLaneMetrics,
@@ -344,6 +345,21 @@ def _run_atp_companion_benchmark_paper_fixture(
     *,
     exit_bearing: bool = False,
 ) -> SimpleNamespace:
+    def _clean_reconciliation_payload() -> dict[str, object]:
+        return {
+            "clean": True,
+            "classification": "clean",
+            "reason": "test_stubbed_clean_reconciliation",
+            "mismatches": [],
+            "repair_actions": [],
+            "recommended_action": "No action needed.",
+            "resulting_strategy_status": "READY",
+            "resulting_fault_code": None,
+            "resulting_entries_enabled": True,
+            "entries_frozen": False,
+            "fault_code": None,
+        }
+
     lane_spec = {
         "lane_id": "atp_companion_v1_asia_us",
         "display_name": "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only",
@@ -573,6 +589,24 @@ def _run_atp_companion_benchmark_paper_fixture(
         ]
 
     monkeypatch.setattr(probationary_runtime_module, "_build_live_polling_service", _fake_build_live_polling_service)
+    monkeypatch.setattr(probationary_runtime_module, "_reconcile_paper_runtime", lambda **kwargs: _clean_reconciliation_payload())
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_run_reconciliation_heartbeat",
+        lambda *, settings, strategy_engine, execution_engine, heartbeat_status, occurred_at=None: (
+            {
+                **dict(heartbeat_status or {}),
+                "enabled": True,
+                "cadence_seconds": int(settings.reconciliation_heartbeat_interval_seconds),
+                "last_attempted_at": (occurred_at or datetime.now(timezone.utc)).isoformat(),
+                "last_result_clean": True,
+                "last_result_classification": "clean",
+                "next_due_at": (occurred_at or datetime.now(timezone.utc)).isoformat(),
+            },
+            _clean_reconciliation_payload(),
+            True,
+        ),
+    )
     monkeypatch.setattr(probationary_runtime_module, "build_feature_states", _fake_build_feature_states)
     monkeypatch.setattr(probationary_runtime_module, "_runtime_feature_row", _fake_runtime_feature_row)
     monkeypatch.setattr(probationary_runtime_module, "classify_entry_states", _fake_classify_entry_states)
@@ -1032,6 +1066,7 @@ def test_build_probationary_paper_runner_includes_atp_companion_benchmark_lane(
 
     assert runner.__class__.__name__ == "ProbationaryPaperSupervisor"
     lane = next(lane for lane in runner._lanes if lane.spec.lane_id == "atp_companion_v1_asia_us")  # noqa: SLF001
+    assert isinstance(lane, ProbationaryAdaptedPaperLaneRuntime)
     assert lane.spec.runtime_kind == ATP_COMPANION_BENCHMARK_RUNTIME_KIND
     assert lane.spec.symbol == "MGC"
     assert lane.spec.allowed_sessions == ("ASIA", "US")

@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, select
@@ -3112,7 +3112,11 @@ class ProbationaryPaperLaneRuntime:
     def supervisor_status_extras(self) -> dict[str, Any]:
         return {"startup_restore_validation": dict(self._startup_restore_validation or {})}
 
-    def poll_and_process(self) -> tuple[int, dict[str, Any], Path]:
+    def poll_and_process(
+        self,
+        higher_priority_signals: Sequence[HigherPrioritySignal] = (),
+    ) -> tuple[int, dict[str, Any], Path]:
+        del higher_priority_signals
         latest_processed_end_ts = self.repositories.processed_bars.latest_end_ts()
         bars = self.live_polling_service.poll_bars(
             SchwabLivePollRequest(
@@ -3362,6 +3366,56 @@ class ProbationaryPaperLaneRuntime:
             timezone_info=self.settings.timezone_info,
             reason_code=PAPER_EXECUTION_CANARY_EXIT_REASON,
         )
+
+
+class ProbationaryLaneRuntimeAdapterBase:
+    """Shared adapter base for custom lane behavior inside the common runtime shell."""
+
+    def __init__(self, runtime: "ProbationaryAdaptedPaperLaneRuntime") -> None:
+        self._runtime = runtime
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._runtime, name)
+
+
+@dataclass(frozen=True)
+class ProbationaryLaneRuntimeAdapterSpec:
+    runtime_adapter_factory: Callable[["ProbationaryAdaptedPaperLaneRuntime"], ProbationaryLaneRuntimeAdapterBase]
+    live_polling_service: LivePollingService
+
+
+class ProbationaryAdaptedPaperLaneRuntime(ProbationaryPaperLaneRuntime):
+    """Shared paper-lane runtime shell for adapter-backed strategies."""
+
+    def __init__(
+        self,
+        *,
+        runtime_adapter_factory: Callable[["ProbationaryAdaptedPaperLaneRuntime"], ProbationaryLaneRuntimeAdapterBase],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._runtime_adapter = runtime_adapter_factory(self)
+
+    def _base_restore_startup(self) -> str | None:
+        return super().restore_startup()
+
+    def restore_startup(self) -> str | None:
+        return self._runtime_adapter.restore_startup()
+
+    def poll_and_process(
+        self,
+        higher_priority_signals: Sequence[HigherPrioritySignal] = (),
+    ) -> tuple[int, dict[str, Any], Path]:
+        return self._runtime_adapter.poll_and_process(higher_priority_signals=higher_priority_signals)
+
+    def config_row_extras(self) -> dict[str, Any]:
+        return self._runtime_adapter.config_row_extras()
+
+    def supervisor_status_extras(self) -> dict[str, Any]:
+        return self._runtime_adapter.supervisor_status_extras()
+
+    def eligibility_snapshot(self, now: datetime) -> dict[str, Any]:
+        return self._runtime_adapter.eligibility_snapshot(now)
 
 
 class ProbationaryTemporaryPaperLaneRuntime(ProbationaryPaperLaneRuntime):
@@ -4318,16 +4372,16 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
         snapshot_path.write_text(json.dumps(snapshot_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime):
-    """Continuous paper runtime for the frozen ATP companion benchmark."""
+class AtpCompanionBenchmarkLaneRuntimeAdapter(ProbationaryLaneRuntimeAdapterBase):
+    """ATP-specific lane behavior behind the shared adapted paper-runtime shell."""
 
     def __init__(
         self,
+        runtime: ProbationaryAdaptedPaperLaneRuntime,
         *,
         observed_instruments: Sequence[str],
-        **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__(runtime)
         self._observed_instruments = tuple(str(value).strip().upper() for value in observed_instruments if str(value).strip())
         if len(self._observed_instruments) != 1:
             raise ValueError(
@@ -4351,7 +4405,7 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
 
     def restore_startup(self) -> str | None:
         now = datetime.now(timezone.utc)
-        startup_reason = super().restore_startup()
+        startup_reason = self._runtime._base_restore_startup()
         if startup_reason is not None:
             return startup_reason
         self._sync_execution_artifacts()
@@ -5663,15 +5717,9 @@ class ProbationaryPaperSupervisor:
                 reconciliation_clean = True
                 higher_priority_signals = _probationary_supervisor_higher_priority_signals(self._lanes)
                 for lane in self._lanes:
-                    if getattr(lane.spec, "runtime_kind", "") in {
-                        ATPE_CANARY_RUNTIME_KIND,
-                        ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
-                    }:
-                        lane_new_bars, reconciliation, _ = lane.poll_and_process(
-                            higher_priority_signals=higher_priority_signals
-                        )
-                    else:
-                        lane_new_bars, reconciliation, _ = lane.poll_and_process()
+                    lane_new_bars, reconciliation, _ = lane.poll_and_process(
+                        higher_priority_signals=higher_priority_signals
+                    )
                     new_bars += lane_new_bars
                     if not reconciliation["clean"]:
                         reconciliation_clean = False
@@ -6499,6 +6547,35 @@ def _approved_quant_probationary_paper_lane_row(
     }
 
 
+def _build_probationary_lane_runtime_adapter_spec(
+    *,
+    spec: ProbationaryPaperLaneSpec,
+    lane_settings: StrategySettings,
+    repositories: RepositorySet,
+    schwab_config_path: str | Path | None,
+) -> ProbationaryLaneRuntimeAdapterSpec | None:
+    adapter_builders: dict[
+        str,
+        Callable[[], ProbationaryLaneRuntimeAdapterSpec],
+    ] = {
+        ATP_COMPANION_BENCHMARK_RUNTIME_KIND: lambda: ProbationaryLaneRuntimeAdapterSpec(
+            runtime_adapter_factory=lambda runtime: AtpCompanionBenchmarkLaneRuntimeAdapter(
+                runtime,
+                observed_instruments=spec.observed_instruments or (lane_settings.symbol,),
+            ),
+            live_polling_service=_build_live_polling_service(
+                lane_settings.model_copy(update={"symbol": next(iter(spec.observed_instruments), lane_settings.symbol)}),
+                repositories,
+                schwab_config_path,
+            ),
+        ),
+    }
+    builder = adapter_builders.get(spec.runtime_kind)
+    if builder is None:
+        return None
+    return builder()
+
+
 def _build_probationary_paper_lanes(
     *,
     settings: StrategySettings,
@@ -6560,6 +6637,27 @@ def _build_probationary_paper_lanes(
             alert_dispatcher=alert_dispatcher,
             runtime_identity=runtime_identity,
         )
+        adapter_spec = _build_probationary_lane_runtime_adapter_spec(
+            spec=spec,
+            lane_settings=lane_settings,
+            repositories=repositories,
+            schwab_config_path=schwab_config_path,
+        )
+        if adapter_spec is not None:
+            lanes.append(
+                ProbationaryAdaptedPaperLaneRuntime(
+                    spec=spec,
+                    settings=lane_settings,
+                    repositories=repositories,
+                    strategy_engine=strategy_engine,
+                    execution_engine=execution_engine,
+                    live_polling_service=adapter_spec.live_polling_service,
+                    structured_logger=lane_logger,
+                    alert_dispatcher=alert_dispatcher,
+                    runtime_adapter_factory=adapter_spec.runtime_adapter_factory,
+                )
+            )
+            continue
         if spec.runtime_kind == ATPE_CANARY_RUNTIME_KIND:
             live_services = {
                 instrument: _build_live_polling_service(
@@ -6587,25 +6685,6 @@ def _build_probationary_paper_lanes(
                     alert_dispatcher=alert_dispatcher,
                     observed_instruments=spec.observed_instruments or settings.probationary_atpe_canary_instruments,
                     variant=selected_variant,
-                )
-            )
-            continue
-        if spec.runtime_kind == ATP_COMPANION_BENCHMARK_RUNTIME_KIND:
-            lanes.append(
-                ProbationaryAtpCompanionBenchmarkLaneRuntime(
-                    spec=spec,
-                    settings=lane_settings,
-                    repositories=repositories,
-                    strategy_engine=strategy_engine,
-                    execution_engine=execution_engine,
-                    live_polling_service=_build_live_polling_service(
-                        lane_settings.model_copy(update={"symbol": next(iter(spec.observed_instruments), lane_settings.symbol)}),
-                        repositories,
-                        schwab_config_path,
-                    ),
-                    structured_logger=lane_logger,
-                    alert_dispatcher=alert_dispatcher,
-                    observed_instruments=spec.observed_instruments or (lane_settings.symbol,),
                 )
             )
             continue
