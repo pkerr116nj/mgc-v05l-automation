@@ -210,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON object payload merged into the queued operator control request.",
     )
+    probationary_operator_parser.add_argument(
+        "--shared-strategy-identity",
+        default=None,
+        help="Optional shared strategy identity to target a single active paper lane through the shared operator-control path.",
+    )
     return parser
 
 
@@ -367,6 +372,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ],
             action=args.action,
             payload=payload,
+            shared_strategy_identity=args.shared_strategy_identity,
         )
         print(json.dumps(_json_ready(result), sort_keys=True))
         return 0

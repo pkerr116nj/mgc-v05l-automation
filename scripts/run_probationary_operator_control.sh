@@ -19,7 +19,7 @@ FINAL_ARGS=()
 if [[ $# -gt 0 ]]; then
   FINAL_ARGS=("$@")
 else
-  echo "Usage: bash scripts/run_probationary_operator_control.sh --action <halt_entries|resume_entries|clear_fault|clear_risk_halts|flatten_and_halt|stop_after_cycle>" >&2
+  echo "Usage: bash scripts/run_probationary_operator_control.sh --action <halt_entries|resume_entries|clear_fault|clear_risk_halts|flatten_and_halt|stop_after_cycle> [--shared-strategy-identity <IDENTITY>]" >&2
   exit 1
 fi
 

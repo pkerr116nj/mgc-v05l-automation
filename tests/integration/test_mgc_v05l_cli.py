@@ -88,3 +88,47 @@ def test_probationary_operator_control_cli_queues_resume_entries(tmp_path: Path,
     assert payload["control_path"] == str(control_path)
     assert control_payload["action"] == "resume_entries"
     assert control_payload["status"] == "pending"
+
+
+def test_probationary_operator_control_cli_targets_shared_strategy_identity(tmp_path: Path, capsys) -> None:
+    control_path = tmp_path / "paper_artifacts" / "runtime" / "operator_control.json"
+    override_config = tmp_path / "override.yaml"
+    override_config.write_text(
+        (
+            f'database_url: "sqlite:///{tmp_path / "probationary.paper.sqlite3"}"\n'
+            f'probationary_artifacts_dir: "{tmp_path / "paper_artifacts"}"\n'
+            "probationary_paper_runtime_exclusive_config: true\n"
+            'probationary_paper_lanes_json: \'[{"shared_strategy_identity":"ATP_COMPANION_V1_ASIA_US","lane_id":"atp_companion_v1_asia_us","display_name":"ATP Companion","symbol":"MGC","long_sources":["trend_participation.pullback_continuation.long.conservative"],"short_sources":[],"session_restriction":"ASIA/US","allowed_sessions":["ASIA","US"],"point_value":"10","trade_size":1,"catastrophic_open_loss":"-500","lane_mode":"ATP_COMPANION_BENCHMARK","strategy_family":"active_trend_participation_engine","strategy_identity_root":"ATP_COMPANION_V1_ASIA_US","runtime_kind":"atp_companion_benchmark_paper"}]\'\n'
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "probationary-operator-control",
+            "--config",
+            "config/base.yaml",
+            "--config",
+            "config/live.yaml",
+            "--config",
+            "config/probationary_pattern_engine.yaml",
+            "--config",
+            "config/probationary_pattern_engine_paper.yaml",
+            "--config",
+            str(override_config),
+            "--action",
+            "resume_entries",
+            "--shared-strategy-identity",
+            "ATP_COMPANION_V1_ASIA_US",
+        ]
+    )
+    stdout = capsys.readouterr().out
+    payload = json.loads(stdout)
+    control_payload = json.loads(control_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["control_path"] == str(control_path)
+    assert control_payload["action"] == "resume_entries"
+    assert control_payload["control_scope"] == "lane"
+    assert control_payload["lane_id"] == "atp_companion_v1_asia_us"
+    assert control_payload["shared_strategy_identity"] == "ATP_COMPANION_V1_ASIA_US"

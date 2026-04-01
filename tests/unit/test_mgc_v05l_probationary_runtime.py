@@ -1127,8 +1127,9 @@ def test_atp_companion_exclusive_runtime_config_ignores_stale_paper_config_in_fo
     assert specs[0].runtime_kind == ATP_COMPANION_BENCHMARK_RUNTIME_KIND
 
 
-def test_atp_companion_operator_control_uses_dedicated_control_path(tmp_path: Path) -> None:
-    control_path = tmp_path / "paper_artifacts" / "runtime" / "atp_companion_operator_control.json"
+def test_atp_companion_operator_control_queues_shared_lane_target(tmp_path: Path) -> None:
+    control_path = tmp_path / "paper_artifacts" / "runtime" / "operator_control.json"
+    legacy_control_path = tmp_path / "paper_artifacts" / "runtime" / "atp_companion_operator_control.json"
     override_path = tmp_path / "paper_atp_companion_control_override.yaml"
     override_path.write_text(
         "\n".join(
@@ -1136,7 +1137,7 @@ def test_atp_companion_operator_control_uses_dedicated_control_path(tmp_path: Pa
                 f'database_url: "sqlite:///{tmp_path / "probationary.paper.sqlite3"}"',
                 f'probationary_artifacts_dir: "{tmp_path / "paper_artifacts"}"',
                 "probationary_paper_runtime_exclusive_config: true",
-                f'probationary_operator_control_path: "{control_path}"',
+                f'probationary_operator_control_path: "{legacy_control_path}"',
             ]
         )
         + "\n",
@@ -1154,12 +1155,16 @@ def test_atp_companion_operator_control_uses_dedicated_control_path(tmp_path: Pa
     settings = load_settings_from_files(config_paths)
     result = submit_probationary_operator_control(config_paths, action="resume_entries")
 
-    assert settings.resolved_probationary_operator_control_path == control_path
+    assert settings.resolved_probationary_operator_control_path == legacy_control_path
     assert result.control_path == str(control_path)
     assert control_path.exists()
     payload = json.loads(control_path.read_text(encoding="utf-8"))
     assert payload["action"] == "resume_entries"
     assert payload["status"] == "pending"
+    assert payload["control_scope"] == "lane"
+    assert payload["lane_id"] == "atp_companion_v1_asia_us"
+    assert payload["shared_strategy_identity"] == "ATP_COMPANION_V1_ASIA_US"
+    assert not legacy_control_path.exists()
 
 def test_atp_companion_benchmark_runtime_processes_live_1m_bars_and_suppresses_duplicates(
     tmp_path: Path,
@@ -5239,6 +5244,70 @@ def test_clear_risk_halts_does_not_restore_same_session_readiness_for_realized_l
     assert updated_state.lane_states["mgc_lane"]["risk_state"] == "HALTED_DEGRADATION"
     assert updated_state.lane_states["mgc_lane"]["halt_reason"] == "lane_realized_loser_limit_per_session"
     assert lane.strategy_engine.state.operator_halt is True
+
+
+def test_resume_entries_targets_single_lane_via_shared_identity(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    atp_lane = _seed_test_lane(
+        tmp_path / "atp",
+        lane_id="atp_companion_v1_asia_us",
+        symbol="MGC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("10"),
+    )
+    atp_lane.spec.shared_strategy_identity = "ATP_COMPANION_V1_ASIA_US"
+    other_lane = _seed_test_lane(
+        tmp_path / "other",
+        lane_id="mgc_us_late_pause_resume_long",
+        symbol="MGC",
+        source="usLatePauseResumeLongTurn",
+        session_restriction="US_LATE",
+        point_value=Decimal("10"),
+    )
+    atp_lane.strategy_engine.set_operator_halt(datetime(2026, 3, 19, 8, 0, tzinfo=ZoneInfo("UTC")), True)
+    other_lane.strategy_engine.set_operator_halt(datetime(2026, 3, 19, 8, 0, tzinfo=ZoneInfo("UTC")), True)
+    risk_state = ProbationaryPaperRiskRuntimeState(
+        session_date="2026-03-19",
+        lane_states={
+            "atp_companion_v1_asia_us": {"risk_state": "OK", "unblock_action": "Resume Entries"},
+            "mgc_us_late_pause_resume_long": {"risk_state": "OK", "unblock_action": "Resume Entries"},
+        },
+    )
+    control_path = settings.probationary_artifacts_path / "runtime" / "operator_control.json"
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    control_path.write_text(
+        json.dumps(
+            {
+                "action": "resume_entries",
+                "status": "pending",
+                "requested_at": "2026-03-19T08:02:00+00:00",
+                "command_id": "resume-atp-1",
+                "lane_id": "atp_companion_v1_asia_us",
+                "shared_strategy_identity": "ATP_COMPANION_V1_ASIA_US",
+                "control_scope": "lane",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    resumed = _apply_probationary_supervisor_operator_control(
+        settings=settings,
+        lanes=[atp_lane, other_lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+        risk_state=risk_state,
+    )
+
+    assert resumed is not None
+    assert resumed["status"] == "applied"
+    assert resumed["lane_id"] == "atp_companion_v1_asia_us"
+    assert resumed["shared_strategy_identity"] == "ATP_COMPANION_V1_ASIA_US"
+    assert resumed["message"] == "Entries resumed for lane atp_companion_v1_asia_us."
+    assert atp_lane.strategy_engine.state.operator_halt is False
+    assert other_lane.strategy_engine.state.operator_halt is True
 
 
 def test_force_lane_resume_session_override_restores_same_session_readiness_for_eligible_lane(tmp_path: Path) -> None:
