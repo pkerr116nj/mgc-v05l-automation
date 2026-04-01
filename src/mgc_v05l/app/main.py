@@ -29,6 +29,10 @@ from ..market_data import (
 )
 from ..market_data.schwab_adapter import SchwabMarketDataAdapter
 from ..app.bootstrap import bootstrap_service
+from .probationary_runtime import (
+    REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
+    submit_probationary_operator_control,
+)
 from .runner import StrategyServiceRunner
 
 
@@ -175,6 +179,37 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="If the preferred port is unavailable, search upward for the next open port.",
     )
+
+    probationary_operator_parser = subparsers.add_parser(
+        "probationary-operator-control",
+        help="Queue a paper-runtime operator control command for the probationary supervisor.",
+    )
+    probationary_operator_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Config file path. May be supplied multiple times; later files override earlier ones.",
+    )
+    probationary_operator_parser.add_argument(
+        "--action",
+        required=True,
+        choices=[
+            "halt_entries",
+            "resume_entries",
+            "clear_fault",
+            "clear_risk_halts",
+            "flatten_and_halt",
+            "stop_after_cycle",
+            "force_reconcile",
+            REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
+        ],
+        help="Operator control action to queue for the probationary paper runtime.",
+    )
+    probationary_operator_parser.add_argument(
+        "--payload-json",
+        default=None,
+        help="Optional JSON object payload merged into the queued operator control request.",
+    )
     return parser
 
 
@@ -318,6 +353,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             info_file=args.info_file,
             allow_port_fallback=args.allow_port_fallback,
         )
+        return 0
+
+    if args.command == "probationary-operator-control":
+        payload = json.loads(args.payload_json) if args.payload_json is not None else None
+        result = submit_probationary_operator_control(
+            args.config
+            or [
+                "config/base.yaml",
+                "config/live.yaml",
+                "config/probationary_pattern_engine.yaml",
+                "config/probationary_pattern_engine_paper.yaml",
+            ],
+            action=args.action,
+            payload=payload,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
         return 0
 
     parser.error(f"Unsupported command: {args.command}")
