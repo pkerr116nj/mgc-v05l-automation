@@ -100,7 +100,7 @@ def test_build_standalone_strategy_definitions_can_use_shared_atp_identity_defau
     assert definition.standalone_strategy_id == "atp_companion_v1_asia_us__MGC"
 
 
-def test_atp_overlay_config_resolves_to_the_shared_lane_identity_in_registry(tmp_path: Path) -> None:
+def test_shared_paper_config_resolves_atp_to_the_shared_lane_identity_in_registry(tmp_path: Path) -> None:
     override_path = tmp_path / "overlay_runtime_override.yaml"
     override_path.write_text(
         "\n".join(
@@ -118,15 +118,13 @@ def test_atp_overlay_config_resolves_to_the_shared_lane_identity_in_registry(tmp
             Path("config/live.yaml"),
             Path("config/probationary_pattern_engine.yaml"),
             Path("config/probationary_pattern_engine_paper.yaml"),
-            Path("config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml"),
             override_path,
         ]
     )
 
     definitions = build_standalone_strategy_definitions(settings)
 
-    assert len(definitions) == 1
-    definition = definitions[0]
+    definition = next(definition for definition in definitions if definition.lane_id == "atp_companion_v1_asia_us")
     assert definition.lane_id == "atp_companion_v1_asia_us"
     assert definition.strategy_family == "active_trend_participation_engine"
     assert definition.allowed_sessions == ("ASIA", "US")

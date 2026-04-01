@@ -28,7 +28,7 @@ Paper-ready does not mean live-ready.
 - market-data probe succeeds for `MGC`
 
 `PASS` Runtime launch verified
-- ATP benchmark runtime starts from `scripts/run_atp_companion_v1_paper_runtime.sh`
+- ATP benchmark runtime starts from the shared paper launcher `scripts/run_probationary_paper_soak.sh`
 - runtime attaches with `runtime_kind = atp_companion_benchmark_paper`
 
 `PASS` Dashboard attachment verified

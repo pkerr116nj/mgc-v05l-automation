@@ -16,7 +16,6 @@ DEFAULT_CONFIGS=(
   "${REPO_ROOT}/config/probationary_pattern_engine_paper.yaml"
 )
 ATPE_CANARY_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_atpe_canary.yaml"
-ATP_COMPANION_V1_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml"
 GC_MGC_ACCEPTANCE_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_gc_mgc_acceptance.yaml"
 DEFAULT_RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
 DEFAULT_PID_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.pid"
@@ -28,7 +27,6 @@ SCHWAB_CONFIG_SET=0
 BACKGROUND=0
 NETWORK_PREFLIGHT_ONLY=0
 INCLUDE_ATPE_CANARY=0
-INCLUDE_ATP_COMPANION_V1=0
 INCLUDE_GC_MGC_ACCEPTANCE=0
 PID_FILE="${DEFAULT_PID_FILE}"
 LOG_FILE="${DEFAULT_LOG_FILE}"
@@ -45,10 +43,6 @@ while (($# > 0)); do
       ;;
     --include-atpe-canary)
       INCLUDE_ATPE_CANARY=1
-      shift
-      ;;
-    --include-atp-companion-v1-paper)
-      INCLUDE_ATP_COMPANION_V1=1
       shift
       ;;
     --include-gc-mgc-acceptance)
@@ -106,9 +100,6 @@ if [[ ${CONFIG_SET} -eq 0 ]]; then
   if [[ ${INCLUDE_ATPE_CANARY} -eq 1 ]]; then
     FINAL_ARGS+=(--config "${ATPE_CANARY_CONFIG}")
   fi
-  if [[ ${INCLUDE_ATP_COMPANION_V1} -eq 1 ]]; then
-    FINAL_ARGS+=(--config "${ATP_COMPANION_V1_CONFIG}")
-  fi
   if [[ ${INCLUDE_GC_MGC_ACCEPTANCE} -eq 1 ]]; then
     FINAL_ARGS+=(--config "${GC_MGC_ACCEPTANCE_CONFIG}")
   fi
@@ -129,9 +120,6 @@ if [[ ${CONFIG_SET} -eq 0 ]]; then
   done
   if [[ ${INCLUDE_ATPE_CANARY} -eq 1 ]]; then
     echo "  - ${ATPE_CANARY_CONFIG}"
-  fi
-  if [[ ${INCLUDE_ATP_COMPANION_V1} -eq 1 ]]; then
-    echo "  - ${ATP_COMPANION_V1_CONFIG}"
   fi
   if [[ ${INCLUDE_GC_MGC_ACCEPTANCE} -eq 1 ]]; then
     echo "  - ${GC_MGC_ACCEPTANCE_CONFIG}"

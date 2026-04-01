@@ -34,22 +34,22 @@ Verified local prerequisites for this runtime:
 Start the benchmark paper runtime:
 
 ```bash
-bash scripts/run_atp_companion_v1_paper_runtime.sh --background
+bash scripts/run_probationary_paper_soak.sh --background
 ```
 
 Stop the benchmark paper runtime:
 
 ```bash
-bash scripts/stop_atp_companion_v1_paper_runtime.sh
+bash scripts/stop_probationary_paper_soak.sh
 ```
 
 Send operator controls:
 
 ```bash
-bash scripts/run_atp_companion_v1_operator_control.sh --action halt_entries
-bash scripts/run_atp_companion_v1_operator_control.sh --action resume_entries
-bash scripts/run_atp_companion_v1_operator_control.sh --action flatten_and_halt
-bash scripts/run_atp_companion_v1_operator_control.sh --action stop_after_cycle
+bash scripts/run_probationary_operator_control.sh --action halt_entries --shared-strategy-identity ATP_COMPANION_V1_ASIA_US
+bash scripts/run_probationary_operator_control.sh --action resume_entries --shared-strategy-identity ATP_COMPANION_V1_ASIA_US
+bash scripts/run_probationary_operator_control.sh --action flatten_and_halt --shared-strategy-identity ATP_COMPANION_V1_ASIA_US
+bash scripts/run_probationary_operator_control.sh --action stop_after_cycle --shared-strategy-identity ATP_COMPANION_V1_ASIA_US
 ```
 
 Recommended startup order:
@@ -120,7 +120,7 @@ After process restart:
 - duplicate bar suppression prevents already-processed finalized bars from being replayed into new paper events
 
 The ATP benchmark runtime also uses a dedicated operator-control file:
-- `outputs/probationary_pattern_engine/paper_session/runtime/atp_companion_v1_operator_control.json`
+- `outputs/probationary_pattern_engine/paper_session/runtime/operator_control.json`
 
 That isolates ATP halt/resume/flatten/stop commands from any separately running generic paper supervisor on the same machine.
 

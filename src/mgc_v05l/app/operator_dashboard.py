@@ -109,15 +109,6 @@ _SESSION_CLOSE_REVIEW_CANONICAL_RE = re.compile(r"^(?P<session_date>\d{4}-\d{2}-
 _SESSION_CLOSE_REVIEW_TIMESTAMPED_RE = re.compile(r"^(?P<session_date>\d{4}-\d{2}-\d{2})_.+\.json$")
 _TEMP_PAPER_OVERLAY_SPECS = (
     {
-        "overlay_id": "atp_companion_v1_asia_us",
-        "flag": "--include-atp-companion-v1-paper",
-        "config_path": "config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml",
-        "runtime_kinds": {ATP_COMPANION_BENCHMARK_RUNTIME_KIND},
-        "lane_id_prefixes": ("atp_companion_v1_asia_us",),
-        "source_families": {"active_trend_participation_engine"},
-        "label": "ATP companion v1 paper benchmark",
-    },
-    {
         "overlay_id": "atpe_canary",
         "flag": "--include-atpe-canary",
         "config_path": "config/probationary_pattern_engine_paper_atpe_canary.yaml",
@@ -1009,8 +1000,6 @@ class OperatorDashboardService:
             "stop-shadow": ["bash", "scripts/stop_probationary_shadow.sh"],
             "start-paper": None,
             "stop-paper": ["bash", "scripts/stop_probationary_paper_soak.sh"],
-            "start-atp-companion-paper": ["bash", "scripts/run_atp_companion_v1_paper_runtime.sh", "--background"],
-            "stop-atp-companion-paper": ["bash", "scripts/stop_atp_companion_v1_paper_runtime.sh"],
             "generate-daily-summary": ["bash", "scripts/run_probationary_daily_summary.sh"],
             "generate-paper-summary": ["bash", "scripts/run_probationary_paper_summary.sh"],
             "auth-gate-check": ["bash", "scripts/run_schwab_auth_gate.sh"],
@@ -1022,10 +1011,6 @@ class OperatorDashboardService:
             "paper-force-reconcile": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "force_reconcile"],
             "paper-flatten-and-halt": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "flatten_and_halt"],
             "paper-stop-after-cycle": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "stop_after_cycle"],
-            "atp-companion-paper-halt-entries": ["bash", "scripts/run_atp_companion_v1_operator_control.sh", "--action", "halt_entries"],
-            "atp-companion-paper-resume-entries": ["bash", "scripts/run_atp_companion_v1_operator_control.sh", "--action", "resume_entries"],
-            "atp-companion-paper-flatten-and-halt": ["bash", "scripts/run_atp_companion_v1_operator_control.sh", "--action", "flatten_and_halt"],
-            "atp-companion-paper-stop-after-cycle": ["bash", "scripts/run_atp_companion_v1_operator_control.sh", "--action", "stop_after_cycle"],
             "refresh-status": None,
         }
         if action not in command_map:
@@ -4875,8 +4860,6 @@ class OperatorDashboardService:
             ),
             "artifacts": {
                 "snapshot": "/api/operator-artifact/paper-temporary-paper-strategies",
-                "tracked_strategies": "/api/operator-artifact/paper-tracked-strategies",
-                "tracked_strategy_details": "/api/operator-artifact/paper-tracked-strategy-details",
                 "strategy_performance": "/api/operator-artifact/paper-strategy-performance",
                 "operator_status": "/api/operator-artifact/paper-operator-status",
                 "non_approved_snapshot": "/api/operator-artifact/paper-non-approved-lanes",
@@ -15927,8 +15910,6 @@ def _humanize_action(action: str) -> str:
         "auto-start-paper": "Auto-Start Paper Soak",
         "restart-paper-with-temp-paper": "Restart Paper Soak With Temp Paper",
         "stop-paper": "Stop Paper Soak",
-        "start-atp-companion-paper": "Start ATP Companion Paper Runtime",
-        "stop-atp-companion-paper": "Stop ATP Companion Paper Runtime",
         "generate-daily-summary": "Generate Shadow Summary",
         "generate-paper-summary": "Generate Paper Summary",
         "auth-gate-check": "Auth Gate Check",
@@ -15939,10 +15920,6 @@ def _humanize_action(action: str) -> str:
         "paper-force-lane-resume-session-override": "Force Lane Resume (Session Override)",
         "paper-flatten-and-halt": "Paper Flatten And Halt",
         "paper-stop-after-cycle": "Paper Stop After Current Cycle",
-        "atp-companion-paper-halt-entries": "ATP Companion Halt Entries",
-        "atp-companion-paper-resume-entries": "ATP Companion Resume Entries",
-        "atp-companion-paper-flatten-and-halt": "ATP Companion Flatten And Halt",
-        "atp-companion-paper-stop-after-cycle": "ATP Companion Stop After Current Cycle",
         "acknowledge-paper-risk": "Acknowledge Paper Risk",
         "acknowledge-inherited-risk": "Acknowledge Inherited Risk",
         "resolve-inherited-risk": "Resolve Inherited Risk",

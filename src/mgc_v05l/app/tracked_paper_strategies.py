@@ -1,4 +1,4 @@
-"""Tracked paper strategy registry and read models for app-facing surfaces."""
+"""Tracked paper compatibility read models for shared paper strategy analysis."""
 
 from __future__ import annotations
 
@@ -55,11 +55,11 @@ def build_tracked_paper_strategy_definitions(repo_root: Path) -> tuple[TrackedPa
             internal_label=TRACKED_ATP_INTERNAL_LABEL,
             environment="paper",
             benchmark_designation=TRACKED_ATP_BENCHMARK_DESIGNATION,
-            config_source=str((repo_root / "config" / "probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml").resolve()),
+            config_source=str((repo_root / "config" / "probationary_pattern_engine_paper.yaml").resolve()),
             benchmark_note_path=str((repo_root / "docs" / "specs" / "ATP_COMPANION_BASELINE_V1_BENCHMARK.md").resolve()),
             description=(
-                "Productized tracked paper strategy view for the frozen ATP companion benchmark. "
-                "ATP execution is limited to ASIA + US while London remains diagnostic-only."
+                "Compatibility audit read model for the ATP companion benchmark while shared paper "
+                "analysis still consumes tracked-strategy detail artifacts."
             ),
             allowed_sessions=("ASIA", "US"),
             diagnostic_only_sessions=("LONDON",),
@@ -85,11 +85,13 @@ def build_tracked_paper_strategies_payload(
             or []
         )
     ]
+    approved_rows = [dict(row) for row in list((paper.get("approved_models") or {}).get("rows") or [])]
+    candidate_rows = approved_rows + temporary_rows
     trade_log_rows = [dict(row) for row in list((paper.get("strategy_performance") or {}).get("trade_log") or [])]
     rows: list[dict[str, Any]] = []
     details_by_id: dict[str, dict[str, Any]] = {}
     for definition in definitions:
-        matched_rows = [row for row in temporary_rows if _matches_definition(row, definition)]
+        matched_rows = [row for row in candidate_rows if _matches_definition(row, definition)]
         if not matched_rows:
             matched_rows = _fallback_rows_for_definition(
                 repo_root=repo_root,
@@ -118,8 +120,8 @@ def build_tracked_paper_strategies_payload(
         "details_by_strategy_id": details_by_id,
         "default_strategy_id": definitions[0].strategy_id if definitions else None,
         "note": (
-            "Tracked paper strategies are secondary audit read models backed by persisted paper/runtime truth. "
-            "Use the shared lane operator detail and shared paper-runtime controls as the primary ATP operator surface."
+            "Tracked paper strategies are compatibility audit read models backed by persisted paper/runtime truth. "
+            "Use shared paper lane surfaces and shared paper-runtime controls for normal ATP operation."
         ),
     }
 
@@ -369,14 +371,6 @@ def _build_tracked_strategy_detail(
         ),
         "observed_instruments": sorted({str(row.get("instrument") or "").strip() for row in matched_rows if row.get("instrument")}),
         "lane_count": len(matched_rows),
-        "runtime_controls": {
-            "start_action": "start-atp-companion-paper",
-            "stop_action": "stop-atp-companion-paper",
-            "halt_entries_action": "atp-companion-paper-halt-entries",
-            "resume_entries_action": "atp-companion-paper-resume-entries",
-            "flatten_and_halt_action": "atp-companion-paper-flatten-and-halt",
-            "stop_after_cycle_action": "atp-companion-paper-stop-after-cycle",
-        },
         **lifecycle_contract,
     }
     detail = {
@@ -422,8 +416,6 @@ def _build_tracked_strategy_detail(
 
 
 def _matches_definition(row: dict[str, Any], definition: TrackedPaperStrategyDefinition) -> bool:
-    if not bool(row.get("temporary_paper_strategy")):
-        return False
     lane_id = str(row.get("lane_id") or "")
     runtime_kind = str(row.get("runtime_kind") or "")
     source_family = str(row.get("strategy_family") or row.get("source_family") or "")
