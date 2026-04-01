@@ -82,6 +82,57 @@ def test_build_standalone_strategy_definitions_from_explicit_runtime_rows(tmp_pa
     assert keyed["pl_lane"].strategy_family == "asiaEarlyPauseResumeShortTurn"
 
 
+def test_build_standalone_strategy_definitions_can_use_shared_atp_identity_defaults(tmp_path: Path) -> None:
+    settings = _load_runtime_settings(
+        tmp_path,
+        '[{"shared_strategy_identity":"ATP_COMPANION_V1_ASIA_US","long_sources":["trend_participation.pullback_continuation.long.conservative"],"runtime_kind":"atp_companion_benchmark_paper","trade_size":1}]',
+    )
+
+    definitions = build_standalone_strategy_definitions(settings)
+
+    assert len(definitions) == 1
+    definition = definitions[0]
+    assert definition.lane_id == "atp_companion_v1_asia_us"
+    assert definition.display_name == "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only"
+    assert definition.instrument == "MGC"
+    assert definition.strategy_family == "active_trend_participation_engine"
+    assert definition.allowed_sessions == ("ASIA", "US")
+    assert definition.standalone_strategy_id == "atp_companion_v1_asia_us__MGC"
+
+
+def test_atp_overlay_config_resolves_to_the_shared_lane_identity_in_registry(tmp_path: Path) -> None:
+    override_path = tmp_path / "overlay_runtime_override.yaml"
+    override_path.write_text(
+        "\n".join(
+            [
+                f'database_url: "sqlite:///{tmp_path / "overlay.sqlite3"}"',
+                f'probationary_artifacts_dir: "{tmp_path / "overlay_artifacts"}"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings = load_settings_from_files(
+        [
+            Path("config/base.yaml"),
+            Path("config/live.yaml"),
+            Path("config/probationary_pattern_engine.yaml"),
+            Path("config/probationary_pattern_engine_paper.yaml"),
+            Path("config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml"),
+            override_path,
+        ]
+    )
+
+    definitions = build_standalone_strategy_definitions(settings)
+
+    assert len(definitions) == 1
+    definition = definitions[0]
+    assert definition.lane_id == "atp_companion_v1_asia_us"
+    assert definition.strategy_family == "active_trend_participation_engine"
+    assert definition.allowed_sessions == ("ASIA", "US")
+    assert definition.standalone_strategy_id == "atp_companion_v1_asia_us__MGC"
+
+
 def test_runtime_registry_routes_bars_by_instrument_without_collision(tmp_path: Path) -> None:
     settings = _load_runtime_settings(
         tmp_path,
