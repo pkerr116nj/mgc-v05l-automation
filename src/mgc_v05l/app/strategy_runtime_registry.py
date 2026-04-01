@@ -18,6 +18,7 @@ from ..persistence.state_repository import StateRepository
 from ..strategy.strategy_engine import StrategyEngine
 from .approved_quant_lanes.engine import ApprovedQuantStrategyEngine
 from .approved_quant_lanes.specs import approved_quant_lane_specs
+from .shared_strategy_identities import get_shared_strategy_identity
 from .strategy_identity import build_standalone_strategy_identity
 
 _APPROVED_LONG_SOURCE_FIELDS = {
@@ -285,19 +286,20 @@ def _coerce_runtime_definition_rows(
 ) -> list[StandaloneStrategyDefinition]:
     rows: list[StandaloneStrategyDefinition] = []
     for raw in raw_rows:
-        instrument = str(raw.get("instrument") or raw.get("symbol") or settings.symbol).strip().upper()
-        long_sources = tuple(str(value) for value in raw.get("long_sources", []) if value)
-        short_sources = tuple(str(value) for value in raw.get("short_sources", []) if value)
-        strategy_family = _resolve_strategy_family(raw, long_sources=long_sources, short_sources=short_sources)
+        normalized_raw = _normalize_runtime_definition_row(raw)
+        instrument = str(normalized_raw.get("instrument") or normalized_raw.get("symbol") or settings.symbol).strip().upper()
+        long_sources = tuple(str(value) for value in normalized_raw.get("long_sources", []) if value)
+        short_sources = tuple(str(value) for value in normalized_raw.get("short_sources", []) if value)
+        strategy_family = _resolve_strategy_family(normalized_raw, long_sources=long_sources, short_sources=short_sources)
         identity = build_standalone_strategy_identity(
             instrument=instrument,
-            lane_id=raw.get("lane_id"),
-            strategy_name=raw.get("display_name"),
+            lane_id=normalized_raw.get("lane_id"),
+            strategy_name=normalized_raw.get("display_name"),
             source_family=strategy_family,
-            lane_name=raw.get("display_name") or raw.get("lane_name"),
-            explicit_root=raw.get("strategy_identity_root"),
+            lane_name=normalized_raw.get("display_name") or normalized_raw.get("lane_name"),
+            explicit_root=normalized_raw.get("strategy_identity_root"),
         )
-        lane_id = str(raw.get("lane_id") or "").strip()
+        lane_id = str(normalized_raw.get("lane_id") or "").strip()
         rows.append(
             StandaloneStrategyDefinition(
                 standalone_strategy_id=identity["standalone_strategy_id"],
@@ -306,22 +308,46 @@ def _coerce_runtime_definition_rows(
                 strategy_family=strategy_family,
                 instrument=instrument,
                 lane_id=lane_id,
-                display_name=str(raw.get("display_name") or raw.get("lane_name") or lane_id or identity["standalone_strategy_label"]),
+                display_name=str(
+                    normalized_raw.get("display_name")
+                    or normalized_raw.get("lane_name")
+                    or lane_id
+                    or identity["standalone_strategy_label"]
+                ),
                 config_source=config_source,
-                runtime_kind=str(raw.get("runtime_kind") or "strategy_engine"),
-                enabled=bool(raw.get("enabled", True)),
-                trade_size=int(raw.get("trade_size", settings.trade_size)),
-                allowed_sessions=tuple(str(value) for value in raw.get("allowed_sessions", []) if value)
-                or ((str(raw.get("session_restriction")),) if raw.get("session_restriction") else ()),
+                runtime_kind=str(normalized_raw.get("runtime_kind") or "strategy_engine"),
+                enabled=bool(normalized_raw.get("enabled", True)),
+                trade_size=int(normalized_raw.get("trade_size", settings.trade_size)),
+                allowed_sessions=tuple(str(value) for value in normalized_raw.get("allowed_sessions", []) if value)
+                or ((str(normalized_raw.get("session_restriction")),) if normalized_raw.get("session_restriction") else ()),
                 long_sources=long_sources,
                 short_sources=short_sources,
-                database_url=str(raw.get("database_url") or _derive_runtime_database_url(settings.database_url, lane_id or identity["standalone_strategy_id"])),
-                artifacts_dir=str(raw.get("artifacts_dir") or (settings.probationary_artifacts_path / "lanes" / (lane_id or identity["standalone_strategy_id"]))),
-                point_value=Decimal(str(raw["point_value"])) if raw.get("point_value") is not None else None,
+                database_url=str(
+                    normalized_raw.get("database_url")
+                    or _derive_runtime_database_url(settings.database_url, lane_id or identity["standalone_strategy_id"])
+                ),
+                artifacts_dir=str(
+                    normalized_raw.get("artifacts_dir")
+                    or (settings.probationary_artifacts_path / "lanes" / (lane_id or identity["standalone_strategy_id"]))
+                ),
+                point_value=Decimal(str(normalized_raw["point_value"])) if normalized_raw.get("point_value") is not None else None,
                 legacy_derived_identity=False,
             )
         )
     return rows
+
+
+def _normalize_runtime_definition_row(raw: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(raw)
+    shared_identity_id = str(normalized.get("shared_strategy_identity") or "").strip()
+    if not shared_identity_id:
+        return normalized
+    shared_identity = get_shared_strategy_identity(shared_identity_id)
+    return {
+        **shared_identity.runtime_row_defaults(),
+        **normalized,
+        "shared_strategy_identity": shared_identity.identity_id,
+    }
 
 
 def _approved_quant_runtime_definitions(settings: StrategySettings) -> list[StandaloneStrategyDefinition]:
