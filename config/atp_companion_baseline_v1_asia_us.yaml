@@ -11,6 +11,7 @@ benchmark_status: "PROMOTED_REPLAY_PAPER_BENCHMARK"
 benchmark_branch: "codex/atp-benchmark-asia-us-london-disabled"
 benchmark_artifacts_dir: "outputs/reports/atp_companion_baseline_v1_asia_us_benchmark"
 tracked_paper_strategy:
+  shared_strategy_identity: "ATP_COMPANION_V1_ASIA_US"
   strategy_id: "atp_companion_v1_asia_us"
   display_name: "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only"
   internal_label: "ATP_COMPANION_V1_ASIA_US"
