@@ -4055,6 +4055,7 @@ class OperatorDashboardService:
             if not lane_id:
                 continue
             configured = config_lanes.get(lane_id, {})
+            temporary_paper_strategy = _is_temporary_paper_strategy_row({**dict(configured), **dict(lane_row)})
             lane_display = str(
                 lane_row.get("display_name")
                 or configured.get("display_name")
@@ -4177,6 +4178,10 @@ class OperatorDashboardService:
                 if lane_open_position and lane_position.get("unrealized_pnl") not in {None, "", "N/A"}
                 else None
             )
+            detail["temporary_paper_strategy"] = temporary_paper_strategy
+            detail["paper_strategy_class"] = (
+                "temporary_paper_strategy" if temporary_paper_strategy else "approved_or_admitted_paper_strategy"
+            )
             details_by_branch[lane_display] = detail
             rows.append(
                 {
@@ -4211,10 +4216,15 @@ class OperatorDashboardService:
                     "latest_activity_timestamp": detail.get("latest_activity_timestamp"),
                     "risk_state": detail.get("risk_state", "OK"),
                     "halt_reason": detail.get("lane_halt_reason"),
+                    "temporary_paper_strategy": temporary_paper_strategy,
+                    "paper_strategy_class": (
+                        "temporary_paper_strategy" if temporary_paper_strategy else "approved_or_admitted_paper_strategy"
+                    ),
                 }
             )
 
         enabled_count = sum(1 for row in rows if row["enabled"])
+        temporary_count = sum(1 for row in rows if row.get("temporary_paper_strategy"))
         default_branch = next((row["branch"] for row in rows if row.get("open_position")), None)
         if default_branch is None:
             active_rows = [row for row in rows if row.get("latest_activity_timestamp")]
@@ -4223,22 +4233,34 @@ class OperatorDashboardService:
             elif rows:
                 default_branch = rows[0]["branch"]
         return {
-            "scope_label": "Admitted probationary paper lanes",
-            "instrument_scope": f"{enabled_count} admitted lanes / multi-lane paper mode",
+            "scope_label": "Shared paper lane operator detail",
+            "instrument_scope": (
+                f"{enabled_count} shared paper lanes / multi-lane paper mode"
+                if not temporary_count
+                else f"{enabled_count} shared paper lanes / {temporary_count} temporary paper lanes visible here"
+            ),
             "enabled_count": enabled_count,
             "total_count": len(rows),
+            "temporary_paper_count": temporary_count,
             "rows": rows,
             "default_branch": default_branch,
             "details_by_branch": details_by_branch,
             "out_of_scope_blocked_count": out_of_scope_blocked_count,
             "out_of_scope_note": (
-                f"{out_of_scope_blocked_count} non-approved branches were blocked out of paper scope in the current session."
-                if out_of_scope_blocked_count
-                else "Non-approved branches remain excluded from paper scope and appear only in blocked/rule artifact trails."
+                (
+                    f"{out_of_scope_blocked_count} non-approved branches were blocked out of paper scope in the current session."
+                    if out_of_scope_blocked_count
+                    else "Non-approved branches remain excluded from paper scope and appear only in blocked/rule artifact trails."
+                )
+                + (
+                    " Temporary paper strategy lanes that are already attached to the paper runtime are surfaced here with explicit experimental labels."
+                    if temporary_count
+                    else ""
+                )
             ),
             "artifacts": artifacts,
             "provenance": {
-                "eligibility": "Lane rows come from the active supervisor-admitted paper lanes in operator_status/config-in-force.",
+                "eligibility": "Lane rows come from the active paper runtime lane universe in operator_status/config-in-force, including temporary paper lanes when they are attached to the shared paper runtime.",
                 "last_signal": "Derived from persisted paper branch_sources filtered by lane symbol/source and lane_id when present.",
                 "last_intent": "Derived from persisted paper order intents filtered by lane instrument plus reason_code.",
                 "last_fill": "Derived from persisted paper fills joined to lane-filtered paper order intents by order_intent_id.",

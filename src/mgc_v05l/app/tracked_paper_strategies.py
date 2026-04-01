@@ -110,7 +110,7 @@ def build_tracked_paper_strategies_payload(
     active_count = sum(1 for row in rows if str(row.get("status") or "").upper() in {"READY", "IN_POSITION", "RECONCILING"})
     return {
         "generated_at": generated_at,
-        "scope_label": "Tracked paper strategies",
+        "scope_label": "Tracked paper strategy audit (secondary read model)",
         "total_count": len(rows),
         "enabled_count": enabled_count,
         "active_count": active_count,
@@ -118,8 +118,8 @@ def build_tracked_paper_strategies_payload(
         "details_by_strategy_id": details_by_id,
         "default_strategy_id": definitions[0].strategy_id if definitions else None,
         "note": (
-            "Tracked paper strategies are app-facing read models backed by persisted paper/runtime truth. "
-            "They do not change strategy semantics or live execution scope."
+            "Tracked paper strategies are secondary audit read models backed by persisted paper/runtime truth. "
+            "Use the shared lane operator detail and shared paper-runtime controls as the primary ATP operator surface."
         ),
     }
 

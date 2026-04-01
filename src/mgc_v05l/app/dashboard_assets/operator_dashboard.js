@@ -2077,7 +2077,7 @@ function renderApprovedModels(payload, eligibility = {}, temporaryPayload = {}) 
   text(
     "approved-models-out-of-scope-note",
     temporaryCount
-      ? `${payload.out_of_scope_note || "-"} Temporary paper strategies are shown here with explicit experimental/paper-only/non-approved labels.`
+      ? `${payload.out_of_scope_note || "-"} Temporary paper strategies are shown here with explicit experimental/paper-only/non-approved labels and should be operated from this shared lane surface.`
       : (payload.out_of_scope_note || "-"),
   );
   const fireabilityState = document.getElementById("approved-models-fireability-state");
@@ -2191,7 +2191,8 @@ function renderApprovedModels(payload, eligibility = {}, temporaryPayload = {}) 
         const instrument = laneInstrument(row);
         const family = row.source_family || lane.family || branch;
         const session = row.session_restriction || "-";
-        return `<option value="${escapeHtml(branch)}">${escapeHtml(`${instrument} | ${family} | ${session}`)}</option>`;
+        const strategyClass = row.temporary_paper_strategy ? "TEMP PAPER" : "ADMITTED";
+        return `<option value="${escapeHtml(branch)}">${escapeHtml(`${strategyClass} | ${instrument} | ${family} | ${session}`)}</option>`;
       })
       .join("");
     if (currentSelection) {
@@ -2290,7 +2291,13 @@ function renderTrackedPaperStrategies(payload) {
   text("tracked-paper-strategy-label", detail.internal_label || "-");
   text("tracked-paper-strategy-status", detail.status || "DISABLED");
   text("tracked-paper-strategy-session", detail.current_session_segment || "-");
-  text("tracked-paper-strategies-note", payload.note || payload.scope_label || "No tracked paper strategies are registered.");
+  const trackedPrimaryNote = "Primary operator path: use Lane Operator Detail / Evidence and shared paper runtime controls.";
+  text(
+    "tracked-paper-strategies-note",
+    [payload.note || payload.scope_label || "No tracked paper strategies are registered.", trackedPrimaryNote]
+      .filter(Boolean)
+      .join(" "),
+  );
   setLink("tracked-paper-strategies-link", "/api/operator-artifact/paper-tracked-strategies");
   setLink("tracked-paper-strategy-details-link", "/api/operator-artifact/paper-tracked-strategy-details");
 
@@ -2381,30 +2388,6 @@ function renderTrackedPaperStrategies(payload) {
     ].join(" | "),
   );
 
-  const startButton = document.getElementById("tracked-paper-start");
-  const stopButton = document.getElementById("tracked-paper-stop");
-  const haltButton = document.getElementById("tracked-paper-halt");
-  const resumeButton = document.getElementById("tracked-paper-resume");
-  const stopAfterCycleButton = document.getElementById("tracked-paper-stop-after-cycle");
-  const flattenButton = document.getElementById("tracked-paper-flatten");
-  if (startButton) {
-    startButton.disabled = state.actionInFlight || detail.runtime_attached;
-  }
-  if (stopButton) {
-    stopButton.disabled = state.actionInFlight || !detail.runtime_attached;
-  }
-  if (haltButton) {
-    haltButton.disabled = state.actionInFlight || !detail.runtime_attached || detail.operator_halt;
-  }
-  if (resumeButton) {
-    resumeButton.disabled = state.actionInFlight || !detail.runtime_attached || (!detail.operator_halt && detail.status !== "RECONCILING");
-  }
-  if (stopAfterCycleButton) {
-    stopAfterCycleButton.disabled = state.actionInFlight || !detail.runtime_attached;
-  }
-  if (flattenButton) {
-    flattenButton.disabled = state.actionInFlight || !detail.runtime_attached;
-  }
 }
 
 function summarizeTrackedPaperEvent(payload, fields) {
@@ -2955,7 +2938,12 @@ function renderApprovedModelDetail(detail, artifacts) {
     detail.reconciliation_state || "UNKNOWN",
     detail.reconciliation_state === "CLEAN" ? "ok" : detail.reconciliation_state ? "warning" : "muted",
   );
-  text("approved-model-detail-note", detail.chain_note || "-");
+  text(
+    "approved-model-detail-note",
+    detail.temporary_paper_strategy
+      ? `Temporary paper strategy shown in the shared lane operator surface. ${detail.chain_note || "-"}`
+      : (detail.chain_note || "-"),
+  );
 
   setLink("approved-model-detail-decisions-link", detail.artifacts?.decisions || artifacts.decisions || null);
   setLink("approved-model-detail-blocks-link", detail.artifacts?.blocks || artifacts.blocks || null);

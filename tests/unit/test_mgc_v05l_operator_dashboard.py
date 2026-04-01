@@ -1922,11 +1922,13 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert 'id="tracked-paper-strategies-table"' in html
     assert 'id="tracked-paper-detail-name"' in html
     assert 'id="tracked-paper-detail-runtime-attached"' in html
-    assert 'data-action="start-atp-companion-paper"' in html
-    assert 'data-action="atp-companion-paper-flatten-and-halt"' in html
+    assert "Tracked Paper Audit / Secondary Read Model" in html
+    assert 'data-action="start-atp-companion-paper"' not in html
+    assert 'data-action="atp-companion-paper-flatten-and-halt"' not in html
     assert "renderOperatorCanarySummary" in js
     assert "renderTemporaryPaperStrategies" in js
     assert "renderTrackedPaperStrategies" in js
+    assert "tracked-paper-start" not in js
     assert ".operator-canary-panel" in css
     assert 'id="operator-risk-cards"' in html
     assert 'id="operator-risk-notes"' in html
@@ -6733,6 +6735,76 @@ def test_dashboard_non_approved_payload_merges_experimental_canary_snapshot(tmp_
     assert integrity_payload["mismatch_status"] == "MISMATCH"
     assert integrity_payload["missing_lane_ids"] == ["atpe_long_medium_high_canary"]
     assert integrity_payload["start_flags"] == ["--include-atpe-canary"]
+
+
+def test_dashboard_approved_models_surface_includes_attached_temporary_paper_lane(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
+    paper_artifacts.mkdir(parents=True)
+    lane_dir = paper_artifacts / "lanes" / "atp_companion_v1_asia_us"
+    lane_dir.mkdir(parents=True)
+
+    service = OperatorDashboardService(repo_root)
+    paper = {
+        "artifacts_dir": str(paper_artifacts),
+        "status": {"session_date": "2026-03-23"},
+        "raw_operator_status": {
+            "lanes": [
+                {
+                    "lane_id": "atp_companion_v1_asia_us",
+                    "display_name": "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only",
+                    "symbol": "MGC",
+                    "runtime_kind": "atp_companion_benchmark_paper",
+                    "strategy_family": "active_trend_participation_engine",
+                    "entries_enabled": True,
+                    "position_side": "FLAT",
+                    "session_restriction": "ASIA/US",
+                    "experimental_status": "experimental_temp_paper",
+                    "paper_only": True,
+                    "non_approved": True,
+                    "approved_long_entry_sources": ["trend_participation.pullback_continuation.long.conservative"],
+                    "database_url": f"sqlite:///{repo_root / 'paper__atp.sqlite3'}",
+                }
+            ]
+        },
+        "config_in_force": {
+            "lanes": [
+                {
+                    "lane_id": "atp_companion_v1_asia_us",
+                    "display_name": "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only",
+                    "symbol": "MGC",
+                    "runtime_kind": "atp_companion_benchmark_paper",
+                    "strategy_family": "active_trend_participation_engine",
+                    "session_restriction": "ASIA/US",
+                    "experimental_status": "experimental_temp_paper",
+                    "paper_only": True,
+                    "non_approved": True,
+                    "long_sources": ["trend_participation.pullback_continuation.long.conservative"],
+                    "artifacts_dir": str(lane_dir),
+                }
+            ]
+        },
+        "lane_risk": {"lanes": []},
+        "events": {"branch_sources": [], "rule_blocks": [], "operator_controls": [], "reconciliation": []},
+        "latest_fills": [],
+        "latest_intents": [],
+        "daily_summary": None,
+        "position": {"side": "FLAT"},
+        "operator_state": {},
+        "performance": {"branch_performance": []},
+    }
+
+    payload = service._paper_approved_models_payload(paper)
+
+    assert payload["temporary_paper_count"] == 1
+    assert payload["scope_label"] == "Shared paper lane operator detail"
+    row = payload["rows"][0]
+    assert row["lane_id"] == "atp_companion_v1_asia_us"
+    assert row["temporary_paper_strategy"] is True
+    assert row["paper_strategy_class"] == "temporary_paper_strategy"
+    detail = payload["details_by_branch"][row["branch"]]
+    assert detail["temporary_paper_strategy"] is True
+    assert detail["paper_strategy_class"] == "temporary_paper_strategy"
 
 
 def test_tracked_paper_strategy_payload_registers_live_attached_atp_benchmark_from_persisted_runtime_truth(tmp_path: Path) -> None:

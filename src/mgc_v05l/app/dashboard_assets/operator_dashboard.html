@@ -897,7 +897,7 @@
           </div>
           <div class="table-card temporary-paper-strategies-card">
             <div class="table-header-row">
-              <h3>Tracked Paper Strategies</h3>
+              <h3>Tracked Paper Audit / Secondary Read Model</h3>
               <div class="panel-actions">
                 <a id="tracked-paper-strategies-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Snapshot JSON</a>
                 <a id="tracked-paper-strategy-details-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Detail JSON</a>
@@ -941,14 +941,7 @@
               <div class="stat wide"><span class="label">Stop / Risk</span><span id="tracked-paper-detail-risk" class="value mono">-</span></div>
               <div class="stat wide"><span class="label">Status Reason</span><span id="tracked-paper-detail-status-reason" class="value">-</span></div>
             </div>
-            <div class="manual-action-cluster">
-              <button id="tracked-paper-start" class="action accent" data-action="start-atp-companion-paper">Start ATP Paper</button>
-              <button id="tracked-paper-stop" class="action stop" data-action="stop-atp-companion-paper">Stop ATP Paper</button>
-              <button id="tracked-paper-halt" class="action stop" data-action="atp-companion-paper-halt-entries">Halt Entries</button>
-              <button id="tracked-paper-resume" class="action" data-action="atp-companion-paper-resume-entries">Resume Entries</button>
-              <button id="tracked-paper-stop-after-cycle" class="action" data-action="atp-companion-paper-stop-after-cycle">Stop After Cycle</button>
-              <button id="tracked-paper-flatten" class="danger-action" data-action="atp-companion-paper-flatten-and-halt">Flatten And Halt</button>
-            </div>
+            <div class="subnote model-scope-note"><strong>Primary Operator Path:</strong> ATP lane operation now lives in the shared Lane Operator Detail / Evidence surface and the shared paper runtime controls above. This panel remains audit-only during migration.</div>
             <div class="subnote model-scope-note"><strong>Audit Drilldown:</strong> <span id="tracked-paper-detail-audit-summary">-</span></div>
           </div>
           <div class="table-card lane-activity-card">
