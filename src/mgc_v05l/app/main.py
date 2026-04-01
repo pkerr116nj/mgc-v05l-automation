@@ -92,6 +92,56 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refresh_parser.add_argument("--token-file", default=None, help="Optional local token file override.")
 
+    auth_gate_parser = subparsers.add_parser(
+        "schwab-auth-gate",
+        help="Validate that the local Schwab token/bootstrap state is ready for runtime use.",
+    )
+    auth_gate_parser.add_argument("--token-file", default=None, help="Optional local token file override.")
+    auth_gate_parser.add_argument(
+        "--schwab-config",
+        default=None,
+        help="Optional JSON config file for the market-data probe.",
+    )
+    auth_gate_parser.add_argument(
+        "--internal-symbol",
+        default="MGC",
+        help="Internal symbol to use for the runtime market-data readiness probe.",
+    )
+
+    token_web_parser = subparsers.add_parser(
+        "schwab-token-web",
+        help="Run the local Schwab token bootstrap web tool.",
+    )
+    token_web_parser.add_argument("--host", default="127.0.0.1", help="Preferred bind host.")
+    token_web_parser.add_argument("--port", type=int, default=8765, help="Preferred bind port.")
+    token_web_parser.add_argument("--token-file", default=None, help="Optional local token file override.")
+    token_web_parser.add_argument(
+        "--info-file",
+        default=None,
+        help="Optional JSON file to write the final bound bootstrap URL.",
+    )
+    token_web_parser.add_argument(
+        "--port-search-limit",
+        type=int,
+        default=25,
+        help="How many higher ports to probe if the preferred port is unavailable.",
+    )
+    token_web_parser.add_argument(
+        "--schwab-config",
+        default=None,
+        help="Optional JSON config file for the readiness probe.",
+    )
+    token_web_parser.add_argument(
+        "--probe-symbol",
+        default="MGC",
+        help="Internal symbol to use for the runtime market-data readiness probe.",
+    )
+    token_web_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not auto-open the local bootstrap UI in a browser.",
+    )
+
     history_parser = subparsers.add_parser(
         "schwab-fetch-history",
         help="Fetch Schwab /pricehistory candles and normalize them into internal bars.",
@@ -279,6 +329,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         oauth_client = _build_oauth_client(auth_config)
         token_set = oauth_client.refresh_token()
         print(json.dumps(_json_ready(token_set), sort_keys=True))
+        return 0
+
+    if args.command == "schwab-auth-gate":
+        from .schwab_token_bootstrap_web import SchwabTokenBootstrapService
+
+        service = SchwabTokenBootstrapService(
+            token_file=args.token_file,
+            schwab_config_path=args.schwab_config,
+            probe_symbol=args.internal_symbol,
+        )
+        print(json.dumps(_json_ready(service.check_runtime_ready()), sort_keys=True))
+        return 0
+
+    if args.command == "schwab-token-web":
+        from .schwab_token_bootstrap_web import run_schwab_token_bootstrap_server
+
+        result = run_schwab_token_bootstrap_server(
+            host=args.host,
+            port=args.port,
+            token_file=args.token_file,
+            open_browser=not args.no_browser,
+            info_file=args.info_file,
+            port_search_limit=args.port_search_limit,
+            schwab_config_path=args.schwab_config,
+            probe_symbol=args.probe_symbol,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
         return 0
 
     if args.command == "schwab-fetch-history":
