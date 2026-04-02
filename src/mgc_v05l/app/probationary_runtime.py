@@ -23,6 +23,8 @@ from sqlalchemy import and_, select
 
 from ..config_models import (
     AddDirectionPolicy,
+    EnvironmentMode,
+    ExecutionTimeframeRole,
     ParticipationPolicy,
     RuntimeMode,
     StrategySettings,
@@ -235,6 +237,19 @@ class ProbationaryOperatorControlResult:
     requested_at: str
 
 
+def _runtime_cadence_payload(settings: StrategySettings, strategy_engine: StrategyEngine) -> dict[str, Any]:
+    cadence = strategy_engine.runtime_cadence_snapshot()
+    return {
+        "execution_timeframe": cadence.get("execution_timeframe") or settings.resolved_execution_timeframe,
+        "context_timeframes": list(cadence.get("context_timeframes") or list(settings.resolved_context_timeframes)),
+        "primary_context_timeframe": cadence.get("primary_context_timeframe") or settings.primary_context_timeframe,
+        "last_execution_bar_id": cadence.get("last_execution_bar_id"),
+        "last_execution_bar_evaluated_at": cadence.get("last_execution_bar_evaluated_at"),
+        "last_completed_context_bars_at": dict(cadence.get("last_completed_context_bars_at") or {}),
+        "uses_multi_timescale_execution": bool(cadence.get("uses_multi_timescale_execution", settings.uses_multi_timescale_execution)),
+    }
+
+
 APPROVED_LONG_SOURCE_FIELDS = {
     "usLatePauseResumeLongTurn": "enable_us_late_pause_resume_longs",
     "asiaEarlyNormalBreakoutRetestHoldTurn": "enable_asia_early_normal_breakout_retest_hold_longs",
@@ -416,6 +431,10 @@ class ProbationaryPaperLaneSpec:
     strategy_family: str = "UNKNOWN"
     strategy_identity_root: str | None = None
     runtime_kind: str = "strategy_engine"
+    execution_timeframe: str | None = None
+    structural_signal_timeframe: str | None = None
+    artifact_timeframe: str | None = None
+    context_timeframes: tuple[str, ...] = ()
     allowed_sessions: tuple[str, ...] = ()
     live_poll_lookback_minutes: int | None = None
     database_url: str | None = None
@@ -1640,6 +1659,10 @@ def _live_timing_contract(settings: StrategySettings) -> dict[str, Any]:
     return {
         "symbol": settings.symbol,
         "timeframe": settings.timeframe,
+        "execution_timeframe": settings.resolved_execution_timeframe,
+        "context_timeframes": list(settings.resolved_context_timeframes),
+        "primary_context_timeframe": settings.primary_context_timeframe,
+        "uses_multi_timescale_execution": settings.uses_multi_timescale_execution,
         "completed_bar_only": True,
         "deterministic_sequential_processing": True,
         "position_transitions_on_fill_only": True,
@@ -2078,6 +2101,7 @@ def _build_live_shadow_summary(
 ) -> dict[str, Any]:
     observed = observed_at or datetime.now(timezone.utc)
     latest_processed_end_ts = repositories.processed_bars.latest_end_ts()
+    cadence = _runtime_cadence_payload(settings, strategy_engine)
     broker_truth_summary = _shadow_broker_truth_summary(
         broker_truth_snapshot=broker_truth_snapshot,
         strategy_engine=strategy_engine,
@@ -2096,9 +2120,12 @@ def _build_live_shadow_summary(
     entry_blocker = broker_truth_summary.get("blocker") or _paper_soak_entry_blocker(strategy_engine)
     latest_shadow_intent = strategy_engine.latest_shadow_intent_summary()
     latest_exit_decision = strategy_engine.latest_exit_decision_summary()
-    last_processed_bar_id = None
-    if latest_processed_end_ts is not None:
-        last_processed_bar_id = f"{settings.symbol}|{settings.timeframe}|{latest_processed_end_ts.astimezone(timezone.utc).isoformat()}"
+    last_processed_bar_id = cadence.get("last_execution_bar_id")
+    if last_processed_bar_id is None and latest_processed_end_ts is not None:
+        last_processed_bar_id = (
+            f"{settings.symbol}|{settings.resolved_execution_timeframe}|"
+            f"{latest_processed_end_ts.astimezone(timezone.utc).isoformat()}"
+        )
     submit_would_be_allowed = (
         entry_blocker is None
         and runtime_phase in {"READY", "IN_POSITION"}
@@ -2107,9 +2134,12 @@ def _build_live_shadow_summary(
     return {
         "generated_at": observed.isoformat(),
         "operator_path": "mgc-v05l probationary-live-shadow",
+        **cadence,
         "allowed_scope": {
             "symbol": settings.symbol,
             "timeframe": settings.timeframe,
+            "execution_timeframe": settings.resolved_execution_timeframe,
+            "context_timeframes": list(settings.resolved_context_timeframes),
             "mode": "LIVE_SHADOW_NO_SUBMIT",
             "completed_bar_only": True,
             "deterministic_sequential_processing": True,
@@ -3209,7 +3239,10 @@ class ProbationaryPaperLaneRuntime:
         return "paper_startup_reconciliation_failed"
 
     def supervisor_status_extras(self) -> dict[str, Any]:
-        return {"startup_restore_validation": dict(self._startup_restore_validation or {})}
+        return {
+            **_runtime_cadence_payload(self.settings, self.strategy_engine),
+            "startup_restore_validation": dict(self._startup_restore_validation or {}),
+        }
 
     def poll_and_process(self) -> tuple[int, dict[str, Any], Path]:
         latest_processed_end_ts = self.repositories.processed_bars.latest_end_ts()
@@ -3218,12 +3251,13 @@ class ProbationaryPaperLaneRuntime:
                 internal_symbol=self.settings.symbol,
                 since=latest_processed_end_ts,
             ),
-            internal_timeframe=self.settings.timeframe,
+            internal_timeframe=self.settings.resolved_execution_timeframe,
             default_is_final=True,
         )
         for bar in bars:
             self.strategy_engine.process_bar(bar)
             self._apply_canary_lifecycle(bar)
+        cadence = _runtime_cadence_payload(self.settings, self.strategy_engine)
         heartbeat_reconciliation, reconciliation, _ = _run_reconciliation_heartbeat(
             settings=self.settings,
             strategy_engine=self.strategy_engine,
@@ -3252,6 +3286,7 @@ class ProbationaryPaperLaneRuntime:
                 "display_name": self.spec.display_name,
                 "session_restriction": self.spec.session_restriction,
                 "lane_mode": self.spec.lane_mode,
+                **cadence,
                 "approved_long_entry_sources": sorted(self.settings.approved_long_entry_sources),
                 "approved_short_entry_sources": sorted(self.settings.approved_short_entry_sources),
                 "last_processed_bar_end_ts": (
@@ -3376,7 +3411,7 @@ class ProbationaryPaperLaneRuntime:
             if exit_not_before is not None and local_time < exit_not_before:
                 return False
             return True
-        required_end = state.entry_timestamp + timedelta(minutes=timeframe_minutes(self.settings.timeframe))
+        required_end = state.entry_timestamp + timedelta(minutes=timeframe_minutes(self.settings.resolved_execution_timeframe))
         return bar.end_ts >= required_end
 
     def _should_submit_force_fire_canary_entry(self) -> bool:
@@ -3405,7 +3440,7 @@ class ProbationaryPaperLaneRuntime:
             return False
         if state.entry_timestamp is None:
             return False
-        required_end = state.entry_timestamp + timedelta(minutes=timeframe_minutes(self.settings.timeframe))
+        required_end = state.entry_timestamp + timedelta(minutes=timeframe_minutes(self.settings.resolved_execution_timeframe))
         return bar.end_ts >= required_end
 
     def _force_fire_canary_enabled(self) -> bool:
@@ -3463,6 +3498,9 @@ class ProbationaryPaperLaneRuntime:
         )
 
 
+ProbationaryAdaptedPaperLaneRuntime = ProbationaryPaperLaneRuntime
+
+
 class ProbationaryTemporaryPaperLaneRuntime(ProbationaryPaperLaneRuntime):
     """Experimental temporary paper strategy surfaced inline with regular paper strategies."""
 
@@ -3480,6 +3518,7 @@ class ProbationaryTemporaryPaperLaneRuntime(ProbationaryPaperLaneRuntime):
 
     def supervisor_status_extras(self) -> dict[str, Any]:
         return {
+            **_runtime_cadence_payload(self.settings, self.strategy_engine),
             "experimental_status": self.spec.experimental_status,
             "paper_only": self.spec.paper_only,
             "non_approved": self.spec.non_approved,
@@ -3497,7 +3536,7 @@ class ProbationaryTemporaryPaperLaneRuntime(ProbationaryPaperLaneRuntime):
     def eligibility_snapshot(self, now: datetime) -> dict[str, Any]:
         last_processed_end = self.repositories.processed_bars.latest_end_ts()
         current_session = label_session_phase(now)
-        latest_completed_bar_end = _latest_completed_probationary_bar_end(now, self.settings.timeframe)
+        latest_completed_bar_end = _latest_completed_probationary_bar_end(now, self.settings.resolved_execution_timeframe)
         warmup_required = self.settings.warmup_bars_required()
         warmup_bars_loaded = len(self.strategy_engine._bar_history)  # noqa: SLF001
         warmup_complete = warmup_bars_loaded >= warmup_required
@@ -3699,7 +3738,14 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
         }
 
     def supervisor_status_extras(self) -> dict[str, Any]:
-        return dict(self._last_supervisor_status)
+        return {
+            **_runtime_cadence_payload_from_research_bars(
+                instrument=self._instrument,
+                bars_1m=self._bars_1m.get(self._instrument, []),
+                latest_polled_end_ts=self._latest_polled_end_ts.get(self._instrument),
+            ),
+            **dict(self._last_supervisor_status),
+        }
 
     def eligibility_snapshot(self, now: datetime) -> dict[str, Any]:
         last_processed_end = self.repositories.processed_bars.latest_end_ts()
@@ -4263,6 +4309,11 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
             "lane_id": self.spec.lane_id,
             "lane_name": self.spec.display_name,
             "display_name": self.spec.display_name,
+            **_runtime_cadence_payload_from_research_bars(
+                instrument=self._instrument,
+                bars_1m=self._bars_1m.get(self._instrument, []),
+                latest_polled_end_ts=self._latest_polled_end_ts.get(self._instrument),
+            ),
             "experimental_status": self.spec.experimental_status,
             "paper_only": self.spec.paper_only,
             "non_approved": self.spec.non_approved,
@@ -4565,6 +4616,11 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
         latest_entry_state = self._latest_entry_states[-1] if self._latest_entry_states else None
         runtime_identity = _atp_runtime_identity_payload(self.spec)
         return {
+            **_runtime_cadence_payload_from_research_bars(
+                instrument=self._instrument,
+                bars_1m=self._bars_1m.get(self._instrument, []),
+                latest_polled_end_ts=self._latest_polled_end_ts.get(self._instrument),
+            ),
             "benchmark_designation": runtime_identity["benchmark_designation"],
             "tracked_strategy_id": runtime_identity["tracked_strategy_id"],
             "quality_bucket_policy": self.spec.quality_bucket_policy,
@@ -5133,6 +5189,11 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
             "lane_id": self.spec.lane_id,
             "lane_name": self.spec.display_name,
             "display_name": self.spec.display_name,
+            **_runtime_cadence_payload_from_research_bars(
+                instrument=self._instrument,
+                bars_1m=self._bars_1m.get(self._instrument, []),
+                latest_polled_end_ts=self._latest_polled_end_ts.get(self._instrument),
+            ),
             "experimental_status": self.spec.experimental_status,
             "paper_only": self.spec.paper_only,
             "non_approved": self.spec.non_approved,
@@ -5225,7 +5286,7 @@ class ProbationaryShadowRunner:
                     internal_symbol=self._settings.symbol,
                     since=latest_processed_end_ts,
                 ),
-                internal_timeframe=self._settings.timeframe,
+                internal_timeframe=self._settings.resolved_execution_timeframe,
                 default_is_final=True,
             )
             for bar in bars:
@@ -5248,6 +5309,7 @@ class ProbationaryShadowRunner:
                 {
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "health": asdict(snapshot),
+                    **_runtime_cadence_payload(self._settings, self._strategy_engine),
                     "last_processed_bar_end_ts": (
                         self._repositories.processed_bars.latest_end_ts().isoformat()
                         if self._repositories.processed_bars.latest_end_ts() is not None
@@ -5321,7 +5383,7 @@ class ProbationaryShadowRunner:
         latest_processed_end_ts = self._repositories.processed_bars.latest_end_ts()
         market_data_ok = True
         if latest_processed_end_ts is not None:
-            allowed_delay = timedelta(minutes=timeframe_minutes(self._settings.timeframe) * 2)
+            allowed_delay = timedelta(minutes=timeframe_minutes(self._settings.resolved_execution_timeframe) * 2)
             market_data_ok = datetime.now(self._settings.timezone_info) - latest_processed_end_ts <= allowed_delay
         broker_truth_summary = _shadow_broker_truth_summary(
             broker_truth_snapshot=broker_truth_snapshot,
@@ -5406,7 +5468,7 @@ class ProbationaryPaperRunner:
                         internal_symbol=self._settings.symbol,
                         since=latest_processed_end_ts,
                     ),
-                    internal_timeframe=self._settings.timeframe,
+                    internal_timeframe=self._settings.resolved_execution_timeframe,
                     default_is_final=True,
                 )
                 for bar in bars:
@@ -5438,6 +5500,7 @@ class ProbationaryPaperRunner:
                     {
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                         "health": asdict(snapshot),
+                        **_runtime_cadence_payload(self._settings, self._strategy_engine),
                         "last_processed_bar_end_ts": (
                             self._repositories.processed_bars.latest_end_ts().isoformat()
                             if self._repositories.processed_bars.latest_end_ts() is not None
@@ -5568,7 +5631,7 @@ class ProbationaryPaperRunner:
         latest_processed_end_ts = self._repositories.processed_bars.latest_end_ts()
         market_data_ok = True
         if latest_processed_end_ts is not None:
-            allowed_delay = timedelta(minutes=timeframe_minutes(self._settings.timeframe) * 2)
+            allowed_delay = timedelta(minutes=timeframe_minutes(self._settings.resolved_execution_timeframe) * 2)
             market_data_ok = datetime.now(self._settings.timezone_info) - latest_processed_end_ts <= allowed_delay
         broker_ok = bool(self._execution_engine.broker.is_connected())
         persistence_ok = True
@@ -5976,7 +6039,7 @@ class ProbationaryLiveStrategyPilotRunner:
                     internal_symbol=self._settings.symbol,
                     since=latest_processed_end_ts,
                 ),
-                internal_timeframe=self._settings.timeframe,
+                internal_timeframe=self._settings.resolved_execution_timeframe,
                 default_is_final=True,
             )
             for bar in bars:
@@ -6019,6 +6082,7 @@ class ProbationaryLiveStrategyPilotRunner:
                 {
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "health": asdict(self._build_health_snapshot(self._latest_broker_truth_snapshot)),
+                    **_runtime_cadence_payload(self._settings, self._strategy_engine),
                     "last_processed_bar_end_ts": (
                         self._repositories.processed_bars.latest_end_ts().isoformat()
                         if self._repositories.processed_bars.latest_end_ts() is not None
@@ -6201,7 +6265,7 @@ class ProbationaryLiveStrategyPilotRunner:
         latest_processed_end_ts = self._repositories.processed_bars.latest_end_ts()
         market_data_ok = True
         if latest_processed_end_ts is not None:
-            allowed_delay = timedelta(minutes=timeframe_minutes(self._settings.timeframe) * 2)
+            allowed_delay = timedelta(minutes=timeframe_minutes(self._settings.resolved_execution_timeframe) * 2)
             market_data_ok = datetime.now(self._settings.timezone_info) - latest_processed_end_ts <= allowed_delay
         broker_truth_summary = _shadow_broker_truth_summary(
             broker_truth_snapshot=broker_truth_snapshot,
@@ -6472,6 +6536,20 @@ def _coerce_probationary_paper_lane_specs(
                     str(raw_spec["strategy_identity_root"]) if raw_spec.get("strategy_identity_root") else None
                 ),
                 runtime_kind=str(raw_spec.get("runtime_kind") or "strategy_engine"),
+                execution_timeframe=(
+                    str(raw_spec["execution_timeframe"]) if raw_spec.get("execution_timeframe") else None
+                ),
+                structural_signal_timeframe=(
+                    str(raw_spec["structural_signal_timeframe"])
+                    if raw_spec.get("structural_signal_timeframe")
+                    else None
+                ),
+                artifact_timeframe=(
+                    str(raw_spec["artifact_timeframe"]) if raw_spec.get("artifact_timeframe") else None
+                ),
+                context_timeframes=tuple(
+                    str(value) for value in raw_spec.get("context_timeframes", []) if str(value).strip()
+                ),
                 allowed_sessions=tuple(str(value) for value in raw_spec.get("allowed_sessions", []) if value),
                 live_poll_lookback_minutes=(
                     int(raw_spec["live_poll_lookback_minutes"])
@@ -6801,6 +6879,10 @@ def _build_probationary_runtime_registry(
                     "session_restriction": lane.spec.session_restriction,
                     "allowed_sessions": list(getattr(lane.spec, "allowed_sessions", ()) or ()),
                     "trade_size": lane.spec.trade_size,
+                    "execution_timeframe": lane.settings.resolved_execution_timeframe,
+                    "structural_signal_timeframe": lane.settings.resolved_structural_signal_timeframe,
+                    "artifact_timeframe": lane.settings.resolved_artifact_timeframe,
+                    "context_timeframes": list(lane.settings.resolved_context_timeframes),
                     "database_url": lane.settings.database_url,
                     "artifacts_dir": str(lane.settings.probationary_artifacts_path),
                     **_lane_config_row_extras(lane),
@@ -6894,6 +6976,24 @@ def _build_probationary_paper_lane_settings(
         "probationary_extra_approved_short_entry_sources_json": "[]",
         "probationary_enforce_approved_branches": True,
     }
+    if settings.mode in {RuntimeMode.LIVE, RuntimeMode.PAPER}:
+        resolved_structural_timeframe = spec.structural_signal_timeframe or settings.resolved_structural_signal_timeframe
+        resolved_execution_timeframe = spec.execution_timeframe or "1m"
+        resolved_context_timeframes = tuple(spec.context_timeframes or (resolved_structural_timeframe,))
+        updates.update(
+            {
+                "environment_mode": EnvironmentMode.LIVE_EXECUTION,
+                "structural_signal_timeframe": resolved_structural_timeframe,
+                "execution_timeframe": resolved_execution_timeframe,
+                "artifact_timeframe": spec.artifact_timeframe or resolved_structural_timeframe,
+                "context_timeframes": resolved_context_timeframes,
+                "execution_timeframe_role": (
+                    ExecutionTimeframeRole.EXECUTION_DETAIL_ONLY
+                    if resolved_execution_timeframe != resolved_structural_timeframe
+                    else ExecutionTimeframeRole.MATCHES_SIGNAL_EVALUATION
+                ),
+            }
+        )
     if spec.live_poll_lookback_minutes is not None:
         updates["live_poll_lookback_minutes"] = spec.live_poll_lookback_minutes
     if spec.lane_mode == PAPER_EXECUTION_CANARY_MODE:
@@ -6970,6 +7070,10 @@ def _write_probationary_paper_config_in_force(
                 "lane_mode": getattr(lane.spec, "lane_mode", "STANDARD"),
                 "point_value": str(lane.spec.point_value),
                 "trade_size": getattr(lane.spec, "trade_size", lane.settings.trade_size),
+                "execution_timeframe": lane.settings.resolved_execution_timeframe,
+                "structural_signal_timeframe": lane.settings.resolved_structural_signal_timeframe,
+                "artifact_timeframe": lane.settings.resolved_artifact_timeframe,
+                "context_timeframes": list(lane.settings.resolved_context_timeframes),
                 "participation_policy": lane.settings.participation_policy.value,
                 "max_concurrent_entries": lane.settings.max_concurrent_entries,
                 "max_position_quantity": lane.settings.max_position_quantity,
@@ -7147,7 +7251,7 @@ def _probationary_lane_eligibility_snapshot(
         return dict(eligibility_hook(now))
     last_processed_end = lane.repositories.processed_bars.latest_end_ts()
     current_session = label_session_phase(now)
-    latest_completed_bar_end = _latest_completed_probationary_bar_end(now, lane.settings.timeframe)
+    latest_completed_bar_end = _latest_completed_probationary_bar_end(now, lane.settings.resolved_execution_timeframe)
     warmup_required = lane.settings.warmup_bars_required()
     warmup_bars_loaded = len(lane.strategy_engine._bar_history)  # noqa: SLF001 - operator status needs runtime truth
     warmup_complete = warmup_bars_loaded >= warmup_required
@@ -7220,6 +7324,28 @@ def _lane_status_row_extras(lane: ProbationaryPaperLaneRuntime) -> dict[str, Any
     if callable(hook):
         return dict(hook())
     return {}
+
+
+def _runtime_cadence_payload_from_research_bars(
+    *,
+    instrument: str,
+    bars_1m: Sequence[ResearchBar],
+    latest_polled_end_ts: datetime | None,
+) -> dict[str, Any]:
+    execution_bar_id = None
+    if latest_polled_end_ts is not None:
+        execution_bar_id = f"{instrument}|1m|{latest_polled_end_ts.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    bars_5m = _resample_research_bars_5m(bars_1m)
+    latest_completed_context = bars_5m[-1].end_ts.isoformat() if bars_5m else None
+    return {
+        "execution_timeframe": "1m",
+        "context_timeframes": ["5m"],
+        "last_execution_bar_id": execution_bar_id,
+        "last_execution_bar_evaluated_at": latest_polled_end_ts.isoformat() if latest_polled_end_ts is not None else None,
+        "last_completed_context_bars_at": {"5m": latest_completed_context},
+        "primary_context_timeframe": "5m",
+        "uses_multi_timescale_execution": True,
+    }
 
 
 def _build_probationary_paper_lane_metrics(
@@ -9685,18 +9811,20 @@ def _paper_soak_snapshot(
     latest_fill = state_snapshot.get("latest_fill") or {}
     latest_processed_end_ts = repositories.processed_bars.latest_end_ts()
     effective_now = observed_at or datetime.now(settings.timezone_info)
+    cadence = _runtime_cadence_payload(settings, strategy_engine)
     market_data_ok = True
     if latest_processed_end_ts is not None:
-        allowed_delay = timedelta(minutes=timeframe_minutes(settings.timeframe) * 2)
+        allowed_delay = timedelta(minutes=timeframe_minutes(settings.resolved_execution_timeframe) * 2)
         market_data_ok = effective_now - latest_processed_end_ts <= allowed_delay
     return {
+        **cadence,
         "runtime_phase": _paper_soak_runtime_phase(
             strategy_engine,
             latest_reconciliation=latest_reconciliation,
             latest_watchdog=latest_watchdog,
         ),
         "strategy_state": strategy_engine.state.strategy_status.value,
-        "last_processed_bar_id": strategy_engine.state.last_signal_bar_id,
+        "last_processed_bar_id": cadence.get("last_execution_bar_id") or strategy_engine.state.last_signal_bar_id,
         "last_processed_bar_end_ts": (
             latest_processed_end_ts.isoformat()
             if latest_processed_end_ts is not None
@@ -10596,7 +10724,7 @@ def _run_probationary_paper_soak_stale_missing_bar_handling(
         settings=settings,
         strategy_engine=strategy_engine,
         execution_engine=execution_engine,
-        observed_at=stale_bar.end_ts + timedelta(minutes=timeframe_minutes(settings.timeframe) * 3),
+        observed_at=stale_bar.end_ts + timedelta(minutes=timeframe_minutes(settings.resolved_execution_timeframe) * 3),
     )
     market_data_health = dict(summary.get("market_data_health") or {})
     passed = (
@@ -12275,10 +12403,12 @@ def _probationary_runtime_transport_diagnostic_payload(
         raise RuntimeError(f"Schwab market-data base URL is invalid: {base_url!r}")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     external_symbol = adapter.map_historical_symbol(settings.symbol)
-    frequency = adapter.map_timeframe(settings.timeframe)
+    frequency = adapter.map_timeframe(settings.resolved_execution_timeframe)
     now = datetime.now(settings.timezone_info)
     end_date_ms = int(now.timestamp() * 1000)
-    start_dt = now - timedelta(minutes=max(settings.live_poll_lookback_minutes, timeframe_minutes(settings.timeframe)))
+    start_dt = now - timedelta(
+        minutes=max(settings.live_poll_lookback_minutes, timeframe_minutes(settings.resolved_execution_timeframe))
+    )
     start_date_ms = int(start_dt.timestamp() * 1000)
     query = {
         "symbol": external_symbol,
@@ -12300,7 +12430,8 @@ def _probationary_runtime_transport_diagnostic_payload(
         "rendered_url": request_url,
         "probe_symbol_internal": settings.symbol,
         "probe_symbol_external": external_symbol,
-        "probe_timeframe": settings.timeframe,
+        "probe_timeframe": settings.resolved_execution_timeframe,
+        "context_timeframes": list(settings.resolved_context_timeframes),
         "request_query": query,
         "proxy_env": _probationary_runtime_transport_env(),
         "python_executable": sys.executable,
@@ -12383,7 +12514,7 @@ def _run_probationary_runtime_market_data_transport_probe(
                 need_extended_hours_data=True,
                 need_previous_close=False,
             ),
-            default_frequency=resolved_adapter.map_timeframe(settings.timeframe),
+            default_frequency=resolved_adapter.map_timeframe(settings.resolved_execution_timeframe),
         )
     except Exception as exc:
         failure_payload = {
@@ -14101,7 +14232,7 @@ def _load_captured_live_bars(
         select(bars_table)
         .where(
             bars_table.c.ticker == settings.symbol,
-            bars_table.c.timeframe == settings.timeframe,
+            bars_table.c.timeframe == settings.resolved_execution_timeframe,
         )
         .order_by(bars_table.c.end_ts.asc())
     )

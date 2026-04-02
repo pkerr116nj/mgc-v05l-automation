@@ -4998,6 +4998,323 @@ def test_paper_runtime_recovery_success_clears_stopped_runtime_surface(
     assert second_payload["restart_suppressed"] is False
 
 
+def test_restart_paper_with_temp_paper_ignores_missing_pid_and_surfaces_auth_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    paper_state = {
+        "running": False,
+        "status": {"fault_state": "CLEAR", "operator_halt": False},
+        "operator_state": {"flatten_pending": False, "stop_after_cycle_requested": False},
+        "desk_risk": {"desk_risk_state": "OK"},
+        "lane_risk": {"lanes": []},
+    }
+    snapshot = {
+        "paper": {
+            "running": False,
+            "temporary_paper_runtime_integrity": {
+                "missing_lane_ids": [],
+                "unresolved_start_lane_ids": [],
+                "summary_line": "clear",
+            },
+        }
+    }
+    snapshots = [snapshot, snapshot]
+    monkeypatch.setattr(service, "snapshot", lambda: snapshots.pop(0) if snapshots else snapshot)
+    monkeypatch.setattr(
+        service,
+        "_paper_start_command_with_enabled_temp_paper",
+        lambda current_snapshot: (["bash", "scripts/run_probationary_paper_soak.sh", "--background"], {"unresolved_lane_ids": []}),
+    )
+    monkeypatch.setattr(service, "_runtime_snapshot", lambda runtime_name: paper_state if runtime_name == "paper" else {"running": False})
+    monkeypatch.setattr(service, "_review_payload", lambda paper, scope: {})
+    monkeypatch.setattr(service, "_paper_carry_forward_state", lambda paper, review: {"active": False})
+    monkeypatch.setattr(service, "_paper_pre_session_review_state", lambda carry: {"ready_for_run": True})
+    monkeypatch.setattr(service, "_launch_gate_auth_status", lambda: {"runtime_ready": False, "next_action": "Auth Gate Check"})
+
+    def _fake_run(command, **kwargs):
+        if command == ["bash", "scripts/stop_probationary_paper_soak.sh"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout=f"No probationary paper PID file found at {tmp_path / 'probationary_paper.pid'}.",
+                stderr="",
+            )
+        raise AssertionError("start command should not run when auth is not ready")
+
+    monkeypatch.setattr(operator_dashboard_module.subprocess, "run", _fake_run)
+
+    result = service.run_action("restart-paper-with-temp-paper")
+
+    assert result["ok"] is False
+    assert result["reason_code"] == "AUTH_NOT_READY"
+    assert result["next_action"] == "Auth Gate Check"
+    assert "AUTH_NOT_READY" in str(result["message"])
+    assert "Auth Gate Check" in str(result["message"])
+    assert str(result["detail"]) == "AUTH_NOT_READY | Next action: Auth Gate Check"
+    assert "auth readiness is not green" in str(result["output"]).lower()
+    assert "No probationary paper PID file found" not in str(result["output"])
+    assert "No probationary paper PID file found" in str(result["stop_output"])
+
+
+def test_launch_gate_auth_status_refreshes_when_cached_status_is_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(Path.cwd())
+
+    calls: list[bool] = []
+
+    def _fake_load_or_refresh_auth_gate_result(*, run_if_missing: bool) -> dict[str, object]:
+        calls.append(run_if_missing)
+        return {"runtime_ready": False, "source": "missing"}
+
+    monkeypatch.setattr(service, "_load_or_refresh_auth_gate_result", _fake_load_or_refresh_auth_gate_result)
+    monkeypatch.setattr(
+        service,
+        "_run_auth_gate_result",
+        lambda: {"runtime_ready": True, "source": "fresh_auth_gate", "next_action": "None"},
+    )
+
+    result = service._launch_gate_auth_status()  # noqa: SLF001
+
+    assert calls == [False]
+    assert result["runtime_ready"] is True
+    assert result["source"] == "fresh_auth_gate"
+
+
+def test_paper_lane_fallback_status_treats_clean_lane_artifacts_as_restartable_when_top_level_status_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path
+    paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
+    runtime_dir = paper_artifacts / "runtime"
+    lane_dir = paper_artifacts / "lanes" / "mgc_us_late_pause_resume_long"
+    runtime_dir.mkdir(parents=True)
+    lane_dir.mkdir(parents=True)
+
+    (runtime_dir / "paper_config_in_force.json").write_text(
+        json.dumps(
+            {
+                "lanes": [
+                    {
+                        "lane_id": "mgc_us_late_pause_resume_long",
+                        "display_name": "MGC / usLatePauseResumeLongTurn",
+                        "symbol": "MGC",
+                        "session_restriction": "US_LATE",
+                        "long_sources": ["usLatePauseResumeLongTurn"],
+                        "database_url": f"sqlite:///{repo_root / 'paper__mgc_us_late_pause_resume_long.sqlite3'}",
+                    }
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (lane_dir / "operator_status.json").write_text(
+        json.dumps(
+            {
+                "lane_id": "mgc_us_late_pause_resume_long",
+                "display_name": "MGC / usLatePauseResumeLongTurn",
+                "symbol": "MGC",
+                "entries_enabled": True,
+                "operator_halt": False,
+                "position_side": "FLAT",
+                "strategy_status": "READY",
+                "processed_bars": 12,
+                "new_bars_last_cycle": 1,
+                "updated_at": "2026-04-02T12:31:29.376148+00:00",
+                "last_processed_bar_end_ts": "2026-04-02T12:30:00+00:00",
+                "reconciliation": {
+                    "clean": True,
+                    "reconcile_required": False,
+                    "broker_snapshot": {"connected": True},
+                },
+                "heartbeat_reconciliation": {
+                    "status": "CLEAN",
+                    "last_completed_at": "2026-04-02T12:31:29.375513+00:00",
+                },
+                "startup_restore_validation": {
+                    "restore_result": "READY",
+                    "clean": True,
+                    "reconcile_required": False,
+                    "unresolved_restore_issue": False,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    service = OperatorDashboardService(repo_root)
+    monkeypatch.setattr(
+        service,
+        "_runtime_paths",
+        lambda runtime_name: {
+            "artifacts_dir": paper_artifacts if runtime_name == "paper" else repo_root / "outputs" / "probationary_pattern_engine",
+            "pid_file": repo_root / f"{runtime_name}.pid",
+            "log_file": repo_root / f"{runtime_name}.log",
+            "db_path": None,
+        },
+    )
+
+    paper = service._runtime_snapshot("paper")
+    paper["readiness"] = service._paper_readiness_payload(paper)
+    paper["entry_eligibility"] = service._paper_entry_eligibility_payload(
+        paper,
+        {"required": False, "completed": True},
+    )
+
+    assert paper["running"] is False
+    assert paper["status"]["reconciliation_clean"] is True
+    assert paper["status"]["entries_enabled"] is True
+    assert paper["status"]["strategy_status"] == "READY"
+    assert paper["entry_eligibility"]["primary_blocking_reason"] != "RECONCILIATION_DIRTY"
+
+
+def test_restart_paper_with_temp_paper_ignores_missing_pid_and_surfaces_temp_paper_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    paper_state = {
+        "running": False,
+        "status": {"fault_state": "CLEAR", "operator_halt": False},
+        "operator_state": {"flatten_pending": False, "stop_after_cycle_requested": False},
+        "desk_risk": {"desk_risk_state": "OK"},
+        "lane_risk": {"lanes": []},
+    }
+    pre_snapshot = {
+        "paper": {
+            "running": False,
+            "temporary_paper_runtime_integrity": {
+                "missing_lane_ids": [],
+                "unresolved_start_lane_ids": [],
+                "summary_line": "clear",
+            },
+        }
+    }
+    post_snapshot = {
+        "paper": {
+            "running": True,
+            "temporary_paper_runtime_integrity": {
+                "missing_lane_ids": ["temp_lane_gc"],
+                "unresolved_start_lane_ids": [],
+                "summary_line": "Enabled in app: 1 | loaded in runtime: 0",
+            },
+        }
+    }
+    snapshots = [pre_snapshot, post_snapshot, post_snapshot]
+    monkeypatch.setattr(service, "snapshot", lambda: snapshots.pop(0) if snapshots else post_snapshot)
+    monkeypatch.setattr(
+        service,
+        "_paper_start_command_with_enabled_temp_paper",
+        lambda current_snapshot: (
+            ["bash", "scripts/run_probationary_paper_soak.sh", "--background", "--include-temp-lane-gc"],
+            {"unresolved_lane_ids": [], "requested_start_flags": ["--include-temp-lane-gc"]},
+        ),
+    )
+    monkeypatch.setattr(service, "_runtime_snapshot", lambda runtime_name: paper_state if runtime_name == "paper" else {"running": False})
+    monkeypatch.setattr(service, "_review_payload", lambda paper, scope: {})
+    monkeypatch.setattr(service, "_paper_carry_forward_state", lambda paper, review: {"active": False})
+    monkeypatch.setattr(service, "_paper_pre_session_review_state", lambda carry: {"ready_for_run": True})
+    monkeypatch.setattr(service, "_load_or_refresh_auth_gate_result", lambda run_if_missing: {"runtime_ready": True})
+
+    def _fake_run(command, **kwargs):
+        if command == ["bash", "scripts/stop_probationary_paper_soak.sh"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout=f"No probationary paper PID file found at {tmp_path / 'probationary_paper.pid'}.",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="paper started", stderr="")
+
+    monkeypatch.setattr(operator_dashboard_module.subprocess, "run", _fake_run)
+
+    result = service.run_action("restart-paper-with-temp-paper")
+
+    assert result["ok"] is False
+    assert result["reason_code"] == "TEMP_PAPER_RUNTIME_MISMATCH"
+    assert result["next_action"] == "Restart Runtime + Temp Paper"
+    assert "TEMP_PAPER_RUNTIME_MISMATCH" in str(result["message"])
+    assert str(result["detail"]) == "TEMP_PAPER_RUNTIME_MISMATCH | Next action: Restart Runtime + Temp Paper"
+    assert "enabled temporary paper lanes were not loaded" in str(result["output"]).lower()
+    assert "temp_lane_gc" in str(result["output"])
+    assert "No probationary paper PID file found" not in str(result["output"])
+    assert result["snapshot"] == post_snapshot
+
+
+def test_restart_paper_with_temp_paper_restarts_cleanly_when_runtime_is_already_stopped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    paper_state = {
+        "running": False,
+        "status": {"fault_state": "CLEAR", "operator_halt": False},
+        "operator_state": {"flatten_pending": False, "stop_after_cycle_requested": False},
+        "desk_risk": {"desk_risk_state": "OK"},
+        "lane_risk": {"lanes": []},
+    }
+    pre_snapshot = {
+        "paper": {
+            "running": False,
+            "temporary_paper_runtime_integrity": {
+                "missing_lane_ids": [],
+                "unresolved_start_lane_ids": [],
+                "summary_line": "clear",
+            },
+        }
+    }
+    post_snapshot = {
+        "paper": {
+            "running": True,
+            "temporary_paper_runtime_integrity": {
+                "missing_lane_ids": [],
+                "unresolved_start_lane_ids": [],
+                "summary_line": "clear",
+            },
+        }
+    }
+    snapshots = [pre_snapshot, post_snapshot, post_snapshot]
+    monkeypatch.setattr(service, "snapshot", lambda: snapshots.pop(0) if snapshots else post_snapshot)
+    monkeypatch.setattr(
+        service,
+        "_paper_start_command_with_enabled_temp_paper",
+        lambda current_snapshot: (
+            ["bash", "scripts/run_probationary_paper_soak.sh", "--background"],
+            {"unresolved_lane_ids": [], "requested_start_flags": []},
+        ),
+    )
+    monkeypatch.setattr(service, "_runtime_snapshot", lambda runtime_name: paper_state if runtime_name == "paper" else {"running": False})
+    monkeypatch.setattr(service, "_review_payload", lambda paper, scope: {})
+    monkeypatch.setattr(service, "_paper_carry_forward_state", lambda paper, review: {"active": False})
+    monkeypatch.setattr(service, "_paper_pre_session_review_state", lambda carry: {"ready_for_run": True})
+    monkeypatch.setattr(service, "_load_or_refresh_auth_gate_result", lambda run_if_missing: {"runtime_ready": True})
+
+    def _fake_run(command, **kwargs):
+        if command == ["bash", "scripts/stop_probationary_paper_soak.sh"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout=f"No probationary paper PID file found at {tmp_path / 'probationary_paper.pid'}.",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="paper started", stderr="")
+
+    monkeypatch.setattr(operator_dashboard_module.subprocess, "run", _fake_run)
+
+    result = service.run_action("restart-paper-with-temp-paper")
+
+    assert result["ok"] is True
+    assert "paper started" in str(result["output"]).lower()
+    assert "No probationary paper PID file found" not in str(result["output"])
+    assert result["snapshot"] == post_snapshot
+    assert "No probationary paper PID file found" in str(result["stop_output"])
+
+
 def test_dashboard_snapshot_writes_paper_performance_artifact(tmp_path: Path) -> None:
     repo_root = tmp_path
     (repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "daily").mkdir(parents=True)
@@ -6760,6 +7077,11 @@ def test_dashboard_approved_models_surface_includes_atp_as_shared_paper_lane(tmp
                     "benchmark_designation": "CURRENT_ATP_COMPANION_BENCHMARK",
                     "tracked_strategy_id": "atp_companion_v1_asia_us",
                     "participation_policy": "SINGLE_ENTRY_ONLY",
+                    "execution_timeframe": "1m",
+                    "structural_signal_timeframe": "5m",
+                    "context_timeframes": ["5m"],
+                    "last_execution_bar_evaluated_at": "2026-03-23T14:32:00-04:00",
+                    "last_completed_context_bars_at": {},
                     "open_entry_leg_count": 0,
                     "open_add_count": 0,
                     "additional_entry_allowed": False,
@@ -6782,6 +7104,9 @@ def test_dashboard_approved_models_surface_includes_atp_as_shared_paper_lane(tmp
                     "runtime_kind": "atp_companion_benchmark_paper",
                     "strategy_family": "active_trend_participation_engine",
                     "session_restriction": "ASIA/US",
+                    "execution_timeframe": "1m",
+                    "structural_signal_timeframe": "5m",
+                    "context_timeframes": ["5m"],
                     "long_sources": ["trend_participation.pullback_continuation.long.conservative"],
                     "artifacts_dir": str(lane_dir),
                 }
@@ -6815,6 +7140,10 @@ def test_dashboard_approved_models_surface_includes_atp_as_shared_paper_lane(tmp
     assert detail["lane_class"] == "benchmark_lane"
     assert detail["designation_label"] == "CURRENT ATP COMPANION BENCHMARK"
     assert detail["staged_capable"] is False
+    assert detail["execution_timeframe"] == "1m"
+    assert detail["context_timeframes"] == ["5m"]
+    assert detail["last_execution_bar_evaluated_at"] == "2026-03-23T14:32:00-04:00"
+    assert detail["last_completed_context_bars_at"] == {}
     assert detail["control_availability"]["resume_entries"] == "NOT NEEDED: ENTRIES ALREADY LIVE"
     assert detail["surface_role"] == "PRIMARY_SHARED_LANE_OPERATOR_SURFACE"
 
@@ -6843,6 +7172,9 @@ def test_dashboard_approved_models_surface_marks_atp_candidate_as_staged_candida
                     "scope_label": "ATP Companion Candidate / Paper Only / London Diagnostic-Only / Staged",
                     "tracked_strategy_id": "atp_companion_v1__paper_gc_asia_us",
                     "participation_policy": "STAGED_SAME_DIRECTION",
+                    "execution_timeframe": "1m",
+                    "structural_signal_timeframe": "5m",
+                    "context_timeframes": ["5m"],
                     "entries_enabled": True,
                     "operator_halt": True,
                     "position_side": "LONG",
@@ -6851,6 +7183,8 @@ def test_dashboard_approved_models_surface_marks_atp_candidate_as_staged_candida
                     "open_entry_leg_count": 2,
                     "open_add_count": 1,
                     "additional_entry_allowed": False,
+                    "last_execution_bar_evaluated_at": "2026-03-23T14:41:00-04:00",
+                    "last_completed_context_bars_at": {"5m": "2026-03-23T14:40:00-04:00"},
                     "runtime_attached": True,
                     "session_restriction": "ASIA/US",
                     "approved_long_entry_sources": ["trend_participation.pullback_continuation.long.conservative"],
@@ -6867,6 +7201,9 @@ def test_dashboard_approved_models_surface_marks_atp_candidate_as_staged_candida
                     "runtime_kind": "atp_companion_benchmark_paper",
                     "strategy_family": "active_trend_participation_engine",
                     "session_restriction": "ASIA/US",
+                    "execution_timeframe": "1m",
+                    "structural_signal_timeframe": "5m",
+                    "context_timeframes": ["5m"],
                     "long_sources": ["trend_participation.pullback_continuation.long.conservative"],
                     "artifacts_dir": str(lane_dir),
                 }
@@ -6896,6 +7233,10 @@ def test_dashboard_approved_models_surface_marks_atp_candidate_as_staged_candida
     assert detail["lane_class"] == "candidate_staged_lane"
     assert detail["designation_label"] == "ATP candidate / staged paper lane"
     assert detail["staged_capable"] is True
+    assert detail["execution_timeframe"] == "1m"
+    assert detail["context_timeframes"] == ["5m"]
+    assert detail["last_execution_bar_evaluated_at"] == "2026-03-23T14:41:00-04:00"
+    assert detail["last_completed_context_bars_at"] == {"5m": "2026-03-23T14:40:00-04:00"}
     assert detail["total_quantity"] == 2
     assert detail["control_availability"]["halt_entries"] == "ALREADY ACTIVE: OPERATOR HALT IS SET"
     assert detail["control_availability"]["resume_entries"] == "AVAILABLE: CLEAR OPERATOR HALT"

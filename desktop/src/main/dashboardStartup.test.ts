@@ -85,11 +85,19 @@ test("only retries reconnect for transient startup failures", () => {
     true,
   );
   assert.equal(
+    shouldAutoReconnectDashboardFailure(classifyStartupFailure("STARTUP_FAILURE_KIND=stale_listener_conflict\nSTARTUP_STALE_LISTENER_DETECTED=1"), 0),
+    true,
+  );
+  assert.equal(
     shouldAutoReconnectDashboardFailure(classifyStartupFailure("Live /health is reachable but /api/dashboard did not become responsive before timeout.", { dashboardApiTimedOut: true }), 0),
     false,
   );
   assert.equal(
     shouldAutoReconnectDashboardFailure(classifyStartupFailure("STARTUP_FAILURE_KIND=stale_listener_conflict"), 0),
+    true,
+  );
+  assert.equal(
+    shouldAutoReconnectDashboardFailure(classifyStartupFailure("STARTUP_FAILURE_KIND=stale_listener_conflict"), 1),
     false,
   );
   assert.equal(shouldAutoReconnectDashboardFailure(classifyStartupFailure("Dashboard failed to start: server process exited early."), 3), false);

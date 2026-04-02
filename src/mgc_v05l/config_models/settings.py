@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..domain.enums import AddDirectionPolicy, ParticipationPolicy, ReplayFillPolicy, VwapPolicy
-from ..market_data.timeframes import normalize_timeframe_label
+from ..market_data.timeframes import normalize_timeframe_label, timeframe_minutes
 
 
 class RuntimeMode(str, Enum):
@@ -43,6 +43,7 @@ class StrategySettings(BaseModel):
     structural_signal_timeframe: str | None = None
     execution_timeframe: str | None = None
     artifact_timeframe: str | None = None
+    context_timeframes: tuple[str, ...] = ()
     execution_timeframe_role: ExecutionTimeframeRole = ExecutionTimeframeRole.MATCHES_SIGNAL_EVALUATION
     timezone: str
     mode: RuntimeMode
@@ -323,6 +324,35 @@ class StrategySettings(BaseModel):
             return None
         return normalize_timeframe_label(str(value))
 
+    @field_validator("context_timeframes", mode="before")
+    @classmethod
+    def validate_context_timeframes(cls, value: Any) -> tuple[str, ...]:
+        if value in (None, "", (), []):
+            return ()
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    raw_values = [str(item).strip() for item in parsed if str(item).strip()]
+                else:
+                    raw_values = [item.strip() for item in stripped.split(",") if item.strip()]
+            else:
+                raw_values = [item.strip() for item in stripped.split(",") if item.strip()]
+        else:
+            raw_values = [str(item).strip() for item in list(value) if str(item).strip()]
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_values:
+            normalized = normalize_timeframe_label(raw)
+            if normalized not in seen:
+                ordered.append(normalized)
+                seen.add(normalized)
+        return tuple(ordered)
+
     @field_validator("timezone")
     @classmethod
     def validate_timezone(cls, value: str) -> str:
@@ -492,11 +522,14 @@ class StrategySettings(BaseModel):
         structural_timeframe = self.structural_signal_timeframe or self.timeframe
         execution_timeframe = self.execution_timeframe or structural_timeframe
         artifact_timeframe = self.artifact_timeframe or structural_timeframe
+        context_timeframes = tuple(self.context_timeframes or (structural_timeframe,))
         if self.environment_mode is EnvironmentMode.BASELINE_PARITY:
             if structural_timeframe != "5m":
                 raise ValueError("baseline_parity_mode requires structural_signal_timeframe=5m.")
             if execution_timeframe != "5m":
                 raise ValueError("baseline_parity_mode requires execution_timeframe=5m.")
+            if context_timeframes != ("5m",):
+                raise ValueError("baseline_parity_mode requires context_timeframes=(5m,).")
             if self.execution_timeframe_role is not ExecutionTimeframeRole.MATCHES_SIGNAL_EVALUATION:
                 raise ValueError("baseline_parity_mode requires execution_timeframe_role=matches_signal_evaluation.")
         if self.environment_mode is EnvironmentMode.RESEARCH_EXECUTION:
@@ -505,8 +538,11 @@ class StrategySettings(BaseModel):
                     raise ValueError(
                         "research_execution_mode with execution_detail_only requires execution_timeframe distinct from structural_signal_timeframe."
                     )
-        if self.environment_mode is EnvironmentMode.LIVE_EXECUTION and self.mode is not RuntimeMode.LIVE:
-            raise ValueError("live_execution_mode requires mode=live.")
+        if self.environment_mode is EnvironmentMode.LIVE_EXECUTION and self.mode not in {
+            RuntimeMode.LIVE,
+            RuntimeMode.PAPER,
+        }:
+            raise ValueError("live_execution_mode requires mode=live or paper.")
         if self.live_strategy_pilot_enabled:
             if self.mode is not RuntimeMode.LIVE:
                 raise ValueError("live_strategy_pilot_enabled requires mode=live.")
@@ -514,6 +550,13 @@ class StrategySettings(BaseModel):
                 raise ValueError("live_strategy_pilot_enabled remains locked to symbol MGC.")
             if self.trade_size != 1:
                 raise ValueError("live_strategy_pilot_enabled requires trade_size=1.")
+        execution_minutes = timeframe_minutes(execution_timeframe)
+        for context_timeframe in context_timeframes:
+            context_minutes = timeframe_minutes(context_timeframe)
+            if context_minutes < execution_minutes:
+                raise ValueError("context_timeframes must not be lower than execution_timeframe.")
+            if context_minutes % execution_minutes != 0:
+                raise ValueError("context_timeframes must be whole-minute multiples of execution_timeframe.")
         if self.max_position_quantity is not None and self.max_position_quantity < self.trade_size:
             raise ValueError("max_position_quantity must be >= trade_size.")
         if self.participation_policy is ParticipationPolicy.SINGLE_ENTRY_ONLY:
@@ -550,6 +593,24 @@ class StrategySettings(BaseModel):
     @property
     def resolved_artifact_timeframe(self) -> str:
         return self.artifact_timeframe or self.resolved_structural_signal_timeframe
+
+    @property
+    def resolved_context_timeframes(self) -> tuple[str, ...]:
+        configured = tuple(self.context_timeframes or ())
+        if configured:
+            return configured
+        return (self.resolved_structural_signal_timeframe,)
+
+    @property
+    def primary_context_timeframe(self) -> str:
+        return self.resolved_context_timeframes[0]
+
+    @property
+    def uses_multi_timescale_execution(self) -> bool:
+        return (
+            self.resolved_execution_timeframe != self.primary_context_timeframe
+            or len(self.resolved_context_timeframes) > 1
+        )
 
     @property
     def probationary_artifacts_path(self) -> Path:

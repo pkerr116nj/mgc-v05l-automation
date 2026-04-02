@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime, time, timezone
 from typing import Callable, Optional
 
-from ..config_models import StrategySettings
+from ..config_models import ExecutionTimeframeRole, StrategySettings
 from ..domain.enums import (
     AddDirectionPolicy,
     LongEntryFamily,
@@ -32,12 +32,15 @@ from ..execution.execution_engine import ExecutionEngine
 from ..execution.order_models import FillEvent, OrderIntent
 from ..execution.paper_broker import PaperBroker
 from ..indicators.feature_engine import IncrementalFeatureComputer, compute_features
+from ..market_data.bar_builder import BarBuilder
 from ..market_data.bar_store import BarStore
+from ..market_data.timeframes import timeframe_minutes
 from ..market_data.session_clock import classify_sessions
 from ..monitoring.alerts import AlertDispatcher
 from ..monitoring.logger import StructuredLogger
 from ..persistence.repositories import RepositorySet
 from ..persistence.state_repository import StateRepository
+from ..research.bar_resampling import build_resampled_bars
 from ..signals.asia_vwap_reclaim import evaluate_asia_vwap_reclaim
 from ..signals.bear_snap import evaluate_bear_snap
 from ..signals.bull_snap import evaluate_bull_snap
@@ -98,7 +101,25 @@ class StrategyEngine:
         self._incremental_feature_computer = (
             IncrementalFeatureComputer(settings) if use_incremental_features else None
         )
+        self._execution_timeframe = settings.resolved_execution_timeframe
+        self._context_timeframes = settings.resolved_context_timeframes
+        self._primary_context_timeframe = settings.primary_context_timeframe
+        self._uses_multi_timescale_execution = settings.uses_multi_timescale_execution
+        self._bar_builder = BarBuilder(settings)
         self._state = self._load_initial_state(initial_state)
+        self._execution_bar_history: list[Bar] = []
+        self._context_bar_histories: dict[str, list[Bar]] = {
+            timeframe: [] for timeframe in self._context_timeframes
+        }
+        self._context_feature_histories: dict[str, list[FeaturePacket]] = {
+            timeframe: [] for timeframe in self._context_timeframes
+        }
+        self._latest_context_signal_packet: Optional[SignalPacket] = None
+        self._last_completed_context_bar_end_by_timeframe: dict[str, datetime | None] = {
+            timeframe: None for timeframe in self._context_timeframes
+        }
+        self._last_execution_bar_evaluated_at: Optional[datetime] = None
+        self._last_execution_bar_id: Optional[str] = None
         self._bar_history: list[Bar] = []
         self._feature_history: list[FeaturePacket] = []
         self._last_signal_packet: Optional[SignalPacket] = None
@@ -116,41 +137,71 @@ class StrategyEngine:
         events: list[DomainEvent] = []
         events.extend(self._apply_due_replay_fills(bar))
 
-        session_bar = classify_sessions(bar, self._settings)
-        if not self._bar_store.validate_next_bar(session_bar):
+        execution_bar = classify_sessions(bar, self._settings)
+        if not self._bar_store.validate_next_bar(execution_bar):
             return events
 
-        events.append(BarClosedEvent(bar_id=session_bar.bar_id, occurred_at=session_bar.end_ts))
-        self._bar_history.append(session_bar)
+        events.append(BarClosedEvent(bar_id=execution_bar.bar_id, occurred_at=execution_bar.end_ts))
+        self._execution_bar_history.append(execution_bar)
+        self._trim_execution_history()
 
-        feature_packet = self._compute_feature_packet(session_bar)
-        self._feature_history.append(feature_packet)
-        signal_packet = self._evaluate_signals(feature_packet, self._feature_history)
-        signal_packet = self._apply_runtime_entry_controls(session_bar, signal_packet)
+        context_advanced = self._refresh_context_histories()
+        current_context_bar = self._bar_history[-1] if self._bar_history else None
+        current_context_feature = self._feature_history[-1] if self._feature_history else None
 
-        working_state = self._advance_state_for_bar(feature_packet, signal_packet, session_bar.end_ts)
-        if working_state.position_side != PositionSide.FLAT:
-            working_state = increment_bars_in_trade(working_state, session_bar.end_ts)
+        if current_context_feature is not None:
+            if context_advanced or self._latest_context_signal_packet is None:
+                self._latest_context_signal_packet = self._evaluate_signals(
+                    current_context_feature,
+                    self._feature_history,
+                )
+            signal_packet = self._signal_packet_for_execution_bar(execution_bar)
+            signal_packet = self._apply_runtime_entry_controls(execution_bar, signal_packet)
+        else:
+            signal_packet = self._empty_execution_signal_packet(execution_bar.bar_id)
 
+        working_state = self._state
+        if context_advanced and current_context_feature is not None and self._latest_context_signal_packet is not None:
+            working_state = self._advance_state_for_bar(
+                current_context_feature,
+                self._latest_context_signal_packet,
+                current_context_bar.end_ts if current_context_bar is not None else execution_bar.end_ts,
+            )
+            if working_state.position_side != PositionSide.FLAT and current_context_bar is not None:
+                working_state = increment_bars_in_trade(working_state, current_context_bar.end_ts)
+        else:
+            working_state = replace(working_state, updated_at=execution_bar.end_ts)
+
+        feature_packet = self._feature_packet_for_execution_bar(execution_bar, current_context_feature)
+        if current_context_feature is None or not self._bar_history:
+            self._last_execution_bar_id = execution_bar.bar_id
+            self._last_execution_bar_evaluated_at = execution_bar.end_ts
+            self._bar_store.mark_processed(execution_bar)
+            self._persist_bar_artifacts(execution_bar, feature_packet, signal_packet)
+            self._last_feature_packet = feature_packet
+            self._last_signal_packet = signal_packet
+            self._state = replace(working_state, updated_at=execution_bar.end_ts)
+            self._persist_state(self._state, transition_label="bar_close")
+            return events
         risk_context = compute_risk_context(self._bar_history, feature_packet, working_state, self._settings)
         working_state = replace(
             working_state,
             long_be_armed=risk_context.long_break_even_armed,
             short_be_armed=risk_context.short_break_even_armed,
-            updated_at=session_bar.end_ts,
+            updated_at=execution_bar.end_ts,
         )
         working_state = update_additive_short_peak_state(
             working_state,
-            session_bar,
+            execution_bar,
             risk_context,
             self._settings,
-            session_bar.end_ts,
+            execution_bar.end_ts,
         )
 
         exit_decision = evaluate_exits(self._bar_history, feature_packet, working_state, risk_context, self._settings)
         if working_state.position_side != PositionSide.FLAT:
             self._last_exit_decision_summary = self._build_exit_decision_summary(
-                bar=session_bar,
+                bar=execution_bar,
                 state=working_state,
                 exit_decision=exit_decision,
                 risk_context=risk_context,
@@ -159,9 +210,9 @@ class StrategyEngine:
             )
             events.append(
                 ExitEvaluatedEvent(
-                    bar_id=session_bar.bar_id,
+                    bar_id=execution_bar.bar_id,
                     primary_reason=exit_decision.primary_reason,
-                    occurred_at=session_bar.end_ts,
+                    occurred_at=execution_bar.end_ts,
                     all_true_reasons=exit_decision.all_true_reasons,
                     long_entry_family=working_state.long_entry_family,
                     short_entry_family=exit_decision.short_entry_family,
@@ -179,18 +230,18 @@ class StrategyEngine:
         violations = validate_state(working_state)
         if violations:
             fault_code = "; ".join(violations)
-            working_state = transition_to_fault(working_state, session_bar.end_ts, fault_code)
-            events.append(FaultRaisedEvent(fault_code=fault_code, occurred_at=session_bar.end_ts))
+            working_state = transition_to_fault(working_state, execution_bar.end_ts, fault_code)
+            events.append(FaultRaisedEvent(fault_code=fault_code, occurred_at=execution_bar.end_ts))
             if self._alert_dispatcher is not None:
                 self._alert_dispatcher.emit(
                     "error",
                     "strategy_invariant_fault",
                     fault_code,
-                    {"bar_id": session_bar.bar_id},
+                    {"bar_id": execution_bar.bar_id},
                 )
             self._persist_state(working_state, transition_label="fault")
         else:
-            maybe_intent = self._maybe_create_order_intent(session_bar, signal_packet, working_state, exit_decision)
+            maybe_intent = self._maybe_create_order_intent(execution_bar, signal_packet, working_state, exit_decision)
             if maybe_intent is not None:
                 long_entry_family = self._resolve_long_entry_family(signal_packet)
                 short_entry_family = (
@@ -205,7 +256,7 @@ class StrategyEngine:
                 )
                 if self._shadow_mode_no_submit:
                     self._latest_shadow_intent_summary = self._build_shadow_intent_summary(
-                        bar=session_bar,
+                        bar=execution_bar,
                         state=working_state,
                         signal_packet=signal_packet,
                         exit_decision=exit_decision,
@@ -218,15 +269,15 @@ class StrategyEngine:
                     events.append(
                         OrderIntentCreatedEvent(
                             order_intent_id=maybe_intent.order_intent_id,
-                            bar_id=session_bar.bar_id,
+                            bar_id=execution_bar.bar_id,
                             intent_type=maybe_intent.intent_type,
-                            occurred_at=session_bar.end_ts,
+                            occurred_at=execution_bar.end_ts,
                         )
                     )
-                    self._emit_shadow_submit_suppressed_alert(maybe_intent, session_bar.end_ts)
+                    self._emit_shadow_submit_suppressed_alert(maybe_intent, execution_bar.end_ts)
                 else:
                     live_intent_summary = self._build_live_intent_summary(
-                        bar=session_bar,
+                        bar=execution_bar,
                         state=working_state,
                         signal_packet=signal_packet,
                         exit_decision=exit_decision,
@@ -237,7 +288,7 @@ class StrategyEngine:
                         short_entry_source=short_entry_source,
                     )
                     submit_blocker = (
-                        self._submit_gate_evaluator(session_bar, working_state, maybe_intent)
+                        self._submit_gate_evaluator(execution_bar, working_state, maybe_intent)
                         if self._submit_gate_evaluator is not None
                         else None
                     )
@@ -256,11 +307,11 @@ class StrategyEngine:
                             "submit_suppressed": False,
                         }
                     if submit_blocker is not None:
-                        self._emit_order_rejection_alert(maybe_intent, session_bar.end_ts, reason=submit_blocker)
+                        self._emit_order_rejection_alert(maybe_intent, execution_bar.end_ts, reason=submit_blocker)
                     else:
                         pending = self._execution_engine.submit_intent(
                             maybe_intent,
-                            signal_bar_id=session_bar.bar_id if maybe_intent.is_entry else None,
+                            signal_bar_id=execution_bar.bar_id if maybe_intent.is_entry else None,
                             long_entry_family=long_entry_family,
                             short_entry_family=short_entry_family,
                             short_entry_source=short_entry_source,
@@ -270,7 +321,7 @@ class StrategyEngine:
                                 working_state,
                                 last_order_intent_id=maybe_intent.order_intent_id,
                                 open_broker_order_id=pending.broker_order_id,
-                                updated_at=session_bar.end_ts,
+                                updated_at=execution_bar.end_ts,
                             )
                             self._latest_live_intent_summary = {
                                 **self._latest_live_intent_summary,
@@ -282,9 +333,9 @@ class StrategyEngine:
                             events.append(
                                 OrderIntentCreatedEvent(
                                     order_intent_id=maybe_intent.order_intent_id,
-                                    bar_id=session_bar.bar_id,
+                                    bar_id=execution_bar.bar_id,
                                     intent_type=maybe_intent.intent_type,
-                                    occurred_at=session_bar.end_ts,
+                                    occurred_at=execution_bar.end_ts,
                                 )
                             )
                             self._persist_order_intent(
@@ -308,8 +359,8 @@ class StrategyEngine:
                                     "intent_created_at": maybe_intent.created_at.isoformat(),
                                     "latest_order_status": pending.broker_order_status,
                                 }
-                            self._emit_order_lifecycle_alert("created", maybe_intent, session_bar.end_ts, pending_broker_order_id=pending.broker_order_id)
-                            self._emit_order_lifecycle_alert("submitted", maybe_intent, session_bar.end_ts, pending_broker_order_id=pending.broker_order_id)
+                            self._emit_order_lifecycle_alert("created", maybe_intent, execution_bar.end_ts, pending_broker_order_id=pending.broker_order_id)
+                            self._emit_order_lifecycle_alert("submitted", maybe_intent, execution_bar.end_ts, pending_broker_order_id=pending.broker_order_id)
                         else:
                             failure = self._execution_engine.last_submit_failure()
                             self._latest_live_intent_summary = {
@@ -325,12 +376,14 @@ class StrategyEngine:
                             working_state = self._handle_submit_failure_or_rejection(
                                 state=working_state,
                                 intent=maybe_intent,
-                                occurred_at=session_bar.end_ts,
+                                occurred_at=execution_bar.end_ts,
                                 default_reason="Execution engine rejected the intent due to an existing pending or opposite-side conflict.",
                             )
 
-        self._bar_store.mark_processed(session_bar)
-        self._persist_bar_artifacts(session_bar, feature_packet, signal_packet)
+        self._last_execution_bar_id = execution_bar.bar_id
+        self._last_execution_bar_evaluated_at = execution_bar.end_ts
+        self._bar_store.mark_processed(execution_bar)
+        self._persist_bar_artifacts(execution_bar, feature_packet, signal_packet)
         self._last_feature_packet = feature_packet
         self._last_signal_packet = signal_packet
         self._state = working_state
@@ -805,22 +858,162 @@ class StrategyEngine:
     def _runtime_entry_quantity(self) -> int:
         return int(self._settings.trade_size)
 
+    def runtime_cadence_snapshot(self) -> dict[str, object]:
+        return {
+            "execution_timeframe": self._execution_timeframe,
+            "context_timeframes": list(self._context_timeframes),
+            "last_execution_bar_id": self._last_execution_bar_id,
+            "last_execution_bar_evaluated_at": (
+                self._last_execution_bar_evaluated_at.isoformat()
+                if self._last_execution_bar_evaluated_at is not None
+                else None
+            ),
+            "last_completed_context_bars_at": {
+                timeframe: value.isoformat() if value is not None else None
+                for timeframe, value in self._last_completed_context_bar_end_by_timeframe.items()
+            },
+            "primary_context_timeframe": self._primary_context_timeframe,
+            "uses_multi_timescale_execution": self._uses_multi_timescale_execution,
+        }
+
+    def _trim_execution_history(self) -> None:
+        max_context_minutes = max(timeframe_minutes(timeframe) for timeframe in self._context_timeframes)
+        keep_count = max(
+            self._settings.warmup_bars_required() * max(1, max_context_minutes // timeframe_minutes(self._execution_timeframe)) + 8,
+            120,
+        )
+        if len(self._execution_bar_history) > keep_count:
+            self._execution_bar_history = self._execution_bar_history[-keep_count:]
+
+    def _settings_for_timeframe(self, timeframe: str) -> StrategySettings:
+        return self._settings.model_copy(
+            update={
+                "timeframe": timeframe,
+                "structural_signal_timeframe": timeframe,
+                "execution_timeframe": timeframe,
+                "artifact_timeframe": timeframe,
+                "context_timeframes": (timeframe,),
+                "execution_timeframe_role": ExecutionTimeframeRole.MATCHES_SIGNAL_EVALUATION,
+            }
+        )
+
+    def _rebuild_feature_history(self, bars: list[Bar], timeframe: str) -> list[FeaturePacket]:
+        if not bars:
+            return []
+        feature_settings = self._settings_for_timeframe(timeframe)
+        feature_computer = IncrementalFeatureComputer(feature_settings)
+        swing_state = replace(self._state)
+        packets: list[FeaturePacket] = []
+        for bar in bars:
+            packet = feature_computer.compute_next(bar, swing_state)
+            packets.append(packet)
+            swing_state = replace(
+                swing_state,
+                last_swing_low=packet.last_swing_low,
+                last_swing_high=packet.last_swing_high,
+            )
+        return packets
+
+    def _persist_context_artifacts(self, timeframe: str, bars: list[Bar], feature_history: list[FeaturePacket]) -> None:
+        if self._repositories is None:
+            return
+        data_source = f"runtime_resampled_{self._execution_timeframe}_to_{timeframe}"
+        known_feature_ids = {packet.bar_id for packet in feature_history}
+        for bar in bars:
+            self._repositories.bars.save(bar, data_source=data_source)
+            if bar.bar_id in known_feature_ids:
+                packet = next(packet for packet in feature_history if packet.bar_id == bar.bar_id)
+                self._repositories.features.save(packet, created_at=bar.end_ts)
+
+    def _refresh_context_histories(self) -> bool:
+        if not self._execution_bar_history:
+            return False
+        context_advanced = False
+        for timeframe in self._context_timeframes:
+            if timeframe == self._execution_timeframe:
+                bars = list(self._execution_bar_history)
+            else:
+                resampled = build_resampled_bars(
+                    self._execution_bar_history,
+                    target_timeframe=timeframe,
+                    bar_builder=self._bar_builder,
+                )
+                bars = list(resampled.bars)
+            previous_latest = self._context_bar_histories.get(timeframe, [])[-1].bar_id if self._context_bar_histories.get(timeframe) else None
+            self._context_bar_histories[timeframe] = bars
+            self._context_feature_histories[timeframe] = self._rebuild_feature_history(bars, timeframe)
+            if bars:
+                self._last_completed_context_bar_end_by_timeframe[timeframe] = bars[-1].end_ts
+                if bars[-1].bar_id != previous_latest:
+                    context_advanced = context_advanced or timeframe == self._primary_context_timeframe
+                self._persist_context_artifacts(timeframe, bars, self._context_feature_histories[timeframe])
+            else:
+                self._last_completed_context_bar_end_by_timeframe[timeframe] = None
+        self._bar_history = list(self._context_bar_histories.get(self._primary_context_timeframe, []))
+        self._feature_history = list(self._context_feature_histories.get(self._primary_context_timeframe, []))
+        if self._feature_history:
+            self._last_feature_packet = self._feature_history[-1]
+        return context_advanced
+
+    def _feature_packet_for_execution_bar(
+        self,
+        execution_bar: Bar,
+        current_context_feature: FeaturePacket | None,
+    ) -> FeaturePacket:
+        if current_context_feature is None:
+            return compute_features([execution_bar], self._state, self._settings_for_timeframe(self._execution_timeframe))
+        return replace(current_context_feature, bar_id=execution_bar.bar_id)
+
+    def _signal_packet_for_execution_bar(self, execution_bar: Bar) -> SignalPacket:
+        if self._latest_context_signal_packet is None:
+            return self._empty_execution_signal_packet(execution_bar.bar_id)
+        return replace(self._latest_context_signal_packet, bar_id=execution_bar.bar_id)
+
+    def _empty_execution_signal_packet(self, bar_id: str) -> SignalPacket:
+        return SignalPacket(**_empty_signal_packet_payload(bar_id))
+
     def _restore_processing_context(self) -> None:
         if self._repositories is None:
             return
         restore_limit = self._settings.warmup_bars_required()
-        recent_bars = self._repositories.bars.list_recent_processed(
-            symbol=self._settings.symbol,
-            timeframe=self._settings.timeframe,
-            limit=restore_limit,
+        execution_restore_limit = max(
+            restore_limit * max(1, timeframe_minutes(self._primary_context_timeframe) // timeframe_minutes(self._execution_timeframe)) + 8,
+            120,
         )
-        if not recent_bars:
+        self._execution_bar_history = self._repositories.bars.list_recent_processed(
+            symbol=self._settings.symbol,
+            timeframe=self._execution_timeframe,
+            limit=execution_restore_limit,
+        )
+        if not self._execution_bar_history:
             return
-        recent_features = self._repositories.features.load_by_bar_ids([bar.bar_id for bar in recent_bars])
-        self._bar_history = recent_bars
-        self._feature_history = recent_features
-        if recent_features:
-            self._last_feature_packet = recent_features[-1]
+        for timeframe in self._context_timeframes:
+            if timeframe == self._execution_timeframe:
+                bars = list(self._execution_bar_history)
+            else:
+                bars = self._repositories.bars.list_recent(
+                    symbol=self._settings.symbol,
+                    timeframe=timeframe,
+                    limit=restore_limit,
+                )
+                if not bars:
+                    resampled = build_resampled_bars(
+                        self._execution_bar_history,
+                        target_timeframe=timeframe,
+                        bar_builder=self._bar_builder,
+                    )
+                    bars = list(resampled.bars)
+            self._context_bar_histories[timeframe] = bars
+            self._context_feature_histories[timeframe] = self._rebuild_feature_history(bars, timeframe)
+            self._last_completed_context_bar_end_by_timeframe[timeframe] = bars[-1].end_ts if bars else None
+        self._bar_history = list(self._context_bar_histories.get(self._primary_context_timeframe, []))
+        self._feature_history = list(self._context_feature_histories.get(self._primary_context_timeframe, []))
+        if self._feature_history:
+            self._last_feature_packet = self._feature_history[-1]
+            self._latest_context_signal_packet = self._evaluate_signals(self._feature_history[-1], self._feature_history)
+        if self._execution_bar_history:
+            self._last_execution_bar_id = self._execution_bar_history[-1].bar_id
+            self._last_execution_bar_evaluated_at = self._execution_bar_history[-1].end_ts
 
     def _apply_due_replay_fills(self, bar: Bar) -> list[DomainEvent]:
         events: list[DomainEvent] = []

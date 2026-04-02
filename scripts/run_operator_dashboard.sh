@@ -204,7 +204,49 @@ is_recoverable_local_dashboard_listener() {
     return 1
   fi
   [[ "${normalized}" == *"mgc_v05l.app.main"* && "${normalized}" == *"operator-dashboard"* ]] || \
-    [[ "${normalized}" == *"python"* && "${normalized}" == *"operator_dashboard"* ]]
+    [[ "${normalized}" == *"python"* && "${normalized}" == *"operator_dashboard"* ]] || \
+    [[ "${normalized}" == *"run_operator_dashboard.sh"* ]] || \
+    [[ "${normalized}" == *"desktop/dist/main/main.js"* && "${normalized}" == *"electron"* ]]
+}
+
+dashboard_health_identifies_local_service() {
+  local health_url="$1"
+  "${PYTHON_BIN}" - <<'PY' "${health_url}"
+import json
+import sys
+import urllib.request
+
+url = sys.argv[1]
+try:
+    payload = json.loads(urllib.request.urlopen(url, timeout=2).read().decode("utf-8"))
+except Exception:
+    raise SystemExit(1)
+endpoints = payload.get("endpoints") or {}
+build_stamp = str(payload.get("build_stamp") or "").strip()
+dashboard_endpoint = str(endpoints.get("dashboard") or "").strip()
+service_ready = bool(payload.get("status"))
+if build_stamp and dashboard_endpoint == "/api/dashboard" and service_ready:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+listener_matches_local_dashboard_service() {
+  local host="$1"
+  local port="$2"
+  dashboard_health_identifies_local_service "http://${host}:${port}/health"
+}
+
+recover_local_dashboard_listener() {
+  local pid="$1"
+  if [[ -z "${pid}" ]]; then
+    return 1
+  fi
+  if stop_dashboard_process "${pid}"; then
+    sleep 0.5
+    return 0
+  fi
+  return 1
 }
 
 dashboard_ready_check() {
@@ -306,12 +348,16 @@ if [[ -f "${INFO_FILE}" ]]; then
       emit_startup_marker "HEALTH_REACHABLE" "1"
       emit_startup_marker "DASHBOARD_API_TIMED_OUT" "1"
       echo "Existing dashboard is live but /api/dashboard is not ready yet. Restarting." >&2
-      if [[ -n "${PID_EXISTING}" ]] && stop_dashboard_process "${PID_EXISTING}"; then
+      RECOVERY_PID="${PID_EXISTING}"
+      if [[ -z "${RECOVERY_PID}" ]]; then
+        RECOVERY_PID="$(listener_pid_for_port "${BOUND_PORT_EXISTING:-${PORT}}" || true)"
+      fi
+      if [[ -n "${RECOVERY_PID}" ]] && recover_local_dashboard_listener "${RECOVERY_PID}"; then
         rm -f "${PID_FILE}" "${INFO_FILE}"
       else
         emit_startup_failure \
           "stale_dashboard_instance" \
-          "Could not stop the old dashboard instance cleanly. PID: ${PID_EXISTING:-unknown}" \
+          "Could not stop the old dashboard instance cleanly. PID: ${RECOVERY_PID:-${PID_EXISTING:-unknown}}" \
           "Stop the stale local dashboard instance, then retry Start/Restart Dashboard/API."
         exit 1
       fi
@@ -347,10 +393,11 @@ if [[ -n "${LISTENER_PID}" ]]; then
   LISTENER_COMMAND="$(read_process_command "${LISTENER_PID}")"
   emit_startup_marker "STALE_LISTENER_DETECTED" "1"
   emit_startup_marker "PORT_CONFLICT_DETECTED" "1"
-  if [[ -n "${LISTENER_COMMAND}" ]] && is_recoverable_local_dashboard_listener "${LISTENER_COMMAND}"; then
+  if {
+    [[ -n "${LISTENER_COMMAND}" ]] && is_recoverable_local_dashboard_listener "${LISTENER_COMMAND}";
+  } || listener_matches_local_dashboard_service "${HOST}" "${PORT}"; then
     echo "Detected recoverable local dashboard listener on ${HOST}:${PORT}; stopping PID ${LISTENER_PID} automatically." >&2
-    if stop_dashboard_process "${LISTENER_PID}"; then
-      sleep 0.5
+    if recover_local_dashboard_listener "${LISTENER_PID}"; then
       LISTENER_PID="$(listener_pid_for_port "${PORT}" || true)"
     else
       emit_startup_failure \

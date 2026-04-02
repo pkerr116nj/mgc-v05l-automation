@@ -3,6 +3,12 @@
 # controlled dimensions only: related-instrument paper validation plus Asia-only
 # staged participation while US add weakness remains unresolved in research.
 mode: "paper"
+environment_mode: "live_execution_mode"
+structural_signal_timeframe: "5m"
+execution_timeframe: "1m"
+artifact_timeframe: "5m"
+context_timeframes: ["5m"]
+execution_timeframe_role: "execution_detail_only"
 database_url: "sqlite:///./mgc_v05l.probationary.paper.sqlite3"
 probationary_artifacts_dir: "./outputs/probationary_pattern_engine/paper_session"
 probationary_paper_runtime_exclusive_config: true

@@ -2761,6 +2761,19 @@ function paperActivityProofLevel(verdict) {
   }
 }
 
+function formatContextTimeframes(timeframes) {
+  if (!Array.isArray(timeframes) || !timeframes.length) return "-";
+  return timeframes.join(", ");
+}
+
+function formatContextBarTimes(contextBars) {
+  if (!contextBars || typeof contextBars !== "object") return "-";
+  const rows = Object.entries(contextBars)
+    .filter(([, value]) => value)
+    .map(([timeframe, value]) => `${timeframe}: ${value}`);
+  return rows.length ? rows.join(" | ") : "No completed context bar yet";
+}
+
 function renderApprovedModelDetail(detail, artifacts) {
   if (!detail) {
     setBadge("approved-model-detail-state", "NO LANE", "muted");
@@ -2770,6 +2783,10 @@ function renderApprovedModelDetail(detail, artifacts) {
     text("approved-model-detail-side", "-");
     text("approved-model-detail-enabled", "-");
     text("approved-model-detail-participation", "-");
+    text("approved-model-detail-execution-timeframe", "-");
+    text("approved-model-detail-context-timeframes", "-");
+    text("approved-model-detail-last-execution-bar", "-");
+    text("approved-model-detail-last-context-bars", "-");
     text("approved-model-detail-open", "-");
     text("approved-model-detail-net-qty", "-");
     text("approved-model-detail-legs", "-");
@@ -2814,6 +2831,10 @@ function renderApprovedModelDetail(detail, artifacts) {
     "approved-model-detail-participation",
     `${detail.participation_policy || "SINGLE_ENTRY_ONLY"}${detail.staged_capable ? " • STAGED CAPABLE" : " • SINGLE ENTRY"}`,
   );
+  text("approved-model-detail-execution-timeframe", detail.execution_timeframe || "-");
+  text("approved-model-detail-context-timeframes", formatContextTimeframes(detail.context_timeframes));
+  text("approved-model-detail-last-execution-bar", detail.last_execution_bar_evaluated_at || "No execution bar yet");
+  text("approved-model-detail-last-context-bars", formatContextBarTimes(detail.last_completed_context_bars_at));
   setStatusValue("approved-model-detail-open", detail.open_position ? "OPEN" : "FLAT", detail.open_position ? "warning" : "ok");
   text("approved-model-detail-net-qty", `${detail.net_side || detail.side || "FLAT"} • ${detail.total_quantity ?? 0}`);
   text("approved-model-detail-legs", `${detail.open_entry_leg_count ?? 0} leg(s) • ${detail.open_add_count ?? 0} add(s)`);

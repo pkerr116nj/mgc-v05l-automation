@@ -629,6 +629,11 @@ def _run_atp_companion_benchmark_paper_fixture(
         if state
         else {},
     )
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_run_probationary_runtime_market_data_transport_probe",
+        lambda *args, **kwargs: None,
+    )
 
     runner = build_probationary_paper_runner(
         [
@@ -1204,6 +1209,10 @@ def test_atp_companion_benchmark_runtime_processes_live_1m_bars_and_suppresses_d
     assert fixture.operator_status["runtime_attached"] is True
     assert fixture.operator_status["duplicate_bar_suppression_count"] == 1
     assert fixture.operator_status["last_processed_bar_end_ts"] == fixture.second_bar.end_ts.isoformat()
+    assert fixture.operator_status["execution_timeframe"] == "1m"
+    assert fixture.operator_status["context_timeframes"] == ["5m"]
+    assert fixture.operator_status["last_execution_bar_evaluated_at"] == fixture.second_bar.end_ts.isoformat()
+    assert fixture.operator_status["last_completed_context_bars_at"] == {"5m": "2026-03-29T19:00:00-04:00"}
     assert fixture.operator_status["active_entry_model"] == "CURRENT_CANDLE_VWAP"
     assert fixture.operator_status["entry_model"] == "CURRENT_CANDLE_VWAP"
     assert fixture.operator_status["supported_entry_models"] == ["BASELINE_NEXT_BAR_OPEN", "CURRENT_CANDLE_VWAP"]
@@ -2458,6 +2467,71 @@ def test_probationary_paper_lane_writes_exit_parity_summary_artifact(tmp_path: P
     ]
     assert payload["exit_fill_pending"] is True
     assert payload["exit_fill_confirmed"] is False
+
+
+def test_probationary_paper_lane_operator_status_reports_post_cycle_execution_and_context_cadence(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    spec = next(spec for spec in _load_probationary_paper_lane_specs(settings) if spec.lane_id == "mgc_us_late_pause_resume_long")
+    lane_settings = _build_probationary_paper_lane_settings(settings, spec)
+    repositories = RepositorySet(build_engine(lane_settings.database_url))
+    structured_logger = StructuredLogger(lane_settings.probationary_artifacts_path)
+    strategy_engine = StrategyEngine(
+        settings=lane_settings,
+        repositories=repositories,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        structured_logger=structured_logger,
+        alert_dispatcher=AlertDispatcher(structured_logger),
+    )
+
+    class FakeLivePollingService:
+        def poll_bars(self, *args, **kwargs):
+            bars: list[Bar] = []
+            for minute in range(46, 54):
+                end_ts = datetime(2026, 4, 2, 10, minute, tzinfo=ZoneInfo("America/New_York"))
+                bars.append(
+                    Bar(
+                        bar_id=f"MGC|1m|{end_ts.astimezone(ZoneInfo('UTC')).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+                        symbol="MGC",
+                        timeframe="1m",
+                        start_ts=end_ts - timedelta(minutes=1),
+                        end_ts=end_ts,
+                        open=Decimal("100"),
+                        high=Decimal("101"),
+                        low=Decimal("99"),
+                        close=Decimal("100"),
+                        volume=100,
+                        is_final=True,
+                        session_asia=False,
+                        session_london=False,
+                        session_us=True,
+                        session_allowed=True,
+                    )
+                )
+            return bars
+
+    lane_runtime = ProbationaryPaperLaneRuntime(
+        spec=spec,
+        settings=lane_settings,
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        live_polling_service=FakeLivePollingService(),
+        structured_logger=ProbationaryLaneStructuredLogger(
+            lane_id=spec.lane_id,
+            symbol=spec.symbol,
+            root_logger=StructuredLogger(tmp_path / "root"),
+            lane_logger=structured_logger,
+        ),
+        alert_dispatcher=AlertDispatcher(structured_logger),
+    )
+
+    lane_runtime.poll_and_process()
+
+    payload = json.loads((lane_settings.probationary_artifacts_path / "operator_status.json").read_text(encoding="utf-8"))
+    assert payload["execution_timeframe"] == "1m"
+    assert payload["context_timeframes"] == ["5m"]
+    assert payload["last_execution_bar_evaluated_at"] == "2026-04-02T10:53:00-04:00"
+    assert payload["last_completed_context_bars_at"] == {"5m": "2026-04-02T10:50:00-04:00"}
 
 
 def test_paper_runtime_restores_pending_order_state_and_reconciles_cleanly(tmp_path: Path) -> None:

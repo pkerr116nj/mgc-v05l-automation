@@ -10,10 +10,70 @@ else
 fi
 LOCAL_DOTENV="${REPO_ROOT}/.env"
 LOCAL_SCHWAB_ENV="${REPO_ROOT}/.local/schwab_env.sh"
+APP_SUPPORT_DIR="${HOME}/Library/Application Support/mgc_v05l"
+APP_SUPPORT_RESEARCH_RUNTIME_ROOT="${APP_SUPPORT_DIR}/research_daily_capture_runtime"
+APP_SUPPORT_SCHWAB_ENV="${APP_SUPPORT_RESEARCH_RUNTIME_ROOT}/schwab_env.sh"
 VENV_ACTIVATE="${REPO_ROOT}/.venv/bin/activate"
+
+missing_schwab_auth_env_names() {
+  local missing=()
+  for name in SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL; do
+    if [[ -z "${!name:-}" ]]; then
+      missing+=("${name}")
+    fi
+  done
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  printf '%s\n' "${missing[*]}"
+}
+
+schwab_env_source_kind_for_path() {
+  local path="$1"
+  if [[ -z "${path}" ]]; then
+    printf 'none'
+    return 0
+  fi
+  if [[ "${path}" == "${LOCAL_SCHWAB_ENV}" ]]; then
+    printf 'repo_local'
+    return 0
+  fi
+  if [[ "${path}" == "${APP_SUPPORT_SCHWAB_ENV}" ]]; then
+    printf 'app_support_research_runtime'
+    return 0
+  fi
+  printf 'custom'
+}
+
+resolve_schwab_env_source() {
+  if [[ -n "${MGC_SCHWAB_ENV_FILE:-}" && -f "${MGC_SCHWAB_ENV_FILE}" ]]; then
+    printf '%s\n' "${MGC_SCHWAB_ENV_FILE}"
+    return 0
+  fi
+  if [[ -f "${APP_SUPPORT_SCHWAB_ENV}" ]]; then
+    printf '%s\n' "${APP_SUPPORT_SCHWAB_ENV}"
+    return 0
+  fi
+  if [[ -f "${LOCAL_SCHWAB_ENV}" ]]; then
+    printf '%s\n' "${LOCAL_SCHWAB_ENV}"
+    return 0
+  fi
+  return 1
+}
+
+schwab_auth_env_next_action() {
+  local source_path="$1"
+  if [[ -n "${source_path}" ]]; then
+    printf 'Restore or source Schwab auth env from %s before running Schwab-backed bootstrap actions.' "${source_path}"
+    return 0
+  fi
+  printf 'Restore Schwab auth env in %s or export SCHWAB_APP_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL, and SCHWAB_TOKEN_FILE before running Schwab-backed bootstrap actions.' "${APP_SUPPORT_SCHWAB_ENV}"
+}
 
 bootstrap_local_operator_env() {
   local missing=()
+  local resolved_schwab_env=""
+  local existing_auth_missing=""
 
   if [[ -f "${VENV_ACTIVATE}" ]]; then
     # shellcheck disable=SC1091
@@ -22,9 +82,13 @@ bootstrap_local_operator_env() {
     missing+=(".venv/bin/activate")
   fi
 
-  if [[ -f "${LOCAL_SCHWAB_ENV}" ]]; then
+  existing_auth_missing="$(missing_schwab_auth_env_names || true)"
+  if [[ -n "${existing_auth_missing}" ]]; then
+    resolved_schwab_env="$(resolve_schwab_env_source || true)"
+  fi
+  if [[ -n "${resolved_schwab_env}" ]]; then
     # shellcheck disable=SC1091
-    source "${LOCAL_SCHWAB_ENV}"
+    source "${resolved_schwab_env}"
   fi
 
   if [[ -f "${LOCAL_DOTENV}" ]]; then
@@ -33,6 +97,8 @@ bootstrap_local_operator_env() {
   fi
 
   export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+  export MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_PATH="${resolved_schwab_env}"
+  export MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_KIND="$(schwab_env_source_kind_for_path "${resolved_schwab_env}")"
 
   if [[ "${#missing[@]}" -ne 0 ]]; then
     echo "Operator bootstrap failed: missing ${missing[*]} under ${REPO_ROOT}. Run from the repo root with the local virtualenv present." >&2
@@ -81,16 +147,6 @@ ensure_dir "${REPLAY_DIR}"
 export MGC_V05L_SETTINGS_SYMBOL="${MGC_V05L_SETTINGS_SYMBOL:-MGC}"
 export MGC_V05L_SETTINGS_TIMEFRAME="${MGC_V05L_SETTINGS_TIMEFRAME:-5m}"
 
-missing_schwab_auth_env_names() {
-  local missing=()
-  for name in SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL; do
-    if [[ -z "${!name:-}" ]]; then
-      missing+=("${name}")
-    fi
-  done
-  printf '%s\n' "${missing[*]}"
-}
-
 schwab_auth_env_loaded() {
   [[ -z "$(missing_schwab_auth_env_names)" ]]
 }
@@ -112,7 +168,7 @@ export MGC_BOOTSTRAP_REPLAY_DB_PATH="${DB_PATH}"
 export MGC_BOOTSTRAP_REPLAY_DB_NEXT_ACTION="$(replay_db_bootstrap_next_action)"
 export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES="$(missing_schwab_auth_env_names)"
 export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS="$([[ -z "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES}" ]] && echo "ready" || echo "missing")"
-export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION="Export SCHWAB_APP_KEY, SCHWAB_APP_SECRET, and SCHWAB_CALLBACK_URL or source .local/schwab_env.sh before running Schwab-backed bootstrap actions."
+export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION="$(schwab_auth_env_next_action "${MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_PATH:-${APP_SUPPORT_SCHWAB_ENV}}")"
 export MGC_OPERATOR_DASHBOARD_REDUCED_MODE="$([[ "${MGC_BOOTSTRAP_REPLAY_DB_STATUS}" == "missing" || "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS}" == "missing" ]] && echo "1" || echo "0")"
 
 ensure_signal_evaluations_structure_columns() {

@@ -189,6 +189,9 @@ let managerLifecycle: "idle" | "starting" | "healthy" | "reconnecting" | "degrad
 let managerOwnsBackend = false;
 let stopWasRequested = false;
 let shutdownRequested = false;
+let testGetDesktopStateHook: (() => Promise<DesktopState>) | null = null;
+let testBeginDashboardLaunchHook: ((options: { manual: boolean }) => Promise<DesktopState>) | null = null;
+let testFetchHook: ((input: string | URL, init?: RequestInit) => Promise<Response>) | null = null;
 
 const SENSITIVE_DASHBOARD_ACTIONS = new Set([
   "same-underlying-acknowledge",
@@ -832,6 +835,42 @@ function appendManagerOutput(chunk: string): void {
   recentManagerOutput = [...recentManagerOutput, ...lines].slice(-120);
 }
 
+function managerOutputText(): string {
+  return recentManagerOutput.join("\n").trim();
+}
+
+function launcherFailureDetailFromManagerOutput(code: number | null, signal: string | null): string {
+  const output = managerOutputText();
+  const assessment = classifyStartupFailure(output);
+  if (assessment.kind !== "none") {
+    return output;
+  }
+  return `STARTUP_FAILURE_KIND=early_process_exit\nManaged dashboard process exited unexpectedly${code !== null ? ` with code ${code}` : ""}${signal ? ` (${signal})` : ""}.`;
+}
+
+function shouldContinueWaitingForRecovery(state: DesktopState): boolean {
+  if (state.connection === "live") {
+    return false;
+  }
+  if (!state.backend.managerOwned) {
+    return false;
+  }
+  if (state.backend.state === "starting" || state.backend.state === "reconnecting") {
+    return true;
+  }
+  if (!managerLastError) {
+    return false;
+  }
+  const assessment = classifyStartupFailure(managerLastError, {
+    healthReachable: state.backend.healthReachable,
+    dashboardApiTimedOut: state.backend.dashboardApiTimedOut,
+  });
+  if (assessment.kind === "stale_listener_conflict" || assessment.kind === "stale_dashboard_instance") {
+    return Boolean(reconnectTimer || state.backend.nextRetryAt);
+  }
+  return false;
+}
+
 function trackDashboardManager(child: ChildProcess): void {
   dashboardManager = child;
   recentManagerOutput = [];
@@ -846,11 +885,9 @@ function trackDashboardManager(child: ChildProcess): void {
     lastExitCode = typeof code === "number" ? code : null;
     lastExitSignal = signal;
     if (!stopWasRequested && managerOwnsBackend && !shutdownRequested) {
-      const exitDetail = `STARTUP_FAILURE_KIND=early_process_exit\nManaged dashboard process exited unexpectedly${code !== null ? ` with code ${code}` : ""}${signal ? ` (${signal})` : ""}.`;
+      const exitDetail = launcherFailureDetailFromManagerOutput(code, signal);
       const assessment = classifyStartupFailure(exitDetail);
-      setManagerError(
-        `Managed dashboard process exited unexpectedly${code !== null ? ` with code ${code}` : ""}${signal ? ` (${signal})` : ""}.`,
-      );
+      setManagerError(summarizeErrorText(exitDetail) ?? exitDetail);
       if (shouldAutoReconnectDashboardFailure(assessment, reconnectAttemptCount)) {
         managerLifecycle = "reconnecting";
         scheduleReconnect();
@@ -1436,12 +1473,7 @@ async function waitForLiveDashboard(timeoutMs = DASHBOARD_STARTUP_TIMEOUT_MS): P
     if (latestState.connection === "live") {
       return latestState;
     }
-    if (
-      managerLastError &&
-      (latestState.backend.state === "reconnecting" ||
-        latestState.backend.state === "degraded" ||
-        latestState.backend.state === "backend_down")
-    ) {
+    if (!shouldContinueWaitingForRecovery(latestState) && managerLastError) {
       return latestState;
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -1610,6 +1642,9 @@ async function probeDesktopState(): Promise<DesktopState> {
 }
 
 export async function getDesktopState(): Promise<DesktopState> {
+  if (testGetDesktopStateHook) {
+    return testGetDesktopStateHook();
+  }
   if (desktopStateRequestPromise) {
     return desktopStateRequestPromise;
   }
@@ -1686,7 +1721,7 @@ export async function startDashboard(): Promise<DesktopCommandResult> {
     };
   }
 
-  const state = await beginDashboardLaunch({ manual: true });
+  const state = await (testBeginDashboardLaunchHook ?? beginDashboardLaunch)({ manual: true });
   if (state.connection === "live") {
     return {
       ok: true,
@@ -1793,7 +1828,7 @@ export async function runDashboardAction(action: string, payload: JsonRecord = {
       }
       authorizedPayload = authorization.payload;
     }
-    const response = await fetch(new URL(`api/action/${action}`, state.backendUrl).toString(), {
+    const response = await (testFetchHook ?? fetch)(new URL(`api/action/${action}`, state.backendUrl).toString(), {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -1802,11 +1837,24 @@ export async function runDashboardAction(action: string, payload: JsonRecord = {
       body: JSON.stringify(authorizedPayload),
     });
     const responsePayload = (await response.json()) as JsonRecord;
+    const actionLabel = String(responsePayload.action_label ?? responsePayload.action ?? action);
+    const normalizedMessage = String(responsePayload.message ?? "").trim();
+    const normalizedDetail = String(
+      responsePayload.detail
+      ?? (
+        responsePayload.reason_code
+          ? `${String(responsePayload.reason_code)}${responsePayload.next_action ? ` | Next action: ${String(responsePayload.next_action)}` : ""}`
+          : ""
+      ),
+    ).trim();
+    const primaryMessage = !response.ok || responsePayload.ok === false
+      ? (normalizedMessage || actionLabel)
+      : actionLabel;
     return {
       ok: response.ok && Boolean(responsePayload.ok ?? true),
-      message: String(responsePayload.action_label ?? responsePayload.action ?? action),
-      detail: String(responsePayload.message ?? ""),
-      output: String(responsePayload.output ?? responsePayload.message ?? ""),
+      message: primaryMessage,
+      detail: normalizedDetail || normalizedMessage,
+      output: String(responsePayload.output ?? normalizedMessage ?? ""),
       state: await getDesktopState(),
     };
   } catch (error) {
@@ -1820,6 +1868,40 @@ export async function runDashboardAction(action: string, payload: JsonRecord = {
     };
   }
 }
+
+export const __testing = {
+  resetRuntimeState(): void {
+    dashboardManager = null;
+    recentManagerOutput = [];
+    lastExitCode = null;
+    lastExitSignal = null;
+    desktopStateRequestPromise = null;
+    dashboardLaunchPromise = null;
+    clearReconnectTimer();
+    reconnectAttemptCount = 0;
+    nextRetryAt = null;
+    managerLastError = null;
+    managerLifecycle = "idle";
+    managerOwnsBackend = false;
+    stopWasRequested = false;
+    shutdownRequested = false;
+    testGetDesktopStateHook = null;
+    testBeginDashboardLaunchHook = null;
+    testFetchHook = null;
+  },
+  setGetDesktopStateHook(hook: (() => Promise<DesktopState>) | null): void {
+    testGetDesktopStateHook = hook;
+  },
+  setBeginDashboardLaunchHook(hook: ((options: { manual: boolean }) => Promise<DesktopState>) | null): void {
+    testBeginDashboardLaunchHook = hook;
+  },
+  setFetchHook(hook: ((input: string | URL, init?: RequestInit) => Promise<Response>) | null): void {
+    testFetchHook = hook;
+  },
+  shouldContinueWaitingForRecovery(state: DesktopState): boolean {
+    return shouldContinueWaitingForRecovery(state);
+  },
+};
 
 export async function runProductionLinkAction(action: string, payload: JsonRecord): Promise<DesktopCommandResult> {
   const state = await getDesktopState();

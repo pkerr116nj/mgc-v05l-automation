@@ -55,11 +55,11 @@ def build_tracked_paper_strategy_definitions(repo_root: Path) -> tuple[TrackedPa
             internal_label=TRACKED_ATP_INTERNAL_LABEL,
             environment="paper",
             benchmark_designation=TRACKED_ATP_BENCHMARK_DESIGNATION,
-            config_source=str((repo_root / "config" / "probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml").resolve()),
+            config_source=str((repo_root / "config" / "probationary_pattern_engine_paper.yaml").resolve()),
             benchmark_note_path=str((repo_root / "docs" / "specs" / "ATP_COMPANION_BASELINE_V1_BENCHMARK.md").resolve()),
             description=(
-                "Productized tracked paper strategy view for the frozen ATP companion benchmark. "
-                "ATP execution is limited to ASIA + US while London remains diagnostic-only."
+                "Secondary audit/read-model view for the frozen ATP companion benchmark running inside the shared paper lane platform. "
+                "ATP benchmark execution remains limited to ASIA + US while London stays diagnostic-only."
             ),
             allowed_sessions=("ASIA", "US"),
             diagnostic_only_sessions=("LONDON",),
@@ -118,8 +118,8 @@ def build_tracked_paper_strategies_payload(
         "details_by_strategy_id": details_by_id,
         "default_strategy_id": definitions[0].strategy_id if definitions else None,
         "note": (
-            "Tracked paper strategies are app-facing read models backed by persisted paper/runtime truth. "
-            "They do not change strategy semantics or live execution scope."
+            "Tracked paper strategies are secondary audit/read-model surfaces backed by persisted paper/runtime truth. "
+            "The shared lane operator detail remains the primary operating surface."
         ),
     }
 

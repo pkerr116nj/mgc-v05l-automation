@@ -145,6 +145,19 @@ class SchwabTokenBootstrapService:
         self._append_event("local_authorize_completed", payload)
         return payload
 
+    def local_authorize_proof(
+        self,
+        *,
+        state: str,
+        scope: str | None,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        return self.run_local_authorize(
+            state=state,
+            scope=scope,
+            timeout_seconds=timeout_seconds,
+        )
+
     def _oauth_client(self) -> SchwabOAuthClient:
         return SchwabOAuthClient(
             config=self._auth_config,

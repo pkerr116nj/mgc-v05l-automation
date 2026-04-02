@@ -909,6 +909,8 @@ class OperatorDashboardService:
                 str(self._research_history_database_path),
             )
         )
+        auth_env_source_path = str(os.environ.get("MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_PATH") or "").strip()
+        auth_env_source_kind = str(os.environ.get("MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_KIND") or "none").strip()
         replay_db_missing = (
             str(os.environ.get("MGC_BOOTSTRAP_REPLAY_DB_STATUS") or "").strip().lower() == "missing"
             or not replay_db_path.exists()
@@ -946,10 +948,16 @@ class OperatorDashboardService:
                 "status": "missing" if auth_missing else "ready",
                 "reduced_mode": auth_missing,
                 "missing_names": auth_missing_names,
+                "source_path": auth_env_source_path or None,
+                "source_kind": auth_env_source_kind,
                 "reason": (
                     f"Schwab auth env is missing: {', '.join(auth_missing_names)}. Schwab-backed bootstrap paths stay unavailable until the env is restored."
                     if auth_missing
-                    else "Schwab auth env is loaded for dashboard bootstrap paths."
+                    else (
+                        f"Schwab auth env is loaded for dashboard bootstrap paths from {auth_env_source_path}."
+                        if auth_env_source_path
+                        else "Schwab auth env is loaded for dashboard bootstrap paths."
+                    )
                 ),
                 "next_action": str(
                     os.environ.get("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION")
@@ -1183,6 +1191,59 @@ class OperatorDashboardService:
                     capture_output=True,
                     check=False,
                 )
+                benign_missing_pid = self._paper_restart_stop_is_benign(stop_result)
+                if stop_result.returncode != 0 and not benign_missing_pid:
+                    combined_stdout = (stop_result.stdout or "").strip()
+                    combined_stderr = (stop_result.stderr or "").strip()
+                    output = combined_stdout or combined_stderr or "Paper runtime stop failed before restart."
+                    result = self._result_record(
+                        action=action,
+                        ok=False,
+                        command=["bash", "scripts/stop_probationary_paper_soak.sh"],
+                        output=output,
+                        returncode=stop_result.returncode,
+                        stdout=combined_stdout,
+                        stderr=combined_stderr,
+                    )
+                    result["temp_paper_runtime_request"] = metadata
+                    self._log_action(result)
+                    result["snapshot"] = self.snapshot()
+                    return result
+                precheck = self._prechecked_action_result("start-paper")
+                if precheck is not None:
+                    result = self._result_record_for_action(precheck, action)
+                    result["temp_paper_runtime_request"] = metadata
+                    if benign_missing_pid:
+                        result["stop_output"] = (stop_result.stdout or stop_result.stderr or "").strip()
+                    post_snapshot = self.snapshot()
+                    blocker = None
+                    existing_reason_code = str(result.get("reason_code") or "").strip().upper()
+                    existing_next_action = str(result.get("next_action") or "").strip()
+                    existing_output = str(result.get("output") or "").strip()
+                    if existing_reason_code:
+                        blocker = {
+                            "reason_code": existing_reason_code,
+                            "next_action": existing_next_action or "Manual inspection required",
+                            "message": f"{_humanize_action(action)} blocked: {existing_reason_code} | Next action: {existing_next_action or 'Manual inspection required'}",
+                            "detail": f"{existing_reason_code} | Next action: {existing_next_action or 'Manual inspection required'}",
+                            "output": existing_output,
+                        }
+                    else:
+                        blocker = self._paper_restart_primary_failure(
+                            action=action,
+                            snapshot=post_snapshot,
+                            metadata=metadata,
+                            start_output=existing_output,
+                        )
+                    if blocker is not None:
+                        result["reason_code"] = blocker["reason_code"]
+                        result["next_action"] = blocker["next_action"]
+                        result["message"] = blocker["message"]
+                        result["detail"] = blocker["detail"]
+                        result["output"] = blocker["output"]
+                    self._log_action(result)
+                    result["snapshot"] = post_snapshot
+                    return result
                 start_result = subprocess.run(
                     command,
                     cwd=self._repo_root,
@@ -1190,12 +1251,26 @@ class OperatorDashboardService:
                     capture_output=True,
                     check=False,
                 )
-                combined_stdout = "\n".join(part for part in [(stop_result.stdout or "").strip(), (start_result.stdout or "").strip()] if part)
-                combined_stderr = "\n".join(part for part in [(stop_result.stderr or "").strip(), (start_result.stderr or "").strip()] if part)
+                combined_stdout = "\n".join(
+                    part
+                    for part in [
+                        "" if benign_missing_pid else (stop_result.stdout or "").strip(),
+                        (start_result.stdout or "").strip(),
+                    ]
+                    if part
+                )
+                combined_stderr = "\n".join(
+                    part
+                    for part in [
+                        "" if benign_missing_pid else (stop_result.stderr or "").strip(),
+                        (start_result.stderr or "").strip(),
+                    ]
+                    if part
+                )
                 output = combined_stdout or combined_stderr or "Restart completed without output."
                 result = self._result_record(
                     action=action,
-                    ok=stop_result.returncode == 0 and start_result.returncode == 0,
+                    ok=start_result.returncode == 0,
                     command=command,
                     output=output,
                     returncode=start_result.returncode,
@@ -1203,16 +1278,24 @@ class OperatorDashboardService:
                     stderr=combined_stderr,
                 )
                 result["temp_paper_runtime_request"] = metadata
+                if benign_missing_pid:
+                    result["stop_output"] = (stop_result.stdout or stop_result.stderr or "").strip()
                 post_snapshot = self.snapshot()
-                mismatch = self._temporary_paper_runtime_mismatch(post_snapshot)
-                if result["ok"] and mismatch["mismatch"]:
-                    result["ok"] = False
-                    result["message"] = "Restart Paper Soak With Temp Paper failed"
-                    result["output"] = (
-                        "Enabled temporary paper lanes were not loaded into the restarted runtime. "
-                        f"Missing lane ids: {', '.join(mismatch['missing_lane_ids']) or 'none'} | "
-                        f"Unresolved lane ids: {', '.join(mismatch['unresolved_lane_ids']) or 'none'}"
+                blocker = None
+                if not result["ok"] or self._temporary_paper_runtime_mismatch(post_snapshot)["mismatch"]:
+                    blocker = self._paper_restart_primary_failure(
+                        action=action,
+                        snapshot=post_snapshot,
+                        metadata=metadata,
+                        start_output=output,
                     )
+                if blocker is not None:
+                    result["ok"] = False
+                    result["reason_code"] = blocker["reason_code"]
+                    result["next_action"] = blocker["next_action"]
+                    result["message"] = blocker["message"]
+                    result["detail"] = blocker["detail"]
+                    result["output"] = blocker["output"]
                 self._log_action(result)
                 result["snapshot"] = post_snapshot
                 return result
@@ -3000,32 +3083,165 @@ class OperatorDashboardService:
             for row in (lane_risk.get("lanes") or [])
             if row.get("lane_id")
         }
+
+        def _maybe_note_latest(current_value: str | None, candidate: Any) -> str | None:
+            candidate_text = str(candidate or "").strip()
+            if not candidate_text:
+                return current_value
+            if current_value is None:
+                return candidate_text
+            current_dt = _parse_iso_datetime(current_value)
+            candidate_dt = _parse_iso_datetime(candidate_text)
+            if current_dt is None:
+                return candidate_text
+            if candidate_dt is None:
+                return current_value
+            return candidate_text if candidate_dt >= current_dt else current_value
+
         merged = dict(operator_status)
-        merged["lanes"] = [
-            {
-                "lane_id": row.get("lane_id"),
-                "display_name": row.get("display_name"),
-                "symbol": row.get("symbol"),
-                "session_restriction": row.get("session_restriction"),
-                "approved_long_entry_sources": list(row.get("long_sources") or []),
-                "approved_short_entry_sources": list(row.get("short_sources") or []),
-                "position_side": "FLAT",
-                "entries_enabled": bool(operator_status.get("entries_enabled", False)),
-                "operator_halt": bool(operator_status.get("operator_halt", False)),
-                "risk_state": risk_by_lane.get(str(row.get("lane_id")), {}).get("risk_state", "OK"),
-                "halt_reason": risk_by_lane.get(str(row.get("lane_id")), {}).get("halt_reason"),
-                "unblock_action": risk_by_lane.get(str(row.get("lane_id")), {}).get("unblock_action"),
-                "realized_losing_trades": risk_by_lane.get(str(row.get("lane_id")), {}).get("realized_losing_trades", 0),
-                "catastrophic_open_loss_threshold": (
-                    risk_by_lane.get(str(row.get("lane_id")), {}).get("catastrophic_open_loss_threshold")
-                    or row.get("catastrophic_open_loss")
-                ),
-                "artifacts_dir": row.get("artifacts_dir") or str(artifacts_dir / "lanes" / str(row.get("lane_id"))),
-                "database_url": row.get("database_url") or _derive_probationary_lane_database_url(db_path, str(row.get("lane_id"))),
-            }
-            for row in config_lanes
-        ]
+        synthesized_lanes: list[dict[str, Any]] = []
+        latest_updated_at: str | None = str(merged.get("updated_at") or "").strip() or None
+        latest_processed_bar_end_ts: str | None = str(merged.get("last_processed_bar_end_ts") or "").strip() or None
+        entries_enabled = bool(merged.get("entries_enabled", True))
+        operator_halt = bool(merged.get("operator_halt", False))
+        all_reconciliation_clean = True
+        all_broker_ok = True
+        any_lane_status = False
+        any_fault_code = bool(merged.get("fault_code"))
+        processed_bars_total = int(merged.get("processed_bars", 0) or 0)
+        new_bars_last_cycle = int(merged.get("new_bars_last_cycle", 0) or 0)
+        position_sides: set[str] = set()
+
+        for row in config_lanes:
+            lane_id = str(row.get("lane_id") or "")
+            lane_artifacts_dir = Path(row.get("artifacts_dir") or artifacts_dir / "lanes" / lane_id)
+            lane_status = _read_json(lane_artifacts_dir / "operator_status.json")
+            risk_row = risk_by_lane.get(lane_id, {})
+
+            lane_entries_enabled = bool(lane_status.get("entries_enabled", merged.get("entries_enabled", True)))
+            lane_operator_halt = bool(lane_status.get("operator_halt", merged.get("operator_halt", False)))
+            lane_position_side = str(lane_status.get("position_side") or "FLAT").upper()
+            lane_reconciliation = dict(lane_status.get("reconciliation") or {})
+            lane_restore = dict(lane_status.get("startup_restore_validation") or {})
+            lane_heartbeat = dict(lane_status.get("heartbeat_reconciliation") or {})
+            lane_timeout = dict(lane_status.get("order_timeout_watchdog") or {})
+            lane_fault_code = lane_status.get("fault_code")
+
+            if lane_status:
+                any_lane_status = True
+                latest_updated_at = _maybe_note_latest(
+                    latest_updated_at,
+                    lane_status.get("updated_at") or lane_heartbeat.get("last_completed_at"),
+                )
+                latest_processed_bar_end_ts = _maybe_note_latest(
+                    latest_processed_bar_end_ts,
+                    lane_status.get("last_processed_bar_end_ts"),
+                )
+                processed_bars_total += int(lane_status.get("processed_bars", 0) or 0)
+                new_bars_last_cycle += int(lane_status.get("new_bars_last_cycle", 0) or 0)
+                operator_halt = operator_halt or lane_operator_halt
+                entries_enabled = entries_enabled and lane_entries_enabled
+                if lane_position_side and lane_position_side != "FLAT":
+                    position_sides.add(lane_position_side)
+                any_fault_code = any_fault_code or bool(lane_fault_code)
+                lane_recon_clean = bool(lane_reconciliation.get("clean", not lane_reconciliation.get("reconcile_required", False)))
+                lane_restore_clean = (
+                    not bool(lane_restore.get("unresolved_restore_issue", False))
+                    and not bool(lane_restore.get("reconcile_required", False))
+                    and str(lane_restore.get("restore_result") or "READY").upper() not in {"FAULT", "FAILED"}
+                )
+                heartbeat_clean = str(lane_heartbeat.get("status") or "CLEAN").upper() in {"CLEAN", "HEALTHY"}
+                all_reconciliation_clean = all_reconciliation_clean and lane_recon_clean and lane_restore_clean and heartbeat_clean
+                broker_snapshot = dict(lane_reconciliation.get("broker_snapshot") or {})
+                all_broker_ok = all_broker_ok and bool(broker_snapshot.get("connected", True))
+
+            synthesized_lanes.append(
+                {
+                    "lane_id": lane_id,
+                    "display_name": lane_status.get("display_name") or row.get("display_name"),
+                    "symbol": lane_status.get("symbol") or row.get("symbol"),
+                    "session_restriction": row.get("session_restriction"),
+                    "approved_long_entry_sources": list(
+                        lane_status.get("approved_long_entry_sources") or row.get("long_sources") or []
+                    ),
+                    "approved_short_entry_sources": list(
+                        lane_status.get("approved_short_entry_sources") or row.get("short_sources") or []
+                    ),
+                    "position_side": lane_position_side,
+                    "strategy_status": lane_status.get("strategy_status") or "UNKNOWN",
+                    "entries_enabled": lane_entries_enabled,
+                    "operator_halt": lane_operator_halt,
+                    "risk_state": risk_row.get("risk_state", "OK"),
+                    "halt_reason": risk_row.get("halt_reason"),
+                    "unblock_action": risk_row.get("unblock_action"),
+                    "realized_losing_trades": risk_row.get("realized_losing_trades", 0),
+                    "catastrophic_open_loss_threshold": (
+                        risk_row.get("catastrophic_open_loss_threshold")
+                        or row.get("catastrophic_open_loss")
+                    ),
+                    "artifacts_dir": row.get("artifacts_dir") or str(lane_artifacts_dir),
+                    "database_url": row.get("database_url") or _derive_probationary_lane_database_url(db_path, lane_id),
+                    "execution_timeframe": (
+                        lane_status.get("execution_timeframe")
+                        or row.get("execution_timeframe")
+                    ),
+                    "structural_signal_timeframe": (
+                        lane_status.get("structural_signal_timeframe")
+                        or row.get("structural_signal_timeframe")
+                    ),
+                    "artifact_timeframe": (
+                        lane_status.get("artifact_timeframe")
+                        or row.get("artifact_timeframe")
+                    ),
+                    "context_timeframes": list(
+                        lane_status.get("context_timeframes")
+                        or row.get("context_timeframes")
+                        or []
+                    ),
+                    "last_execution_bar_evaluated_at": lane_status.get("last_execution_bar_evaluated_at"),
+                    "last_completed_context_bars_at": dict(lane_status.get("last_completed_context_bars_at") or {}),
+                    "updated_at": lane_status.get("updated_at"),
+                    "last_processed_bar_end_ts": lane_status.get("last_processed_bar_end_ts"),
+                    "processed_bars": int(lane_status.get("processed_bars", 0) or 0),
+                    "new_bars_last_cycle": int(lane_status.get("new_bars_last_cycle", 0) or 0),
+                    "fault_code": lane_fault_code,
+                    "reconciliation": lane_reconciliation,
+                    "heartbeat_reconciliation": lane_heartbeat,
+                    "order_timeout_watchdog": lane_timeout,
+                    "startup_restore_validation": lane_restore,
+                    "live_timing_summary": dict(lane_status.get("live_timing_summary") or {}),
+                }
+            )
+
+        merged["lanes"] = synthesized_lanes
         merged["paper_lane_count"] = len(merged["lanes"])
+        if any_lane_status:
+            merged["updated_at"] = latest_updated_at
+            merged["last_processed_bar_end_ts"] = latest_processed_bar_end_ts
+            merged["entries_enabled"] = entries_enabled and not operator_halt
+            merged["operator_halt"] = operator_halt
+            merged["processed_bars"] = processed_bars_total
+            merged["new_bars_last_cycle"] = new_bars_last_cycle
+            if position_sides:
+                merged["position_side"] = next(iter(position_sides)) if len(position_sides) == 1 else "MIXED"
+            else:
+                merged["position_side"] = "FLAT"
+            if not merged.get("strategy_status"):
+                if any_fault_code:
+                    merged["strategy_status"] = "FAULTED"
+                elif all_reconciliation_clean:
+                    merged["strategy_status"] = "READY"
+                else:
+                    merged["strategy_status"] = "RECONCILING"
+            merged["health"] = {
+                **dict(merged.get("health") or {}),
+                "health_status": "HEALTHY" if all_reconciliation_clean and not any_fault_code else "DEGRADED",
+                "market_data_ok": bool(any_lane_status),
+                "broker_ok": all_broker_ok,
+                "persistence_ok": True,
+                "reconciliation_clean": all_reconciliation_clean,
+                "invariants_ok": not any_fault_code and all_reconciliation_clean,
+            }
         if not merged.get("approved_long_entry_sources"):
             merged["approved_long_entry_sources"] = sorted(
                 {
@@ -4256,6 +4472,34 @@ class OperatorDashboardService:
             detail["max_concurrent_entries"] = lane_row.get("max_concurrent_entries") or configured.get("max_concurrent_entries")
             detail["max_position_quantity"] = lane_row.get("max_position_quantity") or configured.get("max_position_quantity")
             detail["max_adds_after_entry"] = lane_row.get("max_adds_after_entry") or configured.get("max_adds_after_entry")
+            detail["execution_timeframe"] = (
+                lane_row.get("execution_timeframe")
+                or configured.get("execution_timeframe")
+                or configured.get("timeframe")
+            )
+            detail["structural_signal_timeframe"] = (
+                lane_row.get("structural_signal_timeframe")
+                or configured.get("structural_signal_timeframe")
+                or configured.get("timeframe")
+            )
+            detail["artifact_timeframe"] = (
+                lane_row.get("artifact_timeframe")
+                or configured.get("artifact_timeframe")
+                or detail["structural_signal_timeframe"]
+            )
+            detail["context_timeframes"] = list(
+                lane_row.get("context_timeframes")
+                or configured.get("context_timeframes")
+                or ([detail["structural_signal_timeframe"]] if detail["structural_signal_timeframe"] else [])
+            )
+            detail["last_execution_bar_evaluated_at"] = (
+                lane_row.get("last_execution_bar_evaluated_at")
+                or lane_row.get("last_processed_bar_end_ts")
+            )
+            detail["last_completed_context_bars_at"] = dict(
+                lane_row.get("last_completed_context_bars_at")
+                or {}
+            )
             detail["net_side"] = lane_row.get("position_side") or "FLAT"
             detail["total_quantity"] = lane_row.get("broker_position_qty") or lane_row.get("internal_position_qty") or 0
             detail["open_entry_leg_count"] = int(lane_row.get("open_entry_leg_count", 0) or 0)
@@ -4319,6 +4563,10 @@ class OperatorDashboardService:
                     "lane_class_badge": detail.get("lane_class_badge"),
                     "designation_label": detail.get("designation_label"),
                     "participation_policy": detail.get("participation_policy"),
+                    "execution_timeframe": detail.get("execution_timeframe"),
+                    "context_timeframes": detail.get("context_timeframes"),
+                    "last_execution_bar_evaluated_at": detail.get("last_execution_bar_evaluated_at"),
+                    "last_completed_context_bars_at": detail.get("last_completed_context_bars_at"),
                     "staged_capable": detail.get("staged_capable"),
                     "net_side": detail.get("net_side"),
                     "total_quantity": detail.get("total_quantity"),
@@ -10675,6 +10923,9 @@ class OperatorDashboardService:
             return bootstrap_status
         if not run_if_missing:
             return {"runtime_ready": False, "source": "missing"}
+        return self._run_auth_gate_result()
+
+    def _run_auth_gate_result(self) -> dict[str, Any]:
         completed = subprocess.run(
             ["bash", "scripts/run_schwab_auth_gate.sh"],
             cwd=self._repo_root,
@@ -10692,6 +10943,15 @@ class OperatorDashboardService:
         _write_json_file(self._auth_cache_path, parsed)
         parsed.setdefault("source", "fresh_auth_gate")
         return parsed
+
+    def _launch_gate_auth_status(self) -> dict[str, Any]:
+        cached = self._load_or_refresh_auth_gate_result(run_if_missing=False)
+        if bool(cached.get("runtime_ready")):
+            return cached
+        fresh = self._run_auth_gate_result()
+        if bool(fresh.get("runtime_ready")):
+            return fresh
+        return fresh or cached
 
     def _bootstrap_auth_status(self) -> dict[str, Any] | None:
         token_path = Path(os.environ.get("SCHWAB_TOKEN_FILE", self._repo_root / ".local" / "schwab" / "tokens.json"))
@@ -10776,6 +11036,11 @@ class OperatorDashboardService:
         shadow = self._runtime_snapshot("shadow")
         carry_forward = self._paper_carry_forward_state(paper, self._review_payload(paper, "paper"))
         pre_session_review = self._paper_pre_session_review_state(carry_forward)
+        auth_status = (
+            self._launch_gate_auth_status()
+            if action == "start-paper"
+            else self._load_or_refresh_auth_gate_result(run_if_missing=False)
+        )
         paper_faulted = paper["status"]["fault_state"] == "FAULTED"
         paper_halted = paper["status"]["operator_halt"]
         desk_risk_state = str((paper.get("desk_risk") or {}).get("desk_risk_state") or "OK")
@@ -10795,6 +11060,23 @@ class OperatorDashboardService:
                 command=None,
                 output="Inherited prior-session risk is active and pre-session review is still pending. Complete the review before starting paper soak.",
             )
+        if action == "start-paper" and not bool(auth_status.get("runtime_ready")):
+            auth_output = str(
+                auth_status.get("detail")
+                or auth_status.get("message")
+                or auth_status.get("error")
+                or "Paper runtime start is blocked because broker/auth readiness is not green yet."
+            ).strip()
+            result = self._result_record(
+                action=action,
+                ok=False,
+                command=None,
+                output=auth_output,
+            )
+            result["reason_code"] = "AUTH_NOT_READY"
+            result["next_action"] = str(auth_status.get("next_action") or "Auth Gate Check")
+            result["auth"] = auth_status
+            return result
         if action == "stop-shadow" and not shadow["running"]:
             return self._result_record(action=action, ok=True, command=None, output="Shadow is not running.")
         if action == "stop-paper" and not paper["running"]:
@@ -10848,6 +11130,89 @@ class OperatorDashboardService:
             return self._result_record(action=action, ok=False, command=None, output="Paper runtime is not running.")
         if action == "paper-stop-after-cycle" and paper["operator_state"]["stop_after_cycle_requested"]:
             return self._result_record(action=action, ok=True, command=None, output="Stop After Current Cycle is already requested.")
+        return None
+
+    def _result_record_for_action(self, result: dict[str, Any], action: str) -> dict[str, Any]:
+        remapped = dict(result)
+        remapped["action"] = action
+        remapped["action_label"] = _humanize_action(action)
+        remapped["message"] = _normalize_action_message(action, bool(remapped.get("ok")), str(remapped.get("output") or ""))
+        return remapped
+
+    def _paper_restart_stop_is_benign(self, completed: subprocess.CompletedProcess[str]) -> bool:
+        output = "\n".join(part for part in [completed.stdout or "", completed.stderr or ""] if part).strip().lower()
+        return completed.returncode != 0 and "no probationary paper pid file found" in output
+
+    def _paper_restart_primary_failure(
+        self,
+        *,
+        action: str,
+        snapshot: dict[str, Any],
+        metadata: dict[str, Any],
+        start_output: str | None = None,
+    ) -> dict[str, Any] | None:
+        runtime_recovery = dict(((snapshot.get("paper") or {}).get("runtime_recovery")) or {})
+        reason_code = str(runtime_recovery.get("reason_code") or "").strip().upper()
+        next_action = str(runtime_recovery.get("next_action") or "").strip()
+        detail = str(
+            runtime_recovery.get("operator_message")
+            or runtime_recovery.get("detail")
+            or runtime_recovery.get("reason")
+            or ""
+        ).strip()
+        unresolved_lane_ids = [str(value) for value in list(metadata.get("unresolved_lane_ids") or []) if value]
+        mismatch = self._temporary_paper_runtime_mismatch(snapshot)
+
+        if reason_code == "AUTH_NOT_READY":
+            output = detail or "Paper runtime stopped; manual intervention required because broker/auth readiness is not green yet."
+            return {
+                "reason_code": "AUTH_NOT_READY",
+                "next_action": next_action or "Auth Gate Check",
+                "message": f"{_humanize_action(action)} blocked: AUTH_NOT_READY | Next action: {next_action or 'Auth Gate Check'}",
+                "detail": f"AUTH_NOT_READY | Next action: {next_action or 'Auth Gate Check'}",
+                "output": output,
+            }
+        if unresolved_lane_ids:
+            unresolved = ", ".join(unresolved_lane_ids) or "none"
+            return {
+                "reason_code": "TEMP_PAPER_STARTUP_MAPPING_MISSING",
+                "next_action": "Restart Runtime + Temp Paper",
+                "message": "Restart Paper Soak With Temp Paper blocked: TEMP_PAPER_STARTUP_MAPPING_MISSING | Next action: Restart Runtime + Temp Paper",
+                "detail": "TEMP_PAPER_STARTUP_MAPPING_MISSING | Next action: Restart Runtime + Temp Paper",
+                "output": (
+                    "Enabled temporary paper lanes are missing a startup mapping. "
+                    f"Unresolved lane ids: {unresolved}"
+                ),
+            }
+        if mismatch["mismatch"]:
+            return {
+                "reason_code": "TEMP_PAPER_RUNTIME_MISMATCH",
+                "next_action": "Restart Runtime + Temp Paper",
+                "message": "Restart Paper Soak With Temp Paper blocked: TEMP_PAPER_RUNTIME_MISMATCH | Next action: Restart Runtime + Temp Paper",
+                "detail": "TEMP_PAPER_RUNTIME_MISMATCH | Next action: Restart Runtime + Temp Paper",
+                "output": (
+                    "Enabled temporary paper lanes were not loaded into the restarted runtime. "
+                    f"Missing lane ids: {', '.join(mismatch['missing_lane_ids']) or 'none'} | "
+                    f"Unresolved lane ids: {', '.join(mismatch['unresolved_lane_ids']) or 'none'}"
+                ),
+            }
+        if reason_code:
+            output = detail or start_output or "Paper runtime start is blocked."
+            return {
+                "reason_code": reason_code,
+                "next_action": next_action or "Manual inspection required",
+                "message": f"{_humanize_action(action)} blocked: {reason_code} | Next action: {next_action or 'Manual inspection required'}",
+                "detail": f"{reason_code} | Next action: {next_action or 'Manual inspection required'}",
+                "output": output,
+            }
+        if start_output:
+            return {
+                "reason_code": "START_COMMAND_FAILED",
+                "next_action": "Inspect Runtime Log",
+                "message": "Restart Paper Soak With Temp Paper failed: START_COMMAND_FAILED | Next action: Inspect Runtime Log",
+                "detail": "START_COMMAND_FAILED | Next action: Inspect Runtime Log",
+                "output": start_output,
+            }
         return None
 
     def _result_record(
