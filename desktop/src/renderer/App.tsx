@@ -422,8 +422,12 @@ const API_FALLBACK: OperatorDesktopApi = {
         apiStatus: "unknown",
         healthStatus: "unknown",
         managerOwned: false,
-        startupFailureKind: "unexpected_bind_error",
+        startupFailureKind: "unexpected_startup_failure",
         actionHint: "Run the desktop app from Electron so the preload bridge is available.",
+        staleListenerDetected: false,
+        healthReachable: false,
+        dashboardApiTimedOut: false,
+        portConflictDetected: false,
       },
       startup: {
         preferredHost: "127.0.0.1",
@@ -436,6 +440,13 @@ const API_FALLBACK: OperatorDesktopApi = {
         ownership: "unavailable",
         latestEvent: "Electron preload bridge is unavailable in this renderer context.",
         recentEvents: [],
+        failureKind: "unexpected_startup_failure",
+        recommendedAction: "Run the desktop app from Electron so the preload bridge is available.",
+        staleListenerDetected: false,
+        healthReachable: false,
+        dashboardApiTimedOut: false,
+        managedExitCode: null,
+        managedExitSignal: null,
       },
       infoFiles: [],
       errors: ["Electron preload bridge is unavailable in this renderer context."],
@@ -1661,16 +1672,22 @@ function ownershipLabel(ownership: DesktopState["startup"]["ownership"] | undefi
 
 function startupFailureLabel(kind: DesktopState["backend"]["startupFailureKind"] | undefined): string {
   switch (kind) {
-    case "permission_denied":
-      return "Permission Denied";
-    case "port_in_use":
-      return "Port In Use";
-    case "conflicting_dashboard":
-      return "Conflicting Dashboard";
-    case "backend_not_ready":
-      return "Backend Not Ready";
-    case "unexpected_bind_error":
-      return "Unexpected Bind Error";
+    case "stale_dashboard_instance":
+      return "Stale Dashboard Instance";
+    case "stale_listener_conflict":
+      return "Stale Listener / Port Conflict";
+    case "build_mismatch":
+      return "Build Mismatch";
+    case "dashboard_api_not_ready":
+      return "Health Up / API Not Ready";
+    case "early_process_exit":
+      return "Early Process Exit";
+    case "permission_or_bind_failure":
+      return "Permission / Bind Failure";
+    case "environment_failure":
+      return "Environment Failure";
+    case "unexpected_startup_failure":
+      return "Unexpected Startup Failure";
     default:
       return "None";
   }
@@ -1994,7 +2011,7 @@ function buildDiagnosticsSummary(input: {
     `Same-Underlying Latest Entry Block: ${formatValue(latestEntryBlockedEvent.blocked_standalone_strategy_id ?? latestEntryBlockedEvent.instrument ?? "None")} at ${formatTimestamp(latestEntryBlockedEvent.occurred_at)}`,
     `Latest Error: ${latestError}`,
     `Production Link Error: ${formatValue(productionDiagnostics.last_error)}`,
-    `Action Hint: ${desktopState?.backend.actionHint ?? "None"}`,
+    `Action Hint: ${desktopState?.startup.recommendedAction ?? desktopState?.backend.actionHint ?? "None"}`,
   ].join("\n");
 }
 
@@ -5645,7 +5662,9 @@ function paperStartupCategoryTone(category: string): Tone {
             <div className="status-banner-body">{desktopState?.source.detail ?? "Loading operator source-of-truth state."}</div>
             <div className="status-banner-body secondary">{desktopState?.backend.detail ?? "Backend state detail is unavailable."}</div>
             {desktopState?.backend.lastError ? <div className="status-banner-error">Latest error: {desktopState.backend.lastError}</div> : null}
-            {desktopState?.backend.actionHint ? <div className="status-banner-warning">Next step: {desktopState.backend.actionHint}</div> : null}
+            {desktopState?.startup.recommendedAction || desktopState?.backend.actionHint ? (
+              <div className="status-banner-warning">Next step: {desktopState?.startup.recommendedAction ?? desktopState?.backend.actionHint}</div>
+            ) : null}
             {!canRunLiveActions ? (
               <div className="status-banner-warning">Live operator actions are locked until the app is back on the live dashboard API.</div>
             ) : null}
@@ -10384,10 +10403,18 @@ function StartupPanel(props: {
         <MetricCard label="Startup State" value={backend?.label ?? "Unknown"} tone={statusTone(backend?.label)} />
         <MetricCard label="Port Policy" value={startup?.allowPortFallback ? "Explicit fallback enabled" : "Fixed preferred port"} />
         <MetricCard label="Failure Kind" value={startupFailureLabel(backend?.startupFailureKind)} tone={statusTone(backend?.startupFailureKind)} />
+        <MetricCard label="Backend Health Reachable" value={backend?.healthReachable ? "YES" : "NO"} tone={backend?.healthReachable ? "good" : "warn"} />
+        <MetricCard label="/api/dashboard Timed Out" value={backend?.dashboardApiTimedOut ? "YES" : "NO"} tone={backend?.dashboardApiTimedOut ? "warn" : "good"} />
+        <MetricCard label="Stale Listener Detected" value={backend?.staleListenerDetected ? "YES" : "NO"} tone={backend?.staleListenerDetected ? "warn" : "good"} />
+        <MetricCard label="Port Conflict Detected" value={backend?.portConflictDetected ? "YES" : "NO"} tone={backend?.portConflictDetected ? "warn" : "good"} />
+        <MetricCard label="Managed Exit Code" value={formatValue(props.desktopState?.manager.lastExitCode)} />
+        <MetricCard label="Managed Exit Signal" value={formatValue(props.desktopState?.manager.lastExitSignal)} />
         <MetricCard label="Next Retry" value={formatTimestamp(backend?.nextRetryAt)} />
       </div>
       {backend?.lastError ? <div className="startup-error">Latest bind/start error: {backend.lastError}</div> : null}
-      {backend?.actionHint ? <div className="startup-hint">Action: {backend.actionHint}</div> : null}
+      {startup?.recommendedAction || backend?.actionHint ? (
+        <div className="startup-hint">Next Action: {startup?.recommendedAction ?? backend?.actionHint}</div>
+      ) : null}
       <div className="action-row inline">
         <button className="panel-button" disabled={!canRetry} onClick={props.onRetryStart}>
           Retry Start

@@ -31,12 +31,19 @@ export interface DesktopBackendStatus {
   managerOwned: boolean;
   startupFailureKind:
     | "none"
-    | "permission_denied"
-    | "port_in_use"
-    | "conflicting_dashboard"
-    | "backend_not_ready"
-    | "unexpected_bind_error";
+    | "stale_dashboard_instance"
+    | "stale_listener_conflict"
+    | "build_mismatch"
+    | "dashboard_api_not_ready"
+    | "early_process_exit"
+    | "permission_or_bind_failure"
+    | "environment_failure"
+    | "unexpected_startup_failure";
   actionHint: string | null;
+  staleListenerDetected: boolean;
+  healthReachable: boolean;
+  dashboardApiTimedOut: boolean;
+  portConflictDetected: boolean;
 }
 
 export interface DesktopStartupStatus {
@@ -50,6 +57,22 @@ export interface DesktopStartupStatus {
   ownership: "attached_existing" | "started_managed" | "snapshot_only" | "unavailable";
   latestEvent: string | null;
   recentEvents: string[];
+  failureKind:
+    | "none"
+    | "stale_dashboard_instance"
+    | "stale_listener_conflict"
+    | "build_mismatch"
+    | "dashboard_api_not_ready"
+    | "early_process_exit"
+    | "permission_or_bind_failure"
+    | "environment_failure"
+    | "unexpected_startup_failure";
+  recommendedAction: string | null;
+  staleListenerDetected: boolean;
+  healthReachable: boolean;
+  dashboardApiTimedOut: boolean;
+  managedExitCode: number | null;
+  managedExitSignal: string | null;
 }
 
 export interface LocalOperatorAuthState {

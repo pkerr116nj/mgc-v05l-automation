@@ -121,6 +121,21 @@ cleanup() {
 
 trap cleanup INT TERM
 
+emit_startup_marker() {
+  local key="$1"
+  local value="$2"
+  echo "STARTUP_${key}=${value}" >&2
+}
+
+emit_startup_failure() {
+  local kind="$1"
+  local message="$2"
+  local next_action="$3"
+  emit_startup_marker "FAILURE_KIND" "${kind}"
+  emit_startup_marker "NEXT_ACTION" "${next_action}"
+  echo "${message}" >&2
+}
+
 health_check() {
   local health_url="$1"
   "${PYTHON_BIN}" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=1).read()' "${health_url}" >/dev/null 2>&1
@@ -163,6 +178,17 @@ listener_pid_for_port() {
 read_process_command() {
   local pid="$1"
   ps -p "${pid}" -o command= 2>/dev/null || true
+}
+
+is_recoverable_local_dashboard_listener() {
+  local command="$1"
+  local normalized
+  normalized="$(printf '%s' "${command}" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "${normalized}" ]]; then
+    return 1
+  fi
+  [[ "${normalized}" == *"mgc_v05l.app.main"* && "${normalized}" == *"operator-dashboard"* ]] || \
+    [[ "${normalized}" == *"python"* && "${normalized}" == *"operator_dashboard"* ]]
 }
 
 dashboard_ready_check() {
@@ -248,19 +274,29 @@ if [[ -f "${INFO_FILE}" ]]; then
     EXISTING_HEALTH_STATUS="$(read_health_field "${DASHBOARD_URL_EXISTING%/}/health" status 2>/dev/null || true)"
     EXISTING_HEALTH_READY="$(read_health_field "${DASHBOARD_URL_EXISTING%/}/health" ready 2>/dev/null || true)"
     if [[ -n "${EXISTING_BUILD}" ]] && [[ "${EXISTING_BUILD}" != "${LOCAL_BUILD_STAMP}" ]]; then
+      emit_startup_marker "HEALTH_REACHABLE" "1"
+      emit_startup_marker "BUILD_MISMATCH" "1"
       echo "Existing dashboard build mismatch: running ${EXISTING_BUILD}, local ${LOCAL_BUILD_STAMP}. Restarting." >&2
       if [[ -n "${PID_EXISTING}" ]] && stop_dashboard_process "${PID_EXISTING}"; then
         rm -f "${PID_FILE}" "${INFO_FILE}"
       else
-        echo "Could not stop the old dashboard instance cleanly. PID: ${PID_EXISTING:-unknown}" >&2
+        emit_startup_failure \
+          "build_mismatch" \
+          "Could not stop the old dashboard instance cleanly. PID: ${PID_EXISTING:-unknown}" \
+          "Stop the old local dashboard instance, then retry Start/Restart Dashboard/API."
         exit 1
       fi
     elif [[ ${VERIFY_DASHBOARD_API} -eq 1 ]] && ! dashboard_api_check "${DASHBOARD_URL_EXISTING%/}/api/dashboard"; then
+      emit_startup_marker "HEALTH_REACHABLE" "1"
+      emit_startup_marker "DASHBOARD_API_TIMED_OUT" "1"
       echo "Existing dashboard is live but /api/dashboard is not ready yet. Restarting." >&2
       if [[ -n "${PID_EXISTING}" ]] && stop_dashboard_process "${PID_EXISTING}"; then
         rm -f "${PID_FILE}" "${INFO_FILE}"
       else
-        echo "Could not stop the old dashboard instance cleanly. PID: ${PID_EXISTING:-unknown}" >&2
+        emit_startup_failure \
+          "stale_dashboard_instance" \
+          "Could not stop the old dashboard instance cleanly. PID: ${PID_EXISTING:-unknown}" \
+          "Stop the stale local dashboard instance, then retry Start/Restart Dashboard/API."
         exit 1
       fi
     else
@@ -274,11 +310,15 @@ if [[ -f "${INFO_FILE}" ]]; then
     fi
   fi
   if [[ -n "${PID_EXISTING}" ]] && ps -p "${PID_EXISTING}" >/dev/null 2>&1; then
+    emit_startup_marker "STALE_LISTENER_DETECTED" "1"
     echo "Existing dashboard process is not ready. Restarting PID ${PID_EXISTING}." >&2
     if stop_dashboard_process "${PID_EXISTING}"; then
       rm -f "${PID_FILE}" "${INFO_FILE}"
     else
-      echo "Could not stop the stale dashboard process cleanly. PID: ${PID_EXISTING}" >&2
+      emit_startup_failure \
+        "stale_dashboard_instance" \
+        "Could not stop the stale dashboard process cleanly. PID: ${PID_EXISTING}" \
+        "Stop the stale local dashboard process, then retry Start/Restart Dashboard/API."
       exit 1
     fi
   fi
@@ -289,13 +329,36 @@ rm -f "${INFO_FILE}"
 LISTENER_PID="$(listener_pid_for_port "${PORT}" || true)"
 if [[ -n "${LISTENER_PID}" ]]; then
   LISTENER_COMMAND="$(read_process_command "${LISTENER_PID}")"
-  echo "Dashboard port conflict on ${HOST}:${PORT}." >&2
-  echo "Listener PID: ${LISTENER_PID}" >&2
-  if [[ -n "${LISTENER_COMMAND}" ]]; then
-    echo "Listener command: ${LISTENER_COMMAND}" >&2
+  emit_startup_marker "STALE_LISTENER_DETECTED" "1"
+  emit_startup_marker "PORT_CONFLICT_DETECTED" "1"
+  if [[ -n "${LISTENER_COMMAND}" ]] && is_recoverable_local_dashboard_listener "${LISTENER_COMMAND}"; then
+    echo "Detected recoverable local dashboard listener on ${HOST}:${PORT}; stopping PID ${LISTENER_PID} automatically." >&2
+    if stop_dashboard_process "${LISTENER_PID}"; then
+      sleep 0.5
+      LISTENER_PID="$(listener_pid_for_port "${PORT}" || true)"
+    else
+      emit_startup_failure \
+        "stale_listener_conflict" \
+        "Callback listener could not be cleared on ${HOST}:${PORT}. Listener PID ${LISTENER_PID} is still bound." \
+        "Stop the stale local dashboard listener, then retry Start/Restart Dashboard/API."
+      if [[ -n "${LISTENER_COMMAND}" ]]; then
+        echo "Listener command: ${LISTENER_COMMAND}" >&2
+      fi
+      exit 1
+    fi
   fi
-  echo "Stop the stale listener or choose a different --port. If this is an old dashboard instance, try scripts/stop_operator_dashboard.sh." >&2
-  exit 1
+  if [[ -n "${LISTENER_PID}" ]]; then
+    echo "Dashboard port conflict on ${HOST}:${PORT}." >&2
+    echo "Listener PID: ${LISTENER_PID}" >&2
+    if [[ -n "${LISTENER_COMMAND}" ]]; then
+      echo "Listener command: ${LISTENER_COMMAND}" >&2
+    fi
+    emit_startup_failure \
+      "stale_listener_conflict" \
+      "A listener is already bound on ${HOST}:${PORT} and could not be auto-cleared safely." \
+      "Stop the conflicting listener or choose a different configured port before retrying Dashboard/API start."
+    exit 1
+  fi
 fi
 
 echo "Launching operator dashboard."
@@ -331,7 +394,10 @@ echo "${DASHBOARD_PID}" > "${PID_FILE}"
 
 for _ in $(seq 1 150); do
   if ! ps -p "${DASHBOARD_PID}" >/dev/null 2>&1; then
-    echo "Dashboard failed to start: server process exited early." >&2
+    emit_startup_failure \
+      "early_process_exit" \
+      "Dashboard failed to start: server process exited early." \
+      "Review the backend log tail, fix the startup error, then retry Start/Restart Dashboard/API."
     rm -f "${PID_FILE}"
     echo "Log tail:" >&2
     tail -n 40 "${LOG_FILE}" >&2 || true
@@ -343,17 +409,23 @@ for _ in $(seq 1 150); do
     BOUND_HOST="$(read_info_field "${INFO_FILE}" host)"
     BOUND_PORT="$(read_info_field "${INFO_FILE}" port)"
     if health_check "${DASHBOARD_URL%/}/health"; then
+      emit_startup_marker "HEALTH_REACHABLE" "1"
       RUNNING_BUILD="$(read_health_field "${DASHBOARD_URL%/}/health" build_stamp 2>/dev/null || true)"
       RUNNING_STARTED="$(read_health_field "${DASHBOARD_URL%/}/health" started_at 2>/dev/null || true)"
       RUNNING_HEALTH_STATUS="$(read_health_field "${DASHBOARD_URL%/}/health" status 2>/dev/null || true)"
       RUNNING_HEALTH_READY="$(read_health_field "${DASHBOARD_URL%/}/health" ready 2>/dev/null || true)"
       if [[ -n "${RUNNING_BUILD}" ]] && [[ "${RUNNING_BUILD}" != "${LOCAL_BUILD_STAMP}" ]]; then
-        echo "Dashboard health check returned a build mismatch: running ${RUNNING_BUILD}, local ${LOCAL_BUILD_STAMP}." >&2
+        emit_startup_marker "BUILD_MISMATCH" "1"
+        emit_startup_failure \
+          "build_mismatch" \
+          "Dashboard health check returned a build mismatch: running ${RUNNING_BUILD}, local ${LOCAL_BUILD_STAMP}." \
+          "Stop the stale local dashboard instance, then retry Start/Restart Dashboard/API."
         kill -TERM "${DASHBOARD_PID}" 2>/dev/null || true
         rm -f "${PID_FILE}"
         exit 1
       fi
       if [[ ${VERIFY_DASHBOARD_API} -eq 1 ]] && ! dashboard_api_check "${DASHBOARD_URL%/}/api/dashboard"; then
+        emit_startup_marker "DASHBOARD_API_TIMED_OUT" "1"
         sleep 0.2
         continue
       fi
@@ -370,7 +442,27 @@ for _ in $(seq 1 150); do
   sleep 0.2
 done
 
-echo "Dashboard failed to become healthy before timeout." >&2
+if [[ -f "${INFO_FILE}" ]]; then
+  DASHBOARD_URL="$(read_info_field "${INFO_FILE}" url 2>/dev/null || true)"
+  if [[ -n "${DASHBOARD_URL}" ]] && health_check "${DASHBOARD_URL%/}/health"; then
+    emit_startup_marker "HEALTH_REACHABLE" "1"
+    emit_startup_marker "DASHBOARD_API_TIMED_OUT" "1"
+    emit_startup_failure \
+      "dashboard_api_not_ready" \
+      "Dashboard health is up, but /api/dashboard never became ready before timeout." \
+      "Review the backend log and fix the blocking backend condition before retrying Dashboard/API start."
+  else
+    emit_startup_failure \
+      "permission_or_bind_failure" \
+      "Dashboard failed to become healthy before timeout." \
+      "Review the backend log for bind, permission, or environment errors, then retry Dashboard/API start."
+  fi
+else
+  emit_startup_failure \
+    "permission_or_bind_failure" \
+    "Dashboard failed to become healthy before timeout." \
+    "Review the backend log for bind, permission, or environment errors, then retry Dashboard/API start."
+fi
 if ps -p "${DASHBOARD_PID}" >/dev/null 2>&1; then
   kill -TERM "${DASHBOARD_PID}" 2>/dev/null || true
 fi

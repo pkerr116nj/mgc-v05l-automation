@@ -5,6 +5,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { safeStorage, shell, systemPreferences } from "electron";
 import packageJson from "../../package.json";
+import {
+  classifyStartupFailure,
+  shouldAutoReconnectDashboardFailure,
+  type StartupFailureAssessment,
+  type StartupFailureKind,
+} from "./dashboardStartup";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -81,14 +87,12 @@ export interface DesktopState {
     apiStatus: "responding" | "timed_out" | "unreachable" | "unknown";
     healthStatus: "ok" | "degraded" | "unreachable" | "unknown";
     managerOwned: boolean;
-    startupFailureKind:
-      | "none"
-      | "permission_denied"
-      | "port_in_use"
-      | "conflicting_dashboard"
-      | "backend_not_ready"
-      | "unexpected_bind_error";
+    startupFailureKind: StartupFailureKind;
     actionHint: string | null;
+    staleListenerDetected: boolean;
+    healthReachable: boolean;
+    dashboardApiTimedOut: boolean;
+    portConflictDetected: boolean;
   };
   startup: {
     preferredHost: string;
@@ -101,6 +105,13 @@ export interface DesktopState {
     ownership: "attached_existing" | "started_managed" | "snapshot_only" | "unavailable";
     latestEvent: string | null;
     recentEvents: string[];
+    failureKind: StartupFailureKind;
+    recommendedAction: string | null;
+    staleListenerDetected: boolean;
+    healthReachable: boolean;
+    dashboardApiTimedOut: boolean;
+    managedExitCode: number | null;
+    managedExitSignal: string | null;
   };
   infoFiles: string[];
   errors: string[];
@@ -125,6 +136,7 @@ const RUNTIME_ROOT = path.join(OUTPUT_ROOT, "runtime");
 const DEFAULT_INFO_FILE = path.join(RUNTIME_ROOT, "operator_dashboard.json");
 const DEFAULT_LOG_FILE = path.join(RUNTIME_ROOT, "operator_dashboard.log");
 const DESKTOP_LOG_FILE = path.join(RUNTIME_ROOT, "desktop_electron.log");
+const DESKTOP_STARTUP_STATUS_FILE = path.join(RUNTIME_ROOT, "desktop_dashboard_startup_status.json");
 const LOCAL_OPERATOR_AUTH_STATE_FILE = path.join(OUTPUT_ROOT, "local_operator_auth_state.json");
 const LOCAL_OPERATOR_AUTH_EVENTS_FILE = path.join(OUTPUT_ROOT, "local_operator_auth_events.jsonl");
 const LOCAL_SECRET_WRAPPER_FILE = path.join(OUTPUT_ROOT, "local_secret_wrapper.json");
@@ -762,6 +774,29 @@ function summarizeErrorText(detail: string | null): string | null {
   return lines.length ? lines[lines.length - 1] : null;
 }
 
+function startupFailureLabelForCommand(kind: StartupFailureKind): string {
+  switch (kind) {
+    case "stale_dashboard_instance":
+      return "stale dashboard instance";
+    case "stale_listener_conflict":
+      return "stale listener or port conflict";
+    case "build_mismatch":
+      return "build mismatch";
+    case "dashboard_api_not_ready":
+      return "dashboard API not ready";
+    case "early_process_exit":
+      return "early process exit";
+    case "permission_or_bind_failure":
+      return "permission or bind failure";
+    case "environment_failure":
+      return "environment failure";
+    case "unexpected_startup_failure":
+      return "unexpected startup failure";
+    default:
+      return "startup failure";
+  }
+}
+
 async function readLogTail(filePath: string, maxLines = 40): Promise<string> {
   try {
     const raw = await fs.readFile(filePath, "utf8");
@@ -811,11 +846,18 @@ function trackDashboardManager(child: ChildProcess): void {
     lastExitCode = typeof code === "number" ? code : null;
     lastExitSignal = signal;
     if (!stopWasRequested && managerOwnsBackend && !shutdownRequested) {
-      managerLifecycle = "reconnecting";
+      const exitDetail = `STARTUP_FAILURE_KIND=early_process_exit\nManaged dashboard process exited unexpectedly${code !== null ? ` with code ${code}` : ""}${signal ? ` (${signal})` : ""}.`;
+      const assessment = classifyStartupFailure(exitDetail);
       setManagerError(
         `Managed dashboard process exited unexpectedly${code !== null ? ` with code ${code}` : ""}${signal ? ` (${signal})` : ""}.`,
       );
-      scheduleReconnect();
+      if (shouldAutoReconnectDashboardFailure(assessment, reconnectAttemptCount)) {
+        managerLifecycle = "reconnecting";
+        scheduleReconnect();
+      } else {
+        clearReconnectTimer();
+        managerLifecycle = "degraded";
+      }
       return;
     }
     managerLifecycle = "degraded";
@@ -824,8 +866,16 @@ function trackDashboardManager(child: ChildProcess): void {
     if (dashboardManager === child) {
       dashboardManager = null;
     }
-    managerLifecycle = "degraded";
+    const errorDetail = `STARTUP_FAILURE_KIND=unexpected_startup_failure\nManaged dashboard process error: ${error.message}`;
+    const assessment = classifyStartupFailure(errorDetail);
     setManagerError(`Managed dashboard process error: ${error.message}`);
+    if (!stopWasRequested && managerOwnsBackend && !shutdownRequested && shouldAutoReconnectDashboardFailure(assessment, reconnectAttemptCount)) {
+      managerLifecycle = "reconnecting";
+      scheduleReconnect();
+      return;
+    }
+    clearReconnectTimer();
+    managerLifecycle = "degraded";
   });
 }
 
@@ -906,60 +956,20 @@ async function candidateUrls(): Promise<{ urls: string[]; infoFiles: string[] }>
   };
 }
 
-function classifyStartupFailure(detail: string | null): {
-  kind: DesktopState["backend"]["startupFailureKind"];
-  hint: string | null;
-} {
-  const text = String(detail ?? "").toLowerCase();
-  if (!text) {
-    return { kind: "none", hint: null };
-  }
-  if (text.includes("permission was denied") || text.includes("operation not permitted") || text.includes("eacces")) {
-    return {
-      kind: "permission_denied",
-      hint: "Local bind permission was denied. Retry from a normal desktop shell and confirm localhost binds are allowed on this machine.",
-    };
-  }
-  if (text.includes("build mismatch") || text.includes("existing dashboard process is not ready") || text.includes("could not stop the old dashboard instance cleanly")) {
-    return {
-      kind: "conflicting_dashboard",
-      hint: "A different or stale dashboard instance is conflicting with this build. Stop the old dashboard first, then retry.",
-    };
-  }
-  if (text.includes("port conflict") || text.includes("port is already in use") || text.includes("listener pid")) {
-    return {
-      kind: "port_in_use",
-      hint: "The preferred dashboard port is already occupied. Stop the conflicting listener or choose a different configured port before retrying.",
-    };
-  }
-  if (
-    text.includes("did not become responsive") ||
-    text.includes("failed to become healthy before timeout") ||
-    text.includes("api never became ready") ||
-    text.includes("not become responsive before timeout") ||
-    text.includes("dashboard_snapshot_failed") ||
-    text.includes("jsondecodeerror") ||
-    text.includes("timed out after")
-  ) {
-    return {
-      kind: "backend_not_ready",
-      hint: "The backend process started but did not become ready in time. Check the backend log and retry after the underlying service issue is resolved.",
-    };
-  }
-  return {
-    kind: "unexpected_bind_error",
-    hint: "The desktop app hit an unexpected local startup error. Check the backend and desktop logs, then retry with the configured host and port.",
-  };
-}
-
 function buildStartupState({
   dashboard,
   health,
   backendUrl,
+  assessment,
+  healthReachable,
+  dashboardApiTimedOut,
 }: {
   dashboard: JsonRecord | null;
   health: JsonRecord | null;
   backendUrl: string | null;
+  assessment: StartupFailureAssessment;
+  healthReachable: boolean;
+  dashboardApiTimedOut: boolean;
 }): DesktopState["startup"] {
   const meta = asJsonRecord((dashboard?.dashboard_meta as JsonRecord | undefined) ?? null);
   const metaUrl = typeof meta.server_url === "string" && meta.server_url.trim() ? meta.server_url : null;
@@ -987,7 +997,39 @@ function buildStartupState({
     ownership,
     latestEvent: recentManagerOutput.length ? recentManagerOutput[recentManagerOutput.length - 1] : null,
     recentEvents: recentManagerOutput.slice(-12),
+    failureKind: assessment.kind,
+    recommendedAction: assessment.hint,
+    staleListenerDetected: assessment.staleListenerDetected,
+    healthReachable,
+    dashboardApiTimedOut,
+    managedExitCode: lastExitCode,
+    managedExitSignal: lastExitSignal,
   };
+}
+
+async function writeDesktopStartupStatus(state: DesktopState): Promise<void> {
+  try {
+    await fs.mkdir(path.dirname(DESKTOP_STARTUP_STATUS_FILE), { recursive: true });
+    await fs.writeFile(
+      DESKTOP_STARTUP_STATUS_FILE,
+      JSON.stringify(
+        {
+          refreshed_at: state.refreshedAt,
+          source: state.source,
+          backend: state.backend,
+          startup: state.startup,
+          manager: state.manager,
+          backendUrl: state.backendUrl,
+          infoFiles: state.infoFiles,
+        },
+        null,
+        2,
+      ) + "\n",
+      "utf8",
+    );
+  } catch (error) {
+    appendDesktopLog(`Failed to write desktop startup status artifact: ${String(error)}`);
+  }
 }
 
 async function fetchJson<T = JsonRecord>(url: string, timeoutMs = 3500): Promise<T> {
@@ -1206,6 +1248,7 @@ function buildRuntimeStates({
   const healthReachable = Boolean(live);
   const apiReachable = live?.mode === "live";
   const staleInfoFile = infoFiles.length > 0 && !healthReachable;
+  const dashboardApiTimedOut = live?.mode === "health-only";
   const pid = readDashboardPid(dashboard, health);
   const activeManagedLifecycle = reconnectTimer ? "reconnecting" : dashboardLaunchPromise ? "starting" : managerLifecycle;
   const healthStatus: DesktopState["backend"]["healthStatus"] = !healthReachable
@@ -1221,7 +1264,33 @@ function buildRuntimeStates({
         ? "unknown"
         : "unreachable";
   const currentError = managerLastError ?? (live?.mode === "health-only" ? live.error : null);
-  const failure = classifyStartupFailure(currentError);
+  const failure = classifyStartupFailure(currentError, {
+    healthReachable,
+    dashboardApiTimedOut,
+  });
+  const backendPayload = (
+    state: DesktopState["backend"]["state"],
+    label: string,
+    detail: string,
+    lastError: string | null,
+  ): DesktopState["backend"] => ({
+    state,
+    label,
+    detail,
+    lastError,
+    nextRetryAt,
+    retryCount: reconnectAttemptCount,
+    pid,
+    apiStatus,
+    healthStatus,
+    managerOwned: managerOwnsBackend,
+    startupFailureKind: failure.kind,
+    actionHint: failure.hint,
+    staleListenerDetected: failure.staleListenerDetected,
+    healthReachable,
+    dashboardApiTimedOut,
+    portConflictDetected: failure.portConflictDetected,
+  });
 
   if (apiReachable) {
     managerLifecycle = "healthy";
@@ -1239,18 +1308,12 @@ function buildRuntimeStates({
         apiReachable: true,
       },
       backend: {
-        state: "healthy",
-        label: "HEALTHY",
-        detail: "Backend health and dashboard API are both responding.",
-        lastError: null,
-        nextRetryAt,
-        retryCount: reconnectAttemptCount,
-        pid,
-        apiStatus,
-        healthStatus,
-        managerOwned: managerOwnsBackend,
+        ...backendPayload("healthy", "HEALTHY", "Backend health and dashboard API are both responding.", null),
         startupFailureKind: "none",
         actionHint: null,
+        staleListenerDetected: false,
+        dashboardApiTimedOut: false,
+        portConflictDetected: false,
       },
     };
   }
@@ -1260,26 +1323,18 @@ function buildRuntimeStates({
       connection: snapshotAvailable ? "snapshot" : "unavailable",
       source: {
         mode: "degraded_reconnecting",
-        label: "DEGRADED / RECONNECTING",
-        detail: "Backend start is in progress; snapshot fallback remains active until the live API is fully ready.",
+        label: "STARTING / RECOVERING",
+        detail: "Backend start is in progress; the desktop will wait for live API readiness before enabling live actions.",
         canRunLiveActions: false,
         healthReachable,
         apiReachable: false,
       },
-      backend: {
-        state: "starting",
-        label: "STARTING",
-        detail: "Dashboard manager is starting the local backend and waiting for readiness.",
-        lastError: managerLastError ?? (live?.mode === "health-only" ? live.error : null),
-        nextRetryAt,
-        retryCount: reconnectAttemptCount,
-        pid,
-        apiStatus,
-        healthStatus,
-        managerOwned: managerOwnsBackend,
-        startupFailureKind: failure.kind,
-        actionHint: failure.hint,
-      },
+      backend: backendPayload(
+        "starting",
+        "STARTING",
+        "Dashboard manager is starting the local backend and waiting for readiness.",
+        managerLastError ?? (live?.mode === "health-only" ? live.error : null),
+      ),
     };
   }
 
@@ -1288,28 +1343,22 @@ function buildRuntimeStates({
       connection: snapshotAvailable ? "snapshot" : "unavailable",
       source: {
         mode: "degraded_reconnecting",
-        label: "DEGRADED / RECONNECTING",
-        detail: "The managed backend is reconnecting after an exit or slow recovery; snapshot fallback is active.",
+        label: "RECOVERING",
+        detail: nextRetryAt
+          ? `Managed backend recovery is active. Next reconnect attempt is scheduled for ${nextRetryAt}.`
+          : "Managed backend recovery is active.",
         canRunLiveActions: false,
         healthReachable,
         apiReachable: false,
       },
-      backend: {
-        state: "reconnecting",
-        label: "RECONNECTING",
-        detail: nextRetryAt
+      backend: backendPayload(
+        "reconnecting",
+        "RECOVERING",
+        nextRetryAt
           ? `Next reconnect attempt scheduled for ${nextRetryAt}.`
           : "Reconnect recovery is active for the managed backend.",
-        lastError: managerLastError ?? (live?.mode === "health-only" ? live.error : null),
-        nextRetryAt,
-        retryCount: reconnectAttemptCount,
-        pid,
-        apiStatus,
-        healthStatus,
-        managerOwned: managerOwnsBackend,
-        startupFailureKind: failure.kind,
-        actionHint: failure.hint,
-      },
+        managerLastError ?? (live?.mode === "health-only" ? live.error : null),
+      ),
     };
   }
 
@@ -1317,59 +1366,47 @@ function buildRuntimeStates({
     return {
       connection: snapshotAvailable ? "snapshot" : "unavailable",
       source: {
-        mode: "degraded_reconnecting",
-        label: "DEGRADED / RECONNECTING",
-        detail: `Live /health is reachable at ${live.url}, but /api/dashboard is not completing within ${DASHBOARD_TIMEOUT_MS / 1000}s.`,
+        mode: snapshotAvailable ? "snapshot_fallback" : "backend_down",
+        label: "API NOT READY",
+        detail: `Live /health is reachable at ${live.url}, but /api/dashboard did not become ready within ${DASHBOARD_TIMEOUT_MS / 1000}s.`,
         canRunLiveActions: false,
         healthReachable: true,
         apiReachable: false,
       },
-      backend: {
-        state: "degraded",
-        label: "DEGRADED",
-        detail: "Backend is up enough to answer /health, but the full dashboard payload is not responsive.",
-        lastError: live.error,
-        nextRetryAt,
-        retryCount: reconnectAttemptCount,
-        pid,
-        apiStatus,
-        healthStatus,
-        managerOwned: managerOwnsBackend,
-        startupFailureKind: classifyStartupFailure(live.error).kind,
-        actionHint: classifyStartupFailure(live.error).hint,
-      },
+      backend: backendPayload(
+        "degraded",
+        "API NOT READY",
+        "Backend health is reachable, but the full /api/dashboard payload is not responsive.",
+        live.error,
+      ),
     };
   }
 
   if (snapshotAvailable) {
+    const snapshotLabel = failure.kind !== "none" ? "STARTUP FAILURE / SNAPSHOT" : "SNAPSHOT FALLBACK";
+    const snapshotDetail = failure.kind !== "none"
+      ? `Using persisted operator snapshots because Dashboard/API startup failed with ${failure.kind.replace(/_/g, " ")}.`
+      : staleInfoFile
+        ? "Using persisted operator snapshots because the stored backend endpoint is stale or unreachable."
+        : "Using persisted operator snapshots because no live dashboard API is currently available.";
     return {
       connection: "snapshot",
       source: {
         mode: "snapshot_fallback",
-        label: "SNAPSHOT FALLBACK",
-        detail: staleInfoFile
-          ? "Using persisted operator snapshots because the stored backend endpoint is stale or unreachable."
-          : "Using persisted operator snapshots because no live dashboard API is currently available.",
+        label: snapshotLabel,
+        detail: snapshotDetail,
         canRunLiveActions: false,
         healthReachable: false,
         apiReachable: false,
       },
-      backend: {
-        state: "backend_down",
-        label: "BACKEND DOWN",
-        detail: staleInfoFile
+      backend: backendPayload(
+        "backend_down",
+        failure.kind !== "none" ? "STARTUP FAILURE" : "BACKEND DOWN",
+        staleInfoFile
           ? "Stored dashboard info exists, but the backend did not answer health checks."
           : "No live backend answered; the app is running from the latest persisted dashboard artifacts.",
-        lastError: managerLastError,
-        nextRetryAt,
-        retryCount: reconnectAttemptCount,
-        pid,
-        apiStatus,
-        healthStatus,
-        managerOwned: managerOwnsBackend,
-        startupFailureKind: classifyStartupFailure(managerLastError).kind,
-        actionHint: classifyStartupFailure(managerLastError).hint,
-      },
+        managerLastError,
+      ),
     };
   }
 
@@ -1383,20 +1420,12 @@ function buildRuntimeStates({
       healthReachable: false,
       apiReachable: false,
     },
-    backend: {
-      state: "backend_down",
-      label: "BACKEND DOWN",
-      detail: "No backend answered health checks and no persisted snapshot bundle was available.",
-      lastError: managerLastError,
-      nextRetryAt,
-      retryCount: reconnectAttemptCount,
-      pid,
-      apiStatus,
-      healthStatus,
-      managerOwned: managerOwnsBackend,
-      startupFailureKind: classifyStartupFailure(managerLastError).kind,
-      actionHint: classifyStartupFailure(managerLastError).hint,
-    },
+    backend: backendPayload(
+      "backend_down",
+      failure.kind !== "none" ? "STARTUP FAILURE" : "BACKEND DOWN",
+      "No backend answered health checks and no persisted snapshot bundle was available.",
+      managerLastError,
+    ),
   };
 }
 
@@ -1463,9 +1492,13 @@ async function probeDesktopState(): Promise<DesktopState> {
     health: liveHealth,
     infoFiles,
   });
+  const startupAssessment = classifyStartupFailure(runtimeStates.backend.lastError, {
+    healthReachable: runtimeStates.source.healthReachable,
+    dashboardApiTimedOut: runtimeStates.backend.dashboardApiTimedOut,
+  });
 
   if (live?.mode === "live" && dashboard) {
-    return {
+    const state: DesktopState = {
       connection: runtimeStates.connection,
       dashboard,
       health: live.health,
@@ -1476,6 +1509,9 @@ async function probeDesktopState(): Promise<DesktopState> {
         dashboard,
         health: live.health,
         backendUrl: live.url,
+        assessment: startupAssessment,
+        healthReachable: runtimeStates.source.healthReachable,
+        dashboardApiTimedOut: runtimeStates.backend.dashboardApiTimedOut,
       }),
       infoFiles,
       errors,
@@ -1492,6 +1528,8 @@ async function probeDesktopState(): Promise<DesktopState> {
       localAuth,
       refreshedAt: new Date().toISOString(),
     };
+    await writeDesktopStartupStatus(state);
+    return state;
   }
 
   if (snapshot) {
@@ -1502,7 +1540,7 @@ async function probeDesktopState(): Promise<DesktopState> {
     } else {
       errors.push("Live dashboard API is unavailable; showing latest persisted operator snapshots.");
     }
-    return {
+    const state: DesktopState = {
       connection: runtimeStates.connection,
       dashboard: snapshot,
       health: live?.mode === "health-only" ? live.health : null,
@@ -1513,6 +1551,9 @@ async function probeDesktopState(): Promise<DesktopState> {
         dashboard: snapshot,
         health: live?.mode === "health-only" ? live.health : null,
         backendUrl: live?.mode === "health-only" ? live.url : null,
+        assessment: startupAssessment,
+        healthReachable: runtimeStates.source.healthReachable,
+        dashboardApiTimedOut: runtimeStates.backend.dashboardApiTimedOut,
       }),
       infoFiles,
       errors,
@@ -1529,10 +1570,12 @@ async function probeDesktopState(): Promise<DesktopState> {
       localAuth,
       refreshedAt: new Date().toISOString(),
     };
+    await writeDesktopStartupStatus(state);
+    return state;
   }
 
   errors.push("No live dashboard API responded and no persisted operator snapshots were available.");
-  return {
+  const state: DesktopState = {
     connection: runtimeStates.connection,
     dashboard: null,
     health: live?.mode === "health-only" ? live.health : null,
@@ -1543,6 +1586,9 @@ async function probeDesktopState(): Promise<DesktopState> {
       dashboard: null,
       health: live?.mode === "health-only" ? live.health : null,
       backendUrl: live?.mode === "health-only" ? live.url : null,
+      assessment: startupAssessment,
+      healthReachable: runtimeStates.source.healthReachable,
+      dashboardApiTimedOut: runtimeStates.backend.dashboardApiTimedOut,
     }),
     infoFiles,
     errors,
@@ -1559,6 +1605,8 @@ async function probeDesktopState(): Promise<DesktopState> {
     localAuth,
     refreshedAt: new Date().toISOString(),
   };
+  await writeDesktopStartupStatus(state);
+  return state;
 }
 
 export async function getDesktopState(): Promise<DesktopState> {
@@ -1655,16 +1703,24 @@ export async function startDashboard(): Promise<DesktopCommandResult> {
   const backendLogTail = await readLogTail(DEFAULT_LOG_FILE, 40);
   const compactError = summarizeErrorText(backendLogTail) ?? summarizeErrorText(failureOutput) ?? state.backend.lastError ?? state.backend.detail;
   setManagerError(compactError ?? null);
-  managerLifecycle = state.backend.state === "reconnecting" ? "reconnecting" : "degraded";
+  const failureAssessment = classifyStartupFailure([failureOutput, backendLogTail, compactError].filter(Boolean).join("\n"), {
+    healthReachable: state.backend.healthReachable,
+    dashboardApiTimedOut: state.backend.dashboardApiTimedOut,
+  });
+  if (shouldAutoReconnectDashboardFailure(failureAssessment, reconnectAttemptCount)) {
+    managerLifecycle = "reconnecting";
+    scheduleReconnect();
+  } else {
+    clearReconnectTimer();
+    managerLifecycle = "degraded";
+  }
   const failureState = await getDesktopState();
   return {
     ok: false,
     message:
       failureState.backend.state === "reconnecting"
-        ? "Dashboard/API failed to come up cleanly; automatic reconnect is scheduled and snapshot fallback remains active."
-        : failureState.health && failureState.backendUrl
-          ? "Dashboard listener started, but /api/dashboard did not become responsive before timeout; snapshot fallback remains active."
-          : "Dashboard launch command ran, but the API never became ready.",
+        ? `Dashboard/API recovery is active after ${startupFailureLabelForCommand(failureState.backend.startupFailureKind)}.`
+        : `Dashboard/API start failed: ${startupFailureLabelForCommand(failureState.backend.startupFailureKind)}.`,
     detail: failureState.backend.lastError ?? undefined,
     output: [failureOutput, backendLogTail].filter(Boolean).join("\n\n"),
     state: failureState,
