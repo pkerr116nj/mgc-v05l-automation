@@ -38,6 +38,18 @@ candidate_logic:
   require_positive_reacceleration: true
   require_low_above_entry: true
 
+paper_candidate_expansion:
+  widening_priority:
+    - "instrument_coverage_first"
+    - "session_scope_second"
+    - "promotion_add_variants_third"
+  us_add_weakness_remains_open: true
+  preferred_next_paper_configs:
+    - "config/probationary_pattern_engine_paper_atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only.yaml"
+    - "config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_promotion_1_075r_favorable_only.yaml"
+  caution:
+    - "Do not widen staged add behavior across US execution until the negative US add contribution is fixed or isolated."
+
 does_not_change:
   - "ATP Companion Baseline v1 setup qualification"
   - "ATP Companion Baseline v1 current-candle VWAP entry timing"

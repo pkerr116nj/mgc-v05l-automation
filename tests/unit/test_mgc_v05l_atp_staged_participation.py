@@ -96,21 +96,47 @@ def _fill_entry(engine: StrategyEngine, *, bar: Bar, price: Decimal, reason_code
 def test_atp_candidate_configs_enable_staged_participation() -> None:
     gc_text = Path("config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us.yaml").read_text(encoding="utf-8")
     pl_text = Path("config/probationary_pattern_engine_paper_atp_companion_v1_pl_asia_us.yaml").read_text(encoding="utf-8")
+    mgc_asia_text = Path(
+        "config/probationary_pattern_engine_paper_atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only.yaml"
+    ).read_text(encoding="utf-8")
+    gc_asia_text = Path(
+        "config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_promotion_1_075r_favorable_only.yaml"
+    ).read_text(encoding="utf-8")
     gc = _candidate_lane_payload(Path("config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us.yaml"))
     pl = _candidate_lane_payload(Path("config/probationary_pattern_engine_paper_atp_companion_v1_pl_asia_us.yaml"))
+    mgc_asia = _candidate_lane_payload(
+        Path("config/probationary_pattern_engine_paper_atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only.yaml")
+    )
+    gc_asia = _candidate_lane_payload(
+        Path("config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_promotion_1_075r_favorable_only.yaml")
+    )
 
     assert 'mode: "paper"' in gc_text
     assert 'probationary_paper_runtime_exclusive_config: true' in gc_text
     assert 'mode: "paper"' in pl_text
     assert 'probationary_paper_runtime_exclusive_config: true' in pl_text
+    assert 'mode: "paper"' in mgc_asia_text
+    assert 'probationary_paper_runtime_exclusive_config: true' in mgc_asia_text
+    assert 'mode: "paper"' in gc_asia_text
+    assert 'probationary_paper_runtime_exclusive_config: true' in gc_asia_text
     assert gc["participation_policy"] == "STAGED_SAME_DIRECTION"
     assert gc["max_concurrent_entries"] == 2
     assert gc["max_position_quantity"] == 2
     assert gc["max_adds_after_entry"] == 1
+    assert gc["lane_mode"] == "ATP_COMPANION_CANDIDATE"
     assert pl["participation_policy"] == "STAGED_SAME_DIRECTION"
     assert pl["max_concurrent_entries"] == 2
     assert pl["max_position_quantity"] == 2
     assert pl["max_adds_after_entry"] == 1
+    assert pl["lane_mode"] == "ATP_COMPANION_CANDIDATE"
+    assert mgc_asia["participation_policy"] == "STAGED_SAME_DIRECTION"
+    assert mgc_asia["allowed_sessions"] == ["ASIA"]
+    assert mgc_asia["candidate_id"] == "promotion_1_075r_favorable_only"
+    assert mgc_asia["lane_mode"] == "ATP_COMPANION_CANDIDATE"
+    assert gc_asia["participation_policy"] == "STAGED_SAME_DIRECTION"
+    assert gc_asia["allowed_sessions"] == ["ASIA"]
+    assert gc_asia["candidate_id"] == "promotion_1_075r_favorable_only"
+    assert gc_asia["lane_mode"] == "ATP_COMPANION_CANDIDATE"
 
 
 def test_atp_candidate_lane_supports_entry_add_partial_exit_and_restore(tmp_path: Path) -> None:
@@ -195,10 +221,24 @@ def test_atp_runtime_identity_labels_candidates_separately_from_benchmark() -> N
             Path("config/probationary_pattern_engine_paper_atp_companion_v1_pl_asia_us.yaml"),
         ]
     )
+    mgc_asia_settings = load_settings_from_files(
+        [
+            Path("config/base.yaml"),
+            Path("config/probationary_pattern_engine_paper_atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only.yaml"),
+        ]
+    )
+    gc_asia_settings = load_settings_from_files(
+        [
+            Path("config/base.yaml"),
+            Path("config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_promotion_1_075r_favorable_only.yaml"),
+        ]
+    )
 
     benchmark_identity = _atp_runtime_identity_payload(_load_probationary_paper_lane_specs(benchmark_settings)[0])
     gc_identity = _atp_runtime_identity_payload(_load_probationary_paper_lane_specs(gc_settings)[0])
     pl_identity = _atp_runtime_identity_payload(_load_probationary_paper_lane_specs(pl_settings)[0])
+    mgc_asia_identity = _atp_runtime_identity_payload(_load_probationary_paper_lane_specs(mgc_asia_settings)[0])
+    gc_asia_identity = _atp_runtime_identity_payload(_load_probationary_paper_lane_specs(gc_asia_settings)[0])
 
     assert benchmark_identity["strategy_status"] == "RUNNING_ATP_COMPANION_BENCHMARK_PAPER"
     assert benchmark_identity["benchmark_designation"] == "CURRENT_ATP_COMPANION_BENCHMARK"
@@ -215,3 +255,11 @@ def test_atp_runtime_identity_labels_candidates_separately_from_benchmark() -> N
     assert pl_identity["tracked_strategy_id"] == "atp_companion_v1__paper_pl_asia_us"
     assert "Candidate" in pl_identity["scope_label"]
     assert "Staged" in pl_identity["scope_label"]
+
+    assert mgc_asia_identity["strategy_status"] == "RUNNING_ATP_COMPANION_CANDIDATE_STAGED_PAPER"
+    assert mgc_asia_identity["benchmark_designation"] is None
+    assert mgc_asia_identity["tracked_strategy_id"] == "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only"
+
+    assert gc_asia_identity["strategy_status"] == "RUNNING_ATP_COMPANION_CANDIDATE_STAGED_PAPER"
+    assert gc_asia_identity["benchmark_designation"] is None
+    assert gc_asia_identity["tracked_strategy_id"] == "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only"
