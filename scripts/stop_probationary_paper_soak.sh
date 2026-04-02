@@ -9,8 +9,8 @@ source "${SCRIPT_DIR}/common_env.sh"
 PID_FILE="${PROBATIONARY_PAPER_PID_FILE:-${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid}"
 
 if [[ ! -f "${PID_FILE}" ]]; then
-  echo "No probationary paper PID file found at ${PID_FILE}; paper runtime is already stopped."
-  exit 0
+  echo "No probationary paper PID file found at ${PID_FILE}."
+  exit 1
 fi
 
 PID="$(cat "${PID_FILE}")"

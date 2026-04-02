@@ -1,0 +1,11 @@
+max_bars_long: 8
+max_bars_short: 6
+vwap_long_max_bars: 6
+us_derivative_bear_max_normalized_curvature: -0.30
+us_derivative_bear_window_start: "09:30"
+us_derivative_bear_window_end: "10:00"
+us_derivative_bear_max_distance_below_vwap_atr: 1.80
+us_derivative_bear_allow_phase_preopen_opening: false
+us_derivative_bear_allow_phase_cash_open_impulse: true
+us_derivative_bear_allow_phase_open_late: false
+us_derivative_bear_require_fast_below_slow: true

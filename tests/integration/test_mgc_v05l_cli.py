@@ -98,10 +98,11 @@ def test_probationary_paper_soak_cli_invokes_runner(monkeypatch, capsys, tmp_pat
 def test_probationary_operator_control_cli_routes_shared_lane_target(monkeypatch, capsys) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_submit(config_paths, action: str, *, payload=None):
+    def _fake_submit(config_paths, action: str, *, payload=None, shared_strategy_identity=None):
         captured["config_paths"] = list(config_paths)
         captured["action"] = action
         captured["payload"] = payload
+        captured["shared_strategy_identity"] = shared_strategy_identity
         return {
             "action": action,
             "control_path": "/tmp/operator_control.json",
@@ -132,6 +133,53 @@ def test_probationary_operator_control_cli_routes_shared_lane_target(monkeypatch
         ],
         "action": "resume_entries",
         "payload": {"lane_id": "mgc_us_late_pause_resume_long"},
+        "shared_strategy_identity": None,
+    }
+    assert payload["action"] == "resume_entries"
+    assert payload["status"] == "pending"
+
+
+def test_probationary_operator_control_cli_routes_shared_strategy_identity(monkeypatch, capsys) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_submit(config_paths, action: str, *, payload=None, shared_strategy_identity=None):
+        captured["config_paths"] = list(config_paths)
+        captured["action"] = action
+        captured["payload"] = payload
+        captured["shared_strategy_identity"] = shared_strategy_identity
+        return {
+            "action": action,
+            "control_path": "/tmp/operator_control.json",
+            "status": "pending",
+            "requested_at": "2026-04-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr("mgc_v05l.app.main.submit_probationary_operator_control", _fake_submit)
+
+    exit_code = main(
+        [
+            "probationary-operator-control",
+            "--action",
+            "resume_entries",
+            "--shared-strategy-identity",
+            "ATP_COMPANION_V1_ASIA_US",
+            "--payload-json",
+            '{"source":"cli-test"}',
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert captured == {
+        "config_paths": [
+            Path("config/base.yaml"),
+            Path("config/live.yaml"),
+            Path("config/probationary_pattern_engine.yaml"),
+            Path("config/probationary_pattern_engine_paper.yaml"),
+        ],
+        "action": "resume_entries",
+        "payload": {"source": "cli-test"},
+        "shared_strategy_identity": "ATP_COMPANION_V1_ASIA_US",
     }
     assert payload["action"] == "resume_entries"
     assert payload["status"] == "pending"

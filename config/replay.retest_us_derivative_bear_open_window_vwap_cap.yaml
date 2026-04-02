@@ -1,0 +1,7 @@
+max_bars_long: 8
+max_bars_short: 6
+vwap_long_max_bars: 6
+us_derivative_bear_max_normalized_curvature: -0.30
+us_derivative_bear_window_start: "09:00"
+us_derivative_bear_window_end: "10:30"
+us_derivative_bear_max_distance_below_vwap_atr: 1.80

@@ -16,7 +16,6 @@ DEFAULT_CONFIGS=(
   "${REPO_ROOT}/config/probationary_pattern_engine_paper.yaml"
 )
 ATPE_CANARY_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_atpe_canary.yaml"
-ATP_COMPANION_V1_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml"
 GC_MGC_ACCEPTANCE_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_gc_mgc_acceptance.yaml"
 DEFAULT_RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
 DEFAULT_PID_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.pid"
@@ -28,11 +27,9 @@ SCHWAB_CONFIG_SET=0
 BACKGROUND=0
 NETWORK_PREFLIGHT_ONLY=0
 INCLUDE_ATPE_CANARY=0
-INCLUDE_ATP_COMPANION_V1=0
 INCLUDE_GC_MGC_ACCEPTANCE=0
 PID_FILE="${DEFAULT_PID_FILE}"
 LOG_FILE="${DEFAULT_LOG_FILE}"
-SCHWAB_CONFIG_VALUE="${DEFAULT_SCHWAB_CONFIG}"
 
 while (($# > 0)); do
   case "$1" in
@@ -46,10 +43,6 @@ while (($# > 0)); do
       ;;
     --include-atpe-canary)
       INCLUDE_ATPE_CANARY=1
-      shift
-      ;;
-    --include-atp-companion-v1-paper)
-      INCLUDE_ATP_COMPANION_V1=1
       shift
       ;;
     --include-gc-mgc-acceptance)
@@ -84,13 +77,11 @@ while (($# > 0)); do
       ;;
     --schwab-config)
       SCHWAB_CONFIG_SET=1
-      SCHWAB_CONFIG_VALUE="$2"
       ARGS+=("$1" "$2")
       shift 2
       ;;
     --schwab-config=*)
       SCHWAB_CONFIG_SET=1
-      SCHWAB_CONFIG_VALUE="${1#*=}"
       ARGS+=("$1")
       shift
       ;;
@@ -109,9 +100,6 @@ if [[ ${CONFIG_SET} -eq 0 ]]; then
   if [[ ${INCLUDE_ATPE_CANARY} -eq 1 ]]; then
     FINAL_ARGS+=(--config "${ATPE_CANARY_CONFIG}")
   fi
-  if [[ ${INCLUDE_ATP_COMPANION_V1} -eq 1 ]]; then
-    FINAL_ARGS+=(--config "${ATP_COMPANION_V1_CONFIG}")
-  fi
   if [[ ${INCLUDE_GC_MGC_ACCEPTANCE} -eq 1 ]]; then
     FINAL_ARGS+=(--config "${GC_MGC_ACCEPTANCE_CONFIG}")
   fi
@@ -124,7 +112,7 @@ if [[ ${#ARGS[@]} -gt 0 ]]; then
 fi
 
 echo "Launching probationary paper soak with repo bootstrap."
-echo "Schwab config: ${SCHWAB_CONFIG_VALUE}"
+echo "Schwab config: ${DEFAULT_SCHWAB_CONFIG}"
 echo "Paper configs:"
 if [[ ${CONFIG_SET} -eq 0 ]]; then
   for config_path in "${DEFAULT_CONFIGS[@]}"; do
@@ -133,9 +121,6 @@ if [[ ${CONFIG_SET} -eq 0 ]]; then
   if [[ ${INCLUDE_ATPE_CANARY} -eq 1 ]]; then
     echo "  - ${ATPE_CANARY_CONFIG}"
   fi
-  if [[ ${INCLUDE_ATP_COMPANION_V1} -eq 1 ]]; then
-    echo "  - ${ATP_COMPANION_V1_CONFIG}"
-  fi
   if [[ ${INCLUDE_GC_MGC_ACCEPTANCE} -eq 1 ]]; then
     echo "  - ${GC_MGC_ACCEPTANCE_CONFIG}"
   fi
@@ -143,7 +128,7 @@ else
   echo "  - custom --config args supplied"
 fi
 
-runtime_network_resolution_preflight "${SCHWAB_CONFIG_VALUE}" "probationary-paper-soak-launch"
+runtime_network_resolution_preflight "${DEFAULT_SCHWAB_CONFIG}" "probationary-paper-soak-launch"
 
 if [[ ${NETWORK_PREFLIGHT_ONLY} -eq 1 ]]; then
   echo "Runtime network preflight completed; skipping probationary paper soak launch."
@@ -163,13 +148,6 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
   nohup "${PYTHON_BIN}" -m mgc_v05l.app.main probationary-paper-soak "${FINAL_ARGS[@]}" >> "${LOG_FILE}" 2>&1 &
   paper_pid=$!
   echo "${paper_pid}" > "${PID_FILE}"
-  sleep 2
-  if ! kill -0 "${paper_pid}" 2>/dev/null; then
-    rm -f "${PID_FILE}"
-    echo "Probationary paper soak exited during startup. Recent log output:" >&2
-    tail -n 40 "${LOG_FILE}" >&2 || true
-    exit 1
-  fi
   echo "Probationary paper soak running in background."
   echo "PID: ${paper_pid}"
   echo "PID file: ${PID_FILE}"

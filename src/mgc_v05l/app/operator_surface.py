@@ -591,7 +591,7 @@ def _annotate_active_strategy_identity(rows: list[dict[str, Any]]) -> list[dict[
         instrument = identity["instrument"]
         same_underlying_ambiguity = instrument_counts.get(instrument, 0) > 1
         ambiguity_note = (
-            "Multiple standalone strategy identities currently share this underlying instrument. Coexistence is allowed by default; review only if broker, pending-order, or opposite-side ambiguity appears."
+            "Multiple standalone strategy identities currently share this underlying instrument. Same-underlying execution/netting remains explicitly constrained."
             if same_underlying_ambiguity
             else None
         )

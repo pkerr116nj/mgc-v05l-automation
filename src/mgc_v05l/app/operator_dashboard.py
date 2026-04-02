@@ -109,15 +109,6 @@ _SESSION_CLOSE_REVIEW_CANONICAL_RE = re.compile(r"^(?P<session_date>\d{4}-\d{2}-
 _SESSION_CLOSE_REVIEW_TIMESTAMPED_RE = re.compile(r"^(?P<session_date>\d{4}-\d{2}-\d{2})_.+\.json$")
 _TEMP_PAPER_OVERLAY_SPECS = (
     {
-        "overlay_id": "atp_companion_v1_asia_us",
-        "flag": "--include-atp-companion-v1-paper",
-        "config_path": "config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml",
-        "runtime_kinds": {ATP_COMPANION_BENCHMARK_RUNTIME_KIND},
-        "lane_id_prefixes": ("atp_companion_v1_asia_us",),
-        "source_families": {"active_trend_participation_engine"},
-        "label": "ATP companion v1 paper benchmark",
-    },
-    {
         "overlay_id": "atpe_canary",
         "flag": "--include-atpe-canary",
         "config_path": "config/probationary_pattern_engine_paper_atpe_canary.yaml",
@@ -1009,8 +1000,6 @@ class OperatorDashboardService:
             "stop-shadow": ["bash", "scripts/stop_probationary_shadow.sh"],
             "start-paper": None,
             "stop-paper": ["bash", "scripts/stop_probationary_paper_soak.sh"],
-            "start-atp-companion-paper": ["bash", "scripts/run_atp_companion_v1_paper_runtime.sh", "--background"],
-            "stop-atp-companion-paper": ["bash", "scripts/stop_atp_companion_v1_paper_runtime.sh"],
             "generate-daily-summary": ["bash", "scripts/run_probationary_daily_summary.sh"],
             "generate-paper-summary": ["bash", "scripts/run_probationary_paper_summary.sh"],
             "auth-gate-check": ["bash", "scripts/run_schwab_auth_gate.sh"],
@@ -1022,10 +1011,6 @@ class OperatorDashboardService:
             "paper-force-reconcile": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "force_reconcile"],
             "paper-flatten-and-halt": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "flatten_and_halt"],
             "paper-stop-after-cycle": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "stop_after_cycle"],
-            "atp-companion-paper-halt-entries": ["bash", "scripts/run_atp_companion_v1_operator_control.sh", "--action", "halt_entries"],
-            "atp-companion-paper-resume-entries": ["bash", "scripts/run_atp_companion_v1_operator_control.sh", "--action", "resume_entries"],
-            "atp-companion-paper-flatten-and-halt": ["bash", "scripts/run_atp_companion_v1_operator_control.sh", "--action", "flatten_and_halt"],
-            "atp-companion-paper-stop-after-cycle": ["bash", "scripts/run_atp_companion_v1_operator_control.sh", "--action", "stop_after_cycle"],
             "refresh-status": None,
         }
         if action not in command_map:
@@ -1093,22 +1078,14 @@ class OperatorDashboardService:
                 pre_snapshot = self.snapshot()
                 command, metadata = self._paper_start_command_with_enabled_temp_paper(pre_snapshot)
                 if command is None:
-                    if metadata.get("incompatible_exclusive_lane_ids"):
-                        output = (
-                            "Enabled temporary paper lanes require runtime-exclusive overlay configs that cannot be loaded into the shared paper runtime. "
-                            f"Lane ids: {', '.join(metadata['incompatible_exclusive_lane_ids']) or 'none'} | "
-                            f"Config paths: {', '.join(metadata['incompatible_exclusive_config_paths']) or 'none'}"
-                        )
-                    else:
-                        output = (
-                            "Enabled temporary paper lanes are missing a startup mapping. "
-                            f"Unresolved lane ids: {', '.join(metadata['unresolved_lane_ids']) or 'none'}"
-                        )
                     result = self._result_record(
                         action=action,
                         ok=False,
                         command=None,
-                        output=output,
+                        output=(
+                            "Enabled temporary paper lanes are missing a startup mapping. "
+                            f"Unresolved lane ids: {', '.join(metadata['unresolved_lane_ids']) or 'none'}"
+                        ),
                     )
                     result["temp_paper_runtime_request"] = metadata
                     self._log_action(result)
@@ -1192,22 +1169,14 @@ class OperatorDashboardService:
         if action == "start-paper":
             command, metadata = self._paper_start_command_with_enabled_temp_paper(pre_snapshot or self.snapshot())
             if command is None:
-                if metadata.get("incompatible_exclusive_lane_ids"):
-                    output = (
-                        "Enabled temporary paper lanes require runtime-exclusive overlay configs that cannot be loaded into the shared paper runtime. "
-                        f"Lane ids: {', '.join(metadata['incompatible_exclusive_lane_ids']) or 'none'} | "
-                        f"Config paths: {', '.join(metadata['incompatible_exclusive_config_paths']) or 'none'}"
-                    )
-                else:
-                    output = (
-                        "Enabled temporary paper lanes are missing a startup mapping. "
-                        f"Unresolved lane ids: {', '.join(metadata['unresolved_lane_ids']) or 'none'}"
-                    )
                 result = self._result_record(
                     action=action,
                     ok=False,
                     command=None,
-                    output=output,
+                    output=(
+                        "Enabled temporary paper lanes are missing a startup mapping. "
+                        f"Unresolved lane ids: {', '.join(metadata['unresolved_lane_ids']) or 'none'}"
+                    ),
                 )
                 result["temp_paper_runtime_request"] = metadata
                 self._record_paper_start_block(pre_snapshot or self.snapshot(), result)
@@ -1686,8 +1655,6 @@ class OperatorDashboardService:
                     next_status = "HOLDING"
                 elif record.get("hold_expired") is True:
                     next_status = "HOLD_EXPIRED"
-                elif row.get("observational_only") is True and row.get("operator_action_required") is not True:
-                    next_status = "OBSERVATIONAL"
                 elif record.get("override_observational_only") is True:
                     next_status = "OVERRIDDEN"
                 elif record.get("acknowledged") is True:
@@ -2996,13 +2963,6 @@ class OperatorDashboardService:
         runtime = self._runtime_paths(runtime_name)
         running = _pid_running(runtime["pid_file"])
         operator_status = _read_json(runtime["artifacts_dir"] / "operator_status.json")
-        runtime_dir = runtime["artifacts_dir"] / "runtime"
-        transport_failure = _read_json(runtime_dir / "market_data_transport_failure.json")
-        transport_failure_active = False
-        if transport_failure and not running:
-            failure_ts = _parse_iso_datetime(str(transport_failure.get("generated_at") or ""))
-            status_ts = _parse_iso_datetime(str(operator_status.get("updated_at") or ""))
-            transport_failure_active = failure_ts is not None and (status_ts is None or failure_ts >= status_ts)
         daily_summary = self._latest_daily_summary(runtime["artifacts_dir"])
         blotter_path, full_blotter_rows = self._latest_blotter_dataset(runtime["artifacts_dir"])
         latest_blotter = list(reversed(full_blotter_rows[-20:]))
@@ -3015,6 +2975,7 @@ class OperatorDashboardService:
             "operator_controls": _tail_jsonl(runtime["artifacts_dir"] / "operator_controls.jsonl", 20),
         }
         alerts_state = _derive_alert_state_from_jsonl(runtime["artifacts_dir"] / "alerts.jsonl")
+        runtime_dir = runtime["artifacts_dir"] / "runtime"
         desk_risk = _read_json(runtime_dir / "paper_desk_risk_status.json") or _read_json(runtime_dir / "paper_desk_risk_snapshot.json")
         lane_risk = _read_json(runtime_dir / "paper_lane_risk_status.json") or _read_json(runtime_dir / "paper_lane_risk_snapshot.json")
         config_in_force = _read_json(runtime_dir / "paper_config_in_force.json")
@@ -3057,8 +3018,6 @@ class OperatorDashboardService:
             market_data_ok=bool(_nested_get(operator_status, "health", "market_data_ok", default=False)),
             freshness=freshness["status"],
         )
-        if transport_failure_active:
-            market_data_semantics = "TRANSPORT FAILURE"
         reconciliation_semantics = (
             "CLEAN" if bool(_nested_get(operator_status, "health", "reconciliation_clean", default=False)) else "DIRTY"
         )
@@ -3187,12 +3146,8 @@ class OperatorDashboardService:
                 "artifacts_dir": str(runtime["artifacts_dir"]),
             },
             "status": {
-                "health_status": (
-                    "BLOCKED"
-                    if transport_failure_active
-                    else _nested_get(operator_status, "health", "health_status", default="UNKNOWN")
-                ),
-                "market_data_ok": False if transport_failure_active else bool(_nested_get(operator_status, "health", "market_data_ok", default=False)),
+                "health_status": _nested_get(operator_status, "health", "health_status", default="UNKNOWN"),
+                "market_data_ok": bool(_nested_get(operator_status, "health", "market_data_ok", default=False)),
                 "broker_ok": bool(_nested_get(operator_status, "health", "broker_ok", default=False)),
                 "persistence_ok": bool(_nested_get(operator_status, "health", "persistence_ok", default=False)),
                 "reconciliation_clean": bool(_nested_get(operator_status, "health", "reconciliation_clean", default=False)),
@@ -3227,9 +3182,6 @@ class OperatorDashboardService:
                 "market_data_semantics": market_data_semantics,
                 "reconciliation_semantics": reconciliation_semantics,
                 "fault_state": fault_state,
-                "runtime_blocker": "market_data_transport_failure" if transport_failure_active else None,
-                "runtime_blocker_detail": transport_failure.get("exception_text") if transport_failure_active else None,
-                "market_data_transport_failure": transport_failure if transport_failure_active else None,
                 "desk_risk_state": operator_status.get("desk_risk_state") or desk_risk.get("desk_risk_state") or "OK",
                 "desk_risk_reason": operator_status.get("desk_risk_reason") or desk_risk.get("trigger_reason"),
                 "desk_unblock_action": operator_status.get("desk_unblock_action") or desk_risk.get("unblock_action_required"),
@@ -3304,8 +3256,6 @@ class OperatorDashboardService:
         }
         runtime_stale = bool(paper_status.get("stale"))
         runtime_running = bool(paper.get("running"))
-        runtime_transport_failure = dict(paper_status.get("market_data_transport_failure") or {})
-        runtime_transport_failure_active = str(paper_status.get("runtime_blocker") or "") == "market_data_transport_failure"
         lane_eligibility_rows = []
         lane_status_rows = []
         for row in sorted(
@@ -3324,10 +3274,7 @@ class OperatorDashboardService:
             risk_state_upper = risk_state.upper()
             eligible_now = bool(row.get("eligible_now"))
             eligibility_reason = row.get("eligibility_reason")
-            if not runtime_running and runtime_transport_failure_active:
-                eligible_now = False
-                eligibility_reason = "market_data_transport_failure"
-            elif not runtime_running:
+            if not runtime_running:
                 eligible_now = False
                 eligibility_reason = "stopped_runtime"
             elif runtime_stale:
@@ -3359,15 +3306,7 @@ class OperatorDashboardService:
                 and not runtime_stale
             )
 
-            if not loaded_in_runtime and runtime_transport_failure_active:
-                tradability_status = "LOADED_NOT_ELIGIBLE"
-                tradability_reason = (
-                    f"Runtime startup failed because Schwab market-data transport could not reach "
-                    f"{runtime_transport_failure.get('target_host') or 'the configured host'}."
-                )
-                next_action = runtime_transport_failure.get("next_fix") or "Fix the host transport path, then retry runtime start."
-                manual_action_required = True
-            elif not loaded_in_runtime:
+            if not loaded_in_runtime:
                 tradability_status = "LOADED_CONFIG_ONLY"
                 tradability_reason = "Lane is configured but not currently loaded into the active runtime."
                 next_action = "Start runtime or wait for lane load."
@@ -3410,10 +3349,6 @@ class OperatorDashboardService:
                     "no_new_completed_bar": "Loaded in runtime, but waiting for the next completed bar.",
                     "entries_disabled": "Loaded in runtime, but entries are currently disabled.",
                     "operator_halt": "Loaded in runtime, but operator halt is active.",
-                    "market_data_transport_failure": (
-                        f"Runtime startup failed because Schwab market-data transport could not reach "
-                        f"{runtime_transport_failure.get('target_host') or 'the configured host'}."
-                    ),
                     "strategy_not_ready": "Loaded in runtime, but strategy state is not yet tradable.",
                     "stale_runtime": "Loaded in runtime, but runtime status is stale.",
                     "stopped_runtime": "Runtime is stopped, so this lane is not tradable.",
@@ -3425,19 +3360,12 @@ class OperatorDashboardService:
                     "no_new_completed_bar": "Wait for the next completed bar.",
                     "entries_disabled": "Resume Entries if trading should be re-enabled.",
                     "operator_halt": "Resume Entries when you want this runtime trading again.",
-                    "market_data_transport_failure": runtime_transport_failure.get("next_fix")
-                    or "Fix the host DNS/proxy/certificate transport path, then retry runtime start.",
                     "strategy_not_ready": "Wait for strategy state to return to READY/flat.",
                     "stale_runtime": "Refresh runtime health before treating this lane as tradable.",
                     "stopped_runtime": "Start runtime.",
                 }
                 next_action = next_action_map.get(str(eligibility_reason or ""), "No manual action needed unless this state is unexpected.")
-                manual_action_required = str(eligibility_reason or "") in {
-                    "entries_disabled",
-                    "operator_halt",
-                    "stopped_runtime",
-                    "market_data_transport_failure",
-                }
+                manual_action_required = str(eligibility_reason or "") in {"entries_disabled", "operator_halt", "stopped_runtime"}
             lane_eligibility_rows.append(
                 {
                     "lane_id": lane_id,
@@ -3553,7 +3481,7 @@ class OperatorDashboardService:
         exposure_state = (
             "FLAT"
             if position.get("side") == "FLAT"
-            else f"{position.get('side', 'UNKNOWN')} {position.get('quantity', 0)} x {position.get('instrument', '-')}"
+            else f"{position.get('side', 'UNKNOWN')} {position.get('quantity', 0)} x {position.get('instrument', 'MGC')}"
         )
         lane_scope = [
             f"{row.get('display_name', row.get('symbol', '-'))} / {row.get('session_restriction', '-')}"
@@ -3614,7 +3542,7 @@ class OperatorDashboardService:
             "approved_models_active": len(active_models),
             "approved_models_total": len(approved_models.get("rows", [])),
             "approved_models_label": ", ".join(row["branch"] for row in active_models) if active_models else "None enabled",
-            "instrument_scope": " | ".join(lane_scope) if lane_scope else f"{position.get('instrument', '-')} / approved promoted branches only",
+            "instrument_scope": " | ".join(lane_scope) if lane_scope else f"{position.get('instrument', 'MGC')} / approved promoted branches only",
             "latest_paper_fill_timestamp": latest_fill_timestamp,
             "latest_paper_decision_timestamp": latest_decision_timestamp,
             "flat_state": position.get("side") == "FLAT",
@@ -4112,6 +4040,7 @@ class OperatorDashboardService:
             if not lane_id:
                 continue
             configured = config_lanes.get(lane_id, {})
+            temporary_paper_strategy = _is_temporary_paper_strategy_row({**dict(configured), **dict(lane_row)})
             lane_display = str(
                 lane_row.get("display_name")
                 or configured.get("display_name")
@@ -4191,9 +4120,6 @@ class OperatorDashboardService:
                 "average_price": lane_row.get("entry_price"),
                 "instrument": symbol,
                 "unrealized_pnl": lane_risk_rows.get(lane_id, {}).get("session_unrealized_pnl"),
-                "open_entry_leg_count": lane_row.get("open_entry_leg_count"),
-                "open_add_count": lane_row.get("open_add_count"),
-                "additional_entry_allowed": lane_row.get("additional_entry_allowed"),
             }
             realized_value = _sum_decimal_field(model_blotter, "net_pnl")
             realized_provenance = "LANE_FILTERED_BLOTTER" if realized_value is not None else None
@@ -4237,6 +4163,10 @@ class OperatorDashboardService:
                 if lane_open_position and lane_position.get("unrealized_pnl") not in {None, "", "N/A"}
                 else None
             )
+            detail["temporary_paper_strategy"] = temporary_paper_strategy
+            detail["paper_strategy_class"] = (
+                "temporary_paper_strategy" if temporary_paper_strategy else "approved_or_admitted_paper_strategy"
+            )
             details_by_branch[lane_display] = detail
             rows.append(
                 {
@@ -4271,10 +4201,15 @@ class OperatorDashboardService:
                     "latest_activity_timestamp": detail.get("latest_activity_timestamp"),
                     "risk_state": detail.get("risk_state", "OK"),
                     "halt_reason": detail.get("lane_halt_reason"),
+                    "temporary_paper_strategy": temporary_paper_strategy,
+                    "paper_strategy_class": (
+                        "temporary_paper_strategy" if temporary_paper_strategy else "approved_or_admitted_paper_strategy"
+                    ),
                 }
             )
 
         enabled_count = sum(1 for row in rows if row["enabled"])
+        temporary_count = sum(1 for row in rows if row.get("temporary_paper_strategy"))
         default_branch = next((row["branch"] for row in rows if row.get("open_position")), None)
         if default_branch is None:
             active_rows = [row for row in rows if row.get("latest_activity_timestamp")]
@@ -4283,22 +4218,34 @@ class OperatorDashboardService:
             elif rows:
                 default_branch = rows[0]["branch"]
         return {
-            "scope_label": "Admitted probationary paper lanes",
-            "instrument_scope": f"{enabled_count} admitted lanes / multi-lane paper mode",
+            "scope_label": "Shared paper lane operator detail",
+            "instrument_scope": (
+                f"{enabled_count} shared paper lanes / multi-lane paper mode"
+                if not temporary_count
+                else f"{enabled_count} shared paper lanes / {temporary_count} temporary paper lanes visible here"
+            ),
             "enabled_count": enabled_count,
             "total_count": len(rows),
+            "temporary_paper_count": temporary_count,
             "rows": rows,
             "default_branch": default_branch,
             "details_by_branch": details_by_branch,
             "out_of_scope_blocked_count": out_of_scope_blocked_count,
             "out_of_scope_note": (
-                f"{out_of_scope_blocked_count} non-approved branches were blocked out of paper scope in the current session."
-                if out_of_scope_blocked_count
-                else "Non-approved branches remain excluded from paper scope and appear only in blocked/rule artifact trails."
+                (
+                    f"{out_of_scope_blocked_count} non-approved branches were blocked out of paper scope in the current session."
+                    if out_of_scope_blocked_count
+                    else "Non-approved branches remain excluded from paper scope and appear only in blocked/rule artifact trails."
+                )
+                + (
+                    " Temporary paper strategy lanes that are already attached to the paper runtime are surfaced here with explicit experimental labels."
+                    if temporary_count
+                    else ""
+                )
             ),
             "artifacts": artifacts,
             "provenance": {
-                "eligibility": "Lane rows come from the active supervisor-admitted paper lanes in operator_status/config-in-force.",
+                "eligibility": "Lane rows come from the active paper runtime lane universe in operator_status/config-in-force, including temporary paper lanes when they are attached to the shared paper runtime.",
                 "last_signal": "Derived from persisted paper branch_sources filtered by lane symbol/source and lane_id when present.",
                 "last_intent": "Derived from persisted paper order intents filtered by lane instrument plus reason_code.",
                 "last_fill": "Derived from persisted paper fills joined to lane-filtered paper order intents by order_intent_id.",
@@ -4909,12 +4856,10 @@ class OperatorDashboardService:
             "note": (
                 "ATPE is surfaced here as a first-class temporary paper strategy. It remains experimental, paper only, non-approved, and lower priority than approved/live strategies."
                 if rows
-                else "No temporary paper strategies are enabled in the current runtime."
+                else "No temporary paper strategies are active in the current runtime."
             ),
             "artifacts": {
                 "snapshot": "/api/operator-artifact/paper-temporary-paper-strategies",
-                "tracked_strategies": "/api/operator-artifact/paper-tracked-strategies",
-                "tracked_strategy_details": "/api/operator-artifact/paper-tracked-strategy-details",
                 "strategy_performance": "/api/operator-artifact/paper-strategy-performance",
                 "operator_status": "/api/operator-artifact/paper-operator-status",
                 "non_approved_snapshot": "/api/operator-artifact/paper-non-approved-lanes",
@@ -4945,8 +4890,6 @@ class OperatorDashboardService:
         overlay_labels: list[str] = []
         config_paths: list[str] = []
         unresolved_lane_ids: list[str] = []
-        incompatible_exclusive_lane_ids: list[str] = []
-        incompatible_exclusive_config_paths: list[str] = []
         for row in enabled_rows:
             spec = _temporary_paper_overlay_spec_for_row(self._repo_root, row)
             if spec is None:
@@ -4955,23 +4898,14 @@ class OperatorDashboardService:
             requested_flags.append(str(spec["flag"]))
             overlay_labels.append(str(spec["label"]))
             config_paths.append(str(spec["config_path"]))
-            config_path = Path(spec["config_path"])
-            if not config_path.exists():
-                unresolved_lane_ids.append(str(row.get("lane_id") or ""))
-                continue
-            if _flat_config_flag_enabled(config_path, "probationary_paper_runtime_exclusive_config"):
-                incompatible_exclusive_lane_ids.append(str(row.get("lane_id") or ""))
-                incompatible_exclusive_config_paths.append(str(config_path))
         metadata = {
             "enabled_lane_ids": [str(row.get("lane_id") or "") for row in enabled_rows],
             "requested_flags": sorted(set(requested_flags)),
             "overlay_labels": sorted(set(overlay_labels)),
             "config_paths": sorted(set(config_paths)),
             "unresolved_lane_ids": unresolved_lane_ids,
-            "incompatible_exclusive_lane_ids": sorted(set(incompatible_exclusive_lane_ids)),
-            "incompatible_exclusive_config_paths": sorted(set(incompatible_exclusive_config_paths)),
         }
-        if unresolved_lane_ids or incompatible_exclusive_lane_ids:
+        if unresolved_lane_ids:
             return None, metadata
         return ["bash", "scripts/run_probationary_paper_soak.sh", *sorted(set(requested_flags)), "--background"], metadata
 
@@ -5597,7 +5531,7 @@ class OperatorDashboardService:
                     "title": "Current Open Exposure",
                     "details": " • ".join(
                         [
-                            f"{position.get('side') or 'OPEN'} {position.get('quantity') or 0} x {position.get('instrument') or '-'}",
+                            f"{position.get('side') or 'OPEN'} {position.get('quantity') or 0} x {position.get('instrument') or 'MGC'}",
                             f"avg {position.get('average_price') or '-'}",
                             f"unrealized {position.get('unrealized_pnl') or 'Unavailable'}",
                         ]
@@ -7309,14 +7243,6 @@ class OperatorDashboardService:
         latest_blotter: list[dict[str, Any]],
     ) -> dict[str, Any]:
         reconciliation = operator_status.get("reconciliation", {})
-        active_lane = next(
-            (
-                row
-                for row in list(operator_status.get("lanes") or [])
-                if str(row.get("position_side") or "FLAT") != "FLAT"
-            ),
-            {},
-        )
         signed_qty = int(reconciliation.get("broker_position_quantity", 0) or 0)
         average_price_raw = reconciliation.get("broker_average_price")
         average_price = Decimal(str(average_price_raw)) if average_price_raw is not None else None
@@ -7345,13 +7271,6 @@ class OperatorDashboardService:
             "realized_pnl": None if daily_summary is None else daily_summary.get("realized_net_pnl"),
             "session_pnl": None if daily_summary is None else daily_summary.get("realized_net_pnl"),
             "unrealized_pnl": None if unrealized is None else str(unrealized),
-            "open_entry_leg_count": active_lane.get("open_entry_leg_count", 0),
-            "open_add_count": active_lane.get("open_add_count", 0),
-            "additional_entry_allowed": active_lane.get("additional_entry_allowed"),
-            "participation_policy": active_lane.get("participation_policy"),
-            "max_concurrent_entries": active_lane.get("max_concurrent_entries"),
-            "max_position_quantity": active_lane.get("max_position_quantity"),
-            "max_adds_after_entry": active_lane.get("max_adds_after_entry"),
             "pnl_by_branch": _aggregate_branch_pnl_from_blotter(latest_blotter),
             "provenance": {
                 "realized": "Latest generated paper daily summary closed-trade ledger.",
@@ -7454,7 +7373,7 @@ class OperatorDashboardService:
         else:
             exposure_summary = " ".join(
                 [
-                    f"{position.get('side', 'UNKNOWN')} {position.get('quantity', 0)} x {position.get('instrument', '-')}",
+                    f"{position.get('side', 'UNKNOWN')} {position.get('quantity', 0)} x {position.get('instrument', 'MGC')}",
                     f"@ {position.get('average_price') or '-'}",
                     f"mark {position.get('latest_bar_close') or 'N/A'}",
                 ]
@@ -7746,13 +7665,6 @@ class OperatorDashboardService:
                     "signal_family_label": attribution_family_label,
                     "status": current_status,
                     "position_side": position_side,
-                    "open_entry_leg_count": lane_row.get("open_entry_leg_count", 0),
-                    "open_add_count": lane_row.get("open_add_count", 0),
-                    "additional_entry_allowed": lane_row.get("additional_entry_allowed"),
-                    "participation_policy": lane_row.get("participation_policy"),
-                    "max_concurrent_entries": lane_row.get("max_concurrent_entries"),
-                    "max_position_quantity": lane_row.get("max_position_quantity"),
-                    "max_adds_after_entry": lane_row.get("max_adds_after_entry"),
                     "entry_timestamp": lane_row.get("entry_timestamp"),
                     "entry_price": _decimal_to_string(entry_price),
                     "last_mark": _decimal_to_string(last_mark),
@@ -7967,14 +7879,14 @@ class OperatorDashboardService:
             "trade_log": trade_log_rows,
             "trade_log_scope": "Closed trades paired from persisted lane-local intents and fills. Open positions remain in the strategy line items rather than the closed-trade log.",
             "trade_log_notes": [
-                "Each standalone strategy identity is keyed by explicit standalone identity metadata when available, with root-plus-instrument used only as a legacy fallback.",
+                "Each standalone strategy identity is keyed by a canonical standalone_strategy_id resolved from the strategy identity root plus instrument.",
                 "Realized P/L comes only from completed closed trades.",
                 "Unrealized P/L is current open-position P/L from the lane runtime when a trusted mark/reference price exists.",
             ],
             "attribution": attribution,
             "notes": [
                 "Concurrent different-instrument standalone strategies remain separate and first-class in this ledger.",
-                "Same-instrument coexistence is surfaced explicitly and allowed by default; only concrete execution ambiguity is escalated.",
+                "Same-instrument ambiguity is surfaced explicitly and remains constrained; this ledger does not silently net or merge same-underlying identities.",
                 "Cumulative metrics are limited to the currently available persisted lane-local history and are not backfilled beyond what exists on disk.",
                 "Execution-likelihood fields are descriptive statistics from available persisted history only; no current-bar or intrabar decision logic was added.",
             ],
@@ -7984,7 +7896,7 @@ class OperatorDashboardService:
             },
             "provenance": {
                 "strategy_rows": "Derived from supervisor lane operator_status plus each lane-local SQLite order_intents/fills history.",
-                "trade_log": "Derived from deterministic pairing of lane-local order intents and fills using the existing trade ledger helper for that lane provenance.",
+                "trade_log": "Derived from deterministic pairing of lane-local order intents and fills using the existing replay-first trade ledger helper.",
                 "attribution": "Derived by grouping closed trades by exact setup_family and a conservative operator-facing family label.",
                 "execution_likelihood": "Derived from persisted lane-local entry fills only; no partial-bar or current-bar logic is used.",
             },
@@ -11225,8 +11137,8 @@ def _initial_operator_canary_cards_markup(rows: list[dict[str, Any]], *, kill_sw
         return (
             '<article class="operator-canary-card">'
             '<div class="operator-canary-summary-list">'
-            '<span>No temporary paper strategies are currently enabled.</span>'
-            '<span>Shared paper runtime and restart actions are aligned with zero requested temp-paper lanes.</span>'
+            '<span>No ATPE temporary paper strategies are currently surfaced.</span>'
+            '<span>Expected lanes: ATPE Long Medium+High Canary and ATPE Short High-Only Canary.</span>'
             "</div>"
             "</article>"
         )
@@ -11718,19 +11630,6 @@ def _temporary_paper_overlay_spec_for_row(repo_root: Path, row: dict[str, Any]) 
     return None
 
 
-def _flat_config_flag_enabled(path: Path, key: str) -> bool:
-    if not path.exists():
-        return False
-    prefix = f"{key}:"
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or not line.startswith(prefix):
-            continue
-        value = line[len(prefix):].strip().strip('"').strip("'").lower()
-        return value == "true"
-    return False
-
-
 def _runtime_lookup_by_lane_id(runtime_registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
     lookup: dict[str, dict[str, Any]] = {}
     for row in list(runtime_registry.get("rows") or []):
@@ -11809,7 +11708,7 @@ def _annotate_same_underlying_strategy_ambiguity(rows: Sequence[dict[str, Any]])
         instrument = str(row.get("instrument") or "").strip().upper()
         same_underlying_ambiguity = bool(instrument) and counts[instrument] > 1
         ambiguity_note = (
-            "Multiple standalone strategy identities currently share this underlying instrument. Coexistence is allowed by default; only concrete execution ambiguity is escalated."
+            "Multiple standalone strategy identities currently share this underlying instrument. Same-underlying order netting and position arbitration remain explicitly constrained."
             if same_underlying_ambiguity
             else None
         )
@@ -11880,31 +11779,19 @@ def _build_same_underlying_conflicts(
             return [
                 f"Multiple standalone strategies are configured for {instrument}, but no overlapping runtime or exposure is surfaced yet.",
                 "This is informational only in the current state; multiple strategies on the same instrument are allowed.",
-                "The app keeps the strategies separate and only escalates if real execution ambiguity later appears.",
+                "The app is not auto-merging or auto-arbitrating these strategies if they later create real execution overlap on the same underlying.",
             ]
         if conflict_kind in {"multiple_runtime_instances_same_instrument", "multiple_eligible_same_instrument"}:
             return [
                 f"Two or more standalone strategies share {instrument} and are currently active or eligible.",
                 "This is informational only; strategy coexistence on one instrument is allowed until real execution ambiguity appears.",
-                "The app is not automatically blocking new entries simply because they coexist.",
+                "The app is not automatically blocking, netting, or choosing between them in this phase.",
             ]
         if conflict_kind == "same_side_in_position_overlap":
             return [
                 f"{instrument} has same-side live exposure across multiple standalone strategies.",
-                "This remains observational by default: coexistence is allowed, but attribution and exposure should remain visible to the operator.",
-                "Only broker mismatch, pending-order ambiguity, opposite-side exposure, or reconciliation-required state should block new entries.",
-            ]
-        if conflict_kind == "reconciliation_required_same_instrument_overlap":
-            return [
-                f"{instrument} has same-underlying overlap while reconciliation is not clear.",
-                "This is blocking because the runtime and broker state need reconciliation before new exposure can be judged safely.",
-                "Clear the reconciliation-required state before allowing more entries on this instrument.",
-            ]
-        if conflict_kind == "broker_vs_strategy_overlap_mismatch":
-            return [
-                f"{instrument} has same-underlying overlap plus broker-reported state that cannot be safely attributed.",
-                "This is blocking because the broker state does not line up cleanly with the strategy-side overlap now surfaced.",
-                "Review broker positions/orders, strategy ledger rows, and reconciliation for this instrument before allowing more exposure.",
+                "This is a non-blocking warning: coexistence is allowed, but attribution and exposure should remain visible to the operator.",
+                "The app will not auto-net, auto-flatten, or auto-arbitrate these strategies for you.",
             ]
         if conflict_kind == "opposite_side_in_position_overlap":
             return [
@@ -11921,12 +11808,18 @@ def _build_same_underlying_conflicts(
         if conflict_kind == "mixed_position_and_pending_overlap":
             return [
                 f"{instrument} has both open-position exposure and pending-order overlap across standalone strategies.",
-                "This is a blocking conflict because open exposure plus pending overlap is an immediate execution-risk condition.",
+                "This is a blocking conflict because the app is not performing same-underlying arbitration or safe netting automatically.",
                 "Pause new exposure on this instrument until the position and pending-order state has been reviewed together.",
+            ]
+        if conflict_kind == "broker_vs_strategy_overlap_mismatch":
+            return [
+                f"{instrument} has both same-underlying strategy overlap and broker-reported exposure or orders.",
+                "This is blocking because the app cannot safely attribute the broker overlap to one standalone strategy automatically.",
+                "Review broker positions/orders, strategy ledger rows, and reconciliation for this instrument before allowing more exposure.",
             ]
         return [
             f"{instrument} has a same-underlying conflict requiring operator review.",
-            "The app is surfacing the conflict because the overlap now carries real execution risk.",
+            "The app is surfacing the conflict, but it is not auto-merging, auto-netting, or auto-resolving same-underlying overlap in this phase.",
             "Review runtime truth, strategy ledger truth, and broker truth separately before allowing more exposure.",
         ]
 
@@ -12059,28 +11952,12 @@ def _build_same_underlying_conflicts(
         )
         reconciliation_state = str(reconciliation.get("label") or reconciliation.get("status") or "").strip()
         reconciliation_clear = reconciliation_state.upper() == "CLEAR"
-        reconciliation_required_overlap = not reconciliation_clear and (
-            broker_overlap_present or in_position_count > 0 or pending_order_count > 0
-        )
-        broker_vs_strategy_overlap_mismatch = broker_overlap_present and (
-            (broker_position_count > 0 and in_position_count == 0)
-            or (broker_order_count > 0 and pending_order_count == 0)
-            or (broker_position_count > 0 and position_side_profile in {"BOTH", "UNKNOWN"})
-            or (broker_order_count > 0 and pending_order_side_profile in {"BOTH", "UNKNOWN"})
-        )
 
-        if reconciliation_required_overlap:
-            conflict_kind = "reconciliation_required_same_instrument_overlap"
-            severity = "BLOCKING"
-            conflict_reason = (
-                f"{instrument} has same-underlying overlap while reconciliation is not clear. "
-                "New entries should stay blocked until runtime and broker state agree again."
-            )
-        elif broker_vs_strategy_overlap_mismatch:
+        if broker_overlap_present and (in_position_count > 0 or pending_order_count > 0 or eligible_count > 1 or runtime_instance_count > 1):
             conflict_kind = "broker_vs_strategy_overlap_mismatch"
             severity = "BLOCKING"
             conflict_reason = (
-                f"{instrument} has broker-reported exposure/orders that do not line up cleanly with the surfaced strategy overlap."
+                f"{instrument} has multiple standalone strategies plus broker-reported exposure/orders. Attribution and netting are not automatic for this underlying."
             )
         elif mixed_overlap_present:
             conflict_kind = "mixed_position_and_pending_overlap"
@@ -12102,9 +11979,9 @@ def _build_same_underlying_conflicts(
             )
         elif in_position_overlap_present:
             conflict_kind = "same_side_in_position_overlap"
-            severity = "INFO"
+            severity = "ACTION"
             conflict_reason = (
-                f"{instrument} has same-side live exposure across multiple standalone strategies. Coexistence remains allowed by default and stays operator-visible."
+                f"{instrument} has same-side live exposure across multiple standalone strategies. Coexistence is allowed, but the overlap remains operator-visible."
             )
         elif eligible_count > 1:
             conflict_kind = "multiple_eligible_same_instrument"
@@ -16033,8 +15910,6 @@ def _humanize_action(action: str) -> str:
         "auto-start-paper": "Auto-Start Paper Soak",
         "restart-paper-with-temp-paper": "Restart Paper Soak With Temp Paper",
         "stop-paper": "Stop Paper Soak",
-        "start-atp-companion-paper": "Start ATP Companion Paper Runtime",
-        "stop-atp-companion-paper": "Stop ATP Companion Paper Runtime",
         "generate-daily-summary": "Generate Shadow Summary",
         "generate-paper-summary": "Generate Paper Summary",
         "auth-gate-check": "Auth Gate Check",
@@ -16045,10 +15920,6 @@ def _humanize_action(action: str) -> str:
         "paper-force-lane-resume-session-override": "Force Lane Resume (Session Override)",
         "paper-flatten-and-halt": "Paper Flatten And Halt",
         "paper-stop-after-cycle": "Paper Stop After Current Cycle",
-        "atp-companion-paper-halt-entries": "ATP Companion Halt Entries",
-        "atp-companion-paper-resume-entries": "ATP Companion Resume Entries",
-        "atp-companion-paper-flatten-and-halt": "ATP Companion Flatten And Halt",
-        "atp-companion-paper-stop-after-cycle": "ATP Companion Stop After Current Cycle",
         "acknowledge-paper-risk": "Acknowledge Paper Risk",
         "acknowledge-inherited-risk": "Acknowledge Inherited Risk",
         "resolve-inherited-risk": "Resolve Inherited Risk",

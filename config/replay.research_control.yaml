@@ -1,0 +1,16 @@
+enable_first_bull_snap_us_london: false
+enable_asia_vwap_longs: false
+allow_london: false
+enable_us_derivative_bear_shorts: true
+us_derivative_bear_min_normalized_slope: -0.80
+us_derivative_bear_max_normalized_slope: -0.15
+us_derivative_bear_max_normalized_curvature: -0.35
+us_derivative_bear_min_bar_range_atr: 1.00
+us_derivative_bear_min_body_atr: 0.45
+us_derivative_bear_max_close_location: 0.28
+us_derivative_bear_min_up_stretch_atr: 1.00
+us_derivative_bear_require_below_fast_ema: true
+us_derivative_bear_require_below_vwap: true
+us_derivative_bear_require_below_slow_ema: false
+us_derivative_bear_min_close_below_slow_ema_atr: 0.00
+us_derivative_bear_cooldown_bars: 20

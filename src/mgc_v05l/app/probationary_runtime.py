@@ -107,6 +107,7 @@ from .gc_mgc_london_open_acceptance_continuation_runtime import (
     GcMgcLondonOpenAcceptanceContinuationStrategyEngine,
     gc_mgc_london_open_acceptance_window_matches,
 )
+from .shared_strategy_identities import get_shared_strategy_identity
 from .session_phase_labels import label_session_phase
 from .strategy_runtime_registry import (
     StandaloneStrategyRuntimeInstance,
@@ -432,6 +433,7 @@ class ProbationaryPaperLaneSpec:
     observer_variant_id: str | None = None
     observer_side: str | None = None
     identity_components: tuple[str, ...] = ()
+    shared_strategy_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -475,6 +477,17 @@ RECONCILIATION_HEARTBEAT_TRIGGER = "heartbeat"
 MISSING_ACK_TIMEOUT_TRIGGER = "missing_ack_timeout"
 FILL_TIMEOUT_TRIGGER = "fill_timeout"
 PENDING_ORDER_UNCERTAINTY_TRIGGER = "pending_order_uncertainty"
+_LANE_TARGETABLE_PROBATIONARY_CONTROL_ACTIONS = frozenset(
+    {
+        "halt_entries",
+        "resume_entries",
+        "clear_fault",
+        "clear_risk_halts",
+        "flatten_and_halt",
+        "force_reconcile",
+        REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
+    }
+)
 
 
 class ProbationaryLaneStructuredLogger:
@@ -6498,6 +6511,9 @@ def _coerce_probationary_paper_lane_specs(
                 ),
                 observer_side=str(raw_spec["observer_side"]) if raw_spec.get("observer_side") else None,
                 identity_components=tuple(str(value) for value in raw_spec.get("identity_components", []) if value),
+                shared_strategy_identity=(
+                    str(raw_spec["shared_strategy_identity"]) if raw_spec.get("shared_strategy_identity") else None
+                ),
             )
         )
     return tuple(specs)
@@ -8171,6 +8187,37 @@ def _apply_probationary_same_underlying_entry_holds(
         )
 
 
+def _resolve_probationary_supervisor_target_lane(
+    payload: dict[str, Any],
+    lanes: Sequence[ProbationaryPaperLaneRuntime],
+) -> tuple[ProbationaryPaperLaneRuntime | None, dict[str, Any] | None]:
+    lane_id = str(payload.get("lane_id") or "").strip()
+    shared_strategy_identity = str(payload.get("shared_strategy_identity") or "").strip()
+    if shared_strategy_identity and not lane_id:
+        try:
+            lane_id = get_shared_strategy_identity(shared_strategy_identity).lane_id
+        except KeyError:
+            return None, {
+                "status": "rejected",
+                "message": (
+                    "Operator control rejected because "
+                    f"shared strategy identity {shared_strategy_identity} is unknown."
+                ),
+            }
+    if not lane_id:
+        return None, None
+    target_lane = next((lane for lane in lanes if lane.spec.lane_id == lane_id), None)
+    if target_lane is None:
+        return None, {
+            "status": "rejected",
+            "message": (
+                "Operator control rejected because "
+                f"lane {lane_id} is not active in the current paper runtime."
+            ),
+        }
+    return target_lane, None
+
+
 def _apply_probationary_supervisor_operator_control(
     *,
     settings: StrategySettings,
@@ -8202,18 +8249,55 @@ def _apply_probationary_supervisor_operator_control(
     result = dict(payload)
     result["applied_at"] = now.isoformat()
     result["control_path"] = str(control_path)
+    target_lane, target_error = _resolve_probationary_supervisor_target_lane(payload, lanes)
+    if target_error is not None:
+        result.update(target_error)
+        control_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        structured_logger.log_operator_control(result)
+        alert_dispatcher.emit(
+            "warning",
+            "operator_control_rejected",
+            result["message"],
+            result,
+        )
+        return result
+    if target_lane is not None and action == "stop_after_cycle":
+        result["status"] = "rejected"
+        result["message"] = "Stop After Current Cycle rejected because it is a runtime-wide control and cannot target a single lane."
+        control_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        structured_logger.log_operator_control(result)
+        alert_dispatcher.emit(
+            "warning",
+            "operator_control_rejected",
+            result["message"],
+            result,
+        )
+        return result
+    selected_lanes = [target_lane] if target_lane is not None and action in _LANE_TARGETABLE_PROBATIONARY_CONTROL_ACTIONS else list(lanes)
+    if target_lane is not None:
+        result["lane_id"] = target_lane.spec.lane_id
+        result["lane_name"] = target_lane.spec.display_name
+        shared_strategy_identity = str(
+            payload.get("shared_strategy_identity") or getattr(target_lane.spec, "shared_strategy_identity", "") or ""
+        ).strip()
+        if shared_strategy_identity:
+            result["shared_strategy_identity"] = shared_strategy_identity
 
     if action == "halt_entries":
-        for lane in lanes:
+        for lane in selected_lanes:
             lane.strategy_engine.set_operator_halt(now, True)
         result["status"] = "applied"
-        result["message"] = "Entries halted for all probationary paper lanes."
+        result["message"] = (
+            f"Entries halted for lane {target_lane.spec.lane_id}."
+            if target_lane is not None
+            else "Entries halted for all probationary paper lanes."
+        )
         result["halt_reason"] = "operator_halt_entries"
     elif action == "force_reconcile":
         lane_results: list[dict[str, Any]] = []
         unresolved_lanes: list[str] = []
         repaired_lanes: list[str] = []
-        for lane in lanes:
+        for lane in selected_lanes:
             reconciliation = lane.strategy_engine.force_reconcile(
                 occurred_at=now,
                 execution_engine=lane.execution_engine,
@@ -8234,9 +8318,19 @@ def _apply_probationary_supervisor_operator_control(
                 unresolved_lanes.append(lane.spec.lane_id)
         result["status"] = "applied"
         result["message"] = (
-            "Force Reconcile completed and all lanes are aligned."
+            (
+                f"Force Reconcile completed for lane {target_lane.spec.lane_id} and it is aligned."
+                if target_lane is not None and not unresolved_lanes
+                else f"Force Reconcile completed for lane {target_lane.spec.lane_id}, but it still requires review before entries can resume."
+                if target_lane is not None
+                else "Force Reconcile completed and all lanes are aligned."
+            )
             if not unresolved_lanes
-            else "Force Reconcile completed, but some lanes still require review before entries can resume."
+            else (
+                f"Force Reconcile completed for lane {target_lane.spec.lane_id}, but it still requires review before entries can resume."
+                if target_lane is not None
+                else "Force Reconcile completed, but some lanes still require review before entries can resume."
+            )
         )
         result["reconciliation"] = {
             "lane_results": lane_results,
@@ -8322,7 +8416,7 @@ def _apply_probationary_supervisor_operator_control(
                 result["audit_event_type"] = "lane_force_resume_session_override"
     elif action == "clear_risk_halts":
         blocked_lanes: list[dict[str, str]] = []
-        for lane in lanes:
+        for lane in selected_lanes:
             reconciliation = _reconcile_paper_runtime(
                 repositories=lane.repositories,
                 strategy_engine=lane.strategy_engine,
@@ -8357,14 +8451,15 @@ def _apply_probationary_supervisor_operator_control(
             result["status"] = "rejected"
             result["message"] = "Clear Risk Halts rejected because no active paper risk halt is persisted."
         else:
-            risk_state.desk_halt_new_entries_triggered = False
-            risk_state.desk_flatten_and_halt_triggered = False
-            risk_state.desk_last_trigger_reason = None
-            risk_state.desk_last_triggered_at = None
-            risk_state.desk_last_cleared_at = now.isoformat()
-            risk_state.desk_last_cleared_action = "clear_risk_halts"
+            if target_lane is None:
+                risk_state.desk_halt_new_entries_triggered = False
+                risk_state.desk_flatten_and_halt_triggered = False
+                risk_state.desk_last_trigger_reason = None
+                risk_state.desk_last_triggered_at = None
+                risk_state.desk_last_cleared_at = now.isoformat()
+                risk_state.desk_last_cleared_action = "clear_risk_halts"
             cleared_lanes: list[str] = []
-            for lane in lanes:
+            for lane in selected_lanes:
                 lane_state = risk_state.lane_states.setdefault(lane.spec.lane_id, {})
                 if lane_state.get("catastrophic_triggered") or lane_state.get("warning_triggered") or lane_state.get("degradation_triggered"):
                     cleared_lanes.append(lane.spec.lane_id)
@@ -8377,7 +8472,11 @@ def _apply_probationary_supervisor_operator_control(
                 lane_state["last_cleared_at"] = now.isoformat()
                 lane_state["last_cleared_action"] = "clear_risk_halts"
             result["status"] = "applied"
-            result["message"] = "Paper risk halts cleared. Use Resume Entries to re-arm eligible lanes."
+            result["message"] = (
+                f"Paper risk halts cleared for lane {target_lane.spec.lane_id}. Use Resume Entries to re-arm it."
+                if target_lane is not None
+                else "Paper risk halts cleared. Use Resume Entries to re-arm eligible lanes."
+            )
             result["cleared_lanes"] = cleared_lanes
             result["requires_resume_entries"] = True
     elif action == "resume_entries":
@@ -8385,22 +8484,9 @@ def _apply_probationary_supervisor_operator_control(
             result["status"] = "rejected"
             result["message"] = "Resume Entries rejected because a desk paper risk guardrail is active."
         else:
-            target_lane_id = str(payload.get("lane_id") or "").strip()
-            target_lanes = list(lanes)
-            if target_lane_id:
-                target_lane = next((lane for lane in lanes if lane.spec.lane_id == target_lane_id), None)
-                if target_lane is None:
-                    result["status"] = "rejected"
-                    result["message"] = (
-                        f"Resume Entries rejected because lane {target_lane_id} is not active in the current paper runtime."
-                    )
-                    result["lane_id"] = target_lane_id
-                    target_lanes = []
-                else:
-                    target_lanes = [target_lane]
             resumed_lanes: list[str] = []
             blocked_lanes: list[dict[str, str]] = []
-            for lane in target_lanes:
+            for lane in selected_lanes:
                 lane_state = risk_state.lane_states.setdefault(lane.spec.lane_id, {})
                 if lane_state.get("catastrophic_triggered") or lane_state.get("warning_triggered") or lane_state.get("degradation_triggered"):
                     blocked_lanes.append(
@@ -8425,24 +8511,21 @@ def _apply_probationary_supervisor_operator_control(
                 resumed_lanes.append(lane.spec.lane_id)
             result["status"] = "applied" if resumed_lanes else "rejected"
             if resumed_lanes:
-                if target_lane_id:
-                    result["message"] = f"Entries resumed for lane: {target_lane_id}."
-                    result["lane_id"] = target_lane_id
+                if target_lane is not None:
+                    result["message"] = f"Entries resumed for lane: {target_lane.spec.lane_id}."
                 else:
                     result["message"] = f"Entries resumed for lanes: {', '.join(resumed_lanes)}."
-            elif target_lane_id and blocked_lanes:
+            elif target_lane is not None and blocked_lanes:
                 blocked = blocked_lanes[0]
                 detail = f" ({blocked['detail']})" if blocked.get("detail") else ""
                 result["message"] = (
-                    f"Resume Entries rejected for lane {target_lane_id} because it remains blocked by "
+                    f"Resume Entries rejected for lane {target_lane.spec.lane_id} because it remains blocked by "
                     f"{blocked['reason']}{detail}."
                 )
-                result["lane_id"] = target_lane_id
-            elif target_lane_id:
+            elif target_lane is not None:
                 result["message"] = (
-                    f"Resume Entries rejected for lane {target_lane_id} because it could not be resumed."
+                    f"Resume Entries rejected for lane {target_lane.spec.lane_id} because it could not be resumed."
                 )
-                result["lane_id"] = target_lane_id
             else:
                 result["message"] = "Resume Entries rejected because all lanes remain blocked by risk or fault state."
             result["resumed_lanes"] = resumed_lanes
@@ -8451,7 +8534,7 @@ def _apply_probationary_supervisor_operator_control(
     elif action == "clear_fault":
         uncleared: list[str] = []
         cleared: list[str] = []
-        for lane in lanes:
+        for lane in selected_lanes:
             reconciliation = _reconcile_paper_runtime(
                 repositories=lane.repositories,
                 strategy_engine=lane.strategy_engine,
@@ -8473,23 +8556,39 @@ def _apply_probationary_supervisor_operator_control(
                 uncleared.append(lane.spec.lane_id)
         result["status"] = "applied" if cleared else "rejected"
         result["message"] = (
-            f"Cleared faults for lanes: {', '.join(cleared)}."
+            (
+                f"Cleared fault for lane {target_lane.spec.lane_id}."
+                if target_lane is not None and cleared
+                else f"Cleared faults for lanes: {', '.join(cleared)}."
+            )
             if cleared
-            else "Clear fault rejected because no lanes were safely flat and reconciled."
+            else (
+                f"Clear fault rejected because lane {target_lane.spec.lane_id} was not safely flat and reconciled."
+                if target_lane is not None
+                else "Clear fault rejected because no lanes were safely flat and reconciled."
+            )
         )
         result["uncleared_lanes"] = uncleared
     elif action == "flatten_and_halt":
         flatten_states: dict[str, str] = {}
-        for lane in lanes:
+        for lane in selected_lanes:
             _halt_probationary_lane(lane, now)
             flatten_state, _ = _flatten_probationary_lane(lane, now, "operator_flatten_and_halt")
             flatten_states[lane.spec.lane_id] = flatten_state
         result["status"] = "flatten_pending" if any(state == "pending_fill" for state in flatten_states.values()) else "applied"
         result["flatten_state"] = "pending_fill" if result["status"] == "flatten_pending" else "complete"
         result["message"] = (
-            "Flatten intent submitted; paper runtime remains halted until all lanes are flat."
+            (
+                f"Flatten intent submitted for lane {target_lane.spec.lane_id}; it remains halted until flat."
+                if target_lane is not None and result["status"] == "flatten_pending"
+                else "Flatten intent submitted; paper runtime remains halted until all lanes are flat."
+            )
             if result["status"] == "flatten_pending"
-            else "Runtime halted and already flat."
+            else (
+                f"Lane {target_lane.spec.lane_id} halted and already flat."
+                if target_lane is not None
+                else "Runtime halted and already flat."
+            )
         )
         result["halt_reason"] = "operator_flatten_and_halt"
         result["lane_flatten_states"] = flatten_states
@@ -11962,6 +12061,7 @@ def submit_probationary_operator_control(
     action: str,
     *,
     payload: dict[str, Any] | None = None,
+    shared_strategy_identity: str | None = None,
 ) -> ProbationaryOperatorControlResult:
     supported = {
         "halt_entries",
@@ -11977,7 +12077,24 @@ def submit_probationary_operator_control(
         raise ValueError(f"Unsupported operator control action: {action}")
     settings = load_settings_from_files(config_paths)
     logger = StructuredLogger(settings.probationary_artifacts_path)
-    control_path = settings.resolved_probationary_operator_control_path
+    merged_payload = dict(payload or {})
+    requested_lane_id = str(merged_payload.get("lane_id") or "").strip() or None
+    requested_shared_identity = (
+        str(merged_payload.get("shared_strategy_identity") or "").strip()
+        or str(shared_strategy_identity or "").strip()
+        or None
+    )
+    target_payload = _resolve_probationary_operator_control_target(
+        settings,
+        action=action,
+        lane_id=requested_lane_id,
+        shared_strategy_identity=requested_shared_identity,
+    )
+    control_path = (
+        _shared_probationary_operator_control_path(settings)
+        if target_payload
+        else settings.resolved_probationary_operator_control_path
+    )
     control_path.parent.mkdir(parents=True, exist_ok=True)
     control_payload = {
         "action": action,
@@ -11988,8 +12105,11 @@ def submit_probationary_operator_control(
         "flatten_state": "pending_confirmation" if action == "flatten_and_halt" else None,
         "stop_after_cycle_requested": action == "stop_after_cycle",
     }
-    if payload:
-        control_payload.update(payload)
+    if merged_payload:
+        control_payload.update(merged_payload)
+    if target_payload:
+        control_payload.update(target_payload)
+        control_payload["control_scope"] = "lane"
     control_path.write_text(json.dumps(control_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     logger.log_operator_control({**control_payload, "control_path": str(control_path)})
     return ProbationaryOperatorControlResult(
@@ -11998,6 +12118,71 @@ def submit_probationary_operator_control(
         status="pending",
         requested_at=str(control_payload["requested_at"]),
     )
+
+
+def _shared_probationary_operator_control_path(settings: StrategySettings) -> Path:
+    return settings.probationary_artifacts_path / "runtime" / "operator_control.json"
+
+
+def _resolve_probationary_operator_control_target(
+    settings: StrategySettings,
+    *,
+    action: str,
+    lane_id: str | None = None,
+    shared_strategy_identity: str | None = None,
+) -> dict[str, str]:
+    requested_lane_id = str(lane_id or "").strip()
+    requested_shared_identity = str(shared_strategy_identity or "").strip()
+
+    if not requested_lane_id and not requested_shared_identity and (
+        settings.probationary_paper_runtime_exclusive_config
+        and action in _LANE_TARGETABLE_PROBATIONARY_CONTROL_ACTIONS
+    ):
+        active_specs = _active_probationary_paper_lane_specs(settings)
+        if len(active_specs) == 1:
+            requested_lane_id = active_specs[0].lane_id
+            requested_shared_identity = str(active_specs[0].shared_strategy_identity or "").strip()
+
+    if not requested_lane_id and not requested_shared_identity:
+        return {}
+
+    active_specs = _active_probationary_paper_lane_specs(settings)
+    specs_by_lane_id = {spec.lane_id: spec for spec in active_specs}
+    specs_by_shared_identity = {
+        str(spec.shared_strategy_identity): spec
+        for spec in active_specs
+        if str(spec.shared_strategy_identity or "").strip()
+    }
+
+    target_spec: ProbationaryPaperLaneSpec | None = None
+    if requested_shared_identity:
+        target_spec = specs_by_shared_identity.get(requested_shared_identity)
+        if target_spec is None:
+            canonical_identity = get_shared_strategy_identity(requested_shared_identity)
+            target_spec = specs_by_lane_id.get(canonical_identity.lane_id)
+    if requested_lane_id:
+        lane_match = specs_by_lane_id.get(requested_lane_id)
+        if lane_match is None:
+            raise ValueError(
+                f"Probationary operator control rejected because lane {requested_lane_id} is not active in the current paper runtime."
+            )
+        if target_spec is not None and lane_match.lane_id != target_spec.lane_id:
+            raise ValueError(
+                "Probationary operator control rejected because lane_id and shared_strategy_identity target different lanes."
+            )
+        target_spec = lane_match
+
+    if target_spec is None:
+        raise ValueError(
+            f"Probationary operator control rejected because shared strategy identity {requested_shared_identity} is not active in the current paper runtime."
+        )
+
+    payload = {"lane_id": target_spec.lane_id}
+    if str(target_spec.shared_strategy_identity or "").strip():
+        payload["shared_strategy_identity"] = str(target_spec.shared_strategy_identity)
+    elif requested_shared_identity:
+        payload["shared_strategy_identity"] = requested_shared_identity
+    return payload
 
 
 def _build_live_polling_service(

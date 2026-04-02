@@ -1,0 +1,243 @@
+{
+  "historical_symbol_map": {
+    "MGC": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "GC": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "MES": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "ES": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "MNQ": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "NQ": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "ZT": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "ZF": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "ZB": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "ZQ": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "TB": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "6E": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "6J": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "6B": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "6A": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "SI": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "HG": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "QC": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "PL": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "AL": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "ZN": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "CL": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "NG": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "BT": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "MBT": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "ET": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "ME": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "RT": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "M2": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "RS": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "YM": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL",
+    "MY": "REPLACE_WITH_CONFIRMED_SCHWAB_HISTORY_SYMBOL"
+  },
+  "quote_symbol_map": {
+    "MGC": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "GC": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "MES": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "ES": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "MNQ": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "NQ": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "ZT": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "ZF": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "ZB": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "ZQ": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "TB": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "6E": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "6J": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "6B": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "6A": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "SI": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "HG": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "QC": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "PL": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "AL": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "ZN": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "CL": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "NG": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "BT": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "MBT": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "ET": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "ME": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "RT": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "M2": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "RS": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "YM": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL",
+    "MY": "REPLACE_WITH_CONFIRMED_SCHWAB_QUOTE_SYMBOL"
+  },
+  "market_context_quote_symbols": {
+    "DJIA": "REPLACE_WITH_CONFIRMED_SCHWAB_MARKET_CONTEXT_SYMBOL",
+    "SPX": "REPLACE_WITH_CONFIRMED_SCHWAB_MARKET_CONTEXT_SYMBOL",
+    "NDX": "REPLACE_WITH_CONFIRMED_SCHWAB_MARKET_CONTEXT_SYMBOL",
+    "RUT": "REPLACE_WITH_CONFIRMED_SCHWAB_MARKET_CONTEXT_SYMBOL",
+    "GOLD": "REPLACE_WITH_CONFIRMED_SCHWAB_MARKET_CONTEXT_SYMBOL",
+    "VIX": "REPLACE_WITH_CONFIRMED_SCHWAB_MARKET_CONTEXT_SYMBOL"
+  },
+  "treasury_context_quote_symbols": {
+    "3M": "REPLACE_WITH_CONFIRMED_SCHWAB_TREASURY_SYMBOL",
+    "5Y": "REPLACE_WITH_CONFIRMED_SCHWAB_TREASURY_SYMBOL",
+    "10Y": "REPLACE_WITH_CONFIRMED_SCHWAB_TREASURY_SYMBOL",
+    "30Y": "REPLACE_WITH_CONFIRMED_SCHWAB_TREASURY_SYMBOL"
+  },
+  "symbol_metadata": {
+    "MGC": {
+      "symbol_role": "execution",
+      "reference_symbol": "GC",
+      "contract_family": "gold"
+    },
+    "GC": {
+      "symbol_role": "reference",
+      "execution_symbol": "MGC",
+      "contract_family": "gold"
+    },
+    "MES": {
+      "symbol_role": "execution",
+      "reference_symbol": "ES",
+      "contract_family": "equity_index_sp500"
+    },
+    "ES": {
+      "symbol_role": "reference",
+      "execution_symbol": "MES",
+      "contract_family": "equity_index_sp500"
+    },
+    "MNQ": {
+      "symbol_role": "execution",
+      "reference_symbol": "NQ",
+      "contract_family": "equity_index_nasdaq"
+    },
+    "NQ": {
+      "symbol_role": "reference",
+      "execution_symbol": "MNQ",
+      "contract_family": "equity_index_nasdaq"
+    },
+    "ZT": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_2y"
+    },
+    "ZF": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_5y"
+    },
+    "ZN": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_10y"
+    },
+    "ZB": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_30y"
+    },
+    "ZQ": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_fed_funds"
+    },
+    "TB": {
+      "symbol_role": "standalone",
+      "contract_family": "rates_tbill"
+    },
+    "6E": {
+      "symbol_role": "standalone",
+      "contract_family": "fx_eur_usd"
+    },
+    "6J": {
+      "symbol_role": "standalone",
+      "contract_family": "fx_jpy_usd"
+    },
+    "6B": {
+      "symbol_role": "standalone",
+      "contract_family": "fx_gbp_usd"
+    },
+    "6A": {
+      "symbol_role": "standalone",
+      "contract_family": "fx_aud_usd"
+    },
+    "HG": {
+      "symbol_role": "standalone",
+      "contract_family": "metals_copper"
+    },
+    "QC": {
+      "symbol_role": "standalone",
+      "contract_family": "metals_copper"
+    },
+    "PL": {
+      "symbol_role": "standalone",
+      "contract_family": "metals_platinum"
+    },
+    "AL": {
+      "symbol_role": "standalone",
+      "contract_family": "metals_aluminum"
+    },
+    "CL": {
+      "symbol_role": "standalone",
+      "contract_family": "energy_crude_oil"
+    },
+    "NG": {
+      "symbol_role": "standalone",
+      "contract_family": "energy_natural_gas"
+    },
+    "BT": {
+      "symbol_role": "standalone",
+      "contract_family": "crypto_bitcoin"
+    },
+    "MBT": {
+      "symbol_role": "standalone",
+      "contract_family": "crypto_bitcoin"
+    },
+    "ET": {
+      "symbol_role": "standalone",
+      "contract_family": "crypto_ether"
+    },
+    "ME": {
+      "symbol_role": "standalone",
+      "contract_family": "crypto_ether"
+    },
+    "RT": {
+      "symbol_role": "standalone",
+      "contract_family": "equity_index_russell"
+    },
+    "M2": {
+      "symbol_role": "standalone",
+      "contract_family": "equity_index_russell"
+    },
+    "RS": {
+      "symbol_role": "standalone",
+      "contract_family": "equity_index_russell"
+    },
+    "YM": {
+      "symbol_role": "standalone",
+      "contract_family": "equity_index_dow"
+    },
+    "MY": {
+      "symbol_role": "standalone",
+      "contract_family": "equity_index_dow"
+    }
+  },
+  "timeframe_map": {
+    "1m": {
+      "frequency_type": "minute",
+      "frequency": 1
+    },
+    "5m": {
+      "frequency_type": "minute",
+      "frequency": 5
+    },
+    "10m": {
+      "frequency_type": "minute",
+      "frequency": 10
+    },
+    "15m": {
+      "frequency_type": "minute",
+      "frequency": 15
+    },
+    "30m": {
+      "frequency_type": "minute",
+      "frequency": 30
+    },
+    "1440m": {
+      "frequency_type": "daily",
+      "frequency": 1
+    }
+  },
+  "quotes_symbol_query_param": "symbols"
+}

@@ -1,0 +1,2 @@
+[console_scripts]
+mgc-v05l = mgc_v05l.app.main:main

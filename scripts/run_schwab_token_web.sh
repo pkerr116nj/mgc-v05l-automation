@@ -3,34 +3,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-LOCAL_SCHWAB_ENV="${REPO_ROOT}/.local/schwab_env.sh"
-LOCAL_DOTENV="${REPO_ROOT}/.env"
-VENV_ACTIVATE="${REPO_ROOT}/.venv/bin/activate"
-PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common_env.sh"
 
-if [[ -f "${VENV_ACTIVATE}" ]]; then
-  # shellcheck disable=SC1091
-  source "${VENV_ACTIVATE}"
-fi
-if [[ -f "${LOCAL_SCHWAB_ENV}" ]]; then
-  # shellcheck disable=SC1091
-  source "${LOCAL_SCHWAB_ENV}"
-fi
-if [[ -f "${LOCAL_DOTENV}" ]]; then
-  # shellcheck disable=SC1091
-  source "${LOCAL_DOTENV}"
-fi
-
-for name in SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL; do
-  if [[ -z "${!name:-}" ]]; then
-    echo "Schwab auth bootstrap incomplete: missing ${name}. Checked shell env, ${LOCAL_SCHWAB_ENV}, and ${LOCAL_DOTENV}." >&2
-    exit 1
-  fi
-done
-
-export REPO_ROOT
-export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+require_schwab_auth_env
 
 DEFAULT_HOST="${SCHWAB_TOKEN_WEB_HOST:-127.0.0.1}"
 DEFAULT_PORT="${SCHWAB_TOKEN_WEB_PORT:-8765}"
@@ -112,20 +88,31 @@ done
 if [[ ${HOST_SET} -eq 0 ]]; then
   FINAL_ARGS+=(--host "${DEFAULT_HOST}")
 fi
+
 if [[ ${PORT_SET} -eq 0 ]]; then
   FINAL_ARGS+=(--port "${DEFAULT_PORT}")
 fi
+
 if [[ ${INFO_FILE_SET} -eq 0 && -n "${DEFAULT_INFO_FILE}" ]]; then
   FINAL_ARGS+=(--info-file "${DEFAULT_INFO_FILE}")
 fi
-if [[ ${SCHWAB_CONFIG_SET} -eq 0 ]]; then
+
+if [[ ${SCHWAB_CONFIG_SET} -eq 0 && -n "${DEFAULT_SCHWAB_CONFIG}" ]]; then
   FINAL_ARGS+=(--schwab-config "${DEFAULT_SCHWAB_CONFIG}")
 fi
-if [[ ${PROBE_SYMBOL_SET} -eq 0 ]]; then
+
+if [[ ${PROBE_SYMBOL_SET} -eq 0 && -n "${DEFAULT_PROBE_SYMBOL}" ]]; then
   FINAL_ARGS+=(--probe-symbol "${DEFAULT_PROBE_SYMBOL}")
 fi
+
 if [[ ${#ARGS[@]} -gt 0 ]]; then
   FINAL_ARGS+=("${ARGS[@]}")
 fi
+
+echo "Launching Schwab token web tool. Preferred URL: http://${DEFAULT_HOST}:${DEFAULT_PORT}/"
+if [[ ${INFO_FILE_SET} -eq 0 && -n "${DEFAULT_INFO_FILE}" ]]; then
+  echo "Launch info file: ${DEFAULT_INFO_FILE}"
+fi
+echo "Resolved token path will be printed by the server after bind."
 
 exec "${PYTHON_BIN}" -m mgc_v05l.app.main schwab-token-web "${FINAL_ARGS[@]}"

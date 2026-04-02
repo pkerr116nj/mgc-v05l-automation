@@ -1,0 +1,5 @@
+use_short_derivative_maturity_exit: true
+derivative_exit_min_profit_r: 0.75
+short_derivative_exit_max_normalized_velocity: -0.12
+short_derivative_exit_min_normalized_velocity_delta: 0.05
+derivative_exit_require_counter_close: true

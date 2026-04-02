@@ -1,0 +1,14 @@
+max_bars_long: 8
+max_bars_short: 6
+vwap_long_max_bars: 6
+us_derivative_bear_max_normalized_curvature: -0.30
+us_derivative_bear_window_start: "09:00"
+us_derivative_bear_window_end: "10:30"
+us_derivative_bear_max_distance_below_vwap_atr: 1.80
+enable_us_derivative_bear_additive_shorts: true
+us_derivative_bear_additive_min_normalized_slope: -0.10
+us_derivative_bear_additive_max_normalized_slope: 0.10
+us_derivative_bear_additive_min_normalized_curvature: -0.50
+us_derivative_bear_additive_max_normalized_curvature: -0.10
+us_derivative_bear_additive_allow_phase_cash_open_impulse: true
+us_derivative_bear_additive_allow_phase_open_late: true

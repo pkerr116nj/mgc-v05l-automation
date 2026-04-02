@@ -1,0 +1,2 @@
+us_derivative_bear_require_below_slow_ema: true
+us_derivative_bear_min_close_below_slow_ema_atr: 0.05

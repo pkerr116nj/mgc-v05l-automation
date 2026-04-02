@@ -1,4 +1,4 @@
-"""Unified strategy analysis payloads across replay, research, paper, and related evidence lanes."""
+"""Unified strategy analysis payloads for replay and paper evidence lanes."""
 
 from __future__ import annotations
 

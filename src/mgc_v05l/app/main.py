@@ -31,6 +31,7 @@ from ..market_data.schwab_adapter import SchwabMarketDataAdapter
 from ..app.bootstrap import bootstrap_service
 from .probationary_runtime import (
     ProbationaryRuntimeTransportFailure,
+    REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
     build_probationary_paper_runner,
     run_probationary_market_data_transport_probe,
     submit_probationary_operator_control,
@@ -307,12 +308,32 @@ def build_parser() -> argparse.ArgumentParser:
     operator_control_parser.add_argument(
         "--action",
         required=True,
+        choices=[
+            "halt_entries",
+            "resume_entries",
+            "clear_fault",
+            "clear_risk_halts",
+            "flatten_and_halt",
+            "stop_after_cycle",
+            "force_reconcile",
+            REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
+        ],
         help="Shared operator control action to queue.",
     )
     operator_control_parser.add_argument(
         "--lane-id",
         default=None,
         help="Optional lane_id to target a single probationary paper lane.",
+    )
+    operator_control_parser.add_argument(
+        "--payload-json",
+        default=None,
+        help="Optional JSON object payload merged into the queued operator control request.",
+    )
+    operator_control_parser.add_argument(
+        "--shared-strategy-identity",
+        default=None,
+        help="Optional shared strategy identity to target a single active paper lane through the shared operator-control path.",
     )
 
     dashboard_parser = subparsers.add_parser(
@@ -577,11 +598,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "config/probationary_pattern_engine.yaml",
             "config/probationary_pattern_engine_paper.yaml",
         ]
-        control_payload = {"lane_id": args.lane_id} if args.lane_id else None
+        control_payload = json.loads(args.payload_json) if args.payload_json is not None else {}
+        if args.lane_id:
+            control_payload["lane_id"] = args.lane_id
         summary = submit_probationary_operator_control(
             [Path(path) for path in config_paths],
             args.action,
-            payload=control_payload,
+            payload=control_payload or None,
+            shared_strategy_identity=args.shared_strategy_identity,
         )
         print(json.dumps(_json_ready(summary), sort_keys=True))
         return 0

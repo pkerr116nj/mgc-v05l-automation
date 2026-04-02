@@ -203,14 +203,18 @@ try:
 except socket.gaierror as exc:
     sandbox_hint = ""
     if os.environ.get("CODEX_SANDBOX"):
-        sandbox_hint = f" likely due to launch context sandbox={os.environ['CODEX_SANDBOX']!r}"
+        sandbox_hint = (
+            " The current launcher is running inside a sandboxed parent process; "
+            "repo code cannot remove that launch context."
+        )
     print(
         "Runtime network preflight failed: "
         f"hostname={hostname!r} "
         f"base_url={base_url!r} "
         f"endpoint={endpoint!r} "
         f"python={sys.executable!r} "
-        f"error={exc!r}.{sandbox_hint}",
+        f"error={exc!r}."
+        f"{sandbox_hint}",
         file=sys.stderr,
     )
     raise SystemExit(1)

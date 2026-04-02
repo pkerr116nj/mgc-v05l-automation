@@ -3,34 +3,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-LOCAL_SCHWAB_ENV="${REPO_ROOT}/.local/schwab_env.sh"
-LOCAL_DOTENV="${REPO_ROOT}/.env"
-VENV_ACTIVATE="${REPO_ROOT}/.venv/bin/activate"
-PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common_env.sh"
 
-if [[ -f "${VENV_ACTIVATE}" ]]; then
-  # shellcheck disable=SC1091
-  source "${VENV_ACTIVATE}"
-fi
-if [[ -f "${LOCAL_SCHWAB_ENV}" ]]; then
-  # shellcheck disable=SC1091
-  source "${LOCAL_SCHWAB_ENV}"
-fi
-if [[ -f "${LOCAL_DOTENV}" ]]; then
-  # shellcheck disable=SC1091
-  source "${LOCAL_DOTENV}"
-fi
-
-for name in SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL; do
-  if [[ -z "${!name:-}" ]]; then
-    echo "Schwab auth bootstrap incomplete: missing ${name}. Checked shell env, ${LOCAL_SCHWAB_ENV}, and ${LOCAL_DOTENV}." >&2
-    exit 1
-  fi
-done
-
-export REPO_ROOT
-export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+require_schwab_auth_env
 
 DEFAULT_SCHWAB_CONFIG="${SCHWAB_CONFIG:-${REPO_ROOT}/config/schwab.local.json}"
 DEFAULT_PROBE_SYMBOL="${SCHWAB_AUTH_GATE_SYMBOL:-MGC}"
