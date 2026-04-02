@@ -1,0 +1,32 @@
+# ATP promotion/add candidate registry.
+# All tested branches remain retained for future optimization work.
+# Only the strongest branch is being advanced as an active research candidate in
+# this pass. Frozen ATP Companion Baseline v1 remains unchanged, while staged
+# ATP paper/research candidate lanes are supported through explicit lane configs.
+
+baseline_reference_label: "ATP_COMPANION_V1_ASIA_US"
+baseline_reference_config: "config/atp_companion_baseline_v1_asia_us.yaml"
+registry_status: "ACTIVE_RESEARCH_WITH_RETAINED_BRANCHES"
+advanced_candidate_id: "promotion_1_075r_favorable_only"
+
+candidates:
+  - candidate_id: "promotion_1_050r_neutral_plus"
+    candidate_label: "ATP Promotion 1 at +0.50R, VWAP Favorable or Neutral"
+    branch_status: "RETAINED_RESEARCH_CANDIDATE"
+    advanced_now: false
+    continued_in_this_pass: false
+    reason_not_advanced: "Quantity increased too aggressively and quality degraded."
+
+  - candidate_id: "promotion_1_075r_neutral_plus"
+    candidate_label: "ATP Promotion 1 at +0.75R, VWAP Favorable or Neutral"
+    branch_status: "RETAINED_RESEARCH_CANDIDATE"
+    advanced_now: false
+    continued_in_this_pass: false
+    reason_not_advanced: "Cleaner than the 0.50R version, but still weaker than the favorable-only candidate."
+
+  - candidate_id: "promotion_1_075r_favorable_only"
+    candidate_label: "ATP Promotion 1 at +0.75R, VWAP Favorable Only"
+    branch_status: "ACTIVE_RESEARCH_CANDIDATE"
+    advanced_now: true
+    continued_in_this_pass: true
+    candidate_config_path: "config/atp_companion_candidate_promotion_1_075r_favorable_only.yaml"

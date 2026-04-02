@@ -1,0 +1,1440 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MGC Operator Dashboard</title>
+    <link rel="stylesheet" href="/dashboard.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="topbar-left">
+          <div class="eyebrow">Pattern Engine v1 Operator Surface</div>
+          <div class="title-row">
+            <h1>Dashboard v0.6</h1>
+            <div class="topbar-badge-cluster">
+              <span id="badge-mode" class="badge badge-info">IDLE</span>
+              <span id="badge-desk-clean" class="badge badge-muted">DESK UNKNOWN</span>
+              <span id="badge-paper-ready" class="badge badge-muted">RUN READINESS UNKNOWN</span>
+              <span id="badge-auth" class="badge badge-muted">AUTH UNKNOWN</span>
+              <span class="badge badge-danger">LIVE DISABLED</span>
+            </div>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <div class="terminal-strip">
+            <div class="terminal-pill">
+              <span class="label">Mode</span>
+              <span id="mode-chip" class="value">-</span>
+            </div>
+            <div class="terminal-pill emphasis-pill">
+              <span class="label">Shadow</span>
+              <span id="shadow-global-status" class="value">-</span>
+            </div>
+            <div class="terminal-pill emphasis-pill">
+              <span class="label">Paper</span>
+              <span id="paper-global-status" class="value">-</span>
+            </div>
+            <div class="terminal-pill">
+              <span class="label">Market</span>
+              <span id="market-data-status" class="value">-</span>
+            </div>
+            <div class="terminal-pill">
+              <span class="label">Health</span>
+              <span id="runtime-health" class="value">-</span>
+            </div>
+            <div class="terminal-pill">
+              <span class="label">Recon</span>
+              <span id="reconciliation-status" class="value">-</span>
+            </div>
+            <div class="terminal-pill">
+              <span class="label">Fault</span>
+              <span id="fault-state" class="value">-</span>
+            </div>
+            <div class="terminal-pill freshness-pill">
+              <span class="label">Freshness</span>
+              <span id="desk-freshness" class="value">-</span>
+            </div>
+          </div>
+          <div class="meta-strip">
+            <span class="meta-chip">Session <span id="session-date" class="mono">-</span></span>
+            <span class="meta-chip">Last Bar <span id="last-processed-bar" class="mono">-</span></span>
+            <span class="meta-chip">Runtime Update <span id="last-update" class="mono">-</span></span>
+            <span class="meta-chip">Dashboard Refresh <span id="last-refreshed" class="mono">-</span></span>
+          </div>
+          <div class="meta-strip runtime-build-strip">
+            <span class="meta-chip">Build <span id="runtime-build-stamp" class="mono">-</span></span>
+            <span class="meta-chip">PID <span id="runtime-server-pid" class="mono">-</span></span>
+            <span class="meta-chip">Started <span id="runtime-started-at" class="mono">-</span></span>
+            <span class="meta-chip">Snapshot <span id="runtime-snapshot-generated" class="mono">-</span></span>
+            <span class="meta-chip">AQ <span id="runtime-approved-quant-count" class="mono">-</span></span>
+            <span class="meta-chip">AP <span id="runtime-admitted-paper-count" class="mono">-</span></span>
+            <span class="meta-chip">Temp Paper <span id="runtime-temporary-paper-count" class="mono">-</span></span>
+          </div>
+          <div id="runtime-registry-line" class="subnote runtime-registry-line">-</div>
+        </div>
+      </header>
+
+      <section id="paper-risk-banner" class="risk-banner hidden panel">
+        <div class="risk-banner-header">
+          <div>
+            <div class="eyebrow">Paper Session Risk</div>
+            <h2 id="paper-risk-title">Unresolved Paper Risk</h2>
+          </div>
+          <div class="panel-actions">
+            <span id="paper-risk-ack-state" class="badge badge-danger">UNACKNOWLEDGED</span>
+            <button id="acknowledge-paper-risk" class="action stop" data-action="acknowledge-paper-risk">Acknowledge Risk</button>
+          </div>
+        </div>
+        <div id="paper-risk-body" class="runtime-meta"></div>
+      </section>
+
+      <section id="carry-forward-banner" class="risk-banner hidden panel carry-forward-banner">
+        <div class="risk-banner-header">
+          <div>
+            <div class="eyebrow">Inherited Prior Session Risk</div>
+            <h2 id="carry-forward-title">Previous Session Not Clean</h2>
+          </div>
+          <div class="panel-actions">
+            <span id="carry-forward-state" class="badge badge-danger">ACTIVE</span>
+            <button id="acknowledge-inherited-risk" class="action stop" data-action="acknowledge-inherited-risk">Acknowledge Inherited Risk</button>
+            <button id="resolve-inherited-risk" class="action accent" data-action="resolve-inherited-risk">Resolve Inherited Risk</button>
+          </div>
+        </div>
+        <div id="carry-forward-body" class="runtime-meta"></div>
+      </section>
+
+      <main class="grid">
+        <section class="panel operator-readiness-panel primary-panel">
+          <div class="panel-header">
+            <div>
+              <div class="eyebrow">Operator-Critical</div>
+              <h2>Runtime / Readiness</h2>
+            </div>
+            <div class="panel-actions">
+              <span class="badge badge-info">OPERATOR-CRITICAL</span>
+            </div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Status:</strong> <span id="operator-readiness-status">-</span></div>
+          <div id="operator-readiness-cards" class="metrics-grid operator-readiness-grid"></div>
+          <ul id="operator-readiness-notes" class="trail-list compact checklist-list"></ul>
+        </section>
+
+        <section class="panel operator-risk-strip-panel primary-panel">
+          <div class="panel-header">
+            <div>
+              <div class="eyebrow">Operator-Critical</div>
+              <h2>Portfolio P&amp;L / Risk</h2>
+            </div>
+            <div class="panel-actions">
+              <a id="operator-risk-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Performance JSON</a>
+            </div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Status:</strong> <span id="operator-risk-status">-</span></div>
+          <div id="operator-risk-cards" class="metrics-grid operator-risk-grid"></div>
+          <ul id="operator-risk-notes" class="trail-list compact checklist-list"></ul>
+        </section>
+
+        <section class="panel operator-instrument-rollup-panel primary-panel">
+          <div class="panel-header">
+            <div>
+              <div class="eyebrow">Operator-Critical</div>
+              <h2>Instrument Rollup</h2>
+            </div>
+            <div class="panel-actions">
+              <span class="badge badge-info">ROLLUP VIEW</span>
+            </div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Status:</strong> <span id="operator-instrument-status">-</span></div>
+          <div class="table-wrap operator-flow-table-wrap"><table id="operator-instrument-table"></table></div>
+        </section>
+
+        <section class="panel operator-active-positions-panel primary-panel">
+          <div class="panel-header">
+            <div>
+              <div class="eyebrow">Operator-Critical</div>
+              <h2>Current Active Positions</h2>
+            </div>
+            <div class="panel-actions">
+              <span class="badge badge-accent">OPEN RISK</span>
+            </div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Status:</strong> <span id="operator-active-positions-status">-</span></div>
+          <div class="table-wrap operator-flow-table-wrap"><table id="operator-active-positions-table"></table></div>
+        </section>
+
+        <section class="panel operator-universe-panel primary-panel">
+          <div class="panel-header">
+            <div>
+              <div class="eyebrow">Operator-Critical</div>
+              <h2>Unified Active Lane / Instrument Surface</h2>
+            </div>
+            <div class="panel-actions">
+              <a id="operator-universe-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Operator Surface JSON</a>
+            </div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Status:</strong> <span id="operator-universe-status">-</span></div>
+          <div id="operator-universe-cards" class="metrics-grid operator-universe-grid"></div>
+          <div class="subnote model-scope-note"><strong>Instrument Scope:</strong> <span id="operator-universe-instruments">-</span></div>
+          <div class="subnote model-scope-note"><strong>Note:</strong> <span id="operator-universe-note">-</span></div>
+          <div class="subnote model-scope-note"><strong>Summary:</strong> <span id="operator-lane-grid-summary">-</span></div>
+          <div class="table-wrap operator-flow-table-wrap"><table id="operator-lane-grid-table"></table></div>
+        </section>
+
+        <section class="panel operator-canary-panel primary-panel">
+          <div class="panel-header">
+            <div>
+              <div class="eyebrow">Operator-Critical</div>
+              <h2>Experimental Paper Strategy / Paper Only</h2>
+            </div>
+            <div class="panel-actions">
+              <span id="operator-canary-badge" class="badge badge-warning">NO TEMP PAPER</span>
+              <a id="operator-canary-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Temporary Paper Snapshot JSON</a>
+            </div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Status:</strong> <span id="operator-canary-status">-</span></div>
+          <div class="metrics-grid operator-canary-summary-grid">
+            <div class="stat"><span class="label">Visible</span><span id="operator-canary-visible-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Enabled</span><span id="operator-canary-enabled-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Kill Switch</span><span id="operator-canary-kill-switch" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Signals</span><span id="operator-canary-signal-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Events</span><span id="operator-canary-event-count" class="value mono">-</span></div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Note:</strong> <span id="operator-canary-note">-</span></div>
+          <div id="operator-canary-cards" class="operator-canary-card-grid"></div>
+        </section>
+
+        <section class="panel operator-context-panel secondary-panel">
+          <div class="panel-header">
+            <div>
+              <div class="eyebrow">Informational Only</div>
+              <h2>Secondary Market Context</h2>
+            </div>
+            <div class="panel-actions">
+              <span class="badge badge-muted">INFORMATIONAL ONLY</span>
+            </div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Status:</strong> <span id="operator-context-status">-</span></div>
+          <div id="operator-context-items" class="operator-context-items"></div>
+          <div class="subnote model-scope-note">Unavailable context is surfaced here without displacing operator-critical lane and risk decisions.</div>
+        </section>
+
+        <section class="panel diagnostics-shell secondary-panel">
+          <details class="diagnostics-toggle">
+            <summary class="diagnostics-summary">
+              <div>
+                <div class="eyebrow">Reference / Diagnostics</div>
+                <h2>Diagnostics / Evidence</h2>
+              </div>
+              <div class="panel-actions">
+                <span class="badge badge-muted">COLLAPSED BY DEFAULT</span>
+              </div>
+            </summary>
+            <div class="subnote diagnostics-summary-note">
+              Paper history, branch evidence, lane drilldowns, blotter tables, controls, and debug surfaces remain available on expand.
+            </div>
+            <div class="diagnostics-stack">
+        <section class="panel hero-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Paper Position / Session P&amp;L</h2>
+            <div class="panel-actions">
+              <span class="badge badge-accent">PAPER ONLY</span>
+              <span id="hero-latest-state" class="badge badge-muted">LATEST SESSION</span>
+            </div>
+          </div>
+          <div class="hero-glance-strip">
+            <div class="glance-chip">
+              <span class="label">Shape</span>
+              <span id="hero-shape-glance" class="value mono">-</span>
+            </div>
+            <div class="glance-chip">
+              <span class="label">Driver</span>
+              <span id="hero-driver-glance" class="value mono">-</span>
+            </div>
+            <div class="glance-chip">
+              <span class="label">Trend</span>
+              <span id="hero-trend-glance" class="value mono">-</span>
+            </div>
+            <div class="glance-chip">
+              <span class="label">Exposure</span>
+              <span id="hero-exposure-glance" class="value mono">-</span>
+            </div>
+          </div>
+          <div class="hero-grid">
+            <div class="hero-position-card">
+              <div class="hero-symbol-row">
+                <div>
+                  <div class="eyebrow">Instrument</div>
+                  <div id="paper-instrument" class="hero-symbol">MGC</div>
+                </div>
+                <div id="paper-side" class="hero-side">FLAT</div>
+              </div>
+              <div class="hero-position-stats">
+                <div class="hero-stat">
+                  <span class="label">Qty</span>
+                  <span id="paper-qty" class="value mono">0</span>
+                </div>
+                <div class="hero-stat">
+                  <span class="label">Avg</span>
+                  <span id="paper-avg" class="value mono">-</span>
+                </div>
+                <div class="hero-stat">
+                  <span class="label">Mark</span>
+                  <span id="paper-mark" class="value mono">-</span>
+                </div>
+              </div>
+            </div>
+            <div class="hero-pnl-grid">
+              <div class="hero-pnl-card">
+                <span class="label">Session P&amp;L</span>
+                <span id="paper-session-pnl" class="hero-pnl mono">-</span>
+              </div>
+              <div class="hero-pnl-card">
+                <span class="label">Unrealized</span>
+                <span id="paper-unrealized" class="hero-pnl mono">-</span>
+              </div>
+              <div class="hero-pnl-card">
+                <span class="label">Realized P&amp;L</span>
+                <span id="paper-realized" class="hero-pnl mono">-</span>
+              </div>
+              <div class="hero-pnl-card">
+                <span class="label">Branch P&amp;L</span>
+                <span id="paper-pnl-branches" class="hero-secondary mono">-</span>
+              </div>
+            </div>
+          </div>
+          <div class="provenance-grid hero-provenance">
+            <div class="subnote"><strong>Realized:</strong> <span id="paper-realized-source">-</span></div>
+            <div class="subnote"><strong>Unrealized:</strong> <span id="paper-unrealized-source">-</span></div>
+            <div class="subnote"><strong>Branch:</strong> <span id="paper-branch-source">-</span></div>
+          </div>
+          <div class="subnote" id="paper-pnl-note"></div>
+        </section>
+
+        <section class="panel performance-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Paper Performance Snapshot</h2>
+            <div class="panel-actions">
+              <span id="paper-performance-scope" class="badge badge-muted">NO SESSION DATA</span>
+              <a id="paper-performance-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Performance JSON</a>
+            </div>
+          </div>
+          <div class="performance-card-grid">
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Session Realized P&amp;L</span>
+              <span id="performance-realized" class="hero-pnl mono">-</span>
+              <span id="performance-realized-scope" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Current Unrealized P&amp;L</span>
+              <span id="performance-unrealized" class="hero-pnl mono">-</span>
+              <span id="performance-unrealized-scope" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Total Session P&amp;L</span>
+              <span id="performance-total" class="hero-pnl mono">-</span>
+              <span id="performance-total-scope" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Open Exposure</span>
+              <span id="performance-exposure" class="hero-secondary mono">-</span>
+              <span id="performance-exposure-source" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Trades / Fills</span>
+              <span id="performance-trade-fill" class="hero-secondary mono">-</span>
+              <span id="performance-trade-fill-source" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Win / Loss</span>
+              <span id="performance-win-loss" class="hero-secondary mono">-</span>
+              <span id="performance-win-loss-source" class="subnote">-</span>
+            </div>
+          </div>
+          <div class="metrics-grid">
+            <div class="stat"><span class="label">Processed Bars</span><span id="metric-bars" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Signals</span><span id="metric-signals" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Blocked Decisions</span><span id="metric-blocked" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Fills</span><span id="metric-fills" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Exit Fills</span><span id="metric-exits" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Open / Closed</span><span id="metric-open-closed" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Avg Realized / Trade</span><span id="metric-average-trade" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Largest Win</span><span id="metric-largest-win" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Largest Loss</span><span id="metric-largest-loss" class="value mono">-</span></div>
+          </div>
+          <div class="provenance-grid">
+            <div class="subnote"><strong>Realized:</strong> <span id="performance-realized-source">-</span></div>
+            <div class="subnote"><strong>Unrealized:</strong> <span id="performance-unrealized-source">-</span></div>
+            <div class="subnote"><strong>Total:</strong> <span id="performance-total-source">-</span></div>
+            <div class="subnote"><strong>Metrics Scope:</strong> <span id="metric-scope">-</span></div>
+          </div>
+        </section>
+
+        <section class="panel shape-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Latest Session Shape</h2>
+            <div class="panel-actions">
+              <span id="shape-badge" class="badge badge-muted">NO SHAPE</span>
+              <a id="paper-session-shape-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Shape JSON</a>
+            </div>
+          </div>
+          <div class="hero-pnl-card metric-card">
+            <span class="label">Session Path</span>
+            <span id="shape-sparkline" class="hero-secondary mono">-</span>
+            <span id="shape-label" class="subnote">-</span>
+          </div>
+          <div class="metrics-grid">
+            <div class="stat"><span class="label">Session Start</span><span id="shape-session-start" class="value mono">-</span></div>
+            <div class="stat"><span class="label">First Positive</span><span id="shape-first-positive" class="value mono">-</span></div>
+            <div class="stat"><span class="label">First Negative</span><span id="shape-first-negative" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Intraday High</span><span id="shape-high-pnl" class="value mono">-</span></div>
+            <div class="stat"><span class="label">High Time</span><span id="shape-high-time" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Intraday Low</span><span id="shape-low-pnl" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Low Time</span><span id="shape-low-time" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Current / Latest P&amp;L</span><span id="shape-current-pnl" class="value mono">-</span></div>
+            <div class="stat"><span class="label">End Realized P&amp;L</span><span id="shape-end-realized" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Max Intraday Drawdown</span><span id="shape-max-dd" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Drawdown Time</span><span id="shape-max-dd-time" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Close Location</span><span id="shape-close-location" class="value">-</span></div>
+            <div class="stat"><span class="label">Final Flatten</span><span id="shape-final-flatten" class="value mono">-</span></div>
+          </div>
+          <div class="provenance-grid">
+            <div class="subnote"><strong>Scope:</strong> <span id="shape-scope">-</span></div>
+            <div class="subnote"><strong>Path:</strong> <span id="shape-path-source">-</span></div>
+            <div class="subnote"><strong>Current:</strong> <span id="shape-current-source">-</span></div>
+            <div class="subnote"><strong>Granularity:</strong> <span id="shape-granularity-note">-</span></div>
+          </div>
+        </section>
+
+        <section class="panel branch-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Branch Performance</h2>
+            <div class="panel-actions">
+              <span id="branch-panel-scope" class="badge badge-accent">APPROVED SOURCES</span>
+              <a id="paper-branch-session-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Session Branch JSON</a>
+            </div>
+          </div>
+          <div class="performance-card-grid branch-phase-grid">
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Top Contributor</span>
+              <span id="branch-top-contributor" class="hero-secondary mono">-</span>
+              <span id="branch-top-contributor-note" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Top Detractor</span>
+              <span id="branch-top-detractor" class="hero-secondary mono">-</span>
+              <span id="branch-top-detractor-note" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Early Run-Up</span>
+              <span id="branch-early-run-up" class="hero-secondary mono">-</span>
+              <span id="branch-early-run-up-note" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Early Drawdown</span>
+              <span id="branch-early-drawdown" class="hero-secondary mono">-</span>
+              <span id="branch-early-drawdown-note" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Late Recovery</span>
+              <span id="branch-late-recovery" class="hero-secondary mono">-</span>
+              <span id="branch-late-recovery-note" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Late Fade</span>
+              <span id="branch-late-fade" class="hero-secondary mono">-</span>
+              <span id="branch-late-fade-note" class="subnote">-</span>
+            </div>
+          </div>
+          <div class="table-card">
+            <div class="table-header-row">
+              <h3>Latest Session Branch Contribution</h3>
+              <input id="branch-session-filter" class="table-filter" type="search" placeholder="Filter latest-session branches" />
+            </div>
+            <div class="subnote" id="branch-performance-note">-</div>
+            <div class="table-wrap"><table id="branch-performance-table"></table></div>
+            <div class="provenance-grid">
+              <div class="subnote"><strong>Scope:</strong> <span id="branch-session-scope">-</span></div>
+              <div class="subnote"><strong>Realized:</strong> <span id="branch-session-realized-source">-</span></div>
+              <div class="subnote"><strong>Timing:</strong> <span id="branch-session-timing-source">-</span></div>
+              <div class="subnote"><strong>Granularity:</strong> <span id="branch-session-granularity-note">-</span></div>
+            </div>
+          </div>
+          <div class="table-card">
+            <div class="table-header-row">
+              <h3>Recent Multi-Session Branch Rollup</h3>
+              <input id="branch-history-filter" class="table-filter" type="search" placeholder="Filter branch history" />
+            </div>
+            <div class="subnote" id="branch-history-note">-</div>
+            <div class="table-wrap"><table id="branch-history-table"></table></div>
+          </div>
+        </section>
+
+        <section class="panel history-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Recent Paper Session History</h2>
+            <div class="panel-actions">
+              <span id="history-scope-badge" class="badge badge-muted">NO HISTORY</span>
+              <a id="paper-history-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">History JSON</a>
+              <a id="history-latest-summary-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Summary</a>
+              <a id="history-latest-blotter-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Blotter</a>
+            </div>
+          </div>
+          <div class="performance-card-grid">
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Latest vs Prior</span>
+              <span id="history-vs-prior" class="hero-pnl mono">-</span>
+              <span id="history-vs-prior-scope" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Latest vs Recent Avg</span>
+              <span id="history-vs-average" class="hero-pnl mono">-</span>
+              <span id="history-vs-average-scope" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Recent Trend</span>
+              <span id="history-trend" class="hero-secondary mono">-</span>
+              <span id="history-streak" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Recent Win Rate</span>
+              <span id="history-win-rate" class="hero-secondary mono">-</span>
+              <span id="history-win-rate-scope" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Avg Realized / Session</span>
+              <span id="history-average-realized" class="hero-secondary mono">-</span>
+              <span id="history-average-realized-scope" class="subnote">-</span>
+            </div>
+            <div class="hero-pnl-card metric-card">
+              <span class="label">Avg Trades / Session</span>
+              <span id="history-average-trades" class="hero-secondary mono">-</span>
+              <span id="history-average-trades-scope" class="subnote">-</span>
+            </div>
+          </div>
+          <div class="metrics-grid">
+            <div class="stat"><span class="label">Best Recent Session</span><span id="history-best-session" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Worst Recent Session</span><span id="history-worst-session" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Median Realized</span><span id="history-median-session" class="value mono">-</span></div>
+            <div class="stat"><span class="label">P/L Range</span><span id="history-range-session" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Dispersion</span><span id="history-dispersion" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Positive / Negative</span><span id="history-positive-negative" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Worst Drawdown</span><span id="history-worst-drawdown" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Distance From HWM</span><span id="history-distance-hwm" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Negative Session Run</span><span id="history-negative-run" class="value mono">-</span></div>
+          </div>
+          <div class="provenance-grid">
+            <div class="subnote"><strong>Distribution:</strong> <span id="history-distribution-scope">-</span></div>
+            <div class="subnote"><strong>Dispersion:</strong> <span id="history-dispersion-note">-</span></div>
+            <div class="subnote"><strong>Drawdown:</strong> <span id="history-drawdown-scope">-</span></div>
+            <div class="subnote"><strong>Sample:</strong> <span id="history-sample-note">-</span></div>
+          </div>
+          <div class="table-card">
+            <div class="table-header-row">
+              <h3>Recent Sessions</h3>
+              <input id="session-history-filter" class="table-filter" type="search" placeholder="Filter sessions" />
+            </div>
+            <div class="subnote" id="history-note">-</div>
+            <div class="table-wrap"><table id="session-history-table"></table></div>
+          </div>
+        </section>
+
+        <section class="panel timeline-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Latest Session Event Timeline</h2>
+            <div class="panel-actions">
+              <span id="timeline-scope-badge" class="badge badge-muted">NO TIMELINE</span>
+              <a id="paper-session-timeline-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Timeline JSON</a>
+            </div>
+          </div>
+          <div class="provenance-grid">
+            <div class="subnote"><strong>Scope:</strong> <span id="timeline-scope">-</span></div>
+            <div class="subnote"><strong>Shape:</strong> <span id="timeline-shape-source">-</span></div>
+            <div class="subnote"><strong>Branch:</strong> <span id="timeline-branch-source">-</span></div>
+            <div class="subnote"><strong>Operator:</strong> <span id="timeline-operator-source">-</span></div>
+          </div>
+          <div class="subnote" id="timeline-granularity-note">-</div>
+          <ul id="session-event-timeline" class="timeline-list"></ul>
+        </section>
+
+        <section class="panel recent-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Recent Paper Trades</h2>
+            <span class="badge badge-muted">LATEST PAPER SESSION</span>
+          </div>
+          <div class="table-card">
+            <div class="table-header-row">
+              <h3>Recent Closed / Open Trade Rows</h3>
+              <input id="recent-trades-filter" class="table-filter" type="search" placeholder="Filter recent trades" />
+            </div>
+            <div class="subnote" id="recent-trades-note">-</div>
+            <div class="table-wrap"><table id="recent-trades-table"></table></div>
+          </div>
+        </section>
+
+        <section class="panel controls-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Runtime Controls</h2>
+            <div class="panel-actions">
+              <label class="inline-control">
+                <span>Auto Refresh</span>
+                <select id="refresh-interval">
+                  <option value="0">Off</option>
+                  <option value="5">5s</option>
+                  <option value="10">10s</option>
+                  <option value="15" selected>15s</option>
+                  <option value="30">30s</option>
+                  <option value="60">60s</option>
+                </select>
+              </label>
+              <button class="action ghost" data-action="refresh-status">Refresh</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <div class="group-label">Runtime</div>
+            <div class="button-grid">
+              <button class="action" data-action="start-shadow">Start Shadow</button>
+              <button class="action stop" data-action="stop-shadow">Stop Shadow</button>
+              <button class="action accent" data-action="start-paper">Start Paper Soak</button>
+              <button class="action stop" data-action="stop-paper">Stop Paper Soak</button>
+              <button class="action" data-action="generate-daily-summary">Shadow Summary</button>
+              <button class="action accent" data-action="generate-paper-summary">Paper Summary</button>
+              <button class="action" data-action="auth-gate-check">Auth Gate Check</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <div class="group-label">Paper Safe Controls</div>
+            <div class="button-grid manual">
+              <button id="manual-halt-entries" data-action="paper-halt-entries" disabled>Halt Entries</button>
+              <button id="manual-resume-entries" data-action="paper-resume-entries" disabled>Resume Entries</button>
+              <button id="manual-force-reconcile" data-action="paper-force-reconcile" disabled>Force Reconcile</button>
+              <button id="manual-clear-fault" data-action="paper-clear-fault" disabled>Acknowledge / Clear Fault</button>
+              <button id="manual-clear-risk-halts" data-action="paper-clear-risk-halts" disabled>Clear Risk Halts</button>
+              <button id="manual-stop-after-cycle" data-action="paper-stop-after-cycle" disabled>Stop After Current Cycle</button>
+              <button id="manual-flatten" class="danger-action" data-action="paper-flatten-and-halt" disabled>Flatten And Halt</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <div class="group-label">Disabled / Not Wired</div>
+            <div class="button-grid manual disabled-grid">
+              <button id="manual-buy" disabled title="Manual paper order entry is not wired yet.">Buy</button>
+              <button id="manual-sell" disabled title="Manual paper order entry is not wired yet.">Sell</button>
+              <button id="manual-kill-switch" disabled title="Live routing is disabled and a paper kill-switch path is not yet separated.">Kill Switch</button>
+            </div>
+            <div id="manual-notes" class="subnote"></div>
+          </div>
+        </section>
+
+        <section class="panel operator-state-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Paper Mode Status / Readiness</h2>
+            <span class="badge badge-accent">PAPER ONLY</span>
+          </div>
+          <div class="operator-grid">
+            <div class="stat"><span class="label">Paper Runtime</span><span id="paper-ready-runtime" class="value">-</span></div>
+            <div class="stat"><span class="label">Entries</span><span id="paper-ready-entries" class="value">-</span></div>
+            <div class="stat"><span class="label">Admitted Lanes</span><span id="paper-ready-approved-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Instruments</span><span id="paper-ready-instrument-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Latest Fill</span><span id="paper-ready-last-fill" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Latest Decision</span><span id="paper-ready-last-decision" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Exposure</span><span id="paper-ready-exposure" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Session State</span><span id="paper-ready-flat-state" class="value">-</span></div>
+            <div class="stat"><span class="label">Desk Risk</span><span id="paper-ready-desk-risk-state" class="value">-</span></div>
+            <div class="stat"><span class="label">Session Realized</span><span id="paper-ready-session-realized" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Session Unrealized</span><span id="paper-ready-session-unrealized" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Session Total</span><span id="paper-ready-session-total" class="value mono">-</span></div>
+            <div class="stat wide"><span class="label">Desk Risk Thresholds</span><span id="paper-ready-desk-thresholds" class="value mono">-</span></div>
+            <div class="stat wide"><span class="label">Desk Clear Action</span><span id="paper-ready-desk-unblock" class="value mono">-</span></div>
+            <div class="stat wide"><span class="label">Last Control</span><span id="paper-ready-last-control" class="value mono">-</span></div>
+            <div class="stat wide"><span class="label">Halt Reason</span><span id="paper-ready-halt-reason" class="value mono">-</span></div>
+            <div class="stat wide"><span class="label">Desk Risk Reason</span><span id="paper-ready-desk-risk-reason" class="value mono">-</span></div>
+            <div class="stat wide"><span class="label">Lane Summary</span><span id="paper-ready-approved-label" class="value mono">-</span></div>
+          </div>
+          <div class="checklist-card compact-checklist-card readiness-scope-card">
+            <div class="table-header-row">
+              <h3>Admitted Lane Scope</h3>
+              <span id="paper-ready-instrument" class="subnote mono">-</span>
+            </div>
+            <ul id="paper-ready-admitted-lane-list" class="lane-scope-list compact-lane-list"></ul>
+          </div>
+          <div class="checklist-card">
+            <div class="table-header-row">
+              <h3>Lane Risk Status</h3>
+            </div>
+            <ul id="paper-ready-lane-risk-list" class="trail-list compact checklist-list"></ul>
+          </div>
+          <div class="table-card">
+            <div class="table-header-row">
+              <h3>Live Paper Lane Eligibility</h3>
+              <span id="paper-ready-lane-eligibility-note" class="subnote mono">-</span>
+            </div>
+            <div class="table-wrap"><table id="paper-ready-lane-eligibility-table"></table></div>
+          </div>
+          <div class="checklist-card paper-fill-alerts-card">
+            <div class="table-header-row">
+              <h3>Paper Fill Alerts</h3>
+              <div class="panel-actions">
+                <button id="paper-fill-notification-request" type="button" class="link-button subtle-link">Request Permission</button>
+                <button id="paper-fill-desktop-toggle" type="button" class="link-button subtle-link">Desktop Alerts Off</button>
+                <button id="paper-fill-sound-toggle" type="button" class="link-button subtle-link">Sound On</button>
+              </div>
+            </div>
+            <div class="operator-grid paper-fill-alerts-grid">
+              <div class="stat">
+                <span class="label">Desktop Alerts</span>
+                <span id="paper-fill-desktop-status" class="value">-</span>
+              </div>
+              <div class="stat">
+                <span class="label">Sound</span>
+                <span id="paper-fill-sound-status" class="value">-</span>
+              </div>
+              <div class="stat">
+                <span class="label">Notification Permission</span>
+                <span id="paper-fill-notification-permission" class="value mono">-</span>
+              </div>
+              <div class="stat wide">
+                <span class="label">Last Trade Alert</span>
+                <span id="paper-fill-last-alert-status" class="value mono">-</span>
+              </div>
+            </div>
+            <div id="paper-fill-alert-note" class="subnote">-</div>
+          </div>
+          <details class="artifact-drawer">
+            <summary>Paper Evidence Links</summary>
+            <div class="link-row">
+              <a id="paper-ready-status-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Operator Status</a>
+              <a id="paper-ready-approved-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Approved Models JSON</a>
+              <a id="paper-ready-desk-risk-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Desk Risk JSON</a>
+              <a id="paper-ready-lane-risk-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Lane Risk JSON</a>
+              <a id="paper-ready-risk-events-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Risk Events JSONL</a>
+              <a id="paper-ready-config-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Config In Force</a>
+              <a id="paper-ready-decisions-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Decisions JSONL</a>
+              <a id="paper-ready-intents-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Intents JSON</a>
+              <a id="paper-ready-fills-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Fills JSON</a>
+              <a id="paper-ready-blotter-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Blotter JSON</a>
+              <a id="paper-ready-position-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Position JSON</a>
+              <a id="paper-ready-blocks-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Rule Blocks JSONL</a>
+              <a id="paper-ready-reconciliation-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Reconciliation JSONL</a>
+              <a id="paper-ready-alerts-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Alerts JSONL</a>
+            </div>
+          </details>
+        </section>
+
+        <section id="paper-entry-eligibility" class="panel entry-eligibility-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Paper Entry Eligibility</h2>
+            <div class="panel-actions">
+              <span id="paper-entry-eligibility-badge" class="badge badge-muted">UNKNOWN</span>
+            </div>
+          </div>
+          <div class="operator-grid entry-eligibility-grid">
+            <div class="stat wide">
+              <span class="label">Current Verdict</span>
+              <span id="paper-entry-eligibility-verdict" class="value">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">What Clears It</span>
+              <span id="paper-entry-eligibility-action" class="value">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Approved Models Eligible Now</span>
+              <span id="paper-entry-eligibility-fireability" class="value">-</span>
+            </div>
+            <div class="stat wide">
+              <span class="label">State Note</span>
+              <span id="paper-entry-eligibility-note" class="value">-</span>
+            </div>
+          </div>
+          <ul id="paper-entry-eligibility-reasons" class="trail-list compact checklist-list"></ul>
+          <div class="subnote"><strong>Source:</strong> <span id="paper-entry-eligibility-provenance">-</span></div>
+        </section>
+
+        <section class="panel soak-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Paper Soak Session Summary</h2>
+            <div class="panel-actions">
+              <span id="paper-soak-end-verdict" class="badge badge-muted">UNKNOWN</span>
+              <button id="capture-paper-soak-evidence" class="action accent" data-action="capture-paper-soak-evidence">Capture Soak Evidence</button>
+            </div>
+          </div>
+          <div class="metrics-grid paper-soak-summary-grid">
+            <div class="stat"><span class="label">Session Start</span><span id="paper-soak-start" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Runtime Duration</span><span id="paper-soak-duration" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Seen</span><span id="paper-soak-seen" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Signaled</span><span id="paper-soak-signaled" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Blocked</span><span id="paper-soak-blocked" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Intents</span><span id="paper-soak-intents" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Fills</span><span id="paper-soak-fills" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Open Now</span><span id="paper-soak-open-now" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Action / Blocking Exceptions</span><span id="paper-soak-severe" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Current Verdict</span><span id="paper-soak-current-verdict" class="value">-</span></div>
+            <div class="stat"><span class="label">Paper Summary</span><span id="paper-soak-summary-generated" class="value">-</span></div>
+            <div class="stat"><span class="label">Latest Evidence</span><span id="paper-soak-latest-evidence" class="value mono">-</span></div>
+          </div>
+          <div id="paper-soak-note" class="subnote model-scope-note">-</div>
+          <details class="artifact-drawer">
+            <summary>Session Evidence Links</summary>
+            <div class="link-row">
+              <a id="paper-soak-session-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Session Snapshot</a>
+              <a id="paper-soak-approved-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Approved Models JSON</a>
+              <a id="paper-soak-exceptions-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Exceptions JSON</a>
+              <a id="paper-soak-latest-json-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Evidence JSON</a>
+              <a id="paper-soak-latest-md-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Evidence Markdown</a>
+            </div>
+          </details>
+        </section>
+
+        <section class="panel run-start-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Current Run Start Context</h2>
+            <div class="panel-actions">
+              <span id="pre-session-state" class="badge badge-muted">UNKNOWN</span>
+              <span id="run-start-state" class="badge badge-muted">NO RUN START</span>
+              <button id="complete-pre-session-review" class="action accent" data-action="complete-pre-session-review">Complete Pre-Session Review</button>
+            </div>
+          </div>
+          <div class="closeout-grid run-start-summary-grid">
+            <div class="stat"><span class="label">Desk Cleanliness</span><span id="pre-desk-clean" class="value">-</span></div>
+            <div class="stat"><span class="label">Runtime Health</span><span id="pre-runtime-health" class="value">-</span></div>
+            <div class="stat"><span class="label">Run Readiness</span><span id="pre-run-readiness" class="value">-</span></div>
+            <div class="stat"><span class="label">Inherited Risk</span><span id="pre-inherited-risk" class="value">-</span></div>
+            <div class="stat"><span class="label">Review Required</span><span id="pre-review-required" class="value">-</span></div>
+            <div class="stat"><span class="label">Review Completed</span><span id="pre-review-completed" class="value">-</span></div>
+            <div class="stat wide close-guidance-card">
+              <span class="label">Pre-Session Guidance</span>
+              <span id="pre-session-guidance" class="value">-</span>
+            </div>
+          </div>
+          <div class="checklist-card compact-checklist-card">
+            <div id="run-start-meta" class="runtime-meta"></div>
+            <details class="artifact-drawer">
+              <summary>Run Start Links</summary>
+              <div class="link-row">
+                <a id="run-start-current-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Current Run JSON</a>
+                <a id="run-start-history-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Run Start History</a>
+                <a id="run-start-blocks-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Blocked Starts</a>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section class="panel activity-proof-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Paper Activity Proof</h2>
+            <div class="panel-actions">
+              <span id="paper-activity-proof-verdict" class="badge badge-muted">INSUFFICIENT EVIDENCE</span>
+            </div>
+          </div>
+          <div class="metrics-grid paper-activity-summary-grid">
+            <div class="stat"><span class="label">Polling / Runtime Active</span><span id="paper-activity-runtime" class="value">-</span></div>
+            <div class="stat"><span class="label">Bars Processed</span><span id="paper-activity-bars" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Approved Models Seen</span><span id="paper-activity-seen" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Signals</span><span id="paper-activity-signals" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Blocked</span><span id="paper-activity-blocked" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Decisions</span><span id="paper-activity-decisions" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Intents</span><span id="paper-activity-intents" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Fills</span><span id="paper-activity-fills" class="value mono">-</span></div>
+            <div class="stat wide"><span class="label">Latest Approved-Model Event</span><span id="paper-activity-latest-event" class="value mono">-</span></div>
+          </div>
+          <div id="paper-activity-stale-watch" class="closeout-warning hidden"></div>
+          <div class="subnote model-scope-note"><strong>Activity Proof:</strong> <span id="paper-activity-note">-</span></div>
+          <div class="table-card">
+            <div class="table-header-row">
+              <h3>Approved Model Activity This Session</h3>
+            </div>
+            <div class="table-wrap"><table id="paper-activity-proof-table"></table></div>
+          </div>
+          <div class="subnote"><strong>Source:</strong> <span id="paper-activity-proof-provenance">-</span></div>
+        </section>
+
+        <section class="panel approved-models-panel lane-detail-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Lane Operator Detail / Evidence</h2>
+            <div class="panel-actions">
+              <span id="approved-models-badge" class="badge badge-muted">ADMITTED LANE DETAIL</span>
+            </div>
+          </div>
+          <div class="metrics-grid">
+            <div class="stat"><span class="label">Lane Scope</span><span id="approved-models-scope" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Admitted</span><span id="approved-models-enabled" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Long Enabled</span><span id="approved-models-long" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Short Enabled</span><span id="approved-models-short" class="value mono">-</span></div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Out of Scope:</strong> <span id="approved-models-out-of-scope-note">-</span></div>
+          <div class="subnote model-scope-note"><strong>Lane Truth:</strong> Distinct instrument + family lanes remain separate when a family repeats across instruments.</div>
+          <div class="subnote model-fireability-note">
+            <strong>Can any approved model fire right now?</strong>
+            <span id="approved-models-fireability-state">-</span>
+            <a id="approved-models-fireability-jump" class="link-button subtle-link hidden" href="#paper-entry-eligibility">Review eligibility</a>
+            <span id="approved-models-fireability-detail">-</span>
+          </div>
+          <div class="table-card">
+            <div class="table-header-row">
+              <h3>Paper Strategies</h3>
+            </div>
+            <div class="table-wrap"><table id="approved-models-table"></table></div>
+          </div>
+          <div class="table-card temporary-paper-strategies-card">
+            <div class="table-header-row">
+              <h3>Temporary Paper Strategies</h3>
+              <a id="temporary-paper-strategies-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Snapshot JSON</a>
+            </div>
+            <div class="metrics-grid lane-activity-summary-grid">
+              <div class="stat"><span class="label">Visible</span><span id="temporary-paper-strategies-count" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Enabled</span><span id="temporary-paper-strategies-enabled" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Disabled</span><span id="temporary-paper-strategies-disabled" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Signals</span><span id="temporary-paper-strategies-signals" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Events</span><span id="temporary-paper-strategies-events" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Kill Switch</span><span id="temporary-paper-strategies-kill-switch" class="value mono">-</span></div>
+            </div>
+            <div class="subnote model-scope-note"><strong>Guardrails:</strong> <span id="temporary-paper-strategies-note">-</span></div>
+            <div class="subnote model-scope-note"><strong>Metrics Bucket:</strong> <span id="temporary-paper-strategies-metrics-bucket">-</span></div>
+            <div class="table-wrap"><table id="temporary-paper-strategies-table"></table></div>
+          </div>
+          <div class="table-card temporary-paper-strategies-card">
+            <div class="table-header-row">
+              <h3>Tracked Paper Strategies</h3>
+              <div class="panel-actions">
+                <a id="tracked-paper-strategies-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Snapshot JSON</a>
+                <a id="tracked-paper-strategy-details-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Detail JSON</a>
+              </div>
+            </div>
+            <div class="metrics-grid lane-activity-summary-grid">
+              <div class="stat"><span class="label">Tracked</span><span id="tracked-paper-strategies-count" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Enabled</span><span id="tracked-paper-strategies-enabled" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Active</span><span id="tracked-paper-strategies-active" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Strategy</span><span id="tracked-paper-strategy-label" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Status</span><span id="tracked-paper-strategy-status" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Session</span><span id="tracked-paper-strategy-session" class="value mono">-</span></div>
+            </div>
+            <div class="subnote model-scope-note"><strong>Note:</strong> <span id="tracked-paper-strategies-note">-</span></div>
+            <div class="table-wrap"><table id="tracked-paper-strategies-table"></table></div>
+            <div class="metrics-grid approved-model-detail-grid">
+              <div class="stat"><span class="label">Benchmark</span><span id="tracked-paper-detail-name" class="value">-</span></div>
+              <div class="stat"><span class="label">Env</span><span id="tracked-paper-detail-env" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Runtime Attached</span><span id="tracked-paper-detail-runtime-attached" class="value">-</span></div>
+              <div class="stat"><span class="label">Heartbeat Age</span><span id="tracked-paper-detail-heartbeat-age" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Data Stale</span><span id="tracked-paper-detail-data-stale" class="value">-</span></div>
+              <div class="stat"><span class="label">Entries</span><span id="tracked-paper-detail-entries" class="value">-</span></div>
+              <div class="stat"><span class="label">Operator Halt</span><span id="tracked-paper-detail-halt" class="value">-</span></div>
+              <div class="stat"><span class="label">Warmup</span><span id="tracked-paper-detail-warmup" class="value">-</span></div>
+              <div class="stat"><span class="label">Position</span><span id="tracked-paper-detail-position" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Qty</span><span id="tracked-paper-detail-qty" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Family</span><span id="tracked-paper-detail-family" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Bars In Trade</span><span id="tracked-paper-detail-bars-in-trade" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Latest Bar</span><span id="tracked-paper-detail-bar-ts" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Realized P/L</span><span id="tracked-paper-detail-realized" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Open P/L</span><span id="tracked-paper-detail-open-pnl" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Win Rate</span><span id="tracked-paper-detail-win-rate" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Profit Factor</span><span id="tracked-paper-detail-profit-factor" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Max Drawdown</span><span id="tracked-paper-detail-max-drawdown" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Day P/L</span><span id="tracked-paper-detail-day-pnl" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Cumulative P/L</span><span id="tracked-paper-detail-cumulative-pnl" class="value mono">-</span></div>
+              <div class="stat wide"><span class="label">Latest Signal</span><span id="tracked-paper-detail-signal" class="value mono">-</span></div>
+              <div class="stat wide"><span class="label">Latest Intent</span><span id="tracked-paper-detail-intent" class="value mono">-</span></div>
+              <div class="stat wide"><span class="label">Latest Fill</span><span id="tracked-paper-detail-fill" class="value mono">-</span></div>
+              <div class="stat wide"><span class="label">Latest Exit</span><span id="tracked-paper-detail-exit" class="value mono">-</span></div>
+              <div class="stat wide"><span class="label">Stop / Risk</span><span id="tracked-paper-detail-risk" class="value mono">-</span></div>
+              <div class="stat wide"><span class="label">Status Reason</span><span id="tracked-paper-detail-status-reason" class="value">-</span></div>
+            </div>
+            <div class="manual-action-cluster">
+              <button id="tracked-paper-start" class="action accent" data-action="start-atp-companion-paper">Start ATP Paper</button>
+              <button id="tracked-paper-stop" class="action stop" data-action="stop-atp-companion-paper">Stop ATP Paper</button>
+              <button id="tracked-paper-halt" class="action stop" data-action="atp-companion-paper-halt-entries">Halt Entries</button>
+              <button id="tracked-paper-resume" class="action" data-action="atp-companion-paper-resume-entries">Resume Entries</button>
+              <button id="tracked-paper-stop-after-cycle" class="action" data-action="atp-companion-paper-stop-after-cycle">Stop After Cycle</button>
+              <button id="tracked-paper-flatten" class="danger-action" data-action="atp-companion-paper-flatten-and-halt">Flatten And Halt</button>
+            </div>
+            <div class="subnote model-scope-note"><strong>Audit Drilldown:</strong> <span id="tracked-paper-detail-audit-summary">-</span></div>
+          </div>
+          <div class="table-card lane-activity-card">
+            <div class="table-header-row">
+              <h3>Paper Lane Activity / Evidence</h3>
+              <a id="paper-lane-activity-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Lane Activity JSON</a>
+            </div>
+            <div class="metrics-grid lane-activity-summary-grid">
+              <div class="stat"><span class="label">Any Activity Today</span><span id="paper-lane-activity-any" class="value">-</span></div>
+              <div class="stat"><span class="label">Idle Only</span><span id="paper-lane-activity-idle" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Blocked</span><span id="paper-lane-activity-blocked" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Filled</span><span id="paper-lane-activity-filled" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Open Now</span><span id="paper-lane-activity-open" class="value mono">-</span></div>
+            </div>
+            <div class="subnote model-scope-note"><strong>Desk Summary:</strong> <span id="paper-lane-activity-summary">-</span></div>
+            <div class="table-wrap"><table id="paper-lane-activity-table"></table></div>
+            <div class="subnote"><strong>Source:</strong> <span id="paper-lane-activity-provenance">-</span></div>
+          </div>
+          <div class="approved-models-detail-layout">
+            <div class="checklist-card">
+              <div class="table-header-row">
+                <h3>Selected Lane Drilldown</h3>
+                <div class="panel-actions">
+                  <span id="approved-model-detail-state" class="badge badge-muted">UNKNOWN</span>
+                  <select id="approved-model-select" aria-label="Select approved paper lane"></select>
+                </div>
+              </div>
+              <div class="metrics-grid approved-model-detail-grid">
+                <div class="stat"><span class="label">Lane</span><span id="approved-model-detail-branch" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Side</span><span id="approved-model-detail-side" class="value">-</span></div>
+                <div class="stat"><span class="label">Enabled</span><span id="approved-model-detail-enabled" class="value">-</span></div>
+                <div class="stat"><span class="label">Open Exposure</span><span id="approved-model-detail-open" class="value">-</span></div>
+                <div class="stat"><span class="label">Open Qty / Avg</span><span id="approved-model-detail-open-meta" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Persistence / Restart</span><span id="approved-model-detail-persistence" class="value">-</span></div>
+                <div class="stat"><span class="label">Latest Signal</span><span id="approved-model-detail-signal" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Latest Block</span><span id="approved-model-detail-block" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Latest Decision</span><span id="approved-model-detail-decision" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Latest Intent</span><span id="approved-model-detail-intent" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Latest Fill</span><span id="approved-model-detail-fill" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Unresolved Intents</span><span id="approved-model-detail-unresolved" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Realized P/L</span><span id="approved-model-detail-realized" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Unrealized P/L</span><span id="approved-model-detail-unrealized" class="value mono">-</span></div>
+                <div class="stat"><span class="label">Reconciliation</span><span id="approved-model-detail-reconciliation" class="value">-</span></div>
+                <div class="stat wide"><span class="label">Chain Note</span><span id="approved-model-detail-note" class="value">-</span></div>
+              </div>
+              <details class="artifact-drawer">
+                <summary>Selected Lane Evidence</summary>
+                <div class="link-row">
+                  <a id="approved-model-detail-decisions-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Decisions JSONL</a>
+                  <a id="approved-model-detail-blocks-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Rule Blocks JSONL</a>
+                  <a id="approved-model-detail-intents-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Intents JSON</a>
+                  <a id="approved-model-detail-fills-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Fills JSON</a>
+                  <a id="approved-model-detail-blotter-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Blotter JSON</a>
+                  <a id="approved-model-detail-position-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Position JSON</a>
+                  <a id="approved-model-detail-status-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Operator Status</a>
+                  <a id="approved-model-detail-reconciliation-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Reconciliation JSONL</a>
+                </div>
+              </details>
+            </div>
+            <div class="checklist-card">
+              <div class="table-header-row">
+                <h3>Per-Lane Event Trail</h3>
+                <span id="approved-model-trail-state" class="badge badge-muted">NO EVENTS</span>
+              </div>
+              <ul id="approved-model-event-trail" class="trail-list approved-model-event-trail"></ul>
+            </div>
+          </div>
+          <div class="provenance-grid">
+            <div class="subnote"><strong>Eligibility:</strong> <span id="approved-models-eligibility-source">-</span></div>
+            <div class="subnote"><strong>Signals:</strong> <span id="approved-models-signal-source">-</span></div>
+            <div class="subnote"><strong>Intents:</strong> <span id="approved-models-intent-source">-</span></div>
+            <div class="subnote"><strong>Fills:</strong> <span id="approved-models-fill-source">-</span></div>
+            <div class="subnote"><strong>P/L:</strong> <span id="approved-models-pnl-source">-</span></div>
+          </div>
+          <details class="artifact-drawer">
+            <summary>Approved Model Artifact Links</summary>
+            <div class="link-row">
+              <a id="paper-approved-models-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Approved Models JSON</a>
+              <a id="paper-approved-models-decisions-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Decisions JSONL</a>
+              <a id="paper-approved-models-intents-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Intents JSON</a>
+              <a id="paper-approved-models-fills-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Fills JSON</a>
+            </div>
+          </details>
+        </section>
+
+        <section class="panel review-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Session Close Checklist</h2>
+            <div class="panel-actions">
+              <span id="paper-closeout-state" class="badge badge-muted">OPEN</span>
+              <button id="paper-signoff" class="action accent" data-action="sign-off-paper-session">Mark Session Reviewed</button>
+            </div>
+          </div>
+          <div class="closeout-grid">
+            <div class="stat"><span class="label">Paper Runtime</span><span id="close-runtime-state" class="value">-</span></div>
+            <div class="stat"><span class="label">Position</span><span id="close-position-state" class="value">-</span></div>
+            <div class="stat"><span class="label">Reconciliation</span><span id="close-recon-state" class="value">-</span></div>
+            <div class="stat"><span class="label">Unresolved</span><span id="close-unresolved-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Risk Ack</span><span id="close-risk-ack" class="value">-</span></div>
+            <div class="stat"><span class="label">Summary</span><span id="close-summary-state" class="value">-</span></div>
+            <div class="stat"><span class="label">Blotter</span><span id="close-blotter-state" class="value">-</span></div>
+            <div class="stat"><span class="label">Fault</span><span id="close-fault-state" class="value">-</span></div>
+            <div class="stat"><span class="label">Freshness</span><span id="close-freshness-state" class="value">-</span></div>
+            <div class="stat wide close-guidance-card">
+              <span class="label">Next Safe Action</span>
+              <span id="close-guidance" class="value">-</span>
+            </div>
+          </div>
+          <div id="closeout-warning" class="closeout-warning hidden"></div>
+          <div class="checklist-card">
+            <div class="table-header-row">
+              <h3>Operator Close Flow</h3>
+              <span id="close-signoff-meta" class="subnote mono">-</span>
+            </div>
+            <ul id="close-checklist" class="trail-list compact checklist-list"></ul>
+          </div>
+          <div class="table-card session-close-review-card">
+            <div class="table-header-row">
+              <h3>Multi-Lane Session Review</h3>
+              <div class="panel-actions">
+                <span id="paper-session-close-review-badge" class="badge badge-muted">UNKNOWN</span>
+                <a id="paper-session-close-review-json-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Review JSON</a>
+                <a id="paper-session-close-review-md-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Review Markdown</a>
+              </div>
+            </div>
+            <div class="metrics-grid session-close-review-summary-grid">
+              <div class="stat"><span class="label">Admitted</span><span id="paper-session-close-admitted" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Active</span><span id="paper-session-close-active" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Blocked</span><span id="paper-session-close-blocked" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Filled</span><span id="paper-session-close-filled" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Open</span><span id="paper-session-close-open" class="value mono">-</span></div>
+              <div class="stat wide"><span class="label">Attributable Realized</span><span id="paper-session-close-realized" class="value mono">-</span></div>
+              <div class="stat"><span class="label">Desk Review Confidence</span><span id="paper-session-close-confidence" class="value">-</span></div>
+              <div class="stat"><span class="label">Desk P/L Completeness</span><span id="paper-session-close-completeness" class="value">-</span></div>
+              <div class="stat wide"><span class="label">Review Required</span><span id="paper-session-close-review-required" class="value mono">-</span></div>
+            </div>
+            <div class="subnote model-scope-note"><strong>Reliable for P/L:</strong> <span id="paper-session-close-reliable">-</span></div>
+            <div class="subnote model-scope-note"><strong>Manual P/L Inspection:</strong> <span id="paper-session-close-manual">-</span></div>
+            <div class="subnote model-scope-note"><strong>Complete Evidence:</strong> <span id="paper-session-close-chain-complete">-</span></div>
+            <div class="subnote model-scope-note"><strong>Partial Evidence:</strong> <span id="paper-session-close-chain-partial">-</span></div>
+            <div class="subnote model-scope-note"><strong>Broken Evidence:</strong> <span id="paper-session-close-chain-broken">-</span></div>
+            <div class="subnote model-scope-note"><strong>Top Gap Reasons:</strong> <span id="paper-session-close-gap-top">-</span></div>
+            <div class="subnote model-scope-note"><strong>Close History:</strong> <span id="paper-session-close-history-verdict">-</span></div>
+            <div class="subnote model-scope-note"><strong>History Confidence:</strong> <span id="paper-session-close-history-confidence">-</span></div>
+            <div class="subnote model-scope-note"><strong>Repeat Issues:</strong> <span id="paper-session-close-history-repeats">-</span></div>
+            <div class="subnote model-scope-note"><strong>History Note:</strong> <span id="paper-session-close-history-note">-</span></div>
+            <div class="subnote model-scope-note"><strong>Source Paths:</strong> <span id="paper-session-close-source-paths">-</span></div>
+            <div class="table-wrap"><table id="paper-session-close-table"></table></div>
+            <div class="subnote"><strong>Notes:</strong> <span id="paper-session-close-notes">-</span></div>
+          </div>
+          <div class="checklist-card">
+            <div class="table-header-row">
+              <h3>Prior Session Carry-Forward</h3>
+              <span id="prior-session-state" class="badge badge-muted">NONE</span>
+            </div>
+            <div id="prior-session-meta" class="runtime-meta"></div>
+            <details class="artifact-drawer">
+              <summary>Prior Session Links</summary>
+              <div class="link-row">
+                <a id="prior-summary-json" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Prior JSON</a>
+                <a id="prior-summary-md" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Prior Markdown</a>
+                <a id="prior-summary-blotter" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Prior Blotter</a>
+              </div>
+            </details>
+          </div>
+          <div class="review-grid">
+            <div class="runtime-card">
+              <div class="runtime-card-header">
+                <h3>Shadow Summary</h3>
+                <span id="shadow-summary-state" class="badge badge-muted">NONE</span>
+              </div>
+              <div id="shadow-summary-meta" class="runtime-meta"></div>
+              <details class="artifact-drawer">
+                <summary>Summary Links</summary>
+                <div class="link-row">
+                  <a id="shadow-summary-json" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">JSON</a>
+                  <a id="shadow-summary-md" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Markdown</a>
+                  <a id="shadow-summary-blotter" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Blotter</a>
+                </div>
+              </details>
+            </div>
+            <div class="runtime-card paper">
+              <div class="runtime-card-header">
+                <h3>Paper Summary / Blotter</h3>
+                <span id="paper-summary-state" class="badge badge-muted">NONE</span>
+              </div>
+              <div id="paper-summary-meta" class="runtime-meta"></div>
+              <details class="artifact-drawer">
+                <summary>Summary Links</summary>
+                <div class="link-row">
+                  <a id="paper-summary-json" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">JSON</a>
+                  <a id="paper-summary-md" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Markdown</a>
+                  <a id="paper-summary-blotter" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Blotter</a>
+                </div>
+              </details>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel canary-table-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Temporary Paper / Non-Approved Audit</h2>
+            <div class="panel-actions">
+              <span id="non-approved-lanes-badge" class="badge badge-muted">NO NON-APPROVED LANES</span>
+              <a id="paper-non-approved-lanes-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Snapshot JSON</a>
+            </div>
+          </div>
+          <div class="metrics-grid lane-activity-summary-grid">
+            <div class="stat"><span class="label">Visible</span><span id="non-approved-lanes-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Canary</span><span id="non-approved-lanes-canary-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Enabled</span><span id="non-approved-lanes-enabled-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Disabled</span><span id="non-approved-lanes-disabled-count" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Kill Switch</span><span id="non-approved-lanes-kill-switch" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Signals</span><span id="non-approved-lanes-recent-signals" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Events</span><span id="non-approved-lanes-recent-events" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Complete</span><span id="non-approved-lanes-complete-count" class="value mono">-</span></div>
+          </div>
+          <div class="subnote model-scope-note"><strong>Scope:</strong> <span id="non-approved-lanes-note">-</span></div>
+          <div class="subnote model-scope-note"><strong>Operator State:</strong> <span id="non-approved-lanes-operator-state">-</span></div>
+          <div class="table-wrap"><table id="non-approved-lanes-table"></table></div>
+          <div class="provenance-grid">
+            <div class="subnote"><strong>Eligibility:</strong> <span id="non-approved-lanes-eligibility-source">-</span></div>
+            <div class="subnote"><strong>Signals:</strong> <span id="non-approved-lanes-signal-source">-</span></div>
+            <div class="subnote"><strong>Fills:</strong> <span id="non-approved-lanes-fill-source">-</span></div>
+            <div class="subnote"><strong>Experimental:</strong> <span id="non-approved-lanes-experimental-source">-</span></div>
+          </div>
+          <div class="link-row">
+            <a id="paper-non-approved-lanes-status-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Operator Status</a>
+            <a id="paper-non-approved-lanes-config-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Config In Force</a>
+            <a id="paper-non-approved-lanes-decisions-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Decisions JSONL</a>
+            <a id="paper-non-approved-lanes-intents-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Intents JSON</a>
+            <a id="paper-non-approved-lanes-fills-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Latest Fills JSON</a>
+            <a id="paper-non-approved-lanes-reconciliation-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Reconciliation JSONL</a>
+            <a id="paper-non-approved-lanes-experimental-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Experimental Snapshot</a>
+            <a id="paper-non-approved-lanes-experimental-summary-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Experimental Summary</a>
+          </div>
+        </section>
+
+        <section class="panel blotter-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Blotter / Fills / Intents</h2>
+            <span class="badge badge-muted">LATEST PAPER SESSION</span>
+          </div>
+          <div class="table-stack">
+            <div class="table-card">
+              <div class="table-header-row">
+                <h3>Paper Blotter</h3>
+                <input id="blotter-filter" class="table-filter" type="search" placeholder="Filter blotter" />
+              </div>
+              <div class="table-wrap"><table id="blotter-table"></table></div>
+            </div>
+            <div class="table-card">
+              <div class="table-header-row">
+                <h3>Latest Fills</h3>
+                <input id="fills-filter" class="table-filter" type="search" placeholder="Filter fills" />
+              </div>
+              <div class="table-wrap"><table id="fills-table"></table></div>
+            </div>
+            <div class="table-card">
+              <div class="table-header-row">
+                <h3>Latest Intents</h3>
+                <input id="intents-filter" class="table-filter" type="search" placeholder="Filter intents" />
+              </div>
+              <div class="table-wrap"><table id="intents-table"></table></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel secondary-panel">
+          <div class="panel-header">
+            <h2>Historical Playback Test</h2>
+            <div class="panel-actions">
+              <span id="historical-playback-availability" class="badge badge-muted">NO RUN</span>
+              <a id="historical-playback-snapshot-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Snapshot JSON</a>
+              <a id="historical-playback-manifest-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Manifest JSON</a>
+              <a id="historical-playback-summary-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Summary JSON</a>
+              <a id="historical-playback-trigger-json-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Trigger Report JSON</a>
+              <a id="historical-playback-trigger-md-link" class="link-button subtle-link disabled" href="#" target="_blank" rel="noopener noreferrer">Trigger Report MD</a>
+            </div>
+          </div>
+          <div class="metrics-grid">
+            <div class="stat"><span class="label">Latest Run Timestamp</span><span id="historical-playback-run-timestamp" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Run Stamp</span><span id="historical-playback-run-stamp" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Symbol(s)</span><span id="historical-playback-symbols" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Bars Processed</span><span id="historical-playback-bars" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Signals Seen</span><span id="historical-playback-signals" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Intents Created</span><span id="historical-playback-intents" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Fills Created</span><span id="historical-playback-fills" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Result Mix</span><span id="historical-playback-result-mix" class="value">-</span></div>
+          </div>
+          <div class="subnote" id="historical-playback-note">Historical playback results are shown separately from live/paper operator state.</div>
+          <div class="table-card">
+            <div class="table-header-row">
+              <h3>Replay Validation Summary</h3>
+              <input id="historical-playback-filter" class="table-filter" type="search" placeholder="Filter playback rows" />
+            </div>
+            <div class="table-wrap"><table id="historical-playback-table"></table></div>
+          </div>
+        </section>
+
+        <section class="panel market-debug-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Market Strip Diagnostics</h2>
+            <div class="panel-actions">
+              <span id="market-debug-build" class="badge badge-muted">BUILD -</span>
+              <button id="refresh-market-strip" class="action ghost" data-action="refresh-market-strip">Refresh Market Strip Now</button>
+              <a id="market-strip-snapshot-link" class="link-button subtle-link" href="#" target="_blank" rel="noopener noreferrer">Snapshot JSON</a>
+              <a id="market-strip-diagnostics-link-raw" class="link-button subtle-link" href="#" target="_blank" rel="noopener noreferrer">Diagnostics JSON</a>
+            </div>
+          </div>
+          <div class="market-debug-meta-grid">
+            <div class="stat"><span class="label">Server PID</span><span id="market-debug-pid" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Server Started</span><span id="market-debug-started" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Chosen URL</span><span id="market-debug-url" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Host / Port</span><span id="market-debug-hostport" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Snapshot Path</span><span id="market-debug-snapshot-path" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Diagnostics Path</span><span id="market-debug-diagnostics-path" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Snapshot Updated</span><span id="market-debug-updated" class="value mono">-</span></div>
+          </div>
+          <div class="table-card">
+            <table class="data-table compact-table">
+              <thead>
+                <tr>
+                  <th>Instrument</th>
+                  <th>Requested</th>
+                  <th>Matched</th>
+                  <th>Class</th>
+                  <th>Current</th>
+                  <th>Change</th>
+                  <th>%</th>
+                  <th>Bid</th>
+                  <th>Ask</th>
+                </tr>
+              </thead>
+              <tbody id="market-debug-table"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel pre-session-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Pre-Session Review / Continuity</h2>
+            <div class="panel-actions">
+              <a id="continuity-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Continuity JSON</a>
+            </div>
+          </div>
+          <div class="pre-session-card-grid">
+            <div class="checklist-card">
+              <div class="table-header-row">
+                <h3>Recent Blocked Paper Starts</h3>
+              </div>
+              <ul id="blocked-starts" class="trail-list compact checklist-list"></ul>
+            </div>
+            <div class="checklist-card continuity-card">
+              <div class="table-header-row">
+                <h3>Session Continuity Timeline</h3>
+                <span class="subnote">Prior close to current desk state</span>
+              </div>
+              <ul id="continuity-timeline" class="trail-list compact checklist-list"></ul>
+            </div>
+          </div>
+          <details class="artifact-drawer">
+            <summary>Continuity Links</summary>
+            <div class="link-row">
+              <a id="continuity-prior-json" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Prior JSON</a>
+              <a id="continuity-prior-blotter" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Prior Blotter</a>
+              <a id="continuity-carry-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Carry-Forward</a>
+              <a id="continuity-review-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Pre-Session Review</a>
+            </div>
+          </details>
+        </section>
+
+        <section class="panel trail-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Decision Trail / Alerts</h2>
+            <span id="trail-mode" class="badge badge-info">SHADOW</span>
+          </div>
+          <div class="trail-grid">
+            <div class="trail-card">
+              <h3>Branch Decisions</h3>
+              <ul id="branch-trail" class="trail-list"></ul>
+            </div>
+            <div class="trail-card">
+              <h3>Rule Blocks</h3>
+              <ul id="rule-trail" class="trail-list"></ul>
+            </div>
+            <div class="trail-card warning-card">
+              <h3>Alerts / Faults</h3>
+              <ul id="alert-trail" class="trail-list"></ul>
+            </div>
+            <div class="trail-card">
+              <h3>Reconciliation</h3>
+              <ul id="reconcile-trail" class="trail-list"></ul>
+            </div>
+            <div class="trail-card">
+              <h3>Operator Controls</h3>
+              <ul id="operator-control-trail" class="trail-list"></ul>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel action-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Action Feedback</h2>
+            <span class="badge badge-muted">REAL WRAPPER OUTPUT</span>
+          </div>
+          <div class="action-summary-grid">
+            <div class="stat">
+              <span class="label">Last Action</span>
+              <span id="action-name" class="value">-</span>
+            </div>
+            <div class="stat">
+              <span class="label">Status</span>
+              <span id="action-status" class="value">-</span>
+            </div>
+            <div class="stat wide">
+              <span class="label">Timestamp</span>
+              <span id="action-timestamp" class="value mono">-</span>
+            </div>
+          </div>
+          <div class="action-result">
+            <div class="label">Command</div>
+            <pre id="action-command" class="mono">-</pre>
+            <div class="label">Result</div>
+            <pre id="action-output" class="mono">No actions run yet.</pre>
+            <details class="action-details">
+              <summary>Stdout / Stderr Snippet</summary>
+              <pre id="action-snippet" class="mono">-</pre>
+            </details>
+            <details class="action-details">
+              <summary>Full Output</summary>
+              <pre id="action-full-output" class="mono">-</pre>
+            </details>
+          </div>
+          <details class="action-history">
+            <summary>Recent Action History</summary>
+            <ul id="action-log" class="trail-list compact"></ul>
+          </details>
+        </section>
+
+        <section class="panel runtime-panel secondary-panel">
+          <div class="panel-header">
+            <h2>Paper Exceptions / Attention</h2>
+            <div class="panel-actions">
+              <span id="paper-exception-verdict" class="badge badge-muted">UNKNOWN</span>
+              <a id="paper-exception-snapshot-link" class="link-button disabled" href="#" target="_blank" rel="noopener noreferrer">Exceptions JSON</a>
+            </div>
+          </div>
+          <div class="metrics-grid paper-exception-summary-grid">
+            <div class="stat"><span class="label">Open Exposure</span><span id="paper-exception-open" class="value">-</span></div>
+            <div class="stat"><span class="label">Owning Model</span><span id="paper-exception-owner" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Open Qty / Avg</span><span id="paper-exception-open-meta" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Unresolved Intents</span><span id="paper-exception-unresolved" class="value mono">-</span></div>
+            <div class="stat"><span class="label">Reconciliation</span><span id="paper-exception-reconciliation" class="value">-</span></div>
+            <div class="stat"><span class="label">Entries</span><span id="paper-exception-entries" class="value">-</span></div>
+            <div class="stat"><span class="label">Flatten Pending</span><span id="paper-exception-flatten" class="value">-</span></div>
+            <div class="stat"><span class="label">Stop After Cycle</span><span id="paper-exception-stop-after-cycle" class="value">-</span></div>
+          </div>
+          <div id="paper-exception-note" class="subnote model-scope-note">-</div>
+          <ul id="paper-exceptions-list" class="trail-list compact paper-exceptions-list"></ul>
+          <details class="runtime-process-drawer">
+            <summary>Runtime Processes</summary>
+            <div class="runtime-cards">
+              <div class="runtime-card">
+                <div class="runtime-card-header">
+                  <h3>Shadow Runtime</h3>
+                  <span id="shadow-running" class="badge badge-muted">STOPPED</span>
+                </div>
+                <div id="shadow-meta" class="runtime-meta"></div>
+              </div>
+              <div class="runtime-card paper">
+                <div class="runtime-card-header">
+                  <h3>Paper Runtime</h3>
+                  <span id="paper-running" class="badge badge-muted">STOPPED</span>
+                </div>
+                <div id="paper-meta" class="runtime-meta"></div>
+              </div>
+            </div>
+          </details>
+        </section>
+            </div>
+          </details>
+        </section>
+      </main>
+    </div>
+    <div id="paper-fill-toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+    <script src="/dashboard.js"></script>
+  </body>
+</html>

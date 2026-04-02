@@ -1,4 +1,4 @@
-"""Bootstrap helpers for the replay-first application."""
+"""Bootstrap helpers for the shared application platform."""
 
 from __future__ import annotations
 

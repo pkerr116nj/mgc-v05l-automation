@@ -29,6 +29,12 @@ from ..market_data import (
 )
 from ..market_data.schwab_adapter import SchwabMarketDataAdapter
 from ..app.bootstrap import bootstrap_service
+from .probationary_runtime import (
+    ProbationaryRuntimeTransportFailure,
+    build_probationary_paper_runner,
+    run_probationary_market_data_transport_probe,
+    submit_probationary_operator_control,
+)
 from .runner import StrategyServiceRunner
 
 
@@ -87,6 +93,92 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refresh the local Schwab access token using the stored refresh token.",
     )
     refresh_parser.add_argument("--token-file", default=None, help="Optional local token file override.")
+
+    debug_exchange_parser = subparsers.add_parser(
+        "schwab-debug-exchange-refresh",
+        help="Run authorization-code exchange plus immediate refresh validation without the bootstrap UI.",
+    )
+    debug_exchange_parser.add_argument("--code", required=True, help="Authorization code returned by Schwab.")
+    debug_exchange_parser.add_argument("--token-file", default=None, help="Optional local token file override.")
+    debug_exchange_parser.add_argument(
+        "--schwab-config",
+        default="config/schwab.local.json",
+        help="Optional JSON config file for shared readiness diagnostics.",
+    )
+    debug_exchange_parser.add_argument(
+        "--probe-symbol",
+        default="MGC",
+        help="Internal symbol to carry through shared readiness diagnostics.",
+    )
+
+    local_authorize_proof_parser = subparsers.add_parser(
+        "schwab-local-authorize-proof",
+        help="Run loopback local authorize plus immediate refresh/probe proof without manual code copy.",
+    )
+    local_authorize_proof_parser.add_argument("--token-file", default=None, help="Optional local token file override.")
+    local_authorize_proof_parser.add_argument(
+        "--schwab-config",
+        default="config/schwab.local.json",
+        help="Optional JSON config file for shared readiness diagnostics.",
+    )
+    local_authorize_proof_parser.add_argument(
+        "--probe-symbol",
+        default="MGC",
+        help="Internal symbol to carry through shared readiness diagnostics.",
+    )
+    local_authorize_proof_parser.add_argument("--state", default="mgc-v05l-local", help="Opaque OAuth state value.")
+    local_authorize_proof_parser.add_argument("--scope", default=None, help="Optional OAuth scope string.")
+    local_authorize_proof_parser.add_argument("--timeout-seconds", type=int, default=180, help="Loopback callback timeout.")
+
+    auth_gate_parser = subparsers.add_parser(
+        "schwab-auth-gate",
+        help="Validate that the local Schwab token/bootstrap state is ready for paper runtime use.",
+    )
+    auth_gate_parser.add_argument("--token-file", default=None, help="Optional local token file override.")
+    auth_gate_parser.add_argument(
+        "--schwab-config",
+        default="config/schwab.local.json",
+        help="Optional JSON config file for the shared market-data readiness probe.",
+    )
+    auth_gate_parser.add_argument(
+        "--internal-symbol",
+        default="MGC",
+        help="Internal symbol to use for the shared runtime readiness probe.",
+    )
+
+    token_web_parser = subparsers.add_parser(
+        "schwab-token-web",
+        help="Run the local Schwab token bootstrap web helper.",
+    )
+    token_web_parser.add_argument("--host", default="127.0.0.1", help="Preferred bind host.")
+    token_web_parser.add_argument("--port", type=int, default=8765, help="Preferred bind port.")
+    token_web_parser.add_argument("--token-file", default=None, help="Optional local token file override.")
+    token_web_parser.add_argument(
+        "--info-file",
+        default=None,
+        help="Optional JSON file to write the final bound bootstrap URL.",
+    )
+    token_web_parser.add_argument(
+        "--port-search-limit",
+        type=int,
+        default=25,
+        help="How many higher ports to probe if the preferred port is unavailable.",
+    )
+    token_web_parser.add_argument(
+        "--schwab-config",
+        default="config/schwab.local.json",
+        help="Optional JSON config file for the shared market-data readiness probe.",
+    )
+    token_web_parser.add_argument(
+        "--probe-symbol",
+        default="MGC",
+        help="Internal symbol to use for the shared runtime readiness probe.",
+    )
+    token_web_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not auto-open the local bootstrap UI in a browser.",
+    )
 
     history_parser = subparsers.add_parser(
         "schwab-fetch-history",
@@ -158,6 +250,87 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Strategy config file path. Used for internal timezone and internal symbol validation.",
     )
+
+    paper_soak_parser = subparsers.add_parser(
+        "probationary-paper-soak",
+        help="Run the probationary paper runtime with optional temporary-paper overlays.",
+    )
+    paper_soak_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Config file path. Later files override earlier ones.",
+    )
+    paper_soak_parser.add_argument(
+        "--schwab-config",
+        default="config/schwab.local.json",
+        help="Optional Schwab market-data config JSON.",
+    )
+    paper_soak_parser.add_argument(
+        "--poll-once",
+        action="store_true",
+        help="Poll once, process completed bars, and exit.",
+    )
+    paper_soak_parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Optional max polling cycles before exit.",
+    )
+
+    market_data_probe_parser = subparsers.add_parser(
+        "probationary-market-data-probe",
+        help="Run the shared authenticated Schwab /pricehistory reachability probe used by paper runtime startup.",
+    )
+    market_data_probe_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Config file path. Later files override earlier ones.",
+    )
+    market_data_probe_parser.add_argument(
+        "--schwab-config",
+        default="config/schwab.local.json",
+        help="Optional Schwab market-data config JSON.",
+    )
+
+    operator_control_parser = subparsers.add_parser(
+        "probationary-operator-control",
+        help="Queue a shared operator control action for the probationary paper runtime.",
+    )
+    operator_control_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Config file path. Later files override earlier ones.",
+    )
+    operator_control_parser.add_argument(
+        "--action",
+        required=True,
+        help="Shared operator control action to queue.",
+    )
+    operator_control_parser.add_argument(
+        "--lane-id",
+        default=None,
+        help="Optional lane_id to target a single probationary paper lane.",
+    )
+
+    dashboard_parser = subparsers.add_parser(
+        "operator-dashboard",
+        help="Run the local operator dashboard for shadow and paper environments.",
+    )
+    dashboard_parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host.")
+    dashboard_parser.add_argument("--port", type=int, default=8790, help="Preferred dashboard port.")
+    dashboard_parser.add_argument(
+        "--info-file",
+        default=None,
+        help="Optional JSON file to write the final bound dashboard URL.",
+    )
+    dashboard_parser.add_argument(
+        "--allow-port-fallback",
+        action="store_true",
+        help="If the preferred port is unavailable, search upward for the next open port.",
+    )
     return parser
 
 
@@ -222,6 +395,74 @@ def main(argv: Sequence[str] | None = None) -> int:
         oauth_client = _build_oauth_client(auth_config)
         token_set = oauth_client.refresh_token()
         print(json.dumps(_json_ready(token_set), sort_keys=True))
+        return 0
+
+    if args.command == "schwab-debug-exchange-refresh":
+        from .schwab_token_bootstrap_web import SchwabTokenBootstrapService
+
+        payload = SchwabTokenBootstrapService(
+            token_file=args.token_file,
+            schwab_config_path=args.schwab_config,
+            probe_symbol=args.probe_symbol,
+        ).debug_exchange_refresh(args.code)
+        print(json.dumps(_json_ready(payload), sort_keys=True))
+        return 0
+
+    if args.command == "schwab-local-authorize-proof":
+        from .schwab_token_bootstrap_web import SchwabTokenBootstrapService
+
+        payload = SchwabTokenBootstrapService(
+            token_file=args.token_file,
+            schwab_config_path=args.schwab_config,
+            probe_symbol=args.probe_symbol,
+        ).local_authorize_proof(
+            state=args.state,
+            scope=args.scope,
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(json.dumps(_json_ready(payload), sort_keys=True))
+        return 0
+
+    if args.command == "schwab-auth-gate":
+        from .schwab_token_bootstrap_web import SchwabTokenBootstrapService
+
+        try:
+            payload = SchwabTokenBootstrapService(
+                token_file=args.token_file,
+                schwab_config_path=args.schwab_config,
+                probe_symbol=args.internal_symbol,
+            ).check_runtime_ready()
+        except Exception as exc:  # pragma: no cover - CLI guardrail
+            print(
+                json.dumps(
+                    {
+                        "runtime_ready": False,
+                        "error": str(exc),
+                        "probe_symbol": args.internal_symbol,
+                        "schwab_config_path": str(Path(args.schwab_config).resolve(strict=False)),
+                        "token_file": args.token_file,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        print(json.dumps(_json_ready(payload), sort_keys=True))
+        return 0
+
+    if args.command == "schwab-token-web":
+        from .schwab_token_bootstrap_web import run_schwab_token_bootstrap_server
+
+        result = run_schwab_token_bootstrap_server(
+            host=args.host,
+            port=args.port,
+            token_file=args.token_file,
+            open_browser=not args.no_browser,
+            info_file=args.info_file,
+            port_search_limit=args.port_search_limit,
+            schwab_config_path=args.schwab_config,
+            probe_symbol=args.probe_symbol,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
         return 0
 
     if args.command == "schwab-fetch-history":
@@ -292,6 +533,70 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"quotes": _json_ready(quotes)}, sort_keys=True))
         return 0
 
+    if args.command == "probationary-paper-soak":
+        config_paths = args.config or [
+            "config/base.yaml",
+            "config/live.yaml",
+            "config/probationary_pattern_engine.yaml",
+            "config/probationary_pattern_engine_paper.yaml",
+        ]
+        try:
+            runner = build_probationary_paper_runner(
+                [Path(path) for path in config_paths],
+                schwab_config_path=args.schwab_config,
+            )
+            summary = runner.run(poll_once=args.poll_once, max_cycles=args.max_cycles)
+        except ProbationaryRuntimeTransportFailure as exc:
+            print(json.dumps(_json_ready(exc.payload), sort_keys=True))
+            return 1
+        print(json.dumps(_json_ready(summary), sort_keys=True))
+        return 0
+
+    if args.command == "probationary-market-data-probe":
+        config_paths = args.config or [
+            "config/base.yaml",
+            "config/live.yaml",
+            "config/probationary_pattern_engine.yaml",
+            "config/probationary_pattern_engine_paper.yaml",
+        ]
+        try:
+            payload = run_probationary_market_data_transport_probe(
+                [Path(path) for path in config_paths],
+                schwab_config_path=args.schwab_config,
+            )
+        except ProbationaryRuntimeTransportFailure as exc:
+            print(json.dumps(_json_ready(exc.payload), sort_keys=True))
+            return 1
+        print(json.dumps(_json_ready(payload), sort_keys=True))
+        return 0
+
+    if args.command == "probationary-operator-control":
+        config_paths = args.config or [
+            "config/base.yaml",
+            "config/live.yaml",
+            "config/probationary_pattern_engine.yaml",
+            "config/probationary_pattern_engine_paper.yaml",
+        ]
+        control_payload = {"lane_id": args.lane_id} if args.lane_id else None
+        summary = submit_probationary_operator_control(
+            [Path(path) for path in config_paths],
+            args.action,
+            payload=control_payload,
+        )
+        print(json.dumps(_json_ready(summary), sort_keys=True))
+        return 0
+
+    if args.command == "operator-dashboard":
+        from .operator_dashboard import run_operator_dashboard_server
+
+        run_operator_dashboard_server(
+            host=args.host,
+            port=args.port,
+            info_file=args.info_file,
+            allow_port_fallback=args.allow_port_fallback,
+        )
+        return 0
+
     parser.error(f"Unsupported command: {args.command}")
     return 2
 
@@ -346,3 +651,7 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

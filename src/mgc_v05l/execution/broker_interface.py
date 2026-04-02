@@ -39,5 +39,8 @@ class BrokerInterface(Protocol):
     def get_account_health(self) -> Any:
         """Return broker account health payload."""
 
+    def snapshot_state(self) -> Any:
+        """Return a normalized broker snapshot used by reconciliation and watchdog logic."""
+
     def fill_order(self, order_intent: OrderIntent, fill_price: Decimal, fill_timestamp: datetime) -> FillEvent:
         """Paper/replay-only deterministic fill hook."""

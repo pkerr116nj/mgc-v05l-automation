@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from mgc_v05l.config_models import load_settings_from_files
+from mgc_v05l.config_models import DataStoragePolicy, load_data_storage_policy, load_settings_from_files
 from mgc_v05l.config_models.settings import RuntimeMode
 
 
@@ -93,3 +93,13 @@ def test_config_loader_merges_base_and_overlay_files(tmp_path: Path) -> None:
     assert settings.mode is RuntimeMode.REPLAY
     assert settings.database_url == "sqlite:///./replay.sqlite3"
     assert settings.symbol == "MGC"
+
+
+def test_data_storage_policy_loads_default_repo_policy() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+
+    policy = load_data_storage_policy(repo_root)
+
+    assert isinstance(policy, DataStoragePolicy)
+    assert policy.config_path == repo_root / "config" / "data_storage_policy.json"
+    assert policy.broker_monitor_database_path == repo_root / "outputs" / "production_link" / "schwab_production_link.sqlite3"

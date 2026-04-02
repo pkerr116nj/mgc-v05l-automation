@@ -65,6 +65,8 @@ def test_strategy_state_matches_phase_25_schema() -> None:
         entries_enabled=True,
         exits_enabled=True,
         operator_halt=False,
+        same_underlying_entry_hold=False,
+        same_underlying_hold_reason=None,
         reconcile_required=False,
         fault_code=None,
         updated_at=datetime.now(timezone.utc),

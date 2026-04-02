@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "storage_layout": {
+    "runtime_base_database_path": "./mgc_v05l.sqlite3",
+    "runtime_replay_database_path": "./mgc_v05l.replay.sqlite3",
+    "runtime_paper_database_path": "./mgc_v05l.paper.sqlite3",
+    "broker_monitor_database_path": "outputs/production_link/schwab_production_link.sqlite3",
+    "broker_monitor_selected_account_path": "outputs/production_link/selected_account.json",
+    "broker_monitor_snapshot_path": "outputs/operator_dashboard/production_link_snapshot.json",
+    "ui_snapshot_root": "outputs/operator_dashboard",
+    "research_root": "outputs/research",
+    "token_file_path": ".local/schwab/tokens.json"
+  },
+  "domains": {
+    "research_history": {
+      "owner": "research",
+      "purpose": "Long-horizon historical bars and additive research outputs.",
+      "includes": [
+        "historical bars",
+        "derived research features",
+        "research signal evaluations",
+        "trade outcomes",
+        "research reports and manifests"
+      ],
+      "rules": [
+        "append-friendly",
+        "forever-retained by default",
+        "never treated as broker or account truth"
+      ],
+      "sqlite_tables": [
+        "bars",
+        "derived_features",
+        "signal_evaluations",
+        "trade_outcomes",
+        "experiment_runs"
+      ],
+      "artifact_paths": [
+        "outputs/research",
+        "outputs/visualizations"
+      ],
+      "acquisition_mode": "scheduled_or_manual_backfill",
+      "retention_class": "forever_audit_research",
+      "cleanup_policy": "retain forever by default; only archive or compact by explicit policy"
+    },
+    "runtime_strategy_state": {
+      "owner": "runtime",
+      "purpose": "Restart-safe strategy state and operational audit evidence.",
+      "includes": [
+        "processed bars",
+        "strategy state snapshots",
+        "order intents",
+        "fills",
+        "runtime reconciliation events",
+        "runtime fault events"
+      ],
+      "rules": [
+        "restart-safe",
+        "authoritative for paper/runtime truth",
+        "minimal and operational",
+        "forever-retained by default"
+      ],
+      "sqlite_tables": [
+        "processed_bars",
+        "strategy_state_snapshots",
+        "order_intents",
+        "fills",
+        "reconciliation_events",
+        "fault_events"
+      ],
+      "artifact_paths": [
+        "desktop/outputs/probationary_pattern_engine"
+      ],
+      "acquisition_mode": "bar_and_event_driven",
+      "ui_rebuild_interval_seconds": 2,
+      "retention_class": "forever_audit_research",
+      "cleanup_policy": "retain forever by default; compact only by explicit archive tooling"
+    },
+    "broker_monitor_truth": {
+      "owner": "production_link",
+      "purpose": "Freshness-scoped live or near-live broker visibility and reconciliation input.",
+      "includes": [
+        "broker account balances",
+        "broker positions",
+        "broker quote overlays",
+        "broker open orders",
+        "recent broker fills and executions",
+        "freshness timestamps"
+      ],
+      "rules": [
+        "snapshot plus timestamped",
+        "not silently merged into paper truth",
+        "suitable for reconciliation and UI monitoring"
+      ],
+      "sqlite_tables": [
+        "broker_accounts",
+        "broker_account_balances",
+        "broker_positions",
+        "broker_quotes",
+        "broker_orders",
+        "broker_order_events",
+        "broker_reconciliation_events",
+        "broker_runtime_state"
+      ],
+      "artifact_paths": [
+        "outputs/production_link",
+        "outputs/operator_dashboard/production_link_snapshot.json"
+      ],
+      "acquisition_mode": "near_live_polling",
+      "refresh_interval_seconds": 5,
+      "service_cache_ttl_seconds": 15,
+      "stale_after_seconds": 120,
+      "retention_class": "medium_operational",
+      "retention_days": 30,
+      "cleanup_policy": "retain latest broker state truth; compact quote overlays by age and keep broker order/reconciliation audit events on a longer retention window"
+    },
+    "derived_ui_snapshot_cache": {
+      "owner": "operator_surface",
+      "purpose": "Fast UI rendering from rebuildable snapshots and summaries.",
+      "includes": [
+        "operator dashboard snapshots",
+        "monitor summaries",
+        "freshness summaries",
+        "runtime info files"
+      ],
+      "rules": [
+        "derivative only",
+        "never the ultimate source of truth",
+        "rebuildable from deeper stores"
+      ],
+      "artifact_paths": [
+        "outputs/operator_dashboard",
+        "outputs/operator_dashboard/runtime"
+      ],
+      "acquisition_mode": "display_rebuild",
+      "ui_rebuild_interval_seconds": 2,
+      "retention_class": "short_cache",
+      "retention_days": 7,
+      "cleanup_policy": "keep latest snapshots plus a short local cache window"
+    }
+  },
+  "tracked_symbols": {
+    "broker_held": {
+      "storage_domain": "broker_monitor_truth",
+      "refresh_policy": "near_live_polling",
+      "refresh_interval_seconds": 5,
+      "promotion_rule": "automatic while a live broker position or open broker order exists",
+      "symbol_discovery": "broker_monitor_activity",
+      "include_in_daily_research_capture": true,
+      "research_capture_timeframes": [
+        "5m"
+      ],
+      "bootstrap_lookback_days": 30,
+      "retention_days": 30
+    },
+    "paper_active": {
+      "storage_domain": "runtime_strategy_state",
+      "refresh_policy": "bar_and_event_driven",
+      "refresh_interval_seconds": 2,
+      "promotion_rule": "automatic while a paper lane is active or has open paper exposure",
+      "symbol_discovery": "runtime_paper_activity",
+      "include_in_daily_research_capture": true,
+      "research_capture_timeframes": [
+        "5m"
+      ],
+      "bootstrap_lookback_days": 30,
+      "retention_days": 365
+    },
+    "watched": {
+      "storage_domain": "broker_monitor_truth",
+      "refresh_policy": "lighter_polling",
+      "refresh_interval_seconds": 30,
+      "promotion_rule": "explicit operator watchlist membership",
+      "symbol_discovery": "explicit_symbols",
+      "symbols": [],
+      "include_in_daily_research_capture": true,
+      "research_capture_timeframes": [
+        "5m"
+      ],
+      "bootstrap_lookback_days": 30,
+      "retention_days": 30
+    },
+    "research_universe": {
+      "storage_domain": "research_history",
+      "refresh_policy": "scheduled_backfill",
+      "promotion_rule": "explicit research manifest or backfill target set",
+      "symbol_discovery": "explicit_symbols",
+      "symbols": [
+        "MGC",
+        "GC",
+        "MES",
+        "ES",
+        "MNQ",
+        "NQ",
+        "SPY",
+        "QQQ",
+        "TQQQ",
+        "SQQQ",
+        "ZT",
+        "ZF",
+        "ZN",
+        "ZB",
+        "ZQ",
+        "6E",
+        "6J",
+        "6B",
+        "6A",
+        "HG",
+        "QC",
+        "PL",
+        "CL",
+        "NG",
+        "MBT",
+        "YM"
+      ],
+      "include_in_daily_research_capture": true,
+      "research_capture_timeframes": [
+        "5m"
+      ],
+      "bootstrap_lookback_days": 30
+    },
+    "ad_hoc": {
+      "storage_domain": "derived_ui_snapshot_cache",
+      "refresh_policy": "temporary_lookup",
+      "refresh_interval_seconds": 30,
+      "promotion_rule": "manual promote to watched, broker_held, paper_active, or research_universe",
+      "symbol_discovery": "explicit_symbols",
+      "expiry_hours": 24,
+      "retention_days": 1
+    }
+  },
+  "truth_hierarchy": {
+    "paper_runtime": [
+      "runtime_strategy_state",
+      "derived_ui_snapshot_cache"
+    ],
+    "broker_monitor": [
+      "broker_monitor_truth",
+      "derived_ui_snapshot_cache"
+    ],
+    "combined_ui": [
+      "runtime_strategy_state",
+      "broker_monitor_truth",
+      "derived_ui_snapshot_cache"
+    ],
+    "reconciliation": [
+      "runtime_strategy_state",
+      "broker_monitor_truth"
+    ]
+  },
+  "cleanup": {
+    "ui_snapshot_cache_keep_days": 7,
+    "broker_monitor_quote_snapshot_keep_days": 30,
+    "broker_monitor_order_event_keep_days": 180,
+    "broker_monitor_reconciliation_event_keep_days": 365,
+    "runtime_event_keep_days": 0,
+    "ad_hoc_symbol_expiry_hours": 24
+  }
+}

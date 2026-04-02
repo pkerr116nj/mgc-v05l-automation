@@ -1,6 +1,8 @@
 """Feature engine contract."""
 
+from collections import deque
 from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
@@ -8,6 +10,109 @@ from ..config_models import StrategySettings
 from ..domain.models import Bar, FeaturePacket, StrategyState
 from .swing_tracker import update_swing_state
 from .vwap_engine import compute_session_vwap
+
+
+@dataclass
+class IncrementalFeatureComputer:
+    """Incremental feature calculator preserving current feature math."""
+
+    settings: StrategySettings
+
+    def __post_init__(self) -> None:
+        close_window = max(self.settings.turn_fast_len, self.settings.turn_slow_len) + 1
+        bar_window = max(self.settings.turn_stretch_lookback + 1, 3)
+        self._closes: deque[Decimal] = deque(maxlen=close_window)
+        self._volumes: deque[Decimal] = deque(maxlen=self.settings.vol_len)
+        self._tr_values: deque[Decimal] = deque(maxlen=self.settings.atr_len)
+        self._recent_bars: deque[Bar] = deque(maxlen=bar_window)
+        self._session_date = None
+        self._session_cumulative_volume = Decimal("0")
+        self._session_cumulative_price_volume = Decimal("0")
+
+    def compute_next(self, bar: Bar, state: StrategyState) -> FeaturePacket:
+        previous_close = self._recent_bars[-1].close if self._recent_bars else None
+        tr = (
+            bar.high - bar.low
+            if previous_close is None
+            else max(bar.high - bar.low, abs(bar.high - previous_close), abs(bar.low - previous_close))
+        )
+        self._tr_values.append(tr)
+        atr = _wilders_average(list(self._tr_values), self.settings.atr_len)
+
+        bar_range = bar.high - bar.low
+        body_size = abs(bar.close - bar.open)
+
+        self._volumes.append(Decimal(bar.volume))
+        avg_vol = _simple_average(list(self._volumes))
+        vol_ratio = Decimal("1") if avg_vol == 0 else Decimal(bar.volume) / avg_vol
+
+        self._closes.append(bar.close)
+        close_values = list(self._closes)
+        turn_ema_fast = _exp_average(close_values, self.settings.turn_fast_len)
+        turn_ema_slow = _exp_average(close_values, self.settings.turn_slow_len)
+        velocity = turn_ema_fast - turn_ema_slow
+        if len(close_values) < 2:
+            previous_velocity = velocity
+        else:
+            prior_close_values = close_values[:-1]
+            previous_velocity = _exp_average(prior_close_values, self.settings.turn_fast_len) - _exp_average(
+                prior_close_values,
+                self.settings.turn_slow_len,
+            )
+        velocity_delta = velocity - previous_velocity
+
+        local_session_date = bar.end_ts.astimezone(self.settings.timezone_info).date()
+        if self._session_date != local_session_date:
+            self._session_date = local_session_date
+            self._session_cumulative_volume = Decimal("0")
+            self._session_cumulative_price_volume = Decimal("0")
+        typical_price = (bar.high + bar.low + bar.close) / Decimal("3")
+        volume_decimal = Decimal(bar.volume)
+        self._session_cumulative_price_volume += typical_price * volume_decimal
+        self._session_cumulative_volume += volume_decimal
+        vwap = (
+            bar.close
+            if self._session_cumulative_volume == 0
+            else self._session_cumulative_price_volume / self._session_cumulative_volume
+        )
+        vwap_buffer = self.settings.reclaim_close_buffer_atr * atr
+
+        recent_history = [*self._recent_bars, bar]
+        swing_low_confirmed, swing_high_confirmed, last_swing_low, last_swing_high = update_swing_state(
+            recent_history,
+            state.last_swing_low,
+            state.last_swing_high,
+        )
+        downside_stretch = _downside_stretch(recent_history, self.settings.turn_stretch_lookback, bar.close)
+        upside_stretch = _upside_stretch(recent_history, self.settings.turn_stretch_lookback, bar.close)
+        bull_close_strong = _close_location_above_threshold(bar.low, bar.close, bar_range, Decimal("0.65"))
+        bear_close_weak = _close_location_below_threshold(bar.low, bar.close, bar_range, Decimal("0.28"))
+
+        self._recent_bars.append(bar)
+
+        return FeaturePacket(
+            bar_id=bar.bar_id,
+            tr=tr,
+            atr=atr,
+            bar_range=bar_range,
+            body_size=body_size,
+            avg_vol=avg_vol,
+            vol_ratio=vol_ratio,
+            turn_ema_fast=turn_ema_fast,
+            turn_ema_slow=turn_ema_slow,
+            velocity=velocity,
+            velocity_delta=velocity_delta,
+            vwap=vwap,
+            vwap_buffer=vwap_buffer,
+            swing_low_confirmed=swing_low_confirmed,
+            swing_high_confirmed=swing_high_confirmed,
+            last_swing_low=last_swing_low,
+            last_swing_high=last_swing_high,
+            downside_stretch=downside_stretch,
+            upside_stretch=upside_stretch,
+            bull_close_strong=bull_close_strong,
+            bear_close_weak=bear_close_weak,
+        )
 
 
 def compute_features(

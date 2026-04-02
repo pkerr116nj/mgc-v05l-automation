@@ -51,9 +51,12 @@ class FillEvent:
     fill_timestamp: datetime
     fill_price: Optional[Decimal]
     broker_order_id: Optional[str]
+    quantity: int = 1
 
     def __post_init__(self) -> None:
         if not self.order_intent_id:
             raise ValueError("FillEvent.order_intent_id is required.")
         if self.fill_timestamp.tzinfo is None or self.fill_timestamp.utcoffset() is None:
             raise ValueError("FillEvent.fill_timestamp must be timezone-aware.")
+        if self.quantity <= 0:
+            raise ValueError("FillEvent.quantity must be > 0.")

@@ -5,7 +5,41 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from .enums import HealthStatus, LongEntryFamily, PositionSide, StrategyStatus
+from .enums import HealthStatus, LongEntryFamily, PositionSide, ShortEntryFamily, StrategyStatus
+
+
+@dataclass(frozen=True)
+class StrategyEntryLeg:
+    leg_id: str
+    order_intent_id: str
+    quantity: int
+    entry_price: Decimal
+    entry_timestamp: datetime
+    signal_bar_id: str
+    position_side: PositionSide
+    long_entry_family: LongEntryFamily = LongEntryFamily.NONE
+    short_entry_family: ShortEntryFamily = ShortEntryFamily.NONE
+    short_entry_source: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.leg_id:
+            raise ValueError("StrategyEntryLeg.leg_id is required.")
+        if not self.order_intent_id:
+            raise ValueError("StrategyEntryLeg.order_intent_id is required.")
+        if self.quantity <= 0:
+            raise ValueError("StrategyEntryLeg.quantity must be > 0.")
+        if self.entry_timestamp.tzinfo is None or self.entry_timestamp.utcoffset() is None:
+            raise ValueError("StrategyEntryLeg.entry_timestamp must be timezone-aware.")
+        if not self.signal_bar_id:
+            raise ValueError("StrategyEntryLeg.signal_bar_id is required.")
+        if self.position_side is PositionSide.FLAT:
+            raise ValueError("StrategyEntryLeg.position_side must not be FLAT.")
+        if self.position_side is PositionSide.LONG and self.long_entry_family is LongEntryFamily.NONE:
+            raise ValueError("Long strategy entry legs require a long_entry_family.")
+        if self.position_side is PositionSide.SHORT and self.short_entry_family is ShortEntryFamily.NONE:
+            raise ValueError("Short strategy entry legs require a short_entry_family.")
+        if self.position_side is PositionSide.LONG and self.short_entry_source is not None:
+            raise ValueError("Long strategy entry legs must not carry short_entry_source.")
 
 
 @dataclass(frozen=True)
@@ -38,9 +72,17 @@ class StrategyState:
     entries_enabled: bool
     exits_enabled: bool
     operator_halt: bool
+    same_underlying_entry_hold: bool
+    same_underlying_hold_reason: Optional[str]
     reconcile_required: bool
     fault_code: Optional[str]
     updated_at: datetime
+    short_entry_family: ShortEntryFamily = ShortEntryFamily.NONE
+    short_entry_source: Optional[str] = None
+    additive_short_max_favorable_excursion: Decimal = Decimal("0")
+    additive_short_peak_threshold_reached: bool = False
+    additive_short_giveback_from_peak: Decimal = Decimal("0")
+    open_entry_legs: tuple[StrategyEntryLeg, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -135,6 +177,15 @@ class SignalPacket:
     asia_acceptance_close_vwap_ok: bool
     asia_acceptance_bar_ok: bool
     asia_vwap_long_signal: bool
+    midday_pause_resume_long_turn_candidate: bool
+    us_late_pause_resume_long_turn_candidate: bool
+    us_late_failed_move_reversal_long_turn_candidate: bool
+    us_late_breakout_retest_hold_long_turn_candidate: bool
+    asia_early_breakout_retest_hold_long_turn_candidate: bool
+    asia_early_normal_breakout_retest_hold_long_turn_candidate: bool
+    asia_late_pause_resume_long_turn_candidate: bool
+    asia_late_flat_pullback_pause_resume_long_turn_candidate: bool
+    asia_late_compressed_flat_pullback_pause_resume_long_turn_candidate: bool
     bear_snap_up_stretch_ok: bool
     bear_snap_range_ok: bool
     bear_snap_body_ok: bool
@@ -145,6 +196,19 @@ class SignalPacket:
     bear_snap_raw: bool
     bear_snap_turn_candidate: bool
     first_bear_snap_turn: bool
+    derivative_bear_slope_ok: bool
+    derivative_bear_curvature_ok: bool
+    derivative_bear_turn_candidate: bool
+    derivative_bear_additive_turn_candidate: bool
+    midday_compressed_failed_move_reversal_short_turn_candidate: bool
+    midday_compressed_rebound_failed_move_reversal_short_turn_candidate: bool
+    midday_expanded_pause_resume_short_turn_candidate: bool
+    midday_compressed_pause_resume_short_turn_candidate: bool
+    midday_pause_resume_short_turn_candidate: bool
+    london_late_pause_resume_short_turn_candidate: bool
+    asia_early_expanded_breakout_retest_hold_short_turn_candidate: bool
+    asia_early_compressed_pause_resume_short_turn_candidate: bool
+    asia_early_pause_resume_short_turn_candidate: bool
     long_entry_raw: bool
     short_entry_raw: bool
     recent_long_setup: bool

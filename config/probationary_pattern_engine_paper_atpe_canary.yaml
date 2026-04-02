@@ -1,0 +1,3 @@
+probationary_atpe_canary_enabled: true
+probationary_atpe_canary_instruments_json: '["MES","MNQ"]'
+probationary_atpe_canary_live_poll_lookback_minutes: 1440

@@ -1,0 +1,46 @@
+# ATP promotion/add research candidate lane.
+# This file documents the strongest post-baseline candidate from the first
+# promotion/add review pass. It does not modify frozen ATP Companion Baseline v1
+# semantics. Shared paper/runtime support for staged ATP candidate lanes now
+# exists separately through explicit candidate lane configs.
+
+candidate_name: "ATP Companion Candidate — Promotion 1 at +0.75R, VWAP Favorable Only"
+candidate_label: "ATP_PROMOTION_1_075R_FAVORABLE_ONLY"
+candidate_status: "RESEARCH_CANDIDATE_ONLY"
+candidate_origin: "atp_promotion_add_review"
+candidate_id: "promotion_1_075r_favorable_only"
+baseline_reference_label: "ATP_COMPANION_V1_ASIA_US"
+baseline_reference_config: "config/atp_companion_baseline_v1_asia_us.yaml"
+
+identity:
+  replay_strategy_id: "atp_companion_v1_asia_us__promotion_1_075r_favorable_only"
+  study_candidate_id: "ATP_COMPANION_V1_ASIA_US__promotion_1_075r_favorable_only"
+  paper_strategy_id: "atp_companion_v1_asia_us__paper__promotion_1_075r_favorable_only"
+  strategy_family: "active_trend_participation_engine"
+  paper_lane_enabled: true
+  paper_lane_status: "SUPPORTED_BY_EXPLICIT_CANDIDATE_LANE_CONFIG"
+
+scope:
+  environment: "replay_study_research_only"
+  instrument_scope: "MGC"
+  executable_allowed_sessions:
+    - "ASIA"
+    - "US"
+  executable_disabled_sessions:
+    - "LONDON"
+
+candidate_logic:
+  promotion_add_logic: true
+  max_adds_per_trade: 1
+  progress_r_multiple: 0.75
+  allowed_vwap_price_quality:
+    - "VWAP_FAVORABLE"
+  require_positive_reacceleration: true
+  require_low_above_entry: true
+
+does_not_change:
+  - "ATP Companion Baseline v1 setup qualification"
+  - "ATP Companion Baseline v1 current-candle VWAP entry timing"
+  - "ATP Companion Baseline v1 exit behavior"
+  - "Asia + US executable coverage"
+  - "London diagnostic-only posture"

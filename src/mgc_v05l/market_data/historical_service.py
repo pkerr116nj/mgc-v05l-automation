@@ -38,4 +38,4 @@ class HistoricalBackfillService:
         if self._repositories is None:
             return
         for bar in bars:
-            self._repositories.bars.save(bar)
+            self._repositories.bars.save(bar, data_source="schwab_history")

@@ -1,6 +1,6 @@
 """State invariant checks."""
 
-from ..domain.enums import LongEntryFamily, PositionSide
+from ..domain.enums import LongEntryFamily, PositionSide, ShortEntryFamily
 from ..domain.models import StrategyState
 
 
@@ -14,6 +14,16 @@ def validate_state(state: StrategyState) -> list[str]:
         violations.append("broker_position_qty must be 0 while flat")
     if state.position_side == PositionSide.FLAT and state.long_entry_family != LongEntryFamily.NONE:
         violations.append("long_entry_family must be NONE while flat")
+    if state.position_side == PositionSide.FLAT and state.short_entry_family != ShortEntryFamily.NONE:
+        violations.append("short_entry_family must be NONE while flat")
+    if state.position_side == PositionSide.FLAT and state.short_entry_source is not None:
+        violations.append("short_entry_source must be None while flat")
+    if state.position_side == PositionSide.FLAT and state.additive_short_max_favorable_excursion != 0:
+        violations.append("additive_short_max_favorable_excursion must be 0 while flat")
+    if state.position_side == PositionSide.FLAT and state.additive_short_peak_threshold_reached:
+        violations.append("additive_short_peak_threshold_reached must be False while flat")
+    if state.position_side == PositionSide.FLAT and state.additive_short_giveback_from_peak != 0:
+        violations.append("additive_short_giveback_from_peak must be 0 while flat")
     if state.position_side != PositionSide.FLAT and state.internal_position_qty <= 0:
         violations.append("internal_position_qty must be > 0 while in position")
     if state.position_side != PositionSide.FLAT and state.broker_position_qty < 0:
@@ -34,16 +44,40 @@ def validate_state(state: StrategyState) -> list[str]:
         violations.append("bars_in_trade must be >= 0")
     if state.position_side == PositionSide.SHORT and state.long_entry_family != LongEntryFamily.NONE:
         violations.append("long_entry_family must be NONE while short")
+    if state.position_side == PositionSide.LONG and state.short_entry_family != ShortEntryFamily.NONE:
+        violations.append("short_entry_family must be NONE while long")
+    if state.position_side == PositionSide.LONG and state.short_entry_source is not None:
+        violations.append("short_entry_source must be None while long")
+    if state.position_side == PositionSide.LONG and state.additive_short_max_favorable_excursion != 0:
+        violations.append("additive_short_max_favorable_excursion must be 0 while long")
+    if state.position_side == PositionSide.LONG and state.additive_short_peak_threshold_reached:
+        violations.append("additive_short_peak_threshold_reached must be False while long")
+    if state.position_side == PositionSide.LONG and state.additive_short_giveback_from_peak != 0:
+        violations.append("additive_short_giveback_from_peak must be 0 while long")
+    if state.additive_short_max_favorable_excursion < 0:
+        violations.append("additive_short_max_favorable_excursion must be >= 0")
+    if state.additive_short_giveback_from_peak < 0:
+        violations.append("additive_short_giveback_from_peak must be >= 0")
     if state.position_side == PositionSide.FLAT and state.entry_price is not None:
         violations.append("entry_price must be None while flat")
     if state.position_side == PositionSide.FLAT and state.entry_timestamp is not None:
         violations.append("entry_timestamp must be None while flat")
     if state.position_side == PositionSide.FLAT and state.entry_bar_id is not None:
         violations.append("entry_bar_id must be None while flat")
+    if state.position_side == PositionSide.FLAT and state.open_entry_legs:
+        violations.append("open_entry_legs must be empty while flat")
     if state.position_side == PositionSide.LONG and state.entry_timestamp is None:
         violations.append("entry_timestamp must not be None while long")
     if state.position_side == PositionSide.SHORT and state.entry_timestamp is None:
         violations.append("entry_timestamp must not be None while short")
+    if state.position_side != PositionSide.FLAT and not state.open_entry_legs:
+        violations.append("open_entry_legs must not be empty while in position")
+    if state.position_side != PositionSide.FLAT:
+        legs_total_qty = sum(int(leg.quantity) for leg in state.open_entry_legs)
+        if legs_total_qty != state.internal_position_qty:
+            violations.append("open_entry_legs total quantity must match internal_position_qty")
+        if any(leg.position_side != state.position_side for leg in state.open_entry_legs):
+            violations.append("open_entry_legs must all match the current position_side")
     if state.bars_since_bull_snap is not None and state.bars_since_bull_snap < 0:
         violations.append("bars_since_bull_snap must be >= 0")
     if state.bars_since_bear_snap is not None and state.bars_since_bear_snap < 0:
