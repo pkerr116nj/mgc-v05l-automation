@@ -23,7 +23,9 @@ def build_operator_surface(
     approved_quant_baselines: dict[str, Any],
     market_context: dict[str, Any],
     treasury_curve: dict[str, Any],
+    bootstrap_prerequisites: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    bootstrap_prerequisites = dict(bootstrap_prerequisites or {})
     session_date = _safe_session_date(global_payload.get("current_session_date"))
     active_rows = _build_active_instrument_surface_rows(
         paper=paper,
@@ -46,6 +48,7 @@ def build_operator_surface(
         paper=paper,
         market_context=market_context,
         treasury_curve=treasury_curve,
+        bootstrap_prerequisites=bootstrap_prerequisites,
         active_rows=active_rows,
     )
     active_surface = _build_active_instrument_surface_block(active_rows=active_rows)
@@ -97,8 +100,10 @@ def _build_runtime_readiness(
     paper: dict[str, Any],
     market_context: dict[str, Any],
     treasury_curve: dict[str, Any],
+    bootstrap_prerequisites: dict[str, Any] | None,
     active_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    bootstrap_prerequisites = dict(bootstrap_prerequisites or {})
     readiness = paper.get("readiness") or {}
     exceptions = paper.get("exceptions") or {}
     runtime_status = str(readiness.get("runtime_phase") or global_payload.get("paper_label") or "UNKNOWN")
@@ -131,6 +136,8 @@ def _build_runtime_readiness(
         ).items()
         if not bool(item.get("available"))
     ]
+    bootstrap_items = list(bootstrap_prerequisites.get("items") or [])
+    bootstrap_issues = [str(item.get("label") or item.get("key") or "") for item in bootstrap_items if str(item.get("status") or "") != "ready"]
     active_lane_count = len(_unique_lane_ids(active_rows, enabled_only=True))
     active_instruments_count = len({str(row.get("instrument") or "") for row in active_rows if row.get("instrument")})
     payload = {
@@ -149,7 +156,8 @@ def _build_runtime_readiness(
             f"entries={'ENABLED' if entries_enabled else 'HALTED'} | "
             f"auth={'READY' if auth_readiness else 'NOT_READY'} | "
             f"market_data={market_data_readiness} | faults={len(blocking_faults)} | "
-            f"runtime_recovery={runtime_recovery_state} | restart_budget={runtime_recovery_attempts}/{runtime_recovery_attempt_budget or '?'}"
+            f"runtime_recovery={runtime_recovery_state} | restart_budget={runtime_recovery_attempts}/{runtime_recovery_attempt_budget or '?'} | "
+            f"bootstrap_issues={len(bootstrap_issues)}"
         ),
         "field_sources": {
             "runtime_status": _source(_OD_FILE, "_paper_readiness_payload", "paper.readiness.runtime_phase"),
@@ -161,6 +169,7 @@ def _build_runtime_readiness(
             "runtime_recovery_message": _source(_OD_FILE, "_paper_runtime_recovery_payload", "paper.runtime_recovery.operator_message"),
             "blocking_faults": _source(_OD_FILE, "_paper_exceptions_payload", "paper.exceptions.exceptions"),
             "degraded_informational_feeds": _source(_OS_FILE, "_build_runtime_readiness", "secondary_context.*.available"),
+            "bootstrap_prerequisites": _source(_OD_FILE, "_dashboard_bootstrap_prerequisites_payload", "bootstrap_prerequisites.items"),
         },
     }
     payload["values"] = {
@@ -179,9 +188,12 @@ def _build_runtime_readiness(
         "blocking_faults_count": len(blocking_faults),
         "blocking_faults_active": payload["blocking_faults_active"],
         "degraded_informational_feeds": degraded_informational_feeds,
+        "bootstrap_prerequisite_issues": bootstrap_issues,
+        "bootstrap_prerequisites_reduced_mode": bool(bootstrap_prerequisites.get("reduced_mode")),
         "active_lanes_count": active_lane_count,
         "active_instruments_count": active_instruments_count,
     }
+    payload["bootstrap_prerequisites"] = bootstrap_prerequisites
     return payload
 
 

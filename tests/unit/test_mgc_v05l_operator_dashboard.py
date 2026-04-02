@@ -1766,12 +1766,16 @@ def test_research_daily_capture_payload_surfaces_latest_run_and_symbol_failures(
     repo_root = tmp_path
     latest_dir = repo_root / "outputs" / "research" / "daily_capture"
     latest_dir.mkdir(parents=True, exist_ok=True)
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    capture_started_at = (now_utc.replace(second=0) if now_utc.second else now_utc).isoformat()
+    capture_completed_at = now_utc.isoformat()
+    last_bar_end_ts = now_utc.isoformat()
     (latest_dir / "latest.json").write_text(
         json.dumps(
             {
                     "status": "partial_failure",
-                    "capture_started_at": "2026-03-28T22:15:00+00:00",
-                    "capture_completed_at": "2026-03-28T22:16:00+00:00",
+                    "capture_started_at": capture_started_at,
+                    "capture_completed_at": capture_completed_at,
                 "attempted_symbols": ["MGC", "MES"],
                 "succeeded_symbols": ["MGC"],
                 "failed_symbols": [
@@ -1784,15 +1788,15 @@ def test_research_daily_capture_payload_surfaces_latest_run_and_symbol_failures(
                     }
                 ],
                 "target_rows": [
-                    {
-                        "symbol": "MGC",
-                            "capture_class": "research_universe",
-                            "timeframe": "5m",
-                            "status": "success",
-                            "last_captured_bar_end_ts": "2026-03-28T22:10:00+00:00",
-                        "failure_code": None,
-                        "failure_detail": None,
-                    },
+                        {
+                            "symbol": "MGC",
+                                "capture_class": "research_universe",
+                                "timeframe": "5m",
+                                "status": "success",
+                                "last_captured_bar_end_ts": last_bar_end_ts,
+                            "failure_code": None,
+                            "failure_detail": None,
+                        },
                     {
                         "symbol": "MES",
                         "capture_class": "watched",
@@ -1823,9 +1827,9 @@ def test_research_daily_capture_payload_surfaces_latest_run_and_symbol_failures(
                     "timeframe": "5m",
                     "capture_class": "research_universe",
                     "data_source": "schwab_history",
-                    "last_attempted_at": "2026-03-28T22:16:00+00:00",
-                    "last_succeeded_at": "2026-03-28T22:16:00+00:00",
-                    "last_bar_end_ts": "2026-03-28T22:10:00+00:00",
+                    "last_attempted_at": capture_completed_at,
+                    "last_succeeded_at": capture_completed_at,
+                    "last_bar_end_ts": last_bar_end_ts,
                     "last_status": "success",
                     "last_failure_code": None,
                     "last_failure_detail": None,
@@ -1836,7 +1840,7 @@ def test_research_daily_capture_payload_surfaces_latest_run_and_symbol_failures(
                     "timeframe": "5m",
                     "capture_class": "watched",
                     "data_source": "schwab_history",
-                    "last_attempted_at": "2026-03-28T22:16:00+00:00",
+                    "last_attempted_at": capture_completed_at,
                     "last_succeeded_at": None,
                     "last_bar_end_ts": None,
                     "last_status": "failure",
@@ -1849,7 +1853,7 @@ def test_research_daily_capture_payload_surfaces_latest_run_and_symbol_failures(
 
     service = OperatorDashboardService(repo_root)
 
-    payload = service._research_daily_capture_payload(generated_at="2026-03-28T22:20:00+00:00")  # type: ignore[attr-defined]
+    payload = service._research_daily_capture_payload(generated_at=now_utc.isoformat())  # type: ignore[attr-defined]
 
     assert payload["run_status"] == "partial_failure"
     assert payload["freshness_state"] == "current"
@@ -6751,6 +6755,16 @@ def test_dashboard_approved_models_surface_includes_atp_as_shared_paper_lane(tmp
                     "symbol": "MGC",
                     "runtime_kind": "atp_companion_benchmark_paper",
                     "strategy_family": "active_trend_participation_engine",
+                    "strategy_status": "RUNNING_ATP_COMPANION_BENCHMARK_PAPER",
+                    "scope_label": "ATP Companion Benchmark / Paper Only / London Diagnostic-Only",
+                    "benchmark_designation": "CURRENT_ATP_COMPANION_BENCHMARK",
+                    "tracked_strategy_id": "atp_companion_v1_asia_us",
+                    "participation_policy": "SINGLE_ENTRY_ONLY",
+                    "open_entry_leg_count": 0,
+                    "open_add_count": 0,
+                    "additional_entry_allowed": False,
+                    "runtime_attached": True,
+                    "operator_halt": False,
                     "entries_enabled": True,
                     "position_side": "FLAT",
                     "session_restriction": "ASIA/US",
@@ -6791,9 +6805,101 @@ def test_dashboard_approved_models_surface_includes_atp_as_shared_paper_lane(tmp
     assert row["lane_id"] == "atp_companion_v1_asia_us"
     assert row["temporary_paper_strategy"] is False
     assert row["paper_strategy_class"] == "approved_or_admitted_paper_strategy"
+    assert row["lane_class"] == "benchmark_lane"
+    assert row["lane_class_label"] == "Benchmark Lane"
+    assert row["participation_policy"] == "SINGLE_ENTRY_ONLY"
     detail = payload["details_by_branch"][row["branch"]]
     assert detail["temporary_paper_strategy"] is False
     assert detail["paper_strategy_class"] == "approved_or_admitted_paper_strategy"
+    assert detail["benchmark_designation"] == "CURRENT_ATP_COMPANION_BENCHMARK"
+    assert detail["lane_class"] == "benchmark_lane"
+    assert detail["designation_label"] == "CURRENT ATP COMPANION BENCHMARK"
+    assert detail["staged_capable"] is False
+    assert detail["control_availability"]["resume_entries"] == "NOT NEEDED: ENTRIES ALREADY LIVE"
+    assert detail["surface_role"] == "PRIMARY_SHARED_LANE_OPERATOR_SURFACE"
+
+
+def test_dashboard_approved_models_surface_marks_atp_candidate_as_staged_candidate_lane(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
+    paper_artifacts.mkdir(parents=True)
+    lane_dir = paper_artifacts / "lanes" / "atp_companion_v1_gc_asia_us"
+    lane_dir.mkdir(parents=True)
+
+    service = OperatorDashboardService(repo_root)
+    paper = {
+        "artifacts_dir": str(paper_artifacts),
+        "running": True,
+        "status": {"session_date": "2026-03-23"},
+        "raw_operator_status": {
+            "lanes": [
+                {
+                    "lane_id": "atp_companion_v1_gc_asia_us",
+                    "display_name": "ATP Companion GC Candidate v1 — Asia + US Paper",
+                    "symbol": "GC",
+                    "runtime_kind": "atp_companion_benchmark_paper",
+                    "strategy_family": "active_trend_participation_engine",
+                    "strategy_status": "RUNNING_ATP_COMPANION_CANDIDATE_STAGED_PAPER",
+                    "scope_label": "ATP Companion Candidate / Paper Only / London Diagnostic-Only / Staged",
+                    "tracked_strategy_id": "atp_companion_v1__paper_gc_asia_us",
+                    "participation_policy": "STAGED_SAME_DIRECTION",
+                    "entries_enabled": True,
+                    "operator_halt": True,
+                    "position_side": "LONG",
+                    "broker_position_qty": 2,
+                    "internal_position_qty": 2,
+                    "open_entry_leg_count": 2,
+                    "open_add_count": 1,
+                    "additional_entry_allowed": False,
+                    "runtime_attached": True,
+                    "session_restriction": "ASIA/US",
+                    "approved_long_entry_sources": ["trend_participation.pullback_continuation.long.conservative"],
+                    "database_url": f"sqlite:///{repo_root / 'paper__atp_gc.sqlite3'}",
+                }
+            ]
+        },
+        "config_in_force": {
+            "lanes": [
+                {
+                    "lane_id": "atp_companion_v1_gc_asia_us",
+                    "display_name": "ATP Companion GC Candidate v1 — Asia + US Paper",
+                    "symbol": "GC",
+                    "runtime_kind": "atp_companion_benchmark_paper",
+                    "strategy_family": "active_trend_participation_engine",
+                    "session_restriction": "ASIA/US",
+                    "long_sources": ["trend_participation.pullback_continuation.long.conservative"],
+                    "artifacts_dir": str(lane_dir),
+                }
+            ]
+        },
+        "lane_risk": {"lanes": []},
+        "events": {"branch_sources": [], "rule_blocks": [], "operator_controls": [], "reconciliation": []},
+        "latest_fills": [],
+        "latest_intents": [],
+        "daily_summary": None,
+        "position": {"side": "LONG"},
+        "operator_state": {},
+        "performance": {"branch_performance": []},
+    }
+
+    payload = service._paper_approved_models_payload(paper)
+
+    row = payload["rows"][0]
+    detail = payload["details_by_branch"][row["branch"]]
+    assert row["lane_class"] == "candidate_staged_lane"
+    assert row["lane_class_label"] == "Candidate Staged Lane"
+    assert row["candidate_designation"] == "ATP_COMPANION_CANDIDATE_STAGED"
+    assert row["participation_policy"] == "STAGED_SAME_DIRECTION"
+    assert row["open_entry_leg_count"] == 2
+    assert row["open_add_count"] == 1
+    assert row["additional_entry_allowed"] is False
+    assert detail["lane_class"] == "candidate_staged_lane"
+    assert detail["designation_label"] == "ATP candidate / staged paper lane"
+    assert detail["staged_capable"] is True
+    assert detail["total_quantity"] == 2
+    assert detail["control_availability"]["halt_entries"] == "ALREADY ACTIVE: OPERATOR HALT IS SET"
+    assert detail["control_availability"]["resume_entries"] == "AVAILABLE: CLEAR OPERATOR HALT"
+    assert detail["control_availability"]["stop_after_cycle"] == "DISABLED: UNSAFE WHILE STAGED EXPOSURE IS OPEN"
 
 
 def test_tracked_paper_strategy_payload_registers_live_attached_atp_benchmark_from_persisted_runtime_truth(tmp_path: Path) -> None:
@@ -6997,6 +7103,8 @@ def test_tracked_paper_strategy_payload_registers_live_attached_atp_benchmark_fr
     )
 
     assert tracked_payload["total_count"] == 1
+    assert "secondary audit/read-model surfaces" in tracked_payload["note"]
+    assert "primary operating surface" in tracked_payload["note"]
     row = tracked_payload["rows"][0]
     detail = tracked_payload["details_by_strategy_id"]["atp_companion_v1_asia_us"]
     assert row["display_name"] == "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only"

@@ -1168,6 +1168,16 @@ function buildOperatorReadinessNotes(payload) {
   const rows = [];
   rows.push(`Auth readiness: ${values.auth_readiness ? "READY" : "NOT_READY"}`);
   rows.push(`Degraded informational feeds: ${(values.degraded_informational_feeds || []).join(", ") || "None"}`);
+  const bootstrap = payload.bootstrap_prerequisites || {};
+  const bootstrapItems = Array.isArray(bootstrap.items) ? bootstrap.items : [];
+  if (bootstrapItems.length) {
+    rows.push(`Bootstrap prerequisites: ${bootstrap.status_line || "Unavailable"}`);
+    bootstrapItems
+      .filter((row) => String(row.status || "ready") !== "ready")
+      .forEach((row) => {
+        rows.push(`${row.label || row.key || "Bootstrap prerequisite"}: ${row.reason || "-"} Next fix: ${row.next_action || "-"}`);
+      });
+  }
   const faults = Array.isArray(payload.blocking_faults) ? payload.blocking_faults : [];
   faults.forEach((row) => {
     rows.push(`Fault ${row.code || "-"}: ${row.summary || "-"}${row.owner ? ` (${row.owner})` : ""}`);
@@ -2149,12 +2159,10 @@ function renderApprovedModels(payload, eligibility = {}, temporaryPayload = {}) 
                   <td>${sessionTagMarkup(row.session_restriction)}</td>
                   <td>
                     <div class="approved-lane-family-wrap">
-                      <span class="${row.temporary_paper_strategy ? "badge badge-warning" : "badge badge-accent"}">${escapeHtml(row.temporary_paper_strategy ? "TEMP PAPER" : "ADMITTED")}</span>
-                      ${row.temporary_paper_strategy ? `
-                        <span class="approved-lane-label subnote mono">EXPERIMENTAL</span>
-                        <span class="approved-lane-label subnote mono">PAPER ONLY</span>
-                        <span class="approved-lane-label subnote mono">NON-APPROVED</span>
-                      ` : ""}
+                      <span class="${row.temporary_paper_strategy ? "badge badge-warning" : (row.lane_class === "benchmark_lane" ? "badge badge-info" : (row.lane_class === "candidate_staged_lane" ? "badge badge-accent" : "badge badge-accent"))}">${escapeHtml(row.lane_class_badge || (row.temporary_paper_strategy ? "TEMP PAPER" : "ADMITTED"))}</span>
+                      <span class="approved-lane-label subnote mono">${escapeHtml(row.lane_class_label || "-")}</span>
+                      <span class="approved-lane-label subnote mono">${escapeHtml(row.designation_label || "-")}</span>
+                      <span class="approved-lane-label subnote mono">${escapeHtml(row.participation_policy || "-")}</span>
                     </div>
                   </td>
                   <td><span class="${row.enabled ? "badge badge-accent" : "badge badge-muted"}">${escapeHtml(row.state || "-")}</span></td>
@@ -2190,7 +2198,7 @@ function renderApprovedModels(payload, eligibility = {}, temporaryPayload = {}) 
         const instrument = laneInstrument(row);
         const family = row.source_family || lane.family || branch;
         const session = row.session_restriction || "-";
-        const strategyClass = row.temporary_paper_strategy ? "TEMP PAPER" : "ADMITTED";
+        const strategyClass = row.lane_class_badge || (row.temporary_paper_strategy ? "TEMP PAPER" : "ADMITTED");
         return `<option value="${escapeHtml(branch)}">${escapeHtml(`${strategyClass} | ${instrument} | ${family} | ${session}`)}</option>`;
       })
       .join("");
@@ -2587,7 +2595,12 @@ function renderPaperLaneActivity(payload, temporaryPayload = {}) {
                   <span class="approved-lane-label subnote mono">${escapeHtml(row.branch || "-")}</span>
                 </div>
               </td>
-              <td>${row.temporary_paper_strategy ? '<span class="badge badge-warning">TEMP PAPER</span>' : '<span class="badge badge-accent">ADMITTED</span>'}</td>
+              <td>
+                <div class="approved-lane-family-wrap">
+                  <span class="${row.temporary_paper_strategy ? "badge badge-warning" : (row.lane_class === "benchmark_lane" ? "badge badge-info" : "badge badge-accent")}">${escapeHtml(row.lane_class_badge || (row.temporary_paper_strategy ? "TEMP PAPER" : "ADMITTED"))}</span>
+                  <span class="approved-lane-label subnote mono">${escapeHtml(row.lane_class_label || "-")}</span>
+                </div>
+              </td>
               <td>${sessionTagMarkup(row.session_restriction)}</td>
               <td><span class="${badgeClass(laneActivityVerdictLevel(row.verdict || "UNKNOWN_INSUFFICIENT_EVIDENCE"))}">${escapeHtml(row.verdict || "UNKNOWN_INSUFFICIENT_EVIDENCE")}</span></td>
               <td>${escapeHtml(row.has_signal_or_decision ? "YES" : "NO")}</td>
@@ -2752,11 +2765,21 @@ function renderApprovedModelDetail(detail, artifacts) {
   if (!detail) {
     setBadge("approved-model-detail-state", "NO LANE", "muted");
     text("approved-model-detail-branch", "-");
+    text("approved-model-detail-class", "-");
+    text("approved-model-detail-designation", "-");
     text("approved-model-detail-side", "-");
     text("approved-model-detail-enabled", "-");
+    text("approved-model-detail-participation", "-");
     text("approved-model-detail-open", "-");
+    text("approved-model-detail-net-qty", "-");
+    text("approved-model-detail-legs", "-");
+    text("approved-model-detail-can-add", "-");
     text("approved-model-detail-open-meta", "-");
     text("approved-model-detail-persistence", "-");
+    text("approved-model-detail-halt-entries", "-");
+    text("approved-model-detail-resume-entries", "-");
+    text("approved-model-detail-flatten-halt", "-");
+    text("approved-model-detail-stop-cycle", "-");
     text("approved-model-detail-signal", "-");
     text("approved-model-detail-block", "-");
     text("approved-model-detail-decision", "-");
@@ -2783,9 +2806,18 @@ function renderApprovedModelDetail(detail, artifacts) {
 
   setBadge("approved-model-detail-state", detail.chain_state || "UNKNOWN", approvedModelChainLevel(detail.chain_state));
   text("approved-model-detail-branch", detail.branch || "-");
+  text("approved-model-detail-class", detail.lane_class_label || "-");
+  text("approved-model-detail-designation", detail.designation_label || detail.scope_label || "-");
   text("approved-model-detail-side", detail.side || "-");
   text("approved-model-detail-enabled", detail.enabled ? "ENABLED" : "DISABLED");
+  text(
+    "approved-model-detail-participation",
+    `${detail.participation_policy || "SINGLE_ENTRY_ONLY"}${detail.staged_capable ? " • STAGED CAPABLE" : " • SINGLE ENTRY"}`,
+  );
   setStatusValue("approved-model-detail-open", detail.open_position ? "OPEN" : "FLAT", detail.open_position ? "warning" : "ok");
+  text("approved-model-detail-net-qty", `${detail.net_side || detail.side || "FLAT"} • ${detail.total_quantity ?? 0}`);
+  text("approved-model-detail-legs", `${detail.open_entry_leg_count ?? 0} leg(s) • ${detail.open_add_count ?? 0} add(s)`);
+  text("approved-model-detail-can-add", detail.additional_entry_allowed ? "YES" : "NO");
   text(
     "approved-model-detail-open-meta",
     detail.open_position
@@ -2793,6 +2825,10 @@ function renderApprovedModelDetail(detail, artifacts) {
       : "No open exposure"
   );
   text("approved-model-detail-persistence", detail.persistence_state || "-");
+  text("approved-model-detail-halt-entries", detail.control_availability?.halt_entries || "-");
+  text("approved-model-detail-resume-entries", detail.control_availability?.resume_entries || "-");
+  text("approved-model-detail-flatten-halt", detail.control_availability?.flatten_and_halt || "-");
+  text("approved-model-detail-stop-cycle", detail.control_availability?.stop_after_cycle || "-");
   text("approved-model-detail-signal", detail.latest_signal_label || "No signal yet");
   text(
     "approved-model-detail-block",
@@ -2814,8 +2850,8 @@ function renderApprovedModelDetail(detail, artifacts) {
   text(
     "approved-model-detail-note",
     detail.temporary_paper_strategy
-      ? `Temporary paper strategy shown in the shared lane operator surface. ${detail.chain_note || "-"}`
-      : (detail.chain_note || "-"),
+      ? `Temporary paper strategy shown in the primary shared lane operator surface. Tracked or compatibility views are secondary audit surfaces. ${detail.chain_note || "-"}`
+      : `${detail.surface_role_note || "Shared lane operator detail is the primary operating surface."} ${detail.chain_note || "-"}`,
   );
 
   setLink("approved-model-detail-decisions-link", detail.artifacts?.decisions || artifacts.decisions || null);

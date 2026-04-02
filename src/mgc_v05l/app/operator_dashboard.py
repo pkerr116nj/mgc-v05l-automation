@@ -309,6 +309,10 @@ class OperatorDashboardService:
         self._experimental_canaries_operator_summary_path = self._experimental_canaries_dir / "operator_summary.md"
         self._operator_surface_path = self._dashboard_artifacts_dir / "operator_surface_snapshot.json"
         self._research_daily_capture_status_path = self._dashboard_artifacts_dir / "research_daily_capture_status.json"
+        self._bootstrap_prerequisites_path = (
+            self._dashboard_artifacts_dir / "runtime" / "dashboard_bootstrap_prerequisites.json"
+        )
+        self._bootstrap_prerequisites_path.parent.mkdir(parents=True, exist_ok=True)
         self._market_index_strip_path = self._dashboard_artifacts_dir / "market_index_strip_snapshot.json"
         self._market_index_diagnostics_path = self._dashboard_artifacts_dir / "market_index_strip_diagnostics.json"
         self._treasury_curve_path = self._dashboard_artifacts_dir / "treasury_curve_snapshot.json"
@@ -593,6 +597,7 @@ class OperatorDashboardService:
                     approved_quant_baselines=approved_quant_baselines,
                     market_context=market_context,
                     treasury_curve=treasury_curve,
+                    bootstrap_prerequisites=self._dashboard_bootstrap_prerequisites_payload(),
                 )
                 research_capture = self._research_daily_capture_payload(generated_at=generated_at)
                 paper["signal_intent_fill_audit"] = self._paper_signal_intent_fill_audit_payload(
@@ -656,6 +661,7 @@ class OperatorDashboardService:
                 _write_json_file(self._paper_soak_session_path, paper["soak_session"])
                 _write_json_file(self._operator_surface_path, operator_surface)
                 _write_json_file(self._research_daily_capture_status_path, research_capture)
+                _write_json_file(self._bootstrap_prerequisites_path, self._dashboard_bootstrap_prerequisites_payload())
                 _write_json_file(self._paper_session_close_review_latest_json_path, paper_session_close_review)
                 _atomic_write_text(
                     self._paper_session_close_review_latest_md_path,
@@ -811,6 +817,7 @@ class OperatorDashboardService:
                     },
                     "degraded_sections": degraded_sections,
                     "dashboard_warnings": snapshot_warnings,
+                    "bootstrap_prerequisites": self._dashboard_bootstrap_prerequisites_payload(),
                     "market_context": market_context,
                     "treasury_curve": treasury_curve,
                     "approved_quant_baselines": approved_quant_baselines,
@@ -843,6 +850,7 @@ class OperatorDashboardService:
         latest_manifest = _load_json_file(self._research_daily_capture_latest_path)
         status_rows = _load_research_capture_status_rows(self._research_history_database_path)
         run_rows = _load_research_capture_run_rows(self._research_history_database_path, limit=20)
+        replay_db_present = self._research_history_database_path.exists()
         attempted_symbols = list(latest_manifest.get("attempted_symbols") or [])
         succeeded_symbols = list(latest_manifest.get("succeeded_symbols") or [])
         failed_symbols = list(latest_manifest.get("failed_symbols") or [])
@@ -858,6 +866,11 @@ class OperatorDashboardService:
             failed_symbols=failed_symbols,
             last_attempted_at=last_attempted_at,
         )
+        if not replay_db_present:
+            status_line = (
+                f"Replay/research DB is unavailable at {self._research_history_database_path}. "
+                "Research capture history is in reduced mode until the replay DB bootstrap is restored."
+            )
         return {
             "generated_at": generated_at,
             "run_status": run_status,
@@ -879,6 +892,7 @@ class OperatorDashboardService:
             "status_rows": status_rows,
             "recent_runs": run_rows,
             "research_database_path": str(self._research_history_database_path),
+            "research_database_present": replay_db_present,
             "latest_manifest_path": str(self._research_daily_capture_latest_path),
             "latest_manifest_present": self._research_daily_capture_latest_path.exists(),
             "status_line": status_line,
@@ -886,6 +900,77 @@ class OperatorDashboardService:
                 "cadence": "daily",
                 "stale_after_hours": 36,
             },
+        }
+
+    def _dashboard_bootstrap_prerequisites_payload(self) -> dict[str, Any]:
+        replay_db_path = Path(
+            os.environ.get(
+                "MGC_BOOTSTRAP_REPLAY_DB_PATH",
+                str(self._research_history_database_path),
+            )
+        )
+        replay_db_missing = (
+            str(os.environ.get("MGC_BOOTSTRAP_REPLAY_DB_STATUS") or "").strip().lower() == "missing"
+            or not replay_db_path.exists()
+        )
+        auth_missing_names = [
+            name
+            for name in str(os.environ.get("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES") or "").split()
+            if name
+        ]
+        if not auth_missing_names:
+            for name in ("SCHWAB_APP_KEY", "SCHWAB_APP_SECRET", "SCHWAB_CALLBACK_URL"):
+                if not os.environ.get(name):
+                    auth_missing_names.append(name)
+        auth_missing = bool(auth_missing_names)
+        items = [
+            {
+                "key": "replay_database",
+                "label": "Replay DB bootstrap",
+                "status": "missing" if replay_db_missing else "ready",
+                "reduced_mode": replay_db_missing,
+                "path": str(replay_db_path),
+                "reason": (
+                    f"Replay DB is missing at {replay_db_path}. Replay/research-backed panels run in reduced mode until the DB is restored."
+                    if replay_db_missing
+                    else f"Replay DB is available at {replay_db_path}."
+                ),
+                "next_action": str(
+                    os.environ.get("MGC_BOOTSTRAP_REPLAY_DB_NEXT_ACTION")
+                    or f"Run `bash scripts/backfill_schwab_1m_history.sh` to create and populate {replay_db_path}."
+                ),
+            },
+            {
+                "key": "schwab_auth_env",
+                "label": "Schwab auth bootstrap env",
+                "status": "missing" if auth_missing else "ready",
+                "reduced_mode": auth_missing,
+                "missing_names": auth_missing_names,
+                "reason": (
+                    f"Schwab auth env is missing: {', '.join(auth_missing_names)}. Schwab-backed bootstrap paths stay unavailable until the env is restored."
+                    if auth_missing
+                    else "Schwab auth env is loaded for dashboard bootstrap paths."
+                ),
+                "next_action": str(
+                    os.environ.get("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION")
+                    or "Export SCHWAB_APP_KEY, SCHWAB_APP_SECRET, and SCHWAB_CALLBACK_URL or source .local/schwab_env.sh."
+                ),
+            },
+        ]
+        missing_items = [item for item in items if item["status"] != "ready"]
+        return {
+            "status": "reduced_mode" if missing_items else "ready",
+            "reduced_mode": bool(missing_items),
+            "issue_count": len(missing_items),
+            "items": items,
+            "status_line": (
+                "Dashboard is running in reduced mode: "
+                + "; ".join(f"{item['label']} missing" for item in missing_items)
+                if missing_items
+                else "Dashboard bootstrap prerequisites are satisfied."
+            ),
+            "primary_next_action": missing_items[0]["next_action"] if missing_items else None,
+            "artifact_path": str(self._bootstrap_prerequisites_path),
         }
 
     def dashboard_snapshot(self) -> dict[str, Any]:
@@ -4163,10 +4248,33 @@ class OperatorDashboardService:
                 if lane_open_position and lane_position.get("unrealized_pnl") not in {None, "", "N/A"}
                 else None
             )
+            detail["strategy_status"] = lane_row.get("strategy_status") or configured.get("strategy_status")
+            detail["scope_label"] = lane_row.get("scope_label") or configured.get("scope_label")
+            detail["benchmark_designation"] = lane_row.get("benchmark_designation") or configured.get("benchmark_designation")
+            detail["tracked_strategy_id"] = lane_row.get("tracked_strategy_id") or configured.get("tracked_strategy_id")
+            detail["participation_policy"] = lane_row.get("participation_policy") or configured.get("participation_policy") or "SINGLE_ENTRY_ONLY"
+            detail["max_concurrent_entries"] = lane_row.get("max_concurrent_entries") or configured.get("max_concurrent_entries")
+            detail["max_position_quantity"] = lane_row.get("max_position_quantity") or configured.get("max_position_quantity")
+            detail["max_adds_after_entry"] = lane_row.get("max_adds_after_entry") or configured.get("max_adds_after_entry")
+            detail["net_side"] = lane_row.get("position_side") or "FLAT"
+            detail["total_quantity"] = lane_row.get("broker_position_qty") or lane_row.get("internal_position_qty") or 0
+            detail["open_entry_leg_count"] = int(lane_row.get("open_entry_leg_count", 0) or 0)
+            detail["open_add_count"] = int(lane_row.get("open_add_count", 0) or 0)
+            detail["additional_entry_allowed"] = bool(lane_row.get("additional_entry_allowed", False))
+            detail["runtime_attached"] = bool(lane_row.get("runtime_attached", paper.get("running", False)))
+            detail["operator_halt"] = bool(lane_row.get("operator_halt", False))
             detail["temporary_paper_strategy"] = temporary_paper_strategy
             detail["paper_strategy_class"] = (
                 "temporary_paper_strategy" if temporary_paper_strategy else "approved_or_admitted_paper_strategy"
             )
+            detail.update(_paper_lane_classification_payload(detail))
+            detail["staged_capable"] = str(detail.get("participation_policy") or "").upper() != "SINGLE_ENTRY_ONLY"
+            detail["surface_role"] = "PRIMARY_SHARED_LANE_OPERATOR_SURFACE"
+            detail["surface_role_note"] = (
+                "Shared lane operator detail is the primary operating surface. "
+                "Tracked/compatibility views are secondary audit surfaces."
+            )
+            detail["control_availability"] = _paper_lane_control_context(detail)
             details_by_branch[lane_display] = detail
             rows.append(
                 {
@@ -4201,6 +4309,22 @@ class OperatorDashboardService:
                     "latest_activity_timestamp": detail.get("latest_activity_timestamp"),
                     "risk_state": detail.get("risk_state", "OK"),
                     "halt_reason": detail.get("lane_halt_reason"),
+                    "strategy_status": detail.get("strategy_status"),
+                    "scope_label": detail.get("scope_label"),
+                    "benchmark_designation": detail.get("benchmark_designation"),
+                    "tracked_strategy_id": detail.get("tracked_strategy_id"),
+                    "candidate_designation": detail.get("candidate_designation"),
+                    "lane_class": detail.get("lane_class"),
+                    "lane_class_label": detail.get("lane_class_label"),
+                    "lane_class_badge": detail.get("lane_class_badge"),
+                    "designation_label": detail.get("designation_label"),
+                    "participation_policy": detail.get("participation_policy"),
+                    "staged_capable": detail.get("staged_capable"),
+                    "net_side": detail.get("net_side"),
+                    "total_quantity": detail.get("total_quantity"),
+                    "open_entry_leg_count": detail.get("open_entry_leg_count"),
+                    "open_add_count": detail.get("open_add_count"),
+                    "additional_entry_allowed": detail.get("additional_entry_allowed"),
                     "temporary_paper_strategy": temporary_paper_strategy,
                     "paper_strategy_class": (
                         "temporary_paper_strategy" if temporary_paper_strategy else "approved_or_admitted_paper_strategy"
@@ -5094,6 +5218,9 @@ class OperatorDashboardService:
                     "latest_fill_price": detail.get("latest_fill_price"),
                     "risk_state": detail.get("risk_state", "OK"),
                     "reconciliation_state": detail.get("reconciliation_state"),
+                    "lane_class": row.get("lane_class"),
+                    "lane_class_label": row.get("lane_class_label"),
+                    "lane_class_badge": row.get("lane_class_badge"),
                     "used_sources": used_sources,
                     "artifacts": artifacts,
                 }
@@ -13889,6 +14016,103 @@ def _paper_lane_activity_verdict(detail: dict[str, Any]) -> str:
     if not detail.get("latest_activity_timestamp"):
         return "NO_ACTIVITY_YET"
     return "UNKNOWN_INSUFFICIENT_EVIDENCE"
+
+
+def _paper_lane_classification_payload(row: dict[str, Any]) -> dict[str, Any]:
+    temporary_paper_strategy = bool(row.get("temporary_paper_strategy"))
+    benchmark_designation = str(row.get("benchmark_designation") or "").strip()
+    tracked_strategy_id = str(row.get("tracked_strategy_id") or "").strip()
+    strategy_status = str(row.get("strategy_status") or "").strip().upper()
+    scope_label = str(row.get("scope_label") or "").strip()
+    participation_policy = str(row.get("participation_policy") or "SINGLE_ENTRY_ONLY").strip().upper()
+
+    if temporary_paper_strategy:
+        return {
+            "lane_class": "temporary_paper_strategy",
+            "lane_class_label": "Temporary Paper Strategy",
+            "lane_class_badge": "TEMP PAPER",
+            "designation_label": "Temporary paper strategy",
+            "candidate_designation": None,
+        }
+    if benchmark_designation:
+        return {
+            "lane_class": "benchmark_lane",
+            "lane_class_label": "Benchmark Lane",
+            "lane_class_badge": "BENCHMARK",
+            "designation_label": benchmark_designation.replace("_", " "),
+            "candidate_designation": None,
+        }
+    if (
+        "CANDIDATE" in strategy_status
+        or "CANDIDATE" in scope_label.upper()
+        or (
+            tracked_strategy_id.startswith("atp_companion_v1__paper_")
+            and participation_policy != "SINGLE_ENTRY_ONLY"
+        )
+    ):
+        return {
+            "lane_class": "candidate_staged_lane",
+            "lane_class_label": "Candidate Staged Lane",
+            "lane_class_badge": "CANDIDATE",
+            "designation_label": "ATP candidate / staged paper lane",
+            "candidate_designation": "ATP_COMPANION_CANDIDATE_STAGED",
+        }
+    return {
+        "lane_class": "approved_or_admitted_paper_lane",
+        "lane_class_label": "Approved / Admitted Paper Lane",
+        "lane_class_badge": "ADMITTED",
+        "designation_label": "Approved / admitted paper lane",
+        "candidate_designation": None,
+    }
+
+
+def _paper_lane_control_context(detail: dict[str, Any]) -> dict[str, Any]:
+    runtime_attached = bool(detail.get("runtime_attached", True))
+    operator_halt = bool(detail.get("operator_halt"))
+    open_position = bool(detail.get("open_position"))
+    staged_exposure_open = open_position or int(detail.get("open_entry_leg_count", 0) or 0) > 0
+    strategy_status = str(detail.get("strategy_status") or "").strip().upper()
+    reconciliation_dirty = str(detail.get("reconciliation_state") or "").strip().upper() == "DIRTY"
+    fault_active = strategy_status.startswith("FAULT") or bool(detail.get("fault_code"))
+    risk_halt_active = str(detail.get("risk_state") or "OK").strip().upper() != "OK" and bool(detail.get("lane_halt_reason"))
+    unblock_action = str(detail.get("lane_unblock_action") or "").strip()
+
+    if not runtime_attached:
+        halt_entries = "DISABLED: RUNTIME NOT ATTACHED"
+        resume_entries = "DISABLED: RUNTIME NOT ATTACHED"
+        flatten_and_halt = "DISABLED: RUNTIME NOT ATTACHED"
+        stop_after_cycle = "DISABLED: RUNTIME NOT ATTACHED"
+    else:
+        halt_entries = "ALREADY ACTIVE: OPERATOR HALT IS SET" if operator_halt else "AVAILABLE"
+        if operator_halt:
+            resume_entries = "AVAILABLE: CLEAR OPERATOR HALT"
+        elif fault_active:
+            resume_entries = "DISABLED: CLEAR FAULT FIRST"
+        elif reconciliation_dirty:
+            resume_entries = "DISABLED: RECONCILIATION REQUIRED"
+        elif risk_halt_active:
+            resume_entries = f"DISABLED: {unblock_action or 'CLEAR RISK HALT FIRST'}"
+        else:
+            resume_entries = "NOT NEEDED: ENTRIES ALREADY LIVE"
+        flatten_and_halt = (
+            "AVAILABLE: FLATTEN OPEN EXPOSURE AND HALT"
+            if staged_exposure_open
+            else "AVAILABLE: HALT NEW ENTRIES / FLATTEN IF NEEDED"
+        )
+        if fault_active:
+            stop_after_cycle = "DISABLED: CLEAR FAULT FIRST"
+        elif reconciliation_dirty:
+            stop_after_cycle = "DISABLED: RECONCILIATION REQUIRED"
+        elif staged_exposure_open:
+            stop_after_cycle = "DISABLED: UNSAFE WHILE STAGED EXPOSURE IS OPEN"
+        else:
+            stop_after_cycle = "AVAILABLE"
+    return {
+        "halt_entries": halt_entries,
+        "resume_entries": resume_entries,
+        "flatten_and_halt": flatten_and_halt,
+        "stop_after_cycle": stop_after_cycle,
+    }
 
 
 def _paper_session_close_lane_verdict(detail: dict[str, Any], closeout_state: dict[str, Any]) -> str:

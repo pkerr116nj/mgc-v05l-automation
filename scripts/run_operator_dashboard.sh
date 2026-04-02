@@ -6,8 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common_env.sh"
 
-require_schwab_auth_env
-
 DEFAULT_HOST="${OPERATOR_DASHBOARD_HOST:-127.0.0.1}"
 DEFAULT_PORT="${OPERATOR_DASHBOARD_PORT:-8790}"
 DEFAULT_RUNTIME_DIR="${REPO_ROOT}/outputs/operator_dashboard/runtime"
@@ -112,6 +110,24 @@ ensure_dir "${DEFAULT_RUNTIME_DIR}"
 ensure_dir "$(dirname "${LOG_FILE}")"
 ensure_dir "$(dirname "${INFO_FILE}")"
 ensure_dir "$(dirname "${PID_FILE}")"
+
+emit_bootstrap_warning() {
+  local label="$1"
+  local message="$2"
+  echo "DASHBOARD_BOOTSTRAP_WARNING ${label}: ${message}" >&2
+}
+
+if [[ "${MGC_BOOTSTRAP_REPLAY_DB_STATUS:-ready}" == "missing" ]]; then
+  emit_bootstrap_warning \
+    "replay_db_missing" \
+    "Replay DB is missing at ${MGC_BOOTSTRAP_REPLAY_DB_PATH:-${DB_PATH}}. Dashboard will start in reduced mode; replay/research-backed panels will be unavailable. ${MGC_BOOTSTRAP_REPLAY_DB_NEXT_ACTION:-Run bash scripts/backfill_schwab_1m_history.sh.}"
+fi
+
+if [[ "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS:-ready}" == "missing" ]]; then
+  emit_bootstrap_warning \
+    "schwab_auth_env_missing" \
+    "Schwab auth env is missing (${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES:-SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL}). Dashboard will start in reduced mode; Schwab-backed bootstrap paths will be unavailable. ${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION:-Export SCHWAB_APP_KEY, SCHWAB_APP_SECRET, and SCHWAB_CALLBACK_URL.}"
+fi
 
 cleanup() {
   if [[ -n "${DASHBOARD_PID}" ]] && ps -p "${DASHBOARD_PID}" >/dev/null 2>&1; then

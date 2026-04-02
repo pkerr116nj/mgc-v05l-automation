@@ -73,7 +73,6 @@ ensure_file "${CONFIG_BASE}"
 ensure_file "${CONFIG_REPLAY}"
 ensure_file "${SCHWAB_CONFIG}"
 ensure_file "${PYTHON_BIN}"
-ensure_file "${DB_PATH}"
 
 ensure_dir "${REPORT_DIR}"
 ensure_dir "${VIZ_DIR}"
@@ -82,7 +81,42 @@ ensure_dir "${REPLAY_DIR}"
 export MGC_V05L_SETTINGS_SYMBOL="${MGC_V05L_SETTINGS_SYMBOL:-MGC}"
 export MGC_V05L_SETTINGS_TIMEFRAME="${MGC_V05L_SETTINGS_TIMEFRAME:-5m}"
 
+missing_schwab_auth_env_names() {
+  local missing=()
+  for name in SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL; do
+    if [[ -z "${!name:-}" ]]; then
+      missing+=("${name}")
+    fi
+  done
+  printf '%s\n' "${missing[*]}"
+}
+
+schwab_auth_env_loaded() {
+  [[ -z "$(missing_schwab_auth_env_names)" ]]
+}
+
+replay_db_missing() {
+  [[ ! -f "${DB_PATH}" ]]
+}
+
+replay_db_bootstrap_next_action() {
+  if schwab_auth_env_loaded; then
+    printf 'Run `bash scripts/backfill_schwab_1m_history.sh` to create and populate %s.' "${DB_PATH}"
+  else
+    printf 'Load Schwab auth env (`source .local/schwab_env.sh`) and then run `bash scripts/backfill_schwab_1m_history.sh` to create %s.' "${DB_PATH}"
+  fi
+}
+
+export MGC_BOOTSTRAP_REPLAY_DB_STATUS="$([[ -f "${DB_PATH}" ]] && echo "ready" || echo "missing")"
+export MGC_BOOTSTRAP_REPLAY_DB_PATH="${DB_PATH}"
+export MGC_BOOTSTRAP_REPLAY_DB_NEXT_ACTION="$(replay_db_bootstrap_next_action)"
+export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES="$(missing_schwab_auth_env_names)"
+export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS="$([[ -z "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES}" ]] && echo "ready" || echo "missing")"
+export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION="Export SCHWAB_APP_KEY, SCHWAB_APP_SECRET, and SCHWAB_CALLBACK_URL or source .local/schwab_env.sh before running Schwab-backed bootstrap actions."
+export MGC_OPERATOR_DASHBOARD_REDUCED_MODE="$([[ "${MGC_BOOTSTRAP_REPLAY_DB_STATUS}" == "missing" || "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS}" == "missing" ]] && echo "1" || echo "0")"
+
 ensure_signal_evaluations_structure_columns() {
+  require_replay_db_available
   "${PYTHON_BIN}" - <<'PY'
 import os
 import sqlite3
@@ -115,14 +149,17 @@ PY
 }
 
 require_schwab_auth_env() {
-  local missing=()
-  for name in SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL; do
-    if [[ -z "${!name:-}" ]]; then
-      missing+=("${name}")
-    fi
-  done
-  if [[ "${#missing[@]}" -ne 0 ]]; then
-    echo "Schwab auth bootstrap incomplete: missing ${missing[*]}. Checked shell env, ${LOCAL_SCHWAB_ENV}, and ${LOCAL_DOTENV}." >&2
+  local missing
+  missing="$(missing_schwab_auth_env_names)"
+  if [[ -n "${missing}" ]]; then
+    echo "Schwab auth bootstrap incomplete: missing ${missing}. Checked shell env, ${LOCAL_SCHWAB_ENV}, and ${LOCAL_DOTENV}." >&2
+    exit 1
+  fi
+}
+
+require_replay_db_available() {
+  if replay_db_missing; then
+    echo "Replay DB bootstrap incomplete: missing ${DB_PATH}. $(replay_db_bootstrap_next_action)" >&2
     exit 1
   fi
 }
