@@ -7,18 +7,27 @@ import json
 import os
 import shutil
 import signal
+import socket
+import sys
 import time as time_module
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Iterable, Sequence
+from urllib.parse import urlencode, urlparse
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, select
 
-from ..config_models import RuntimeMode, StrategySettings, load_settings_from_files
+from ..config_models import (
+    AddDirectionPolicy,
+    ParticipationPolicy,
+    RuntimeMode,
+    StrategySettings,
+    load_settings_from_files,
+)
 from ..domain.enums import HealthStatus
 from ..domain.enums import (
     LongEntryFamily,
@@ -44,6 +53,7 @@ from ..market_data import (
     HistoricalPollingLiveClient,
     LivePollingService,
     SchwabHistoricalHttpClient,
+    SchwabHistoricalRequest,
     SchwabLivePollRequest,
     SchwabMarketDataAdapter,
     load_schwab_market_data_config,
@@ -208,6 +218,15 @@ class ProbationaryLiveStrategyPilotSummary:
     stop_reason: str | None
 
 
+class ProbationaryRuntimeTransportFailure(RuntimeError):
+    """Raised when the paper runtime cannot reach Schwab market-data at startup."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        message = str(payload.get("exception_text") or payload.get("message") or "Probationary runtime transport failure.")
+        super().__init__(message)
+        self.payload = payload
+
+
 @dataclass(frozen=True)
 class ProbationaryOperatorControlResult:
     action: str
@@ -320,6 +339,62 @@ APPROVED_QUANT_POINT_VALUES: dict[str, Decimal] = {
 }
 
 
+def _atp_runtime_identity_payload(spec: "ProbationaryPaperLaneSpec") -> dict[str, Any]:
+    experimental_status = str(spec.experimental_status or "").strip().lower()
+    is_benchmark = experimental_status == "tracked_paper_benchmark"
+    participation_policy = spec.participation_policy.value
+    is_staged_candidate = (not is_benchmark) and spec.participation_policy is not ParticipationPolicy.SINGLE_ENTRY_ONLY
+
+    if is_benchmark:
+        strategy_status = "RUNNING_ATP_COMPANION_BENCHMARK_PAPER"
+        scope_label = "ATP Companion Benchmark / Paper Only / London Diagnostic-Only"
+        runtime_mode = "atp_companion_benchmark_paper_runtime"
+        tracked_strategy_id = "atp_companion_v1_asia_us"
+        benchmark_designation = "CURRENT_ATP_COMPANION_BENCHMARK"
+        notes = [
+            "ATP Companion Baseline v1 benchmark runtime",
+            "Paper Only",
+            "Asia + US executable",
+            "London diagnostic-only",
+            f"Participation Policy: {participation_policy}",
+        ]
+    else:
+        strategy_status = (
+            "RUNNING_ATP_COMPANION_CANDIDATE_STAGED_PAPER"
+            if is_staged_candidate
+            else "RUNNING_ATP_COMPANION_CANDIDATE_PAPER"
+        )
+        scope_label = (
+            "ATP Companion Candidate / Paper Only / London Diagnostic-Only / Staged"
+            if is_staged_candidate
+            else "ATP Companion Candidate / Paper Only / London Diagnostic-Only"
+        )
+        runtime_mode = (
+            "atp_companion_candidate_staged_paper_runtime"
+            if is_staged_candidate
+            else "atp_companion_candidate_paper_runtime"
+        )
+        tracked_strategy_id = str(spec.standalone_strategy_id or spec.lane_id)
+        benchmark_designation = None
+        notes = [
+            "ATP Companion candidate lane runtime",
+            "Paper Only",
+            "Asia + US executable",
+            "London diagnostic-only",
+            f"Participation Policy: {participation_policy}",
+        ]
+
+    return {
+        "strategy_status": strategy_status,
+        "scope_label": scope_label,
+        "live_runtime_mode": runtime_mode,
+        "tracked_strategy_id": tracked_strategy_id,
+        "benchmark_designation": benchmark_designation,
+        "notes": notes,
+        "participation_policy": participation_policy,
+    }
+
+
 @dataclass(frozen=True)
 class ProbationaryPaperLaneSpec:
     lane_id: str
@@ -329,7 +404,13 @@ class ProbationaryPaperLaneSpec:
     short_sources: tuple[str, ...]
     session_restriction: str | None
     point_value: Decimal
+    standalone_strategy_id: str | None = None
     trade_size: int = 1
+    participation_policy: ParticipationPolicy = ParticipationPolicy.SINGLE_ENTRY_ONLY
+    max_concurrent_entries: int = 1
+    max_position_quantity: int | None = None
+    max_adds_after_entry: int = 0
+    add_direction_policy: AddDirectionPolicy = AddDirectionPolicy.SAME_DIRECTION_ONLY
     catastrophic_open_loss: Decimal | None = None
     lane_mode: str = "STANDARD"
     strategy_family: str = "UNKNOWN"
@@ -351,6 +432,7 @@ class ProbationaryPaperLaneSpec:
     non_approved: bool = False
     observer_variant_id: str | None = None
     observer_side: str | None = None
+    identity_components: tuple[str, ...] = ()
     shared_strategy_identity: str | None = None
 
 
@@ -368,6 +450,9 @@ class ProbationaryPaperLaneMetrics:
     position_side: str
     internal_position_qty: int
     broker_position_qty: int
+    open_entry_leg_count: int
+    open_add_count: int
+    additional_entry_allowed: bool
     entry_price: Decimal | None
     last_mark: Decimal | None
     last_processed_bar_end_ts: str | None
@@ -2530,6 +2615,7 @@ def _run_live_strategy_fill_sync(
                 fill_timestamp=fill_timestamp or observed_at,
                 fill_price=fill_price,
                 broker_order_id=pending.broker_order_id,
+                quantity=pending.intent.quantity,
             )
             strategy_engine.apply_fill(
                 fill_event=fill_event,
@@ -3125,11 +3211,7 @@ class ProbationaryPaperLaneRuntime:
     def supervisor_status_extras(self) -> dict[str, Any]:
         return {"startup_restore_validation": dict(self._startup_restore_validation or {})}
 
-    def poll_and_process(
-        self,
-        higher_priority_signals: Sequence[HigherPrioritySignal] = (),
-    ) -> tuple[int, dict[str, Any], Path]:
-        del higher_priority_signals
+    def poll_and_process(self) -> tuple[int, dict[str, Any], Path]:
         latest_processed_end_ts = self.repositories.processed_bars.latest_end_ts()
         bars = self.live_polling_service.poll_bars(
             SchwabLivePollRequest(
@@ -3379,56 +3461,6 @@ class ProbationaryPaperLaneRuntime:
             timezone_info=self.settings.timezone_info,
             reason_code=PAPER_EXECUTION_CANARY_EXIT_REASON,
         )
-
-
-class ProbationaryLaneRuntimeAdapterBase:
-    """Shared adapter base for custom lane behavior inside the common runtime shell."""
-
-    def __init__(self, runtime: "ProbationaryAdaptedPaperLaneRuntime") -> None:
-        self._runtime = runtime
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._runtime, name)
-
-
-@dataclass(frozen=True)
-class ProbationaryLaneRuntimeAdapterSpec:
-    runtime_adapter_factory: Callable[["ProbationaryAdaptedPaperLaneRuntime"], ProbationaryLaneRuntimeAdapterBase]
-    live_polling_service: LivePollingService
-
-
-class ProbationaryAdaptedPaperLaneRuntime(ProbationaryPaperLaneRuntime):
-    """Shared paper-lane runtime shell for adapter-backed strategies."""
-
-    def __init__(
-        self,
-        *,
-        runtime_adapter_factory: Callable[["ProbationaryAdaptedPaperLaneRuntime"], ProbationaryLaneRuntimeAdapterBase],
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self._runtime_adapter = runtime_adapter_factory(self)
-
-    def _base_restore_startup(self) -> str | None:
-        return super().restore_startup()
-
-    def restore_startup(self) -> str | None:
-        return self._runtime_adapter.restore_startup()
-
-    def poll_and_process(
-        self,
-        higher_priority_signals: Sequence[HigherPrioritySignal] = (),
-    ) -> tuple[int, dict[str, Any], Path]:
-        return self._runtime_adapter.poll_and_process(higher_priority_signals=higher_priority_signals)
-
-    def config_row_extras(self) -> dict[str, Any]:
-        return self._runtime_adapter.config_row_extras()
-
-    def supervisor_status_extras(self) -> dict[str, Any]:
-        return self._runtime_adapter.supervisor_status_extras()
-
-    def eligibility_snapshot(self, now: datetime) -> dict[str, Any]:
-        return self._runtime_adapter.eligibility_snapshot(now)
 
 
 class ProbationaryTemporaryPaperLaneRuntime(ProbationaryPaperLaneRuntime):
@@ -4385,16 +4417,16 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
         snapshot_path.write_text(json.dumps(snapshot_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-class AtpCompanionBenchmarkLaneRuntimeAdapter(ProbationaryLaneRuntimeAdapterBase):
-    """ATP-specific lane behavior behind the shared adapted paper-runtime shell."""
+class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime):
+    """Continuous paper runtime for the frozen ATP companion benchmark."""
 
     def __init__(
         self,
-        runtime: ProbationaryAdaptedPaperLaneRuntime,
         *,
         observed_instruments: Sequence[str],
+        **kwargs: Any,
     ) -> None:
-        super().__init__(runtime)
+        super().__init__(**kwargs)
         self._observed_instruments = tuple(str(value).strip().upper() for value in observed_instruments if str(value).strip())
         if len(self._observed_instruments) != 1:
             raise ValueError(
@@ -4418,7 +4450,7 @@ class AtpCompanionBenchmarkLaneRuntimeAdapter(ProbationaryLaneRuntimeAdapterBase
 
     def restore_startup(self) -> str | None:
         now = datetime.now(timezone.utc)
-        startup_reason = self._runtime._base_restore_startup()
+        startup_reason = super().restore_startup()
         if startup_reason is not None:
             return startup_reason
         self._sync_execution_artifacts()
@@ -4512,6 +4544,7 @@ class AtpCompanionBenchmarkLaneRuntimeAdapter(ProbationaryLaneRuntimeAdapterBase
         return new_bar_count, effective_reconciliation, status_path
 
     def config_row_extras(self) -> dict[str, Any]:
+        runtime_identity = _atp_runtime_identity_payload(self.spec)
         return {
             "experimental_status": self.spec.experimental_status,
             "paper_only": self.spec.paper_only,
@@ -4520,19 +4553,25 @@ class AtpCompanionBenchmarkLaneRuntimeAdapter(ProbationaryLaneRuntimeAdapterBase
             "observer_side": self.spec.observer_side,
             "observer_variant_id": self.spec.observer_variant_id,
             "observed_instruments": list(self._observed_instruments),
-            "scope_label": "ATP Companion Benchmark / Paper Only / London Diagnostic-Only",
+            "scope_label": runtime_identity["scope_label"],
             "execution_authority": False,
-            "benchmark_designation": "CURRENT_ATP_COMPANION_BENCHMARK",
-            "tracked_strategy_id": "atp_companion_v1_asia_us",
+            "benchmark_designation": runtime_identity["benchmark_designation"],
+            "tracked_strategy_id": runtime_identity["tracked_strategy_id"],
+            "participation_policy": runtime_identity["participation_policy"],
         }
 
     def supervisor_status_extras(self) -> dict[str, Any]:
         latest_timing_state = self._latest_timing_states[-1] if self._latest_timing_states else None
         latest_entry_state = self._latest_entry_states[-1] if self._latest_entry_states else None
+        runtime_identity = _atp_runtime_identity_payload(self.spec)
         return {
-            "benchmark_designation": "CURRENT_ATP_COMPANION_BENCHMARK",
-            "tracked_strategy_id": "atp_companion_v1_asia_us",
+            "benchmark_designation": runtime_identity["benchmark_designation"],
+            "tracked_strategy_id": runtime_identity["tracked_strategy_id"],
             "quality_bucket_policy": self.spec.quality_bucket_policy,
+            "scope_label": runtime_identity["scope_label"],
+            "strategy_status": runtime_identity["strategy_status"],
+            "live_runtime_mode": runtime_identity["live_runtime_mode"],
+            "participation_policy": runtime_identity["participation_policy"],
             "latest_atp_state": latest_atp_state_summary(self._latest_feature_rows[-1] if self._latest_feature_rows else None),
             "latest_atp_entry_state": latest_atp_entry_state_summary(latest_entry_state),
             "latest_atp_timing_state": latest_atp_timing_state_summary(latest_timing_state),
@@ -5082,6 +5121,7 @@ class AtpCompanionBenchmarkLaneRuntimeAdapter(ProbationaryLaneRuntimeAdapterBase
             trade_rows=trade_rows,
             artifact_context="ATP_COMPANION_PAPER_RUNTIME_STATUS",
         )
+        runtime_identity = _atp_runtime_identity_payload(self.spec)
         latest_update_age_seconds = (
             max((observed_at - last_processed_end).total_seconds(), 0.0)
             if last_processed_end is not None
@@ -5124,29 +5164,26 @@ class AtpCompanionBenchmarkLaneRuntimeAdapter(ProbationaryLaneRuntimeAdapterBase
                 if self.strategy_engine.state.entry_price is not None
                 else None
             ),
-            "strategy_status": "RUNNING_ATP_COMPANION_BENCHMARK_PAPER",
+            "strategy_status": runtime_identity["strategy_status"],
+            "scope_label": runtime_identity["scope_label"],
+            "participation_policy": runtime_identity["participation_policy"],
             "last_processed_bar_end_ts": (
                 last_processed_end.isoformat() if last_processed_end is not None else None
             ),
             "reconciliation": self._last_reconciliation_payload or {},
             "heartbeat_reconciliation": self._heartbeat_reconciliation,
             "order_timeout_watchdog": self._order_timeout_watchdog,
-            "live_runtime_mode": "atp_companion_v1_paper_runtime",
+            "live_runtime_mode": runtime_identity["live_runtime_mode"],
             "priority_tier": "paper_tracking_pre_live_soak",
-            "benchmark_designation": "CURRENT_ATP_COMPANION_BENCHMARK",
-            "tracked_strategy_id": "atp_companion_v1_asia_us",
+            "benchmark_designation": runtime_identity["benchmark_designation"],
+            "tracked_strategy_id": runtime_identity["tracked_strategy_id"],
             "runtime_attached": True,
             "runtime_heartbeat_at": observed_at.isoformat(),
             "runtime_heartbeat_age_seconds": 0.0,
             "data_stale": bool(latest_update_age_seconds is not None and latest_update_age_seconds > 180),
             "latest_bar_age_seconds": latest_update_age_seconds,
             "duplicate_bar_suppression_count": self._duplicate_bar_suppression_count,
-            "notes": [
-                "ATP Companion Baseline v1 benchmark runtime",
-                "Paper Only",
-                "Asia + US executable",
-                "London diagnostic-only",
-            ],
+            "notes": runtime_identity["notes"],
             **lifecycle_contract,
         }
         return self.structured_logger.write_operator_status(payload)
@@ -5726,13 +5763,28 @@ class ProbationaryPaperSupervisor:
                     structured_logger=self._structured_logger,
                     alert_dispatcher=self._alert_dispatcher,
                 )
+                if control_result is not None:
+                    _write_probationary_supervisor_operator_status(
+                        settings=self._settings,
+                        lanes=self._lanes,
+                        structured_logger=self._structured_logger,
+                        risk_state=risk_state,
+                        latest_operator_control=control_result,
+                        lane_metrics=None,
+                    )
 
                 reconciliation_clean = True
                 higher_priority_signals = _probationary_supervisor_higher_priority_signals(self._lanes)
                 for lane in self._lanes:
-                    lane_new_bars, reconciliation, _ = lane.poll_and_process(
-                        higher_priority_signals=higher_priority_signals
-                    )
+                    if getattr(lane.spec, "runtime_kind", "") in {
+                        ATPE_CANARY_RUNTIME_KIND,
+                        ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
+                    }:
+                        lane_new_bars, reconciliation, _ = lane.poll_and_process(
+                            higher_priority_signals=higher_priority_signals
+                        )
+                    else:
+                        lane_new_bars, reconciliation, _ = lane.poll_and_process()
                     new_bars += lane_new_bars
                     if not reconciliation["clean"]:
                         reconciliation_clean = False
@@ -6265,6 +6317,10 @@ def build_probationary_paper_runner(
     schwab_config_path: str | Path | None,
 ) -> ProbationaryPaperRunner | ProbationaryPaperSupervisor:
     settings = load_settings_from_files(config_paths)
+    _run_probationary_runtime_market_data_transport_probe(
+        settings=settings,
+        schwab_config_path=schwab_config_path,
+    )
     structured_logger = StructuredLogger(settings.probationary_artifacts_path)
     alert_dispatcher = AlertDispatcher(structured_logger, source_subsystem="probationary_paper_supervisor")
     lane_specs = _load_probationary_paper_lane_specs(settings)
@@ -6384,6 +6440,7 @@ def _coerce_probationary_paper_lane_specs(
                 lane_id=lane_id,
                 display_name=str(raw_spec.get("display_name") or raw_spec["lane_id"]),
                 symbol=str(raw_spec["symbol"]),
+                standalone_strategy_id=str(raw_spec["standalone_strategy_id"]) if raw_spec.get("standalone_strategy_id") else None,
                 long_sources=tuple(str(value) for value in raw_spec.get("long_sources", [])),
                 short_sources=tuple(str(value) for value in raw_spec.get("short_sources", [])),
                 session_restriction=(
@@ -6391,6 +6448,19 @@ def _coerce_probationary_paper_lane_specs(
                 ),
                 point_value=Decimal(str(raw_spec["point_value"])),
                 trade_size=int(raw_spec.get("trade_size", 1)),
+                participation_policy=ParticipationPolicy(
+                    str(raw_spec.get("participation_policy") or ParticipationPolicy.SINGLE_ENTRY_ONLY.value)
+                ),
+                max_concurrent_entries=max(1, int(raw_spec.get("max_concurrent_entries", 1))),
+                max_position_quantity=(
+                    int(raw_spec["max_position_quantity"])
+                    if raw_spec.get("max_position_quantity") is not None
+                    else None
+                ),
+                max_adds_after_entry=max(0, int(raw_spec.get("max_adds_after_entry", 0))),
+                add_direction_policy=AddDirectionPolicy(
+                    str(raw_spec.get("add_direction_policy") or AddDirectionPolicy.SAME_DIRECTION_ONLY.value)
+                ),
                 catastrophic_open_loss=(
                     Decimal(str(raw_spec["catastrophic_open_loss"]))
                     if raw_spec.get("catastrophic_open_loss") is not None
@@ -6440,6 +6510,7 @@ def _coerce_probationary_paper_lane_specs(
                     str(raw_spec["observer_variant_id"]) if raw_spec.get("observer_variant_id") else None
                 ),
                 observer_side=str(raw_spec["observer_side"]) if raw_spec.get("observer_side") else None,
+                identity_components=tuple(str(value) for value in raw_spec.get("identity_components", []) if value),
                 shared_strategy_identity=(
                     str(raw_spec["shared_strategy_identity"]) if raw_spec.get("shared_strategy_identity") else None
                 ),
@@ -6563,35 +6634,6 @@ def _approved_quant_probationary_paper_lane_row(
     }
 
 
-def _build_probationary_lane_runtime_adapter_spec(
-    *,
-    spec: ProbationaryPaperLaneSpec,
-    lane_settings: StrategySettings,
-    repositories: RepositorySet,
-    schwab_config_path: str | Path | None,
-) -> ProbationaryLaneRuntimeAdapterSpec | None:
-    adapter_builders: dict[
-        str,
-        Callable[[], ProbationaryLaneRuntimeAdapterSpec],
-    ] = {
-        ATP_COMPANION_BENCHMARK_RUNTIME_KIND: lambda: ProbationaryLaneRuntimeAdapterSpec(
-            runtime_adapter_factory=lambda runtime: AtpCompanionBenchmarkLaneRuntimeAdapter(
-                runtime,
-                observed_instruments=spec.observed_instruments or (lane_settings.symbol,),
-            ),
-            live_polling_service=_build_live_polling_service(
-                lane_settings.model_copy(update={"symbol": next(iter(spec.observed_instruments), lane_settings.symbol)}),
-                repositories,
-                schwab_config_path,
-            ),
-        ),
-    }
-    builder = adapter_builders.get(spec.runtime_kind)
-    if builder is None:
-        return None
-    return builder()
-
-
 def _build_probationary_paper_lanes(
     *,
     settings: StrategySettings,
@@ -6609,14 +6651,21 @@ def _build_probationary_paper_lanes(
                     "lane_id": spec.lane_id,
                     "display_name": spec.display_name,
                     "symbol": spec.symbol,
+                    "standalone_strategy_id": spec.standalone_strategy_id,
                     "strategy_family": spec.strategy_family,
                     "strategy_identity_root": spec.strategy_identity_root,
+                    "identity_components": list(spec.identity_components),
                     "runtime_kind": spec.runtime_kind,
                     "long_sources": list(spec.long_sources),
                     "short_sources": list(spec.short_sources),
                     "session_restriction": spec.session_restriction,
                     "allowed_sessions": list(spec.allowed_sessions),
                     "trade_size": spec.trade_size,
+                    "participation_policy": spec.participation_policy.value,
+                    "max_concurrent_entries": spec.max_concurrent_entries,
+                    "max_position_quantity": spec.max_position_quantity,
+                    "max_adds_after_entry": spec.max_adds_after_entry,
+                    "add_direction_policy": spec.add_direction_policy.value,
                     "database_url": spec.database_url or _derive_probationary_lane_database_url(settings.database_url, spec.lane_id),
                     "artifacts_dir": spec.artifacts_dir or str(settings.probationary_artifacts_path / "lanes" / spec.lane_id),
                     "observed_instruments": list(spec.observed_instruments),
@@ -6653,27 +6702,6 @@ def _build_probationary_paper_lanes(
             alert_dispatcher=alert_dispatcher,
             runtime_identity=runtime_identity,
         )
-        adapter_spec = _build_probationary_lane_runtime_adapter_spec(
-            spec=spec,
-            lane_settings=lane_settings,
-            repositories=repositories,
-            schwab_config_path=schwab_config_path,
-        )
-        if adapter_spec is not None:
-            lanes.append(
-                ProbationaryAdaptedPaperLaneRuntime(
-                    spec=spec,
-                    settings=lane_settings,
-                    repositories=repositories,
-                    strategy_engine=strategy_engine,
-                    execution_engine=execution_engine,
-                    live_polling_service=adapter_spec.live_polling_service,
-                    structured_logger=lane_logger,
-                    alert_dispatcher=alert_dispatcher,
-                    runtime_adapter_factory=adapter_spec.runtime_adapter_factory,
-                )
-            )
-            continue
         if spec.runtime_kind == ATPE_CANARY_RUNTIME_KIND:
             live_services = {
                 instrument: _build_live_polling_service(
@@ -6701,6 +6729,25 @@ def _build_probationary_paper_lanes(
                     alert_dispatcher=alert_dispatcher,
                     observed_instruments=spec.observed_instruments or settings.probationary_atpe_canary_instruments,
                     variant=selected_variant,
+                )
+            )
+            continue
+        if spec.runtime_kind == ATP_COMPANION_BENCHMARK_RUNTIME_KIND:
+            lanes.append(
+                ProbationaryAtpCompanionBenchmarkLaneRuntime(
+                    spec=spec,
+                    settings=lane_settings,
+                    repositories=repositories,
+                    strategy_engine=strategy_engine,
+                    execution_engine=execution_engine,
+                    live_polling_service=_build_live_polling_service(
+                        lane_settings.model_copy(update={"symbol": next(iter(spec.observed_instruments), lane_settings.symbol)}),
+                        repositories,
+                        schwab_config_path,
+                    ),
+                    structured_logger=lane_logger,
+                    alert_dispatcher=alert_dispatcher,
+                    observed_instruments=spec.observed_instruments or (lane_settings.symbol,),
                 )
             )
             continue
@@ -6830,6 +6877,11 @@ def _build_probationary_paper_lane_settings(
     updates: dict[str, Any] = {
         "symbol": spec.symbol,
         "trade_size": spec.trade_size,
+        "participation_policy": spec.participation_policy,
+        "max_concurrent_entries": spec.max_concurrent_entries,
+        "max_position_quantity": spec.max_position_quantity,
+        "max_adds_after_entry": spec.max_adds_after_entry,
+        "add_direction_policy": spec.add_direction_policy,
         "database_url": spec.database_url or _derive_probationary_lane_database_url(settings.database_url, spec.lane_id),
         "probationary_artifacts_dir": spec.artifacts_dir or str(settings.probationary_artifacts_path / "lanes" / spec.lane_id),
         "probationary_paper_lane_id": spec.lane_id,
@@ -6918,6 +6970,11 @@ def _write_probationary_paper_config_in_force(
                 "lane_mode": getattr(lane.spec, "lane_mode", "STANDARD"),
                 "point_value": str(lane.spec.point_value),
                 "trade_size": getattr(lane.spec, "trade_size", lane.settings.trade_size),
+                "participation_policy": lane.settings.participation_policy.value,
+                "max_concurrent_entries": lane.settings.max_concurrent_entries,
+                "max_position_quantity": lane.settings.max_position_quantity,
+                "max_adds_after_entry": lane.settings.max_adds_after_entry,
+                "add_direction_policy": lane.settings.add_direction_policy.value,
                 "catastrophic_open_loss": (
                     str(lane.spec.catastrophic_open_loss) if lane.spec.catastrophic_open_loss is not None else None
                 ),
@@ -7214,6 +7271,9 @@ def _build_probationary_paper_lane_metrics(
         position_side=lane.strategy_engine.state.position_side.value,
         internal_position_qty=int(lane.strategy_engine.state.internal_position_qty),
         broker_position_qty=int(lane.strategy_engine.state.broker_position_qty),
+        open_entry_leg_count=len(lane.strategy_engine.state.open_entry_legs),
+        open_add_count=max(0, len(lane.strategy_engine.state.open_entry_legs) - 1),
+        additional_entry_allowed=_probationary_lane_can_add_participation(lane),
         entry_price=lane.strategy_engine.state.entry_price,
         last_mark=last_mark,
         last_processed_bar_end_ts=(
@@ -7250,6 +7310,26 @@ def _compute_probationary_unrealized_pnl(
     if state.position_side == PositionSide.SHORT:
         return (state.entry_price - last_mark) * quantity * point_value
     return Decimal("0")
+
+
+def _probationary_lane_can_add_participation(lane: ProbationaryPaperLaneRuntime) -> bool:
+    state = lane.strategy_engine.state
+    if state.position_side == PositionSide.FLAT:
+        return False
+    if state.operator_halt or state.same_underlying_entry_hold or state.fault_code is not None:
+        return False
+    if state.open_broker_order_id is not None:
+        return False
+    if lane.settings.participation_policy is ParticipationPolicy.SINGLE_ENTRY_ONLY:
+        return False
+    if len(state.open_entry_legs) >= lane.settings.max_concurrent_entries:
+        return False
+    if max(0, len(state.open_entry_legs) - 1) >= lane.settings.max_adds_after_entry:
+        return False
+    max_position_quantity = lane.settings.max_position_quantity or (
+        lane.settings.trade_size * lane.settings.max_concurrent_entries
+    )
+    return state.internal_position_qty + lane.settings.trade_size <= max_position_quantity
 
 
 def _apply_probationary_paper_risk_controls(
@@ -7715,6 +7795,9 @@ def _write_probationary_supervisor_operator_status(
             position_side=lane.strategy_engine.state.position_side.value,
             internal_position_qty=int(lane.strategy_engine.state.internal_position_qty),
             broker_position_qty=int(lane.strategy_engine.state.broker_position_qty),
+            open_entry_leg_count=len(lane.strategy_engine.state.open_entry_legs),
+            open_add_count=max(0, len(lane.strategy_engine.state.open_entry_legs) - 1),
+            additional_entry_allowed=_probationary_lane_can_add_participation(lane),
             entry_price=lane.strategy_engine.state.entry_price,
             last_mark=None,
             last_processed_bar_end_ts=None,
@@ -7810,6 +7893,11 @@ def _write_probationary_supervisor_operator_status(
                 "lane_mode": getattr(lane.spec, "lane_mode", "STANDARD"),
                 "approved_long_entry_sources": sorted(lane.settings.approved_long_entry_sources),
                 "approved_short_entry_sources": sorted(lane.settings.approved_short_entry_sources),
+                "participation_policy": lane.settings.participation_policy.value,
+                "max_concurrent_entries": lane.settings.max_concurrent_entries,
+                "max_position_quantity": lane.settings.max_position_quantity,
+                "max_adds_after_entry": lane.settings.max_adds_after_entry,
+                "add_direction_policy": lane.settings.add_direction_policy.value,
                 "position_side": lane.strategy_engine.state.position_side.value,
                 "strategy_status": lane.strategy_engine.state.strategy_status.value,
                 "entries_enabled": lane.strategy_engine.state.entries_enabled,
@@ -7850,6 +7938,9 @@ def _write_probationary_supervisor_operator_status(
                 "open_order_count": resolved_lane_metrics[lane.spec.lane_id].open_order_count,
                 "internal_position_qty": resolved_lane_metrics[lane.spec.lane_id].internal_position_qty,
                 "broker_position_qty": resolved_lane_metrics[lane.spec.lane_id].broker_position_qty,
+                "open_entry_leg_count": resolved_lane_metrics[lane.spec.lane_id].open_entry_leg_count,
+                "open_add_count": resolved_lane_metrics[lane.spec.lane_id].open_add_count,
+                "additional_entry_allowed": resolved_lane_metrics[lane.spec.lane_id].additional_entry_allowed,
                 "entry_price": (
                     str(resolved_lane_metrics[lane.spec.lane_id].entry_price)
                     if resolved_lane_metrics[lane.spec.lane_id].entry_price is not None
@@ -8394,30 +8485,50 @@ def _apply_probationary_supervisor_operator_control(
             result["message"] = "Resume Entries rejected because a desk paper risk guardrail is active."
         else:
             resumed_lanes: list[str] = []
-            blocked_lanes: list[str] = []
+            blocked_lanes: list[dict[str, str]] = []
             for lane in selected_lanes:
-                lane_state = risk_state.lane_states.get(lane.spec.lane_id, {})
+                lane_state = risk_state.lane_states.setdefault(lane.spec.lane_id, {})
                 if lane_state.get("catastrophic_triggered") or lane_state.get("warning_triggered") or lane_state.get("degradation_triggered"):
-                    blocked_lanes.append(lane.spec.lane_id)
+                    blocked_lanes.append(
+                        {
+                            "lane_id": lane.spec.lane_id,
+                            "reason": "lane_specific_risk_halt",
+                            "detail": str(lane_state.get("halt_reason") or ""),
+                        }
+                    )
                     continue
-                if lane.strategy_engine.state.fault_code is None:
-                    lane.strategy_engine.set_operator_halt(now, False)
-                    lane_state["unblock_action"] = "No action needed; already eligible"
-                    resumed_lanes.append(lane.spec.lane_id)
+                if lane.strategy_engine.state.fault_code is not None:
+                    blocked_lanes.append(
+                        {
+                            "lane_id": lane.spec.lane_id,
+                            "reason": "fault",
+                            "detail": str(lane.strategy_engine.state.fault_code),
+                        }
+                    )
+                    continue
+                lane.strategy_engine.set_operator_halt(now, False)
+                lane_state["unblock_action"] = "No action needed; already eligible"
+                resumed_lanes.append(lane.spec.lane_id)
             result["status"] = "applied" if resumed_lanes else "rejected"
-            result["message"] = (
-                (
-                    f"Entries resumed for lane {target_lane.spec.lane_id}."
-                    if target_lane is not None and resumed_lanes
-                    else f"Entries resumed for lanes: {', '.join(resumed_lanes)}."
+            if resumed_lanes:
+                if target_lane is not None:
+                    result["message"] = f"Entries resumed for lane: {target_lane.spec.lane_id}."
+                else:
+                    result["message"] = f"Entries resumed for lanes: {', '.join(resumed_lanes)}."
+            elif target_lane is not None and blocked_lanes:
+                blocked = blocked_lanes[0]
+                detail = f" ({blocked['detail']})" if blocked.get("detail") else ""
+                result["message"] = (
+                    f"Resume Entries rejected for lane {target_lane.spec.lane_id} because it remains blocked by "
+                    f"{blocked['reason']}{detail}."
                 )
-                if resumed_lanes
-                else (
-                    f"Resume Entries rejected because lane {target_lane.spec.lane_id} remains blocked by risk or fault state."
-                    if target_lane is not None
-                    else "Resume Entries rejected because all lanes remain blocked by risk or fault state."
+            elif target_lane is not None:
+                result["message"] = (
+                    f"Resume Entries rejected for lane {target_lane.spec.lane_id} because it could not be resumed."
                 )
-            )
+            else:
+                result["message"] = "Resume Entries rejected because all lanes remain blocked by risk or fault state."
+            result["resumed_lanes"] = resumed_lanes
             result["blocked_lanes"] = blocked_lanes
             result["halt_reason"] = None
     elif action == "clear_fault":
@@ -9211,19 +9322,42 @@ def _build_probationary_paper_soak_validation_settings(
     base_settings: StrategySettings,
     database_path: Path,
     artifacts_dir: Path,
+    symbol: str = "MGC",
+    lane_id: str = "mgc_paper_soak_validation",
+    lane_display_name: str = "MGC Paper Soak Validation",
+    point_value: Decimal = Decimal("10"),
+    participation_policy: ParticipationPolicy | None = None,
+    max_concurrent_entries: int | None = None,
+    max_position_quantity: int | None = None,
+    max_adds_after_entry: int | None = None,
+    add_direction_policy: AddDirectionPolicy | None = None,
 ) -> StrategySettings:
+    resolved_participation_policy = participation_policy or base_settings.participation_policy
+    resolved_max_concurrent_entries = max_concurrent_entries or base_settings.max_concurrent_entries
+    resolved_max_position_quantity = (
+        max_position_quantity if max_position_quantity is not None else base_settings.max_position_quantity
+    )
+    resolved_max_adds_after_entry = (
+        max_adds_after_entry if max_adds_after_entry is not None else base_settings.max_adds_after_entry
+    )
+    resolved_add_direction_policy = add_direction_policy or base_settings.add_direction_policy
     return base_settings.model_copy(
         update={
             "mode": RuntimeMode.PAPER,
-            "symbol": "MGC",
+            "symbol": symbol,
             "timeframe": "5m",
             "database_url": f"sqlite:///{database_path}",
             "probationary_artifacts_dir": str(artifacts_dir),
             "trade_size": 1,
+            "participation_policy": resolved_participation_policy,
+            "max_concurrent_entries": resolved_max_concurrent_entries,
+            "max_position_quantity": resolved_max_position_quantity,
+            "max_adds_after_entry": resolved_max_adds_after_entry,
+            "add_direction_policy": resolved_add_direction_policy,
             "replay_fill_policy": ReplayFillPolicy.NEXT_BAR_OPEN,
             "enable_bull_snap_longs": True,
-            "probationary_paper_lane_id": "mgc_paper_soak_validation",
-            "probationary_paper_lane_display_name": "MGC Paper Soak Validation",
+            "probationary_paper_lane_id": lane_id,
+            "probationary_paper_lane_display_name": lane_display_name,
             "probationary_paper_lane_session_restriction": "",
             "probationary_enforce_approved_branches": False,
             "allow_asia": True,
@@ -9277,19 +9411,37 @@ def _build_probationary_paper_soak_validation_runtime(
     scenario_dir: Path,
     bars: Sequence[Bar],
     broker: PaperBroker | None = None,
+    symbol: str = "MGC",
+    lane_id: str = "mgc_paper_soak_validation",
+    lane_display_name: str = "MGC Paper Soak Validation",
+    point_value: Decimal = Decimal("10"),
+    participation_policy: ParticipationPolicy | None = None,
+    max_concurrent_entries: int | None = None,
+    max_position_quantity: int | None = None,
+    max_adds_after_entry: int | None = None,
+    add_direction_policy: AddDirectionPolicy | None = None,
 ) -> tuple[ProbationaryPaperLaneRuntime, StrategyEngine, ExecutionEngine, RepositorySet, StructuredLogger]:
     scenario_dir.mkdir(parents=True, exist_ok=True)
     settings = _build_probationary_paper_soak_validation_settings(
         base_settings=base_settings,
         database_path=scenario_dir / "validation.sqlite3",
         artifacts_dir=scenario_dir / "artifacts",
+        symbol=symbol,
+        lane_id=lane_id,
+        lane_display_name=lane_display_name,
+        point_value=point_value,
+        participation_policy=participation_policy,
+        max_concurrent_entries=max_concurrent_entries,
+        max_position_quantity=max_position_quantity,
+        max_adds_after_entry=max_adds_after_entry,
+        add_direction_policy=add_direction_policy,
     )
     repositories = RepositorySet(build_engine(settings.database_url))
     root_logger = StructuredLogger(settings.probationary_artifacts_path.parent)
     lane_logger = StructuredLogger(settings.probationary_artifacts_path)
     structured_logger = ProbationaryLaneStructuredLogger(
-        lane_id="mgc_paper_soak_validation",
-        symbol="MGC",
+        lane_id=lane_id,
+        symbol=symbol,
         root_logger=root_logger,
         lane_logger=lane_logger,
     )
@@ -9308,13 +9460,13 @@ def _build_probationary_paper_soak_validation_runtime(
     )
     runtime = ProbationaryPaperLaneRuntime(
         spec=ProbationaryPaperLaneSpec(
-            lane_id="mgc_paper_soak_validation",
-            display_name="MGC Paper Soak Validation",
-            symbol="MGC",
+            lane_id=lane_id,
+            display_name=lane_display_name,
+            symbol=symbol,
             long_sources=("bullSnap",),
             short_sources=(),
             session_restriction=None,
-            point_value=Decimal("10"),
+            point_value=point_value,
             catastrophic_open_loss=Decimal("-500"),
         ),
         settings=settings,
@@ -9332,6 +9484,47 @@ def _reset_probationary_paper_soak_scenario_dir(scenario_dir: Path) -> None:
     if scenario_dir.exists():
         shutil.rmtree(scenario_dir, ignore_errors=True)
     scenario_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _fill_pending_probationary_validation_intent(
+    *,
+    strategy_engine: StrategyEngine,
+    execution_engine: ExecutionEngine,
+    order_intent_id: str,
+    fill_price: Decimal,
+    fill_timestamp: datetime,
+    signal_bar_id: str | None = None,
+    long_entry_family: LongEntryFamily = LongEntryFamily.NONE,
+    short_entry_family: ShortEntryFamily = ShortEntryFamily.NONE,
+    short_entry_source: str | None = None,
+) -> FillEvent:
+    pending = execution_engine.pending_execution(order_intent_id)
+    if pending is None:
+        raise ValueError(f"Pending execution not found for {order_intent_id}.")
+    fill = execution_engine.broker.fill_order(
+        order_intent=pending.intent,
+        fill_price=fill_price,
+        fill_timestamp=fill_timestamp,
+    )
+    strategy_engine._persist_order_intent(  # noqa: SLF001
+        pending.intent,
+        fill.broker_order_id or pending.broker_order_id,
+        order_status=OrderStatus.FILLED,
+        submitted_at=pending.submitted_at,
+        acknowledged_at=pending.acknowledged_at or fill_timestamp,
+        broker_order_status=OrderStatus.FILLED.value,
+        last_status_checked_at=fill_timestamp,
+        retry_count=pending.retry_count,
+    )
+    strategy_engine.apply_fill(
+        fill_event=fill,
+        signal_bar_id=signal_bar_id or pending.signal_bar_id,
+        long_entry_family=long_entry_family if pending.intent.is_entry else pending.long_entry_family,
+        short_entry_family=short_entry_family if pending.intent.is_entry else pending.short_entry_family,
+        short_entry_source=short_entry_source if pending.intent.is_entry else pending.short_entry_source,
+    )
+    execution_engine.clear_intent(order_intent_id)
+    return fill
 
 
 def _latest_row(rows: Sequence[dict[str, Any]], timestamp_key: str) -> dict[str, Any]:
@@ -9519,6 +9712,15 @@ def _paper_soak_snapshot(
             "internal_qty": strategy_engine.state.internal_position_qty,
             "broker_qty": strategy_engine.state.broker_position_qty,
             "entry_price": strategy_engine.state.entry_price,
+            "open_entry_leg_count": len(strategy_engine.state.open_entry_legs),
+            "open_add_count": max(0, len(strategy_engine.state.open_entry_legs) - 1),
+            "open_entry_leg_quantities": [int(leg.quantity) for leg in strategy_engine.state.open_entry_legs],
+            "open_entry_leg_prices": [str(leg.entry_price) for leg in strategy_engine.state.open_entry_legs],
+            "additional_entry_allowed": strategy_engine._can_add_to_existing_position(strategy_engine.state),  # noqa: SLF001
+            "participation_policy": strategy_engine._settings.participation_policy.value,  # noqa: SLF001
+            "max_concurrent_entries": strategy_engine._settings.max_concurrent_entries,  # noqa: SLF001
+            "max_position_quantity": strategy_engine._settings.max_position_quantity,  # noqa: SLF001
+            "max_adds_after_entry": strategy_engine._settings.max_adds_after_entry,  # noqa: SLF001
         },
         "latest_order_intent": latest_intent,
         "latest_fill": latest_fill,
@@ -9764,6 +9966,297 @@ def _run_probationary_paper_soak_restart_in_position(
         detail="Restart restored the in-position paper state before the next evaluation." if passed else "In-position restart did not restore broker/internal state cleanly.",
         summary=summary,
         evidence={"in_position_reached": in_position_reached, "restore_validation": restore_validation},
+    )
+
+
+def _run_probationary_paper_soak_staged_participation(
+    base_settings: StrategySettings,
+    root_dir: Path,
+) -> dict[str, Any]:
+    scenario_dir = root_dir / "staged_participation"
+    _reset_probationary_paper_soak_scenario_dir(scenario_dir)
+    runtime, strategy_engine, execution_engine, repositories, lane_logger = _build_probationary_paper_soak_validation_runtime(
+        base_settings=base_settings,
+        scenario_dir=scenario_dir,
+        bars=(),
+        participation_policy=ParticipationPolicy.STAGED_SAME_DIRECTION,
+        max_concurrent_entries=2,
+        max_position_quantity=2,
+        max_adds_after_entry=1,
+    )
+    startup_fault = runtime.restore_startup()
+    bar_1 = _paper_soak_validation_bar(datetime(2026, 3, 27, 10, 0, tzinfo=ZoneInfo("America/New_York")), "100", "101", "99", "100")
+    bar_2 = _paper_soak_validation_bar(datetime(2026, 3, 27, 10, 5, tzinfo=ZoneInfo("America/New_York")), "101", "102", "100", "101")
+    bar_3 = _paper_soak_validation_bar(datetime(2026, 3, 27, 10, 10, tzinfo=ZoneInfo("America/New_York")), "102", "103", "101", "102")
+
+    intent_1 = strategy_engine.submit_runtime_entry_intent(
+        bar_1,
+        side="LONG",
+        signal_source="paperSoakStageOne",
+        reason_code="paperSoakStageOne",
+        long_entry_family=LongEntryFamily.K,
+    )
+    assert intent_1 is not None
+    _fill_pending_probationary_validation_intent(
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        order_intent_id=intent_1.order_intent_id,
+        fill_price=Decimal("100"),
+        fill_timestamp=bar_1.end_ts,
+        signal_bar_id=bar_1.bar_id,
+        long_entry_family=LongEntryFamily.K,
+    )
+
+    intent_2 = strategy_engine.submit_runtime_entry_intent(
+        bar_2,
+        side="LONG",
+        signal_source="paperSoakStageTwo",
+        reason_code="paperSoakStageTwo",
+        long_entry_family=LongEntryFamily.K,
+    )
+    assert intent_2 is not None
+    _fill_pending_probationary_validation_intent(
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        order_intent_id=intent_2.order_intent_id,
+        fill_price=Decimal("101"),
+        fill_timestamp=bar_2.end_ts,
+        signal_bar_id=bar_2.bar_id,
+        long_entry_family=LongEntryFamily.K,
+    )
+
+    rejected_add = strategy_engine.submit_runtime_entry_intent(
+        bar_3,
+        side="LONG",
+        signal_source="paperSoakStageThree",
+        reason_code="paperSoakStageThree",
+        long_entry_family=LongEntryFamily.K,
+    )
+    summary = _paper_soak_snapshot(
+        repositories=repositories,
+        settings=runtime.settings,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+    )
+    position_state = dict(summary.get("position_state") or {})
+    passed = (
+        startup_fault is None
+        and intent_1 is not None
+        and intent_2 is not None
+        and rejected_add is None
+        and strategy_engine.state.position_side is PositionSide.LONG
+        and strategy_engine.state.internal_position_qty == 2
+        and len(strategy_engine.state.open_entry_legs) == 2
+        and position_state.get("additional_entry_allowed") is False
+        and position_state.get("open_add_count") == 1
+    )
+    return _paper_soak_validation_scenario(
+        scenario_id="staged_same_direction_participation",
+        title="Staged same-direction entry/add with lane caps",
+        status="PASS" if passed else "FAIL",
+        detail="The paper runtime accepted an initial entry and one same-direction add, then refused the next add once the configured staged cap was reached." if passed else "Staged participation did not honor the configured add/cap rules.",
+        summary=summary,
+        evidence={
+            "startup_fault": startup_fault,
+            "first_intent_id": intent_1.order_intent_id if intent_1 is not None else None,
+            "second_intent_id": intent_2.order_intent_id if intent_2 is not None else None,
+            "third_add_rejected": rejected_add is None,
+            "restore_validation": _read_json(lane_logger.artifact_dir / "restore_validation_latest.json"),
+        },
+    )
+
+
+def _run_probationary_paper_soak_staged_partial_exit(
+    base_settings: StrategySettings,
+    root_dir: Path,
+) -> dict[str, Any]:
+    scenario_dir = root_dir / "staged_partial_exit"
+    _reset_probationary_paper_soak_scenario_dir(scenario_dir)
+    runtime, strategy_engine, execution_engine, repositories, _lane_logger = _build_probationary_paper_soak_validation_runtime(
+        base_settings=base_settings,
+        scenario_dir=scenario_dir,
+        bars=(),
+        participation_policy=ParticipationPolicy.PYRAMID_WITH_LIMIT,
+        max_concurrent_entries=3,
+        max_position_quantity=3,
+        max_adds_after_entry=2,
+    )
+    startup_fault = runtime.restore_startup()
+    entry_bars = [
+        _paper_soak_validation_bar(datetime(2026, 3, 27, 10, 15 + (index * 5), tzinfo=ZoneInfo("America/New_York")), str(100 + index), str(101 + index), str(99 + index), str(100 + index))
+        for index in range(2)
+    ]
+    for index, bar in enumerate(entry_bars, start=1):
+        intent = strategy_engine.submit_runtime_entry_intent(
+            bar,
+            side="LONG",
+            signal_source=f"paperSoakPartialEntry{index}",
+            reason_code=f"paperSoakPartialEntry{index}",
+            long_entry_family=LongEntryFamily.K,
+        )
+        assert intent is not None
+        _fill_pending_probationary_validation_intent(
+            strategy_engine=strategy_engine,
+            execution_engine=execution_engine,
+            order_intent_id=intent.order_intent_id,
+            fill_price=Decimal(str(99 + index)),
+            fill_timestamp=bar.end_ts,
+            signal_bar_id=bar.bar_id,
+            long_entry_family=LongEntryFamily.K,
+        )
+
+    exit_bar = _paper_soak_validation_bar(datetime(2026, 3, 27, 10, 30, tzinfo=ZoneInfo("America/New_York")), "102", "103", "101", "102")
+    partial_exit_intent = strategy_engine.submit_runtime_exit_intent(
+        exit_bar.end_ts,
+        quantity=1,
+        reason_code="paperSoakPartialExit",
+    )
+    assert partial_exit_intent is not None
+    _fill_pending_probationary_validation_intent(
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        order_intent_id=partial_exit_intent.order_intent_id,
+        fill_price=Decimal("102"),
+        fill_timestamp=exit_bar.end_ts,
+    )
+
+    summary = _paper_soak_snapshot(
+        repositories=repositories,
+        settings=runtime.settings,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+    )
+    position_state = dict(summary.get("position_state") or {})
+    passed = (
+        startup_fault is None
+        and strategy_engine.state.position_side is PositionSide.LONG
+        and strategy_engine.state.internal_position_qty == 1
+        and len(strategy_engine.state.open_entry_legs) == 1
+        and position_state.get("open_entry_leg_count") == 1
+        and position_state.get("additional_entry_allowed") is True
+        and str((summary.get("latest_fill") or {}).get("intent_type") or "") == OrderIntentType.SELL_TO_CLOSE.value
+    )
+    return _paper_soak_validation_scenario(
+        scenario_id="staged_partial_exit_preserves_remaining_exposure",
+        title="Partial exit leaves staged exposure open",
+        status="PASS" if passed else "FAIL",
+        detail="A partial exit reduced the staged position to one remaining open leg without collapsing the lane back to flat." if passed else "Partial exit did not preserve the remaining staged exposure coherently.",
+        summary=summary,
+        evidence={
+            "startup_fault": startup_fault,
+            "latest_fill": summary.get("latest_fill"),
+            "remaining_leg_quantities": [int(leg.quantity) for leg in strategy_engine.state.open_entry_legs],
+        },
+    )
+
+
+def _run_probationary_paper_soak_restart_staged_in_position(
+    base_settings: StrategySettings,
+    root_dir: Path,
+) -> dict[str, Any]:
+    scenario_dir = root_dir / "restart_staged_in_position"
+    _reset_probationary_paper_soak_scenario_dir(scenario_dir)
+    replay_bars = _paper_soak_validation_bars()[:2]
+    runtime, strategy_engine, execution_engine, repositories, _lane_logger = _build_probationary_paper_soak_validation_runtime(
+        base_settings=base_settings,
+        scenario_dir=scenario_dir,
+        bars=replay_bars,
+        participation_policy=ParticipationPolicy.PYRAMID_WITH_LIMIT,
+        max_concurrent_entries=3,
+        max_position_quantity=3,
+        max_adds_after_entry=2,
+    )
+    runtime.restore_startup()
+    while True:
+        new_bars, _reconciliation, _ = runtime.poll_and_process()
+        if new_bars <= 0:
+            break
+    processed_before_restart = repositories.processed_bars.count()
+
+    bar_1 = _paper_soak_validation_bar(datetime(2026, 3, 27, 10, 35, tzinfo=ZoneInfo("America/New_York")), "100", "101", "99", "100")
+    bar_2 = _paper_soak_validation_bar(datetime(2026, 3, 27, 10, 40, tzinfo=ZoneInfo("America/New_York")), "101", "102", "100", "101")
+    for index, bar in enumerate((bar_1, bar_2), start=1):
+        intent = strategy_engine.submit_runtime_entry_intent(
+            bar,
+            side="LONG",
+            signal_source=f"paperSoakRestartEntry{index}",
+            reason_code=f"paperSoakRestartEntry{index}",
+            long_entry_family=LongEntryFamily.K,
+        )
+        assert intent is not None
+        _fill_pending_probationary_validation_intent(
+            strategy_engine=strategy_engine,
+            execution_engine=execution_engine,
+            order_intent_id=intent.order_intent_id,
+            fill_price=Decimal(str(99 + index)),
+            fill_timestamp=bar.end_ts,
+            signal_bar_id=bar.bar_id,
+            long_entry_family=LongEntryFamily.K,
+        )
+
+    restarted_runtime, restarted_engine, restarted_execution, restarted_repositories, restarted_logger = (
+        _build_probationary_paper_soak_validation_runtime(
+            base_settings=base_settings,
+            scenario_dir=scenario_dir,
+            bars=replay_bars,
+            participation_policy=ParticipationPolicy.PYRAMID_WITH_LIMIT,
+            max_concurrent_entries=3,
+            max_position_quantity=3,
+            max_adds_after_entry=2,
+        )
+    )
+    startup_fault = restarted_runtime.restore_startup()
+    restore_validation = _read_json(restarted_logger.artifact_dir / "restore_validation_latest.json")
+    restart_new_bars, latest_reconciliation, _ = restarted_runtime.poll_and_process()
+    add_bar = _paper_soak_validation_bar(datetime(2026, 3, 27, 10, 45, tzinfo=ZoneInfo("America/New_York")), "102", "103", "101", "102")
+    add_intent = restarted_engine.submit_runtime_entry_intent(
+        add_bar,
+        side="LONG",
+        signal_source="paperSoakRestartAdd",
+        reason_code="paperSoakRestartAdd",
+        long_entry_family=LongEntryFamily.K,
+    )
+    assert add_intent is not None
+    _fill_pending_probationary_validation_intent(
+        strategy_engine=restarted_engine,
+        execution_engine=restarted_execution,
+        order_intent_id=add_intent.order_intent_id,
+        fill_price=Decimal("102"),
+        fill_timestamp=add_bar.end_ts,
+        signal_bar_id=add_bar.bar_id,
+        long_entry_family=LongEntryFamily.K,
+    )
+    summary = _paper_soak_snapshot(
+        repositories=restarted_repositories,
+        settings=restarted_runtime.settings,
+        strategy_engine=restarted_engine,
+        execution_engine=restarted_execution,
+        latest_reconciliation=latest_reconciliation,
+        latest_restore=restore_validation,
+    )
+    position_state = dict(summary.get("position_state") or {})
+    passed = (
+        startup_fault is None
+        and restore_validation.get("restore_result") == "READY"
+        and bool(restore_validation.get("duplicate_action_prevention_held")) is True
+        and restart_new_bars == 0
+        and restarted_repositories.processed_bars.count() == processed_before_restart
+        and position_state.get("open_entry_leg_count") == 3
+        and position_state.get("additional_entry_allowed") is False
+        and restarted_engine.state.internal_position_qty == 3
+    )
+    return _paper_soak_validation_scenario(
+        scenario_id="restart_restores_staged_position_without_duplicate_bar_processing",
+        title="Restart restores staged position and preserves add eligibility",
+        status="PASS" if passed else "FAIL",
+        detail="Restart restored staged open legs, suppressed already-processed finalized bars, and preserved correct add eligibility before the next add." if passed else "Restart did not restore staged exposure or duplicate-bar suppression cleanly.",
+        summary=summary,
+        evidence={
+            "processed_before_restart": processed_before_restart,
+            "processed_after_restart": restarted_repositories.processed_bars.count(),
+            "restart_new_bars": restart_new_bars,
+            "restore_validation": restore_validation,
+        },
     )
 
 
@@ -11508,6 +12001,9 @@ def run_probationary_paper_soak_validation(
         _run_probationary_paper_soak_restart_flat(base_settings, validation_dir),
         _run_probationary_paper_soak_restart_pending(base_settings, validation_dir),
         _run_probationary_paper_soak_restart_in_position(base_settings, validation_dir),
+        _run_probationary_paper_soak_staged_participation(base_settings, validation_dir),
+        _run_probationary_paper_soak_staged_partial_exit(base_settings, validation_dir),
+        _run_probationary_paper_soak_restart_staged_in_position(base_settings, validation_dir),
         _run_probationary_paper_soak_duplicate_bar_suppression(base_settings, validation_dir),
         _run_probationary_paper_soak_out_of_order_rejection(base_settings, validation_dir),
         _run_probationary_paper_soak_stale_missing_bar_handling(base_settings, validation_dir),
@@ -11557,6 +12053,70 @@ def run_probationary_paper_soak_validation(
         artifact_path=str(json_path),
         markdown_path=str(markdown_path),
         summary=payload,
+    )
+
+
+def submit_probationary_operator_control(
+    config_paths: Sequence[str | Path],
+    action: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    shared_strategy_identity: str | None = None,
+) -> ProbationaryOperatorControlResult:
+    supported = {
+        "halt_entries",
+        "resume_entries",
+        "clear_fault",
+        "clear_risk_halts",
+        "flatten_and_halt",
+        "stop_after_cycle",
+        "force_reconcile",
+        REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
+    }
+    if action not in supported:
+        raise ValueError(f"Unsupported operator control action: {action}")
+    settings = load_settings_from_files(config_paths)
+    logger = StructuredLogger(settings.probationary_artifacts_path)
+    merged_payload = dict(payload or {})
+    requested_lane_id = str(merged_payload.get("lane_id") or "").strip() or None
+    requested_shared_identity = (
+        str(merged_payload.get("shared_strategy_identity") or "").strip()
+        or str(shared_strategy_identity or "").strip()
+        or None
+    )
+    target_payload = _resolve_probationary_operator_control_target(
+        settings,
+        action=action,
+        lane_id=requested_lane_id,
+        shared_strategy_identity=requested_shared_identity,
+    )
+    control_path = (
+        _shared_probationary_operator_control_path(settings)
+        if target_payload
+        else settings.resolved_probationary_operator_control_path
+    )
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    control_payload = {
+        "action": action,
+        "status": "pending",
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "command_id": f"{action}-{int(datetime.now(timezone.utc).timestamp() * 1000)}",
+        "halt_reason": "operator_flatten_and_halt" if action == "flatten_and_halt" else ("operator_halt_entries" if action == "halt_entries" else None),
+        "flatten_state": "pending_confirmation" if action == "flatten_and_halt" else None,
+        "stop_after_cycle_requested": action == "stop_after_cycle",
+    }
+    if merged_payload:
+        control_payload.update(merged_payload)
+    if target_payload:
+        control_payload.update(target_payload)
+        control_payload["control_scope"] = "lane"
+    control_path.write_text(json.dumps(control_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    logger.log_operator_control({**control_payload, "control_path": str(control_path)})
+    return ProbationaryOperatorControlResult(
+        action=action,
+        control_path=str(control_path),
+        status="pending",
+        requested_at=str(control_payload["requested_at"]),
     )
 
 
@@ -11625,70 +12185,6 @@ def _resolve_probationary_operator_control_target(
     return payload
 
 
-def submit_probationary_operator_control(
-    config_paths: Sequence[str | Path],
-    action: str,
-    *,
-    payload: dict[str, Any] | None = None,
-    shared_strategy_identity: str | None = None,
-) -> ProbationaryOperatorControlResult:
-    supported = {
-        "halt_entries",
-        "resume_entries",
-        "clear_fault",
-        "clear_risk_halts",
-        "flatten_and_halt",
-        "stop_after_cycle",
-        "force_reconcile",
-        REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
-    }
-    if action not in supported:
-        raise ValueError(f"Unsupported operator control action: {action}")
-    settings = load_settings_from_files(config_paths)
-    logger = StructuredLogger(settings.probationary_artifacts_path)
-    merged_payload = dict(payload or {})
-    requested_lane_id = str(merged_payload.get("lane_id") or "").strip() or None
-    requested_shared_identity = (
-        str(merged_payload.get("shared_strategy_identity") or "").strip()
-        or str(shared_strategy_identity or "").strip()
-        or None
-    )
-    target_payload = _resolve_probationary_operator_control_target(
-        settings,
-        action=action,
-        lane_id=requested_lane_id,
-        shared_strategy_identity=requested_shared_identity,
-    )
-    control_path = (
-        _shared_probationary_operator_control_path(settings)
-        if target_payload
-        else settings.resolved_probationary_operator_control_path
-    )
-    control_path.parent.mkdir(parents=True, exist_ok=True)
-    control_payload = {
-        "action": action,
-        "status": "pending",
-        "requested_at": datetime.now(timezone.utc).isoformat(),
-        "command_id": f"{action}-{int(datetime.now(timezone.utc).timestamp() * 1000)}",
-        "halt_reason": "operator_flatten_and_halt" if action == "flatten_and_halt" else ("operator_halt_entries" if action == "halt_entries" else None),
-        "flatten_state": "pending_confirmation" if action == "flatten_and_halt" else None,
-        "stop_after_cycle_requested": action == "stop_after_cycle",
-    }
-    if merged_payload:
-        control_payload.update(merged_payload)
-    if target_payload:
-        control_payload.update(target_payload)
-        control_payload["control_scope"] = "lane"
-    control_path.write_text(json.dumps(control_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    logger.log_operator_control({**control_payload, "control_path": str(control_path)})
-    return ProbationaryOperatorControlResult(
-        action=action,
-        control_path=str(control_path),
-        status="pending",
-        requested_at=str(control_payload["requested_at"]),
-    )
-
-
 def _build_live_polling_service(
     settings: StrategySettings,
     repositories: RepositorySet,
@@ -11715,6 +12211,208 @@ def _build_live_polling_service(
         ),
         repositories=repositories,
     )
+
+
+def _probationary_runtime_transport_probe_artifact_path(settings: StrategySettings) -> Path:
+    return settings.probationary_artifacts_path / "runtime" / "market_data_transport_probe.json"
+
+
+def _probationary_runtime_transport_failure_artifact_path(settings: StrategySettings) -> Path:
+    return settings.probationary_artifacts_path / "runtime" / "market_data_transport_failure.json"
+
+
+def _probationary_runtime_transport_env() -> dict[str, str]:
+    env_names = (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "HOSTALIASES",
+        "RES_OPTIONS",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    )
+    return {name: os.environ.get(name, "<unset>") for name in env_names}
+
+
+def _probationary_runtime_http_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _clear_probationary_runtime_transport_failure(settings: StrategySettings) -> None:
+    failure_path = _probationary_runtime_transport_failure_artifact_path(settings)
+    if failure_path.exists():
+        failure_path.unlink()
+
+
+def _write_probationary_runtime_transport_probe(settings: StrategySettings, payload: dict[str, Any]) -> Path:
+    path = _probationary_runtime_transport_probe_artifact_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_probationary_runtime_transport_failure(settings: StrategySettings, payload: dict[str, Any]) -> Path:
+    path = _probationary_runtime_transport_failure_artifact_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _probationary_runtime_transport_diagnostic_payload(
+    settings: StrategySettings,
+    schwab_config,
+    adapter: SchwabMarketDataAdapter,
+) -> dict[str, Any]:
+    base_url = str(schwab_config.market_data_base_url or "").strip()
+    if not base_url:
+        raise RuntimeError("Schwab market-data base URL is empty.")
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError(f"Schwab market-data base URL is invalid: {base_url!r}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    external_symbol = adapter.map_historical_symbol(settings.symbol)
+    frequency = adapter.map_timeframe(settings.timeframe)
+    now = datetime.now(settings.timezone_info)
+    end_date_ms = int(now.timestamp() * 1000)
+    start_dt = now - timedelta(minutes=max(settings.live_poll_lookback_minutes, timeframe_minutes(settings.timeframe)))
+    start_date_ms = int(start_dt.timestamp() * 1000)
+    query = {
+        "symbol": external_symbol,
+        "periodType": "day",
+        "needExtendedHoursData": True,
+        "needPreviousClose": False,
+        "frequencyType": frequency.frequency_type,
+        "frequency": frequency.frequency,
+        "startDate": start_date_ms,
+        "endDate": end_date_ms,
+    }
+    request_url = f"{base_url.rstrip('/')}/pricehistory?{urlencode({key: _probationary_runtime_http_value(value) for key, value in query.items()})}"
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "blocker_label": "market_data_transport_failure",
+        "cwd": os.getcwd(),
+        "target_host": parsed.hostname,
+        "market_data_base_url": base_url,
+        "rendered_url": request_url,
+        "probe_symbol_internal": settings.symbol,
+        "probe_symbol_external": external_symbol,
+        "probe_timeframe": settings.timeframe,
+        "request_query": query,
+        "proxy_env": _probationary_runtime_transport_env(),
+        "python_executable": sys.executable,
+        "venv_prefix": sys.prefix,
+        "hostname": parsed.hostname,
+        "market_data_base_url": base_url,
+        "port": port,
+        "pid": os.getpid(),
+    }
+
+
+def run_probationary_market_data_transport_probe(
+    config_paths: Sequence[str | Path],
+    schwab_config_path: str | Path | None,
+) -> dict[str, Any]:
+    settings = load_settings_from_files(config_paths)
+    return _run_probationary_runtime_market_data_transport_probe(
+        settings=settings,
+        schwab_config_path=schwab_config_path,
+    )
+
+
+def _run_probationary_runtime_market_data_transport_probe(
+    *,
+    settings: StrategySettings,
+    schwab_config_path: str | Path | None,
+    schwab_config=None,
+    adapter: SchwabMarketDataAdapter | None = None,
+    oauth_client: SchwabOAuthClient | None = None,
+) -> dict[str, Any]:
+    resolved_schwab_config = schwab_config or load_schwab_market_data_config(schwab_config_path)
+    resolved_adapter = adapter or SchwabMarketDataAdapter(settings, resolved_schwab_config)
+    diagnostic = _probationary_runtime_transport_diagnostic_payload(settings, resolved_schwab_config, resolved_adapter)
+    print(f"Probationary paper runtime network preflight: {json.dumps(diagnostic, sort_keys=True)}", flush=True)
+    failure_base = {
+        **diagnostic,
+        "runtime_ready": False,
+        "status": "failed",
+        "next_fix": (
+            "Host cannot reach Schwab market data from the paper runtime context. "
+            "Verify Mac DNS/proxy/certificate settings, then rerun the shared market-data transport probe."
+        ),
+    }
+    try:
+        resolved = socket.getaddrinfo(str(diagnostic["target_host"]), int(diagnostic["port"]), type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        failure_payload = {
+            **failure_base,
+            "failure_kind": "dns_resolution_failed",
+            "dns_resolution_succeeds": False,
+            "authenticated_probe_attempted": False,
+            "authenticated_probe_succeeds": False,
+            "exception_text": str(exc),
+            "message": f"DNS resolution failed for {diagnostic['target_host']}.",
+        }
+        failure_path = _write_probationary_runtime_transport_failure(settings, failure_payload)
+        failure_payload["artifact_path"] = str(failure_path)
+        raise ProbationaryRuntimeTransportFailure(failure_payload) from exc
+    resolved_addresses = sorted({entry[4][0] for entry in resolved if entry[4]})
+    resolved_oauth_client = oauth_client or SchwabOAuthClient(
+        config=resolved_schwab_config.auth,
+        transport=UrllibJsonTransport(),
+        token_store=SchwabTokenStore(resolved_schwab_config.auth.token_store_path),
+    )
+    historical_client = SchwabHistoricalHttpClient(
+        oauth_client=resolved_oauth_client,
+        market_data_config=resolved_schwab_config,
+        transport=UrllibJsonTransport(),
+    )
+    try:
+        historical_client.fetch_price_history(
+            str(diagnostic["probe_symbol_external"]),
+            SchwabHistoricalRequest(
+                internal_symbol=settings.symbol,
+                period_type="day",
+                frequency_type=str(diagnostic["request_query"]["frequencyType"]),
+                frequency=int(diagnostic["request_query"]["frequency"]),
+                start_date_ms=int(diagnostic["request_query"]["startDate"]),
+                end_date_ms=int(diagnostic["request_query"]["endDate"]),
+                need_extended_hours_data=True,
+                need_previous_close=False,
+            ),
+            default_frequency=resolved_adapter.map_timeframe(settings.timeframe),
+        )
+    except Exception as exc:
+        failure_payload = {
+            **failure_base,
+            "failure_kind": "authenticated_pricehistory_probe_failed",
+            "dns_resolution_succeeds": True,
+            "resolved_addresses": resolved_addresses,
+            "authenticated_probe_attempted": True,
+            "authenticated_probe_succeeds": False,
+            "exception_text": str(exc),
+            "message": f"Authenticated Schwab /pricehistory probe failed for {diagnostic['target_host']}.",
+        }
+        failure_path = _write_probationary_runtime_transport_failure(settings, failure_payload)
+        failure_payload["artifact_path"] = str(failure_path)
+        raise ProbationaryRuntimeTransportFailure(failure_payload) from exc
+
+    success_payload = {
+        **diagnostic,
+        "status": "ok",
+        "runtime_ready": True,
+        "dns_resolution_succeeds": True,
+        "resolved_addresses": resolved_addresses,
+        "authenticated_probe_attempted": True,
+        "authenticated_probe_succeeds": True,
+    }
+    _clear_probationary_runtime_transport_failure(settings)
+    artifact_path = _write_probationary_runtime_transport_probe(settings, success_payload)
+    success_payload["artifact_path"] = str(artifact_path)
+    return success_payload
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -12696,6 +13394,12 @@ def _restore_validation_state_snapshot(
         "internal_position_qty": int(strategy_engine.state.internal_position_qty),
         "broker_position_qty": int(strategy_engine.state.broker_position_qty),
         "entry_price": strategy_engine.state.entry_price,
+        "open_entry_leg_count": len(strategy_engine.state.open_entry_legs),
+        "open_add_count": max(0, len(strategy_engine.state.open_entry_legs) - 1),
+        "open_entry_leg_quantities": [int(leg.quantity) for leg in strategy_engine.state.open_entry_legs],
+        "open_entry_leg_prices": [str(leg.entry_price) for leg in strategy_engine.state.open_entry_legs],
+        "additional_entry_allowed": strategy_engine._can_add_to_existing_position(strategy_engine.state),  # noqa: SLF001
+        "participation_policy": strategy_engine._settings.participation_policy.value,  # noqa: SLF001
         "open_broker_order_id": strategy_engine.state.open_broker_order_id,
         "last_order_intent_id": strategy_engine.state.last_order_intent_id,
         "long_entry_family": strategy_engine.state.long_entry_family.value,

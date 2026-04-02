@@ -64,10 +64,20 @@ def validate_state(state: StrategyState) -> list[str]:
         violations.append("entry_timestamp must be None while flat")
     if state.position_side == PositionSide.FLAT and state.entry_bar_id is not None:
         violations.append("entry_bar_id must be None while flat")
+    if state.position_side == PositionSide.FLAT and state.open_entry_legs:
+        violations.append("open_entry_legs must be empty while flat")
     if state.position_side == PositionSide.LONG and state.entry_timestamp is None:
         violations.append("entry_timestamp must not be None while long")
     if state.position_side == PositionSide.SHORT and state.entry_timestamp is None:
         violations.append("entry_timestamp must not be None while short")
+    if state.position_side != PositionSide.FLAT and not state.open_entry_legs:
+        violations.append("open_entry_legs must not be empty while in position")
+    if state.position_side != PositionSide.FLAT:
+        legs_total_qty = sum(int(leg.quantity) for leg in state.open_entry_legs)
+        if legs_total_qty != state.internal_position_qty:
+            violations.append("open_entry_legs total quantity must match internal_position_qty")
+        if any(leg.position_side != state.position_side for leg in state.open_entry_legs):
+            violations.append("open_entry_legs must all match the current position_side")
     if state.bars_since_bull_snap is not None and state.bars_since_bull_snap < 0:
         violations.append("bars_since_bull_snap must be >= 0")
     if state.bars_since_bear_snap is not None and state.bars_since_bear_snap < 0:

@@ -43,6 +43,7 @@ def _ensure_runtime_identity_columns(engine: Engine) -> None:
             ("strategy_family", "TEXT"),
             ("instrument", "TEXT"),
             ("lane_id", "TEXT"),
+            ("quantity", "INTEGER"),
         ),
         "processed_bars": (
             ("standalone_strategy_id", "TEXT"),

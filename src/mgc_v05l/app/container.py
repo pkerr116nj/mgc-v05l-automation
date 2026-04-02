@@ -1,4 +1,4 @@
-"""Dependency container for replay-first runs."""
+"""Dependency container for shared platform runs."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from .strategy_runtime_registry import StrategyRuntimeRegistry, build_strategy_r
 
 @dataclass(frozen=True)
 class ApplicationContainer:
-    """Holds typed runtime settings and replay-first dependencies."""
+    """Holds typed runtime settings and shared runtime dependencies."""
 
     settings: StrategySettings
     repositories: RepositorySet
@@ -26,7 +26,7 @@ class ApplicationContainer:
 
 
 def build_application_container(config_paths: Sequence[str | Path]) -> ApplicationContainer:
-    """Construct the replay-first application container from typed config files."""
+    """Construct the application container from typed config files."""
     settings = load_settings_from_files(config_paths)
     strategy_runtime_registry = build_strategy_runtime_registry(settings)
     primary_instance = strategy_runtime_registry.primary_engine_instance()

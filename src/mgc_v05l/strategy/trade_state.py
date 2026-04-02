@@ -1,10 +1,11 @@
 """Trade-state helpers."""
 
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
 from ..domain.enums import LongEntryFamily, PositionSide, ShortEntryFamily, StrategyStatus
-from ..domain.models import StrategyState
+from ..domain.models import StrategyEntryLeg, StrategyState
 
 
 def build_initial_state(now: datetime) -> StrategyState:
@@ -48,4 +49,26 @@ def build_initial_state(now: datetime) -> StrategyState:
         additive_short_max_favorable_excursion=Decimal("0"),
         additive_short_peak_threshold_reached=False,
         additive_short_giveback_from_peak=Decimal("0"),
+        open_entry_legs=(),
     )
+
+
+def normalize_legacy_single_position_state(state: StrategyState) -> StrategyState:
+    """Backfill a synthetic single leg for legacy in-position snapshots without staged-leg state."""
+    if state.position_side == PositionSide.FLAT or state.open_entry_legs or state.internal_position_qty <= 0:
+        return state
+    if state.entry_price is None or state.entry_timestamp is None or state.entry_bar_id is None:
+        return state
+    synthetic_leg = StrategyEntryLeg(
+        leg_id=f"legacy::{state.last_order_intent_id or state.entry_bar_id}",
+        order_intent_id=str(state.last_order_intent_id or state.entry_bar_id),
+        quantity=state.internal_position_qty,
+        entry_price=state.entry_price,
+        entry_timestamp=state.entry_timestamp,
+        signal_bar_id=state.entry_bar_id,
+        position_side=state.position_side,
+        long_entry_family=state.long_entry_family if state.position_side == PositionSide.LONG else LongEntryFamily.NONE,
+        short_entry_family=state.short_entry_family if state.position_side == PositionSide.SHORT else ShortEntryFamily.NONE,
+        short_entry_source=state.short_entry_source if state.position_side == PositionSide.SHORT else None,
+    )
+    return replace(state, open_entry_legs=(synthetic_leg,))

@@ -2,13 +2,14 @@
 
 ## Current Build State
 
-The current v0.5l build is a replay-first external automation engine with:
+The current v0.5l build is a shared strategy platform with distinct replay, research, paper, and tightly gated live provenance lanes:
 - typed settings and locked implementation decisions
 - completed-bar session classification
 - feature calculation, signal generation, state tracking, risk, and family-specific exits
 - deterministic replay execution with `NEXT_BAR_OPEN` fills
 - SQLite persistence for replay safety and restart inspection
 - a paper broker only
+- lane-level participation policy, including explicit single-entry and staged same-direction participation modes
 
 ## Implemented
 
@@ -22,6 +23,7 @@ Production-path implementation currently includes:
 - risk and exit engines
 - invariants and fill-driven state machine transitions
 - strategy engine orchestration
+- staged participation state tracking with explicit entry-leg persistence
 - replay CSV ingestion
 - processed-bar persistence and duplicate suppression
 - order intent persistence
@@ -45,9 +47,17 @@ The following are explicitly research-only:
 
 These modules do not participate in current production entry or exit decisions.
 
-## Replay-First Architecture
+## Provenance Architecture
 
-Current architecture is:
+Replay remains one provenance lane, not the governing platform identity. Shared architecture now supports replay, research, paper, and future live execution under the same core state/execution model, with lane-level controls for:
+1. participation policy
+2. session restrictions
+3. approved entry sources
+4. persistence and artifacts
+
+Frozen benchmark lanes may still keep explicit single-entry or fixed-session assumptions in their own lane configs. ATP candidate paper/research lanes are now allowed to use staged participation when their configs explicitly opt into it; that support is no longer treated as out of scope for the shared paper path.
+
+Replay execution today is still:
 1. replay CSV ingest
 2. session classification
 3. feature computation

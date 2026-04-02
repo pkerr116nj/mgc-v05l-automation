@@ -44,6 +44,8 @@ class InternalReconciliationSnapshot:
     operator_halt: bool
     reconcile_required: bool
     fault_code: str | None
+    open_entry_leg_count: int = 0
+    open_entry_leg_quantities: tuple[int, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -63,6 +65,8 @@ class InternalReconciliationSnapshot:
             "operator_halt": self.operator_halt,
             "reconcile_required": self.reconcile_required,
             "fault_code": self.fault_code,
+            "open_entry_leg_count": self.open_entry_leg_count,
+            "open_entry_leg_quantities": list(self.open_entry_leg_quantities),
         }
 
 

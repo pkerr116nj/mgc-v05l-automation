@@ -1,4 +1,4 @@
-"""Strategy engine orchestration for replay-first execution."""
+"""Strategy engine orchestration for deterministic bar-close execution."""
 
 from __future__ import annotations
 
@@ -10,9 +10,11 @@ from typing import Callable, Optional
 
 from ..config_models import StrategySettings
 from ..domain.enums import (
+    AddDirectionPolicy,
     LongEntryFamily,
     OrderIntentType,
     OrderStatus,
+    ParticipationPolicy,
     PositionSide,
     ShortEntryFamily,
     StrategyStatus,
@@ -52,7 +54,7 @@ from .state_machine import (
     update_additive_short_peak_state,
 )
 from .reconcile import StrategyReconciler
-from .trade_state import build_initial_state
+from .trade_state import build_initial_state, normalize_legacy_single_position_state
 
 
 class StrategyEngine:
@@ -350,7 +352,6 @@ class StrategyEngine:
             self._state = transition_on_entry_fill(
                 state=self._state,
                 fill_event=fill_event,
-                trade_size=self._settings.trade_size,
                 signal_bar_id=signal_bar_id,
                 long_entry_family=long_entry_family,
                 short_entry_family=short_entry_family,
@@ -514,12 +515,44 @@ class StrategyEngine:
         reason_code: str = "operator_flatten_and_halt",
     ) -> OrderIntent | None:
         """Create and submit a paper-safe operator flatten intent against the current position."""
+        try:
+            return self.submit_runtime_exit_intent(
+                occurred_at,
+                quantity=self._state.internal_position_qty,
+                reason_code=reason_code,
+                signal_source="operatorFlatten",
+            )
+        except ValueError as exc:
+            if "runtime-managed exit intent" in str(exc):
+                raise ValueError("Execution engine rejected the operator flatten intent.") from exc
+            raise
+
+    def submit_runtime_exit_intent(
+        self,
+        occurred_at: datetime,
+        *,
+        quantity: int | None = None,
+        reason_code: str,
+        signal_source: str = "runtimeManagedExit",
+        symbol: str | None = None,
+    ) -> OrderIntent | None:
+        """Create a runtime-managed exit intent, including staged partial exits."""
+        if self._repositories is None:
+            raise ValueError("Runtime-managed exit intent requires persistence repositories.")
         if self._state.position_side == PositionSide.FLAT or self._state.internal_position_qty <= 0:
             return None
         if self._state.open_broker_order_id is not None:
-            raise ValueError("Cannot submit operator flatten intent while another broker order is open.")
+            raise ValueError("Cannot submit a runtime-managed exit intent while another broker order is open.")
+        if not self._state.exits_enabled or self._state.fault_code is not None:
+            return None
 
-        bar_id = f"operator-control|{int(occurred_at.timestamp() * 1000)}"
+        resolved_quantity = int(quantity or self._state.internal_position_qty)
+        if resolved_quantity <= 0:
+            raise ValueError("Runtime-managed exit quantity must be > 0.")
+        if resolved_quantity > self._state.internal_position_qty:
+            raise ValueError("Runtime-managed exit quantity cannot exceed the current internal position quantity.")
+
+        bar_id = f"runtime-exit|{int(occurred_at.timestamp() * 1000)}"
         if self._state.position_side == PositionSide.LONG:
             intent_type = OrderIntentType.SELL_TO_CLOSE
         else:
@@ -527,9 +560,9 @@ class StrategyEngine:
         intent = OrderIntent(
             order_intent_id=f"{bar_id}|{intent_type.value}",
             bar_id=bar_id,
-            symbol=self._settings.symbol,
+            symbol=self._settings.symbol if symbol is None else str(symbol),
             intent_type=intent_type,
-            quantity=self._state.internal_position_qty,
+            quantity=resolved_quantity,
             created_at=occurred_at,
             reason_code=reason_code,
         )
@@ -539,10 +572,10 @@ class StrategyEngine:
                 state=self._state,
                 intent=intent,
                 occurred_at=occurred_at,
-                default_reason="Execution engine rejected the operator flatten intent.",
+                default_reason="Execution engine rejected the runtime-managed exit intent.",
             )
-            self._persist_state(self._state, transition_label="operator_flatten_intent_rejected")
-            raise ValueError("Execution engine rejected the operator flatten intent.")
+            self._persist_state(self._state, transition_label="runtime_exit_intent_rejected")
+            raise ValueError("Execution engine rejected the runtime-managed exit intent.")
         self._state = replace(
             self._state,
             last_order_intent_id=intent.order_intent_id,
@@ -558,7 +591,20 @@ class StrategyEngine:
             last_status_checked_at=pending.last_status_checked_at,
             retry_count=pending.retry_count,
         )
-        self._persist_state(self._state, transition_label="operator_flatten_intent")
+        self._persist_state(self._state, transition_label="runtime_exit_intent")
+        self._latest_live_intent_summary = {
+            "order_intent_id": intent.order_intent_id,
+            "intent_type": intent.intent_type.value,
+            "quantity": intent.quantity,
+            "reason_code": intent.reason_code,
+            "signal_source": signal_source,
+            "submit_attempted_at": occurred_at.isoformat(),
+            "submit_attempted": True,
+            "submit_suppressed": False,
+            "submit_gate_blocker": None,
+            "resulting_position_side": self._state.position_side.value,
+            "resulting_internal_qty": self._state.internal_position_qty,
+        }
         self._emit_order_lifecycle_alert("created", intent, occurred_at, pending_broker_order_id=pending.broker_order_id)
         self._emit_order_lifecycle_alert("submitted", intent, occurred_at, pending_broker_order_id=pending.broker_order_id)
         return intent
@@ -596,11 +642,9 @@ class StrategyEngine:
         normalized_side = str(side or "").strip().upper()
         if normalized_side not in {"LONG", "SHORT"}:
             raise ValueError(f"Unsupported runtime entry side: {side}")
-        if self._state.position_side != PositionSide.FLAT or self._state.internal_position_qty > 0:
-            return None
         if self._state.open_broker_order_id is not None:
             return None
-        if self._state.strategy_status is not StrategyStatus.READY:
+        if not self._entry_side_is_currently_allowed(normalized_side, self._state):
             return None
         if (
             not self._state.entries_enabled
@@ -657,7 +701,7 @@ class StrategyEngine:
             bar_id=bar.bar_id,
             symbol=str(symbol or self._settings.symbol),
             intent_type=intent_type,
-            quantity=self._settings.trade_size,
+            quantity=self._runtime_entry_quantity(),
             created_at=bar.end_ts,
             reason_code=reason_code,
         )
@@ -705,13 +749,61 @@ class StrategyEngine:
 
     def _load_initial_state(self, initial_state: Optional[StrategyState]) -> StrategyState:
         if initial_state is not None:
-            return initial_state
+            return normalize_legacy_single_position_state(initial_state)
         if self._state_repository is not None:
             persisted_state = self._state_repository.load_latest()
             if persisted_state is not None:
-                return persisted_state
+                return normalize_legacy_single_position_state(persisted_state)
         now = datetime.now(timezone.utc)
         return transition_to_ready(build_initial_state(now), now)
+
+    def _entry_side_is_currently_allowed(self, desired_side: str, state: StrategyState) -> bool:
+        normalized_side = str(desired_side or "").strip().upper()
+        if normalized_side not in {"LONG", "SHORT"}:
+            return False
+        if state.open_broker_order_id is not None:
+            return False
+        if state.strategy_status not in {
+            StrategyStatus.READY,
+            StrategyStatus.IN_LONG_K,
+            StrategyStatus.IN_LONG_VWAP,
+            StrategyStatus.IN_SHORT_K,
+        }:
+            return False
+        if normalized_side == "LONG" and state.position_side == PositionSide.SHORT:
+            return False
+        if normalized_side == "SHORT" and state.position_side == PositionSide.LONG:
+            return False
+        if state.position_side == PositionSide.FLAT:
+            return True
+        if self._settings.add_direction_policy is not AddDirectionPolicy.SAME_DIRECTION_ONLY:
+            return False
+        if normalized_side != state.position_side.value:
+            return False
+        return self._can_add_to_existing_position(state)
+
+    def _can_add_to_existing_position(self, state: StrategyState) -> bool:
+        if state.position_side == PositionSide.FLAT:
+            return True
+        if self._settings.participation_policy is ParticipationPolicy.SINGLE_ENTRY_ONLY:
+            return False
+        entry_leg_count = len(state.open_entry_legs)
+        if entry_leg_count <= 0:
+            return False
+        if entry_leg_count >= self._settings.max_concurrent_entries:
+            return False
+        if (entry_leg_count - 1) >= self._settings.max_adds_after_entry:
+            return False
+        next_quantity = state.internal_position_qty + self._runtime_entry_quantity()
+        max_position_quantity = self._settings.max_position_quantity or (
+            self._settings.trade_size * self._settings.max_concurrent_entries
+        )
+        if next_quantity > max_position_quantity:
+            return False
+        return True
+
+    def _runtime_entry_quantity(self) -> int:
+        return int(self._settings.trade_size)
 
     def _restore_processing_context(self) -> None:
         if self._repositories is None:
@@ -1047,11 +1139,9 @@ class StrategyEngine:
         exit_decision: ExitDecision,
     ) -> Optional[OrderIntent]:
         warmup_complete = len(self._bar_history) >= self._settings.warmup_bars_required()
-        if state.position_side == PositionSide.FLAT:
+        if self._entry_side_is_currently_allowed("LONG", state) or self._entry_side_is_currently_allowed("SHORT", state):
             if (
-                state.strategy_status is StrategyStatus.READY
-                and warmup_complete
-                and state.entries_enabled
+                state.entries_enabled
                 and not state.operator_halt
                 and state.same_underlying_entry_hold
             ):
@@ -1059,7 +1149,7 @@ class StrategyEngine:
                     str(state.same_underlying_hold_reason or "").strip()
                     or f"New entries held by operator for same-underlying conflict review on {self._settings.symbol}."
                 )
-                if signal_packet.long_entry:
+                if signal_packet.long_entry and self._entry_side_is_currently_allowed("LONG", state):
                     self._log_same_underlying_entry_block(
                         bar=bar,
                         intent_type=OrderIntentType.BUY_TO_OPEN,
@@ -1067,7 +1157,7 @@ class StrategyEngine:
                         reason=hold_reason,
                     )
                     return None
-                if signal_packet.short_entry:
+                if signal_packet.short_entry and self._entry_side_is_currently_allowed("SHORT", state):
                     self._log_same_underlying_entry_block(
                         bar=bar,
                         intent_type=OrderIntentType.SELL_TO_OPEN,
@@ -1076,29 +1166,28 @@ class StrategyEngine:
                     )
                     return None
             if (
-                state.strategy_status is StrategyStatus.READY
-                and warmup_complete
+                warmup_complete
                 and state.entries_enabled
                 and not state.operator_halt
                 and not state.same_underlying_entry_hold
             ):
-                if signal_packet.long_entry:
+                if signal_packet.long_entry and self._entry_side_is_currently_allowed("LONG", state):
                     return OrderIntent(
                         order_intent_id=f"{bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
                         bar_id=bar.bar_id,
                         symbol=self._settings.symbol,
                         intent_type=OrderIntentType.BUY_TO_OPEN,
-                        quantity=self._settings.trade_size,
+                        quantity=self._runtime_entry_quantity(),
                         created_at=bar.end_ts,
                         reason_code=signal_packet.long_entry_source or "longEntry",
                     )
-                if signal_packet.short_entry:
+                if signal_packet.short_entry and self._entry_side_is_currently_allowed("SHORT", state):
                     return OrderIntent(
                         order_intent_id=f"{bar.bar_id}|{OrderIntentType.SELL_TO_OPEN.value}",
                         bar_id=bar.bar_id,
                         symbol=self._settings.symbol,
                         intent_type=OrderIntentType.SELL_TO_OPEN,
-                        quantity=self._settings.trade_size,
+                        quantity=self._runtime_entry_quantity(),
                         created_at=bar.end_ts,
                         reason_code=signal_packet.short_entry_source or "shortEntry",
                     )

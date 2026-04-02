@@ -1,0 +1,10 @@
+# ATP companion paper candidate on GC with Asia-only staged adds.
+# This follows the active promotion/add research branch and widens coverage by
+# controlled dimensions only: related-instrument paper validation plus Asia-only
+# staged participation while US add weakness remains unresolved in research.
+mode: "paper"
+database_url: "sqlite:///./mgc_v05l.probationary.paper.sqlite3"
+probationary_artifacts_dir: "./outputs/probationary_pattern_engine/paper_session"
+probationary_paper_runtime_exclusive_config: true
+
+probationary_paper_lanes_json: '[{"lane_id":"atp_companion_v1_gc_asia_promotion_1_075r_favorable_only","display_name":"ATP Companion Candidate — GC / Asia Only / Promotion 1 +0.75R Favorable Only","symbol":"GC","standalone_strategy_id":"atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only","identity_components":["paper","gc","asia","promotion_1_075r_favorable_only"],"long_sources":["trend_participation.pullback_continuation.long.conservative"],"short_sources":[],"session_restriction":"ASIA","allowed_sessions":["ASIA"],"point_value":"100","trade_size":1,"participation_policy":"STAGED_SAME_DIRECTION","max_concurrent_entries":2,"max_position_quantity":2,"max_adds_after_entry":1,"add_direction_policy":"SAME_DIRECTION_ONLY","catastrophic_open_loss":"-750","lane_mode":"ATP_COMPANION_CANDIDATE","strategy_family":"active_trend_participation_engine","strategy_identity_root":"ATP_COMPANION_V1","runtime_kind":"atp_companion_benchmark_paper","live_poll_lookback_minutes":1440,"observed_instruments":["GC"],"quality_bucket_policy":"VWAP_FAVORABLE_ONLY","experimental_status":"paper_candidate","paper_only":true,"non_approved":true,"observer_variant_id":"trend_participation.pullback_continuation.long.conservative","observer_side":"LONG","candidate_id":"promotion_1_075r_favorable_only","candidate_origin":"atp_promotion_add_review","artifacts_dir":"./outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_gc_asia_promotion_1_075r_favorable_only","database_url":"sqlite:///./mgc_v05l.probationary.paper__atp_companion_v1_gc_asia_promotion_1_075r_favorable_only.sqlite3"}]'

@@ -1,7 +1,8 @@
 # ATP promotion/add candidate registry.
 # All tested branches remain retained for future optimization work.
 # Only the strongest branch is being advanced as an active research candidate in
-# this pass. Frozen ATP Companion Baseline v1 remains unchanged.
+# this pass. Frozen ATP Companion Baseline v1 remains unchanged, while staged
+# ATP paper/research candidate lanes are supported through explicit lane configs.
 
 baseline_reference_label: "ATP_COMPANION_V1_ASIA_US"
 baseline_reference_config: "config/atp_companion_baseline_v1_asia_us.yaml"

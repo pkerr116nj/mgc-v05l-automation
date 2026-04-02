@@ -1,4 +1,4 @@
-"""SQLite schema for replay-first persistence plus additive research storage."""
+"""SQLite schema for platform persistence plus additive research storage."""
 
 from sqlalchemy import (
     Boolean,
@@ -253,6 +253,7 @@ fills_table = Table(
     Column("fill_timestamp", Text, nullable=False, index=True),
     Column("fill_price", Text, nullable=True),
     Column("broker_order_id", Text, nullable=True),
+    Column("quantity", Integer, nullable=True),
 )
 
 alert_events_table = Table(

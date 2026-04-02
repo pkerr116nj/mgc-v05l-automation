@@ -9,6 +9,40 @@ from .enums import HealthStatus, LongEntryFamily, PositionSide, ShortEntryFamily
 
 
 @dataclass(frozen=True)
+class StrategyEntryLeg:
+    leg_id: str
+    order_intent_id: str
+    quantity: int
+    entry_price: Decimal
+    entry_timestamp: datetime
+    signal_bar_id: str
+    position_side: PositionSide
+    long_entry_family: LongEntryFamily = LongEntryFamily.NONE
+    short_entry_family: ShortEntryFamily = ShortEntryFamily.NONE
+    short_entry_source: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.leg_id:
+            raise ValueError("StrategyEntryLeg.leg_id is required.")
+        if not self.order_intent_id:
+            raise ValueError("StrategyEntryLeg.order_intent_id is required.")
+        if self.quantity <= 0:
+            raise ValueError("StrategyEntryLeg.quantity must be > 0.")
+        if self.entry_timestamp.tzinfo is None or self.entry_timestamp.utcoffset() is None:
+            raise ValueError("StrategyEntryLeg.entry_timestamp must be timezone-aware.")
+        if not self.signal_bar_id:
+            raise ValueError("StrategyEntryLeg.signal_bar_id is required.")
+        if self.position_side is PositionSide.FLAT:
+            raise ValueError("StrategyEntryLeg.position_side must not be FLAT.")
+        if self.position_side is PositionSide.LONG and self.long_entry_family is LongEntryFamily.NONE:
+            raise ValueError("Long strategy entry legs require a long_entry_family.")
+        if self.position_side is PositionSide.SHORT and self.short_entry_family is ShortEntryFamily.NONE:
+            raise ValueError("Short strategy entry legs require a short_entry_family.")
+        if self.position_side is PositionSide.LONG and self.short_entry_source is not None:
+            raise ValueError("Long strategy entry legs must not carry short_entry_source.")
+
+
+@dataclass(frozen=True)
 class StrategyState:
     strategy_status: StrategyStatus
     position_side: PositionSide
@@ -48,6 +82,7 @@ class StrategyState:
     additive_short_max_favorable_excursion: Decimal = Decimal("0")
     additive_short_peak_threshold_reached: bool = False
     additive_short_giveback_from_peak: Decimal = Decimal("0")
+    open_entry_legs: tuple[StrategyEntryLeg, ...] = ()
 
 
 @dataclass(frozen=True)

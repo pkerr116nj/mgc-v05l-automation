@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..domain.enums import ReplayFillPolicy, VwapPolicy
+from ..domain.enums import AddDirectionPolicy, ParticipationPolicy, ReplayFillPolicy, VwapPolicy
 from ..market_data.timeframes import normalize_timeframe_label
 
 
@@ -90,6 +90,11 @@ class StrategySettings(BaseModel):
     runtime_supervisor_failure_cooldown_seconds: int = 180
     max_bars_long: int
     max_bars_short: int
+    participation_policy: ParticipationPolicy = ParticipationPolicy.SINGLE_ENTRY_ONLY
+    max_concurrent_entries: int = 1
+    max_position_quantity: int | None = None
+    max_adds_after_entry: int = 0
+    add_direction_policy: AddDirectionPolicy = AddDirectionPolicy.SAME_DIRECTION_ONLY
     use_long_swing_exit: bool = True
     use_short_swing_exit: bool = True
     use_long_integrity_exit: bool = True
@@ -359,6 +364,7 @@ class StrategySettings(BaseModel):
         "atr_len",
         "max_bars_long",
         "max_bars_short",
+        "max_concurrent_entries",
         "additive_short_stalled_exit_min_bars",
         "additive_short_profit_protect_min_bars",
         "anti_churn_bars",
@@ -399,6 +405,20 @@ class StrategySettings(BaseModel):
     def validate_non_negative_ints(cls, value: int) -> int:
         if value < 0:
             raise ValueError("integer settings must be >= 0.")
+        return value
+
+    @field_validator("max_adds_after_entry")
+    @classmethod
+    def validate_max_adds_after_entry(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("max_adds_after_entry must be >= 0.")
+        return value
+
+    @field_validator("max_position_quantity")
+    @classmethod
+    def validate_max_position_quantity(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("max_position_quantity must be > 0 when configured.")
         return value
 
     @field_validator("probationary_paper_lane_realized_loser_limit_per_session")
@@ -494,6 +514,13 @@ class StrategySettings(BaseModel):
                 raise ValueError("live_strategy_pilot_enabled remains locked to symbol MGC.")
             if self.trade_size != 1:
                 raise ValueError("live_strategy_pilot_enabled requires trade_size=1.")
+        if self.max_position_quantity is not None and self.max_position_quantity < self.trade_size:
+            raise ValueError("max_position_quantity must be >= trade_size.")
+        if self.participation_policy is ParticipationPolicy.SINGLE_ENTRY_ONLY:
+            if self.max_concurrent_entries != 1:
+                raise ValueError("SINGLE_ENTRY_ONLY requires max_concurrent_entries=1.")
+            if self.max_adds_after_entry != 0:
+                raise ValueError("SINGLE_ENTRY_ONLY requires max_adds_after_entry=0.")
         return self
 
     def warmup_bars_required(self) -> int:

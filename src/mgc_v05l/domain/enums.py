@@ -25,6 +25,16 @@ class PositionSide(StrEnum):
     SHORT = "SHORT"
 
 
+class ParticipationPolicy(StrEnum):
+    SINGLE_ENTRY_ONLY = "SINGLE_ENTRY_ONLY"
+    STAGED_SAME_DIRECTION = "STAGED_SAME_DIRECTION"
+    PYRAMID_WITH_LIMIT = "PYRAMID_WITH_LIMIT"
+
+
+class AddDirectionPolicy(StrEnum):
+    SAME_DIRECTION_ONLY = "SAME_DIRECTION_ONLY"
+
+
 class LongEntryFamily(StrEnum):
     NONE = "NONE"
     K = "K"

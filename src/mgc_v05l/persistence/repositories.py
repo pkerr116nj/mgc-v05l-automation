@@ -1,4 +1,4 @@
-"""Persistence repositories for replay-first execution plus additive research storage."""
+"""Persistence repositories for platform execution and additive research storage."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
 from ..domain.enums import LongEntryFamily, OrderIntentType, OrderStatus, PositionSide, ShortEntryFamily, StrategyStatus
-from ..domain.models import Bar, FeaturePacket, SignalPacket, StrategyState
+from ..domain.models import Bar, FeaturePacket, SignalPacket, StrategyEntryLeg, StrategyState
 from ..execution.order_models import FillEvent, OrderIntent
 from .db import create_schema
 from .research_models import (
@@ -23,6 +23,7 @@ from .research_models import (
     SignalEvaluationRecord,
     TradeOutcomeRecord,
 )
+from ..strategy.trade_state import normalize_legacy_single_position_state
 from .tables import (
     alert_events_table,
     bars_table,
@@ -96,13 +97,24 @@ def _deserialize_value(value: Any) -> Any:
     return value
 
 
+def _deserialize_recursive(value: Any) -> Any:
+    decoded = _deserialize_value(value)
+    if decoded is not value:
+        return decoded
+    if isinstance(value, list):
+        return [_deserialize_recursive(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _deserialize_recursive(item) for key, item in value.items()}
+    return value
+
+
 def _json_dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, default=_serialize_value, sort_keys=True)
 
 
 def _json_loads(payload_json: str) -> dict[str, Any]:
     raw = json.loads(payload_json)
-    return {key: _deserialize_value(value) for key, value in raw.items()}
+    return {key: _deserialize_recursive(value) for key, value in raw.items()}
 
 
 class InstrumentRepository:
@@ -649,6 +661,7 @@ class FillRepository:
                     "fill_timestamp": _to_iso(fill.fill_timestamp),
                     "fill_price": str(fill.fill_price) if fill.fill_price is not None else None,
                     "broker_order_id": fill.broker_order_id,
+                    "quantity": fill.quantity,
                 },
             )
 
@@ -816,9 +829,25 @@ def decode_strategy_state(payload_json: str) -> StrategyState:
     payload["long_entry_family"] = LongEntryFamily(payload["long_entry_family"])
     payload.setdefault("same_underlying_entry_hold", False)
     payload.setdefault("same_underlying_hold_reason", None)
+    payload.setdefault("open_entry_legs", [])
     if "short_entry_family" in payload:
         payload["short_entry_family"] = ShortEntryFamily(payload["short_entry_family"])
-    return StrategyState(**payload)
+    payload["open_entry_legs"] = tuple(
+        StrategyEntryLeg(
+            leg_id=str(leg["leg_id"]),
+            order_intent_id=str(leg["order_intent_id"]),
+            quantity=int(leg["quantity"]),
+            entry_price=_to_decimal(leg["entry_price"]) or Decimal("0"),
+            entry_timestamp=leg["entry_timestamp"],
+            signal_bar_id=str(leg["signal_bar_id"]),
+            position_side=PositionSide(str(leg["position_side"])),
+            long_entry_family=LongEntryFamily(str(leg.get("long_entry_family") or LongEntryFamily.NONE.value)),
+            short_entry_family=ShortEntryFamily(str(leg.get("short_entry_family") or ShortEntryFamily.NONE.value)),
+            short_entry_source=(str(leg["short_entry_source"]) if leg.get("short_entry_source") is not None else None),
+        )
+        for leg in list(payload.get("open_entry_legs") or [])
+    )
+    return normalize_legacy_single_position_state(StrategyState(**payload))
 
 
 def decode_bar(row: dict[str, Any]) -> Bar:
@@ -874,6 +903,7 @@ def decode_fill(row: dict[str, Any]) -> FillEvent:
         fill_timestamp=_from_iso(row["fill_timestamp"]),
         fill_price=Decimal(row["fill_price"]) if row["fill_price"] is not None else None,
         broker_order_id=row["broker_order_id"],
+        quantity=int(row.get("quantity") or 1),
     )
 
 

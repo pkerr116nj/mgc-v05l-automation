@@ -53,5 +53,8 @@ def load_schwab_market_data_config(path: str | Path | None = None) -> SchwabMark
         treasury_context_quote_symbols={
             str(key): str(value) for key, value in payload.get("treasury_context_quote_symbols", {}).items()
         },
+        market_data_base_url=str(
+            payload.get("market_data_base_url", "https://api.schwabapi.com/marketdata/v1")
+        ),
         quotes_symbol_query_param=str(payload.get("quotes_symbol_query_param", "symbols")),
     )

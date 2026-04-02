@@ -24,6 +24,21 @@ from .schwab_models import (
 class SchwabHttpError(RuntimeError):
     """Raised when the Schwab HTTP layer fails."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        url: str | None = None,
+        status_code: int | None = None,
+        headers: dict[str, str] | None = None,
+        response_body: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.url = url
+        self.status_code = status_code
+        self.headers = headers
+        self.response_body = response_body
+
 
 class UrllibJsonTransport(JsonHttpTransport):
     """Small stdlib transport so tests can stay network-free by injecting fakes."""
@@ -60,10 +75,14 @@ class UrllibJsonTransport(JsonHttpTransport):
             except UnicodeDecodeError:
                 detail = repr(body_bytes[:500])
             raise SchwabHttpError(
-                f"Schwab HTTP error {exc.code}. Headers={headers}. Body={detail}"
+                f"Schwab HTTP error {exc.code}. Headers={headers}. Body={detail}",
+                url=url,
+                status_code=exc.code,
+                headers=headers,
+                response_body=detail,
             ) from exc
         except URLError as exc:
-            raise SchwabHttpError(f"Schwab transport error: {exc}") from exc
+            raise SchwabHttpError(f"Schwab transport error for {url}: {exc}", url=url) from exc
 
         try:
             raw = json.loads(payload)

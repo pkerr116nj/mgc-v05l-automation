@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from ..config_models import StrategySettings
+from ..config_models import AddDirectionPolicy, ParticipationPolicy, StrategySettings
 from ..domain.events import DomainEvent
 from ..domain.models import Bar
 from ..execution.execution_engine import ExecutionEngine
@@ -18,7 +18,6 @@ from ..persistence.state_repository import StateRepository
 from ..strategy.strategy_engine import StrategyEngine
 from .approved_quant_lanes.engine import ApprovedQuantStrategyEngine
 from .approved_quant_lanes.specs import approved_quant_lane_specs
-from .shared_strategy_identities import get_shared_strategy_identity
 from .strategy_identity import build_standalone_strategy_identity
 
 _APPROVED_LONG_SOURCE_FIELDS = {
@@ -38,13 +37,19 @@ class StandaloneStrategyDefinition:
     standalone_strategy_label: str
     strategy_family: str
     instrument: str
+    identity_components: tuple[str, ...]
     lane_id: str
     display_name: str
     config_source: str
     runtime_kind: str
     enabled: bool
     trade_size: int
-    allowed_sessions: tuple[str, ...]
+    allowed_sessions: tuple[str, ...] = ()
+    participation_policy: ParticipationPolicy = ParticipationPolicy.SINGLE_ENTRY_ONLY
+    max_concurrent_entries: int = 1
+    max_position_quantity: int | None = None
+    max_adds_after_entry: int = 0
+    add_direction_policy: AddDirectionPolicy = AddDirectionPolicy.SAME_DIRECTION_ONLY
     long_sources: tuple[str, ...] = ()
     short_sources: tuple[str, ...] = ()
     database_url: str | None = None
@@ -60,11 +65,17 @@ class StandaloneStrategyDefinition:
             "standalone_strategy_label": self.standalone_strategy_label,
             "strategy_family": self.strategy_family,
             "instrument": self.instrument,
+            "identity_components": list(self.identity_components),
             "lane_id": self.lane_id,
             "display_name": self.display_name,
             "config_source": self.config_source,
             "legacy_derived_identity": self.legacy_derived_identity,
             "runtime_kind": self.runtime_kind,
+            "participation_policy": self.participation_policy.value,
+            "max_concurrent_entries": self.max_concurrent_entries,
+            "max_position_quantity": self.max_position_quantity,
+            "max_adds_after_entry": self.max_adds_after_entry,
+            "add_direction_policy": self.add_direction_policy.value,
         }
 
 
@@ -240,6 +251,11 @@ def build_runtime_settings(settings: StrategySettings, definition: StandaloneStr
     updates: dict[str, Any] = {
         "symbol": definition.instrument,
         "trade_size": definition.trade_size,
+        "participation_policy": definition.participation_policy,
+        "max_concurrent_entries": definition.max_concurrent_entries,
+        "max_position_quantity": definition.max_position_quantity,
+        "max_adds_after_entry": definition.max_adds_after_entry,
+        "add_direction_policy": definition.add_direction_policy,
     }
     if definition.database_url:
         updates["database_url"] = definition.database_url
@@ -286,20 +302,23 @@ def _coerce_runtime_definition_rows(
 ) -> list[StandaloneStrategyDefinition]:
     rows: list[StandaloneStrategyDefinition] = []
     for raw in raw_rows:
-        normalized_raw = _normalize_runtime_definition_row(raw)
-        instrument = str(normalized_raw.get("instrument") or normalized_raw.get("symbol") or settings.symbol).strip().upper()
-        long_sources = tuple(str(value) for value in normalized_raw.get("long_sources", []) if value)
-        short_sources = tuple(str(value) for value in normalized_raw.get("short_sources", []) if value)
-        strategy_family = _resolve_strategy_family(normalized_raw, long_sources=long_sources, short_sources=short_sources)
+        instrument = str(raw.get("instrument") or raw.get("symbol") or settings.symbol).strip().upper()
+        long_sources = tuple(str(value) for value in raw.get("long_sources", []) if value)
+        short_sources = tuple(str(value) for value in raw.get("short_sources", []) if value)
+        strategy_family = _resolve_strategy_family(raw, long_sources=long_sources, short_sources=short_sources)
         identity = build_standalone_strategy_identity(
             instrument=instrument,
-            lane_id=normalized_raw.get("lane_id"),
-            strategy_name=normalized_raw.get("display_name"),
+            lane_id=raw.get("lane_id"),
+            strategy_name=raw.get("display_name"),
             source_family=strategy_family,
-            lane_name=normalized_raw.get("display_name") or normalized_raw.get("lane_name"),
-            explicit_root=normalized_raw.get("strategy_identity_root"),
+            lane_name=raw.get("display_name") or raw.get("lane_name"),
+            explicit_root=raw.get("strategy_identity_root"),
+            explicit_id=raw.get("standalone_strategy_id"),
+            explicit_label=raw.get("standalone_strategy_label"),
+            identity_components=raw.get("identity_components"),
+            identity_variant=raw.get("identity_variant"),
         )
-        lane_id = str(normalized_raw.get("lane_id") or "").strip()
+        lane_id = str(raw.get("lane_id") or "").strip()
         rows.append(
             StandaloneStrategyDefinition(
                 standalone_strategy_id=identity["standalone_strategy_id"],
@@ -307,47 +326,33 @@ def _coerce_runtime_definition_rows(
                 standalone_strategy_label=identity["standalone_strategy_label"],
                 strategy_family=strategy_family,
                 instrument=instrument,
+                identity_components=tuple(str(value) for value in list(identity.get("identity_components") or [])),
                 lane_id=lane_id,
-                display_name=str(
-                    normalized_raw.get("display_name")
-                    or normalized_raw.get("lane_name")
-                    or lane_id
-                    or identity["standalone_strategy_label"]
-                ),
+                display_name=str(raw.get("display_name") or raw.get("lane_name") or lane_id or identity["standalone_strategy_label"]),
                 config_source=config_source,
-                runtime_kind=str(normalized_raw.get("runtime_kind") or "strategy_engine"),
-                enabled=bool(normalized_raw.get("enabled", True)),
-                trade_size=int(normalized_raw.get("trade_size", settings.trade_size)),
-                allowed_sessions=tuple(str(value) for value in normalized_raw.get("allowed_sessions", []) if value)
-                or ((str(normalized_raw.get("session_restriction")),) if normalized_raw.get("session_restriction") else ()),
+                runtime_kind=str(raw.get("runtime_kind") or "strategy_engine"),
+                enabled=bool(raw.get("enabled", True)),
+                trade_size=int(raw.get("trade_size", settings.trade_size)),
+                participation_policy=ParticipationPolicy(str(raw.get("participation_policy") or settings.participation_policy.value)),
+                max_concurrent_entries=int(raw.get("max_concurrent_entries", settings.max_concurrent_entries)),
+                max_position_quantity=(
+                    int(raw["max_position_quantity"])
+                    if raw.get("max_position_quantity") is not None
+                    else settings.max_position_quantity
+                ),
+                max_adds_after_entry=int(raw.get("max_adds_after_entry", settings.max_adds_after_entry)),
+                add_direction_policy=AddDirectionPolicy(str(raw.get("add_direction_policy") or settings.add_direction_policy.value)),
+                allowed_sessions=tuple(str(value) for value in raw.get("allowed_sessions", []) if value)
+                or ((str(raw.get("session_restriction")),) if raw.get("session_restriction") else ()),
                 long_sources=long_sources,
                 short_sources=short_sources,
-                database_url=str(
-                    normalized_raw.get("database_url")
-                    or _derive_runtime_database_url(settings.database_url, lane_id or identity["standalone_strategy_id"])
-                ),
-                artifacts_dir=str(
-                    normalized_raw.get("artifacts_dir")
-                    or (settings.probationary_artifacts_path / "lanes" / (lane_id or identity["standalone_strategy_id"]))
-                ),
-                point_value=Decimal(str(normalized_raw["point_value"])) if normalized_raw.get("point_value") is not None else None,
+                database_url=str(raw.get("database_url") or _derive_runtime_database_url(settings.database_url, lane_id or identity["standalone_strategy_id"])),
+                artifacts_dir=str(raw.get("artifacts_dir") or (settings.probationary_artifacts_path / "lanes" / (lane_id or identity["standalone_strategy_id"]))),
+                point_value=Decimal(str(raw["point_value"])) if raw.get("point_value") is not None else None,
                 legacy_derived_identity=False,
             )
         )
     return rows
-
-
-def _normalize_runtime_definition_row(raw: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(raw)
-    shared_identity_id = str(normalized.get("shared_strategy_identity") or "").strip()
-    if not shared_identity_id:
-        return normalized
-    shared_identity = get_shared_strategy_identity(shared_identity_id)
-    return {
-        **shared_identity.runtime_row_defaults(),
-        **normalized,
-        "shared_strategy_identity": shared_identity.identity_id,
-    }
 
 
 def _approved_quant_runtime_definitions(settings: StrategySettings) -> list[StandaloneStrategyDefinition]:
@@ -368,12 +373,18 @@ def _approved_quant_runtime_definitions(settings: StrategySettings) -> list[Stan
                     standalone_strategy_label=identity["standalone_strategy_label"],
                     strategy_family=spec.family,
                     instrument=str(instrument),
+                    identity_components=tuple(str(value) for value in list(identity.get("identity_components") or [])),
                     lane_id=identity["standalone_strategy_id"],
                     display_name=f"{spec.lane_name} / {instrument}",
                     config_source="approved_quant_lane_specs",
                     runtime_kind="approved_quant_strategy_engine",
                     enabled=True,
                     trade_size=1,
+                    participation_policy=settings.participation_policy,
+                    max_concurrent_entries=settings.max_concurrent_entries,
+                    max_position_quantity=settings.max_position_quantity,
+                    max_adds_after_entry=settings.max_adds_after_entry,
+                    add_direction_policy=settings.add_direction_policy,
                     allowed_sessions=tuple(spec.allowed_sessions),
                     long_sources=(spec.family,) if str(spec.direction).upper() == "LONG" else (),
                     short_sources=(spec.family,) if str(spec.direction).upper() == "SHORT" else (),
@@ -431,12 +442,18 @@ def _legacy_definition(settings: StrategySettings) -> StandaloneStrategyDefiniti
         standalone_strategy_label=identity["standalone_strategy_label"],
         strategy_family="LEGACY_RUNTIME",
         instrument=settings.symbol,
+        identity_components=tuple(str(value) for value in list(identity.get("identity_components") or [])),
         lane_id="legacy_runtime",
         display_name=f"Legacy Runtime / {settings.symbol}",
         config_source="legacy_single_symbol_config",
         runtime_kind="strategy_engine",
         enabled=True,
         trade_size=settings.trade_size,
+        participation_policy=settings.participation_policy,
+        max_concurrent_entries=settings.max_concurrent_entries,
+        max_position_quantity=settings.max_position_quantity,
+        max_adds_after_entry=settings.max_adds_after_entry,
+        add_direction_policy=settings.add_direction_policy,
         allowed_sessions=(),
         database_url=settings.database_url,
         artifacts_dir=str(settings.probationary_artifacts_path),

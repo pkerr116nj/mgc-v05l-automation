@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This layer adds a real Schwab auth and historical market-data path without changing the replay-first strategy core or introducing a separate strategy-specific market-data model.
+This layer adds a real Schwab auth and historical market-data path without changing the shared strategy core or introducing a separate strategy-specific market-data model.
 
 Replay remains intact and continues to serve as:
 - deterministic test mode

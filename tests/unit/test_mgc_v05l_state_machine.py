@@ -25,7 +25,6 @@ def test_long_entry_fill_transitions_state_to_in_long_k() -> None:
     next_state = transition_on_entry_fill(
         state=state,
         fill_event=fill,
-        trade_size=1,
         signal_bar_id="bar-1",
         long_entry_family=LongEntryFamily.K,
     )
@@ -35,6 +34,8 @@ def test_long_entry_fill_transitions_state_to_in_long_k() -> None:
     assert next_state.bars_in_trade == 1
     assert next_state.broker_position_qty == 1
     assert next_state.long_be_armed is False
+    assert len(next_state.open_entry_legs) == 1
+    assert next_state.open_entry_legs[0].quantity == 1
 
 
 def test_exit_fill_transitions_state_back_to_ready_flat() -> None:
@@ -51,7 +52,6 @@ def test_exit_fill_transitions_state_back_to_ready_flat() -> None:
     in_position = transition_on_entry_fill(
         state=state,
         fill_event=entry_fill,
-        trade_size=1,
         signal_bar_id="bar-1",
         long_entry_family=LongEntryFamily.VWAP,
     )
@@ -71,6 +71,102 @@ def test_exit_fill_transitions_state_back_to_ready_flat() -> None:
     assert flat_state.bars_in_trade == 0
     assert flat_state.broker_position_qty == 0
     assert flat_state.entry_price is None
+    assert flat_state.open_entry_legs == ()
+
+
+def test_second_same_direction_entry_fill_stages_participation() -> None:
+    now = datetime.now(timezone.utc)
+    state = build_initial_state(now)
+    first_fill = FillEvent(
+        order_intent_id="intent-1",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        order_status=OrderStatus.FILLED,
+        fill_timestamp=now,
+        fill_price=Decimal("3000.50"),
+        broker_order_id="paper-intent-1",
+        quantity=1,
+    )
+    second_fill = FillEvent(
+        order_intent_id="intent-2",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        order_status=OrderStatus.FILLED,
+        fill_timestamp=now,
+        fill_price=Decimal("3002.50"),
+        broker_order_id="paper-intent-2",
+        quantity=1,
+    )
+
+    in_position = transition_on_entry_fill(
+        state=state,
+        fill_event=first_fill,
+        signal_bar_id="bar-1",
+        long_entry_family=LongEntryFamily.K,
+    )
+    next_state = transition_on_entry_fill(
+        state=in_position,
+        fill_event=second_fill,
+        signal_bar_id="bar-2",
+        long_entry_family=LongEntryFamily.K,
+    )
+
+    assert next_state.position_side is PositionSide.LONG
+    assert next_state.internal_position_qty == 2
+    assert next_state.broker_position_qty == 2
+    assert next_state.bars_in_trade == 1
+    assert next_state.entry_price == Decimal("3001.50")
+    assert len(next_state.open_entry_legs) == 2
+
+
+def test_partial_exit_keeps_remaining_staged_participation_open() -> None:
+    now = datetime.now(timezone.utc)
+    state = build_initial_state(now)
+    first_fill = FillEvent(
+        order_intent_id="intent-1",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        order_status=OrderStatus.FILLED,
+        fill_timestamp=now,
+        fill_price=Decimal("3000.00"),
+        broker_order_id="paper-intent-1",
+        quantity=1,
+    )
+    second_fill = FillEvent(
+        order_intent_id="intent-2",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        order_status=OrderStatus.FILLED,
+        fill_timestamp=now,
+        fill_price=Decimal("3002.00"),
+        broker_order_id="paper-intent-2",
+        quantity=1,
+    )
+    staged = transition_on_entry_fill(
+        state=transition_on_entry_fill(
+            state=state,
+            fill_event=first_fill,
+            signal_bar_id="bar-1",
+            long_entry_family=LongEntryFamily.K,
+        ),
+        fill_event=second_fill,
+        signal_bar_id="bar-2",
+        long_entry_family=LongEntryFamily.K,
+    )
+    partial_exit = FillEvent(
+        order_intent_id="intent-3",
+        intent_type=OrderIntentType.SELL_TO_CLOSE,
+        order_status=OrderStatus.FILLED,
+        fill_timestamp=now,
+        fill_price=Decimal("3003.00"),
+        broker_order_id="paper-intent-3",
+        quantity=1,
+    )
+
+    next_state = transition_on_exit_fill(staged, partial_exit)
+
+    assert next_state.position_side is PositionSide.LONG
+    assert next_state.strategy_status is StrategyStatus.IN_LONG_K
+    assert next_state.internal_position_qty == 1
+    assert next_state.broker_position_qty == 1
+    assert len(next_state.open_entry_legs) == 1
+    assert next_state.entry_price == Decimal("3002.00")
 
 
 def test_invariants_detect_family_while_flat() -> None:

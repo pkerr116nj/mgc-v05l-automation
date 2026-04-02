@@ -13,8 +13,14 @@ from mgc_v05l.config_models import load_settings_from_files
 from mgc_v05l.market_data.historical_service import HistoricalBackfillService
 from mgc_v05l.market_data.quote_service import QuoteService
 from mgc_v05l.market_data.schwab_adapter import SchwabMarketDataAdapter
-from mgc_v05l.market_data.schwab_auth import SchwabOAuthClient, SchwabTokenStore, load_schwab_auth_config_from_env
-from mgc_v05l.market_data.schwab_http import SchwabHistoricalHttpClient, SchwabQuoteHttpClient
+from mgc_v05l.market_data.schwab_auth import (
+    SchwabOAuthClient,
+    SchwabTokenStore,
+    SchwabTokenWriteMismatchError,
+    load_schwab_auth_config_from_env,
+)
+from mgc_v05l.market_data.schwab_config import load_schwab_market_data_config
+from mgc_v05l.market_data.schwab_http import SchwabHistoricalHttpClient, SchwabHttpError, SchwabQuoteHttpClient
 from mgc_v05l.market_data.schwab_models import (
     HttpRequest,
     JsonHttpTransport,
@@ -42,6 +48,16 @@ class _FakeJsonTransport(JsonHttpTransport):
         if not self._responses:
             raise AssertionError("Unexpected extra HTTP request.")
         return self._responses.pop(0)
+
+
+class _FailingJsonTransport(JsonHttpTransport):
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+        self.requests: list[HttpRequest] = []
+
+    def request_json(self, request: HttpRequest) -> dict:
+        self.requests.append(request)
+        raise self._error
 
 
 def _fixture_payload(name: str) -> dict:
@@ -142,6 +158,162 @@ def test_exchange_code_decodes_percent_encoded_callback_code(tmp_path: Path) -> 
     }
 
 
+def test_refresh_token_uses_basic_auth_without_client_id_and_writes_failure_diagnostic(tmp_path: Path) -> None:
+    token_path = tmp_path / "tokens.json"
+    auth_config = SchwabAuthConfig(
+        app_key="app-key",
+        app_secret="app-secret",
+        callback_url="http://127.0.0.1:8182/callback",
+        token_store_path=token_path,
+    )
+    error = SchwabHttpError(
+        "provider error: unsupported_token_type",
+        url="https://api.schwabapi.com/v1/oauth/token",
+        status_code=400,
+        headers={"Content-Type": "application/json"},
+        response_body='{"error":"unsupported_token_type"}',
+    )
+    transport = _FailingJsonTransport(error)
+    client = SchwabOAuthClient(
+        config=auth_config,
+        transport=transport,
+        token_store=SchwabTokenStore(token_path),
+    )
+    client.token_store.save(
+        SchwabTokenSet(
+            access_token="stored-access-token",
+            refresh_token="refresh-token-456",
+            token_type="Bearer",
+            expires_in=1800,
+            scope="api",
+            issued_at=datetime.now(timezone.utc),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported_token_type"):
+        client.refresh_token()
+
+    assert transport.requests[0].headers["Authorization"].startswith("Basic ")
+    assert transport.requests[0].form == {
+        "grant_type": "refresh_token",
+        "refresh_token": "refresh-token-456",
+    }
+    diagnostic = json.loads((tmp_path / "bootstrap_artifacts/latest_refresh_failure.json").read_text(encoding="utf-8"))
+    assert diagnostic["token_endpoint_url"] == "https://api.schwabapi.com/v1/oauth/token"
+    assert diagnostic["callback_url"] == "http://127.0.0.1:8182/callback"
+    assert diagnostic["stored_token_fields"]["has_refresh_token"] is True
+    assert diagnostic["refresh_token_length"] == len("refresh-token-456")
+    assert diagnostic["refresh_token_head"] == "refr"
+    assert diagnostic["refresh_token_tail"] == "-456"
+    assert diagnostic["error_text"] == "provider error: unsupported_token_type"
+    assert diagnostic["provider_status_code"] == 400
+    assert diagnostic["provider_response_body"] == '{"error":"unsupported_token_type"}'
+
+
+def test_exchange_writes_sanitized_exchange_artifact_and_persists_refresh_token_exactly(tmp_path: Path) -> None:
+    token_path = tmp_path / "tokens.json"
+    transport = _FakeJsonTransport(
+        [
+            {
+                "access_token": "access-token-123",
+                "refresh_token": "refresh-token-456",
+                "id_token": "id-token-789",
+                "token_type": "Bearer",
+                "scope": "api",
+                "expires_in": 1800,
+            }
+        ]
+    )
+    auth_config = SchwabAuthConfig(
+        app_key="app-key",
+        app_secret="app-secret",
+        callback_url="http://127.0.0.1:8182/callback",
+        token_store_path=token_path,
+    )
+    client = SchwabOAuthClient(
+        config=auth_config,
+        transport=transport,
+        token_store=SchwabTokenStore(token_path),
+    )
+
+    client.exchange_code("code-abc")
+
+    persisted = client.token_store.load_payload()
+    exchange_artifact = json.loads((tmp_path / "bootstrap_artifacts/latest_exchange_result.json").read_text(encoding="utf-8"))
+
+    assert persisted["refresh_token"] == "refresh-token-456"
+    assert client.token_store.load().refresh_token == "refresh-token-456"
+    assert exchange_artifact["exchange_response_summary"]["has_access_token"] is True
+    assert exchange_artifact["exchange_response_summary"]["has_refresh_token"] is True
+    assert exchange_artifact["exchange_response_summary"]["has_id_token"] is True
+    assert exchange_artifact["exchange_response_summary"]["refresh_token"]["length"] == len("refresh-token-456")
+    assert exchange_artifact["persisted_refresh_token_matches_exchange"] is True
+    assert exchange_artifact["persisted_refresh_matches_exchange_access_token"] is False
+    assert exchange_artifact["persisted_refresh_matches_exchange_id_token"] is False
+
+
+def test_token_store_round_trip_preserves_refresh_token_exact_bytes(tmp_path: Path) -> None:
+    token_path = tmp_path / "tokens.json"
+    original_refresh = "AbC1+/=zZ9 tail"
+    store = SchwabTokenStore(token_path)
+    store.save(
+        SchwabTokenSet(
+            access_token="access",
+            refresh_token=original_refresh,
+            token_type="Bearer",
+            expires_in=1800,
+            scope="api",
+            issued_at=datetime.now(timezone.utc),
+        )
+    )
+
+    reloaded = store.load()
+
+    assert reloaded is not None
+    assert reloaded.refresh_token == original_refresh
+
+
+def test_exchange_raises_when_persisted_refresh_token_differs_from_exchange_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    token_path = tmp_path / "tokens.json"
+    transport = _FakeJsonTransport(
+        [
+            {
+                "access_token": "access-token-123",
+                "refresh_token": "refresh-token-456",
+                "token_type": "Bearer",
+                "scope": "api",
+                "expires_in": 1800,
+            }
+        ]
+    )
+    auth_config = SchwabAuthConfig(
+        app_key="app-key",
+        app_secret="app-secret",
+        callback_url="http://127.0.0.1:8182/callback",
+        token_store_path=token_path,
+    )
+    client = SchwabOAuthClient(
+        config=auth_config,
+        transport=transport,
+        token_store=SchwabTokenStore(token_path),
+    )
+    original_save = client.token_store.save
+
+    def _mutating_save(token_set, auth_metadata=None):
+        original_save(token_set, auth_metadata=auth_metadata)
+        payload = client.token_store.load_payload()
+        payload["refresh_token"] = "wrong-refresh-token"
+        token_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    monkeypatch.setattr(client.token_store, "save", _mutating_save)
+
+    with pytest.raises(SchwabTokenWriteMismatchError, match="Persisted refresh token does not match"):
+        client.exchange_code("code-abc")
+
+    exchange_artifact = json.loads((tmp_path / "bootstrap_artifacts/latest_exchange_result.json").read_text(encoding="utf-8"))
+    assert exchange_artifact["persisted_refresh_token_matches_exchange"] is False
+
+
 def test_load_schwab_auth_config_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     token_path = tmp_path / "env-token.json"
     monkeypatch.setenv("SCHWAB_APP_KEY", "env-key")
@@ -155,6 +327,34 @@ def test_load_schwab_auth_config_from_env(tmp_path: Path, monkeypatch: pytest.Mo
     assert config.app_secret == "env-secret"
     assert config.callback_url == "http://localhost/callback"
     assert config.token_store_path == token_path
+
+
+def test_load_schwab_market_data_config_honors_market_data_base_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_path = tmp_path / "tokens.json"
+    config_path = tmp_path / "schwab.local.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "historical_symbol_map": {"MGC": "/MGC"},
+                "quote_symbol_map": {"MGC": "/MGC"},
+                "timeframe_map": {"5m": {"frequency_type": "minute", "frequency": 5}},
+                "market_data_base_url": "https://example.invalid/marketdata/v99",
+                "quotes_symbol_query_param": "symbols",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SCHWAB_APP_KEY", "env-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "env-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "http://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+
+    config = load_schwab_market_data_config(config_path)
+
+    assert config.market_data_base_url == "https://example.invalid/marketdata/v99"
 
 
 def test_token_response_parsing_refresh_and_expiry() -> None:
@@ -188,7 +388,7 @@ def test_pricehistory_response_normalization_and_persistence(tmp_path: Path) -> 
             token_type="Bearer",
             expires_in=1800,
             scope="marketdata",
-            issued_at=datetime(2026, 3, 14, 14, 0, tzinfo=timezone.utc),
+            issued_at=datetime.now(timezone.utc),
         )
     )
     service = HistoricalBackfillService(
@@ -254,7 +454,7 @@ def test_quote_response_normalization(tmp_path: Path) -> None:
             token_type="Bearer",
             expires_in=1800,
             scope="marketdata",
-            issued_at=datetime(2026, 3, 14, 14, 0, tzinfo=timezone.utc),
+            issued_at=datetime.now(timezone.utc),
         )
     )
     service = QuoteService(

@@ -10,24 +10,24 @@ benchmark_label: "ATP_COMPANION_V1_ASIA_US"
 benchmark_status: "PROMOTED_REPLAY_PAPER_BENCHMARK"
 benchmark_branch: "codex/atp-benchmark-asia-us-london-disabled"
 benchmark_artifacts_dir: "outputs/reports/atp_companion_baseline_v1_asia_us_benchmark"
-shared_paper_lane:
-  shared_strategy_identity: "ATP_COMPANION_V1_ASIA_US"
+tracked_paper_strategy:
   strategy_id: "atp_companion_v1_asia_us"
   display_name: "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only"
   internal_label: "ATP_COMPANION_V1_ASIA_US"
   environment: "paper"
   benchmark_designation: "CURRENT_ATP_COMPANION_BENCHMARK"
-  app_visibility: "shared_paper_lane"
+  app_visibility: "shared_lane"
   execution_scope: "paper_only"
   london_runtime_role: "diagnostic_only"
-  runtime_config: "config/probationary_pattern_engine_paper.yaml"
-  runtime_launch_script: "scripts/run_probationary_paper_soak.sh"
-  runtime_stop_script: "scripts/stop_probationary_paper_soak.sh"
-  operator_control_script: "scripts/run_probationary_operator_control.sh"
+  runtime_config_entry: "config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml"
+  shared_paper_launcher: "scripts/run_probationary_paper_soak.sh"
+  shared_operator_control: "scripts/run_probationary_operator_control.sh"
+  shared_dashboard_surface: "paper runtime / approved-lane operator surfaces"
 
-baseline_contract: "ATP_V1_SHARED_PAPER_LANE"
+baseline_contract: "ATP_V1_OVERLAY"
 scope: "replay_paper_only"
 instrument_scope: "MGC"
+benchmark_instrument_scope_only: true
 
 retained_legacy_assumptions:
   replay_first: true
@@ -37,6 +37,13 @@ retained_legacy_assumptions:
   fill_driven_state_transitions: true
   one_position_at_a_time: true
   legacy_replay_fill_policy_preserved: "NEXT_BAR_OPEN"
+  benchmark_local_only: true
+
+shared_platform_invariants:
+  benchmark_assumptions_are_not_repo_wide_defaults: true
+  shared_runtime_does_not_imply_mgc_scope: true
+  shared_runtime_does_not_imply_one_position_at_a_time: true
+  shared_runtime_does_not_imply_replay_first_provenance: true
 
 atp_overlay_assumptions:
   context_timeframe: "5m"
@@ -55,6 +62,7 @@ atp_overlay_assumptions:
 
 not_yet_baseline:
   promotion_add_logic: false
+  staged_candidate_lanes_supported_separately: true
   london_re_enable_with_new_model: false
   exit_redesign: false
   clustering_controls: false
