@@ -8,7 +8,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from mgc_v05l.app.historical_playback import run_historical_playback
-from mgc_v05l.app.strategy_study import build_strategy_study, build_strategy_study_v3, normalize_strategy_study_payload
+from mgc_v05l.app.strategy_study import (
+    build_strategy_study,
+    build_strategy_study_v3,
+    compact_strategy_study_payload,
+    normalize_strategy_study_payload,
+)
 from mgc_v05l.config_models import load_settings_from_files
 from mgc_v05l.config_models.settings import EnvironmentMode, ExecutionTimeframeRole
 from mgc_v05l.domain.enums import OrderIntentType
@@ -599,3 +604,60 @@ def test_strategy_study_v3_surfaces_unsupported_current_candle_model_without_sil
     assert study["meta"]["pnl_truth_basis"] == "UNSUPPORTED_ENTRY_MODEL"
     assert study["meta"]["lifecycle_truth_class"] == "UNSUPPORTED_ENTRY_MODEL"
     assert study["meta"]["unsupported_reason"]
+
+
+def test_compact_strategy_study_payload_preserves_trade_linked_rows_and_counts() -> None:
+    bars = [
+        {
+            "bar_id": f"bar-{index}",
+            "timestamp": f"2026-03-13T18:{index:02d}:00+00:00",
+            "start_timestamp": f"2026-03-13T17:{index:02d}:00+00:00",
+            "end_timestamp": f"2026-03-13T18:{index:02d}:00+00:00",
+        }
+        for index in range(12)
+    ]
+    payload = {
+        "contract_version": "strategy_study_v3",
+        "symbol": "MGC",
+        "timeframe": "5m",
+        "bars": bars,
+        "rows": bars,
+        "pnl_points": [
+            {"point_id": f"p-{index}", "bar_id": f"bar-{index}", "timestamp": row["timestamp"]}
+            for index, row in enumerate(bars)
+        ],
+        "execution_slices": [
+            {"slice_id": f"s-{index}", "linked_bar_id": f"bar-{index}", "timestamp": row["timestamp"]}
+            for index, row in enumerate(bars)
+        ],
+        "trade_events": [
+            {"event_id": "entry", "linked_bar_id": "bar-3", "event_type": "ENTRY_FILL"},
+            {"event_id": "exit", "linked_bar_id": "bar-9", "event_type": "EXIT_FILL"},
+        ],
+        "summary": {},
+        "meta": {
+            "study_id": "study-1",
+            "symbol": "MGC",
+            "strategy_id": "study-1",
+            "study_mode": "research_execution_mode",
+        },
+        "run_metadata": {},
+    }
+
+    compacted = compact_strategy_study_payload(
+        payload,
+        max_bars=5,
+        max_pnl_points=5,
+        max_execution_slices=5,
+    )
+
+    compacted_bar_ids = {str(row.get("bar_id")) for row in compacted["bars"]}
+    compacted_slice_ids = {str(row.get("linked_bar_id")) for row in compacted["execution_slices"]}
+
+    assert compacted["meta"]["series_compaction"]["applied"] is True
+    assert compacted["meta"]["series_compaction"]["bars_original_count"] == 12
+    assert compacted["meta"]["series_compaction"]["bars_compacted_count"] <= 5
+    assert "bar-3" in compacted_bar_ids
+    assert "bar-9" in compacted_bar_ids
+    assert "bar-3" in compacted_slice_ids
+    assert "bar-9" in compacted_slice_ids

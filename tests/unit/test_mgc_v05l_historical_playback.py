@@ -304,6 +304,40 @@ def test_sqlite_historical_bar_source_aggregates_1m_into_completed_larger_timefr
     assert aggregated.end_ts == datetime(2026, 3, 13, 18, 15, tzinfo=ny)
 
 
+def test_sqlite_historical_bar_source_aggregates_1m_into_completed_10m_bars_and_skips_partial_bucket(tmp_path: Path) -> None:
+    source_db = tmp_path / "source.sqlite3"
+    settings = _build_settings(tmp_path / "playback.sqlite3")
+    ny = ZoneInfo("America/New_York")
+    one_minute_bars = [
+        _build_bar(
+            symbol="MGC",
+            timeframe="1m",
+            end_ts=datetime(2026, 3, 13, 18, minute, tzinfo=ny),
+            open_price=str(100 + minute),
+            high_price=str(101 + minute),
+            low_price=str(99 + minute),
+            close_price=str(100.5 + minute),
+            volume=10,
+        )
+        for minute in range(1, 13)
+    ]
+    _persist_bars(source_db, one_minute_bars, data_source="historical_1m_canonical")
+
+    loaded = SQLiteHistoricalBarSource(source_db, settings).load_bars(
+        symbol="MGC",
+        source_timeframe="1m",
+        target_timeframe="10m",
+    )
+
+    assert loaded.data_source == "historical_1m_canonical"
+    assert loaded.source_bar_count == 12
+    assert loaded.skipped_incomplete_buckets == 1
+    assert len(loaded.playback_bars) == 1
+    aggregated = loaded.playback_bars[0]
+    assert aggregated.timeframe == "10m"
+    assert aggregated.end_ts == datetime(2026, 3, 13, 18, 10, tzinfo=ny)
+
+
 def test_historical_playback_runs_persisted_bars_and_writes_trigger_report(tmp_path: Path) -> None:
     source_db = tmp_path / "source.sqlite3"
     replay_db = tmp_path / "unused.sqlite3"
@@ -417,6 +451,38 @@ def test_historical_playback_can_rebuild_missing_strategy_study_artifacts_from_s
     rebuilt_payload = json.loads(rebuilt_json_path.read_text(encoding="utf-8"))
     assert rebuilt_payload["summary"]["bar_count"] == 12
     assert rebuilt_payload["run_metadata"]["artifact_rebuilt"] is True
+
+
+def test_historical_playback_can_emit_summary_and_study_without_persisted_replay_db(tmp_path: Path) -> None:
+    source_db = tmp_path / "source.sqlite3"
+    replay_db = tmp_path / "unused.sqlite3"
+    output_dir = tmp_path / "outputs"
+    base_config, replay_config = _write_replay_config_files(tmp_path, replay_db)
+    _persist_bars(source_db, _replay_bars(), data_source="schwab_history")
+
+    result = run_historical_playback(
+        config_paths=[base_config, replay_config],
+        source_db_path=source_db,
+        symbols=["MGC"],
+        source_timeframe="5m",
+        target_timeframe="5m",
+        output_dir=output_dir,
+        run_stamp="ephemeral_test",
+        persist_replay_db=False,
+    )
+
+    symbol_result = result.symbols[0]
+    summary_payload = json.loads(Path(symbol_result.summary_path).read_text(encoding="utf-8"))
+    study_payload = json.loads(Path(symbol_result.strategy_study_json_path).read_text(encoding="utf-8"))
+
+    assert symbol_result.replay_db_path is None
+    assert symbol_result.trigger_report_json_path is None
+    assert symbol_result.trigger_report_markdown_path is None
+    assert summary_payload["replay_db_path"] is None
+    assert summary_payload["trigger_report_json_path"] is None
+    assert summary_payload["trigger_report_markdown_path"] is None
+    assert study_payload["summary"]["bar_count"] == 12
+    assert Path(symbol_result.strategy_study_markdown_path).exists()
 
 
 def test_historical_playback_cli_writes_manifest(tmp_path: Path, capsys) -> None:

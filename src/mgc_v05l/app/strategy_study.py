@@ -839,11 +839,208 @@ def _ensure_strategy_study_v3_compatibility(payload: dict[str, Any]) -> dict[str
     return normalized
 
 
+def compact_strategy_study_payload(
+    payload: dict[str, Any],
+    *,
+    max_bars: int = 4000,
+    max_pnl_points: int = 4000,
+    max_execution_slices: int = 6000,
+) -> dict[str, Any]:
+    normalized = normalize_strategy_study_payload(payload) or dict(payload)
+    if not normalized:
+        return dict(payload)
+
+    bars = list(normalized.get("bars") or [])
+    pnl_points = list(normalized.get("pnl_points") or [])
+    execution_slices = list(normalized.get("execution_slices") or [])
+    trade_events = list(normalized.get("trade_events") or [])
+
+    compacted_bars = _sample_dense_series(
+        bars,
+        max_items=max_bars,
+        anchor_ids={str(event.get("linked_bar_id") or "") for event in trade_events if event.get("linked_bar_id")},
+        timestamp_key="timestamp",
+    )
+    compacted_pnl_points = _sample_dense_series(
+        pnl_points,
+        max_items=max_pnl_points,
+        anchor_ids={str(item.get("bar_id") or "") for item in compacted_bars if item.get("bar_id")},
+        item_id_key="bar_id",
+        timestamp_key="timestamp",
+    )
+    compacted_execution_slices = _sample_dense_series(
+        execution_slices,
+        max_items=max_execution_slices,
+        anchor_ids={str(event.get("linked_bar_id") or "") for event in trade_events if event.get("linked_bar_id")},
+        item_id_key="linked_bar_id",
+        timestamp_key="timestamp",
+    )
+
+    compacted = dict(normalized)
+    compacted["bars"] = compacted_bars
+    compacted["rows"] = compacted_bars
+    compacted["pnl_points"] = compacted_pnl_points
+    compacted["execution_slices"] = compacted_execution_slices
+    meta = dict(compacted.get("meta") or {})
+    meta["series_compaction"] = {
+        "applied": (
+            len(compacted_bars) != len(bars)
+            or len(compacted_pnl_points) != len(pnl_points)
+            or len(compacted_execution_slices) != len(execution_slices)
+        ),
+        "bars_original_count": len(bars),
+        "bars_compacted_count": len(compacted_bars),
+        "pnl_points_original_count": len(pnl_points),
+        "pnl_points_compacted_count": len(compacted_pnl_points),
+        "execution_slices_original_count": len(execution_slices),
+        "execution_slices_compacted_count": len(compacted_execution_slices),
+        "trade_events_count": len(trade_events),
+        "compaction_policy": "uniform_preserve_edges_and_trade_linked_points",
+    }
+    compacted["meta"] = meta
+    return compacted
+
+
+def build_strategy_study_preview(payload: dict[str, Any]) -> dict[str, Any] | None:
+    normalized = normalize_strategy_study_payload(payload) or dict(payload)
+    if not isinstance(normalized, dict):
+        return None
+    return {
+        "contract_version": normalized.get("contract_version"),
+        "generated_at": normalized.get("generated_at"),
+        "symbol": normalized.get("symbol"),
+        "timeframe": normalized.get("timeframe"),
+        "standalone_strategy_id": normalized.get("standalone_strategy_id"),
+        "strategy_family": normalized.get("strategy_family"),
+        "meta": dict(normalized.get("meta") or {}),
+        "summary": dict(normalized.get("summary") or {}),
+    }
+
+
+def build_strategy_study_catalog_entry(
+    *,
+    payload: dict[str, Any],
+    run_stamp: str,
+    run_timestamp: str | None = None,
+    manifest_path: str | None = None,
+    summary_path: str | None = None,
+    strategy_study_json_path: str | None = None,
+    strategy_study_markdown_path: str | None = None,
+    label: str | None = None,
+) -> dict[str, Any] | None:
+    normalized = normalize_strategy_study_payload(payload) or dict(payload)
+    if not isinstance(normalized, dict):
+        return None
+    meta = dict(normalized.get("meta") or {})
+    summary = dict(normalized.get("summary") or {})
+    timeframe_truth = dict(meta.get("timeframe_truth") or {})
+    coverage = dict(meta.get("coverage_range") or {})
+    symbol = str(meta.get("symbol") or normalized.get("symbol") or "-")
+    strategy_id = meta.get("strategy_id")
+    strategy_family = meta.get("strategy_family") or normalized.get("strategy_family")
+    study_mode = str(meta.get("study_mode") or "baseline_parity_mode")
+    scope_label = (
+        "Research Execution"
+        if study_mode == "research_execution_mode"
+        else "Live Execution"
+        if study_mode == "live_execution_mode"
+        else "Legacy Benchmark"
+    )
+    study_key = str(meta.get("study_id") or f"{run_stamp}:{symbol}:{strategy_id or strategy_family or 'study'}")
+    closed_trade_breakdown = list(summary.get("closed_trade_breakdown") or [])
+    return {
+        "study_key": study_key,
+        "label": label
+        or " / ".join(
+            part
+            for part in (
+                symbol,
+                str(strategy_id or strategy_family or "study"),
+                study_mode,
+                str(meta.get("entry_model") or ""),
+            )
+            if part
+        ),
+        "run_stamp": run_stamp,
+        "run_timestamp": run_timestamp,
+        "symbol": symbol,
+        "strategy_id": strategy_id,
+        "candidate_id": meta.get("candidate_id"),
+        "scope_label": scope_label,
+        "strategy_family": strategy_family,
+        "contract_version": normalized.get("contract_version"),
+        "context_resolution": meta.get("context_resolution"),
+        "execution_resolution": meta.get("execution_resolution"),
+        "timeframe_truth": timeframe_truth,
+        "meta": meta,
+        "coverage_start": meta.get("coverage_start") or coverage.get("start_timestamp"),
+        "coverage_end": meta.get("coverage_end") or coverage.get("end_timestamp"),
+        "study_mode": study_mode,
+        "entry_model": meta.get("entry_model"),
+        "supported_entry_models": list(meta.get("supported_entry_models") or []),
+        "entry_model_supported": bool(meta.get("entry_model_supported", True)),
+        "execution_truth_emitter": meta.get("execution_truth_emitter"),
+        "intrabar_execution_authoritative": bool(meta.get("intrabar_execution_authoritative")),
+        "authoritative_intrabar_available": bool(meta.get("authoritative_intrabar_available")),
+        "authoritative_entry_truth_available": bool(meta.get("authoritative_entry_truth_available")),
+        "authoritative_exit_truth_available": bool(meta.get("authoritative_exit_truth_available")),
+        "authoritative_trade_lifecycle_available": bool(meta.get("authoritative_trade_lifecycle_available")),
+        "pnl_truth_basis": meta.get("pnl_truth_basis"),
+        "lifecycle_truth_class": meta.get("lifecycle_truth_class"),
+        "unsupported_reason": meta.get("unsupported_reason"),
+        "active_entry_model": meta.get("active_entry_model") or meta.get("entry_model"),
+        "truth_provenance": dict(meta.get("truth_provenance") or {}),
+        "entry_model_capabilities": list(meta.get("entry_model_capabilities") or []),
+        "available_overlay_flags": dict(meta.get("available_overlay_flags") or {}),
+        "closed_trade_count": len(closed_trade_breakdown),
+        "artifact_paths": {
+            "manifest": manifest_path,
+            "summary": summary_path,
+            "strategy_study_json": strategy_study_json_path,
+            "strategy_study_markdown": strategy_study_markdown_path,
+        },
+        "summary": summary,
+        "study_preview": build_strategy_study_preview(normalized),
+    }
+
+
 def write_strategy_study_json(payload: dict[str, Any], output_path: str | Path) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def _sample_dense_series(
+    rows: Sequence[dict[str, Any]],
+    *,
+    max_items: int,
+    anchor_ids: set[str] | None = None,
+    item_id_key: str = "bar_id",
+    timestamp_key: str = "timestamp",
+) -> list[dict[str, Any]]:
+    items = list(rows or [])
+    if max_items <= 0 or len(items) <= max_items:
+        return items
+
+    keep_indexes: set[int] = {0, len(items) - 1}
+    normalized_anchor_ids = {item for item in (anchor_ids or set()) if item}
+    if normalized_anchor_ids:
+        for index, row in enumerate(items):
+            row_anchor = str(row.get(item_id_key) or "")
+            if row_anchor and row_anchor in normalized_anchor_ids:
+                keep_indexes.add(index)
+
+    remaining_capacity = max(max_items - len(keep_indexes), 0)
+    if remaining_capacity > 0:
+        step = max((len(items) - 1) / (remaining_capacity + 1), 1.0)
+        for slot in range(1, remaining_capacity + 1):
+            keep_indexes.add(min(int(round(step * slot)), len(items) - 1))
+
+    sampled = [items[index] for index in sorted(keep_indexes)]
+    if len(sampled) > max_items:
+        sampled = sampled[: max_items - 1] + [items[-1]]
+    return sorted(sampled, key=lambda row: str(row.get(timestamp_key) or ""))
 
 
 def render_strategy_study_markdown(payload: dict[str, Any]) -> str:

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { DesktopCommandResult, DesktopState, JsonRecord, OperatorDesktopApi } from "./types";
 import {
   asArray,
@@ -13,6 +13,7 @@ import {
 
 type PageId =
   | "home"
+  | "calendar"
   | "runtime"
   | "strategies"
   | "positions"
@@ -101,6 +102,37 @@ type PositionsViewMode = "broker" | "paper" | "combined";
 type PositionsDrawerTab = "summary" | "trades" | "orders" | "attribution" | "margin" | "conflict" | "activity" | "instrument";
 type SortDirection = "asc" | "desc";
 type PositionsSourceClass = "BROKER" | "PAPER" | "EXPERIMENTAL";
+type PnlCalendarPeriod = "monthly" | "weekly" | "quarterly" | "ytd" | "custom";
+type PnlCalendarViewMode = "calendar" | "line" | "bar";
+type PnlCalendarSource = "all" | "live" | "paper" | "benchmark_replay" | "research_execution";
+
+interface CalendarSourceEntry {
+  source: Exclude<PnlCalendarSource, "all">;
+  date: string;
+  laneId: string | null;
+  strategyId: string;
+  strategyName: string;
+  pnl: number;
+  tradeCount: number;
+}
+
+interface CalendarStrategyContribution {
+  source: Exclude<PnlCalendarSource, "all">;
+  laneId: string | null;
+  strategyId: string;
+  strategyName: string;
+  pnl: number;
+  tradeCount: number;
+}
+
+interface CalendarDayPoint {
+  date: string;
+  pnl: number;
+  tradeCount: number;
+  cumulative: number;
+  contributions: CalendarStrategyContribution[];
+  coveredSources: Array<Exclude<PnlCalendarSource, "all" | "live" | "paper">>;
+}
 
 interface PositionsSortState {
   columnId: string;
@@ -333,17 +365,158 @@ const POSITIONS_AVAILABLE_COLUMNS: Record<PositionsViewMode, string[]> = {
 };
 
 const NAV_ITEMS: Array<{ id: PageId; label: string }> = [
-  { id: "home", label: "Home" },
-  { id: "runtime", label: "Runtime" },
-  { id: "strategies", label: "Strategies" },
-  { id: "positions", label: "Positions" },
-  { id: "market", label: "Market" },
-  { id: "replay", label: "Replay / Testing" },
-  { id: "logs", label: "Logs / Events" },
-  { id: "configuration", label: "Configuration" },
-  { id: "diagnostics", label: "Diagnostics" },
+  { id: "home", label: "Dashboard" },
+  { id: "calendar", label: "P&L Calendar" },
+  { id: "positions", label: "Live P&L" },
+  { id: "market", label: "Trade Entry" },
+  { id: "strategies", label: "Strategy Deep-Dive" },
+  { id: "diagnostics", label: "Evidence" },
   { id: "settings", label: "Settings" },
 ];
+
+const DEMOTED_PRIMARY_SECTION_TITLES = new Set([
+  "Strategy Roster Table",
+  "Strategy Risk Context",
+  "Market Context",
+  "Instrument Rollup Preview",
+  "Active Lane Preview",
+  "Current Active Positions",
+  "Strategy Analysis Lab",
+  "Standalone Strategy Lens",
+  "Same-Underlying Review Events",
+  "Live Eligibility",
+  "Strategy Performance",
+  "Expected Fire / Historical Cadence",
+  "Signal / Intent / Fill Audit",
+  "Strategy Trade Log",
+  "Attribution Summary",
+  "Positions Monitor",
+  "Broker Orders and Fills",
+]);
+
+const PRIMARY_WORKSTATION_PAGES = new Set<PageId>(["home", "calendar", "positions", "market", "strategies"]);
+
+const ATP_PRODUCT_CATALOG: Array<{
+  laneId: string;
+  standaloneStrategyId: string;
+  trackedStrategyId: string;
+  displayName: string;
+  instrument: string;
+  designation: "benchmark" | "candidate";
+  experimentalStatus: string;
+  participationPolicy: string;
+  candidateId?: string;
+}> = [
+  {
+    laneId: "atp_companion_v1_asia_us",
+    standaloneStrategyId: "atp_companion_v1__benchmark_mgc_asia_us",
+    trackedStrategyId: "atp_companion_v1_asia_us",
+    displayName: "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only",
+    instrument: "MGC",
+    designation: "benchmark",
+    experimentalStatus: "tracked_paper_benchmark",
+    participationPolicy: "SINGLE_ENTRY_ONLY",
+  },
+  {
+    laneId: "atp_companion_v1_gc_asia_us",
+    standaloneStrategyId: "atp_companion_v1__paper_gc_asia_us",
+    trackedStrategyId: "atp_companion_v1__paper_gc_asia_us",
+    displayName: "ATP Companion Candidate v1 — GC / Asia + US Executable, London Diagnostic-Only",
+    instrument: "GC",
+    designation: "candidate",
+    experimentalStatus: "paper_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
+  },
+  {
+    laneId: "atp_companion_v1_pl_asia_us",
+    standaloneStrategyId: "atp_companion_v1__paper_pl_asia_us",
+    trackedStrategyId: "atp_companion_v1__paper_pl_asia_us",
+    displayName: "ATP Companion Candidate v1 — PL / Asia + US Executable, London Diagnostic-Only",
+    instrument: "PL",
+    designation: "candidate",
+    experimentalStatus: "paper_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
+  },
+  {
+    laneId: "atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only",
+    standaloneStrategyId: "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only",
+    trackedStrategyId: "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only",
+    displayName: "ATP Companion Candidate — MGC / Asia Only / Promotion 1 +0.75R Favorable Only",
+    instrument: "MGC",
+    designation: "candidate",
+    experimentalStatus: "paper_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
+    candidateId: "promotion_1_075r_favorable_only",
+  },
+  {
+    laneId: "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only",
+    standaloneStrategyId: "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only",
+    trackedStrategyId: "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only",
+    displayName: "ATP Companion Candidate — GC / Asia Only / Promotion 1 +0.75R Favorable Only",
+    instrument: "GC",
+    designation: "candidate",
+    experimentalStatus: "paper_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
+    candidateId: "promotion_1_075r_favorable_only",
+  },
+];
+
+const EVIDENCE_ONLY_SECTION_TITLES = new Set([
+  "Lane Detail",
+  "ATP / Temp Paper Truth",
+  "Strategy Roster Table",
+  "Desktop Startup",
+  "Paper Runtime Launch",
+  "Paper Soak Continuity",
+  "Paper Soak Validation",
+  "Live Shadow Runtime",
+  "Live Strategy Pilot",
+  "Broker Truth Shadow Validation",
+  "Live Timing Summary",
+  "Live Timing Validation",
+  "Exit Parity Summary",
+  "Extended Paper Soak",
+  "Unattended Paper Soak",
+  "Local Operator Auth",
+  "Sunday Open Preflight",
+  "Strategy Runtime Truth",
+  "Same-Underlying Conflicts",
+  "Portfolio P&L",
+  "Replay / Backtest Truth",
+  "Research History Capture",
+  "Broker Portfolio Truth",
+  "Operator Alerts",
+  "Runtime / Readiness Context",
+  "Strategy Risk Context",
+  "Market Context",
+  "Instrument Rollup Preview",
+  "Active Lane Preview",
+  "Current Active Positions",
+  "Positions Monitor",
+  "Closed Trades",
+  "Manual Order Ticket",
+  "Broker Orders and Fills",
+  "Operator Results Board",
+  "Historical Playback Context",
+  "Strategy Analysis Lab",
+  "Standalone Strategy Lens",
+  "Standalone Strategy Registry",
+  "Same-Underlying Conflict Table",
+  "Same-Underlying Review Events",
+  "Live Eligibility",
+  "Strategy Performance",
+  "Expected Fire / Historical Cadence",
+  "Signal / Intent / Fill Audit",
+  "Strategy Trade Log",
+  "Attribution Summary",
+  "Temp-Paper Runtime Integrity",
+  "Paper Capture Integrity",
+  "Runtime Identity",
+  "Health / Readiness",
+  "Manager Output",
+]);
+
+let currentSectionPageContext: PageId | null = null;
 
 const POSITIONS_PAGE_POLL_SECONDS = 2;
 const POSITIONS_PAGE_BROKER_REFRESH_SECONDS = 5;
@@ -573,7 +746,15 @@ function getApi(): OperatorDesktopApi {
 
 function hashPage(defaultPage: PageId): PageId {
   const raw = window.location.hash.replace(/^#\/?/, "");
-  const matched = NAV_ITEMS.find((item) => item.id === raw);
+  const redirected =
+    raw === "runtime"
+      ? "home"
+      : raw === "replay"
+        ? "strategies"
+        : raw === "logs" || raw === "configuration"
+          ? "diagnostics"
+          : raw;
+  const matched = NAV_ITEMS.find((item) => item.id === redirected);
   return matched?.id ?? defaultPage;
 }
 
@@ -830,6 +1011,139 @@ function paperStrategyClassTone(row: JsonRecord | null | undefined): "good" | "w
   return "good";
 }
 
+function laneClassLabel(row: JsonRecord | null | undefined): string {
+  const explicit = String(row?.lane_class_label ?? row?.designation_label ?? "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  if (isTemporaryPaperStrategyRow(row)) {
+    return "Temporary Paper Strategy";
+  }
+  return "Approved / Admitted Paper Lane";
+}
+
+function designationLabel(row: JsonRecord | null | undefined): string {
+  const explicit = String(row?.designation_label ?? row?.scope_label ?? "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  if (row?.benchmark_designation) {
+    return "Benchmark Lane";
+  }
+  if (row?.candidate_designation) {
+    return "Candidate Staged Lane";
+  }
+  return isTemporaryPaperStrategyRow(row) ? "Audit / Experimental" : "Shared Paper Lane";
+}
+
+function runtimeAttachmentLabel(row: JsonRecord | null | undefined): string {
+  if (row?.audit_only === true || row?.snapshot_only === true) {
+    return "Audit Only";
+  }
+  if (row?.runtime_instance_present === true && row?.runtime_state_loaded === true) {
+    return "Attached Live";
+  }
+  if (row?.runtime_instance_present === true) {
+    return "Attached / State Pending";
+  }
+  return "Not Loaded";
+}
+
+function stagedPostureLabel(row: JsonRecord | null | undefined): string {
+  const side = String(row?.net_side ?? row?.position_side ?? "FLAT").trim() || "FLAT";
+  const quantity = row?.total_quantity ?? row?.internal_position_qty ?? 0;
+  const openLegs = row?.open_entry_leg_count ?? 0;
+  const adds = row?.open_add_count ?? row?.add_count ?? 0;
+  const canAddMore = row?.additional_entry_allowed ?? row?.can_add_more;
+  return `${side} | Qty ${formatShortNumber(quantity)} | Legs ${formatShortNumber(openLegs)} | Adds ${formatShortNumber(adds)} | ${canAddMore === true ? "Can Add" : "At Cap"}`;
+}
+
+function cadenceLabel(row: JsonRecord | null | undefined): string {
+  const execution = String(row?.execution_timeframe ?? "—").trim() || "—";
+  const contexts = asArray<string>(row?.context_timeframes).length ? asArray<string>(row?.context_timeframes).join(" / ") : "—";
+  return `${execution} exec | ${contexts} ctx`;
+}
+
+function isAtpRow(row: JsonRecord | null | undefined): boolean {
+  return /atp_companion/i.test(
+    [
+      row?.lane_id,
+      row?.standalone_strategy_id,
+      row?.display_name,
+      row?.branch,
+      row?.strategy_family,
+      row?.strategy_status,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+}
+
+function compactBranchLabel(row: JsonRecord | null | undefined): string {
+  const raw = String(row?.branch ?? row?.strategy_name ?? row?.lane_id ?? row?.standalone_strategy_id ?? "Unnamed Lane");
+  return raw.replace(/\s*\/\s*/g, " / ");
+}
+
+function trackedStrategyDisplayName(detail: JsonRecord | null | undefined): string {
+  return String(
+    detail?.display_name
+      ?? detail?.strategy_name
+      ?? detail?.strategy_id
+      ?? detail?.tracked_strategy_id
+      ?? "Tracked ATP Strategy",
+  );
+}
+
+function rosterStatusChip(row: JsonRecord | null | undefined): string {
+  if (row?.benchmark_designation) {
+    return "BENCH";
+  }
+  if (row?.candidate_designation) {
+    return "CAND";
+  }
+  if (isTemporaryPaperStrategyRow(row)) {
+    return row?.runtime_instance_present === true ? "TEMP LIVE" : "TEMP";
+  }
+  if (runtimeAttachmentLabel(row) === "Attached Live") {
+    return "LIVE";
+  }
+  if (runtimeAttachmentLabel(row) === "Attached / State Pending") {
+    return "ATTACH";
+  }
+  if (String(row?.state ?? row?.strategy_status ?? "").toUpperCase().includes("PAUSE")) {
+    return "PAUSED";
+  }
+  return "PAPER";
+}
+
+function rosterStatusTone(row: JsonRecord | null | undefined): Tone {
+  const chip = rosterStatusChip(row);
+  if (chip === "LIVE" || chip === "ATTACH") {
+    return "good";
+  }
+  if (chip === "CAND" || chip === "TEMP" || chip === "TEMP LIVE") {
+    return "warn";
+  }
+  if (chip === "PAUSED") {
+    return "muted";
+  }
+  return "muted";
+}
+
+function rosterCardAccentClass(row: JsonRecord | null | undefined): string {
+  const chip = rosterStatusChip(row);
+  if (chip === "LIVE" || chip === "ATTACH") {
+    return "live";
+  }
+  if (chip === "CAND") {
+    return "candidate";
+  }
+  if (chip === "PAUSED") {
+    return "paused";
+  }
+  return "paper";
+}
+
 function normalizeTemporaryPaperRegistryRow(row: JsonRecord, runtimeRow?: JsonRecord): JsonRecord {
   const runtimePresent = runtimeRow?.runtime_instance_present === true || row.runtime_instance_present === true;
   const runtimeLoaded = runtimeRow?.runtime_state_loaded === true || row.runtime_state_loaded === true;
@@ -1063,6 +1377,204 @@ function latestTimestamp(values: Array<unknown>): string | null {
     }
   }
   return latest;
+}
+
+function dateKeyFromTimestamp(value: unknown): string | null {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  const isoMatch = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) {
+    return isoMatch[1];
+  }
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateFromKey(dateKey: string): Date {
+  const [year, month, day] = dateKey.split("-").map((part) => Number(part));
+  return new Date(year, Math.max(month - 1, 0), day || 1);
+}
+
+function formatMonthTitle(dateKey: string): string {
+  return new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(dateFromKey(dateKey));
+}
+
+function formatWeekTitle(dateKey: string): string {
+  const start = startOfWeek(dateKey);
+  const end = addDays(start, 4);
+  const formatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
+  return `Week of ${formatter.format(dateFromKey(start))} - ${formatter.format(dateFromKey(end))}`;
+}
+
+function formatLongDate(dateKey: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(dateFromKey(dateKey));
+}
+
+function addDays(dateKey: string, offset: number): string {
+  const next = dateFromKey(dateKey);
+  next.setDate(next.getDate() + offset);
+  return dateKeyFromTimestamp(next.toISOString()) ?? dateKey;
+}
+
+function addMonths(dateKey: string, offset: number): string {
+  const next = dateFromKey(dateKey);
+  next.setMonth(next.getMonth() + offset, 1);
+  return dateKeyFromTimestamp(next.toISOString()) ?? dateKey;
+}
+
+function startOfMonth(dateKey: string): string {
+  const value = dateFromKey(dateKey);
+  value.setDate(1);
+  return dateKeyFromTimestamp(value.toISOString()) ?? dateKey;
+}
+
+function endOfMonth(dateKey: string): string {
+  const value = dateFromKey(startOfMonth(dateKey));
+  value.setMonth(value.getMonth() + 1, 0);
+  return dateKeyFromTimestamp(value.toISOString()) ?? dateKey;
+}
+
+function startOfYear(dateKey: string): string {
+  const value = dateFromKey(dateKey);
+  value.setMonth(0, 1);
+  return dateKeyFromTimestamp(value.toISOString()) ?? dateKey;
+}
+
+function startOfQuarter(dateKey: string): string {
+  const value = dateFromKey(dateKey);
+  const quarterStartMonth = Math.floor(value.getMonth() / 3) * 3;
+  value.setMonth(quarterStartMonth, 1);
+  return dateKeyFromTimestamp(value.toISOString()) ?? dateKey;
+}
+
+function endOfQuarter(dateKey: string): string {
+  const value = dateFromKey(startOfQuarter(dateKey));
+  value.setMonth(value.getMonth() + 3, 0);
+  return dateKeyFromTimestamp(value.toISOString()) ?? dateKey;
+}
+
+function startOfWeek(dateKey: string): string {
+  const value = dateFromKey(dateKey);
+  const day = value.getDay();
+  const offset = day === 0 ? -6 : 1 - day;
+  value.setDate(value.getDate() + offset);
+  return dateKeyFromTimestamp(value.toISOString()) ?? dateKey;
+}
+
+function isWeekendDate(dateKey: string): boolean {
+  const day = dateFromKey(dateKey).getDay();
+  return day === 0 || day === 6;
+}
+
+function daysBetween(startDate: string, endDate: string): number {
+  const diff = dateFromKey(endDate).getTime() - dateFromKey(startDate).getTime();
+  return Math.round(diff / 86400000);
+}
+
+function formatPercentValue(value: number | null, digits = 1): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  return `${value.toFixed(digits)}%`;
+}
+
+function formatRatioValue(value: number | null, digits = 2): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  return value.toFixed(digits);
+}
+
+function calendarSourceLabel(source: PnlCalendarSource): string {
+  switch (source) {
+    case "live":
+      return "Live";
+    case "paper":
+      return "Paper";
+    case "benchmark_replay":
+      return "Benchmark / Replay";
+    case "research_execution":
+      return "Research Execution";
+    default:
+      return "All Accounts";
+  }
+}
+
+function formatSignedCompactWhole(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  const rounded = Math.round(value);
+  return `${rounded > 0 ? "+" : rounded < 0 ? "-" : ""}$${Math.abs(rounded).toLocaleString()}`;
+}
+
+function formatCompactCurrency(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  return `${value > 0 ? "+" : value < 0 ? "-" : ""}$${Math.abs(value).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function sharpeTone(value: number | null): Tone {
+  if (value === null) {
+    return "muted";
+  }
+  if (value >= 1.5) {
+    return "good";
+  }
+  if (value >= 1) {
+    return "warn";
+  }
+  return "danger";
+}
+
+function winRateTone(value: number | null): Tone {
+  if (value === null) {
+    return "muted";
+  }
+  if (value >= 55) {
+    return "good";
+  }
+  if (value >= 50) {
+    return "warn";
+  }
+  return "danger";
+}
+
+function sourcePeriodLabel(period: PnlCalendarPeriod, anchorDate: string, startDate: string, endDate: string): string {
+  if (period === "weekly") {
+    return formatWeekTitle(anchorDate);
+  }
+  if (period === "quarterly") {
+    const start = startOfQuarter(anchorDate);
+    const end = endOfQuarter(anchorDate);
+    return `${formatMonthTitle(start)} - ${formatMonthTitle(end)}`;
+  }
+  if (period === "ytd") {
+    const formatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
+    return `${formatter.format(dateFromKey(startDate))} - ${formatter.format(dateFromKey(endDate))}`;
+  }
+  if (period === "custom") {
+    const formatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
+    return `${formatter.format(dateFromKey(startDate))} - ${formatter.format(dateFromKey(endDate))}`;
+  }
+  return formatMonthTitle(anchorDate);
 }
 
 interface ParsedOptionContract {
@@ -2064,6 +2576,20 @@ export function App() {
   });
   const [selectedProductionPositionKey, setSelectedProductionPositionKey] = useState("");
   const [selectedAuditStrategyKey, setSelectedAuditStrategyKey] = useState("");
+  const [selectedWorkspaceLaneId, setSelectedWorkspaceLaneId] = useState("");
+  const [calendarPeriod, setCalendarPeriod] = useState<PnlCalendarPeriod>("monthly");
+  const [calendarViewMode, setCalendarViewMode] = useState<PnlCalendarViewMode>("calendar");
+  const [calendarSource, setCalendarSource] = useState<PnlCalendarSource>("all");
+  const [calendarAutoRangeApplied, setCalendarAutoRangeApplied] = useState(false);
+  const [calendarAnchorDate, setCalendarAnchorDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [calendarCustomStart, setCalendarCustomStart] = useState(() => {
+    const value = new Date();
+    value.setDate(1);
+    return value.toISOString().slice(0, 10);
+  });
+  const [calendarCustomEnd, setCalendarCustomEnd] = useState(() => new Date().toISOString().slice(0, 10));
+  const [selectedCalendarDay, setSelectedCalendarDay] = useState<string | null>(null);
+  const [calendarContextLabel, setCalendarContextLabel] = useState<string | null>(null);
   const [selectedSameUnderlyingConflictInstrument, setSelectedSameUnderlyingConflictInstrument] = useState("");
   const [sameUnderlyingOperatorLabel, setSameUnderlyingOperatorLabel] = useState("manual operator");
   const [sameUnderlyingReviewNote, setSameUnderlyingReviewNote] = useState("");
@@ -2468,6 +2994,9 @@ function paperStartupCategoryTone(category: string): Tone {
   const currentPositions = asArray<JsonRecord>(asRecord(operatorSurface.current_active_positions).rows);
   const shadow = asRecord(dashboard?.shadow);
   const paper = asRecord(dashboard?.paper);
+  const paperApprovedModels = asRecord(paper.approved_models);
+  const approvedModelRows = asArray<JsonRecord>(paperApprovedModels.rows);
+  const approvedModelDetailsByBranch = asRecord(paperApprovedModels.details_by_branch);
   const paperEvents = asRecord(paper.events);
   const paperAlertEvents = asArray<JsonRecord>(paperEvents.alerts);
   const paperAlertsState = asRecord(paper.alerts_state);
@@ -2488,6 +3017,9 @@ function paperStartupCategoryTone(category: string): Tone {
   const paperSoakExtended = asRecord(paper.soak_extended);
   const paperSoakUnattended = asRecord(paper.soak_unattended);
   const paperStrategyPerformance = asRecord(paper.strategy_performance);
+  const paperTrackedStrategies = asRecord(paper.tracked_strategies);
+  const trackedStrategyRows = asArray<JsonRecord>(paperTrackedStrategies.rows);
+  const trackedStrategyDetailsById = asRecord(paperTrackedStrategies.details_by_strategy_id);
   const strategyRuntimeSummary = asRecord(paper.strategy_runtime_summary);
   const paperSignalIntentFillAudit = asRecord(paper.signal_intent_fill_audit);
   const paperExitParitySummary = asRecord(paper.exit_parity_summary);
@@ -2630,18 +3162,72 @@ function paperStartupCategoryTone(category: string): Tone {
   const strategyAnalysis = asRecord(dashboard?.strategy_analysis);
   const playbackStudyCatalog = asRecord(playback.study_catalog);
   const playbackStudyItems = asArray<JsonRecord>(playbackStudyCatalog.items);
+  const playbackLatestStudyItems = useMemo(() => {
+    const uniqueItems: JsonRecord[] = [];
+    const seenStudyKeys = new Set<string>();
+    for (const item of playbackStudyItems) {
+      const studyKey = String(item.study_key ?? "").trim();
+      if (!studyKey || seenStudyKeys.has(studyKey)) {
+        continue;
+      }
+      seenStudyKeys.add(studyKey);
+      uniqueItems.push(item);
+    }
+    return uniqueItems;
+  }, [playbackStudyItems]);
   const playbackLatestRun = asRecord(playback.latest_run);
+  const playbackLatestRunArtifacts = asRecord(playbackLatestRun.artifacts);
+  const playbackSync = asRecord(dashboard?.historical_playback_sync);
   const playbackAggregateSummary = asRecord(playbackLatestRun.aggregate_portfolio_summary);
   const playbackPerStrategySummaries = asArray<JsonRecord>(playbackLatestRun.per_strategy_summaries);
-  const playbackSelectedStudy = asRecord(playback.selected_study ?? playbackLatestRun.strategy_study);
-  const playbackStudy = playbackSelectedStudy;
+  const playbackSelectedStudyPreview = asRecord(playback.selected_study ?? playbackLatestRun.strategy_study);
+  const playbackSelectedStudyMeta = asRecord(playbackSelectedStudyPreview.meta);
+  const playbackSelectedStudyKey = String(
+    playbackSelectedStudyMeta.study_id
+    ?? playbackStudyCatalog.selected_study_key
+    ?? "",
+  ).trim();
   const playbackStudyStatus = asRecord(playbackLatestRun.strategy_study_status ?? playback.strategy_study_status);
+  const playbackStudyArtifactFound = playbackStudyStatus.artifact_found === true;
+  const [playbackStudyLoaded, setPlaybackStudyLoaded] = useState<JsonRecord | null>(null);
+  useEffect(() => {
+    const artifactTarget = String(playbackLatestRunArtifacts.strategy_study_json ?? "").trim();
+    const backendUrl = String(desktopState?.backendUrl ?? "").trim();
+    if (!artifactTarget || !backendUrl || !playbackStudyArtifactFound) {
+      setPlaybackStudyLoaded(null);
+      return;
+    }
+    let cancelled = false;
+    const artifactUrl = artifactTarget.startsWith("/api/")
+      ? new URL(artifactTarget.replace(/^\//, ""), backendUrl).toString()
+      : artifactTarget;
+    void fetch(artifactUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Selected playback study fetch failed (${response.status})`);
+        }
+        return response.json() as Promise<JsonRecord>;
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setPlaybackStudyLoaded(asRecord(payload));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPlaybackStudyLoaded(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [desktopState?.backendUrl, playbackLatestRunArtifacts.strategy_study_json, playbackStudyArtifactFound]);
+  const playbackStudy = playbackStudyLoaded ?? playbackSelectedStudyPreview;
   const playbackStudyRows = asArray<JsonRecord>(playbackStudy.bars ?? playbackStudy.rows);
   const playbackStudySummary = asRecord(playbackStudy.summary);
   const playbackStudyAvailable =
-    (playbackStudyItems.length > 0 || playbackLatestRun.strategy_study_available === true) && playbackStudyRows.length > 0;
+    (playbackLatestStudyItems.length > 0 || playbackLatestRun.strategy_study_available === true) && playbackStudyRows.length > 0;
   const playbackStudyRunLoaded = playbackStudyStatus.run_loaded === true;
-  const playbackStudyArtifactFound = playbackStudyStatus.artifact_found === true;
   const playbackStudyBaseTimeframe = formatValue(playbackStudyStatus.base_timeframe ?? "Not loaded");
   const playbackStudyStructuralTimeframe = formatValue(playbackStudyStatus.structural_signal_timeframe ?? playbackStudyStatus.base_timeframe ?? "Not loaded");
   const playbackStudyExecutionTimeframe = formatValue(playbackStudyStatus.execution_resolution ?? "Not loaded");
@@ -2655,6 +3241,42 @@ function paperStartupCategoryTone(category: string): Tone {
   const playbackReplaySummaryAvailable =
     playbackLatestRun.replay_summary_available === true &&
     (playbackPerStrategySummaries.length > 0 || Object.keys(playbackAggregateSummary).length > 0);
+  const playbackRunStampLabel = String(playbackLatestRun.run_stamp ?? "Not loaded");
+  const playbackStrategyCount = Number(strategyAnalysis.strategy_count ?? 0);
+  const playbackLaneCount = Number(strategyAnalysis.lane_count ?? 0);
+  const playbackSyncInState = playbackSync.in_sync === true;
+  const playbackSyncLabel = playback.available === true
+    ? playbackSyncInState
+      ? "Latest playback manifest loaded"
+      : formatValue(playbackSync.detail ?? "Playback state is stale")
+    : "Historical playback not loaded";
+  const playbackCoverageDateKeysBySource = useMemo(() => {
+    const coverage: Record<Exclude<PnlCalendarSource, "all" | "live" | "paper">, Set<string>> = {
+      benchmark_replay: new Set<string>(),
+      research_execution: new Set<string>(),
+    };
+    for (const item of playbackLatestStudyItems) {
+      const studyMode = String(item.study_mode ?? "").trim();
+      const source: Exclude<PnlCalendarSource, "all" | "live" | "paper"> =
+        studyMode === "research_execution_mode" ? "research_execution" : "benchmark_replay";
+      const startDate = dateKeyFromTimestamp(item.coverage_start);
+      const endDate = dateKeyFromTimestamp(item.coverage_end);
+      if (!startDate || !endDate) {
+        continue;
+      }
+      for (let cursor = startDate; cursor <= endDate; cursor = addDays(cursor, 1)) {
+        coverage[source].add(cursor);
+      }
+    }
+    return coverage;
+  }, [playbackLatestStudyItems]);
+  const earliestPlaybackCoverageDate = useMemo(() => {
+    const allDates = [
+      ...playbackCoverageDateKeysBySource.benchmark_replay,
+      ...playbackCoverageDateKeysBySource.research_execution,
+    ].sort();
+    return allDates[0] ?? null;
+  }, [playbackCoverageDateKeysBySource]);
   const sortedSameUnderlyingConflictRows = useMemo(
     () =>
       [...sameUnderlyingConflictRows].sort((left, right) => {
@@ -5062,6 +5684,865 @@ function paperStartupCategoryTone(category: string): Tone {
     { label: "Manual Action", value: formatValue(paperRuntimeRecovery.manual_action_required ?? false), tone: paperRuntimeRecovery.manual_action_required ? "warn" : "good" },
     { label: "Latest Attempt", value: formatTimestamp(paperRuntimeRecovery.attempted_at ?? latestPaperStartBlock.timestamp ?? paperRunStartCurrent.timestamp) },
   ];
+  const dashboardRosterRows = useMemo(
+    () => {
+      const liveApprovedRows = [...approvedModelRows].map((row) => ({
+        ...asRecord(approvedModelDetailsByBranch[String(row.branch ?? "")]),
+        ...row,
+      }));
+      const liveLookup = new Map<string, JsonRecord>();
+      for (const row of [...liveApprovedRows, ...runtimeRegistryRows, ...temporaryPaperStrategyRows]) {
+        for (const key of [
+          String(row.lane_id ?? ""),
+          String(row.standalone_strategy_id ?? ""),
+          String(row.tracked_strategy_id ?? ""),
+        ]) {
+          if (key) {
+            liveLookup.set(key, row);
+          }
+        }
+      }
+      const trackedLookup = new Map<string, JsonRecord>();
+      for (const row of trackedStrategyRows) {
+        const key = String(row.strategy_id ?? row.tracked_strategy_id ?? "");
+        if (key) {
+          trackedLookup.set(key, row);
+        }
+      }
+      const roster = new Map<string, JsonRecord>();
+      for (const row of liveApprovedRows) {
+        roster.set(String(row.lane_id ?? row.standalone_strategy_id ?? row.branch ?? strategyRowIdentity(row)), row);
+      }
+      for (const meta of ATP_PRODUCT_CATALOG) {
+        const liveRow =
+          liveLookup.get(meta.laneId)
+          ?? liveLookup.get(meta.standaloneStrategyId)
+          ?? liveLookup.get(meta.trackedStrategyId)
+          ?? null;
+        const trackedDetail = asRecord(trackedStrategyDetailsById[meta.trackedStrategyId] ?? trackedStrategyDetailsById[meta.laneId]);
+        const trackedRow = trackedLookup.get(meta.trackedStrategyId) ?? trackedLookup.get(meta.laneId) ?? null;
+        const mergedRow: JsonRecord = {
+          ...trackedDetail,
+          ...trackedRow,
+          ...liveRow,
+          lane_id: meta.laneId,
+          branch: meta.displayName,
+          display_name: meta.displayName,
+          strategy_name: meta.displayName,
+          tracked_strategy_id: meta.trackedStrategyId,
+          standalone_strategy_id: String(liveRow?.standalone_strategy_id ?? meta.standaloneStrategyId),
+          instrument: String(liveRow?.instrument ?? meta.instrument),
+          observed_instruments: liveRow?.observed_instruments ?? [meta.instrument],
+          strategy_family: String(liveRow?.strategy_family ?? "active_trend_participation_engine"),
+          paper_strategy_class: meta.designation === "benchmark" ? "atp_benchmark_lane" : "atp_experimental_strategy",
+          lane_class_label: meta.designation === "benchmark" ? "ATP Benchmark Lane" : "ATP Experimental Strategy",
+          designation_label:
+            meta.designation === "benchmark"
+              ? "Benchmark Lane"
+              : meta.candidateId
+                ? "Experimental Candidate Lane"
+                : "Experimental Strategy",
+          benchmark_designation:
+            meta.designation === "benchmark"
+              ? String(liveRow?.benchmark_designation ?? trackedDetail.benchmark_designation ?? "CURRENT_ATP_COMPANION_BENCHMARK")
+              : null,
+          candidate_designation:
+            meta.designation === "candidate"
+              ? String(liveRow?.candidate_designation ?? trackedDetail.candidate_id ?? meta.candidateId ?? "ATP_COMPANION_CANDIDATE")
+              : null,
+          candidate_id: String(liveRow?.candidate_id ?? trackedDetail.candidate_id ?? meta.candidateId ?? ""),
+          experimental_status: String(liveRow?.experimental_status ?? meta.experimentalStatus),
+          participation_policy: String(liveRow?.participation_policy ?? meta.participationPolicy),
+          execution_timeframe: String(liveRow?.execution_timeframe ?? "1m"),
+          context_timeframes: asArray<string>(liveRow?.context_timeframes).length ? asArray<string>(liveRow?.context_timeframes) : ["5m"],
+          runtime_instance_present: liveRow?.runtime_instance_present === true || trackedDetail.runtime_attached === true,
+          runtime_state_loaded: liveRow?.runtime_state_loaded === true,
+          can_process_bars: liveRow?.can_process_bars === true,
+          audit_only: liveRow ? false : true,
+          snapshot_only: liveRow ? false : true,
+          truth_label: liveRow ? "LIVE_SHARED_PAPER_ROSTER" : "CONFIGURED_ATP_UNIVERSE",
+          current_strategy_status: String(
+            liveRow?.current_strategy_status
+              ?? liveRow?.strategy_status
+              ?? trackedDetail.status
+              ?? (meta.designation === "benchmark" ? "AUDIT ONLY" : "CONFIGURED / NOT LOADED"),
+          ),
+          status: String(
+            liveRow?.status
+              ?? trackedDetail.status
+              ?? (meta.designation === "benchmark" ? "AUDIT_ONLY" : "NOT_LOADED"),
+          ),
+          status_reason: String(
+            liveRow?.status_reason
+              ?? trackedDetail.status_reason
+              ?? (meta.designation === "benchmark"
+                ? "ATP benchmark is present through tracked/audit truth even when not surfaced as a live shared-paper lane row."
+                : "ATP experimental strategy is configured in the platform universe but is not currently attached to the live paper runtime."),
+          ),
+          total_quantity: Number(liveRow?.total_quantity ?? 0),
+          open_entry_leg_count: Number(liveRow?.open_entry_leg_count ?? 0),
+          open_add_count: Number(liveRow?.open_add_count ?? 0),
+          additional_entry_allowed: liveRow?.additional_entry_allowed ?? false,
+          net_side: String(liveRow?.net_side ?? "FLAT"),
+          last_execution_bar_evaluated_at: String(liveRow?.last_execution_bar_evaluated_at ?? trackedDetail.runtime_heartbeat_at ?? ""),
+          last_completed_context_bars_at: liveRow?.last_completed_context_bars_at ?? {},
+          config_source: String(
+            liveRow?.config_source
+              ?? trackedDetail?.config_identity?.config_source
+              ?? trackedDetail?.config_identity?.benchmark_overlay_config
+              ?? "ATP product catalog",
+          ),
+        };
+        roster.set(meta.laneId, mergedRow);
+      }
+      return [...roster.values()].sort((left, right) => {
+        const leftAtp = isAtpRow(left) ? 0 : 1;
+        const rightAtp = isAtpRow(right) ? 0 : 1;
+        if (leftAtp !== rightAtp) {
+          return leftAtp - rightAtp;
+        }
+        const leftBench = left.benchmark_designation ? 0 : left.candidate_designation ? 1 : 2;
+        const rightBench = right.benchmark_designation ? 0 : right.candidate_designation ? 1 : 2;
+        if (leftBench !== rightBench) {
+          return leftBench - rightBench;
+        }
+        return String(left.branch ?? left.display_name ?? "").localeCompare(String(right.branch ?? right.display_name ?? ""));
+      });
+    },
+    [approvedModelDetailsByBranch, approvedModelRows, runtimeRegistryRows, temporaryPaperStrategyRows, trackedStrategyRows, trackedStrategyDetailsById],
+  );
+  useEffect(() => {
+    if (!dashboardRosterRows.length) {
+      return;
+    }
+    if (!selectedWorkspaceLaneId || !dashboardRosterRows.some((row) => String(row.lane_id ?? "") === selectedWorkspaceLaneId)) {
+      setSelectedWorkspaceLaneId(String(dashboardRosterRows[0]?.lane_id ?? ""));
+    }
+  }, [dashboardRosterRows, selectedWorkspaceLaneId]);
+  const selectedWorkspaceRow = useMemo(
+    () => dashboardRosterRows.find((row) => String(row.lane_id ?? "") === selectedWorkspaceLaneId) ?? dashboardRosterRows[0] ?? null,
+    [dashboardRosterRows, selectedWorkspaceLaneId],
+  );
+  useEffect(() => {
+    if (calendarAutoRangeApplied || !playback.available || !earliestPlaybackCoverageDate) {
+      return;
+    }
+    if (earliestPlaybackCoverageDate < startOfMonth(new Date().toISOString().slice(0, 10))) {
+      setCalendarPeriod("ytd");
+    }
+    setCalendarAutoRangeApplied(true);
+  }, [calendarAutoRangeApplied, earliestPlaybackCoverageDate, playback.available]);
+  const selectedWorkspaceInstrument = String(selectedWorkspaceRow?.instrument ?? "").trim().toUpperCase();
+  const selectedWorkspacePerformanceRow = useMemo(
+    () =>
+      strategyPerformanceRows.find(
+        (row) =>
+          String(row.lane_id ?? "") === String(selectedWorkspaceRow?.lane_id ?? "")
+          || String(row.standalone_strategy_id ?? "") === String(selectedWorkspaceRow?.tracked_strategy_id ?? ""),
+      ) ?? null,
+    [selectedWorkspaceRow, strategyPerformanceRows],
+  );
+  const selectedWorkspaceTrades = useMemo(
+    () =>
+      closedStrategyTradeRows
+        .filter((row) => String(row.lane_id ?? "") === String(selectedWorkspaceRow?.lane_id ?? ""))
+        .slice(0, 12),
+    [closedStrategyTradeRows, selectedWorkspaceRow],
+  );
+  const selectedWorkspacePlaybackStudyItem = useMemo(() => {
+    if (!playbackLatestStudyItems.length) {
+      return null;
+    }
+    const exactStrategyIds = [
+      String(selectedWorkspaceRow?.tracked_strategy_id ?? "").trim(),
+      String(selectedWorkspaceRow?.standalone_strategy_id ?? "").trim(),
+    ].filter(Boolean);
+    const exactMatch = playbackLatestStudyItems.find((item) => {
+      return exactStrategyIds.includes(String(item.strategy_id ?? "").trim());
+    });
+    if (exactMatch) {
+      return exactMatch;
+    }
+    const preferredMode = selectedWorkspaceRow?.candidate_designation ? "research_execution_mode" : "baseline_parity_mode";
+    const instrumentMatches = playbackLatestStudyItems
+      .filter((item) => {
+        return (
+          String(item.symbol ?? "").trim().toUpperCase() === selectedWorkspaceInstrument
+          && String(item.study_mode ?? "").trim() === preferredMode
+        );
+      })
+      .sort((left, right) => {
+        const leftSpan = Math.max(
+          0,
+          parseTimestampMs(String(left.coverage_end ?? "")) - parseTimestampMs(String(left.coverage_start ?? "")),
+        );
+        const rightSpan = Math.max(
+          0,
+          parseTimestampMs(String(right.coverage_end ?? "")) - parseTimestampMs(String(right.coverage_start ?? "")),
+        );
+        if (rightSpan !== leftSpan) {
+          return rightSpan - leftSpan;
+        }
+        const leftTrades = asArray<JsonRecord>(asRecord(left.summary).closed_trade_breakdown).length;
+        const rightTrades = asArray<JsonRecord>(asRecord(right.summary).closed_trade_breakdown).length;
+        return rightTrades - leftTrades;
+      });
+    if (instrumentMatches.length) {
+      return instrumentMatches[0];
+    }
+    const resultsBoard = asRecord(strategyAnalysis.results_board);
+    const boardRows = asArray<JsonRecord>(resultsBoard.rows);
+    const defaultRowId = String(resultsBoard.default_row_id ?? "").trim();
+    const preferredReplayRow =
+      boardRows.find((row) => String(row.lane_id ?? row.id ?? "") === defaultRowId)
+      ?? boardRows.find((row) => String(row.source_lane ?? "").trim() === "historical_playback")
+      ?? null;
+    const preferredStudyKey = String(asRecord(asRecord(preferredReplayRow?.evidence).bars).ref?.study_key ?? "").trim();
+    if (preferredStudyKey) {
+      return playbackLatestStudyItems.find((item) => String(item.study_key ?? "").trim() === preferredStudyKey) ?? playbackLatestStudyItems[0];
+    }
+    return playbackLatestStudyItems[0];
+  }, [playbackLatestStudyItems, selectedWorkspaceInstrument, selectedWorkspaceRow, strategyAnalysis.results_board]);
+  const selectedWorkspacePlaybackSummary = asRecord(selectedWorkspacePlaybackStudyItem?.summary);
+  const selectedWorkspacePlaybackCoverage = useMemo(
+    () => ({
+      start_timestamp: selectedWorkspacePlaybackStudyItem?.coverage_start ?? null,
+      end_timestamp: selectedWorkspacePlaybackStudyItem?.coverage_end ?? null,
+    }),
+    [selectedWorkspacePlaybackStudyItem],
+  );
+  const [selectedWorkspacePlaybackStudyLoaded, setSelectedWorkspacePlaybackStudyLoaded] = useState<JsonRecord | null>(null);
+  useEffect(() => {
+    const artifactTarget = String(asRecord(selectedWorkspacePlaybackStudyItem?.artifact_paths).strategy_study_json ?? "").trim();
+    const backendUrl = String(desktopState?.backendUrl ?? "").trim();
+    if (!artifactTarget || !backendUrl) {
+      setSelectedWorkspacePlaybackStudyLoaded(null);
+      return;
+    }
+    let cancelled = false;
+    const artifactUrl = artifactTarget.startsWith("/api/")
+      ? new URL(artifactTarget.replace(/^\//, ""), backendUrl).toString()
+      : artifactTarget;
+    void fetch(artifactUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Workspace playback study fetch failed (${response.status})`);
+        }
+        return response.json() as Promise<JsonRecord>;
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setSelectedWorkspacePlaybackStudyLoaded(asRecord(payload));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSelectedWorkspacePlaybackStudyLoaded(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [desktopState?.backendUrl, selectedWorkspacePlaybackStudyItem]);
+  const selectedWorkspacePlaybackStudy = selectedWorkspacePlaybackStudyLoaded ?? asRecord(selectedWorkspacePlaybackStudyItem?.study_preview);
+  const selectedWorkspacePlaybackStudyRows = asArray<JsonRecord>(
+    selectedWorkspacePlaybackStudy.bars ?? selectedWorkspacePlaybackStudy.rows,
+  );
+  const selectedWorkspacePlaybackCanRenderStudy =
+    Boolean(selectedWorkspacePlaybackStudyItem) && selectedWorkspacePlaybackStudyRows.length > 0;
+  const selectedWorkspaceEquityCurve = useMemo(() => {
+    let running = 0;
+    const ordered = [...selectedWorkspaceTrades].sort(
+      (left, right) => parseTimestampMs(left.exit_timestamp ?? left.entry_timestamp) - parseTimestampMs(right.exit_timestamp ?? right.entry_timestamp),
+    );
+    return ordered.map((row) => {
+      running += Number(row.realized_pnl ?? 0) || 0;
+      return {
+        timestamp: String(row.exit_timestamp ?? row.entry_timestamp ?? ""),
+        value: running,
+      };
+    });
+  }, [selectedWorkspaceTrades]);
+  const atpStrategyRows = useMemo(
+    () =>
+      [...runtimeRegistryRows, ...approvedModelRows, ...temporaryPaperStrategyRows].filter((row, index, rows) => {
+        if (!isAtpRow(row)) {
+          return false;
+        }
+        const key = String(row.standalone_strategy_id ?? row.lane_id ?? row.branch ?? index);
+        return rows.findIndex((candidate) => String(candidate.standalone_strategy_id ?? candidate.lane_id ?? candidate.branch ?? "") === key) === index;
+      }),
+    [runtimeRegistryRows, approvedModelRows, temporaryPaperStrategyRows],
+  );
+  const atpBenchmarkRows = useMemo(
+    () => atpStrategyRows.filter((row) => Boolean(row.benchmark_designation) || /benchmark/i.test(String(row.designation_label ?? row.strategy_status ?? ""))),
+    [atpStrategyRows],
+  );
+  const atpCandidateRows = useMemo(
+    () => atpStrategyRows.filter((row) => !atpBenchmarkRows.includes(row)),
+    [atpBenchmarkRows, atpStrategyRows],
+  );
+  const selectWorkspaceLane = useCallback(
+    (laneId: string, options?: { navigateTo?: PageId; syncTradeEntry?: boolean }) => {
+      const nextRow =
+        dashboardRosterRows.find((row) => String(row.lane_id ?? "") === String(laneId))
+        ?? dashboardRosterRows[0]
+        ?? null;
+      const nextLaneId = String(nextRow?.lane_id ?? laneId ?? "");
+      const nextInstrument = String(nextRow?.instrument ?? "").trim().toUpperCase();
+      setSelectedWorkspaceLaneId(nextLaneId);
+      if (options?.syncTradeEntry !== false && nextInstrument) {
+        setManualOrderForm((current) => ({ ...current, symbol: nextInstrument }));
+        const matchingProductionPosition = productionPositions.find(
+          (row) => String(row.symbol ?? "").trim().toUpperCase() === nextInstrument,
+        );
+        if (matchingProductionPosition?.position_key) {
+          setSelectedProductionPositionKey(String(matchingProductionPosition.position_key));
+        }
+      }
+      if (options?.navigateTo) {
+        window.location.hash = `#/${options.navigateTo}`;
+        setPage(options.navigateTo);
+      }
+    },
+    [dashboardRosterRows, productionPositions],
+  );
+  const openCalendarContributionStrategy = useCallback(
+    (contribution: CalendarStrategyContribution) => {
+      const matched =
+        dashboardRosterRows.find((row) => String(row.lane_id ?? "") === String(contribution.laneId ?? ""))
+        ?? dashboardRosterRows.find((row) => String(row.standalone_strategy_id ?? row.tracked_strategy_id ?? "") === String(contribution.strategyId))
+        ?? dashboardRosterRows.find((row) => String(row.display_name ?? row.branch ?? "").trim() === contribution.strategyName.trim())
+        ?? null;
+      if (!matched) {
+        return;
+      }
+      setCalendarContextLabel(`${selectedCalendarDay ?? "Selected Day"} • ${calendarSourceLabel(calendarSource)}`);
+      selectWorkspaceLane(String(matched.lane_id ?? ""), { navigateTo: "strategies" });
+    },
+    [calendarSource, dashboardRosterRows, selectWorkspaceLane, selectedCalendarDay],
+  );
+  const tradeEntrySymbol = (manualOrderForm.symbol.trim() || selectedWorkspaceInstrument || selectedProductionSymbol || "").toUpperCase();
+  const tradeEntryQuoteRow = useMemo(
+    () => productionQuoteRows.find((row) => String(row.symbol ?? row.instrument ?? "").trim().toUpperCase() === tradeEntrySymbol) ?? null,
+    [productionQuoteRows, tradeEntrySymbol],
+  );
+  const headerQuoteRow = tradeEntryQuoteRow ?? productionQuoteRows[0] ?? null;
+  const headerSymbol = String(
+    tradeEntrySymbol
+    || headerQuoteRow?.symbol
+    || headerQuoteRow?.instrument
+    || selectedWorkspaceRow?.instrument
+    || "MGC",
+  ).toUpperCase();
+  const headerLastPrice = headerQuoteRow?.last_price ?? headerQuoteRow?.mark ?? headerQuoteRow?.price ?? "—";
+  const headerNetChange = headerQuoteRow?.net_change ?? headerQuoteRow?.quoteTrend ?? "No live quote";
+  const headerNetChangeTone = statusTone(headerQuoteRow?.net_change ?? headerQuoteRow?.quoteTrend);
+  const selectedWorkspaceDesignation = designationLabel(selectedWorkspaceRow);
+  const selectedWorkspaceRuntimeLabel = runtimeAttachmentLabel(selectedWorkspaceRow);
+  const selectedWorkspaceContextTimes = asArray<string>(selectedWorkspaceRow?.context_timeframes).join(" / ") || "5m";
+  const tradeEntryPaperRows = useMemo(
+    () => {
+      const matched = strategyPerformanceRows.filter(
+        (row) => String(row.instrument ?? row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol,
+      );
+      const workspaceMatchesSymbol =
+        Boolean(tradeEntrySymbol)
+        && String(selectedWorkspaceRow?.instrument ?? "").trim().toUpperCase() === tradeEntrySymbol;
+      if (
+        workspaceMatchesSymbol
+        && selectedWorkspaceRow
+        && !matched.some((row) => String(row.lane_id ?? row.standalone_strategy_id ?? "") === String(selectedWorkspaceRow.lane_id ?? selectedWorkspaceRow.standalone_strategy_id ?? ""))
+      ) {
+        return [selectedWorkspaceRow, ...matched];
+      }
+      return matched;
+    },
+    [selectedWorkspaceRow, strategyPerformanceRows, tradeEntrySymbol],
+  );
+  const paperIntradayCurveRows = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = closedStrategyTradeRows
+      .filter((row) => String(row.exit_timestamp ?? row.entry_timestamp ?? "").slice(0, 10) === today)
+      .sort((left, right) => parseTimestampMs(left.exit_timestamp ?? left.entry_timestamp) - parseTimestampMs(right.exit_timestamp ?? right.entry_timestamp));
+    let running = 0;
+    return rows.map((row) => {
+      running += Number(row.realized_pnl ?? 0) || 0;
+      return {
+        timestamp: String(row.exit_timestamp ?? row.entry_timestamp ?? ""),
+        value: running,
+      };
+    });
+  }, [closedStrategyTradeRows]);
+  const liveIntradayCurveRows = useMemo(() => {
+    const fills = [...productionRecentFills]
+      .sort((left, right) => parseTimestampMs(left.updated_at ?? left.occurred_at) - parseTimestampMs(right.updated_at ?? right.occurred_at));
+    if (!fills.length) {
+      return productionTotals.total_current_day_pnl == null
+        ? []
+        : [{ timestamp: desktopState?.refreshedAt ?? new Date().toISOString(), value: Number(productionTotals.total_current_day_pnl ?? 0) || 0 }];
+    }
+    const currentValue = Number(productionTotals.total_current_day_pnl ?? 0) || 0;
+    return fills.map((row, index) => ({
+      timestamp: String(row.updated_at ?? row.occurred_at ?? desktopState?.refreshedAt ?? new Date().toISOString()),
+      value: currentValue * ((index + 1) / fills.length),
+    }));
+  }, [desktopState?.refreshedAt, productionRecentFills, productionTotals.total_current_day_pnl]);
+  const paperCalendarEntries = useMemo<CalendarSourceEntry[]>(
+    () => {
+      const entries: CalendarSourceEntry[] = [];
+      for (const row of closedStrategyTradeRows) {
+          const date = dateKeyFromTimestamp(row.exit_timestamp ?? row.entry_timestamp);
+          const pnl = numericOrNull(row.realized_pnl ?? row.gross_pnl);
+          if (!date || pnl === null) {
+            continue;
+          }
+          entries.push({
+            source: "paper",
+            date,
+            laneId: String(row.lane_id ?? "") || null,
+            strategyId: String(row.standalone_strategy_id ?? row.strategy_key ?? row.lane_id ?? row.instrument ?? "paper_lane"),
+            strategyName: String(row.strategy_name ?? row.standalone_strategy_label ?? row.lane_id ?? row.instrument ?? "Paper Lane"),
+            pnl,
+            tradeCount: Math.max(1, numericOrNull(row.trade_count) ?? 1),
+          });
+      }
+      return entries;
+    },
+    [closedStrategyTradeRows],
+  );
+  const liveCalendarEntries = useMemo<CalendarSourceEntry[]>(
+    () => {
+      const entries: CalendarSourceEntry[] = [];
+      for (const row of productionRecentFills) {
+          const date = dateKeyFromTimestamp(row.updated_at ?? row.occurred_at ?? row.fill_timestamp);
+          const pnl = numericOrNull(row.realized_pnl ?? row.fill_pnl ?? row.pnl ?? row.net_pnl ?? row.profit_loss);
+          if (!date || pnl === null) {
+            continue;
+          }
+          entries.push({
+            source: "live",
+            date,
+            laneId: null,
+            strategyId: String(row.strategy_id ?? row.strategy_tag ?? row.symbol ?? row.instrument ?? "live_fill"),
+            strategyName: String(row.strategy_name ?? row.strategy_tag ?? row.symbol ?? row.instrument ?? "Live Activity"),
+            pnl,
+            tradeCount: Math.max(1, numericOrNull(row.trade_count ?? row.filled_quantity ?? row.quantity) ?? 1),
+          });
+      }
+      return entries;
+    },
+    [productionRecentFills],
+  );
+  const benchmarkReplayCalendarEntries = useMemo<CalendarSourceEntry[]>(
+    () => {
+      const entries: CalendarSourceEntry[] = [];
+      for (const item of playbackLatestStudyItems) {
+        const summary = asRecord(item.summary);
+        const studyMode = String(item.study_mode ?? "").trim();
+        if (studyMode !== "baseline_parity_mode") {
+          continue;
+        }
+        for (const trade of asArray<JsonRecord>(summary.closed_trade_breakdown)) {
+          const date = dateKeyFromTimestamp(trade.exit_timestamp ?? trade.entry_timestamp);
+          const pnl = numericOrNull(trade.realized_pnl);
+          if (!date || pnl === null) {
+            continue;
+          }
+          entries.push({
+            source: "benchmark_replay",
+            date,
+            laneId: String(item.study_key ?? "") || null,
+            strategyId: String(item.strategy_id ?? item.study_key ?? item.symbol ?? "benchmark_replay"),
+            strategyName: String(item.label ?? item.strategy_id ?? item.symbol ?? "Benchmark Replay"),
+            pnl,
+            tradeCount: 1,
+          });
+        }
+      }
+      return entries;
+    },
+    [playbackLatestStudyItems],
+  );
+  const researchExecutionCalendarEntries = useMemo<CalendarSourceEntry[]>(
+    () => {
+      const entries: CalendarSourceEntry[] = [];
+      for (const item of playbackLatestStudyItems) {
+        const summary = asRecord(item.summary);
+        const studyMode = String(item.study_mode ?? "").trim();
+        if (studyMode !== "research_execution_mode") {
+          continue;
+        }
+        for (const trade of asArray<JsonRecord>(summary.closed_trade_breakdown)) {
+          const date = dateKeyFromTimestamp(trade.exit_timestamp ?? trade.entry_timestamp);
+          const pnl = numericOrNull(trade.realized_pnl);
+          if (!date || pnl === null) {
+            continue;
+          }
+          entries.push({
+            source: "research_execution",
+            date,
+            laneId: String(item.study_key ?? "") || null,
+            strategyId: String(item.strategy_id ?? item.study_key ?? item.symbol ?? "research_execution"),
+            strategyName: String(item.label ?? item.strategy_id ?? item.symbol ?? "Research Execution"),
+            pnl,
+            tradeCount: 1,
+          });
+        }
+      }
+      return entries;
+    },
+    [playbackLatestStudyItems],
+  );
+  const calendarEntriesBySource = useMemo(
+    () => ({
+      live: liveCalendarEntries,
+      paper: paperCalendarEntries,
+      benchmark_replay: benchmarkReplayCalendarEntries,
+      research_execution: researchExecutionCalendarEntries,
+    }),
+    [benchmarkReplayCalendarEntries, liveCalendarEntries, paperCalendarEntries, researchExecutionCalendarEntries],
+  );
+  const calendarAvailableSources = useMemo(
+    () =>
+      (Object.entries(calendarEntriesBySource) as Array<[Exclude<PnlCalendarSource, "all">, CalendarSourceEntry[]]>)
+        .filter(([, entries]) => entries.length > 0)
+        .map(([source]) => source),
+    [calendarEntriesBySource],
+  );
+  const calendarSourceSelection = useMemo(() => {
+    if (calendarSource === "all") {
+      const includedSources = calendarAvailableSources.length ? calendarAvailableSources : ["paper"];
+      const uniqueSources = [...new Set(includedSources)];
+      const mergedEntries = uniqueSources.flatMap((source) => calendarEntriesBySource[source as Exclude<PnlCalendarSource, "all">] ?? []);
+      return {
+        selectedSourceLabel: "All Accounts",
+        includedSources: uniqueSources,
+        entries: mergedEntries,
+        note:
+          uniqueSources.length > 1
+            ? `Combined only across provenance-safe daily streams: ${uniqueSources.map((source) => source.replace(/_/g, " ")).join(" + ")}.`
+            : `Only ${uniqueSources[0].replace(/_/g, " ")} currently exposes closed-trade daily history in the loaded workstation snapshot.`,
+      };
+    }
+    const entries = calendarEntriesBySource[calendarSource] ?? [];
+      return {
+        selectedSourceLabel: calendarSourceLabel(calendarSource),
+        includedSources: [calendarSource],
+        entries,
+      note:
+        entries.length > 0
+          ? `${calendarSource === "paper" ? "Persisted paper/runtime trade ledger." : calendarSource === "live" ? "Broker/live closed-fill stream." : calendarSource === "benchmark_replay" ? "Replay/backtest artifact stream." : "Research execution artifact stream."}`
+          : `${calendarSource === "benchmark_replay" ? "Replay" : calendarSource === "research_execution" ? "Research-execution" : sentenceCase(calendarSource)} daily history is not loaded in the current workstation snapshot.`,
+    };
+  }, [calendarAvailableSources, calendarEntriesBySource, calendarSource]);
+  const effectiveCalendarViewMode = calendarPeriod === "ytd" ? "line" : calendarViewMode;
+  const calendarRange = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    if (calendarPeriod === "weekly") {
+      const start = startOfWeek(calendarAnchorDate);
+      return { start, end: addDays(start, 4) };
+    }
+    if (calendarPeriod === "quarterly") {
+      return { start: startOfQuarter(calendarAnchorDate), end: endOfQuarter(calendarAnchorDate) };
+    }
+    if (calendarPeriod === "ytd") {
+      return { start: startOfYear(today), end: today };
+    }
+    if (calendarPeriod === "custom") {
+      return {
+        start: calendarCustomStart <= calendarCustomEnd ? calendarCustomStart : calendarCustomEnd,
+        end: calendarCustomEnd >= calendarCustomStart ? calendarCustomEnd : calendarCustomStart,
+      };
+    }
+    return { start: startOfMonth(calendarAnchorDate), end: endOfMonth(calendarAnchorDate) };
+  }, [calendarAnchorDate, calendarCustomEnd, calendarCustomStart, calendarPeriod]);
+  const calendarPeriodTitle = useMemo(
+    () => sourcePeriodLabel(calendarPeriod, calendarAnchorDate, calendarRange.start, calendarRange.end),
+    [calendarAnchorDate, calendarPeriod, calendarRange.end, calendarRange.start],
+  );
+  const calendarDayPoints = useMemo<CalendarDayPoint[]>(() => {
+    const grouped = new Map<string, { pnl: number; tradeCount: number; contributions: Map<string, CalendarStrategyContribution>; coveredSources: Set<Exclude<PnlCalendarSource, "all" | "live" | "paper">> }>();
+    const coverageDates = new Set<string>();
+    for (const source of calendarSourceSelection.includedSources) {
+      if (source === "benchmark_replay" || source === "research_execution") {
+        for (const dateKey of playbackCoverageDateKeysBySource[source]) {
+          if (dateKey >= calendarRange.start && dateKey <= calendarRange.end) {
+            coverageDates.add(dateKey);
+            const existing = grouped.get(dateKey) ?? { pnl: 0, tradeCount: 0, contributions: new Map(), coveredSources: new Set() };
+            existing.coveredSources.add(source);
+            grouped.set(dateKey, existing);
+          }
+        }
+      }
+    }
+    const filteredEntries = calendarSourceSelection.entries
+      .filter((entry) => entry.date >= calendarRange.start && entry.date <= calendarRange.end)
+      .sort((left, right) => left.date.localeCompare(right.date));
+    for (const entry of filteredEntries) {
+      const day = grouped.get(entry.date) ?? { pnl: 0, tradeCount: 0, contributions: new Map(), coveredSources: new Set() };
+      day.pnl += entry.pnl;
+      day.tradeCount += entry.tradeCount;
+      const contributionKey = `${entry.source}:${entry.strategyId}:${entry.laneId ?? ""}`;
+      const existing = day.contributions.get(contributionKey) ?? {
+        source: entry.source,
+        laneId: entry.laneId,
+        strategyId: entry.strategyId,
+        strategyName: entry.strategyName,
+        pnl: 0,
+        tradeCount: 0,
+      };
+      existing.pnl += entry.pnl;
+      existing.tradeCount += entry.tradeCount;
+      day.contributions.set(contributionKey, existing);
+      grouped.set(entry.date, day);
+    }
+    for (const dateKey of coverageDates) {
+      if (!grouped.has(dateKey)) {
+        grouped.set(dateKey, { pnl: 0, tradeCount: 0, contributions: new Map(), coveredSources: new Set() });
+      }
+    }
+    let running = 0;
+    return [...grouped.entries()]
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([date, payload]) => {
+        running += payload.pnl;
+        return {
+          date,
+          pnl: payload.pnl,
+          tradeCount: payload.tradeCount,
+          cumulative: running,
+          contributions: [...payload.contributions.values()].sort((left, right) => Math.abs(right.pnl) - Math.abs(left.pnl)),
+          coveredSources: [...payload.coveredSources.values()].sort(),
+        };
+      });
+  }, [calendarRange.end, calendarRange.start, calendarSourceSelection.entries, calendarSourceSelection.includedSources, playbackCoverageDateKeysBySource]);
+  const calendarDayPointMap = useMemo(() => new Map(calendarDayPoints.map((point) => [point.date, point])), [calendarDayPoints]);
+  const selectedCalendarDayPoint = useMemo(
+    () => (selectedCalendarDay ? calendarDayPointMap.get(selectedCalendarDay) ?? null : null),
+    [calendarDayPointMap, selectedCalendarDay],
+  );
+  const calendarDailyPnls = useMemo(() => calendarDayPoints.map((point) => point.pnl), [calendarDayPoints]);
+  const calendarGrossPnl = useMemo(() => calendarDailyPnls.reduce((sum, value) => sum + value, 0), [calendarDailyPnls]);
+  const calendarWinningDays = useMemo(() => calendarDailyPnls.filter((value) => value > 0).length, [calendarDailyPnls]);
+  const calendarLosingDays = useMemo(() => calendarDailyPnls.filter((value) => value < 0).length, [calendarDailyPnls]);
+  const calendarProfitFactor = useMemo(() => {
+    const grossWins = calendarDailyPnls.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
+    const grossLosses = Math.abs(calendarDailyPnls.filter((value) => value < 0).reduce((sum, value) => sum + value, 0));
+    if (grossWins <= 0 || grossLosses <= 0) {
+      return grossWins > 0 && grossLosses === 0 ? grossWins : null;
+    }
+    return grossWins / grossLosses;
+  }, [calendarDailyPnls]);
+  const calendarSharpe = useMemo(() => {
+    if (calendarDailyPnls.length < 2) {
+      return null;
+    }
+    const mean = calendarDailyPnls.reduce((sum, value) => sum + value, 0) / calendarDailyPnls.length;
+    const variance =
+      calendarDailyPnls.reduce((sum, value) => sum + ((value - mean) ** 2), 0) / Math.max(calendarDailyPnls.length - 1, 1);
+    const stdDev = Math.sqrt(variance);
+    if (!Number.isFinite(stdDev) || stdDev === 0) {
+      return null;
+    }
+    return (mean / stdDev) * Math.sqrt(252);
+  }, [calendarDailyPnls]);
+  const calendarMaxDrawdown = useMemo(() => {
+    let peak = 0;
+    let maxDrawdown = 0;
+    let cumulative = 0;
+    for (const value of calendarDailyPnls) {
+      cumulative += value;
+      if (cumulative > peak) {
+        peak = cumulative;
+      }
+      const drawdown = peak - cumulative;
+      if (drawdown > maxDrawdown) {
+        maxDrawdown = drawdown;
+      }
+    }
+    return maxDrawdown === 0 ? 0 : -maxDrawdown;
+  }, [calendarDailyPnls]);
+  const calendarPortfolioBase = useMemo(() => {
+    if (calendarSource === "live") {
+      return numericOrNull(productionBalances.liquidation_value ?? productionBalances.cash_balance ?? productionTotals.buying_power);
+    }
+    if (calendarSource === "paper" || calendarSource === "all") {
+      return numericOrNull(
+        asRecord(paperStrategyPerformance.portfolio_snapshot).starting_equity
+        ?? asRecord(paperStrategyPerformance.portfolio_snapshot).account_basis
+        ?? asRecord(paperStrategyPerformance.portfolio_snapshot).starting_balance,
+      );
+    }
+    return null;
+  }, [
+    calendarSource,
+    paperStrategyPerformance.portfolio_snapshot,
+    productionBalances.cash_balance,
+    productionBalances.liquidation_value,
+    productionTotals.buying_power,
+  ]);
+  const calendarPortfolioReturn = calendarPortfolioBase && calendarPortfolioBase !== 0 ? (calendarGrossPnl / calendarPortfolioBase) * 100 : null;
+  const calendarWinRate = calendarDayPoints.length ? (calendarWinningDays / calendarDayPoints.length) * 100 : null;
+  const calendarAvgDailyPnl = calendarDayPoints.length ? calendarGrossPnl / calendarDayPoints.length : null;
+  const calendarTotalTrades = useMemo(
+    () => calendarDayPoints.reduce((sum, point) => sum + point.tradeCount, 0),
+    [calendarDayPoints],
+  );
+  const calendarStreaks = useMemo(() => {
+    let bestWin = 0;
+    let maxLoss = 0;
+    let currentWins = 0;
+    let currentLosses = 0;
+    for (const value of calendarDailyPnls) {
+      if (value > 0) {
+        currentWins += 1;
+        currentLosses = 0;
+      } else if (value < 0) {
+        currentLosses += 1;
+        currentWins = 0;
+      } else {
+        currentWins = 0;
+        currentLosses = 0;
+      }
+      bestWin = Math.max(bestWin, currentWins);
+      maxLoss = Math.max(maxLoss, currentLosses);
+    }
+    return { bestWin, maxLoss };
+  }, [calendarDailyPnls]);
+  const calendarAlertRows = useMemo(() => {
+    const alerts: Array<{ label: string; note: string; tone: Tone }> = [];
+    if (calendarDayPoints.length) {
+      const latest = calendarDayPoints[calendarDayPoints.length - 1] ?? null;
+      if (latest && latest.cumulative >= Math.max(...calendarDayPoints.map((point) => point.cumulative))) {
+        alerts.push({ label: "High-Water Mark", note: `${formatCompactCurrency(latest.cumulative)} cumulative through ${latest.date}.`, tone: "good" });
+      }
+    }
+    if (calendarMaxDrawdown < -100) {
+      alerts.push({ label: "Drawdown Watch", note: `${formatCompactCurrency(calendarMaxDrawdown)} peak-to-trough drawdown in the selected period.`, tone: "danger" });
+    }
+    if (calendarStreaks.maxLoss >= 3) {
+      alerts.push({ label: "Loss Streak", note: `${calendarStreaks.maxLoss} consecutive losing days in the selected range.`, tone: "warn" });
+    }
+    if (calendarStreaks.bestWin >= 3) {
+      alerts.push({ label: "Win Streak", note: `${calendarStreaks.bestWin} consecutive winning days in the selected range.`, tone: "good" });
+    }
+    return alerts.slice(0, 3);
+  }, [calendarDayPoints, calendarMaxDrawdown, calendarStreaks.bestWin, calendarStreaks.maxLoss]);
+  const calendarKpis = useMemo(
+    () => [
+      { label: "Gross P&L", value: formatCompactCurrency(calendarGrossPnl), tone: pnlTone(calendarGrossPnl) },
+      { label: "Portfolio Return", value: formatPercentValue(calendarPortfolioReturn, 2), tone: pnlTone(calendarPortfolioReturn) },
+      { label: "Sharpe Ratio", value: formatRatioValue(calendarSharpe), tone: sharpeTone(calendarSharpe) },
+      { label: "Max Drawdown", value: formatCompactCurrency(calendarMaxDrawdown), tone: "danger" as Tone },
+      { label: "Win Rate", value: formatPercentValue(calendarWinRate), tone: winRateTone(calendarWinRate) },
+      { label: "Profit Factor", value: formatRatioValue(calendarProfitFactor), tone: sharpeTone(calendarProfitFactor) },
+      { label: "Avg Daily P&L", value: formatCompactCurrency(calendarAvgDailyPnl), tone: pnlTone(calendarAvgDailyPnl) },
+      { label: "Total Trades", value: formatShortNumber(calendarTotalTrades), tone: "muted" as Tone },
+      { label: "Best Win Streak", value: formatShortNumber(calendarStreaks.bestWin), tone: "good" as Tone },
+      { label: "Max Loss Streak", value: formatShortNumber(calendarStreaks.maxLoss), tone: "danger" as Tone },
+    ],
+    [calendarAvgDailyPnl, calendarGrossPnl, calendarMaxDrawdown, calendarPortfolioReturn, calendarProfitFactor, calendarSharpe, calendarStreaks.bestWin, calendarStreaks.maxLoss, calendarTotalTrades, calendarWinRate],
+  );
+  const calendarGridDays = useMemo(() => {
+    if (calendarPeriod === "weekly") {
+      const start = startOfWeek(calendarAnchorDate);
+      return Array.from({ length: 5 }, (_, index) => addDays(start, index));
+    }
+    if (calendarPeriod === "quarterly") {
+      const start = startOfQuarter(calendarAnchorDate);
+      const end = endOfQuarter(calendarAnchorDate);
+      return Array.from({ length: daysBetween(start, end) + 1 }, (_, index) => addDays(start, index));
+    }
+    const monthStart = startOfMonth(calendarAnchorDate);
+    const monthEnd = endOfMonth(calendarAnchorDate);
+    const leadingOffset = dateFromKey(monthStart).getDay();
+    const firstVisible = addDays(monthStart, -leadingOffset);
+    return Array.from({ length: 42 }, (_, index) => addDays(firstVisible, index)).filter((date) => {
+      if (calendarPeriod === "monthly") {
+        return true;
+      }
+      return date >= calendarRange.start && date <= calendarRange.end;
+    });
+  }, [calendarAnchorDate, calendarPeriod, calendarRange.end, calendarRange.start]);
+
+  useEffect(() => {
+    if (!calendarDayPoints.length) {
+      setSelectedCalendarDay(null);
+      return;
+    }
+    if (!selectedCalendarDay || !calendarDayPointMap.has(selectedCalendarDay)) {
+      setSelectedCalendarDay(calendarDayPoints[calendarDayPoints.length - 1]?.date ?? null);
+    }
+  }, [calendarDayPointMap, calendarDayPoints, selectedCalendarDay]);
+
+  useEffect(() => {
+    if (page !== "calendar" && page !== "strategies" && calendarContextLabel) {
+      setCalendarContextLabel(null);
+    }
+  }, [calendarContextLabel, page]);
+
+  const primaryNavItems = NAV_ITEMS.filter((item) => ["home", "calendar", "positions", "market", "strategies"].includes(item.id));
+  const utilityNavItems = NAV_ITEMS.filter((item) => !primaryNavItems.includes(item));
+  const processControlCards = [
+    {
+      label: "Dashboard/API",
+      status: desktopState?.backend.label ?? "Unknown",
+      tone: statusTone(desktopState?.backend.label),
+      onClick: () => void runCommand("restart-dashboard", () => api.restartDashboard()),
+      disabled: busyAction !== null,
+    },
+    {
+      label: "Paper Runtime",
+      status: formatValue(paperReadiness.runtime_phase ?? "STOPPED"),
+      tone: statusTone(paperReadiness.runtime_phase),
+      onClick: () => void runCommand("restart-paper-with-temp-paper", () => api.runDashboardAction("restart-paper-with-temp-paper"), {
+        confirmMessage: "Restart Runtime + Temp Paper will restart the paper soak with all enabled temporary paper lanes included. Proceed?",
+        requiresLive: true,
+      }),
+      disabled: busyAction !== null || !canRunLiveActions,
+    },
+    {
+      label: "Auth Gate",
+      status: authReadyForPaperStartup ? "READY" : "BLOCKED",
+      tone: authReadyForPaperStartup ? "good" : "warn",
+      onClick: () => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true }),
+      disabled: busyAction !== null || !canRunLiveActions,
+    },
+    {
+      label: "Entries",
+      status: formatValue(global.entries_enabled ?? paperReadiness.entries_enabled),
+      tone: statusTone(global.entries_enabled ?? paperReadiness.entries_enabled),
+      onClick: () => void runCommand("paper-resume-entries", () => api.runDashboardAction("paper-resume-entries"), { requiresLive: true }),
+      disabled: busyAction !== null || !canRunLiveActions,
+    },
+    {
+      label: "Production Link",
+      status: formatValue(productionLink.label ?? productionLink.status ?? "Unavailable"),
+      tone: statusTone(productionLink.label ?? productionLink.status),
+      onClick: () => {
+        window.location.hash = "#/positions";
+        setPage("positions");
+      },
+      disabled: false,
+    },
+    {
+      label: "Evidence",
+      status: "OPEN",
+      tone: "muted" as Tone,
+      onClick: () => {
+        window.location.hash = "#/diagnostics";
+        setPage("diagnostics");
+      },
+      disabled: false,
+    },
+  ];
+  const rosterSummaryCounts = {
+    live: dashboardRosterRows.filter((row) => rosterStatusChip(row) === "LIVE" || rosterStatusChip(row) === "ATTACH").length,
+    paper: dashboardRosterRows.filter((row) => rosterStatusChip(row) === "PAPER" || rosterStatusChip(row) === "BENCH").length,
+    candidate: dashboardRosterRows.filter((row) => rosterStatusChip(row) === "CAND").length,
+    paused: dashboardRosterRows.filter((row) => rosterStatusChip(row) === "PAUSED").length,
+  };
   const replaySummaryMetrics: Array<{ label: string; value: string; tone?: Tone }> = playbackReplaySummaryAvailable
     ? [
         { label: "Standalone Strategies", value: formatShortNumber(playbackAggregateSummary.standalone_strategy_count) },
@@ -5591,17 +7072,32 @@ function paperStartupCategoryTone(category: string): Tone {
     { label: "Current Session", value: paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date ?? "Unknown", tone: statusTone(paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date) },
     { label: "Last Refresh", value: formatRelativeAge(desktopState?.refreshedAt), tone: "muted" as const },
   ];
+  const showGlobalStatusBanner = !PRIMARY_WORKSTATION_PAGES.has(page);
+  const showGlobalCommandStrip = !PRIMARY_WORKSTATION_PAGES.has(page);
+  const showWorkspaceContextBar = false;
+  const showPrimaryCommandResult = page === "home" || page === "market" || page === "diagnostics";
+
+  currentSectionPageContext = page;
 
   return (
     <div className="operator-app">
       <aside className="sidebar">
         <div className="brand-block">
-          <div className="brand-eyebrow">Trading Operations Desktop</div>
-          <div className="brand-title">MGC Operator</div>
-          <div className="brand-subtitle">Local-first operator console</div>
+          <div className="brand-line">
+            <div className="brand-title">MGC Trade Engine</div>
+            <div className="brand-version">{desktopState?.appVersion ?? "v0.51"}</div>
+          </div>
+          <div className="brand-meta-row">
+            <Badge label={desktopState?.backend.healthStatus === "ok" ? "Connected" : desktopState?.backend.label ?? "Disconnected"} tone={statusTone(desktopState?.backend.healthStatus === "ok" ? "ready" : desktopState?.backend.label)} />
+            <span className="brand-eyebrow">Shared Paper API</span>
+            <span className="ticker-symbol">{headerSymbol}</span>
+            <span className="ticker-price">{formatValue(headerLastPrice)}</span>
+            <span className={`ticker-change ${headerNetChangeTone}`}>{formatValue(headerNetChange)}</span>
+            <span className="ticker-time">{clock.toLocaleTimeString()}</span>
+          </div>
         </div>
         <nav className="nav-stack">
-          {NAV_ITEMS.map((item) => (
+          {primaryNavItems.map((item) => (
             <button
               key={item.id}
               data-page={item.id}
@@ -5616,42 +7112,59 @@ function paperStartupCategoryTone(category: string): Tone {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <MetricMini label="Source" value={desktopState?.source.label ?? "Loading"} tone={statusTone(desktopState?.source.label)} />
-          <MetricMini label="Backend" value={desktopState?.backend.label ?? "Unknown"} tone={statusTone(desktopState?.backend.label)} />
-          <MetricMini label="Refresh" value={settings.refreshSeconds > 0 ? `${settings.refreshSeconds}s` : "Manual"} />
-          <MetricMini label="Version" value={desktopState?.appVersion ?? "0.0.0"} />
+          <div className="header-utility-links">
+            {utilityNavItems.map((item) => (
+              <button
+                key={item.id}
+                data-page={item.id}
+                className={`utility-nav-item ${page === item.id ? "active" : ""}`}
+                onClick={() => {
+                  window.location.hash = `#/${item.id}`;
+                  setPage(item.id);
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <div className="header-chip-row">
+            <MetricMini label="Mode" value={global.mode_label ?? "Loading"} tone={statusTone(global.mode_label)} />
+            <MetricMini label="Source" value={desktopState?.source.label ?? "Loading"} tone={statusTone(desktopState?.source.label)} />
+            <MetricMini label="Session" value={paperReadiness.current_detected_session ?? "Unknown"} />
+          </div>
+          <button
+            className="danger-button"
+            disabled={busyAction !== null || !canRunLiveActions}
+            onClick={() =>
+              void runCommand("paper-halt-entries", () => api.runDashboardAction("paper-halt-entries"), {
+                confirmMessage: "Emergency Halt will stop new paper entries immediately. Proceed?",
+                requiresLive: true,
+              })
+            }
+          >
+            {busyAction === "paper-halt-entries" ? "Halting..." : "Emergency Halt"}
+          </button>
         </div>
       </aside>
 
       <div className="shell">
         <header className="topbar">
-          <div>
+          <div className="topbar-copy">
             <div className="page-eyebrow">{pageTitle(page)}</div>
-            <h1 className="page-title">Operator Control Surface</h1>
+            <h1 className="page-title">{pageTitle(page)}</h1>
           </div>
           <div className="topbar-status">
-            <Badge label={global.mode_label ?? "IDLE"} tone={statusTone(global.mode_label)} />
-            <Badge label={desktopState?.source.label ?? "UNKNOWN"} tone={statusTone(desktopState?.source.label)} />
-            <Badge label={desktopState?.backend.label ?? "UNKNOWN"} tone={statusTone(desktopState?.backend.label)} />
+            <Badge label={desktopState?.backend.healthStatus === "ok" ? "Backend Live" : desktopState?.backend.label ?? "Unknown"} tone={statusTone(desktopState?.backend.healthStatus === "ok" ? "ready" : desktopState?.backend.label)} />
+            <Badge label={authReadyForPaperStartup ? "Auth Ready" : "Auth Blocked"} tone={authReadyForPaperStartup ? "good" : "warn"} />
+            <Badge label={tempPaperMismatchActive ? "Temp Paper Blocked" : "Temp Paper Clear"} tone={tempPaperMismatchActive ? "warn" : "good"} />
             <div className="time-card">
               <div className="time-label">Session Time</div>
               <div className="time-value">{clock.toLocaleString()}</div>
             </div>
-            <button
-              className="danger-button"
-              disabled={busyAction !== null || !canRunLiveActions}
-              onClick={() =>
-                void runCommand("paper-halt-entries", () => api.runDashboardAction("paper-halt-entries"), {
-                  confirmMessage: "Emergency Halt will stop new paper entries immediately. Proceed?",
-                  requiresLive: true,
-                })
-              }
-            >
-              {busyAction === "paper-halt-entries" ? "Halting..." : "Emergency Halt"}
-            </button>
           </div>
         </header>
 
+        {showGlobalStatusBanner ? (
         <section className={`status-banner ${statusTone(desktopState?.source.label ?? desktopState?.backend.label)}`}>
           <div className="status-banner-main">
             <div className="status-banner-title">
@@ -5693,7 +7206,9 @@ function paperStartupCategoryTone(category: string): Tone {
             </div>
           </div>
         </section>
+        ) : null}
 
+        {showGlobalCommandStrip ? (
         <div className="action-row">
           <button className="panel-button" disabled={busyAction !== null} onClick={() => void manualRefresh()}>
             Refresh
@@ -5752,6 +7267,42 @@ function paperStartupCategoryTone(category: string): Tone {
           </button>
           {busyAction ? <span className="busy-indicator">Working: {busyAction}</span> : null}
         </div>
+        ) : null}
+
+        {showWorkspaceContextBar ? (
+        <section className="workspace-context-bar">
+          <div className="workspace-context-copy">
+            <div className="workspace-context-kicker">Selected Workspace</div>
+            <div className="workspace-context-title">{compactBranchLabel(selectedWorkspaceRow)}</div>
+            <div className="workspace-context-meta">
+              <Badge label={laneClassLabel(selectedWorkspaceRow)} tone={paperStrategyClassTone(selectedWorkspaceRow)} />
+              <Badge label={selectedWorkspaceDesignation} tone={selectedWorkspaceRow?.benchmark_designation ? "warn" : selectedWorkspaceRow?.candidate_designation ? "good" : "muted"} />
+              <Badge label={selectedWorkspaceRuntimeLabel} tone={selectedWorkspaceRuntimeLabel === "Attached Live" ? "good" : selectedWorkspaceRuntimeLabel === "Audit Only" ? "warn" : "muted"} />
+              <span>{selectedWorkspaceInstrument || "No instrument"}</span>
+              <span>Exec {formatValue(selectedWorkspaceRow?.execution_timeframe ?? "1m")}</span>
+              <span>Context {selectedWorkspaceContextTimes}</span>
+              <span>Last eval {formatTimestamp(selectedWorkspaceRow?.last_execution_bar_evaluated_at)}</span>
+            </div>
+          </div>
+          <div className="workspace-context-actions">
+            <button className={`panel-button subtle ${page === "strategies" ? "active-pill" : ""}`} onClick={() => selectWorkspaceLane(String(selectedWorkspaceRow?.lane_id ?? ""), { navigateTo: "strategies" })}>
+              Open Deep-Dive
+            </button>
+            <button className={`panel-button subtle ${page === "market" ? "active-pill" : ""}`} onClick={() => selectWorkspaceLane(String(selectedWorkspaceRow?.lane_id ?? ""), { navigateTo: "market" })}>
+              Open Trade Entry
+            </button>
+            <button
+              className="panel-button subtle"
+              onClick={() => {
+                window.location.hash = "#/diagnostics";
+                setPage("diagnostics");
+              }}
+            >
+              Open Evidence
+            </button>
+          </div>
+        </section>
+        ) : null}
 
         {desktopState?.errors?.length ? (
           <section className="notice-strip">
@@ -5763,7 +7314,7 @@ function paperStartupCategoryTone(category: string): Tone {
           </section>
         ) : null}
 
-        {lastResult ? (
+        {lastResult && showPrimaryCommandResult ? (
           <section className={`command-result ${lastResult.ok ? "success" : "failure"}`}>
             <div className="command-result-title">{lastResult.message}</div>
             {lastResult.detail ? <div className="command-result-body">{lastResult.detail}</div> : null}
@@ -5771,6 +7322,7 @@ function paperStartupCategoryTone(category: string): Tone {
           </section>
         ) : null}
 
+        {page === "diagnostics" ? (
         <section className="recent-actions-card">
           <div className="section-header">
             <div>
@@ -5795,12 +7347,171 @@ function paperStartupCategoryTone(category: string): Tone {
             <div className="placeholder-note">No operator actions have been run in this desktop session yet.</div>
           )}
         </section>
+        ) : null}
 
         <main className="content">
           {loading ? <Section title="Loading">Loading operator state…</Section> : null}
 
           {!loading && page === "home" ? (
             <>
+              <Section
+                title="Control Center"
+                subtitle="Shared-paper runtime control, operating posture, and strategy-universe summary"
+                className="dashboard-command-center"
+                headerClassName="section-header-tight"
+              >
+                <div className="dashboard-command-grid">
+                  <div className="dashboard-command-column">
+                    <div className="process-control-grid">
+                      {processControlCards.map((card) => (
+                        <button
+                          key={card.label}
+                          className={`process-control-card ${card.tone}`}
+                          disabled={card.disabled}
+                          onClick={card.onClick}
+                        >
+                          <span className={`process-dot ${card.tone}`} />
+                          <span className="process-control-label">{card.label}</span>
+                          <span className="process-control-status">{card.status}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <div className="action-row inline dashboard-primary-actions">
+                      <ControlButton
+                        label="Start Runtime"
+                        onClick={() => void runCommand("start-paper", () => api.runDashboardAction("start-paper"), { requiresLive: true })}
+                        busyAction={busyAction}
+                        disabled={!canRunLiveActions}
+                      />
+                      <ControlButton
+                        label="Restart Runtime + Temp Paper"
+                        onClick={() =>
+                          void runCommand("restart-paper-with-temp-paper", () => api.runDashboardAction("restart-paper-with-temp-paper"), {
+                            confirmMessage: "Restart Runtime + Temp Paper will restart the paper soak with all enabled temporary paper lanes included. Proceed?",
+                            requiresLive: true,
+                          })
+                        }
+                        busyAction={busyAction}
+                        disabled={!canRunLiveActions}
+                      />
+                      <ControlButton
+                        label="Auth Gate Check"
+                        onClick={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true })}
+                        busyAction={busyAction}
+                        disabled={!canRunLiveActions}
+                      />
+                    </div>
+                  </div>
+                  <div className="dashboard-command-column">
+                    <div className="metric-grid dashboard-overview-grid">
+                      <MetricCard label="Runtime Mode" value={formatValue(global.mode_label ?? runtimeValues.runtime_status ?? "Unknown")} tone={statusTone(global.mode_label ?? runtimeValues.runtime_status)} />
+                      <MetricCard label="Paper Runtime" value={formatValue(paperReadiness.runtime_phase ?? "STOPPED")} tone={statusTone(paperReadiness.runtime_phase)} />
+                      <MetricCard label="Auth" value={authReadyForPaperStartup ? "READY" : "NOT READY"} tone={authReadyForPaperStartup ? "good" : "warn"} />
+                      <MetricCard label="Entries Enabled" value={formatValue(global.entries_enabled ?? paperReadiness.entries_enabled)} tone={statusTone(global.entries_enabled ?? paperReadiness.entries_enabled)} />
+                      <MetricCard label="Execution" value="1m decision surface" tone="good" />
+                      <MetricCard label="Context" value="Completed 5m context" tone="muted" />
+                      <MetricCard label="ATP Bench" value={formatShortNumber(atpBenchmarkRows.length)} tone={atpBenchmarkRows.length ? "warn" : "muted"} />
+                      <MetricCard label="ATP Cand" value={formatShortNumber(atpCandidateRows.length)} tone={atpCandidateRows.length ? "good" : "muted"} />
+                    </div>
+                    <div className="status-chip-row dashboard-status-chip-row">
+                      <Badge label={`LIVE ${rosterSummaryCounts.live}`} tone="good" />
+                      <Badge label={`PAPER ${rosterSummaryCounts.paper}`} tone="muted" />
+                      <Badge label={`CAND ${rosterSummaryCounts.candidate}`} tone="warn" />
+                      <Badge label={`PAUSED ${rosterSummaryCounts.paused}`} tone="muted" />
+                      <Badge label={tempPaperMismatchActive ? "TEMP PAPER BLOCKED" : "TEMP PAPER CLEAR"} tone={tempPaperMismatchActive ? "danger" : "good"} />
+                    </div>
+                  </div>
+                </div>
+              </Section>
+
+              <Section
+                title={`Strategy Roster — ${dashboardRosterRows.length} Lanes`}
+                subtitle="Benchmark, candidate, temporary, and admitted lanes in a scan-first grid. Click any card to jump into Strategy Deep-Dive."
+                className="dashboard-roster-section"
+                headerClassName="section-header-tight"
+              >
+                <div className="strategy-roster-grid">
+                  {dashboardRosterRows.map((row) => {
+                    const performance = strategyPerformanceRows.find((candidate) => String(candidate.lane_id ?? "") === String(row.lane_id ?? "")) ?? null;
+                    const pnlValue = Number(
+                      performance?.day_pnl ?? performance?.realized_pnl ?? row.realized_pnl ?? row.unrealized_pnl ?? 0,
+                    ) || 0;
+                    return (
+                      <button
+                        key={String(row.lane_id ?? row.branch)}
+                        className={`strategy-card strategy-card-${rosterCardAccentClass(row)} ${String(selectedWorkspaceLaneId) === String(row.lane_id ?? "") ? "active" : ""}`}
+                        onClick={() => {
+                          selectWorkspaceLane(String(row.lane_id ?? ""), { navigateTo: "strategies" });
+                        }}
+                      >
+                        <div className="strategy-card-header">
+                          <div className="strategy-card-kicker">{formatValue(row.instrument ?? performance?.instrument ?? "Lane")}</div>
+                          <Badge label={rosterStatusChip(row)} tone={rosterStatusTone(row)} />
+                        </div>
+                        <div className="strategy-card-title">{compactBranchLabel(row)}</div>
+                        <div className={`strategy-card-pnl ${pnlTone(pnlValue)}`}>{renderPnlValue(pnlValue)}</div>
+                        <div className="strategy-card-meta">
+                          <span>{designationLabel(row)}</span>
+                          <span>{stagedPostureLabel(row)}</span>
+                        </div>
+                        <div className="strategy-card-footer">
+                          <span>{cadenceLabel(row)}</span>
+                          <span>{runtimeAttachmentLabel(row)}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </Section>
+
+              <Section title="Strategy Roster Table" subtitle="Dense secondary table retained for scan-heavy operator workflows and audit cross-checks">
+                <DataTable
+                  columns={[
+                    { key: "branch", label: "Lane", render: (row) => formatValue(row.branch ?? row.display_name ?? row.lane_id) },
+                    { key: "lane_class_label", label: "Class", render: (row) => <Badge label={laneClassLabel(row)} tone={paperStrategyClassTone(row)} /> },
+                    { key: "designation_label", label: "Designation", render: (row) => <Badge label={designationLabel(row)} tone={row.benchmark_designation ? "warn" : row.candidate_designation ? "good" : "muted"} /> },
+                    { key: "strategy_status", label: "Status", render: (row) => <Badge label={formatValue(row.strategy_status ?? row.current_strategy_status ?? "Unknown")} tone={statusTone(row.strategy_status ?? row.current_strategy_status)} /> },
+                    { key: "participation_policy", label: "Participation", render: (row) => formatValue(row.participation_policy ?? "Unavailable") },
+                    { key: "posture", label: "Current Posture", render: (row) => stagedPostureLabel(row) },
+                    { key: "cadence", label: "Cadence", render: (row) => cadenceLabel(row) },
+                    { key: "runtime_attachment", label: "Runtime", render: (row) => <Badge label={runtimeAttachmentLabel(row)} tone={runtimeAttachmentLabel(row) === "Attached Live" ? "good" : runtimeAttachmentLabel(row) === "Audit Only" ? "warn" : "muted"} /> },
+                    { key: "last_execution_bar_evaluated_at", label: "Last 1m Eval", render: (row) => formatTimestamp(row.last_execution_bar_evaluated_at) },
+                    {
+                      key: "detail",
+                      label: "Detail",
+                      render: (row) => (
+                        <button
+                          className="panel-button subtle"
+                          onClick={() => {
+                            setStrategyLensIdentityFilter(standaloneStrategyId(row));
+                            selectWorkspaceLane(String(row.lane_id ?? ""), { navigateTo: "strategies" });
+                          }}
+                        >
+                          Open Strategy
+                        </button>
+                      ),
+                    },
+                  ]}
+                  rows={dashboardRosterRows.slice(0, 14)}
+                  emptyLabel="No shared paper lanes are currently available in the roster."
+                />
+              </Section>
+
+              <Section title="ATP / Temp Paper Truth" subtitle="Unambiguous view of whether ATP and temporary paper lanes exist, attach live, stay audit-only, or are not loaded">
+                <div className="metric-grid">
+                  <MetricCard label="ATP Benchmark Lanes" value={formatShortNumber(atpBenchmarkRows.length)} tone={atpBenchmarkRows.length ? "warn" : "muted"} />
+                  <MetricCard label="ATP Candidate Lanes" value={formatShortNumber(atpCandidateRows.length)} tone={atpCandidateRows.length ? "good" : "muted"} />
+                  <MetricCard label="ATP Attached Live" value={formatShortNumber(atpStrategyRows.filter((row) => runtimeAttachmentLabel(row) === "Attached Live").length)} tone={atpStrategyRows.some((row) => runtimeAttachmentLabel(row) === "Attached Live") ? "good" : "muted"} />
+                  <MetricCard label="Temp Paper Enabled" value={formatShortNumber(temporaryPaperRuntimeIntegrity.enabled_in_app_count ?? temporaryPaperStrategyRows.length)} tone={Number(temporaryPaperRuntimeIntegrity.enabled_in_app_count ?? temporaryPaperStrategyRows.length ?? 0) > 0 ? "warn" : "good"} />
+                  <MetricCard label="Temp Paper Loaded" value={formatShortNumber(temporaryPaperRuntimeIntegrity.loaded_in_runtime_count ?? 0)} tone={Number(temporaryPaperRuntimeIntegrity.loaded_in_runtime_count ?? 0) > 0 ? "good" : "muted"} />
+                  <MetricCard label="Temp Paper Audit-Only" value={formatShortNumber(temporaryPaperRuntimeIntegrity.snapshot_only_count ?? 0)} tone={Number(temporaryPaperRuntimeIntegrity.snapshot_only_count ?? 0) > 0 ? "warn" : "good"} />
+                </div>
+                <div className="notice-strip compact">
+                  <div>ATP benchmark lanes remain explicit benchmark truth. ATP candidate lanes remain separate candidate-staged identities. Temporary paper rows are secondary audit/runtime-integrity surfaces, not the main operator path.</div>
+                  <div>Current temp-paper integrity: {formatValue(temporaryPaperRuntimeIntegrity.mismatch_status ?? "UNKNOWN")} | Enabled {formatShortNumber(temporaryPaperRuntimeIntegrity.enabled_in_app_count ?? 0)} | Loaded {formatShortNumber(temporaryPaperRuntimeIntegrity.loaded_in_runtime_count ?? 0)}.</div>
+                </div>
+              </Section>
+
               <Section title="Desktop Startup" subtitle="Backend bind, chosen URL, and ownership">
                 <StartupPanel
                   desktopState={desktopState}
@@ -7009,8 +8720,375 @@ function paperStartupCategoryTone(category: string): Tone {
             </>
           ) : null}
 
+          {!loading && page === "calendar" ? (
+            <>
+              <Section
+                title="P&L Calendar"
+                subtitle="Historical performance workspace with provenance-safe source selection and direct routing into strategy detail"
+                className="calendar-page-section"
+                headerClassName="section-header-tight"
+              >
+                <div className="calendar-toolbar">
+                  <div className="calendar-period-group" role="group" aria-label="Calendar period">
+                    {[
+                      ["monthly", "Monthly"],
+                      ["weekly", "Weekly"],
+                      ["quarterly", "Quarterly"],
+                      ["ytd", "YTD"],
+                      ["custom", "Custom"],
+                    ].map(([value, label]) => (
+                      <button
+                        key={value}
+                        className={`calendar-pill ${calendarPeriod === value ? "active" : ""}`}
+                        onClick={() => setCalendarPeriod(value as PnlCalendarPeriod)}
+                        data-calendar-period={value}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="calendar-mode-row">
+                    <div className="calendar-view-group" role="group" aria-label="Calendar view">
+                      {[
+                        ["calendar", "Calendar"],
+                        ["line", "Line Graph"],
+                        ["bar", "Bar"],
+                      ].map(([value, label]) => (
+                        <button
+                          key={value}
+                          className={`calendar-pill ${effectiveCalendarViewMode === value ? "active" : ""}`}
+                          onClick={() => setCalendarViewMode(value as PnlCalendarViewMode)}
+                          disabled={calendarPeriod === "ytd" && value === "calendar"}
+                          data-calendar-view-toggle={value}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="calendar-nav-group">
+                      <button
+                        className="calendar-nav-button"
+                        onClick={() =>
+                          setCalendarAnchorDate((current) =>
+                            calendarPeriod === "weekly"
+                              ? addDays(current, -7)
+                              : calendarPeriod === "quarterly"
+                                ? addMonths(current, -3)
+                                : addMonths(current, -1),
+                          )
+                        }
+                        aria-label="Previous period"
+                      >
+                        &lt;
+                      </button>
+                      <div className="calendar-period-label">{calendarPeriodTitle}</div>
+                      <button
+                        className="calendar-nav-button"
+                        onClick={() =>
+                          setCalendarAnchorDate((current) =>
+                            calendarPeriod === "weekly"
+                              ? addDays(current, 7)
+                              : calendarPeriod === "quarterly"
+                                ? addMonths(current, 3)
+                                : addMonths(current, 1),
+                          )
+                        }
+                        aria-label="Next period"
+                      >
+                        &gt;
+                      </button>
+                    </div>
+                  </div>
+                  <div className="calendar-filter-row">
+                    <label className="settings-field compact">
+                      <span>Truth Basis</span>
+                      <select value={calendarSource} onChange={(event) => setCalendarSource(event.target.value as PnlCalendarSource)} data-calendar-source>
+                        <option value="all">All Accounts</option>
+                        <option value="live">Live</option>
+                        <option value="paper">Paper</option>
+                        <option value="benchmark_replay">Benchmark / Replay</option>
+                        <option value="research_execution">Research Execution</option>
+                      </select>
+                    </label>
+                    {calendarPeriod === "custom" ? (
+                      <div className="calendar-custom-range">
+                        <label className="settings-field compact">
+                          <span>From</span>
+                          <input type="date" value={calendarCustomStart} onChange={(event) => setCalendarCustomStart(event.target.value)} />
+                        </label>
+                        <label className="settings-field compact">
+                          <span>To</span>
+                          <input type="date" value={calendarCustomEnd} onChange={(event) => setCalendarCustomEnd(event.target.value)} />
+                        </label>
+                      </div>
+                    ) : null}
+                    <div className="calendar-toolbar-actions">
+                      <button
+                        className="panel-button subtle"
+                        onClick={() =>
+                          void api.copyText([
+                            "date,gross_pnl,trade_count,cumulative_pnl",
+                            ...calendarDayPoints.map((point) => `${point.date},${point.pnl.toFixed(2)},${point.tradeCount},${point.cumulative.toFixed(2)}`),
+                          ].join("\n"))
+                        }
+                      >
+                        Copy CSV
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="notice-strip compact calendar-provenance-strip">
+                  <div><strong>Source:</strong> {calendarSourceSelection.selectedSourceLabel}</div>
+                  <div>{calendarSourceSelection.note}</div>
+                </div>
+
+                {calendarAlertRows.length ? (
+                  <div className="calendar-alert-strip">
+                    {calendarAlertRows.map((alert) => (
+                      <div key={alert.label} className={`calendar-alert-card ${alert.tone}`}>
+                        <div className="calendar-alert-label">{alert.label}</div>
+                        <div className="calendar-alert-note">{alert.note}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div className="calendar-kpi-strip">
+                  {calendarKpis.map((metric) => (
+                    <MetricCard key={metric.label} label={metric.label} value={metric.value} tone={metric.tone} />
+                  ))}
+                </div>
+
+                {effectiveCalendarViewMode === "calendar" ? (
+                  <div className="calendar-board-shell" data-calendar-surface="monthly">
+                    <div className="calendar-weekday-row">
+                      {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label) => (
+                        <div key={label} className="calendar-weekday-cell">{label}</div>
+                      ))}
+                    </div>
+                    <div className={`calendar-grid ${calendarPeriod === "weekly" ? "weekly" : ""}`}>
+                      {calendarGridDays.map((dateKey) => {
+                        const point = calendarDayPointMap.get(dateKey) ?? null;
+                        const isSelected = selectedCalendarDay === dateKey;
+                        const isToday = dateKey === new Date().toISOString().slice(0, 10);
+                        const outsideMonth = calendarPeriod === "monthly" && !dateKey.startsWith(startOfMonth(calendarAnchorDate).slice(0, 7));
+                        const weekend = isWeekendDate(dateKey);
+                        return (
+                          <button
+                            key={dateKey}
+                            className={[
+                              "calendar-day-cell",
+                              point ? (point.pnl >= 0 ? "positive" : "negative") : weekend ? "weekend" : "flat",
+                              isSelected ? "selected" : "",
+                              isToday ? "today" : "",
+                              outsideMonth ? "outside-month" : "",
+                            ].filter(Boolean).join(" ")}
+                            onClick={() => setSelectedCalendarDay(dateKey)}
+                            data-calendar-day={dateKey}
+                          >
+                            <div className="calendar-day-number">{dateFromKey(dateKey).getDate()}</div>
+                            {weekend && !point ? (
+                              <div className="calendar-day-weekend">Weekend</div>
+                            ) : (
+                              <>
+                                <div className={`calendar-day-pnl ${point ? pnlTone(point.pnl) : "muted"}`}>{point ? formatSignedCompactWhole(point.pnl) : "—"}</div>
+                                <div className="calendar-day-meta">
+                                  <span>
+                                    {point
+                                      ? point.tradeCount > 0
+                                        ? `${point.tradeCount}T`
+                                        : point.coveredSources.length
+                                          ? "Covered"
+                                          : "0T"
+                                      : "No trades"}
+                                  </span>
+                                  <span>{point ? `cum:${formatSignedCompactWhole(point.cumulative)}` : ""}</span>
+                                </div>
+                              </>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <CalendarHistoryChart
+                    mode={effectiveCalendarViewMode}
+                    title={effectiveCalendarViewMode === "line" ? "Cumulative + Daily Progression" : "Daily P&L Bars"}
+                    subtitle={effectiveCalendarViewMode === "line" ? "Cumulative curve uses completed day totals; daily series stays provenance-safe to the selected source." : "Daily P&L bars for the currently selected source and period."}
+                    points={calendarDayPoints}
+                  />
+                )}
+
+                {selectedCalendarDayPoint ? (
+                  <CalendarDayDetailPanel
+                    day={selectedCalendarDayPoint}
+                    sourceLabel={`${calendarSourceSelection.selectedSourceLabel} • ${calendarPeriodTitle}`}
+                    onClose={() => setSelectedCalendarDay(null)}
+                    onOpenStrategy={openCalendarContributionStrategy}
+                  />
+                ) : null}
+              </Section>
+            </>
+          ) : null}
+
           {!loading && page === "strategies" ? (
             <>
+              <Section
+                title="Strategy Deep-Dive Workspace"
+                subtitle="Select one strategy lane, inspect core performance, and verify current runtime posture without opening the analysis lab first"
+                className="strategy-deep-dive-section"
+                headerClassName="section-header-tight"
+              >
+                {selectedWorkspaceRow ? (
+                  <div className="local-workspace-strip">
+                    <div className="local-workspace-copy">
+                      <div className="local-workspace-kicker">Selected Workspace</div>
+                      <div className="local-workspace-title">{compactBranchLabel(selectedWorkspaceRow)}</div>
+                      <div className="local-workspace-meta">
+                        <Badge label={laneClassLabel(selectedWorkspaceRow)} tone={paperStrategyClassTone(selectedWorkspaceRow)} />
+                        <Badge label={selectedWorkspaceDesignation} tone={selectedWorkspaceRow?.benchmark_designation ? "warn" : selectedWorkspaceRow?.candidate_designation ? "good" : "muted"} />
+                        <Badge label={runtimeAttachmentLabel(selectedWorkspaceRow)} tone={runtimeAttachmentLabel(selectedWorkspaceRow) === "Attached Live" ? "good" : runtimeAttachmentLabel(selectedWorkspaceRow) === "Audit Only" ? "warn" : "muted"} />
+                        <span>{selectedWorkspaceInstrument || "No instrument"}</span>
+                        <span>Exec {formatValue(selectedWorkspaceRow?.execution_timeframe ?? "1m")}</span>
+                        <span>Context {selectedWorkspaceContextTimes}</span>
+                        <span>Last eval {formatTimestamp(selectedWorkspaceRow?.last_execution_bar_evaluated_at)}</span>
+                      </div>
+                    </div>
+                    <div className="local-workspace-actions">
+                      <button className="panel-button subtle" onClick={() => selectWorkspaceLane(String(selectedWorkspaceRow?.lane_id ?? ""), { navigateTo: "market" })}>
+                        Open Trade Entry
+                      </button>
+                      <button
+                        className="panel-button subtle"
+                        onClick={() => {
+                          window.location.hash = "#/diagnostics";
+                          setPage("diagnostics");
+                        }}
+                      >
+                        Open Evidence
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {playback.available === true ? (
+                  <div className="notice-strip compact strategy-context-strip">
+                    <div><strong>Historical Playback</strong> {playbackSyncLabel}</div>
+                    <div><strong>Run</strong> {playbackRunStampLabel}</div>
+                    <div><strong>Study Catalog</strong> {formatShortNumber(playbackStudyItems.length)} catalog rows / {formatShortNumber(playbackLatestStudyItems.length)} latest unique studies</div>
+                    <div><strong>Strategy Coverage</strong> {formatShortNumber(playbackStrategyCount)} strategies / {formatShortNumber(playbackLaneCount)} lanes</div>
+                    <div><strong>Where To Inspect</strong> Strategy Analysis Lab below carries the ranked replay/back-cast lanes and linked study surface.</div>
+                  </div>
+                ) : null}
+                <div className="strategy-focus-layout">
+                  <div className="strategy-focus-sidebar">
+                    <label className="settings-field">
+                      <span>Select Strategy</span>
+                      <select value={selectedWorkspaceLaneId} onChange={(event) => selectWorkspaceLane(event.target.value)}>
+                        {dashboardRosterRows.map((row) => (
+                          <option key={String(row.lane_id ?? row.branch)} value={String(row.lane_id ?? "")}>
+                            {compactBranchLabel(row)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {calendarContextLabel ? (
+                      <div className="notice-strip compact strategy-context-strip">
+                        <div><strong>Calendar Context</strong></div>
+                        <div>{calendarContextLabel}</div>
+                      </div>
+                    ) : null}
+                    <div className="metric-grid compact strategy-metric-grid">
+                      <MetricCard label="Sharpe Proxy" value={formatValue(selectedWorkspacePerformanceRow?.operator_interpretation_state ?? "—")} />
+                      <MetricCard label="Win Rate" value={formatValue(selectedWorkspacePerformanceRow?.operator_interpretation ?? "Sparse history")} />
+                      <MetricCard label="Trade Count" value={formatShortNumber(selectedWorkspacePerformanceRow?.trade_count ?? selectedWorkspaceTrades.length)} />
+                      <MetricCard label="Avg Trade P&L" value={renderPnlValue(selectedWorkspaceTrades.length ? selectedWorkspaceTrades.reduce((sum, row) => sum + (Number(row.realized_pnl ?? 0) || 0), 0) / selectedWorkspaceTrades.length : 0)} tone={pnlTone(selectedWorkspaceTrades.length ? selectedWorkspaceTrades.reduce((sum, row) => sum + (Number(row.realized_pnl ?? 0) || 0), 0) / selectedWorkspaceTrades.length : 0)} />
+                      <MetricCard label="Status" value={formatValue(selectedWorkspaceRow?.strategy_status ?? selectedWorkspacePerformanceRow?.status ?? "Unknown")} tone={statusTone(selectedWorkspaceRow?.strategy_status ?? selectedWorkspacePerformanceRow?.status)} />
+                      <MetricCard label="30D Est P&L" value={renderPnlValue(selectedWorkspacePerformanceRow?.cumulative_pnl ?? selectedWorkspacePerformanceRow?.realized_pnl)} tone={pnlTone(selectedWorkspacePerformanceRow?.cumulative_pnl ?? selectedWorkspacePerformanceRow?.realized_pnl)} />
+                      <MetricCard label="Participation" value={formatValue(selectedWorkspaceRow?.participation_policy ?? "Unavailable")} />
+                      <MetricCard label="Can Add More" value={selectedWorkspaceRow?.additional_entry_allowed === true ? "YES" : "NO"} tone={selectedWorkspaceRow?.additional_entry_allowed === true ? "good" : "muted"} />
+                    </div>
+                  </div>
+                  <div className="strategy-focus-main">
+                    <TrendPanel
+                      title="Equity Curve"
+                      subtitle="Strategy-level realized equity progression from the persisted trade ledger."
+                      points={selectedWorkspaceEquityCurve}
+                      tone={pnlTone(selectedWorkspacePerformanceRow?.realized_pnl)}
+                      footer={`Execution ${formatValue(selectedWorkspaceRow?.execution_timeframe ?? "1m")} | Context ${(asArray<string>(selectedWorkspaceRow?.context_timeframes).join(" / ") || "5m")} | Last eval ${formatTimestamp(selectedWorkspaceRow?.last_execution_bar_evaluated_at)}`}
+                      className="strategy-primary-trend"
+                    />
+                    <div>
+                      <h3 className="subsection-title">Trade Log</h3>
+                      <DataTable
+                        columns={[
+                          { key: "entry_timestamp", label: "Date", render: (row) => formatTimestamp(row.entry_timestamp ?? row.exit_timestamp) },
+                          { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+                          { key: "entry_price", label: "Entry", render: (row) => formatValue(row.entry_price) },
+                          { key: "exit_price", label: "Exit", render: (row) => formatValue(row.exit_price) },
+                          { key: "realized_pnl", label: "P&L", render: (row) => renderPnlValue(row.realized_pnl) },
+                          { key: "exit_reason", label: "Reason", render: (row) => formatValue(row.exit_reason) },
+                        ]}
+                        rows={selectedWorkspaceTrades}
+                        emptyLabel="No trade log rows are available for the selected lane yet."
+                      />
+                    </div>
+                  </div>
+                </div>
+                {selectedWorkspacePlaybackStudyItem ? (
+                  <div className="strategy-playback-preview">
+                    <div className="notice-strip compact strategy-context-strip">
+                      <div><strong>Historical Study Preview</strong> {formatValue(selectedWorkspacePlaybackStudyItem.label ?? selectedWorkspacePlaybackStudyItem.strategy_id ?? "Loaded")}</div>
+                      <div><strong>Coverage</strong> {strategyLaneDateRangeLabel(selectedWorkspacePlaybackCoverage)}</div>
+                      <div><strong>Closed Trades</strong> {formatShortNumber(asArray<JsonRecord>(selectedWorkspacePlaybackSummary.closed_trade_breakdown).length)}</div>
+                      <div><strong>Net P&L</strong> {renderPnlValue(selectedWorkspacePlaybackSummary.net_pnl ?? selectedWorkspacePlaybackSummary.realized_pnl)}</div>
+                    </div>
+                    {selectedWorkspacePlaybackCanRenderStudy ? (
+                      <ReplayStrategyStudy studies={[{ study_key: String(selectedWorkspacePlaybackStudyItem.study_key ?? "workspace"), label: String(selectedWorkspacePlaybackStudyItem.label ?? "Replay Study"), study: selectedWorkspacePlaybackStudy }]} />
+                    ) : (
+                      <div className="placeholder-note">Summary and trade economics are loaded for this playback lane; the full bar-by-bar study will appear here as soon as the linked artifact finishes loading.</div>
+                    )}
+                  </div>
+                ) : null}
+              </Section>
+
+              <Section title="Strategy Analysis Lab" subtitle="Full ranked analysis, comparison, study, runtime, and diagnostics remain available here when you need the deeper evidence model">
+                {strategyAnalysis.available === true ? (
+                  <UnifiedStrategyAnalysis
+                    analysis={strategyAnalysis}
+                    replayStudyItems={playbackLatestStudyItems}
+                    preferredStrategyKey={String(selectedWorkspacePerformanceRow?.strategy_key ?? "")}
+                    studyPanel={(
+                      <>
+                        <div className="notice-strip compact">
+                          Deep-dive keeps the latest study/equity visualization close to strategy selection. Replay-only artifacts stay secondary when not available.
+                        </div>
+                        {playbackStudyAvailable ? (
+                          <ReplayStrategyStudy studies={[{ study_key: playbackSelectedStudyKey || "latest", label: "Latest replay study", study: playbackStudy }]} />
+                        ) : (
+                          <div className="placeholder-note">No replay study artifact is attached to the currently selected strategy.</div>
+                        )}
+                      </>
+                    )}
+                    runtimePanel={(
+                      <div className="notice-strip compact">
+                        <div><strong>Execution cadence:</strong> 1m decision surface with completed higher-timeframe context.</div>
+                        <div><strong>Paper runtime:</strong> {formatValue(paperReadiness.runtime_phase ?? "STOPPED")} | <strong>Entries enabled:</strong> {formatValue(global.entries_enabled ?? paperReadiness.entries_enabled)}</div>
+                      </div>
+                    )}
+                    diagnosticsPanel={(
+                      <div className="notice-strip compact">
+                        <div>Strategy diagnostics stay available here, but raw artifact navigation is demoted behind Evidence.</div>
+                        <div>Use the roster and lane-level status below when you need runtime attachment truth alongside strategy analysis.</div>
+                      </div>
+                    )}
+                  />
+                ) : (
+                  <div className="placeholder-note">Strategy analysis is not yet available from the current snapshot.</div>
+                )}
+              </Section>
+
               <Section title="Standalone Strategy Lens" subtitle="Filter the strategy surfaces by standalone identity, family, instrument, runtime state, status, and ambiguity">
                 <div className="badge-row">
                   <Badge label="RUNTIME TRUTH" tone={truthBadgeTone("RUNTIME TRUTH")} />
@@ -8004,6 +10082,111 @@ function paperStartupCategoryTone(category: string): Tone {
 
           {!loading && page === "positions" ? (
             <>
+              <Section
+                title="Live P&L Workspace"
+                subtitle="Live and paper account monitoring with current exposure, curves, and order activity in one operator surface"
+                className="pnl-workspace-section"
+                headerClassName="section-header-tight"
+              >
+                <div className="split-panel pnl-account-panels">
+                  <div className="account-panel-shell">
+                    <div className="subsection-title">Live Account</div>
+                    <div className="metric-grid account-metric-grid">
+                      <MetricCard label="Net Liq" value={formatCompactMetric(productionBalances.liquidation_value)} />
+                      <MetricCard label="Buying Power" value={formatCompactMetric(productionBalances.buying_power)} />
+                      <MetricCard label="Day P&L" value={renderPnlValue(productionTotals.total_current_day_pnl)} tone={pnlTone(productionTotals.total_current_day_pnl)} />
+                      <MetricCard label="Open P&L" value={renderPnlValue(productionTotals.total_open_pnl)} tone={pnlTone(productionTotals.total_open_pnl)} />
+                      <MetricCard label="Open Positions" value={formatShortNumber(productionPositions.length)} />
+                      <MetricCard label="Working Orders" value={formatShortNumber(productionOpenOrders.length)} tone={productionOpenOrders.length ? "warn" : "muted"} />
+                    </div>
+                    <DataTable
+                      columns={[
+                        { key: "symbol", label: "Symbol", render: (row) => formatValue(row.symbol) },
+                        { key: "quantity", label: "Qty", render: (row) => formatValue(row.quantity) },
+                        { key: "average_price", label: "Avg", render: (row) => formatValue(row.average_price ?? row.averagePrice) },
+                        { key: "market_value", label: "Mkt Value", render: (row) => formatMaybePnL(row.market_value) },
+                        { key: "current_day_profit_loss", label: "Day P&L", render: (row) => formatMaybePnL(row.current_day_profit_loss ?? row.currentDayProfitLoss) },
+                        { key: "current_day_profit_loss_percentage", label: "Day %", render: (row) => formatValue(row.current_day_profit_loss_percentage ?? row.currentDayProfitLossPercentage) },
+                      ]}
+                      rows={productionPositions.slice(0, 5)}
+                      emptyLabel="No live-account positions are open."
+                    />
+                  </div>
+                  <div className="account-panel-shell">
+                    <div className="subsection-title">Paper / Simulated</div>
+                    <div className="metric-grid account-metric-grid">
+                      <MetricCard label="Paper Realized" value={renderPnlValue(combinedStrategyPortfolioSnapshot.total_realized_pnl)} tone={pnlTone(combinedStrategyPortfolioSnapshot.total_realized_pnl)} />
+                      <MetricCard label="Paper Open P&L" value={renderPnlValue(combinedStrategyPortfolioSnapshot.total_unrealized_pnl)} tone={pnlTone(combinedStrategyPortfolioSnapshot.total_unrealized_pnl)} />
+                      <MetricCard label="Paper Day P&L" value={renderPnlValue(combinedStrategyPortfolioSnapshot.total_day_pnl)} tone={pnlTone(combinedStrategyPortfolioSnapshot.total_day_pnl)} />
+                      <MetricCard label="Open Positions" value={formatShortNumber(sortedPositionsRows.filter((row) => row.paperRows.some((paperRow) => String(paperRow.position_side ?? "").toUpperCase() !== "FLAT")).length)} />
+                      <MetricCard label="Tracked Strategies" value={formatShortNumber(combinedStrategyPortfolioSnapshot.active_strategy_count)} />
+                      <MetricCard label="Recent Fills" value={formatShortNumber(closedStrategyTradeRows.length)} />
+                    </div>
+                    <DataTable
+                      columns={[
+                        { key: "branch", label: "Strategy", render: (row) => formatValue(row.branch ?? row.strategy_name ?? row.lane_id) },
+                        { key: "instrument", label: "Symbol", render: (row) => formatValue(row.instrument) },
+                        { key: "position_side", label: "Side", render: (row) => formatValue(row.position_side ?? row.net_side ?? "FLAT") },
+                        { key: "realized_pnl", label: "Realized", render: (row) => formatMaybePnL(row.realized_pnl) },
+                        { key: "unrealized_pnl", label: "Open P&L", render: (row) => formatMaybePnL(row.unrealized_pnl) },
+                        { key: "latest_activity_timestamp", label: "Latest", render: (row) => formatTimestamp(row.latest_activity_timestamp) },
+                      ]}
+                      rows={strategyPerformanceRows.slice(0, 5)}
+                      emptyLabel="No paper strategy positions are currently surfaced."
+                    />
+                  </div>
+                </div>
+                <div className="split-panel pnl-chart-grid">
+                  <TrendPanel
+                    title="Live Account Intraday Curve"
+                    subtitle={liveIntradayCurveRows.length > 1 ? "Derived from live session activity with current broker day-P&L anchor." : "Current broker payload is snapshot-heavy; line is anchored from the latest available live session truth."}
+                    points={liveIntradayCurveRows}
+                    tone={pnlTone(productionTotals.total_current_day_pnl)}
+                    footer={`Orders ${formatTimestamp(brokerOrdersTimestamp)} | Fills ${formatTimestamp(brokerFillsTimestamp)} | Quotes ${formatTimestamp(brokerQuotesTimestamp)}`}
+                    className="pnl-trend-panel"
+                  />
+                  <TrendPanel
+                    title="Paper / Simulated Equity Curve"
+                    subtitle={paperIntradayCurveRows.length > 1 ? "Built from today’s realized trade ledger so the operator can see paper progression without opening raw artifacts." : "No intraday paper trade ladder has been recorded yet in the current session."}
+                    points={paperIntradayCurveRows}
+                    tone={pnlTone(combinedStrategyPortfolioSnapshot.total_day_pnl)}
+                    footer={`Runtime ${formatTimestamp(paperRuntimeTimestamp)} | Last fill ${formatTimestamp(closedStrategyTradeRows[0]?.exit_timestamp ?? closedStrategyTradeRows[0]?.entry_timestamp)}`}
+                    className="pnl-trend-panel"
+                  />
+                </div>
+                <div className="split-panel pnl-table-grid">
+                  <div className="table-panel-shell">
+                    <h3 className="subsection-title">Working Orders</h3>
+                    <DataTable
+                      columns={[
+                        { key: "entered_time", label: "Time", render: (row) => formatTimestamp(row.entered_time ?? row.updated_at) },
+                        { key: "symbol", label: "Symbol", render: (row) => formatValue(row.symbol) },
+                        { key: "order_type", label: "Type", render: (row) => formatValue(row.order_type ?? row.orderType) },
+                        { key: "instruction", label: "Side", render: (row) => formatValue(row.instruction ?? row.side) },
+                        { key: "quantity", label: "Qty", render: (row) => formatValue(row.quantity) },
+                        { key: "status", label: "Status", render: (row) => <Badge label={formatValue(row.status ?? "Working")} tone={statusTone(row.status)} /> },
+                      ]}
+                      rows={productionOpenOrders.slice(0, 8)}
+                      emptyLabel="No broker working orders are currently open."
+                    />
+                  </div>
+                  <div className="table-panel-shell">
+                    <h3 className="subsection-title">Recent Fills</h3>
+                    <DataTable
+                      columns={[
+                        { key: "updated_at", label: "Time", render: (row) => formatTimestamp(row.updated_at ?? row.occurred_at) },
+                        { key: "symbol", label: "Symbol", render: (row) => formatValue(row.symbol) },
+                        { key: "instruction", label: "Side", render: (row) => formatValue(row.instruction ?? row.side) },
+                        { key: "quantity", label: "Qty", render: (row) => formatValue(row.quantity) },
+                        { key: "price", label: "Price", render: (row) => formatValue(row.price ?? row.execution_price) },
+                      ]}
+                      rows={productionRecentFills.slice(0, 8)}
+                      emptyLabel="No recent broker fills are available."
+                    />
+                  </div>
+                </div>
+              </Section>
+
               <Section title="Positions Monitor" subtitle="One row per symbol, separate source-of-truth modes, and deeper detail in a side drawer">
                 <div className="positions-workbench">
                   <div className="positions-toolbar">
@@ -9059,30 +11242,274 @@ function paperStartupCategoryTone(category: string): Tone {
 
           {!loading && page === "market" ? (
             <>
-              <Section title="Context Strip" subtitle="MGC, indices, VIX, and Treasury context">
-                <div className="market-strip">
-                  {asArray<JsonRecord>(marketContext.items).map((item) => (
-                    <div key={String(item.label)} className="market-tile">
-                      <div className="market-label">{formatValue(item.label)}</div>
-                      <div className="market-value">{formatValue(item.value_label ?? item.value)}</div>
-                      <div className="market-meta">{formatTimestamp(item.last_refresh_timestamp)}</div>
-                      <div className="market-note">{formatValue(item.reason ?? item.note)}</div>
+              <Section
+                title="Trade Entry Workspace"
+                subtitle="Manual routing, current symbol truth, and explicit live-vs-paper account context"
+                className="trade-entry-section"
+                headerClassName="section-header-tight"
+              >
+                {selectedWorkspaceRow ? (
+                  <div className="local-workspace-strip">
+                    <div className="local-workspace-copy">
+                      <div className="local-workspace-kicker">Selected Strategy Context</div>
+                      <div className="local-workspace-title">{compactBranchLabel(selectedWorkspaceRow)}</div>
+                      <div className="local-workspace-meta">
+                        <Badge label={laneClassLabel(selectedWorkspaceRow)} tone={paperStrategyClassTone(selectedWorkspaceRow)} />
+                        <Badge label={selectedWorkspaceDesignation} tone={selectedWorkspaceRow?.benchmark_designation ? "warn" : selectedWorkspaceRow?.candidate_designation ? "good" : "muted"} />
+                        <Badge label={runtimeAttachmentLabel(selectedWorkspaceRow)} tone={runtimeAttachmentLabel(selectedWorkspaceRow) === "Attached Live" ? "good" : runtimeAttachmentLabel(selectedWorkspaceRow) === "Audit Only" ? "warn" : "muted"} />
+                        <span>{selectedWorkspaceInstrument || "No instrument"}</span>
+                        <span>Exec {formatValue(selectedWorkspaceRow?.execution_timeframe ?? "1m")}</span>
+                        <span>Context {selectedWorkspaceContextTimes}</span>
+                        <span>Last eval {formatTimestamp(selectedWorkspaceRow?.last_execution_bar_evaluated_at)}</span>
+                      </div>
                     </div>
-                  ))}
+                    <div className="local-workspace-actions">
+                      <button className="panel-button subtle" onClick={() => selectWorkspaceLane(String(selectedWorkspaceRow?.lane_id ?? ""), { navigateTo: "strategies" })}>
+                        Open Deep-Dive
+                      </button>
+                      <button
+                        className="panel-button subtle"
+                        onClick={() => {
+                          window.location.hash = "#/diagnostics";
+                          setPage("diagnostics");
+                        }}
+                      >
+                        Open Evidence
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="trade-entry-layout">
+                  <div className="trade-entry-ticket-shell">
+                    <div className="subsection-title">Order Ticket</div>
+                    <div className="ticket-grid trade-entry-ticket-grid">
+                      <label className="settings-field">
+                        <span>Account</span>
+                        <select
+                          disabled={busyAction !== null}
+                          value={manualOrderForm.accountHash}
+                          onChange={(event) => setManualOrderForm((current) => ({ ...current, accountHash: event.target.value }))}
+                        >
+                          {productionAccounts.map((row) => (
+                            <option key={String(row.account_hash)} value={String(row.account_hash)}>
+                              {maskAccountNumber(row.account_number)} / {formatValue(row.account_type)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="settings-field">
+                        <span>Symbol</span>
+                        <input disabled={busyAction !== null} value={manualOrderForm.symbol} onChange={(event) => setManualOrderForm((current) => ({ ...current, symbol: event.target.value.toUpperCase() }))} />
+                      </label>
+                      <label className="settings-field">
+                        <span>Intent / Tag</span>
+                        <select disabled={busyAction !== null} value={manualOrderForm.intentType} onChange={(event) => setManualOrderForm((current) => ({ ...current, intentType: event.target.value }))}>
+                          {["MANUAL_LIVE_PILOT", "FLATTEN", "ENTRY", "EXIT", "ADJUSTMENT", "MANUAL"].map((intentType) => (
+                            <option key={intentType} value={intentType}>
+                              {manualIntentTypeLabel(intentType)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="settings-field">
+                        <span>Side</span>
+                        <select disabled={busyAction !== null} value={manualOrderForm.side} onChange={(event) => setManualOrderForm((current) => ({ ...current, side: event.target.value }))}>
+                          {manualSideOptions.map((side) => (
+                            <option key={side} value={side}>
+                              {sentenceCase(side.replace(/_/g, " ").toLowerCase())}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="settings-field">
+                        <span>Quantity</span>
+                        <input disabled={busyAction !== null} value={manualOrderForm.quantity} onChange={(event) => setManualOrderForm((current) => ({ ...current, quantity: event.target.value }))} />
+                      </label>
+                      <label className="settings-field">
+                        <span>Order Type</span>
+                        <select disabled={busyAction !== null} value={manualOrderForm.orderType} onChange={(event) => setManualOrderForm((current) => ({ ...current, orderType: event.target.value }))}>
+                          {manualOrderTypes.map((orderType) => (
+                            <option key={orderType} value={orderType}>
+                              {sentenceCase(orderType.replace(/_/g, "-").toLowerCase())}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {["LIMIT", "STOP_LIMIT", "LIMIT_ON_CLOSE"].includes(manualOrderForm.orderType) ? (
+                        <label className="settings-field">
+                          <span>Limit Price</span>
+                          <input disabled={busyAction !== null} value={manualOrderForm.limitPrice} onChange={(event) => setManualOrderForm((current) => ({ ...current, limitPrice: event.target.value }))} />
+                        </label>
+                      ) : null}
+                      {["STOP", "STOP_LIMIT"].includes(manualOrderForm.orderType) ? (
+                        <label className="settings-field">
+                          <span>Stop Price</span>
+                          <input disabled={busyAction !== null} value={manualOrderForm.stopPrice} onChange={(event) => setManualOrderForm((current) => ({ ...current, stopPrice: event.target.value }))} />
+                        </label>
+                      ) : null}
+                      <label className="settings-field">
+                        <span>Time In Force</span>
+                        <select disabled={busyAction !== null} value={manualOrderForm.timeInForce} onChange={(event) => setManualOrderForm((current) => ({ ...current, timeInForce: event.target.value }))}>
+                          {manualTimeInForceOptions.map((timeInForce) => (
+                            <option key={timeInForce} value={timeInForce}>
+                              {timeInForce}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="settings-field">
+                        <span>Session</span>
+                        <select disabled={busyAction !== null} value={manualOrderForm.session} onChange={(event) => setManualOrderForm((current) => ({ ...current, session: event.target.value }))}>
+                          {manualSessionOptions.map((session) => (
+                            <option key={session} value={session}>
+                              {session}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="settings-field workflow-field-wide">
+                        <span>Operator Note</span>
+                        <input disabled={busyAction !== null} value={manualOrderForm.operatorNote} onChange={(event) => setManualOrderForm((current) => ({ ...current, operatorNote: event.target.value }))} />
+                      </label>
+                    </div>
+                    <label className="settings-toggle trade-entry-confirmation">
+                      <input
+                        type="checkbox"
+                        checked={manualOrderForm.reviewConfirmed}
+                        disabled={busyAction !== null}
+                        onChange={(event) => setManualOrderForm((current) => ({ ...current, reviewConfirmed: event.target.checked }))}
+                      />
+                      <span>Review confirmed. Do not send without this explicit confirmation.</span>
+                    </label>
+                    <div className="action-row inline trade-entry-primary-actions">
+                      <ControlButton
+                        label="Build Dry-Run Payload"
+                        onClick={() =>
+                          void runCommand(
+                            "preview-broker-order",
+                            () => api.runProductionLinkAction("preview-order", buildManualOrderPayload()),
+                            {
+                              requiresLive: true,
+                              confirmMessage: `Build a dry-run payload preview for ${manualOrderForm.orderType} ${manualOrderForm.side} ${manualOrderForm.quantity} ${manualOrderForm.symbol || "SYMBOL"}?`,
+                            },
+                          )
+                        }
+                        busyAction={busyAction}
+                        disabled={manualPreviewBlockers.length > 0}
+                      />
+                      <ControlButton
+                        label="Review / Confirm / Send"
+                        onClick={() =>
+                          void runCommand(
+                            "submit-broker-order",
+                            () => api.runProductionLinkAction("submit-order", buildManualOrderPayload()),
+                            {
+                              requiresLive: true,
+                              confirmMessage: `Final live order confirmation: ${manualOrderForm.orderType} ${manualOrderForm.side} ${manualOrderForm.quantity} ${manualOrderForm.symbol || "SYMBOL"} on ${maskAccountNumber(selectedManualAccount?.account_number)}.`,
+                            },
+                          )
+                        }
+                        busyAction={busyAction}
+                        disabled={!productionManualSubmitEnabled || manualOrderGateBlockers.length > 0}
+                      />
+                    </div>
+                    {manualPreviewBlockers.length || manualOrderGateBlockers.length ? (
+                      <details className="secondary-evidence-shell ticket-gate-shell">
+                        <summary className="secondary-evidence-summary">
+                          <span className="secondary-evidence-title">Ticket Gate Details</span>
+                          <span className="secondary-evidence-note">
+                            {Array.from(new Set([...manualPreviewBlockers, ...manualOrderGateBlockers])).length} active guardrails
+                          </span>
+                        </summary>
+                        <div className="section-card secondary-evidence-card">
+                          <div className="notice-strip compact">
+                            {Array.from(new Set([...manualPreviewBlockers, ...manualOrderGateBlockers])).map((item) => (
+                              <div key={item}>{item}</div>
+                            ))}
+                          </div>
+                        </div>
+                      </details>
+                    ) : null}
+                  </div>
+                  <div className="trade-entry-market-shell">
+                    <div className="trade-entry-quote-shell">
+                      <div className="subsection-title">Quote Box</div>
+                      <div className="metric-grid trade-entry-quote-grid">
+                      <MetricCard label="Symbol" value={tradeEntrySymbol || "None selected"} />
+                      <MetricCard label="Last" value={formatValue(tradeEntryQuoteRow?.last_price ?? tradeEntryQuoteRow?.mark ?? tradeEntryQuoteRow?.price ?? "Unavailable")} />
+                      <MetricCard label="Bid" value={formatValue(tradeEntryQuoteRow?.bid_price ?? tradeEntryQuoteRow?.bid ?? "Unavailable")} />
+                      <MetricCard label="Ask" value={formatValue(tradeEntryQuoteRow?.ask_price ?? tradeEntryQuoteRow?.ask ?? "Unavailable")} />
+                      <MetricCard label="Net Change" value={formatValue(tradeEntryQuoteRow?.net_change ?? tradeEntryQuoteRow?.quoteTrend ?? "Unavailable")} tone={statusTone(tradeEntryQuoteRow?.net_change)} />
+                      <MetricCard label="Quote Timestamp" value={formatTimestamp(tradeEntryQuoteRow?.updated_at ?? productionQuotes.updated_at)} />
+                    </div>
+                    </div>
+                    <div className="notice-strip compact trade-entry-account-note">
+                      <div>Live account: {selectedProductionAccount ? `${maskAccountNumber(selectedProductionAccount.account_number)} / ${formatValue(selectedProductionAccount.account_type)}` : "No live account selected"}.</div>
+                      <div>Paper account: shared paper runtime truth stays separate from broker routing and remains strategy-attributed.</div>
+                    </div>
+                    <div className="trade-entry-position-shell">
+                      <div className="subsection-title">Current Position & Attribution</div>
+                      <div className="metric-grid trade-entry-position-grid">
+                        <MetricCard label="Broker Position" value={selectedProductionPosition ? `${formatValue(selectedProductionPosition.side)} ${formatValue(selectedProductionPosition.quantity)} ${formatValue(selectedProductionPosition.symbol)}` : "Flat / None selected"} tone={selectedProductionPosition ? "warn" : "good"} />
+                        <MetricCard label="Paper Strategy Rows" value={formatShortNumber(tradeEntryPaperRows.length)} tone={tradeEntryPaperRows.length ? "good" : "muted"} />
+                        <MetricCard label="Strategy Tag" value={manualIntentTypeLabel(manualOrderForm.intentType)} />
+                        <MetricCard label="Participation" value={formatValue(tradeEntryPaperRows[0]?.participation_policy ?? "Unavailable")} />
+                        <MetricCard label="Net Side" value={formatValue(tradeEntryPaperRows[0]?.net_side ?? tradeEntryPaperRows[0]?.position_side ?? "FLAT")} />
+                        <MetricCard label="Can Add More" value={formatValue(tradeEntryPaperRows[0]?.additional_entry_allowed ?? tradeEntryPaperRows[0]?.can_add_more ?? false)} tone={(tradeEntryPaperRows[0]?.additional_entry_allowed ?? tradeEntryPaperRows[0]?.can_add_more) ? "good" : "muted"} />
+                      </div>
+                      <DataTable
+                        columns={[
+                          { key: "strategy_name", label: "Strategy" },
+                          { key: "paper_strategy_class", label: "Class", render: (row) => <Badge label={paperStrategyClassLabel(row)} tone={paperStrategyClassTone(row)} /> },
+                          { key: "current_strategy_status", label: "Status", render: (row) => formatValue(row.current_strategy_status ?? row.status) },
+                          { key: "latest_activity_timestamp", label: "Last Activity", render: (row) => formatTimestamp(row.latest_activity_timestamp) },
+                        ]}
+                        rows={tradeEntryPaperRows.slice(0, 4)}
+                        emptyLabel="No paper strategy attribution rows are attached to the selected symbol."
+                      />
+                    </div>
+                    <div className="trade-entry-fills-shell">
+                      <h3 className="subsection-title">Recent Fills</h3>
+                      <DataTable
+                        columns={[
+                          { key: "broker_order_id", label: "Order ID" },
+                          { key: "symbol", label: "Symbol" },
+                          { key: "instruction", label: "Instruction" },
+                          { key: "filled_quantity", label: "Filled" },
+                          { key: "updated_at", label: "Updated", render: (row) => formatTimestamp(row.updated_at) },
+                        ]}
+                        rows={productionRecentFills.filter((row) => !tradeEntrySymbol || String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol).slice(0, 6)}
+                        emptyLabel="No recent fills match the current symbol filter."
+                      />
+                    </div>
+                  </div>
                 </div>
-              </Section>
-
-              <Section title="Feed Health By Source" subtitle="Freshness and failure reasons">
-                <DataTable
-                  columns={[
-                    { key: "label", label: "Source" },
-                    { key: "status_label", label: "Status" },
-                    { key: "last_refresh_timestamp", label: "Last Refresh", render: (row) => formatTimestamp(row.last_refresh_timestamp) },
-                    { key: "note", label: "Reason / Note", render: (row) => formatValue(row.reason ?? row.note) },
-                  ]}
-                  rows={asArray<JsonRecord>(marketContext.items)}
-                  emptyLabel="No market feed rows are available."
-                />
+                <div className="split-panel pnl-table-grid">
+                  <div className="table-panel-shell">
+                    <h3 className="subsection-title">Working Orders</h3>
+                    <DataTable
+                      columns={[
+                        { key: "broker_order_id", label: "Order ID" },
+                        { key: "symbol", label: "Symbol" },
+                        { key: "instruction", label: "Instruction" },
+                        { key: "quantity", label: "Qty" },
+                        { key: "status", label: "Status" },
+                        { key: "updated_at", label: "Updated", render: (row) => formatTimestamp(row.updated_at) },
+                      ]}
+                      rows={productionOpenOrders.filter((row) => !tradeEntrySymbol || String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol).slice(0, 8)}
+                      emptyLabel="No working broker orders match the current symbol filter."
+                    />
+                  </div>
+                  <div className="table-panel-shell trade-entry-working-summary">
+                    <div className="subsection-title">Symbol Activity</div>
+                    <div className="metric-grid compact trade-entry-activity-grid">
+                      <MetricCard label="Recent Fills" value={formatShortNumber(productionRecentFills.filter((row) => !tradeEntrySymbol || String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol).length)} tone={productionRecentFills.length ? "good" : "muted"} />
+                      <MetricCard label="Working Orders" value={formatShortNumber(productionOpenOrders.filter((row) => !tradeEntrySymbol || String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol).length)} tone={productionOpenOrders.length ? "warn" : "muted"} />
+                      <MetricCard label="Quote Updated" value={formatTimestamp(tradeEntryQuoteRow?.updated_at ?? productionQuotes.updated_at)} />
+                      <MetricCard label="Broker Position" value={selectedProductionPosition ? "OPEN" : "FLAT"} tone={selectedProductionPosition ? "warn" : "good"} />
+                    </div>
+                  </div>
+                </div>
               </Section>
             </>
           ) : null}
@@ -9098,7 +11525,7 @@ function paperStartupCategoryTone(category: string): Tone {
                 {strategyAnalysis.available === true ? (
                   <UnifiedStrategyAnalysis
                     analysis={strategyAnalysis}
-                    replayStudyItems={playbackStudyItems}
+                    replayStudyItems={playbackLatestStudyItems}
                     studyPanel={(
                       <>
                         <div className="badge-row">
@@ -9121,7 +11548,7 @@ function paperStartupCategoryTone(category: string): Tone {
                         </div>
                         {playbackStudyAvailable ? (
                           <>
-                            <ReplayStrategyStudy studies={playbackStudyItems.length ? playbackStudyItems : [{ study_key: "latest", label: "Latest replay study", study: playbackStudy }]} />
+                            <ReplayStrategyStudy studies={playbackLatestStudyItems.length ? playbackLatestStudyItems : [{ study_key: "latest", label: "Latest replay study", study: playbackStudy }]} />
                             <div className="notice-strip compact">
                               {formatValue(
                                 playbackStudySummary.pnl_unavailable_reason ??
@@ -9925,10 +12352,33 @@ function paperStartupCategoryTone(category: string): Tone {
   );
 }
 
-function Section(props: { title: string; subtitle?: string; children: ReactNode }) {
+function Section(props: { title: string; subtitle?: string; children: ReactNode; className?: string; headerClassName?: string }) {
+  if (currentSectionPageContext && PRIMARY_WORKSTATION_PAGES.has(currentSectionPageContext) && EVIDENCE_ONLY_SECTION_TITLES.has(props.title)) {
+    return null;
+  }
+  const demoted = DEMOTED_PRIMARY_SECTION_TITLES.has(props.title);
+  if (demoted) {
+    return (
+      <details className="secondary-evidence-shell">
+        <summary className="secondary-evidence-summary">
+          <span className="secondary-evidence-title">{props.title}</span>
+          <span className="secondary-evidence-note">{props.subtitle ?? "Supporting evidence"}</span>
+        </summary>
+        <section className={`section-card secondary-evidence-card ${props.className ?? ""}`.trim()} data-section-title={props.title}>
+          <div className={`section-header ${props.headerClassName ?? ""}`.trim()}>
+            <div>
+              <div className="section-title">{props.title}</div>
+              {props.subtitle ? <div className="section-subtitle">{props.subtitle}</div> : null}
+            </div>
+          </div>
+          {props.children}
+        </section>
+      </details>
+    );
+  }
   return (
-    <section className="section-card">
-      <div className="section-header">
+    <section className={`section-card ${props.className ?? ""}`.trim()} data-section-title={props.title}>
+      <div className={`section-header ${props.headerClassName ?? ""}`.trim()}>
         <div>
           <div className="section-title">{props.title}</div>
           {props.subtitle ? <div className="section-subtitle">{props.subtitle}</div> : null}
@@ -9936,6 +12386,222 @@ function Section(props: { title: string; subtitle?: string; children: ReactNode 
       </div>
       {props.children}
     </section>
+  );
+}
+
+function TrendPanel(props: {
+  title: string;
+  subtitle: string;
+  points: Array<{ timestamp: string; value: number }>;
+  tone?: Tone;
+  footer?: string;
+  className?: string;
+}) {
+  const width = 420;
+  const height = 180;
+  const values = props.points.map((point) => point.value).filter((value) => Number.isFinite(value));
+  const min = values.length ? Math.min(...values) : 0;
+  const max = values.length ? Math.max(...values) : 0;
+  const range = max - min || 1;
+  const path = props.points
+    .map((point, index) => {
+      const x = props.points.length === 1 ? width / 2 : (index / Math.max(props.points.length - 1, 1)) * (width - 24) + 12;
+      const y = height - (((point.value - min) / range) * (height - 36) + 18);
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+  return (
+    <div className={`trend-panel ${props.className ?? ""}`.trim()}>
+      <div className="trend-panel-header">
+        <div>
+          <div className="subsection-title">{props.title}</div>
+          <div className="section-subtitle">{props.subtitle}</div>
+        </div>
+        <Badge label={props.points.length > 1 ? "LIVE SERIES" : "SNAPSHOT"} tone={props.tone ?? "muted"} />
+      </div>
+      <div className="trend-panel-shell">
+        {props.points.length ? (
+          <svg className="trend-panel-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={props.title}>
+            <line x1="12" y1={height - 18} x2={width - 12} y2={height - 18} className="trend-panel-axis" />
+            <line x1="12" y1="18" x2="12" y2={height - 18} className="trend-panel-axis" />
+            <path d={path} className={`trend-panel-line ${props.tone ?? "muted"}`} />
+          </svg>
+        ) : (
+          <div className="placeholder-note">No intraday points are available yet.</div>
+        )}
+      </div>
+      <div className="trend-panel-footer">
+        <span>{props.points.length ? `${formatShortNumber(props.points.length)} points` : "0 points"}</span>
+        <span>{props.footer ?? "Waiting for fresh activity."}</span>
+      </div>
+    </div>
+  );
+}
+
+function CalendarHistoryChart(props: {
+  mode: "line" | "bar";
+  title: string;
+  subtitle: string;
+  points: CalendarDayPoint[];
+}) {
+  const width = 1080;
+  const height = 340;
+  const marginLeft = 44;
+  const marginRight = 26;
+  const marginTop = 28;
+  const marginBottom = 44;
+  const plotWidth = width - marginLeft - marginRight;
+  const plotHeight = height - marginTop - marginBottom;
+  if (!props.points.length) {
+    return (
+      <div className="calendar-chart-shell">
+        <div className="calendar-chart-header">
+          <div>
+            <div className="subsection-title">{props.title}</div>
+            <div className="section-subtitle">{props.subtitle}</div>
+          </div>
+        </div>
+        <div className="placeholder-note">No closed-trade daily history is available for this source and period yet.</div>
+      </div>
+    );
+  }
+  const cumulativeValues = props.points.map((point) => point.cumulative);
+  const dailyValues = props.points.map((point) => point.pnl);
+  const cumulativeMin = Math.min(...cumulativeValues, 0);
+  const cumulativeMax = Math.max(...cumulativeValues, 0);
+  const dailyMin = Math.min(...dailyValues, 0);
+  const dailyMax = Math.max(...dailyValues, 0);
+  const cumulativeRange = Math.max(cumulativeMax - cumulativeMin, 1);
+  const dailyRange = Math.max(dailyMax - dailyMin, 1);
+  const xForIndex = (index: number) => marginLeft + (plotWidth * index) / Math.max(props.points.length - 1, 1);
+  const cumulativeY = (value: number) => marginTop + ((cumulativeMax - value) / cumulativeRange) * plotHeight;
+  const dailyY = (value: number) => marginTop + ((dailyMax - value) / dailyRange) * plotHeight;
+  const zeroY = dailyY(0);
+  const cumulativePath = props.points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${xForIndex(index).toFixed(2)} ${cumulativeY(point.cumulative).toFixed(2)}`)
+    .join(" ");
+  const dailyPath = props.points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${xForIndex(index).toFixed(2)} ${dailyY(point.pnl).toFixed(2)}`)
+    .join(" ");
+  const tickIndices = props.points.length <= 6 ? props.points.map((_, index) => index) : [0, Math.floor(props.points.length * 0.25), Math.floor(props.points.length * 0.5), Math.floor(props.points.length * 0.75), props.points.length - 1];
+
+  return (
+    <div className="calendar-chart-shell" data-calendar-view={props.mode}>
+      <div className="calendar-chart-header">
+        <div>
+          <div className="subsection-title">{props.title}</div>
+          <div className="section-subtitle">{props.subtitle}</div>
+        </div>
+        <div className="calendar-chart-legend">
+          {props.mode === "line" ? (
+            <>
+              <span className="calendar-legend-item"><span className="calendar-legend-swatch cumulative" /> Cumulative P&amp;L</span>
+              <span className="calendar-legend-item"><span className="calendar-legend-swatch daily" /> Daily P&amp;L</span>
+            </>
+          ) : (
+            <span className="calendar-legend-item"><span className="calendar-legend-swatch bars" /> Daily P&amp;L</span>
+          )}
+        </div>
+      </div>
+      <svg className="calendar-history-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={props.title}>
+        <line x1={marginLeft} y1={marginTop} x2={marginLeft} y2={height - marginBottom} className="calendar-axis-line" />
+        <line x1={marginLeft} y1={height - marginBottom} x2={width - marginRight} y2={height - marginBottom} className="calendar-axis-line" />
+        <line x1={marginLeft} y1={zeroY} x2={width - marginRight} y2={zeroY} className="calendar-zero-line" />
+        {tickIndices.map((index) => (
+          <g key={`tick-${index}`}>
+            <line x1={xForIndex(index)} y1={marginTop} x2={xForIndex(index)} y2={height - marginBottom} className="calendar-grid-line" />
+            <text x={xForIndex(index)} y={height - 14} className="calendar-axis-label" textAnchor="middle">
+              {dateFromKey(props.points[index]?.date ?? props.points[0]?.date ?? "").toLocaleString(undefined, { month: "short", day: "numeric" })}
+            </text>
+          </g>
+        ))}
+        {props.mode === "line" ? (
+          <>
+            <path d={cumulativePath} className="calendar-line cumulative" />
+            <path d={dailyPath} className="calendar-line daily" />
+            {props.points.map((point, index) => (
+              <circle key={point.date} cx={xForIndex(index)} cy={cumulativeY(point.cumulative)} r={3} className="calendar-point cumulative" />
+            ))}
+          </>
+        ) : (
+          props.points.map((point, index) => {
+            const x = xForIndex(index);
+            const y = dailyY(point.pnl);
+            const barWidth = Math.max(Math.min(plotWidth / Math.max(props.points.length, 1) - 8, 20), 6);
+            const barHeight = Math.max(Math.abs(zeroY - y), 2);
+            const top = point.pnl >= 0 ? y : zeroY;
+            return (
+              <rect
+                key={point.date}
+                x={x - barWidth / 2}
+                y={top}
+                width={barWidth}
+                height={barHeight}
+                rx={3}
+                className={`calendar-bar ${point.pnl >= 0 ? "positive" : "negative"}`}
+              />
+            );
+          })
+        )}
+      </svg>
+    </div>
+  );
+}
+
+function CalendarDayDetailPanel(props: {
+  day: CalendarDayPoint;
+  sourceLabel: string;
+  onClose: () => void;
+  onOpenStrategy: (contribution: CalendarStrategyContribution) => void;
+}) {
+  return (
+    <div className="calendar-day-detail" data-selected-calendar-day={props.day.date}>
+      <div className="calendar-day-detail-header">
+        <div>
+          <div className="page-eyebrow">Selected Day</div>
+          <div className="section-title">{formatLongDate(props.day.date)}</div>
+          <div className="section-subtitle">{props.sourceLabel}</div>
+        </div>
+        <button className="panel-button subtle" onClick={props.onClose}>Close</button>
+      </div>
+      <div className="metric-grid calendar-day-detail-metrics">
+        <MetricCard label="Gross P&L" value={formatCompactCurrency(props.day.pnl)} tone={pnlTone(props.day.pnl)} />
+        <MetricCard label="Trade Count" value={formatShortNumber(props.day.tradeCount)} tone="muted" />
+        <MetricCard label="Cumulative P&L" value={formatCompactCurrency(props.day.cumulative)} tone={pnlTone(props.day.cumulative)} />
+      </div>
+      {props.day.tradeCount === 0 && props.day.coveredSources.length ? (
+        <div className="notice-strip compact">
+          <div><strong>Historical Coverage</strong> {props.day.coveredSources.map((source) => source.replace(/_/g, " ")).join(" + ")}</div>
+          <div>No closed trades were published for this covered back-cast day.</div>
+        </div>
+      ) : null}
+      <div className="calendar-contribution-table-shell">
+        <table className="data-table calendar-contribution-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Source</th>
+              <th>Trades</th>
+              <th>P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {props.day.contributions.map((contribution) => (
+              <tr
+                key={`${contribution.source}:${contribution.strategyId}:${contribution.laneId ?? ""}`}
+                className="is-clickable"
+                onClick={() => props.onOpenStrategy(contribution)}
+              >
+                <td>{contribution.strategyName}</td>
+                <td><Badge label={contribution.source.replace(/_/g, " ")} tone={contribution.source === "paper" ? "muted" : contribution.source === "live" ? "good" : "warn"} /></td>
+                <td>{formatShortNumber(contribution.tradeCount)}</td>
+                <td>{renderPnlValue(contribution.pnl)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -11381,12 +14047,14 @@ type StrategyAnalysisTab = "results" | "compare" | "study" | "runtime" | "diagno
 function UnifiedStrategyAnalysis({
   analysis,
   replayStudyItems,
+  preferredStrategyKey,
   studyPanel,
   runtimePanel,
   diagnosticsPanel,
 }: {
   analysis: JsonRecord;
   replayStudyItems: JsonRecord[];
+  preferredStrategyKey?: string;
   studyPanel?: ReactNode;
   runtimePanel?: ReactNode;
   diagnosticsPanel?: ReactNode;
@@ -11403,20 +14071,20 @@ function UnifiedStrategyAnalysis({
     const lookup = new Map<string, JsonRecord>();
     allLanes.forEach((lane) => {
       const key = String(lane.lane_id ?? "");
-      if (key) {
+      if (key && !lookup.has(key)) {
         lookup.set(key, lane);
       }
     });
     return lookup;
   }, [allLanes]);
-  const replayStudyByKey = useMemo(() => {
+  const replayStudyItemByKey = useMemo(() => {
     const lookup = new Map<string, JsonRecord>();
-    replayStudyItems.forEach((item) => {
-      const key = String(item.study_key ?? "");
-      if (key) {
-        lookup.set(key, item);
+    for (const item of replayStudyItems) {
+      const studyKey = String(item.study_key ?? "").trim();
+      if (studyKey && !lookup.has(studyKey)) {
+        lookup.set(studyKey, item);
       }
-    });
+    }
     return lookup;
   }, [replayStudyItems]);
   const boardRows = asArray<JsonRecord>(resultsBoard.rows);
@@ -11452,7 +14120,7 @@ function UnifiedStrategyAnalysis({
     const lookup = new Map<string, JsonRecord>();
     boardRows.forEach((row) => {
       const key = String(row.lane_id ?? row.id ?? "");
-      if (key) {
+      if (key && !lookup.has(key)) {
         lookup.set(key, row);
       }
     });
@@ -11470,6 +14138,16 @@ function UnifiedStrategyAnalysis({
       setSelectedStrategyKey(preferredDefaultStrategyKey);
     }
   }, [preferredDefaultStrategyKey, selectedStrategyKey, strategyOptions]);
+
+  useEffect(() => {
+    if (!preferredStrategyKey || preferredStrategyKey === "all") {
+      return;
+    }
+    if (!strategyOptions.some((row) => String(row.id ?? "") === preferredStrategyKey)) {
+      return;
+    }
+    setSelectedStrategyKey(preferredStrategyKey);
+  }, [preferredStrategyKey, strategyOptions]);
 
   const selectedSavedView = asRecord(savedViews.find((row) => String(row.id ?? "") === selectedSavedViewId));
   const activeSavedViewSourceTypes = useMemo(
@@ -11592,10 +14270,15 @@ function UnifiedStrategyAnalysis({
     selectedRunScope,
   ]);
   const defaultVisibleLaneId = String(
-    rankedBoardRows[0]?.lane_id
-      ?? asRecord(detailsByStrategyKey[selectedStrategyKey]).default_lane_id
-      ?? resultsBoard.default_row_id
-      ?? "",
+    strategyAnalysisPreferredVisibleLaneId(
+      rankedBoardRows,
+      replayStudyItems,
+      String(
+        asRecord(detailsByStrategyKey[selectedStrategyKey]).default_lane_id
+          ?? resultsBoard.default_row_id
+          ?? "",
+      ),
+    ),
   );
   const [selectedLaneId, setSelectedLaneId] = useState(defaultVisibleLaneId);
 
@@ -11642,7 +14325,49 @@ function UnifiedStrategyAnalysis({
 
   const comparisonLane = comparisonLaneId ? laneById.get(comparisonLaneId) ?? null : null;
   const selectedReplayStudyKey = String(asRecord(asRecord(selectedLane?.evidence).bars).ref?.study_key ?? "");
-  const selectedReplayStudy = selectedReplayStudyKey ? replayStudyByKey.get(selectedReplayStudyKey) ?? null : null;
+  const selectedReplayStudyItem = selectedReplayStudyKey ? replayStudyItemByKey.get(selectedReplayStudyKey) ?? null : null;
+  const [selectedReplayStudyLoaded, setSelectedReplayStudyLoaded] = useState<JsonRecord | null>(null);
+  useEffect(() => {
+    const artifactTarget = String(asRecord(selectedReplayStudyItem?.artifact_paths).strategy_study_json ?? "").trim();
+    const backendUrl = String(desktopState?.backendUrl ?? "").trim();
+    if (!selectedReplayStudyKey || !artifactTarget || !backendUrl) {
+      setSelectedReplayStudyLoaded(null);
+      return;
+    }
+    let cancelled = false;
+    const artifactUrl = artifactTarget.startsWith("/api/")
+      ? new URL(artifactTarget.replace(/^\//, ""), backendUrl).toString()
+      : artifactTarget;
+    void fetch(artifactUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Replay study fetch failed (${response.status})`);
+        }
+        return response.json() as Promise<JsonRecord>;
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setSelectedReplayStudyLoaded(asRecord(payload));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSelectedReplayStudyLoaded(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedReplayStudyItem, selectedReplayStudyKey]);
+  const selectedReplayStudyPayload = selectedReplayStudyLoaded ?? asRecord(selectedReplayStudyItem?.study_preview);
+  const selectedReplayStudyRows = asArray<JsonRecord>(selectedReplayStudyPayload.bars ?? selectedReplayStudyPayload.rows);
+  const selectedReplayStudy = selectedReplayStudyKey && selectedReplayStudyPayload
+    ? {
+        study_key: selectedReplayStudyKey,
+        label: String(selectedReplayStudyItem?.label ?? selectedReplayStudyItem?.strategy_id ?? "Replay Study"),
+        study: selectedReplayStudyPayload,
+      }
+    : null;
   const comparisonMetrics = useMemo(
     () => (selectedLane && comparisonLane ? strategyComparisonMetricRows(selectedLane, comparisonLane) : []),
     [comparisonLane, selectedLane],
@@ -12052,7 +14777,7 @@ function UnifiedStrategyAnalysis({
             <span><strong>Lifecycle</strong> {selectedLaneLifecycleLabel}</span>
             <span><strong>Provenance</strong> {selectedLaneProvenanceLabel}</span>
           </div>
-          {selectedLane?.source_lane === "historical_playback" && selectedReplayStudy ? (
+          {selectedLane?.source_lane === "historical_playback" && selectedReplayStudy && selectedReplayStudyRows.length > 0 ? (
             <>
               <div className="notice-strip compact">
                 <div><strong>Study Available:</strong> Linked replay study published for the selected lane.</div>
@@ -12060,6 +14785,8 @@ function UnifiedStrategyAnalysis({
               </div>
               <ReplayStrategyStudy studies={[selectedReplayStudy]} />
             </>
+          ) : selectedLane?.source_lane === "historical_playback" && selectedReplayStudy ? (
+            <div className="placeholder-note">Replay study metadata is attached to this lane and the full artifact is loading.</div>
           ) : studyPanel ?? <div className="placeholder-note">No study surface is available for the selected lane yet.</div>}
         </div>
       ) : null}
@@ -12287,6 +15014,55 @@ function strategyMetricAvailable(lane: JsonRecord | null | undefined, metricKey:
 
 function strategyAnalysisIsReportableLane(lane: JsonRecord | null | undefined): boolean {
   return ["net_pnl", "average_trade", "profit_factor", "max_drawdown", "trade_count"].every((key) => strategyMetricAvailable(lane, key));
+}
+
+function strategyAnalysisReplayStudyKey(lane: JsonRecord | null | undefined): string {
+  return String(asRecord(asRecord(lane?.evidence).bars).ref?.study_key ?? "").trim();
+}
+
+function strategyAnalysisIsHistoricalReplayLane(lane: JsonRecord | null | undefined): boolean {
+  const sourceLane = String(lane?.source_lane ?? lane?.lane_type ?? "").trim();
+  return sourceLane === "historical_playback" || sourceLane === "benchmark_replay";
+}
+
+function strategyAnalysisRuntimeLaneIsSparse(lane: JsonRecord | null | undefined): boolean {
+  if (!lane) {
+    return true;
+  }
+  const sourceLane = String(lane.source_lane ?? lane.lane_type ?? "").trim();
+  if (strategyAnalysisIsHistoricalReplayLane(lane)) {
+    return false;
+  }
+  if (!strategyAnalysisIsReportableLane(lane)) {
+    return true;
+  }
+  const tradeCountMetric = asRecord(asRecord(lane.metrics).trade_count);
+  const tradeCount = Number(tradeCountMetric.value ?? 0);
+  if (!Number.isFinite(tradeCount) || tradeCount <= 0) {
+    return true;
+  }
+  return sourceLane === "paper_runtime" && tradeCount < 3;
+}
+
+function strategyAnalysisPreferredVisibleLaneId(
+  rankedBoardRows: JsonRecord[],
+  replayStudyItems: JsonRecord[],
+  fallbackLaneId: string,
+): string {
+  const replayStudyKeys = new Set(
+    replayStudyItems
+      .map((item) => String(item.study_key ?? "").trim())
+      .filter(Boolean),
+  );
+  const firstRankedRow = rankedBoardRows[0] ?? null;
+  const historicalRow = rankedBoardRows.find((row) => {
+    const studyKey = strategyAnalysisReplayStudyKey(row);
+    return strategyAnalysisIsHistoricalReplayLane(row) && studyKey && replayStudyKeys.has(studyKey) && strategyAnalysisIsReportableLane(row);
+  });
+  if (historicalRow && strategyAnalysisRuntimeLaneIsSparse(firstRankedRow)) {
+    return String(historicalRow.lane_id ?? historicalRow.id ?? fallbackLaneId ?? "");
+  }
+  return String(firstRankedRow?.lane_id ?? firstRankedRow?.id ?? fallbackLaneId ?? "");
 }
 
 function strategyAnalysisPreferredStrategyKey(boardRows: JsonRecord[], fallbackStrategyKey: string): string {

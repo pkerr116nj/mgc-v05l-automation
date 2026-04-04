@@ -9,19 +9,11 @@ from typing import Any
 
 from ..config_models import StrategySettings
 from ..domain.enums import OrderIntentType
-from ..market_data import (
-    QuoteService,
-    SchwabMarketDataAdapter,
-    SchwabOAuthClient,
-    SchwabQuoteHttpClient,
-    SchwabQuoteRequest,
-    SchwabTokenStore,
-    UrllibJsonTransport,
-    load_schwab_market_data_config,
-)
-from ..production_link import SchwabProductionLinkService
-from ..production_link.client import SchwabBrokerHttpClient
+from ..market_data import QuoteSnapshot, SchwabMarketDataProvider
+from ..market_data.provider_interfaces import MarketDataProvider
 from ..production_link.service import _normalize_orders, _single_leg_payload
+from .provider_interfaces import ExecutionProvider
+from .schwab_execution_provider import SchwabExecutionProvider
 from .order_models import FillEvent, OrderIntent
 
 
@@ -33,34 +25,13 @@ class LiveStrategyPilotBroker:
         *,
         settings: StrategySettings,
         repo_root: Path,
-        production_link_service: SchwabProductionLinkService | None = None,
-        quote_service: QuoteService | None = None,
-        market_data_adapter: SchwabMarketDataAdapter | None = None,
-        broker_client: SchwabBrokerHttpClient | None = None,
+        market_data_provider: MarketDataProvider | None = None,
+        execution_provider: ExecutionProvider | None = None,
     ) -> None:
         self._settings = settings
         self._repo_root = Path(repo_root)
-        self._production_link_service = production_link_service or SchwabProductionLinkService(self._repo_root)
-        self._market_data_config = load_schwab_market_data_config(self._production_link_service.config.market_data_config_path)
-        self._adapter = market_data_adapter or SchwabMarketDataAdapter(settings, self._market_data_config)
-        oauth_client = SchwabOAuthClient(
-            config=self._market_data_config.auth,
-            transport=UrllibJsonTransport(timeout_seconds=self._production_link_service.config.request_timeout_seconds),
-            token_store=SchwabTokenStore(self._market_data_config.auth.token_store_path),
-        )
-        self._quote_service = quote_service or QuoteService(
-            adapter=self._adapter,
-            client=SchwabQuoteHttpClient(
-                oauth_client=oauth_client,
-                market_data_config=self._market_data_config,
-                transport=UrllibJsonTransport(timeout_seconds=self._production_link_service.config.request_timeout_seconds),
-            ),
-        )
-        self._client = broker_client or SchwabBrokerHttpClient(
-            oauth_client=oauth_client,
-            base_url=self._production_link_service.config.trader_api_base_url,
-            timeout_seconds=self._production_link_service.config.request_timeout_seconds,
-        )
+        self._market_data_provider = market_data_provider or SchwabMarketDataProvider(settings, repo_root=self._repo_root)
+        self._execution_provider = execution_provider or SchwabExecutionProvider(self._repo_root)
         self._connected = False
         self._last_snapshot: dict[str, Any] = {}
         self._last_submit_context: dict[str, Any] = {}
@@ -78,7 +49,7 @@ class LiveStrategyPilotBroker:
         self._last_snapshot = dict(payload or {})
 
     def load_snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
-        payload = self._production_link_service.snapshot(force_refresh=force_refresh)
+        payload = self._execution_provider.snapshot_state(force_refresh=force_refresh)
         self.refresh_from_snapshot(payload if isinstance(payload, dict) else {})
         return dict(self._last_snapshot)
 
@@ -89,11 +60,11 @@ class LiveStrategyPilotBroker:
         if account_hash is None:
             raise RuntimeError("No live Schwab account is currently selected for the strategy pilot.")
         side = _intent_to_broker_side(order_intent.intent_type)
-        quote = self._quote_service.fetch_quotes(SchwabQuoteRequest(internal_symbols=(order_intent.symbol,)))
-        if not quote:
+        quotes = self._market_data_provider.fetch_quotes((order_intent.symbol,))
+        if not quotes:
             raise RuntimeError(f"No live quote was returned for {order_intent.symbol}.")
-        limit_price = _marketable_limit_price(intent_type=order_intent.intent_type, quote_payload=quote[0].quote_future)
-        external_symbol = self._adapter.map_quote_symbol(order_intent.symbol)
+        limit_price = _marketable_limit_price(intent_type=order_intent.intent_type, quote_snapshot=quotes[0])
+        external_symbol = quotes[0].external_symbol
         order_payload = _single_leg_payload(
             symbol=external_symbol,
             asset_type="FUTURE",
@@ -106,7 +77,7 @@ class LiveStrategyPilotBroker:
             session="NORMAL",
             time_in_force="DAY",
         )
-        response = self._client.submit_order(account_hash, order_payload)
+        response = self._execution_provider.submit_order(account_hash, order_payload)
         broker_order_id = str(response.get("broker_order_id") or "").strip()
         if not broker_order_id:
             raise RuntimeError("Broker submit did not return a broker_order_id.")
@@ -129,13 +100,13 @@ class LiveStrategyPilotBroker:
         account_hash = self._selected_account_hash()
         if account_hash is None:
             raise RuntimeError("No live Schwab account is currently selected for cancel.")
-        self._client.cancel_order(account_hash, broker_order_id)
+        self._execution_provider.cancel_order(account_hash, broker_order_id)
 
     def get_order_status(self, broker_order_id: str) -> Any:
         account_hash = self._selected_account_hash()
         if account_hash is None:
             raise RuntimeError("No live Schwab account is currently selected for order-status lookup.")
-        payload = self._client.get_order_status(account_hash, broker_order_id)
+        payload = self._execution_provider.get_order_status(account_hash, broker_order_id)
         normalized = _normalize_orders([payload], account_hash=account_hash, fetched_at=datetime.now(timezone.utc))
         current = normalized[0] if normalized else None
         fill_row = self.latest_recent_fill_for_order(broker_order_id)
@@ -241,6 +212,9 @@ class LiveStrategyPilotBroker:
 
     def _selected_account_hash(self) -> str | None:
         snapshot = self._last_snapshot or {}
+        provider = getattr(self, "_execution_provider", None)
+        if provider is not None:
+            return provider.selected_account_hash(snapshot)
         connection = dict(snapshot.get("connection") or {})
         accounts = dict(snapshot.get("accounts") or {})
         account_hash = str(
@@ -257,14 +231,14 @@ def _intent_to_broker_side(intent_type: OrderIntentType) -> str:
     return "SELL"
 
 
-def _marketable_limit_price(*, intent_type: OrderIntentType, quote_payload: dict[str, Any] | None) -> Decimal:
-    quote = dict(quote_payload or {})
-    buy_fields = ("askPrice", "ask", "lastPrice", "last", "mark", "markPrice")
-    sell_fields = ("bidPrice", "bid", "lastPrice", "last", "mark", "markPrice")
-    fields = buy_fields if intent_type in {OrderIntentType.BUY_TO_OPEN, OrderIntentType.BUY_TO_CLOSE} else sell_fields
-    for key in fields:
-        value = quote.get(key)
-        if value in (None, ""):
+def _marketable_limit_price(*, intent_type: OrderIntentType, quote_snapshot: QuoteSnapshot) -> Decimal:
+    fields = (
+        (quote_snapshot.ask_price, quote_snapshot.last_price, quote_snapshot.mark_price)
+        if intent_type in {OrderIntentType.BUY_TO_OPEN, OrderIntentType.BUY_TO_CLOSE}
+        else (quote_snapshot.bid_price, quote_snapshot.last_price, quote_snapshot.mark_price)
+    )
+    for value in fields:
+        if value is None:
             continue
         return Decimal(str(value))
     raise RuntimeError("Live strategy pilot could not derive a marketable limit price from the current quote.")

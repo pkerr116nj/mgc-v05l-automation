@@ -154,6 +154,7 @@ const EXPLICIT_DASHBOARD_URLS = String(process.env.MGC_OPERATOR_DASHBOARD_URLS |
   .filter(Boolean);
 const SNAPSHOT_FILES = {
   historicalPlayback: path.join(OUTPUT_ROOT, "historical_playback_snapshot.json"),
+  strategyAnalysis: path.join(OUTPUT_ROOT, "strategy_analysis_snapshot.json"),
   marketIndexStrip: path.join(OUTPUT_ROOT, "market_index_strip_snapshot.json"),
   operatorSurface: path.join(OUTPUT_ROOT, "operator_surface_snapshot.json"),
   paperApprovedModels: path.join(OUTPUT_ROOT, "paper_approved_models_snapshot.json"),
@@ -171,7 +172,7 @@ const SNAPSHOT_FILES = {
   productionLink: path.join(OUTPUT_ROOT, "production_link_snapshot.json"),
 };
 const HEALTH_TIMEOUT_MS = 5000;
-const DASHBOARD_TIMEOUT_MS = 45000;
+const DASHBOARD_TIMEOUT_MS = 120000;
 const DASHBOARD_STARTUP_TIMEOUT_MS = 120000;
 const RECONNECT_BACKOFF_MS = [2000, 5000, 10000, 20000, 30000];
 
@@ -1134,6 +1135,7 @@ async function loadLiveDashboard(
 async function loadSnapshotBundle(): Promise<JsonRecord | null> {
   const [
     historicalPlayback,
+    strategyAnalysis,
     marketIndexStrip,
     operatorSurface,
     paperApprovedModels,
@@ -1151,6 +1153,7 @@ async function loadSnapshotBundle(): Promise<JsonRecord | null> {
     actionLog,
   ] = await Promise.all([
     readJsonFile(SNAPSHOT_FILES.historicalPlayback),
+    readJsonFile(SNAPSHOT_FILES.strategyAnalysis),
     readJsonFile(SNAPSHOT_FILES.marketIndexStrip),
     readJsonFile(SNAPSHOT_FILES.operatorSurface),
     readJsonFile(SNAPSHOT_FILES.paperApprovedModels),
@@ -1253,7 +1256,108 @@ async function loadSnapshotBundle(): Promise<JsonRecord | null> {
     paper_carry_forward: paperCarryForward,
     paper_pre_session_review: null,
     historical_playback: historicalPlayback,
+    strategy_analysis: strategyAnalysis,
     production_link: productionLink,
+  };
+}
+
+async function latestHistoricalPlaybackManifestInfo(): Promise<{ path: string | null; runStamp: string | null; modifiedAt: string | null }> {
+  const historicalPlaybackDir = path.join(REPO_ROOT, "outputs", "historical_playback");
+  try {
+    const names = await fs.readdir(historicalPlaybackDir);
+    const manifestNames = names.filter((name) => /^historical_playback_.*\.manifest\.json$/u.test(name));
+    if (!manifestNames.length) {
+      return { path: null, runStamp: null, modifiedAt: null };
+    }
+    const entries = await Promise.all(
+      manifestNames.map(async (name) => {
+        const fullPath = path.join(historicalPlaybackDir, name);
+        const stat = await fs.stat(fullPath);
+        return { fullPath, stat };
+      }),
+    );
+    entries.sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs);
+    const latest = entries[0];
+    const runStamp = latest.fullPath.match(/historical_playback_(.*)\.manifest\.json$/u)?.[1] ?? null;
+    return {
+      path: latest.fullPath,
+      runStamp,
+      modifiedAt: new Date(latest.stat.mtimeMs).toISOString(),
+    };
+  } catch {
+    return { path: null, runStamp: null, modifiedAt: null };
+  }
+}
+
+function dashboardHistoricalPlaybackRunStamp(dashboard: JsonRecord | null): string | null {
+  const historicalPlayback = (dashboard?.historical_playback as JsonRecord | undefined) ?? null;
+  const latestRun = (historicalPlayback?.latest_run as JsonRecord | undefined) ?? null;
+  const runStamp = String(latestRun?.run_stamp ?? "").trim();
+  return runStamp || null;
+}
+
+function dashboardStrategyAnalysisAvailable(dashboard: JsonRecord | null): boolean {
+  const strategyAnalysis = (dashboard?.strategy_analysis as JsonRecord | undefined) ?? null;
+  if (!strategyAnalysis) {
+    return false;
+  }
+  if (strategyAnalysis.available === true) {
+    return true;
+  }
+  const strategyCount = Number(strategyAnalysis.strategy_count ?? 0);
+  const laneCount = Number(strategyAnalysis.lane_count ?? 0);
+  return strategyCount > 0 || laneCount > 0;
+}
+
+async function buildHistoricalPlaybackSyncStatus(dashboard: JsonRecord | null): Promise<JsonRecord> {
+  const latestManifest = await latestHistoricalPlaybackManifestInfo();
+  const dashboardRunStamp = dashboardHistoricalPlaybackRunStamp(dashboard);
+  const strategyAnalysisAvailable = dashboardStrategyAnalysisAvailable(dashboard);
+  const hasLatestManifest = Boolean(latestManifest.runStamp);
+  const runStampMatches = !hasLatestManifest || latestManifest.runStamp === dashboardRunStamp;
+  const inSync = runStampMatches && (!hasLatestManifest || strategyAnalysisAvailable);
+  const detail = !hasLatestManifest
+    ? "No historical playback manifest is present under outputs/historical_playback."
+    : !dashboardRunStamp
+      ? `Latest historical playback manifest is ${latestManifest.runStamp}, but the current dashboard state has no loaded playback run stamp.`
+      : latestManifest.runStamp !== dashboardRunStamp
+        ? `Latest historical playback manifest is ${latestManifest.runStamp}, but the current dashboard state exposes ${dashboardRunStamp}.`
+        : !strategyAnalysisAvailable
+          ? `Historical playback run ${dashboardRunStamp} is loaded, but strategy analysis is missing from the current desktop state.`
+          : `Historical playback run ${dashboardRunStamp} matches the latest manifest and strategy analysis is present.`;
+  return {
+    in_sync: inSync,
+    latest_manifest_path: latestManifest.path,
+    latest_manifest_run_stamp: latestManifest.runStamp,
+    latest_manifest_modified_at: latestManifest.modifiedAt,
+    dashboard_run_stamp: dashboardRunStamp,
+    strategy_analysis_available: strategyAnalysisAvailable,
+    detail,
+  };
+}
+
+function attachHistoricalPlaybackSync(dashboard: JsonRecord | null, syncStatus: JsonRecord): void {
+  if (!dashboard) {
+    return;
+  }
+  dashboard.historical_playback_sync = syncStatus;
+}
+
+function applyHistoricalPlaybackSyncWarning(state: DesktopState, syncStatus: JsonRecord): DesktopState {
+  if (syncStatus.in_sync === true) {
+    return state;
+  }
+  const warning = String(syncStatus.detail ?? "Historical playback state is not synchronized.").trim();
+  const errors = state.errors.includes(warning) ? state.errors : [...state.errors, warning];
+  const sourceLabel = state.source.mode === "snapshot_fallback" ? "SNAPSHOT (PLAYBACK STALE)" : state.source.label;
+  return {
+    ...state,
+    errors,
+    source: {
+      ...state.source,
+      label: sourceLabel,
+      detail: `${state.source.detail} ${warning}`.trim(),
+    },
   };
 }
 
@@ -1517,6 +1621,8 @@ async function probeDesktopState(): Promise<DesktopState> {
   const liveHealth = live?.mode === "live" ? live.health : live?.mode === "health-only" ? live.health : null;
   const snapshot = liveDashboard ? null : await loadSnapshotBundle();
   const dashboard = liveDashboard ?? snapshot;
+  const historicalPlaybackSync = await buildHistoricalPlaybackSyncStatus(dashboard);
+  attachHistoricalPlaybackSync(dashboard, historicalPlaybackSync);
   const runtimeStates = buildRuntimeStates({
     live,
     snapshotAvailable: Boolean(snapshot),
@@ -1560,8 +1666,9 @@ async function probeDesktopState(): Promise<DesktopState> {
       localAuth,
       refreshedAt: new Date().toISOString(),
     };
-    await writeDesktopStartupStatus(state);
-    return state;
+    const syncedState = applyHistoricalPlaybackSyncWarning(state, historicalPlaybackSync);
+    await writeDesktopStartupStatus(syncedState);
+    return syncedState;
   }
 
   if (snapshot) {
@@ -1602,8 +1709,9 @@ async function probeDesktopState(): Promise<DesktopState> {
       localAuth,
       refreshedAt: new Date().toISOString(),
     };
-    await writeDesktopStartupStatus(state);
-    return state;
+    const syncedState = applyHistoricalPlaybackSyncWarning(state, historicalPlaybackSync);
+    await writeDesktopStartupStatus(syncedState);
+    return syncedState;
   }
 
   errors.push("No live dashboard API responded and no persisted operator snapshots were available.");

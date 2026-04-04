@@ -52,6 +52,7 @@ from ..execution.reconciliation import (
     RECONCILIATION_SAFE_CLASSES,
 )
 from ..market_data import (
+    CanonicalMarketDataMaintenanceService,
     HistoricalPollingLiveClient,
     LivePollingService,
     SchwabHistoricalHttpClient,
@@ -12338,6 +12339,7 @@ def _build_live_polling_service(
             lookback_minutes=settings.live_poll_lookback_minutes,
         ),
         repositories=repositories,
+        canonical_maintenance=CanonicalMarketDataMaintenanceService(database_url=settings.database_url),
     )
 
 

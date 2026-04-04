@@ -731,6 +731,29 @@ def test_json_ready_normalizes_nested_dashboard_payload_values(tmp_path: Path) -
     json.dumps(normalized, sort_keys=True)
 
 
+def test_json_ready_replaces_non_finite_numbers_with_none() -> None:
+    payload = {
+        "profit_factor": float("inf"),
+        "max_drawdown": float("nan"),
+        "detail": {
+            "decimal_inf": Decimal("Infinity"),
+            "decimal_nan": Decimal("NaN"),
+        },
+    }
+
+    normalized = _json_ready(payload)
+
+    assert normalized == {
+        "profit_factor": None,
+        "max_drawdown": None,
+        "detail": {
+            "decimal_inf": None,
+            "decimal_nan": None,
+        },
+    }
+    json.dumps(normalized, sort_keys=True)
+
+
 def test_same_underlying_conflicts_treat_multiple_runtime_instances_as_informational_only(tmp_path: Path) -> None:
     gc_bull_db = tmp_path / "gc_bull.sqlite3"
     gc_bear_db = tmp_path / "gc_bear.sqlite3"
@@ -3199,9 +3222,6 @@ def test_dashboard_snapshot_reads_real_artifacts(tmp_path: Path) -> None:
     assert snapshot["historical_playback"]["strategy_study_status"]["mode"] == "ATP_ENHANCED"
     assert historical_payload["strategy_study_status"]["artifact_row_count"] == 2
     assert historical_payload["strategy_study"]["summary"]["bar_count"] == 2
-    assert historical_payload["strategy_study"]["rows"][0]["entry_marker"] is True
-    assert historical_payload["strategy_study"]["rows"][0]["current_bias_state"] == "LONG_BIAS"
-    assert historical_payload["strategy_study"]["rows"][0]["atp_timing_state"] == "ATP_TIMING_CONFIRMED"
     assert historical_payload["strategy_study"]["meta"]["timeframe_truth"]["artifact_timeframe"] == "5m"
     assert historical_payload["strategy_study"]["summary"]["atp_summary"]["available"] is True
     assert historical_payload["strategy_study"]["summary"]["atp_summary"]["top_atp_blocker_codes"][0]["code"] == "ATP_NO_PULLBACK"
@@ -3431,6 +3451,7 @@ def test_dashboard_historical_playback_payload_backfills_legacy_strategy_study_a
 
     assert payload["latest_run"]["strategy_study_available"] is True
     assert payload["selected_study"]["contract_version"] == "strategy_study_v3"
+    assert "rows" not in payload["selected_study"]
     assert payload["study_catalog"]["selected_study_key"]
     assert payload["study_catalog"]["items"][0]["contract_version"] == "strategy_study_v3"
     assert payload["study_catalog"]["facets"]["symbols"] == ["MGC"]

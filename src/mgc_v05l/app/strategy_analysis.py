@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -919,7 +920,9 @@ def _metric_sort_value(metric: Any) -> float | None:
     if metric_dict.get("available") is not True:
         return None
     value = _decimal_or_none(metric_dict.get("value"))
-    return float(value) if value is not None else None
+    if value is None or not value.is_finite():
+        return None
+    return float(value)
 
 
 def _timestamp_metric_sort_value(metric: dict[str, Any]) -> float | None:
@@ -962,9 +965,9 @@ def _replay_strategy_lanes(historical_playback: dict[str, Any]) -> list[dict[str
     lanes: list[dict[str, Any]] = []
     for item in study_catalog_items:
         study = dict(item.get("study") or {})
-        summary = dict(study.get("summary") or item.get("summary") or {})
-        meta = dict(study.get("meta") or {})
-        timeframe_truth = dict(meta.get("timeframe_truth") or item.get("timeframe_truth") or {})
+        summary = dict(item.get("summary") or study.get("summary") or {})
+        meta = dict(item.get("meta") or study.get("meta") or {})
+        timeframe_truth = dict(item.get("timeframe_truth") or meta.get("timeframe_truth") or {})
         explicit_study_mode = str(item.get("study_mode") or meta.get("study_mode") or "").strip()
         study_mode = explicit_study_mode or "baseline_parity_mode"
         lane_type = _replay_lane_type(study_mode, summary, meta, explicit_study_mode=bool(explicit_study_mode))
@@ -1040,7 +1043,7 @@ def _replay_strategy_lanes(historical_playback: dict[str, Any]) -> list[dict[str
                     "study_id": meta.get("study_id") or item.get("study_key"),
                     "study_key": item.get("study_key"),
                     "candidate_id": item.get("candidate_id"),
-                    "contract_version": study.get("contract_version"),
+                    "contract_version": item.get("contract_version") or study.get("contract_version"),
                 },
                 "config_identity": {
                     "benchmark_label": "Historical playback benchmark"
@@ -1066,8 +1069,8 @@ def _replay_strategy_lanes(historical_playback: dict[str, Any]) -> list[dict[str
                     "explicit": True,
                 },
                 "date_range": {
-                    "start_timestamp": item.get("coverage_start") or _nested_get(meta, "coverage_range", "start_timestamp"),
-                    "end_timestamp": item.get("coverage_end") or _nested_get(meta, "coverage_range", "end_timestamp"),
+                    "start_timestamp": item.get("coverage_start") or meta.get("coverage_start") or _nested_get(meta, "coverage_range", "start_timestamp"),
+                    "end_timestamp": item.get("coverage_end") or meta.get("coverage_end") or _nested_get(meta, "coverage_range", "end_timestamp"),
                     "session_window": _replay_session_window(summary),
                 },
                 "metrics": {
@@ -2841,10 +2844,11 @@ def _sort_decimal_for_rows(value: Any) -> Decimal:
 
 
 def _metric_value(value: Any, *, unavailable_reason: str | None = None) -> dict[str, Any]:
-    available = value not in (None, "")
+    normalized_value = _json_metric_value(value)
+    available = normalized_value not in (None, "")
     return {
         "available": available,
-        "value": value if available else None,
+        "value": normalized_value if available else None,
         "reason": None if available else unavailable_reason,
     }
 
@@ -2881,9 +2885,20 @@ def _decimal_or_none(value: Any) -> Decimal | None:
     if value in (None, ""):
         return None
     try:
-        return Decimal(str(value))
+        result = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
         return None
+    if not result.is_finite():
+        return None
+    return result
+
+
+def _json_metric_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return _decimal_to_string(value) if value.is_finite() else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
 
 
 def _decimal_to_string(value: Decimal | None) -> str | None:

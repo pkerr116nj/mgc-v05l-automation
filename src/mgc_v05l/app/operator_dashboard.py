@@ -30,7 +30,11 @@ from urllib.parse import parse_qs, urlparse
 
 from ..config_models import load_data_storage_policy, load_settings_from_files
 from .historical_playback import ensure_strategy_study_artifacts
-from .strategy_study import normalize_strategy_study_payload
+from .strategy_study import (
+    build_strategy_study_catalog_entry,
+    build_strategy_study_preview,
+    normalize_strategy_study_payload,
+)
 from .replay_reporting import build_summary_metrics, build_trade_ledger
 from .session_phase_labels import label_session_phase
 from .approved_quant_lanes.dashboard_payloads import load_approved_quant_baselines_snapshot
@@ -201,6 +205,12 @@ def _historical_playback_study_catalog_payload(items: Sequence[dict[str, Any]]) 
             "execution_resolutions": execution_resolutions,
         },
     }
+
+
+def _historical_strategy_study_preview(strategy_study_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(strategy_study_payload, dict):
+        return None
+    return build_strategy_study_preview(strategy_study_payload)
 
 
 @dataclass(frozen=True)
@@ -2502,9 +2512,18 @@ class OperatorDashboardService:
     def _historical_playback_payload(self) -> dict[str, Any]:
         snapshot_artifact = "/api/operator-artifact/historical-playback-snapshot"
         manifest_path = self._latest_historical_playback_manifest_path()
-        study_catalog_items = self._historical_playback_study_catalog_items()
-        selected_catalog_entry = study_catalog_items[0] if study_catalog_items else None
+        study_catalog_items = self._historical_playback_study_catalog_items(manifest_path=manifest_path)
+        selected_catalog_entry = next(
+            (
+                item
+                for item in study_catalog_items
+                if int(item.get("closed_trade_count") or 0) > 0
+            ),
+            study_catalog_items[0] if study_catalog_items else None,
+        )
         study_catalog_payload = _historical_playback_study_catalog_payload(study_catalog_items)
+        if selected_catalog_entry is not None:
+            study_catalog_payload["selected_study_key"] = selected_catalog_entry.get("study_key")
         if manifest_path is None:
             strategy_study_status = _historical_strategy_study_status(
                 selected_catalog_entry.get("study") if selected_catalog_entry is not None else None,
@@ -2535,6 +2554,7 @@ class OperatorDashboardService:
         artifact_paths: dict[str, str] = {"manifest": str(manifest_path)}
         replay_summary_payload: dict[str, Any] | None = None
         strategy_study_payload: dict[str, Any] | None = None
+        selected_study_preview_payload: dict[str, Any] | None = None
 
         for entry in symbol_entries:
             symbol = str(entry.get("symbol") or "-")
@@ -2576,7 +2596,7 @@ class OperatorDashboardService:
                 artifact_paths.setdefault("trigger_report_markdown", str(trigger_report_markdown_path))
             if strategy_study_json_path is not None and strategy_study_json_path.exists():
                 artifact_paths.setdefault("strategy_study_json", str(strategy_study_json_path))
-                if strategy_study_payload is None:
+                if strategy_study_payload is None and not entry.get("study_preview"):
                     strategy_study_payload = normalize_strategy_study_payload(_read_json(strategy_study_json_path))
             if strategy_study_markdown_path is not None and strategy_study_markdown_path.exists():
                 artifact_paths.setdefault("strategy_study_markdown", str(strategy_study_markdown_path))
@@ -2614,12 +2634,18 @@ class OperatorDashboardService:
             if replay_summary_payload is not None
             else None
         )
-        selected_study_payload = (
-            dict(selected_catalog_entry.get("study") or {})
-            if selected_catalog_entry is not None
-            else strategy_study_payload
-        )
-        selected_study_status = _historical_strategy_study_status(selected_study_payload, run_loaded=True)
+        selected_study_payload = None
+        if selected_catalog_entry is not None:
+            selected_study_preview_payload = dict(selected_catalog_entry.get("study_preview") or {}) or None
+            selected_study_path = _path_or_none(
+                dict(selected_catalog_entry.get("artifact_paths") or {}).get("strategy_study_json")
+            )
+            if selected_study_preview_payload is None and selected_study_path is not None and selected_study_path.exists():
+                selected_study_payload = normalize_strategy_study_payload(_read_json(selected_study_path))
+        if selected_study_payload is None:
+            selected_study_payload = strategy_study_payload
+        selected_study_preview = selected_study_preview_payload or _historical_strategy_study_preview(selected_study_payload)
+        selected_study_status = _historical_strategy_study_status(selected_study_preview or selected_study_payload, run_loaded=True)
         selected_artifact_paths = dict(selected_catalog_entry.get("artifact_paths") or {}) if selected_catalog_entry is not None else {}
         for artifact_key, artifact_value in selected_artifact_paths.items():
             artifact_paths[f"selected_{artifact_key}"] = artifact_value
@@ -2630,7 +2656,7 @@ class OperatorDashboardService:
             "artifacts": {"snapshot": snapshot_artifact},
             "strategy_study_status": selected_study_status,
             "study_catalog": study_catalog_payload,
-            "selected_study": selected_study_payload,
+            "selected_study": selected_study_preview,
             "latest_run": {
                 "run_stamp": run_stamp,
                 "run_timestamp": run_timestamp,
@@ -2649,7 +2675,7 @@ class OperatorDashboardService:
                 "primary_standalone_strategy_id": primary_standalone_strategy_id,
                 "aggregate_portfolio_summary": replay_aggregate,
                 "per_strategy_summaries": replay_per_strategy,
-                "strategy_study": selected_study_payload,
+                "strategy_study": selected_study_preview,
                 "strategy_study_status": selected_study_status,
                 "strategy_study_available": selected_study_payload is not None,
                 "artifact_paths": artifact_paths,
@@ -2690,117 +2716,73 @@ class OperatorDashboardService:
         )
         return manifest_paths[-1] if manifest_paths else None
 
-    def _historical_playback_study_catalog_items(self) -> list[dict[str, Any]]:
+    def _historical_playback_study_catalog_items(self, manifest_path: Path | None = None) -> list[dict[str, Any]]:
         if not self._historical_playback_dir.exists():
             return []
-        manifest_paths = sorted(
-            self._historical_playback_dir.glob("historical_playback_*.manifest.json"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
+        resolved_manifest_path = manifest_path or self._latest_historical_playback_manifest_path()
+        if resolved_manifest_path is None or not resolved_manifest_path.exists():
+            return []
         items: list[dict[str, Any]] = []
-        for manifest_path in manifest_paths:
-            manifest = _read_json(manifest_path)
-            run_stamp = str(manifest.get("run_stamp") or manifest_path.stem)
-            run_timestamp = datetime.fromtimestamp(manifest_path.stat().st_mtime, tz=timezone.utc).isoformat()
-            for entry in list(manifest.get("symbols") or []):
-                summary_path = _path_or_none(entry.get("summary_path"))
-                summary_payload: dict[str, Any] | None = None
-                if summary_path is not None and summary_path.exists():
-                    summary_payload = _read_json(summary_path)
-                strategy_study_json_path = _path_or_none(entry.get("strategy_study_json_path"))
-                strategy_study_markdown_path = _path_or_none(entry.get("strategy_study_markdown_path"))
-                if (
-                    summary_path is not None
-                    and summary_path.exists()
-                    and (
-                        strategy_study_json_path is None
-                        or strategy_study_markdown_path is None
-                        or not strategy_study_json_path.exists()
-                        or not strategy_study_markdown_path.exists()
-                    )
-                ):
-                    rebuilt_json_path, rebuilt_markdown_path = ensure_strategy_study_artifacts(
-                        summary_path=summary_path,
-                        summary_payload=summary_payload,
-                    )
-                    if rebuilt_json_path is not None:
-                        strategy_study_json_path = rebuilt_json_path
-                    if rebuilt_markdown_path is not None:
-                        strategy_study_markdown_path = rebuilt_markdown_path
-                if strategy_study_json_path is None or not strategy_study_json_path.exists():
-                    continue
-                normalized_study = normalize_strategy_study_payload(_read_json(strategy_study_json_path))
-                if normalized_study is None:
-                    continue
-                meta = dict(normalized_study.get("meta") or {})
-                timeframe_truth = dict(meta.get("timeframe_truth") or {})
-                coverage = dict(meta.get("coverage_range") or {})
-                symbol = str(meta.get("symbol") or normalized_study.get("symbol") or entry.get("symbol") or "-")
-                strategy_id = meta.get("strategy_id")
-                strategy_family = meta.get("strategy_family") or normalized_study.get("strategy_family")
-                study_mode = str(meta.get("study_mode") or "baseline_parity_mode")
-                scope_label = (
-                    "Research Execution"
-                    if study_mode == "research_execution_mode"
-                    else "Live Execution"
-                    if study_mode == "live_execution_mode"
-                    else "Legacy Benchmark"
+        manifest = _read_json(resolved_manifest_path)
+        run_stamp = str(manifest.get("run_stamp") or resolved_manifest_path.stem)
+        run_timestamp = datetime.fromtimestamp(resolved_manifest_path.stat().st_mtime, tz=timezone.utc).isoformat()
+        for entry in list(manifest.get("symbols") or []):
+            manifest_catalog_entry = dict(entry.get("catalog_entry") or {})
+            if manifest_catalog_entry:
+                item = dict(manifest_catalog_entry)
+                item.setdefault("run_stamp", run_stamp)
+                item.setdefault("run_timestamp", run_timestamp)
+                item["artifact_paths"] = {
+                    **dict(item.get("artifact_paths") or {}),
+                    "manifest": str(resolved_manifest_path),
+                    "summary": entry.get("summary_path"),
+                    "strategy_study_json": entry.get("strategy_study_json_path"),
+                    "strategy_study_markdown": entry.get("strategy_study_markdown_path"),
+                }
+                if entry.get("study_preview") and not item.get("study_preview"):
+                    item["study_preview"] = entry.get("study_preview")
+                items.append(item)
+                continue
+            summary_path = _path_or_none(entry.get("summary_path"))
+            summary_payload: dict[str, Any] | None = None
+            if summary_path is not None and summary_path.exists():
+                summary_payload = _read_json(summary_path)
+            strategy_study_json_path = _path_or_none(entry.get("strategy_study_json_path"))
+            strategy_study_markdown_path = _path_or_none(entry.get("strategy_study_markdown_path"))
+            if (
+                summary_path is not None
+                and summary_path.exists()
+                and (
+                    strategy_study_json_path is None
+                    or strategy_study_markdown_path is None
+                    or not strategy_study_json_path.exists()
+                    or not strategy_study_markdown_path.exists()
                 )
-                study_key = str(meta.get("study_id") or f"{run_stamp}:{symbol}:{strategy_id or strategy_family or 'study'}")
-                items.append(
-                    {
-                        "study_key": study_key,
-                        "label": " / ".join(
-                            part
-                            for part in (
-                                symbol,
-                                str(strategy_id or strategy_family or "study"),
-                                study_mode,
-                                str(meta.get("entry_model") or ""),
-                            )
-                            if part
-                        ),
-                        "run_stamp": run_stamp,
-                        "run_timestamp": run_timestamp,
-                        "symbol": symbol,
-                        "strategy_id": strategy_id,
-                        "candidate_id": meta.get("candidate_id"),
-                        "scope_label": scope_label,
-                        "strategy_family": strategy_family,
-                        "contract_version": normalized_study.get("contract_version"),
-                        "context_resolution": meta.get("context_resolution"),
-                        "execution_resolution": meta.get("execution_resolution"),
-                        "timeframe_truth": timeframe_truth,
-                        "coverage_start": meta.get("coverage_start") or coverage.get("start_timestamp"),
-                        "coverage_end": meta.get("coverage_end") or coverage.get("end_timestamp"),
-                        "study_mode": study_mode,
-                        "entry_model": meta.get("entry_model"),
-                        "supported_entry_models": list(meta.get("supported_entry_models") or []),
-                        "entry_model_supported": bool(meta.get("entry_model_supported", True)),
-                        "execution_truth_emitter": meta.get("execution_truth_emitter"),
-                        "intrabar_execution_authoritative": bool(meta.get("intrabar_execution_authoritative")),
-                        "authoritative_intrabar_available": bool(meta.get("authoritative_intrabar_available")),
-                        "authoritative_entry_truth_available": bool(meta.get("authoritative_entry_truth_available")),
-                        "authoritative_exit_truth_available": bool(meta.get("authoritative_exit_truth_available")),
-                        "authoritative_trade_lifecycle_available": bool(meta.get("authoritative_trade_lifecycle_available")),
-                        "pnl_truth_basis": meta.get("pnl_truth_basis"),
-                        "lifecycle_truth_class": meta.get("lifecycle_truth_class"),
-                        "unsupported_reason": meta.get("unsupported_reason"),
-                        "active_entry_model": meta.get("active_entry_model") or meta.get("entry_model"),
-                        "truth_provenance": dict(meta.get("truth_provenance") or {}),
-                        "entry_model_capabilities": list(meta.get("entry_model_capabilities") or []),
-                        "available_overlay_flags": dict(meta.get("available_overlay_flags") or {}),
-                        "artifact_paths": {
-                            "manifest": str(manifest_path),
-                            "summary": str(summary_path) if summary_path is not None else None,
-                            "strategy_study_json": str(strategy_study_json_path),
-                            "strategy_study_markdown": str(strategy_study_markdown_path) if strategy_study_markdown_path is not None else None,
-                        },
-                        "summary": dict(normalized_study.get("summary") or {}),
-                        "study": normalized_study,
-                    }
+            ):
+                rebuilt_json_path, rebuilt_markdown_path = ensure_strategy_study_artifacts(
+                    summary_path=summary_path,
+                    summary_payload=summary_payload,
                 )
+                if rebuilt_json_path is not None:
+                    strategy_study_json_path = rebuilt_json_path
+                if rebuilt_markdown_path is not None:
+                    strategy_study_markdown_path = rebuilt_markdown_path
+            if strategy_study_json_path is None or not strategy_study_json_path.exists():
+                continue
+            normalized_study = normalize_strategy_study_payload(_read_json(strategy_study_json_path))
+            if normalized_study is None:
+                continue
+            catalog_entry = build_strategy_study_catalog_entry(
+                payload=normalized_study,
+                run_stamp=run_stamp,
+                run_timestamp=run_timestamp,
+                manifest_path=str(resolved_manifest_path),
+                summary_path=str(summary_path) if summary_path is not None else None,
+                strategy_study_json_path=str(strategy_study_json_path),
+                strategy_study_markdown_path=str(strategy_study_markdown_path) if strategy_study_markdown_path is not None else None,
+            )
+            if catalog_entry is not None:
+                items.append(catalog_entry)
         return items
 
     def _active_runtime(self, paper: dict[str, Any], shadow: dict[str, Any]) -> dict[str, Any]:
@@ -11791,7 +11773,13 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_ready(item) for item in value]
     if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
         return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return value
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, Path):

@@ -14,9 +14,11 @@ This workspace is the first-pass Electron + React desktop shell for the trading 
 - `npm run dev`
   Starts the Vite renderer, compiles Electron main/preload TypeScript, then launches Electron.
 - `npm run dev:launch`
-  Builds the current desktop workspace and launches Electron against the production renderer bundle.
+  Builds the local `MGC Operator.app` bundle and launches the bundled app executable from its packaged app context.
 - `npm run build`
   Builds Electron main/preload output into `dist/main` and the renderer into `dist/renderer`.
+- `npm run start:bundle`
+  Launches the packaged local `MGC Operator.app` through macOS `open --args`, preserving automation capture flags while avoiding the raw `node_modules/electron/dist/Electron.app` bootstrap path.
 - `npm run dist`
   Runs a production build and packages the desktop app via `electron-builder`.
 - `npm run package:local`

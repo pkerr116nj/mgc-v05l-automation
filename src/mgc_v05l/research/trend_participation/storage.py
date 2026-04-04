@@ -40,6 +40,7 @@ def load_sqlite_bars(
     sqlite_path: Path,
     instrument: str,
     timeframe: str,
+    data_source: str | None = None,
     start_ts: datetime | None = None,
     end_ts: datetime | None = None,
 ) -> list[ResearchBar]:
@@ -52,6 +53,9 @@ def load_sqlite_bars(
             where symbol = ? and timeframe = ?
         """
         params: list[Any] = [instrument, timeframe]
+        if data_source is not None:
+            query += " and data_source = ?"
+            params.append(data_source)
         if start_ts is not None:
             query += " and end_ts >= ?"
             params.append(start_ts.isoformat())
@@ -154,6 +158,47 @@ def resample_bars_from_1m(*, bars_1m: Iterable[ResearchBar], target_timeframe: s
             )
         )
     return resampled
+
+
+def rolling_window_bars_from_1m(
+    *,
+    bars_1m: Iterable[ResearchBar],
+    window_minutes: int = 5,
+    timeframe_label: str = "5m",
+) -> list[ResearchBar]:
+    if window_minutes <= 1:
+        return list(sorted(bars_1m, key=lambda item: (item.instrument, item.end_ts)))
+
+    grouped: dict[str, list[ResearchBar]] = {}
+    for bar in sorted(bars_1m, key=lambda item: (item.instrument, item.end_ts)):
+        grouped.setdefault(bar.instrument, []).append(bar)
+
+    rolling_rows: list[ResearchBar] = []
+    for instrument, instrument_bars in grouped.items():
+        if len(instrument_bars) < window_minutes:
+            continue
+        for index in range(window_minutes - 1, len(instrument_bars)):
+            bucket = instrument_bars[index - window_minutes + 1 : index + 1]
+            first = bucket[0]
+            last = bucket[-1]
+            bucket_end = last.end_ts
+            rolling_rows.append(
+                ResearchBar(
+                    instrument=instrument,
+                    timeframe=timeframe_label,
+                    start_ts=bucket_end - timedelta(minutes=window_minutes),
+                    end_ts=bucket_end,
+                    open=first.open,
+                    high=max(item.high for item in bucket),
+                    low=min(item.low for item in bucket),
+                    close=last.close,
+                    volume=sum(item.volume for item in bucket),
+                    session_label=label_session_phase(bucket_end),
+                    session_segment=_base_session_segment(label_session_phase(bucket_end)),
+                    source="rolling_resampled_from_1m",
+                )
+            )
+    return rolling_rows
 
 
 def write_storage_manifest(path: Path, payload: dict[str, Any]) -> Path:

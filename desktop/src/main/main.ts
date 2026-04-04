@@ -19,26 +19,53 @@ import {
 
 let mainWindow: BrowserWindow | null = null;
 
+function cliSwitchValue(name: string): string | undefined {
+  const prefix = `--${name}=`;
+  for (const arg of process.argv.slice(1)) {
+    if (arg === `--${name}`) {
+      return "1";
+    }
+    if (arg.startsWith(prefix)) {
+      return arg.slice(prefix.length);
+    }
+  }
+  return undefined;
+}
+
 function captureDelayMs(): number {
-  const raw = Number(process.env.MGC_DESKTOP_CAPTURE_DELAY_MS || 5000);
+  const raw = Number(cliSwitchValue("mgc-capture-delay-ms") || process.env.MGC_DESKTOP_CAPTURE_DELAY_MS || 5000);
   if (!Number.isFinite(raw)) {
     return 5000;
   }
   return Math.max(500, raw);
 }
 
+function configuredWindowSize(): { width: number; height: number } {
+  const width = Number(cliSwitchValue("mgc-capture-window-width") || process.env.MGC_DESKTOP_CAPTURE_WINDOW_WIDTH || 1540);
+  const height = Number(cliSwitchValue("mgc-capture-window-height") || process.env.MGC_DESKTOP_CAPTURE_WINDOW_HEIGHT || 980);
+  return {
+    width: Number.isFinite(width) ? Math.max(1180, Math.round(width)) : 1540,
+    height: Number.isFinite(height) ? Math.max(760, Math.round(height)) : 980,
+  };
+}
+
 async function maybeCaptureWindow(window: BrowserWindow): Promise<void> {
-  const capturePath = process.env.MGC_DESKTOP_CAPTURE_PATH;
+  const capturePath = cliSwitchValue("mgc-capture-path") || process.env.MGC_DESKTOP_CAPTURE_PATH;
   if (!capturePath) {
     return;
   }
-  const requestedHash = process.env.MGC_DESKTOP_CAPTURE_HASH;
-  const scrollSectionTitle = process.env.MGC_DESKTOP_CAPTURE_SCROLL_SECTION_TITLE;
-  const scrollRowText = process.env.MGC_DESKTOP_CAPTURE_SCROLL_ROW_TEXT;
+  const requestedHash = cliSwitchValue("mgc-capture-hash") || process.env.MGC_DESKTOP_CAPTURE_HASH;
+  const captureScript = cliSwitchValue("mgc-capture-js") || process.env.MGC_DESKTOP_CAPTURE_JS;
+  const scrollSectionTitle = cliSwitchValue("mgc-capture-scroll-section-title") || process.env.MGC_DESKTOP_CAPTURE_SCROLL_SECTION_TITLE;
+  const scrollRowText = cliSwitchValue("mgc-capture-scroll-row-text") || process.env.MGC_DESKTOP_CAPTURE_SCROLL_ROW_TEXT;
   if (requestedHash) {
     await window.webContents.executeJavaScript(`window.location.hash = ${JSON.stringify(requestedHash)};`);
   }
   await new Promise((resolve) => setTimeout(resolve, captureDelayMs()));
+  if (captureScript) {
+    await window.webContents.executeJavaScript(captureScript);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
   if (scrollSectionTitle) {
     await window.webContents.executeJavaScript(`
       (() => {
@@ -83,7 +110,7 @@ async function maybeCaptureWindow(window: BrowserWindow): Promise<void> {
   await fs.writeFile(capturePath, image.toPNG());
   appendDesktopLog(`[electron] renderer capture written to ${capturePath}`);
   console.info("[mgc-operator-desktop] renderer capture written", capturePath);
-  if (process.env.MGC_DESKTOP_CAPTURE_AND_EXIT === "1") {
+  if ((cliSwitchValue("mgc-capture-and-exit") || process.env.MGC_DESKTOP_CAPTURE_AND_EXIT) === "1") {
     app.quit();
   }
 }
@@ -121,7 +148,7 @@ async function runRendererSelfTest(window: BrowserWindow): Promise<void> {
 }
 
 function rendererEntry(): string {
-  const devUrl = process.env.MGC_RENDERER_URL || process.env.VITE_DEV_SERVER_URL;
+  const devUrl = cliSwitchValue("mgc-renderer-url") || process.env.MGC_RENDERER_URL || process.env.VITE_DEV_SERVER_URL;
   if (devUrl) {
     return devUrl;
   }
@@ -162,9 +189,10 @@ function createMenu(): Menu {
 }
 
 async function createWindow(): Promise<void> {
+  const windowSize = configuredWindowSize();
   mainWindow = new BrowserWindow({
-    width: 1540,
-    height: 980,
+    width: windowSize.width,
+    height: windowSize.height,
     minWidth: 1180,
     minHeight: 760,
     backgroundColor: "#0b1320",

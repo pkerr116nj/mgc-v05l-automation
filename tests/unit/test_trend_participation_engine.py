@@ -51,6 +51,8 @@ from mgc_v05l.research.trend_participation.canary import CanaryLaneSpec, _decisi
 from mgc_v05l.research.trend_participation.phase2_continuation import overlay_position_blocks
 from mgc_v05l.research.trend_participation.phase4 import build_rolling_windows
 from mgc_v05l.research.trend_participation.phase5 import _fragility_diagnosis
+from mgc_v05l.research.trend_participation.phase3_timing import ATP_TIMING_ACTIVATION_ROLLING_5M
+from mgc_v05l.research.trend_participation.storage import rolling_window_bars_from_1m
 
 
 def _bar(
@@ -477,6 +479,40 @@ def test_phase3_timing_marks_invalidation_before_entry() -> None:
     assert latest.timing_state == ATP_TIMING_INVALIDATED
     assert latest.primary_blocker == ATP_TIMING_INVALIDATED_BEFORE_ENTRY
     assert latest.invalidated_before_entry is True
+
+
+def test_rolling_window_bars_from_1m_emits_minute_stepped_5m_context() -> None:
+    bars_1m = [
+        _bar(instrument="MES", timeframe="1m", minute_offset=index, minutes=1, open_=100.0 + index * 0.1, high=100.2 + index * 0.1, low=99.9 + index * 0.1, close=100.1 + index * 0.1)
+        for index in range(6)
+    ]
+
+    rolling = rolling_window_bars_from_1m(bars_1m=bars_1m)
+
+    assert len(rolling) == 2
+    assert rolling[0].timeframe == "5m"
+    assert rolling[0].open == bars_1m[0].open
+    assert rolling[0].close == bars_1m[4].close
+    assert rolling[1].open == bars_1m[1].open
+    assert rolling[1].close == bars_1m[5].close
+
+
+def test_phase3_timing_rolling_activation_can_execute_on_current_minute_window() -> None:
+    bars_5m, bars_1m = _eligible_phase2_setup_and_1m_followthrough()
+    features = build_feature_states(bars_5m=bars_5m, bars_1m=[])
+    entry_states = classify_entry_states(feature_rows=features)
+    rolling_entry_state = replace(entry_states[-1], decision_ts=bars_1m[0].end_ts)
+
+    timing_states = classify_timing_states(
+        entry_states=[rolling_entry_state],
+        bars_1m=bars_1m,
+        entry_activation_basis=ATP_TIMING_ACTIVATION_ROLLING_5M,
+    )
+
+    assert rolling_entry_state.entry_state == ENTRY_ELIGIBLE
+    assert any(state.executable_entry for state in timing_states)
+    assert timing_states[-1].entry_ts is not None
+    assert timing_states[-1].entry_ts >= bars_1m[0].end_ts
 
 
 def test_phase3_vwap_price_quality_classifier_is_explicit() -> None:

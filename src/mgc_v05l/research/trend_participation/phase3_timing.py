@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +23,9 @@ ATP_TIMING_CONFIRMED = "ATP_TIMING_CONFIRMED"
 ATP_TIMING_CHASE_RISK = "ATP_TIMING_CHASE_RISK"
 ATP_TIMING_INVALIDATED = "ATP_TIMING_INVALIDATED"
 ATP_TIMING_UNAVAILABLE = "ATP_TIMING_UNAVAILABLE"
+
+ATP_TIMING_ACTIVATION_COMPLETED_5M = "completed_5m_close"
+ATP_TIMING_ACTIVATION_ROLLING_5M = "rolling_5m_on_1m"
 
 VWAP_FAVORABLE = "VWAP_FAVORABLE"
 VWAP_NEUTRAL = "VWAP_NEUTRAL"
@@ -45,8 +48,13 @@ def build_phase3_replay_package(
     bars_1m: Sequence[Any],
     point_value: float,
     old_proxy_trade_count: int,
+    entry_activation_basis: str = ATP_TIMING_ACTIVATION_COMPLETED_5M,
 ) -> dict[str, Any]:
-    initial_timing_states = classify_timing_states(entry_states=entry_states, bars_1m=bars_1m)
+    initial_timing_states = classify_timing_states(
+        entry_states=entry_states,
+        bars_1m=bars_1m,
+        entry_activation_basis=entry_activation_basis,
+    )
     initial_trades = simulate_timed_entries(
         timing_states=initial_timing_states,
         bars_1m=bars_1m,
@@ -76,6 +84,7 @@ def classify_timing_states(
     *,
     entry_states: Sequence[AtpEntryState],
     bars_1m: Sequence[Any],
+    entry_activation_basis: str = ATP_TIMING_ACTIVATION_COMPLETED_5M,
 ) -> list[AtpTimingState]:
     minute_bars = sorted(bars_1m, key=lambda bar: (bar.instrument, bar.end_ts))
     bars_by_instrument: dict[str, list[Any]] = {}
@@ -108,7 +117,11 @@ def classify_timing_states(
                 )
             )
             continue
-        candidate_window = _timing_window_bars(state=state, minute_bars=instrument_bars)
+        candidate_window = _timing_window_bars(
+            state=state,
+            minute_bars=instrument_bars,
+            entry_activation_basis=entry_activation_basis,
+        )
         if not candidate_window:
             timing_states.append(
                 _timing_state(
@@ -523,9 +536,17 @@ def write_phase3_artifacts(
     return json_path, markdown_path
 
 
-def _timing_window_bars(*, state: AtpEntryState, minute_bars: Sequence[Any]) -> list[Any]:
-    variant = atp_phase2_variant()
+def _timing_window_bars(
+    *,
+    state: AtpEntryState,
+    minute_bars: Sequence[Any],
+    entry_activation_basis: str,
+) -> list[Any]:
     minute_end_timestamps = [bar.end_ts for bar in minute_bars]
+    variant = atp_phase2_variant()
+    if entry_activation_basis == ATP_TIMING_ACTIVATION_ROLLING_5M:
+        start_index = bisect_left(minute_end_timestamps, state.decision_ts)
+        return list(minute_bars[start_index : start_index + variant.entry_window_bars_1m])
     start_index = bisect_right(minute_end_timestamps, state.decision_ts)
     return list(minute_bars[start_index : start_index + variant.entry_window_bars_1m])
 

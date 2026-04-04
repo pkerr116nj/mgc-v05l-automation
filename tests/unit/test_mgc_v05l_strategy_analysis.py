@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from math import inf
+
 from mgc_v05l.app.strategy_analysis import (
     LANE_TYPE_BENCHMARK_REPLAY,
     LANE_TYPE_HISTORICAL_PLAYBACK,
@@ -948,3 +950,52 @@ def test_strategy_analysis_prefers_exact_tracked_paper_breakdowns_over_preview_i
     assert lane["metrics"]["trade_family_breakdown"]["value"][0]["family"] == "ATP Companion"
     assert lane["metrics"]["session_breakdown"]["available"] is True
     assert lane["metrics"]["session_breakdown"]["value"][0]["session"] == "US_LATE"
+
+
+def test_strategy_analysis_treats_non_finite_profit_factor_as_unavailable() -> None:
+    strategy_key = "example__MGC"
+    payload = build_strategy_analysis_payload(
+        historical_playback={
+            "study_catalog": {
+                "items": [
+                    {
+                        "study_key": "study-a",
+                        "label": "Example replay",
+                        "run_stamp": "run-1",
+                        "run_timestamp": "2026-04-04T10:00:00+00:00",
+                        "symbol": "MGC",
+                        "strategy_id": strategy_key,
+                        "strategy_family": "example_family",
+                        "study_mode": "baseline_parity_mode",
+                        "coverage_start": "2026-02-03T00:00:00-05:00",
+                        "coverage_end": "2026-04-03T09:15:00-04:00",
+                        "artifact_paths": {"strategy_study_json": "/tmp/study-a.json"},
+                        "summary": {
+                            "total_trades": 3,
+                            "profit_factor": inf,
+                        },
+                        "study": {
+                            "meta": {
+                                "strategy_id": strategy_key,
+                                "strategy_family": "example_family",
+                                "study_mode": "baseline_parity_mode",
+                            },
+                            "summary": {
+                                "total_trades": 3,
+                                "profit_factor": inf,
+                            },
+                            "bars": [],
+                            "trade_events": [],
+                            "execution_slices": [],
+                        },
+                    }
+                ]
+            }
+        },
+        paper={"status": {"session_date": "2026-04-04", "stale": False}},
+        generated_at="2026-04-04T12:00:00+00:00",
+    )
+
+    lane = payload["details_by_strategy_key"][strategy_key]["lanes"][0]
+    assert lane["metrics"]["profit_factor"]["available"] is False
+    assert lane["metrics"]["profit_factor"]["value"] is None

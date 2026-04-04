@@ -6,6 +6,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common_env.sh"
 
 require_schwab_auth_env
 
+PYTHONPATH="${REPO_ROOT}/src" "${PYTHON_BIN}" -m mgc_v05l.app.replay_base_preservation --write-report --fail-on-regression
+
 export INTERNAL_SYMBOLS="${INTERNAL_SYMBOLS:-$(active_schwab_symbols)}"
 export CHUNK_DAYS="${CHUNK_DAYS:-5}"
 export LOOKBACK_DAYS_IF_EMPTY="${LOOKBACK_DAYS_IF_EMPTY:-7}"
@@ -31,6 +33,8 @@ dry_run = os.environ["DRY_RUN"] == "1"
 now_utc = datetime.now(timezone.utc)
 
 def latest_bar(symbol: str) -> str | None:
+    if not db_path.exists():
+        return None
     connection = sqlite3.connect(db_path)
     try:
         row = connection.execute(
@@ -41,11 +45,19 @@ def latest_bar(symbol: str) -> str | None:
             """,
             (symbol,),
         ).fetchone()
+    except sqlite3.OperationalError:
+        row = (None,)
     finally:
         connection.close()
     return row[0]
 
 def coverage(symbol: str) -> dict[str, str | int | None]:
+    if not db_path.exists():
+        return {
+            "bar_count": 0,
+            "first_bar_ts": None,
+            "last_bar_ts": None,
+        }
     connection = sqlite3.connect(db_path)
     try:
         row = connection.execute(
@@ -56,6 +68,8 @@ def coverage(symbol: str) -> dict[str, str | int | None]:
             """,
             (symbol,),
         ).fetchone()
+    except sqlite3.OperationalError:
+        row = (0, None, None)
     finally:
         connection.close()
     return {
@@ -93,7 +107,28 @@ for symbol in symbols:
         if dry_run:
             print(json.dumps({"dry_run": True, "cmd": cmd}, default=str))
         else:
-            subprocess.run(cmd, check=True, cwd=repo, env={**os.environ, "PYTHONPATH": str(repo / "src")})
+            completed = subprocess.run(
+                cmd,
+                check=True,
+                cwd=repo,
+                env={**os.environ, "PYTHONPATH": str(repo / "src")},
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(completed.stdout)
+            print(
+                json.dumps(
+                    {
+                        "symbol": symbol,
+                        "chunk_start": current.isoformat(),
+                        "chunk_end": chunk_end.isoformat(),
+                        "bar_count": int(payload.get("bar_count") or 0),
+                        "persisted": bool(payload.get("persisted")),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
         current = chunk_end
 
 coverage_after = {symbol: coverage(symbol) for symbol in symbols}
@@ -121,3 +156,5 @@ PY
   --symbol-config "${SCHWAB_CONFIG}" \
   --output-json "${REPORT_DIR}/market_data_status_after_daily_sync.json" \
   --output-csv "${REPORT_DIR}/market_data_status_after_daily_sync.csv"
+
+PYTHONPATH="${REPO_ROOT}/src" "${PYTHON_BIN}" -m mgc_v05l.app.replay_base_preservation --write-report --fail-on-regression

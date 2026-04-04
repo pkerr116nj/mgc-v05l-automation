@@ -17,6 +17,8 @@ from ..persistence import build_engine
 from ..persistence.tables import bars_table
 from ..research.bar_resampling import build_resampled_bars
 from .bar_builder import BarBuilder
+from .provider_config import load_market_data_providers_config
+from .provider_models import MarketDataUseCase
 from .timeframes import normalize_timeframe_label
 
 
@@ -141,12 +143,8 @@ class SQLiteHistoricalBarSource:
             raise ValueError(f"No finalized persisted bars found for {symbol} {timeframe}.")
 
         preferred: list[str]
-        if timeframe == "1m":
-            preferred = ["schwab_history"]
-        elif timeframe == "5m":
-            preferred = ["internal", "schwab_history"]
-        else:
-            preferred = []
+        providers_config = load_market_data_providers_config()
+        preferred = list(providers_config.preferred_data_sources(MarketDataUseCase.HISTORICAL_RESEARCH, timeframe))
 
         for candidate in preferred:
             if candidate in available:

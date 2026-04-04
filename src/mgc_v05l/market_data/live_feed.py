@@ -8,6 +8,7 @@ from typing import Optional
 
 from ..domain.models import Bar
 from ..persistence.repositories import RepositorySet
+from .canonical_maintenance import CanonicalMarketDataMaintenanceService
 from .schwab_adapter import SchwabMarketDataAdapter
 from .schwab_models import (
     SchwabHistoricalClient,
@@ -71,10 +72,12 @@ class LivePollingService:
         adapter: SchwabMarketDataAdapter,
         client: Optional[SchwabLivePollingClient] = None,
         repositories: Optional[RepositorySet] = None,
+        canonical_maintenance: CanonicalMarketDataMaintenanceService | None = None,
     ) -> None:
         self._adapter = adapter
         self._client = client
         self._repositories = repositories
+        self._canonical_maintenance = canonical_maintenance
 
     def poll_bars(
         self,
@@ -119,6 +122,16 @@ class LivePollingService:
             return
         for bar in bars:
             self._repositories.bars.save(bar, data_source="schwab_live_poll")
+        if self._canonical_maintenance is not None:
+            self._canonical_maintenance.persist_completed_1m_bars(
+                bars=bars,
+                raw_data_source="schwab_live_poll",
+                provider="schwab_market_data",
+                provenance_tag="schwab_market_data_live_poll",
+                dataset="schwab_pricehistory_live_poll",
+                schema_name="ohlcv-1m",
+                provider_metadata={"ingest_mode": "completed_live_poll"},
+            )
 
 
 class LiveStreamService:

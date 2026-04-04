@@ -11,14 +11,15 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..config_models import load_settings_from_files
-from ..persistence import build_engine
-from ..persistence.repositories import RepositorySet
-from ..research import build_causal_momentum_report, write_causal_momentum_report_csv
 from ..market_data import (
-    HistoricalBackfillService,
+    CanonicalMarketDataMaintenanceService,
+    DatabentoMarketDataProvider,
+    HistoricalBarsRequest,
+    HistoricalMarketDataIngestionService,
     QuoteService,
     SchwabHistoricalHttpClient,
     SchwabHistoricalRequest,
+    SchwabMarketDataProvider,
     SchwabOAuthClient,
     SchwabQuoteHttpClient,
     SchwabQuoteRequest,
@@ -27,8 +28,12 @@ from ..market_data import (
     load_schwab_auth_config_from_env,
     load_schwab_market_data_config,
 )
+from ..persistence import build_engine
+from ..persistence.repositories import RepositorySet
+from ..research import build_causal_momentum_report, write_causal_momentum_report_csv
 from ..market_data.schwab_adapter import SchwabMarketDataAdapter
 from ..app.bootstrap import bootstrap_service
+from .replay_base_preservation import preserve_replay_base
 from .probationary_runtime import (
     ProbationaryRuntimeTransportFailure,
     REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
@@ -37,6 +42,7 @@ from .probationary_runtime import (
     submit_probationary_operator_control,
 )
 from .runner import StrategyServiceRunner
+from .historical_playback import run_historical_playback
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,6 +192,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fetch Schwab /pricehistory candles and normalize them into internal bars.",
     )
     history_parser.add_argument("--internal-symbol", required=True, help="Internal strategy symbol, such as MGC.")
+    history_parser.add_argument(
+        "--internal-timeframe",
+        default=None,
+        help="Optional internal timeframe override, such as 1m. Defaults to the loaded settings timeframe.",
+    )
     history_parser.add_argument("--period-type", required=True, help="Schwab periodType value.")
     history_parser.add_argument("--period", type=int, default=None, help="Optional Schwab period value.")
     history_parser.add_argument("--frequency-type", default=None, help="Optional Schwab frequencyType value.")
@@ -250,6 +261,143 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="Strategy config file path. Used for internal timezone and internal symbol validation.",
+    )
+
+    provider_backfill_parser = subparsers.add_parser(
+        "market-data-backfill",
+        help="Backfill canonical historical bars through a configured market-data provider.",
+    )
+    provider_backfill_parser.add_argument(
+        "--provider",
+        required=True,
+        choices=["databento", "schwab_market_data"],
+        help="Market-data provider to use for the historical backfill.",
+    )
+    provider_backfill_parser.add_argument(
+        "--symbol",
+        action="append",
+        required=True,
+        help="Internal symbol to backfill. May be supplied multiple times.",
+    )
+    provider_backfill_parser.add_argument(
+        "--start",
+        required=True,
+        help="Inclusive start timestamp in ISO-8601 form.",
+    )
+    provider_backfill_parser.add_argument(
+        "--end",
+        default=None,
+        help="Exclusive end timestamp in ISO-8601 form.",
+    )
+    provider_backfill_parser.add_argument(
+        "--timeframe",
+        default="1m",
+        help="Internal timeframe to backfill. Defaults to 1m.",
+    )
+    provider_backfill_parser.add_argument(
+        "--provider-config",
+        default=None,
+        help="Optional provider-routing JSON config override.",
+    )
+    provider_backfill_parser.add_argument(
+        "--schwab-config",
+        default=None,
+        help="Optional Schwab market-data config path for the Schwab provider.",
+    )
+    provider_backfill_parser.add_argument(
+        "--allow-canonical-overwrite",
+        action="store_true",
+        help="Allow incoming historical bars to overwrite existing canonical bars with the same bar_id.",
+    )
+    provider_backfill_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for timezone and replay DB selection.",
+    )
+
+    historical_playback_parser = subparsers.add_parser(
+        "historical-playback",
+        help="Run persisted historical playback and emit a manifest plus strategy-study artifacts.",
+    )
+    historical_playback_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Config file path. Later files override earlier ones.",
+    )
+    historical_playback_parser.add_argument("--database", required=True, help="SQLite source database path.")
+    historical_playback_parser.add_argument(
+        "--symbol",
+        action="append",
+        required=True,
+        help="Internal symbol to replay. May be supplied multiple times.",
+    )
+    historical_playback_parser.add_argument("--source-timeframe", required=True, help="Persisted source timeframe to load.")
+    historical_playback_parser.add_argument("--target-timeframe", default="5m", help="Playback target timeframe.")
+    historical_playback_parser.add_argument("--output-dir", required=True, help="Artifact output directory.")
+    historical_playback_parser.add_argument("--run-stamp", default=None, help="Optional fixed run stamp.")
+    historical_playback_parser.add_argument("--data-source", default=None, help="Optional explicit data source override.")
+    historical_playback_parser.add_argument("--start", default=None, help="Optional inclusive ISO timestamp.")
+    historical_playback_parser.add_argument("--end", default=None, help="Optional inclusive ISO timestamp.")
+    historical_playback_parser.add_argument(
+        "--ephemeral-replay-db",
+        action="store_true",
+        help="Run playback against an in-memory replay DB and emit summary/study artifacts without persisting replay SQLite files.",
+    )
+
+    canonical_maintenance_parser = subparsers.add_parser(
+        "market-data-maintain-canonical",
+        help="Audit canonical 1m coverage, repair gaps, and derive higher whole-minute canonical bars.",
+    )
+    canonical_maintenance_parser.add_argument(
+        "--symbol",
+        action="append",
+        required=True,
+        help="Internal symbol to audit/repair/derive. May be supplied multiple times.",
+    )
+    canonical_maintenance_parser.add_argument(
+        "--derive-timeframe",
+        action="append",
+        default=["5m", "10m"],
+        help="Derived timeframe to persist from canonical 1m. Defaults to 5m and 10m.",
+    )
+    canonical_maintenance_parser.add_argument(
+        "--repair-gaps",
+        action="store_true",
+        help="Backfill detected unexpected gaps through the selected provider.",
+    )
+    canonical_maintenance_parser.add_argument(
+        "--provider",
+        default="databento",
+        choices=["databento", "schwab_market_data"],
+        help="Historical market-data provider to use when repairing gaps.",
+    )
+    canonical_maintenance_parser.add_argument(
+        "--provider-config",
+        default=None,
+        help="Optional provider-routing JSON config override.",
+    )
+    canonical_maintenance_parser.add_argument(
+        "--schwab-config",
+        default=None,
+        help="Optional Schwab market-data config path for the Schwab provider.",
+    )
+    canonical_maintenance_parser.add_argument(
+        "--start",
+        default=None,
+        help="Optional inclusive start timestamp to limit derived timeframe coverage.",
+    )
+    canonical_maintenance_parser.add_argument(
+        "--end",
+        default=None,
+        help="Optional inclusive end timestamp to limit derived timeframe coverage.",
+    )
+    canonical_maintenance_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for timezone and replay DB selection.",
     )
 
     paper_soak_parser = subparsers.add_parser(
@@ -505,6 +653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 transport=UrllibJsonTransport(),
             ),
             repositories=repositories,
+            canonical_maintenance=CanonicalMarketDataMaintenanceService(database_url=settings.database_url) if args.persist else None,
         )
         bars = service.fetch_bars(
             SchwabHistoricalRequest(
@@ -518,7 +667,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 need_extended_hours_data=args.need_extended_hours_data,
                 need_previous_close=args.need_previous_close,
             ),
-            internal_timeframe=settings.timeframe,
+            internal_timeframe=args.internal_timeframe or settings.timeframe,
         )
         print(
             json.dumps(
@@ -552,6 +701,157 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         quotes = service.fetch_quotes(SchwabQuoteRequest(internal_symbols=(args.internal_symbol,)))
         print(json.dumps({"quotes": _json_ready(quotes)}, sort_keys=True))
+        return 0
+
+    if args.command == "market-data-backfill":
+        try:
+            settings = load_settings_from_files(args.config or ["config/base.yaml", "config/replay.yaml"])
+            preserve_replay_base()
+            ingestion = HistoricalMarketDataIngestionService(
+                database_url=settings.database_url,
+                provider_config_path=args.provider_config,
+            )
+            provider = _build_market_data_provider(
+                provider_name=args.provider,
+                settings=settings,
+                repo_root=Path.cwd(),
+                provider_config_path=args.provider_config,
+                schwab_config_path=args.schwab_config,
+            )
+            start = _parse_cli_datetime(args.start, settings)
+            end = _parse_cli_datetime(args.end, settings) if args.end is not None else None
+            audits = []
+            for symbol in args.symbol:
+                audits.append(
+                    ingestion.ingest(
+                        provider=provider,
+                        request=HistoricalBarsRequest(
+                            internal_symbol=symbol.strip().upper(),
+                            timeframe=args.timeframe,
+                            start=start,
+                            end=end,
+                        ),
+                        allow_canonical_overwrite=args.allow_canonical_overwrite,
+                    )
+                )
+            preservation = preserve_replay_base()
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "provider": args.provider,
+                        "symbols": [str(item).strip().upper() for item in args.symbol],
+                        "timeframe": args.timeframe,
+                        "start": args.start,
+                        "end": args.end,
+                        "error": str(exc),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        print(
+            json.dumps(
+                {
+                    "provider": args.provider,
+                    "symbol_count": len(audits),
+                    "symbols": [audit.internal_symbol for audit in audits],
+                    "audits": _json_ready(audits),
+                    "replay_base_preservation": _json_ready(preservation),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if args.command == "historical-playback":
+        settings = load_settings_from_files(args.config or ["config/base.yaml", "config/replay.yaml"])
+        result = run_historical_playback(
+            config_paths=args.config or ["config/base.yaml", "config/replay.yaml"],
+            source_db_path=args.database,
+            symbols=[str(item).strip().upper() for item in args.symbol],
+            source_timeframe=args.source_timeframe,
+            target_timeframe=args.target_timeframe,
+            start_timestamp=_parse_cli_datetime(args.start, settings) if args.start is not None else None,
+            end_timestamp=_parse_cli_datetime(args.end, settings) if args.end is not None else None,
+            output_dir=args.output_dir,
+            data_source=args.data_source,
+            run_stamp=args.run_stamp,
+            persist_replay_db=not bool(args.ephemeral_replay_db),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "market-data-maintain-canonical":
+        try:
+            settings = load_settings_from_files(args.config or ["config/base.yaml", "config/replay.yaml"])
+            preserve_replay_base()
+            maintenance = CanonicalMarketDataMaintenanceService(
+                database_url=settings.database_url,
+                provider_config_path=args.provider_config,
+            )
+            start = _parse_cli_datetime(args.start, settings) if args.start is not None else None
+            end = _parse_cli_datetime(args.end, settings) if args.end is not None else None
+            repair_provider = None
+            if args.repair_gaps:
+                repair_provider = _build_market_data_provider(
+                    provider_name=args.provider,
+                    settings=settings,
+                    repo_root=Path.cwd(),
+                    provider_config_path=args.provider_config,
+                    schwab_config_path=args.schwab_config,
+                )
+            coverage_audits = []
+            repair_results = []
+            derivation_audits = []
+            for symbol in args.symbol:
+                normalized_symbol = symbol.strip().upper()
+                coverage_audits.append(
+                    maintenance.audit_coverage(symbol=normalized_symbol)
+                )
+                if repair_provider is not None:
+                    repair_results.append(
+                        maintenance.backfill_detected_gaps(
+                            provider=repair_provider,
+                            symbol=normalized_symbol,
+                        )
+                    )
+                    coverage_audits[-1] = maintenance.audit_coverage(symbol=normalized_symbol)
+                for timeframe in {str(item).strip().lower() for item in args.derive_timeframe if str(item).strip()}:
+                    derivation_audits.append(
+                        maintenance.derive_timeframe(
+                            symbol=normalized_symbol,
+                            target_timeframe=timeframe,
+                            start=start,
+                            end=end,
+                        )
+                    )
+            preservation = preserve_replay_base()
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "symbols": [str(item).strip().upper() for item in args.symbol],
+                        "repair_gaps": bool(args.repair_gaps),
+                        "provider": args.provider,
+                        "error": str(exc),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        print(
+            json.dumps(
+                {
+                    "symbols": [str(item).strip().upper() for item in args.symbol],
+                    "coverage_audits": _json_ready(coverage_audits),
+                    "repair_results": _json_ready(repair_results),
+                    "derivation_audits": _json_ready(derivation_audits),
+                    "replay_base_preservation": _json_ready(preservation),
+                },
+                sort_keys=True,
+            )
+        )
         return 0
 
     if args.command == "probationary-paper-soak":
@@ -661,6 +961,30 @@ def _load_cli_schwab_config(
     )
 
 
+def _build_market_data_provider(
+    *,
+    provider_name: str,
+    settings,
+    repo_root: Path,
+    provider_config_path: str | None,
+    schwab_config_path: str | None,
+):
+    if provider_name == "databento":
+        return DatabentoMarketDataProvider(
+            settings,
+            repo_root=repo_root,
+            config_path=provider_config_path,
+        )
+    if provider_name == "schwab_market_data":
+        return SchwabMarketDataProvider(
+            settings,
+            repo_root=repo_root,
+            provider_config_path=provider_config_path,
+            schwab_config_path=schwab_config_path,
+        )
+    raise ValueError(f"Unsupported market-data provider: {provider_name}")
+
+
 def _json_ready(value: Any) -> Any:
     if is_dataclass(value):
         return _json_ready(asdict(value))
@@ -675,6 +999,13 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def _parse_cli_datetime(raw_value: str, settings) -> datetime:
+    parsed = datetime.fromisoformat(raw_value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=settings.timezone_info)
+    return parsed.astimezone(settings.timezone_info)
 
 
 if __name__ == "__main__":

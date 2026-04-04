@@ -19,7 +19,14 @@ from ..persistence.repositories import RepositorySet, decode_strategy_state
 from ..persistence.tables import fault_events_table, fills_table, order_intents_table, signals_table, strategy_state_snapshots_table
 from ..strategy.strategy_engine import StrategyEngine
 from .session_phase_labels import label_session_phase
-from .strategy_study import build_strategy_study_v3, write_strategy_study_json, write_strategy_study_markdown
+from .strategy_study import (
+    build_strategy_study_catalog_entry,
+    build_strategy_study_v3,
+    build_strategy_study_preview,
+    compact_strategy_study_payload,
+    write_strategy_study_json,
+    write_strategy_study_markdown,
+)
 from .container import ApplicationContainer
 from .runner import StrategyServiceRunner
 from .strategy_runtime_registry import build_strategy_runtime_registry
@@ -46,10 +53,10 @@ class HistoricalPlaybackSymbolResult:
     symbol: str
     run_stamp: str
     source_db_path: str
-    replay_db_path: str
+    replay_db_path: str | None
     summary_path: str
-    trigger_report_json_path: str
-    trigger_report_markdown_path: str
+    trigger_report_json_path: str | None
+    trigger_report_markdown_path: str | None
     strategy_study_json_path: str
     strategy_study_markdown_path: str
     source_timeframe: str
@@ -110,6 +117,7 @@ def run_historical_playback(
     output_dir: str | Path,
     data_source: str | None = None,
     run_stamp: str | None = None,
+    persist_replay_db: bool = True,
 ) -> HistoricalPlaybackRunResult:
     if not symbols:
         raise ValueError("At least one symbol is required for historical playback.")
@@ -137,17 +145,34 @@ def run_historical_playback(
             output_dir=resolved_output_dir,
             data_source=data_source,
             run_stamp=stamp,
+            persist_replay_db=persist_replay_db,
         )
         results.append(result)
 
     manifest_path = resolved_output_dir / f"historical_playback_{stamp}.manifest.json"
+    run_timestamp = datetime.now(UTC).isoformat()
     manifest_payload = {
         "run_stamp": stamp,
         "source_db_path": str(source_database_path),
         "output_dir": str(resolved_output_dir),
         "config_paths": config_strings,
-        "symbols": [asdict(result) for result in results],
+        "symbols": [],
     }
+    for result in results:
+        entry = asdict(result)
+        study_payload = json.loads(Path(result.strategy_study_json_path).read_text(encoding="utf-8"))
+        entry["study_preview"] = build_strategy_study_preview(study_payload)
+        entry["catalog_entry"] = build_strategy_study_catalog_entry(
+            payload=study_payload,
+            run_stamp=stamp,
+            run_timestamp=run_timestamp,
+            manifest_path=str(manifest_path),
+            summary_path=result.summary_path,
+            strategy_study_json_path=result.strategy_study_json_path,
+            strategy_study_markdown_path=result.strategy_study_markdown_path,
+            label=f"{result.symbol} / {result.primary_standalone_strategy_id or 'historical_playback'}",
+        )
+        manifest_payload["symbols"].append(entry)
     manifest_path.write_text(json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     return HistoricalPlaybackRunResult(
@@ -243,6 +268,7 @@ def ensure_strategy_study_artifacts(
             instrument=symbol,
             run_metadata=common_metadata,
         )
+    study_payload = compact_strategy_study_payload(study_payload)
     write_strategy_study_json(study_payload, study_json_path)
     write_strategy_study_markdown(study_payload, study_markdown_path)
     return study_json_path, study_markdown_path
@@ -261,12 +287,13 @@ def _run_symbol_playback(
     output_dir: Path,
     data_source: str | None,
     run_stamp: str,
+    persist_replay_db: bool,
 ) -> HistoricalPlaybackSymbolResult:
     prefix = output_dir / f"historical_playback_{symbol.lower()}_{run_stamp}"
-    replay_db_path = prefix.with_suffix(".sqlite3")
+    replay_db_path = prefix.with_suffix(".sqlite3") if persist_replay_db else None
     summary_path = prefix.with_suffix(".summary.json")
-    trigger_report_json_path = prefix.with_suffix(".trigger_report.json")
-    trigger_report_markdown_path = prefix.with_suffix(".trigger_report.md")
+    trigger_report_json_path = prefix.with_suffix(".trigger_report.json") if persist_replay_db else None
+    trigger_report_markdown_path = prefix.with_suffix(".trigger_report.md") if persist_replay_db else None
     strategy_study_json_path = prefix.with_suffix(".strategy_study.json")
     strategy_study_markdown_path = prefix.with_suffix(".strategy_study.md")
 
@@ -274,7 +301,7 @@ def _run_symbol_playback(
         update={
             "symbol": symbol,
             "timeframe": target_timeframe,
-            "database_url": f"sqlite:///{replay_db_path}",
+            "database_url": f"sqlite:///{replay_db_path}" if replay_db_path is not None else "sqlite:///:memory:",
         }
     )
     source = SQLiteHistoricalBarSource(source_db_path, symbol_settings)
@@ -305,18 +332,22 @@ def _run_symbol_playback(
     )
     runner = StrategyServiceRunner(container)
     summary = runner.run_bars(loaded.playback_bars)
-    trigger_rows = build_trigger_report(
-        replay_db_path=replay_db_path,
-        settings=symbol_settings,
-        playback_bars=loaded.playback_bars,
-    )
-    _write_trigger_report_json(trigger_rows, trigger_report_json_path)
-    _write_trigger_report_markdown(trigger_rows, trigger_report_markdown_path)
+    trigger_rows: list[dict[str, Any]]
+    if replay_db_path is not None and trigger_report_json_path is not None and trigger_report_markdown_path is not None:
+        trigger_rows = build_trigger_report(
+            replay_db_path=replay_db_path,
+            settings=symbol_settings,
+            playback_bars=loaded.playback_bars,
+        )
+        _write_trigger_report_json(trigger_rows, trigger_report_json_path)
+        _write_trigger_report_markdown(trigger_rows, trigger_report_markdown_path)
+    else:
+        trigger_rows = []
     common_metadata = {
         "mode": "REPLAY",
         "run_stamp": run_stamp,
         "source_db_path": str(source_db_path),
-        "replay_db_path": str(replay_db_path),
+        "replay_db_path": str(replay_db_path) if replay_db_path is not None else None,
         "summary_path": str(summary_path),
         "artifact_context": "HISTORICAL_PLAYBACK_STRATEGY_STUDY",
         "persistence_origin": "PERSISTED_RUNTIME_TRUTH",
@@ -345,13 +376,14 @@ def _run_symbol_playback(
             instrument=symbol,
             run_metadata=common_metadata,
         )
+    study_payload = compact_strategy_study_payload(study_payload)
     write_strategy_study_json(study_payload, strategy_study_json_path)
     write_strategy_study_markdown(study_payload, strategy_study_markdown_path)
 
     summary_payload = {
         "run_stamp": run_stamp,
         "source_db_path": str(source_db_path),
-        "replay_db_path": str(replay_db_path),
+        "replay_db_path": str(replay_db_path) if replay_db_path is not None else None,
         "symbol": symbol,
         "source_timeframe": loaded.source_timeframe,
         "target_timeframe": loaded.target_timeframe,
@@ -378,8 +410,8 @@ def _run_symbol_playback(
         "standalone_strategy_count": len(summary.per_strategy_summaries),
         "per_strategy_summaries": [asdict(item) for item in summary.per_strategy_summaries],
         "aggregate_portfolio_summary": asdict(summary.aggregate_portfolio_summary),
-        "trigger_report_json_path": str(trigger_report_json_path),
-        "trigger_report_markdown_path": str(trigger_report_markdown_path),
+        "trigger_report_json_path": str(trigger_report_json_path) if trigger_report_json_path is not None else None,
+        "trigger_report_markdown_path": str(trigger_report_markdown_path) if trigger_report_markdown_path is not None else None,
         "strategy_study_json_path": str(strategy_study_json_path),
         "strategy_study_markdown_path": str(strategy_study_markdown_path),
         "study_contract_version": study_payload.get("contract_version"),
@@ -405,10 +437,10 @@ def _run_symbol_playback(
         symbol=symbol,
         run_stamp=run_stamp,
         source_db_path=str(source_db_path),
-        replay_db_path=str(replay_db_path),
+        replay_db_path=str(replay_db_path) if replay_db_path is not None else None,
         summary_path=str(summary_path),
-        trigger_report_json_path=str(trigger_report_json_path),
-        trigger_report_markdown_path=str(trigger_report_markdown_path),
+        trigger_report_json_path=str(trigger_report_json_path) if trigger_report_json_path is not None else None,
+        trigger_report_markdown_path=str(trigger_report_markdown_path) if trigger_report_markdown_path is not None else None,
         strategy_study_json_path=str(strategy_study_json_path),
         strategy_study_markdown_path=str(strategy_study_markdown_path),
         source_timeframe=loaded.source_timeframe,

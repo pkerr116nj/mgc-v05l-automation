@@ -19,6 +19,8 @@ NUMERIC_TYPE = Numeric(24, 10, asdecimal=True)
 PERSISTENCE_TABLES = (
     "instruments",
     "bars",
+    "market_data_ingest_runs",
+    "market_data_bar_provenance",
     "features",
     "signals",
     "derived_features",
@@ -78,6 +80,51 @@ bars_table = Table(
     Column("created_at", Text, nullable=False),
     UniqueConstraint("ticker", "timeframe", "timestamp", "data_source", name="uq_bars_identity"),
     Index("ix_bars_lookup", "ticker", "timeframe", "timestamp"),
+    Index("ix_bars_source_lookup", "ticker", "timeframe", "data_source", "end_ts"),
+)
+
+market_data_ingest_runs_table = Table(
+    "market_data_ingest_runs",
+    metadata,
+    Column("ingest_run_id", Text, primary_key=True),
+    Column("provider", Text, nullable=False, index=True),
+    Column("dataset", Text, nullable=True),
+    Column("schema_name", Text, nullable=True),
+    Column("request_symbol", Text, nullable=True),
+    Column("internal_symbol", Text, nullable=False, index=True),
+    Column("timeframe", Text, nullable=False),
+    Column("data_source", Text, nullable=False, index=True),
+    Column("coverage_start", Text, nullable=True),
+    Column("coverage_end", Text, nullable=True),
+    Column("ingest_started_at", Text, nullable=False, index=True),
+    Column("ingest_completed_at", Text, nullable=True),
+    Column("status", Text, nullable=False),
+    Column("payload_json", Text, nullable=True),
+)
+
+market_data_bar_provenance_table = Table(
+    "market_data_bar_provenance",
+    metadata,
+    Column("provenance_id", Text, primary_key=True),
+    Column("ingest_run_id", Text, ForeignKey("market_data_ingest_runs.ingest_run_id"), nullable=False, index=True),
+    Column("bar_id", Text, ForeignKey("bars.bar_id"), nullable=False, index=True),
+    Column("data_source", Text, nullable=False, index=True),
+    Column("provider", Text, nullable=False, index=True),
+    Column("dataset", Text, nullable=True),
+    Column("schema_name", Text, nullable=True),
+    Column("internal_symbol", Text, nullable=False, index=True),
+    Column("raw_symbol", Text, nullable=True, index=True),
+    Column("request_symbol", Text, nullable=True),
+    Column("stype_in", Text, nullable=True),
+    Column("stype_out", Text, nullable=True),
+    Column("interval", Text, nullable=False),
+    Column("source_timestamp", Text, nullable=False, index=True),
+    Column("ingest_time", Text, nullable=False, index=True),
+    Column("coverage_start", Text, nullable=True),
+    Column("coverage_end", Text, nullable=True),
+    Column("provenance_tag", Text, nullable=False),
+    Column("provider_metadata_json", Text, nullable=True),
+    UniqueConstraint("bar_id", "data_source", "provider", "ingest_run_id", name="uq_market_data_bar_provenance_row"),
 )
 
 features_table = Table(

@@ -82,7 +82,7 @@ def build_market_data_status_report(*, db_path: Path, symbol_config_path: Path |
                 "is_derived_surface": row.is_derived_surface,
             }
         )
-        if row.timeframe == "1m" and row.data_source == "schwab_history":
+        if row.timeframe == "1m" and row.data_source in {"schwab_history", "historical_1m_canonical"}:
             symbol["base_1m_available"] = True
         if row.is_native_surface and row.canonical_timeframe not in symbol["native_timeframes"]:
             symbol["native_timeframes"].append(row.canonical_timeframe)
@@ -94,11 +94,13 @@ def build_market_data_status_report(*, db_path: Path, symbol_config_path: Path |
             )
     for symbol in by_symbol.values():
         if not symbol["base_1m_available"]:
-            symbol["notes"].append("research execution base layer missing: stored 1m schwab_history bars unavailable")
+            symbol["notes"].append("research execution base layer missing: stored canonical 1m history unavailable")
         if "3m" not in symbol["derived_timeframes"]:
             symbol["notes"].append("3m derived surface not available")
         if "5m" not in symbol["native_timeframes"] and "5m" not in symbol["derived_timeframes"]:
             symbol["notes"].append("legacy benchmark 5m surface not available")
+        if "10m" not in symbol["derived_timeframes"] and "10m" not in symbol["native_timeframes"]:
+            symbol["notes"].append("10m derived surface not available")
         symbol["coverage_modes"]["research_execution_mode"] = bool(symbol["base_1m_available"])
         available_timeframes = {
             str(item.get("canonical_timeframe") or item.get("timeframe") or "")
@@ -123,6 +125,7 @@ def build_market_data_status_report(*, db_path: Path, symbol_config_path: Path |
                 "execution_timeframe": "1m_or_strategy_specific",
                 "artifact_timeframe": "study-specific",
                 "minimum_execution_base_layer": "1m_schwab_history",
+                "preferred_preserved_base_layer": "historical_1m_canonical",
             },
         },
         "rows": [row.__dict__ for row in rows],
@@ -235,8 +238,8 @@ def _load_rows(db_path: Path, *, symbol_metadata: dict[str, dict[str, Any]]) -> 
                     expected_interval_minutes=expected,
                     gap_count_over_2x_interval=gap_count,
                     max_gap_minutes=max_gap_minutes,
-                    is_base_1m=(canonical_timeframe == "1m" and data_source == "schwab_history"),
-                    is_native_surface=(data_source == "schwab_history"),
+                    is_base_1m=(canonical_timeframe == "1m" and data_source in {"schwab_history", "historical_1m_canonical"}),
+                    is_native_surface=(data_source in {"schwab_history", "historical_1m_canonical"}),
                     is_derived_surface=data_source.startswith("resampled_"),
                     derived_from=_derived_from(data_source),
                 )

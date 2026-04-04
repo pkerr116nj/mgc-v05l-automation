@@ -37,6 +37,7 @@ def test_market_data_status_report_flags_base_and_derived_surfaces(tmp_path: Pat
 
     assert report["mode_aware_assumptions"]["baseline_parity_mode"]["structural_signal_timeframe"] == "5m"
     assert report["mode_aware_assumptions"]["research_execution_mode"]["minimum_execution_base_layer"] == "1m_schwab_history"
+    assert report["mode_aware_assumptions"]["research_execution_mode"]["preferred_preserved_base_layer"] == "historical_1m_canonical"
     assert symbol["ticker"] == "MGC"
     assert symbol["base_1m_available"] is True
     assert symbol["native_timeframes"] == ["1m"]
@@ -76,6 +77,37 @@ def test_market_data_status_report_labels_missing_5m_as_baseline_parity_gap(tmp_
     assert symbol["coverage_modes"]["research_execution_mode"] is True
     assert symbol["coverage_modes"]["baseline_parity_mode"] is False
     assert "legacy benchmark 5m surface not available" in symbol["notes"]
+
+
+def test_market_data_status_report_treats_canonical_1m_as_base_layer(tmp_path: Path) -> None:
+    db_path = tmp_path / "status.sqlite3"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            """
+            create table bars (
+              bar_id text primary key,
+              ticker text not null,
+              data_source text not null,
+              timeframe text not null,
+              end_ts text not null
+            );
+            """
+        )
+        base = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+        rows = [
+            ("a", "MGC", "historical_1m_canonical", "1m", base.isoformat()),
+        ]
+        connection.executemany("insert into bars (bar_id, ticker, data_source, timeframe, end_ts) values (?, ?, ?, ?, ?)", rows)
+        connection.commit()
+    finally:
+        connection.close()
+
+    report = build_market_data_status_report(db_path=db_path)
+    symbol = report["symbols"][0]
+
+    assert symbol["base_1m_available"] is True
+    assert symbol["coverage_modes"]["research_execution_mode"] is True
 
 
 def test_market_data_status_report_includes_symbol_role_metadata(tmp_path: Path) -> None:
