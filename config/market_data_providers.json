@@ -1,0 +1,175 @@
+{
+  "provider_selection": {
+    "historical_research": [
+      "databento",
+      "schwab_market_data"
+    ],
+    "live_market_data": [
+      "schwab_market_data",
+      "databento"
+    ],
+    "execution_truth": [
+      "schwab_execution"
+    ]
+  },
+  "data_source_precedence": {
+    "historical_research": {
+      "1m": [
+        "historical_1m_canonical",
+        "databento_historical",
+        "schwab_history"
+      ],
+      "5m": [
+        "historical_5m_canonical",
+        "internal",
+        "resampled_1m_to_5m",
+        "schwab_history"
+      ],
+      "10m": [
+        "historical_10m_canonical",
+        "resampled_1m_to_10m",
+        "historical_1m_canonical"
+      ]
+    },
+    "live_market_data": {
+      "1m": [
+        "schwab_live_poll",
+        "databento_live",
+        "historical_1m_canonical",
+        "schwab_history"
+      ]
+    }
+  },
+  "schwab_market_data": {
+    "config_path": "config/schwab.local.json",
+    "provenance_tag": "schwab_market_data",
+    "canonical_data_source_by_timeframe": {
+      "1m": "historical_1m_canonical",
+      "5m": "historical_5m_canonical"
+    }
+  },
+  "databento": {
+    "enabled": true,
+    "api_key_env": "DATABENTO_API_KEY",
+    "historical_base_url": "https://hist.databento.com/v0",
+    "encoding": "json",
+    "compression": "none",
+    "pretty_px": true,
+    "pretty_ts": true,
+    "map_symbols": true,
+    "provenance_tag": "databento_historical",
+    "canonical_data_source_by_timeframe": {
+      "1m": "historical_1m_canonical"
+    },
+    "pilot_symbols": {
+      "MGC": {
+        "request_symbol": "MGC.v.0",
+        "dataset": "GLBX.MDP3",
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "schema_by_timeframe": {
+          "1m": "ohlcv-1m"
+        },
+        "asset_class": "future",
+        "exchange": "COMEX",
+        "description": "Micro Gold futures volume-based front continuous"
+      },
+      "GC": {
+        "request_symbol": "GC.v.0",
+        "dataset": "GLBX.MDP3",
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "schema_by_timeframe": {
+          "1m": "ohlcv-1m"
+        },
+        "asset_class": "future",
+        "exchange": "COMEX",
+        "description": "Gold futures volume-based front continuous"
+      },
+      "MES": {
+        "request_symbol": "MES.v.0",
+        "dataset": "GLBX.MDP3",
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "schema_by_timeframe": {
+          "1m": "ohlcv-1m"
+        },
+        "asset_class": "future",
+        "exchange": "CME",
+        "description": "Micro E-mini S&P 500 futures volume-based front continuous"
+      },
+      "ES": {
+        "request_symbol": "ES.v.0",
+        "dataset": "GLBX.MDP3",
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "schema_by_timeframe": {
+          "1m": "ohlcv-1m"
+        },
+        "asset_class": "future",
+        "exchange": "CME",
+        "description": "E-mini S&P 500 futures volume-based front continuous"
+      },
+      "MNQ": {
+        "request_symbol": "MNQ.v.0",
+        "dataset": "GLBX.MDP3",
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "schema_by_timeframe": {
+          "1m": "ohlcv-1m"
+        },
+        "asset_class": "future",
+        "exchange": "CME",
+        "description": "Micro E-mini Nasdaq-100 futures volume-based front continuous"
+      },
+      "NQ": {
+        "request_symbol": "NQ.v.0",
+        "dataset": "GLBX.MDP3",
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "schema_by_timeframe": {
+          "1m": "ohlcv-1m"
+        },
+        "asset_class": "future",
+        "exchange": "CME",
+        "description": "E-mini Nasdaq-100 futures volume-based front continuous"
+      },
+      "CL": {
+        "request_symbol": "CL.v.0",
+        "dataset": "GLBX.MDP3",
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "schema_by_timeframe": {
+          "1m": "ohlcv-1m"
+        },
+        "asset_class": "future",
+        "exchange": "NYMEX",
+        "description": "WTI crude oil futures volume-based front continuous"
+      },
+      "6E": {
+        "request_symbol": "6E.v.0",
+        "dataset": "GLBX.MDP3",
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "schema_by_timeframe": {
+          "1m": "ohlcv-1m"
+        },
+        "asset_class": "future",
+        "exchange": "CME",
+        "description": "Euro FX futures volume-based front continuous"
+      },
+      "ZN": {
+        "request_symbol": "ZN.v.0",
+        "dataset": "GLBX.MDP3",
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "schema_by_timeframe": {
+          "1m": "ohlcv-1m"
+        },
+        "asset_class": "future",
+        "exchange": "CBOT",
+        "description": "10-year Treasury note futures volume-based front continuous"
+      }
+    }
+  }
+}
