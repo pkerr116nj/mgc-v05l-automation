@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from sqlalchemy.exc import OperationalError
+
 from mgc_v05l.app.probationary_runtime import _sync_runtime_health_alerts
 from mgc_v05l.config_models import load_settings_from_files
 from mgc_v05l.domain.enums import HealthStatus, LongEntryFamily, OrderIntentType, OrderStatus, PositionSide, StrategyStatus
@@ -209,6 +211,28 @@ def test_alert_dispatcher_deduplicates_and_resolves_stateful_alerts(tmp_path: Pa
     state = _read_alert_state(logger)
     assert state["active_alerts"] == []
     assert state["by_key"]["market-data"]["occurrence_count"] == 3
+
+
+def test_alert_dispatcher_tolerates_transient_repository_lock(tmp_path: Path) -> None:
+    logger = StructuredLogger(tmp_path / "artifacts")
+
+    class _LockedAlertRepository:
+        def save(self, record, *, occurred_at):  # type: ignore[no-untyped-def]
+            raise OperationalError("insert", {}, Exception("database is locked"))
+
+    dispatcher = AlertDispatcher(logger, _LockedAlertRepository(), source_subsystem="test")
+
+    emitted = dispatcher.emit(
+        severity="ACTION",
+        code="market_data_stale",
+        message="Completed bars stopped advancing.",
+        payload={"instrument": "MGC"},
+        occurred_at=datetime(2026, 3, 26, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert emitted is not None
+    rows = _read_alert_rows(logger)
+    assert rows[-1]["code"] == "market_data_stale"
 
 
 def test_sync_runtime_health_alerts_emits_market_data_and_broker_disconnect_alerts(tmp_path: Path) -> None:

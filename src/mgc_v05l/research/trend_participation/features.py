@@ -8,6 +8,7 @@ from statistics import fmean
 from typing import Iterable
 
 from ...app.session_phase_labels import label_session_phase
+from ...market_data.timeframes import timeframe_minutes
 from .models import FeatureState, ResearchBar
 from .state_layers import (
     EMA_FAST_SPAN,
@@ -40,8 +41,14 @@ def build_feature_states(
     slow_ema_values = rolling_ema(close_values, span=EMA_SLOW_SPAN)
     atr_values = rolling_atr(sorted_5m)
 
+    decision_window_minutes = (
+        max(timeframe_minutes(str(sorted_5m[0].timeframe or "5m")), 1)
+        if sorted_5m
+        else 5
+    )
+
     for index, bar in enumerate(sorted_5m):
-        recent_1m_cutoff = bar.end_ts - timedelta(minutes=5)
+        recent_1m_cutoff = bar.end_ts - timedelta(minutes=decision_window_minutes)
         while one_minute_cursor < len(sorted_1m) and sorted_1m[one_minute_cursor].end_ts <= bar.end_ts:
             recent_1m_window.append(sorted_1m[one_minute_cursor])
             one_minute_cursor += 1

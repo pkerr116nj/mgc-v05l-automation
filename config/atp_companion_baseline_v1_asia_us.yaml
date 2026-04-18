@@ -4,12 +4,16 @@
 #
 # Legacy v0.5l locked baseline remains authoritative for the parity path.
 # This file names and freezes the current replay/paper ATP companion benchmark.
+# The assumptions recorded here are benchmark-local only and do not become
+# repo-wide research or production rules by default.
 
 benchmark_name: "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only"
 benchmark_label: "ATP_COMPANION_V1_ASIA_US"
 benchmark_status: "PROMOTED_REPLAY_PAPER_BENCHMARK"
+strategy_taxonomy_class: "BENCHMARK_LANE"
 benchmark_branch: "codex/atp-benchmark-asia-us-london-disabled"
 benchmark_artifacts_dir: "outputs/reports/atp_companion_baseline_v1_asia_us_benchmark"
+benchmark_replacement_requires_explicit_promotion: true
 tracked_paper_strategy:
   strategy_id: "atp_companion_v1_asia_us"
   display_name: "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only"
@@ -44,6 +48,7 @@ shared_platform_invariants:
   shared_runtime_does_not_imply_mgc_scope: true
   shared_runtime_does_not_imply_one_position_at_a_time: true
   shared_runtime_does_not_imply_replay_first_provenance: true
+  benchmark_candidate_success_does_not_equal_benchmark_replacement: true
 
 atp_overlay_assumptions:
   context_timeframe: "5m"
@@ -67,3 +72,7 @@ not_yet_baseline:
   exit_redesign: false
   clustering_controls: false
   live_submit_expansion: false
+
+related_documents:
+  taxonomy: "docs/specs/ATP_STRATEGY_TAXONOMY.md"
+  production_track_candidate_example: "docs/specs/ATP_COMPANION_GC_ASIA_US_PRODUCTION_TRACK_PACKAGE.md"

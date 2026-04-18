@@ -160,8 +160,106 @@ def test_run_approved_quant_exit_research_writes_lane_reports(monkeypatch, tmp_p
         assert "approved_control" in families
         assert "time_stop_only" in families
         assert "session_boundary" in families
+        assert "checkpoint_no_traction" in families
         assert isinstance(lane["recommendation"]["current_approved_exit_should_remain_unchanged"], bool)
 
     markdown = artifacts.markdown_path.read_text(encoding="utf-8")
     assert "# Approved Quant Exit Research" in markdown
     assert "Top exit variants:" in markdown
+
+
+def test_simulate_trade_checkpoint_no_traction_arms_and_trails() -> None:
+    spec = approved_quant_lane_specs()[0]
+    execution = _execution_for_direction("GC", "LONG")
+    features = _features_for_lane(lane_id=spec.lane_id)
+    entry = exit_research.ApprovedLaneEntryCandidate(
+        lane_id=spec.lane_id,
+        lane_name=spec.lane_name,
+        symbol="GC",
+        session_label="US",
+        signal_index=1,
+        entry_index=2,
+        signal_ts=execution.timestamps[1].isoformat(),
+        entry_ts=execution.timestamps[2].isoformat(),
+        entry_price=execution.opens[2],
+        risk=1.0,
+        direction="LONG",
+        rule_snapshot={},
+    )
+    variant = exit_research.ExitVariantSpec(
+        lane_id=spec.lane_id,
+        exit_id="test.checkpoint_no_traction",
+        family="checkpoint_no_traction",
+        description="test",
+        hold_bars=spec.hold_bars,
+        stop_r=spec.stop_r,
+        target_r=None,
+        checkpoint_arm_r=0.8,
+        checkpoint_lock_r=0.35,
+        checkpoint_trail_r=0.25,
+        no_traction_abort_bars=2,
+        no_traction_min_favorable_r=0.25,
+    )
+
+    trade = exit_research._simulate_trade(
+        spec=spec,
+        variant=variant,
+        entry=entry,
+        execution=execution,
+        features=features,
+    )
+
+    assert trade.exit_reason == "checkpoint_stop"
+    assert trade.exit_price > trade.entry_price
+
+
+def test_simulate_trade_no_traction_abort_triggers_before_checkpoint() -> None:
+    spec = approved_quant_lane_specs()[0]
+    execution = _FrameSeries.from_bars(
+        [
+            _bar(symbol="GC", index=0, open_=100.0, high=100.2, low=99.8, close=100.0),
+            _bar(symbol="GC", index=1, open_=100.0, high=100.1, low=99.9, close=100.0),
+            _bar(symbol="GC", index=2, open_=100.0, high=100.1, low=99.8, close=99.95),
+            _bar(symbol="GC", index=3, open_=99.95, high=100.15, low=99.7, close=99.9),
+            _bar(symbol="GC", index=4, open_=99.9, high=100.1, low=99.6, close=99.85),
+        ]
+    )
+    features = _features_for_lane(lane_id=spec.lane_id)
+    entry = exit_research.ApprovedLaneEntryCandidate(
+        lane_id=spec.lane_id,
+        lane_name=spec.lane_name,
+        symbol="GC",
+        session_label="US",
+        signal_index=1,
+        entry_index=2,
+        signal_ts=execution.timestamps[1].isoformat(),
+        entry_ts=execution.timestamps[2].isoformat(),
+        entry_price=execution.opens[2],
+        risk=1.0,
+        direction="LONG",
+        rule_snapshot={},
+    )
+    variant = exit_research.ExitVariantSpec(
+        lane_id=spec.lane_id,
+        exit_id="test.checkpoint_no_traction",
+        family="checkpoint_no_traction",
+        description="test",
+        hold_bars=spec.hold_bars,
+        stop_r=spec.stop_r,
+        target_r=None,
+        checkpoint_arm_r=0.8,
+        checkpoint_lock_r=0.35,
+        checkpoint_trail_r=0.25,
+        no_traction_abort_bars=2,
+        no_traction_min_favorable_r=0.25,
+    )
+
+    trade = exit_research._simulate_trade(
+        spec=spec,
+        variant=variant,
+        entry=entry,
+        execution=execution,
+        features=features,
+    )
+
+    assert trade.exit_reason == "no_traction_abort"

@@ -1,4 +1,4 @@
-"""Isolated Schwab production-link service for broker truth and manual orders."""
+"""Broker production-link service for broker truth and manual orders."""
 
 from __future__ import annotations
 
@@ -9,13 +9,15 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from ..market_data import SchwabAuthError, SchwabOAuthClient, SchwabTokenStore, UrllibJsonTransport, load_schwab_auth_config_from_env
 from ..market_data import SchwabQuoteHttpClient, load_schwab_market_data_config
-from .client import SchwabBrokerHttpClient, SchwabBrokerHttpError
-from .config import load_schwab_production_link_config
+from ..local_operator_auth import local_operator_auth_surface
+from .client import BrokerHttpClient, BrokerHttpError
+from .config import load_production_link_config
 from .models import (
     BrokerAccountIdentity,
     BrokerBalanceSnapshot,
@@ -27,7 +29,7 @@ from .models import (
     ManualFlattenRequest,
     ManualOcoLegRequest,
     ManualOrderRequest,
-    SchwabProductionLinkConfig,
+    ProductionLinkConfig,
 )
 from .schema_validation import (
     build_broker_truth_shadow_validation_payload,
@@ -191,6 +193,79 @@ _NEAR_TERM_LIVE_VERIFICATION_RUNBOOKS: dict[str, dict[str, Any]] = {
         "cancel_expectation": "If the stop-limit remains WORKING, cancel should be attempted and verified before any broader rollout.",
         "replace_expectation": "Replace remains disabled in this phase.",
     },
+    "FUTURE:MARKET": {
+        "minimal_safe_test_shape": "1 contract, FUTURE, MARKET, DAY, NORMAL, whitelisted mapped futures symbol, review-confirmed, manual operator initiated only.",
+        "required_flags": [
+            "MGC_PRODUCTION_LINK_ENABLED=1",
+            "MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED=1",
+            "MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED=1",
+            "MGC_PRODUCTION_FUTURES_PILOT_ENABLED=1",
+            "MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED=1",
+        ],
+        "required_config": {
+            "futures_supported_asset_classes": ["FUTURE"],
+            "futures_supported_order_types": ["MARKET"],
+            "futures_symbol_whitelist": ["<WHITELISTED_FUTURES_SYMBOL>"],
+            "futures_max_quantity": "1",
+            "futures_supported_time_in_force_values": ["DAY"],
+            "futures_supported_session_values": ["NORMAL"],
+        },
+        "required_account_state": [
+            "Selected account must be present and live-verified from Schwab.",
+            "Auth must be healthy.",
+            "Broker must be reachable.",
+            "Reconciliation must be CLEAR.",
+        ],
+        "required_freshness_state": [
+            "Balances refresh age must be inside broker_freshness_max_age_seconds.",
+            "Positions refresh age must be inside broker_freshness_max_age_seconds.",
+            "Orders refresh age must be inside broker_freshness_max_age_seconds.",
+        ],
+        "required_fields": [
+            "account_hash",
+            "symbol=<WHITELISTED_FUTURES_SYMBOL>",
+            "asset_class=FUTURE",
+            "side",
+            "quantity=1",
+            "order_type=MARKET",
+            "time_in_force=DAY",
+            "session=NORMAL",
+        ],
+        "submit_path": [
+            "Open Positions -> Manual Order Ticket.",
+            "Confirm selected account matches the intended live Schwab account.",
+            "Set asset class FUTURE, order type MARKET, quantity 1, DAY, NORMAL, and a whitelisted mapped futures symbol.",
+            "Check Review confirmed.",
+            "Use Review / Confirm / Send through the narrow manual futures lane only.",
+        ],
+        "expected_broker_response_states": ["ACKNOWLEDGED", "FILLED", "REJECTED"],
+        "expected_app_ui_panels": [
+            "Positions -> Manual Order Ticket",
+            "Positions -> Broker Orders and Fills",
+            "Positions -> selected-position detail",
+            "Diagnostics -> Production Link Diagnostics",
+        ],
+        "cancel_path": [
+            "If broker acknowledgement is delayed or the order unexpectedly rests, copy the broker order id from Broker Orders and Fills or Diagnostics.",
+            "Enter that broker order id into Cancel Open Order in Positions -> Manual Order Ticket.",
+            "Confirm cancel and refresh broker state.",
+        ],
+        "expected_reconciliation_checks": [
+            "missing_local_orders = 0",
+            "missing_broker_orders = 0",
+            "quantity_mismatches = 0",
+            "status_mismatches = 0",
+            "position_mismatches = 0",
+        ],
+        "expected_post_submit_checks": [
+            "Last Manual Order shows request, broker order id, current status, and symbol authorization.",
+            "Broker Orders and Fills shows the order as ACKNOWLEDGED or FILLED.",
+            "Selected-position detail shows linked order/fill events when the symbol matches.",
+            "Diagnostics -> Production Link Diagnostics shows reconciliation remains CLEAR after refresh.",
+        ],
+        "cancel_expectation": "Do not expect cancel by default; market orders may fill immediately. Only test cancel if the broker shows a genuine open order.",
+        "replace_expectation": "Replace remains disabled in this phase.",
+    },
 }
 
 _SYNC_CLOSED_ORDER_STATUS = "NOT_OPEN_ON_BROKER"
@@ -218,12 +293,16 @@ class SchwabProductionLinkService:
         self,
         repo_root: Path,
         *,
-        client_factory: Callable[[SchwabProductionLinkConfig, SchwabOAuthClient], SchwabBrokerHttpClient] | None = None,
+        client_factory: Callable[[ProductionLinkConfig, SchwabOAuthClient], BrokerHttpClient] | None = None,
         quote_payload_fetcher: Callable[[Path, SchwabOAuthClient, list[str]], tuple[dict[str, Any], dict[str, Any]]] | None = None,
     ) -> None:
         self._repo_root = repo_root
-        self._config = load_schwab_production_link_config(repo_root)
+        self._config = load_production_link_config(repo_root)
         self._store = ProductionLinkStore(self._config.database_path)
+        self._store.save_provider_context(
+            broker_provider_id=self._config.broker_provider_id,
+            market_data_provider_id=self._config.market_data_provider_id,
+        )
         self._lock = threading.RLock()
         self._cached_snapshot: dict[str, Any] | None = None
         self._cached_at: datetime | None = None
@@ -234,7 +313,7 @@ class SchwabProductionLinkService:
         self._manual_restore_validation_pending = True
 
     @property
-    def config(self) -> SchwabProductionLinkConfig:
+    def config(self) -> ProductionLinkConfig:
         return self._config
 
     @property
@@ -264,7 +343,7 @@ class SchwabProductionLinkService:
                 self._last_live_fetch_at = now.isoformat()
                 self._write_snapshot(live_snapshot)
                 return live_snapshot
-            except (SchwabAuthError, SchwabBrokerHttpError, ProductionLinkActionError, FileNotFoundError, KeyError, ValueError) as exc:
+            except (SchwabAuthError, BrokerHttpError, ProductionLinkActionError, FileNotFoundError, KeyError, ValueError) as exc:
                 self._last_error = str(exc)
                 degraded = self._degraded_snapshot(now, detail=str(exc))
                 self._cached_snapshot = degraded
@@ -281,22 +360,22 @@ class SchwabProductionLinkService:
                 "ok": True,
                 "action": action,
                 "action_label": "Refresh Broker State",
-                "message": "Broker state refreshed from the live Schwab production-link path.",
+                "message": f"Broker state refreshed from the live {_provider_label(self._config.broker_provider_id)} production-link path.",
                 "output": snapshot.get("detail") or "Refresh completed.",
                 "production_link": snapshot,
             }
         if action == "select-account":
-            account_hash = str(payload.get("account_hash") or "").strip()
+            account_hash = str(payload.get("account_id") or payload.get("account_hash") or "").strip()
             if not account_hash:
-                raise ProductionLinkActionError("select-account requires account_hash.")
+                raise ProductionLinkActionError("select-account requires account_id or account_hash.")
             self._persist_selected_account(account_hash)
             snapshot = self.snapshot(force_refresh=True)
             return {
                 "ok": True,
                 "action": action,
                 "action_label": "Select Broker Account",
-                "message": f"Selected Schwab broker account {account_hash}.",
-                "output": f"Selected account hash {account_hash}.",
+                "message": f"Selected {_provider_label(self._config.broker_provider_id)} broker account {account_hash}.",
+                "output": f"Selected account id {account_hash}.",
                 "production_link": snapshot,
             }
         if action == "submit-order":
@@ -309,10 +388,10 @@ class SchwabProductionLinkService:
             return self._preview_manual_order(request)
         if action == "cancel-order":
             self._require_manual_ticket_enabled()
-            account_hash = str(payload.get("account_hash") or "").strip()
+            account_hash = str(payload.get("account_id") or payload.get("account_hash") or "").strip()
             broker_order_id = str(payload.get("broker_order_id") or "").strip()
             if not account_hash or not broker_order_id:
-                raise ProductionLinkActionError("cancel-order requires account_hash and broker_order_id.")
+                raise ProductionLinkActionError("cancel-order requires account_id or account_hash, plus broker_order_id.")
             self._assert_manual_cancel_safety(account_hash=account_hash, broker_order_id=broker_order_id)
             return self._cancel_order(account_hash=account_hash, broker_order_id=broker_order_id)
         if action == "replace-order":
@@ -356,11 +435,7 @@ class SchwabProductionLinkService:
         now = datetime.now(timezone.utc)
         snapshot = self.snapshot(force_refresh=True)
         target_symbol = str(symbol or "MGC").strip().upper() or "MGC"
-        selected_account_hash = str(
-            as_dict(snapshot.get("connection")).get("selected_account_hash")
-            or as_dict(snapshot.get("accounts")).get("selected_account_hash")
-            or ""
-        ).strip() or None
+        selected_account_hash = _selected_account_id_from_snapshot(snapshot) or None
         open_rows = [as_dict(row) for row in as_list(as_dict(snapshot.get("orders")).get("open_rows"))]
         recent_fill_rows = [as_dict(row) for row in as_list(as_dict(snapshot.get("orders")).get("recent_fill_rows"))]
         position_rows = [as_dict(row) for row in as_list(as_dict(snapshot.get("portfolio")).get("positions"))]
@@ -384,10 +459,15 @@ class SchwabProductionLinkService:
                 oauth_client, _ = self._build_oauth_client()
                 client = self._client_factory(self._config, oauth_client)
                 direct_status_raw = client.get_order_status(selected_account_hash, requested_broker_order_id)
-                normalized = _normalize_orders([direct_status_raw], account_hash=selected_account_hash, fetched_at=now)
+                normalized = _normalize_orders(
+                    [direct_status_raw],
+                    account_hash=selected_account_hash,
+                    fetched_at=now,
+                    broker_provider_id=self._config.broker_provider_id,
+                )
                 if normalized:
                     direct_status_normalized = _broker_order_record_payload(normalized[0])
-            except (SchwabAuthError, SchwabBrokerHttpError, ProductionLinkActionError, FileNotFoundError, KeyError, ValueError) as exc:
+            except (SchwabAuthError, BrokerHttpError, ProductionLinkActionError, FileNotFoundError, KeyError, ValueError) as exc:
                 direct_status_error = str(exc)
 
         order_status_validation = validate_order_status_sample(
@@ -437,7 +517,13 @@ class SchwabProductionLinkService:
         selected_account_hash = selection.get("account_hash")
 
         accounts_payload = client.list_accounts(fields=["positions"])
-        normalized_accounts = _normalize_accounts(accounts_payload, account_index, selected_account_hash=selected_account_hash, fetched_at=now)
+        normalized_accounts = _normalize_accounts(
+            accounts_payload,
+            account_index,
+            selected_account_hash=selected_account_hash,
+            fetched_at=now,
+            broker_provider_id=self._config.broker_provider_id,
+        )
         if not normalized_accounts:
             raise ProductionLinkActionError("Schwab account detail payload returned no normalized broker accounts.")
         if not selected_account_hash:
@@ -468,7 +554,12 @@ class SchwabProductionLinkService:
             status="FILLED",
             max_results=100,
         )
-        normalized_orders = _normalize_orders(open_orders + recent_orders, account_hash=selected_account_hash, fetched_at=now)
+        normalized_orders = _normalize_orders(
+            open_orders + recent_orders,
+            account_hash=selected_account_hash,
+            fetched_at=now,
+            broker_provider_id=self._config.broker_provider_id,
+        )
         manual_state = self._load_manual_live_orders_state()
         direct_status_records = self._collect_post_ack_direct_status_records(
             client=client,
@@ -503,7 +594,7 @@ class SchwabProductionLinkService:
                     source=str(quote_runtime.get("source_label") or "schwab_quotes"),
                 )
                 quote_refresh_at = now.isoformat()
-            except (FileNotFoundError, SchwabAuthError, SchwabBrokerHttpError, ValueError) as exc:
+            except (FileNotFoundError, SchwabAuthError, BrokerHttpError, ValueError) as exc:
                 quote_error = str(exc)
                 quote_runtime = {
                     "auth_mode": "unavailable",
@@ -545,6 +636,7 @@ class SchwabProductionLinkService:
                 "quote_symbol_count": len(normalized_quotes),
                 "quote_error": quote_error,
                 "quote_runtime": quote_runtime,
+                "selected_account_id": selected_account_hash,
                 "selected_account_hash": selected_account_hash,
                 "retired_open_order_ids": retired_open_order_ids,
             },
@@ -567,8 +659,8 @@ class SchwabProductionLinkService:
         snapshot["generated_at"] = now.isoformat()
         snapshot["status"] = "ready"
         snapshot["label"] = "CONNECTED"
-        snapshot["detail"] = "Using live Schwab broker truth for the selected production account."
-        snapshot["source_of_record"] = "schwab_broker"
+        snapshot["detail"] = f"Using live {_provider_label(self._config.broker_provider_id)} broker truth for the selected production account."
+        snapshot["source_of_record"] = f"{self._config.broker_provider_id}_broker"
         snapshot["enabled"] = True
         snapshot["feature_flags"] = asdict(self._config.features)
         snapshot["auth"] = auth_summary
@@ -581,7 +673,7 @@ class SchwabProductionLinkService:
         snapshot["freshness"] = freshness
         snapshot["health"] = {
             "auth_healthy": {"ok": bool(auth_summary.get("ready")), "label": auth_summary.get("label"), "detail": auth_summary.get("detail")},
-            "broker_reachable": {"ok": True, "label": "BROKER REACHABLE", "detail": "Live Schwab account endpoints responded in the current refresh cycle."},
+            "broker_reachable": {"ok": True, "label": "BROKER REACHABLE", "detail": "Live broker account endpoints responded in the current refresh cycle."},
             "account_selected": {"ok": bool(selected_account_hash), "label": "ACCOUNT SELECTED" if selected_account_hash else "ACCOUNT NOT SELECTED", "detail": selected_account["identity"].display_name},
             "balances_fresh": _health_from_freshness(freshness.get("balances")),
             "positions_fresh": _health_from_freshness(freshness.get("positions")),
@@ -598,6 +690,7 @@ class SchwabProductionLinkService:
             "database_path": str(self._config.database_path),
             "snapshot_path": str(self._config.snapshot_path),
             "selected_account_path": str(self._config.selected_account_path),
+            "selected_account_id": selected_account_hash,
             "selected_account_hash": selected_account_hash,
             "selected_account_number": selected_account["identity"].account_number,
             "selected_account_display_name": selected_account["identity"].display_name,
@@ -653,7 +746,10 @@ class SchwabProductionLinkService:
             ],
         }
         snapshot["connection"] = {
-            "broker_name": "Schwab",
+            "broker_name": _provider_label(self._config.broker_provider_id),
+            "broker_provider_id": self._config.broker_provider_id,
+            "market_data_provider_id": self._config.market_data_provider_id,
+            "selected_account_id": selected_account_hash,
             "selected_account_hash": selected_account_hash,
             "selected_account_number": selected_account["identity"].account_number,
             "selected_account_display_name": selected_account["identity"].display_name,
@@ -662,17 +758,105 @@ class SchwabProductionLinkService:
             "cache_ttl_seconds": self._config.cache_ttl_seconds,
         }
         snapshot["reconciliation"] = reconciliation
+        snapshot["local_operator_auth"] = self._local_operator_auth_surface()
         snapshot["manual_order_safety"] = self._manual_order_safety_snapshot(snapshot=snapshot, now=now)
         snapshot = self._augment_manual_live_order_surface(snapshot=snapshot, now=now)
-        return snapshot
+        return self._attach_operator_status(snapshot)
 
     def _submit_manual_order(self, request: ManualOrderRequest) -> dict[str, Any]:
-        self._assert_manual_order_safety(request)
-        order_payload = _build_schwab_order_payload(request)
+        futures_symbol_resolution = self._resolve_futures_live_submit_symbol(request)
+        self._assert_manual_order_safety(request, futures_symbol_resolution=futures_symbol_resolution)
+        broker_submit_symbol = str(futures_symbol_resolution.get("broker_submit_symbol") or "").strip() or request.symbol
+        order_payload = _build_schwab_order_payload(
+            request,
+            features=self._config.features,
+            broker_symbol_override=broker_submit_symbol,
+            broker_order_type_override=str(futures_symbol_resolution.get("broker_transport_order_type") or "").strip() or None,
+            broker_limit_price_override=_decimal(futures_symbol_resolution.get("broker_transport_limit_price")),
+        )
         now = datetime.now(timezone.utc)
+        time_session_policy_decision = _futures_pilot_time_session_policy_decision(request, now=now, features=self._config.features)
+        action_phase = _futures_pilot_action_phase(request, preview=False)
+        symbol_authorization = (
+            _futures_symbol_authorization_decision(request.symbol, features=self._config.features)
+            if _is_futures_pilot_request(request)
+            else None
+        )
         client = self._client_factory(self._config, self._build_oauth_client()[0])
+        broker_preview_result = self._broker_preview_result(
+            client=client,
+            request=request,
+            order_payload=order_payload,
+            futures_symbol_resolution=futures_symbol_resolution,
+            symbol_authorization=symbol_authorization,
+            time_session_policy_decision=time_session_policy_decision,
+        )
         self._manual_restore_validation_pending = False
         request_payload = _manual_order_request_json(request)
+        if broker_preview_result is not None and not bool(broker_preview_result.get("ok")):
+            failed_at = datetime.now(timezone.utc)
+            failure_detail = str(
+                broker_preview_result.get("error")
+                or "Schwab broker preview rejected this futures payload before live submit."
+            ).strip()
+            self._store.record_order_event(
+                BrokerOrderEvent(
+                    account_hash=request.account_hash,
+                    broker_order_id=None,
+                    client_order_id=request.client_order_id,
+                    event_type="submit_failed",
+                    status="FAILED",
+                    occurred_at=failed_at,
+                    message=failure_detail,
+                    request_payload=order_payload,
+                    response_payload={
+                        "error": failure_detail,
+                        "action_phase": action_phase,
+                        "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                        "symbol_authorization": symbol_authorization,
+                        "futures_symbol_resolution": futures_symbol_resolution,
+                        "time_session_policy_decision": time_session_policy_decision,
+                        "broker_preview_result": broker_preview_result,
+                    },
+                    source="manual_ticket",
+                )
+            )
+            self._record_manual_validation_event(
+                scenario_type="manual_live_submit_failed",
+                occurred_at=failed_at,
+                payload={
+                    "intent_parameters": request_payload,
+                    "pilot_mode_enabled": self._config.features.manual_live_pilot_enabled,
+                    "submit_attempted_at": now.isoformat(),
+                    "failed_at": failed_at.isoformat(),
+                    "error": failure_detail,
+                    "duplicate_action_prevention_held": True,
+                    "action_phase": action_phase,
+                    "gate_summary": _futures_pilot_gate_summary(self.snapshot(force_refresh=False)) if _is_futures_pilot_request(request) else None,
+                    "symbol_authorization": symbol_authorization,
+                    "futures_symbol_resolution": futures_symbol_resolution,
+                    "time_session_policy_decision": time_session_policy_decision,
+                    "broker_preview_result": broker_preview_result,
+                },
+            )
+            self._store.save_runtime_state(
+                "last_manual_order",
+                {
+                    "request": {**request_payload, "requested_at": now.isoformat()},
+                    "result": {
+                        "ok": False,
+                        "error": failure_detail,
+                        "failed_at": failed_at.isoformat(),
+                        "action_phase": action_phase,
+                        "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                        "symbol_authorization": symbol_authorization,
+                        "futures_symbol_resolution": futures_symbol_resolution,
+                        "time_session_policy_decision": time_session_policy_decision,
+                        "broker_preview_result": broker_preview_result,
+                    },
+                },
+            )
+            raise ProductionLinkActionError(failure_detail)
         self._store.save_runtime_state(
             "last_manual_order",
             {
@@ -690,13 +874,21 @@ class SchwabProductionLinkService:
                 occurred_at=now,
                 message=f"{request.order_type} {request.side} {request.quantity} {request.symbol}",
                 request_payload=order_payload,
-                response_payload=request_payload,
+                response_payload={
+                    "request": request_payload,
+                    "action_phase": action_phase,
+                    "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                    "symbol_authorization": symbol_authorization,
+                    "futures_symbol_resolution": futures_symbol_resolution,
+                    "time_session_policy_decision": time_session_policy_decision,
+                    "broker_preview_result": broker_preview_result,
+                },
                 source="manual_ticket",
             )
         )
         try:
             response = client.submit_order(request.account_hash, order_payload)
-        except SchwabBrokerHttpError as exc:
+        except BrokerHttpError as exc:
             failed_at = datetime.now(timezone.utc)
             failure_detail = str(exc)
             self._store.record_order_event(
@@ -709,7 +901,15 @@ class SchwabProductionLinkService:
                     occurred_at=failed_at,
                     message=failure_detail,
                     request_payload=order_payload,
-                    response_payload={"error": failure_detail},
+                    response_payload={
+                        "error": failure_detail,
+                        "action_phase": action_phase,
+                        "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                        "symbol_authorization": symbol_authorization,
+                        "futures_symbol_resolution": futures_symbol_resolution,
+                        "time_session_policy_decision": time_session_policy_decision,
+                        "broker_preview_result": broker_preview_result,
+                    },
                     source="manual_ticket",
                 )
             )
@@ -723,6 +923,12 @@ class SchwabProductionLinkService:
                     "failed_at": failed_at.isoformat(),
                     "error": failure_detail,
                     "duplicate_action_prevention_held": True,
+                    "action_phase": action_phase,
+                    "gate_summary": _futures_pilot_gate_summary(self.snapshot(force_refresh=False)) if _is_futures_pilot_request(request) else None,
+                    "symbol_authorization": symbol_authorization,
+                    "futures_symbol_resolution": futures_symbol_resolution,
+                    "time_session_policy_decision": time_session_policy_decision,
+                    "broker_preview_result": broker_preview_result,
                 },
             )
             self._store.save_runtime_state(
@@ -733,6 +939,12 @@ class SchwabProductionLinkService:
                         "ok": False,
                         "error": failure_detail,
                         "failed_at": failed_at.isoformat(),
+                        "action_phase": action_phase,
+                        "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                        "symbol_authorization": symbol_authorization,
+                        "futures_symbol_resolution": futures_symbol_resolution,
+                        "time_session_policy_decision": time_session_policy_decision,
+                        "broker_preview_result": broker_preview_result,
                     },
                 },
             )
@@ -750,7 +962,15 @@ class SchwabProductionLinkService:
                 occurred_at=acknowledged_at,
                 message=f"Schwab acknowledged manual order for {request.symbol}.",
                 request_payload=order_payload,
-                response_payload=response,
+                response_payload={
+                    "action_phase": action_phase,
+                    "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                    "symbol_authorization": symbol_authorization,
+                    "futures_symbol_resolution": futures_symbol_resolution,
+                    "broker_response": response,
+                    "time_session_policy_decision": time_session_policy_decision,
+                    "broker_preview_result": broker_preview_result,
+                },
                 source="manual_ticket",
             )
         )
@@ -769,6 +989,12 @@ class SchwabProductionLinkService:
                     "body": response.get("body"),
                 },
                 "duplicate_action_prevention_held": True,
+                "action_phase": action_phase,
+                "gate_summary": _futures_pilot_gate_summary(self.snapshot(force_refresh=False)) if _is_futures_pilot_request(request) else None,
+                "symbol_authorization": symbol_authorization,
+                "futures_symbol_resolution": futures_symbol_resolution,
+                "time_session_policy_decision": time_session_policy_decision,
+                "broker_preview_result": broker_preview_result,
             },
         )
         self._store.upsert_orders(
@@ -777,7 +1003,7 @@ class SchwabProductionLinkService:
                     broker_order_id=broker_order_id,
                     account_hash=request.account_hash,
                     client_order_id=request.client_order_id,
-                    symbol=request.symbol,
+                    symbol=broker_submit_symbol,
                     description=None,
                     asset_class=request.asset_class,
                     instruction=request.side,
@@ -799,6 +1025,11 @@ class SchwabProductionLinkService:
                         "operator_note": request.operator_note,
                         "operator_authenticated": request.operator_authenticated,
                         "local_operator_identity": request.local_operator_identity,
+                        "action_phase": action_phase,
+                        "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                        "symbol_authorization": symbol_authorization,
+                        "futures_symbol_resolution": futures_symbol_resolution,
+                        "time_session_policy_decision": time_session_policy_decision,
                     },
                 )
             ],
@@ -809,7 +1040,7 @@ class SchwabProductionLinkService:
                 "broker_order_id": broker_order_id,
                 "client_order_id": request.client_order_id,
                 "account_hash": request.account_hash,
-                "symbol": request.symbol,
+                "symbol": broker_submit_symbol,
                 "asset_class": request.asset_class,
                 "intent_type": request.intent_type or "MANUAL",
                 "operator_note": request.operator_note,
@@ -845,10 +1076,19 @@ class SchwabProductionLinkService:
                 "active": True,
                 "source": "manual_ticket",
                 "operator_authenticated": request.operator_authenticated,
+                "operator_reduce_only_authorized": request.operator_reduce_only_authorized,
+                "operator_auth_policy": request.operator_auth_policy,
+                "operator_auth_risk_bucket": request.operator_auth_risk_bucket,
                 "local_operator_identity": request.local_operator_identity,
                 "auth_session_id": request.auth_session_id,
                 "auth_method": request.auth_method,
                 "authenticated_at": request.authenticated_at,
+                "action_phase": action_phase,
+                "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                "symbol_authorization": symbol_authorization,
+                "futures_symbol_resolution": futures_symbol_resolution,
+                "time_session_policy_decision": time_session_policy_decision,
+                "broker_preview_result": broker_preview_result,
             }
         )
         self._store.save_runtime_state(
@@ -860,6 +1100,15 @@ class SchwabProductionLinkService:
                     "status_code": response.get("status_code"),
                     "location": response.get("location"),
                     "received_at": acknowledged_at.isoformat(),
+                    "operator_auth_policy": request.operator_auth_policy,
+                    "operator_auth_risk_bucket": request.operator_auth_risk_bucket,
+                    "action_phase": action_phase,
+                    "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                    "gate_summary": _futures_pilot_gate_summary(self.snapshot(force_refresh=False)) if _is_futures_pilot_request(request) else None,
+                    "symbol_authorization": symbol_authorization,
+                    "futures_symbol_resolution": futures_symbol_resolution,
+                    "time_session_policy_decision": time_session_policy_decision,
+                    "broker_preview_result": broker_preview_result,
                 },
             },
         )
@@ -877,18 +1126,66 @@ class SchwabProductionLinkService:
         snapshot = self.snapshot(force_refresh=True)
         self._assert_manual_preview_support(request)
         now = datetime.now(timezone.utc)
-        order_payload = _build_schwab_order_payload(request)
+        futures_symbol_resolution = self._resolve_futures_live_submit_symbol(request)
+        order_payload = _build_schwab_order_payload(
+            request,
+            features=self._config.features,
+            broker_symbol_override=str(futures_symbol_resolution.get("broker_submit_symbol") or "").strip() or None,
+            broker_order_type_override=str(futures_symbol_resolution.get("broker_transport_order_type") or "").strip() or None,
+            broker_limit_price_override=_decimal(futures_symbol_resolution.get("broker_transport_limit_price")),
+        )
         structure_summary = _manual_order_structure_summary(request)
         live_submit_blockers = self._manual_order_live_submit_blockers(snapshot=snapshot, request=request, now=now)
+        live_submit_blockers.extend(as_list(futures_symbol_resolution.get("blockers")))
+        live_submit_blockers = list(dict.fromkeys(str(item) for item in live_submit_blockers if str(item).strip()))
+        time_session_policy_decision = _futures_pilot_time_session_policy_decision(request, now=now, features=self._config.features)
+        action_phase = _futures_pilot_action_phase(request, preview=True)
+        symbol_authorization = (
+            _futures_symbol_authorization_decision(request.symbol, features=self._config.features)
+            if _is_futures_pilot_request(request)
+            else None
+        )
+        broker_preview_result = None
+        if _is_futures_pilot_request(request) and len(live_submit_blockers) == 0:
+            client = self._client_factory(self._config, self._build_oauth_client()[0])
+            broker_preview_result = self._broker_preview_result(
+                client=client,
+                request=request,
+                order_payload=order_payload,
+                futures_symbol_resolution=futures_symbol_resolution,
+                symbol_authorization=symbol_authorization,
+                time_session_policy_decision=time_session_policy_decision,
+            )
+            if broker_preview_result is not None and not bool(broker_preview_result.get("ok")):
+                live_submit_blockers.append(
+                    str(
+                        broker_preview_result.get("error")
+                        or "Schwab broker preview rejected this futures payload before live submit."
+                    ).strip()
+                )
+        live_submit_blockers = list(dict.fromkeys(str(item) for item in live_submit_blockers if str(item).strip()))
         preview_payload = {
             "requested_at": now.isoformat(),
             "request": _manual_order_request_json(request),
             "structure_summary": structure_summary,
+            "route_scope": "futures_pilot" if _is_futures_pilot_request(request) else "stock_pilot_or_manual",
             "payload_summary": {
                 "intended_schwab_payload": order_payload,
+                "resolved_broker_symbol": str(futures_symbol_resolution.get("broker_submit_symbol") or "").strip()
+                or _resolved_broker_symbol_for_request(request, features=self._config.features),
+                "client_order_id_omitted": _omit_client_order_id_for_live_pilot(request, features=self._config.features),
                 "advanced_mode": _advanced_mode_label(request),
                 "unverified_fields": _advanced_unverified_fields(request),
+                "futures_symbol_resolution": futures_symbol_resolution,
+                "broker_transport_order_type": str(futures_symbol_resolution.get("broker_transport_order_type") or "").strip() or None,
+                "broker_transport_limit_price": futures_symbol_resolution.get("broker_transport_limit_price"),
+                "broker_preview_result": broker_preview_result,
             },
+            "action_phase": action_phase,
+            "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+            "symbol_authorization": symbol_authorization,
+            "gate_summary": _futures_pilot_gate_summary(snapshot) if _is_futures_pilot_request(request) else None,
+            "time_session_policy_decision": time_session_policy_decision,
             "live_submit_enabled": len(live_submit_blockers) == 0,
             "live_submit_blockers": live_submit_blockers,
             "feature_flags": {
@@ -940,6 +1237,8 @@ class SchwabProductionLinkService:
         diagnostics = as_dict(refreshed_snapshot.get("diagnostics"))
         diagnostics["last_manual_order_preview"] = preview_payload
         refreshed_snapshot["diagnostics"] = diagnostics
+        refreshed_snapshot["local_operator_auth"] = self._local_operator_auth_surface()
+        refreshed_snapshot = self._attach_operator_status(refreshed_snapshot)
         self._cached_snapshot = refreshed_snapshot
         self._cached_at = now
         self._write_snapshot(refreshed_snapshot)
@@ -951,6 +1250,40 @@ class SchwabProductionLinkService:
             "output": _json_dumps(preview_payload),
             "payload": preview_payload,
             "production_link": refreshed_snapshot,
+        }
+
+    def _broker_preview_result(
+        self,
+        *,
+        client: BrokerHttpClient,
+        request: ManualOrderRequest,
+        order_payload: dict[str, Any],
+        futures_symbol_resolution: dict[str, Any] | None,
+        symbol_authorization: dict[str, Any] | None,
+        time_session_policy_decision: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not _is_futures_pilot_request(request):
+            return None
+        try:
+            response = client.preview_order(request.account_hash, order_payload)
+        except BrokerHttpError as exc:
+            return {
+                "ok": False,
+                "error": f"Schwab broker preview rejected this futures payload before live submit: {exc}",
+                "action_phase": _futures_pilot_action_phase(request, preview=True),
+                "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                "symbol_authorization": symbol_authorization,
+                "futures_symbol_resolution": futures_symbol_resolution,
+                "time_session_policy_decision": time_session_policy_decision,
+            }
+        return {
+            "ok": True,
+            "response": response,
+            "action_phase": _futures_pilot_action_phase(request, preview=True),
+            "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+            "symbol_authorization": symbol_authorization,
+            "futures_symbol_resolution": futures_symbol_resolution,
+            "time_session_policy_decision": time_session_policy_decision,
         }
 
     def _cancel_order(self, *, account_hash: str, broker_order_id: str) -> dict[str, Any]:
@@ -1016,7 +1349,7 @@ class SchwabProductionLinkService:
         }
 
     def _replace_order(self, request: ManualOrderRequest, *, broker_order_id: str) -> dict[str, Any]:
-        order_payload = _build_schwab_order_payload(request)
+        order_payload = _build_schwab_order_payload(request, features=self._config.features)
         client = self._client_factory(self._config, self._build_oauth_client()[0])
         response = client.replace_order(request.account_hash, broker_order_id, order_payload)
         self._store.record_order_event(
@@ -1070,6 +1403,9 @@ class SchwabProductionLinkService:
             operator_note="Flatten broker position",
             client_order_id=f"flatten-{uuid.uuid4().hex[:10]}",
             operator_authenticated=request.operator_authenticated,
+            operator_reduce_only_authorized=request.operator_reduce_only_authorized,
+            operator_auth_policy=request.operator_auth_policy,
+            operator_auth_risk_bucket=request.operator_auth_risk_bucket,
             local_operator_identity=request.local_operator_identity,
             auth_session_id=request.auth_session_id,
             auth_method=request.auth_method,
@@ -1084,7 +1420,7 @@ class SchwabProductionLinkService:
     def _collect_post_ack_direct_status_records(
         self,
         *,
-        client: SchwabBrokerHttpClient,
+        client: BrokerHttpClient,
         selected_account_hash: str,
         manual_state: dict[str, Any],
         normalized_orders: list[BrokerOrderRecord],
@@ -1131,7 +1467,7 @@ class SchwabProductionLinkService:
             checked_at = now.isoformat()
             try:
                 payload = client.get_order_status(selected_account_hash, broker_order_id)
-            except SchwabBrokerHttpError as exc:
+            except BrokerHttpError as exc:
                 error_text = str(exc)
                 direct_status = "NOT_FOUND" if "HTTP error 404" in error_text else "UNAVAILABLE"
                 self._store.record_order_event(
@@ -1196,7 +1532,12 @@ class SchwabProductionLinkService:
                     source="schwab_direct_status",
                 )
             )
-            normalized = _normalize_orders([payload], account_hash=selected_account_hash, fetched_at=now)
+            normalized = _normalize_orders(
+                [payload],
+                account_hash=selected_account_hash,
+                fetched_at=now,
+                broker_provider_id=self._config.broker_provider_id,
+            )
             if not normalized:
                 continue
             normalized_order = normalized[0]
@@ -1465,11 +1806,7 @@ class SchwabProductionLinkService:
     def _assert_manual_cancel_safety(self, *, account_hash: str, broker_order_id: str) -> None:
         snapshot = self.snapshot(force_refresh=True)
         health = as_dict(snapshot.get("health"))
-        selected_account_hash = str(
-            as_dict(snapshot.get("connection")).get("selected_account_hash")
-            or as_dict(snapshot.get("accounts")).get("selected_account_hash")
-            or ""
-        ).strip()
+        selected_account_hash = _selected_account_id_from_snapshot(snapshot)
         blockers: list[str] = []
         if as_dict(health.get("auth_healthy")).get("ok") is not True:
             blockers.append("Auth is not healthy.")
@@ -2312,8 +2649,9 @@ class SchwabProductionLinkService:
             **persisted,
             "manual_order_safety": self._manual_order_safety_snapshot(snapshot={**persisted, "enabled": False, "status": "disabled", "health": {}}, now=current_now),
         }
+        payload["local_operator_auth"] = self._local_operator_auth_surface()
         payload = self._augment_manual_live_order_surface(snapshot=payload, now=current_now)
-        return payload
+        return self._attach_operator_status(payload)
 
     def _degraded_snapshot(self, now: datetime, *, detail: str) -> dict[str, Any]:
         persisted = self._store.build_snapshot()
@@ -2351,7 +2689,10 @@ class SchwabProductionLinkService:
                 "detail": detail,
             },
             "connection": {
-                "broker_name": "Schwab",
+                "broker_name": _provider_label(self._config.broker_provider_id),
+                "broker_provider_id": self._config.broker_provider_id,
+                "market_data_provider_id": self._config.market_data_provider_id,
+                "selected_account_id": selected_account_hash,
                 "selected_account_hash": selected_account_hash,
                 "selection_source": "persisted_cache",
             },
@@ -2427,18 +2768,109 @@ class SchwabProductionLinkService:
             **persisted,
             "manual_order_safety": self._manual_order_safety_snapshot(snapshot={**persisted, "enabled": True, "status": "degraded", "health": {}}, now=now),
         }
+        payload["local_operator_auth"] = self._local_operator_auth_surface()
         payload = self._augment_manual_live_order_surface(snapshot=payload, now=now)
-        return payload
+        return self._attach_operator_status(payload)
 
     def _require_manual_ticket_enabled(self) -> None:
         if not self._config.features.manual_order_ticket_enabled:
             raise ProductionLinkActionError("Manual live broker actions are disabled by production-link feature flag.")
 
-    def _assert_manual_order_safety(self, request: ManualOrderRequest) -> None:
+    def _assert_manual_order_safety(
+        self,
+        request: ManualOrderRequest,
+        *,
+        futures_symbol_resolution: dict[str, Any] | None = None,
+    ) -> None:
         snapshot = self.snapshot(force_refresh=True)
         blockers = self._manual_order_live_submit_blockers(snapshot=snapshot, request=request, now=datetime.now(timezone.utc))
+        if futures_symbol_resolution:
+            blockers.extend(as_list(futures_symbol_resolution.get("blockers")))
+            blockers = list(dict.fromkeys(str(item) for item in blockers if str(item).strip()))
         if blockers:
             raise ProductionLinkActionError("Manual live order submit is blocked: " + " | ".join(blockers))
+
+    def _resolve_futures_live_submit_symbol(self, request: ManualOrderRequest) -> dict[str, Any]:
+        configured_symbol = _resolved_broker_symbol_for_request(request, features=self._config.features)
+        if not _is_futures_pilot_request(request):
+            return {
+                "policy_mode": "NOT_APPLICABLE",
+                "requested_symbol": request.symbol,
+                "configured_external_symbol": configured_symbol,
+                "broker_submit_symbol": configured_symbol,
+                "allowed": True,
+                "blockers": [],
+            }
+        result: dict[str, Any] = {
+            "policy_mode": "LIVE_CONTRACT_RESOLUTION",
+            "requested_symbol": request.symbol,
+            "configured_external_symbol": configured_symbol,
+            "broker_submit_symbol": configured_symbol,
+            "allowed": False,
+            "blockers": [],
+        }
+        try:
+            oauth_client, _ = self._build_oauth_client()
+            quote_payload, quote_runtime = self._quote_payload_fetcher(
+                self._config.market_data_config_path,
+                oauth_client,
+                [configured_symbol],
+            )
+        except (FileNotFoundError, SchwabAuthError, BrokerHttpError, ValueError) as exc:
+            result["quote_resolution_error"] = str(exc)
+            result["blockers"] = [
+                f"Futures live submit requires a resolved live contract symbol for {request.symbol}: {exc}"
+            ]
+            return result
+        resolved_quote_payload = _resolve_quote_payload(quote_payload, configured_symbol)
+        result["quote_runtime"] = quote_runtime
+        if not isinstance(resolved_quote_payload, dict):
+            result["blockers"] = [
+                f"Futures live submit requires a live quote payload for {request.symbol} via {configured_symbol}."
+            ]
+            return result
+        broker_submit_symbol = _live_futures_contract_symbol_from_quote_payload(
+            resolved_quote_payload,
+            configured_external_symbol=configured_symbol,
+        )
+        result["resolved_quote_symbol"] = str(resolved_quote_payload.get("symbol") or "").strip() or None
+        if not broker_submit_symbol:
+            result["blockers"] = [
+                (
+                    f"Futures live submit requires a concrete contract symbol for {request.symbol}; "
+                    f"quote truth did not expose one for {configured_symbol}."
+                )
+            ]
+            return result
+        transport_limit_price, transport_limit_price_source = _marketable_futures_limit_price_from_quote_payload(
+            resolved_quote_payload,
+            side=request.side,
+        )
+        if transport_limit_price is None:
+            result["blockers"] = [
+                (
+                    f"Futures live submit requires a live quote price to derive a marketable broker limit for "
+                    f"{request.symbol} via {configured_symbol}."
+                )
+            ]
+            return result
+        # Keep the broker submit symbol on the configured futures root while recording
+        # the concrete live contract symbol for audit/debug truth. The existing futures
+        # execution helper submits the configured root symbol, not the contract symbol.
+        result["quote_contract_symbol"] = broker_submit_symbol
+        result["broker_submit_symbol"] = configured_symbol
+        result["broker_transport_order_type"] = "LIMIT"
+        result["broker_transport_limit_price"] = transport_limit_price
+        result["broker_transport_limit_price_source"] = transport_limit_price_source
+        result["allowed"] = True
+        result["blockers"] = []
+        result["allowed_reason"] = (
+            f"Allowed because live quote truth resolved {request.symbol} through {configured_symbol} "
+            f"to the current contract {broker_submit_symbol}, while the broker submit path remains "
+            f"anchored to the configured futures root {configured_symbol} and transports the operator MARKET "
+            f"ticket as a marketable LIMIT at {transport_limit_price} from {transport_limit_price_source}."
+        )
+        return result
 
     def _assert_manual_live_action_enabled(self) -> None:
         snapshot = self.snapshot(force_refresh=True)
@@ -2454,6 +2886,8 @@ class SchwabProductionLinkService:
             if request.structure_type == "SINGLE"
             else [leg.order_type for leg in request.oco_legs]
         )
+        if _is_futures_pilot_request(request) and not self._config.features.futures_pilot_enabled:
+            blockers.append("Futures pilot preview is disabled because MGC_PRODUCTION_FUTURES_PILOT_ENABLED is false.")
         supported_dry_run_types = set(_supported_dry_run_order_types_for_asset(self._config.features, request.asset_class))
         for order_type in order_types:
             if order_type not in supported_dry_run_types:
@@ -2469,11 +2903,20 @@ class SchwabProductionLinkService:
         if blockers:
             raise ProductionLinkActionError("Manual dry-run preview is blocked: " + " | ".join(blockers))
 
+    def _local_operator_auth_surface(self) -> dict[str, Any]:
+        return local_operator_auth_surface(self._repo_root)
+
+    def _attach_operator_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload["operator_status"] = _pilot_status_export_payload(payload)
+        payload["futures_pilot_policy"] = _futures_pilot_policy_snapshot(payload)
+        payload["futures_pilot_status"] = _futures_pilot_status_export_payload(payload)
+        return payload
+
     def _manual_order_safety_snapshot(self, *, snapshot: dict[str, Any], now: datetime) -> dict[str, Any]:
         health = as_dict(snapshot.get("health"))
         diagnostics = as_dict(snapshot.get("diagnostics"))
         capabilities = as_dict(snapshot.get("capabilities")) or _capabilities_snapshot(self._config.features)
-        selected_account_hash = str(as_dict(snapshot.get("connection")).get("selected_account_hash") or as_dict(snapshot.get("accounts")).get("selected_account_hash") or "")
+        selected_account_hash = _selected_account_id_from_snapshot(snapshot)
         selected_accounts = [as_dict(row) for row in as_list(as_dict(snapshot.get("accounts")).get("rows")) if bool(as_dict(row).get("selected"))]
         selected_account = selected_accounts[0] if selected_accounts else {}
         max_age = int(self._config.features.broker_freshness_max_age_seconds)
@@ -2500,8 +2943,8 @@ class SchwabProductionLinkService:
             blockers.append("Broker is not reachable.")
         if as_dict(health.get("account_selected")).get("ok") is not True or not selected_account_hash:
             blockers.append("No live-selected broker account is available.")
-        if selected_account_hash and str(selected_account.get("source") or "") != "schwab_live":
-            blockers.append("Selected account is not currently live-verified from Schwab.")
+        if selected_account_hash and str(selected_account.get("source") or "") != _live_account_source(self._config.broker_provider_id):
+            blockers.append(f"Selected account is not currently live-verified from {_provider_label(self._config.broker_provider_id)}.")
         if balances_age is None or balances_age > max_age:
             blockers.append("Balances refresh is stale beyond the configured safety limit.")
         if positions_age is None or positions_age > max_age:
@@ -2510,10 +2953,31 @@ class SchwabProductionLinkService:
             blockers.append("Orders refresh is stale beyond the configured safety limit.")
         if as_dict(snapshot.get("reconciliation")).get("status") != "clear":
             blockers.append("Reconciliation is not clear.")
-        if not self._config.features.supported_manual_order_types:
-            blockers.append("No manual order types are configured for live submit.")
-        if not self._config.features.manual_symbol_whitelist:
-            blockers.append("Manual live submit is blocked because MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST is empty.")
+        active_futures_lane = _current_active_manual_lane_is_futures(self._config.features)
+        if active_futures_lane:
+            if "FUTURE" not in set(self._config.features.futures_supported_asset_classes):
+                blockers.append("Futures manual live submit requires FUTURE in MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES.")
+            if _futures_pilot_order_type() not in set(self._config.features.futures_supported_order_types):
+                blockers.append(
+                    f"Futures manual live submit requires {_futures_pilot_order_type()} in MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES."
+                )
+            if not self._config.features.futures_symbol_whitelist:
+                blockers.append("Futures manual live submit is blocked because MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST is empty.")
+            if "DAY" not in set(self._config.features.futures_supported_time_in_force_values):
+                blockers.append("Futures manual live submit requires DAY in MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES.")
+            if "NORMAL" not in set(self._config.features.futures_supported_session_values):
+                blockers.append("Futures manual live submit requires NORMAL in MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES.")
+            if self._config.features.futures_max_quantity != Decimal("1"):
+                blockers.append("Futures manual live submit requires MGC_PRODUCTION_FUTURES_MAX_QUANTITY=1.")
+            if not self._config.features.futures_live_submit_enabled:
+                blockers.append("Futures live submission is disabled because MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED is false.")
+            if not _futures_pilot_live_verified(self._config.features):
+                blockers.append("Futures pilot live submit remains preview-only until FUTURE:MARKET is explicitly live-verified.")
+        else:
+            if not self._config.features.supported_manual_order_types:
+                blockers.append("No manual order types are configured for live submit.")
+            if not self._config.features.manual_symbol_whitelist:
+                blockers.append("Manual live submit is blocked because MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST is empty.")
         if self._config.features.ext_exto_ticket_support_enabled and not self._config.features.ext_exto_live_submit_enabled:
             warnings.append("EXTO / GTC_EXTO ticket support is available in dry-run mode only; live submit remains disabled.")
         if self._config.features.oco_ticket_support_enabled and not self._config.features.oco_live_submit_enabled:
@@ -2521,10 +2985,43 @@ class SchwabProductionLinkService:
         if fills_age is None:
             warnings.append("Recent fills/events have not been refreshed yet.")
 
-        first_live_stock_limit = _NEAR_TERM_LIVE_VERIFICATION_RUNBOOKS["STOCK:LIMIT"]
+        active_futures_lane = _current_active_manual_lane_is_futures(self._config.features)
         submit_status = _manual_submit_status_summary(blockers=blockers)
-        locked_policy = _manual_live_pilot_policy_snapshot(self._config.features)
+        locked_policy = _current_active_manual_live_policy_snapshot(self._config.features)
+        historical_stock_policy = _manual_live_pilot_policy_snapshot(self._config.features)
+        active_route_key = _futures_pilot_verification_key() if active_futures_lane else "STOCK:LIMIT"
+        active_runbook = _NEAR_TERM_LIVE_VERIFICATION_RUNBOOKS[active_route_key]
         submit_enabled = len(blockers) == 0
+        active_supported_asset_classes = (
+            list(self._config.features.futures_supported_asset_classes)
+            if active_futures_lane
+            else list(self._config.features.supported_manual_asset_classes)
+        )
+        active_supported_order_types = (
+            list(self._config.features.futures_supported_order_types)
+            if active_futures_lane
+            else list(self._config.features.supported_manual_order_types)
+        )
+        active_supported_time_in_force_values = (
+            list(self._config.features.futures_supported_time_in_force_values)
+            if active_futures_lane
+            else list(self._config.features.supported_manual_time_in_force_values)
+        )
+        active_supported_session_values = (
+            list(self._config.features.futures_supported_session_values)
+            if active_futures_lane
+            else list(self._config.features.supported_manual_session_values)
+        )
+        active_symbol_whitelist = (
+            list(self._config.features.futures_symbol_whitelist)
+            if active_futures_lane
+            else list(self._config.features.manual_symbol_whitelist)
+        )
+        active_max_quantity = (
+            str(self._config.features.futures_max_quantity)
+            if active_futures_lane
+            else str(self._config.features.manual_max_quantity)
+        )
 
         return {
             "submit_enabled": submit_enabled,
@@ -2534,22 +3031,40 @@ class SchwabProductionLinkService:
             "blockers": blockers,
             "warnings": warnings,
             "pilot_mode": {
-                "enabled": bool(self._config.features.manual_live_pilot_enabled),
-                "label": "MANUAL LIVE PILOT ACTIVE" if self._config.features.manual_live_pilot_enabled else "MANUAL LIVE PILOT OFF",
+                "enabled": bool(self._config.features.futures_pilot_enabled if active_futures_lane else self._config.features.manual_live_pilot_enabled),
+                "label": (
+                    "MANUAL FUTURES PILOT ACTIVE"
+                    if active_futures_lane and self._config.features.futures_pilot_enabled
+                    else "HISTORICAL STOCK PILOT ACTIVE"
+                    if self._config.features.manual_live_pilot_enabled
+                    else "MANUAL LIVE PILOT OFF"
+                ),
                 "detail": (
-                    "Real Schwab manual-live pilot is enabled for the narrow first-live validation scope."
+                    "Real Schwab manual futures pilot is enabled for the narrow whitelist-controlled live validation scope."
+                    if active_futures_lane and self._config.features.futures_pilot_enabled
+                    else "Historical stock pilot support remains present as historical proof, but it is not the current active live-test lane."
                     if self._config.features.manual_live_pilot_enabled
                     else "Manual live pilot mode is off. Dry-run preview is still available, but live submit remains blocked."
                 ),
                 "scope": locked_policy,
+                "current_active_lane": "FUTURES" if active_futures_lane else "STOCK_HISTORICAL",
             },
             "pilot_readiness": {
-                "enabled": bool(self._config.features.manual_live_pilot_enabled),
+                "enabled": bool(self._config.features.futures_pilot_enabled if active_futures_lane else self._config.features.manual_live_pilot_enabled),
                 "submit_eligible": submit_enabled,
-                "label": "LIVE MANUAL PILOT READY" if submit_enabled else "LIVE MANUAL PILOT BLOCKED",
+                "label": (
+                    "LIVE MANUAL FUTURES PILOT READY"
+                    if active_futures_lane and submit_enabled
+                    else "LIVE MANUAL FUTURES PILOT BLOCKED"
+                    if active_futures_lane
+                    else "HISTORICAL STOCK PILOT READY"
+                    if submit_enabled
+                    else "HISTORICAL STOCK PILOT BLOCKED"
+                ),
                 "detail": submit_status["detail"],
                 "blocked_reason": blockers[0] if blockers else None,
                 "locked_policy": locked_policy,
+                "historical_stock_policy": historical_stock_policy,
                 "auth_healthy": as_dict(health.get("auth_healthy")).get("ok") is True,
                 "broker_reachable": as_dict(health.get("broker_reachable")).get("ok") is True,
                 "account_selected": as_dict(health.get("account_selected")).get("ok") is True,
@@ -2560,16 +3075,21 @@ class SchwabProductionLinkService:
                 "reconciliation_detail": as_dict(snapshot.get("reconciliation")).get("detail"),
                 "reconciliation_mismatch_count": as_dict(snapshot.get("reconciliation")).get("mismatch_count"),
             },
+            "selected_account_id": selected_account_hash or None,
             "selected_account_hash": selected_account_hash or None,
-            "selected_account_live_verified": bool(selected_account_hash and str(selected_account.get("source") or "") == "schwab_live"),
+            "selected_account_live_verified": bool(
+                selected_account_hash
+                and str(selected_account.get("source") or "") == _live_account_source(self._config.broker_provider_id)
+            ),
             "constraints": {
-                "supported_asset_classes": list(self._config.features.supported_manual_asset_classes),
-                "supported_order_types": list(self._config.features.supported_manual_order_types),
+                "current_active_lane": "FUTURES" if active_futures_lane else "STOCK_HISTORICAL",
+                "supported_asset_classes": active_supported_asset_classes,
+                "supported_order_types": active_supported_order_types,
                 "supported_dry_run_order_types": list(self._config.features.supported_manual_dry_run_order_types),
-                "supported_time_in_force_values": list(self._config.features.supported_manual_time_in_force_values),
-                "supported_session_values": list(self._config.features.supported_manual_session_values),
-                "symbol_whitelist": list(self._config.features.manual_symbol_whitelist),
-                "max_quantity": str(self._config.features.manual_max_quantity),
+                "supported_time_in_force_values": active_supported_time_in_force_values,
+                "supported_session_values": active_supported_session_values,
+                "symbol_whitelist": active_symbol_whitelist,
+                "max_quantity": active_max_quantity,
                 "require_reconciliation_clear": True,
                 "broker_freshness_max_age_seconds": max_age,
                 "manual_order_ack_timeout_seconds": int(self._config.manual_order_ack_timeout_seconds),
@@ -2590,6 +3110,14 @@ class SchwabProductionLinkService:
                 "trailing_live_submit_enabled": self._config.features.trailing_live_submit_enabled,
                 "close_order_live_submit_enabled": self._config.features.close_order_live_submit_enabled,
                 "futures_live_submit_enabled": self._config.features.futures_live_submit_enabled,
+                "futures_pilot_enabled": self._config.features.futures_pilot_enabled,
+                "futures_symbol_whitelist": list(self._config.features.futures_symbol_whitelist),
+                "futures_supported_asset_classes": list(self._config.features.futures_supported_asset_classes),
+                "futures_supported_order_types": list(self._config.features.futures_supported_order_types),
+                "futures_supported_time_in_force_values": list(self._config.features.futures_supported_time_in_force_values),
+                "futures_supported_session_values": list(self._config.features.futures_supported_session_values),
+                "futures_max_quantity": str(self._config.features.futures_max_quantity),
+                "futures_market_data_symbol_map": dict(self._config.features.futures_market_data_symbol_map),
                 "supported_order_structures": ["SINGLE", "OCO"] if self._config.features.oco_ticket_support_enabled else ["SINGLE"],
                 "live_verified_order_keys": capabilities.get("live_verified_order_keys"),
                 "order_type_matrix_by_asset_class": capabilities.get("order_type_matrix_by_asset_class"),
@@ -2597,9 +3125,17 @@ class SchwabProductionLinkService:
                 "dry_run_only_order_types_by_asset_class": capabilities.get("dry_run_only_order_types_by_asset_class"),
                 "order_type_live_verification_matrix": capabilities.get("order_type_live_verification_matrix"),
                 "order_type_live_verification_sequence": capabilities.get("order_type_live_verification_sequence"),
-                "next_live_verification_step": capabilities.get("next_live_verification_step"),
+                "next_live_verification_step": {
+                    "verification_key": active_route_key,
+                    "label": active_runbook.get("minimal_safe_test_shape"),
+                    "blocked": not submit_enabled,
+                    "blocker_reason": blockers[0] if blockers else None,
+                    "route_key": _futures_pilot_route_key() if active_futures_lane else "MANUAL_LIVE_PILOT_STOCK_LIMIT_BUY",
+                },
                 "near_term_live_verification_runbooks": capabilities.get("near_term_live_verification_runbooks"),
-                "first_live_stock_limit_test": first_live_stock_limit,
+                "current_active_live_runbook": active_runbook,
+                "first_live_stock_limit_test": _NEAR_TERM_LIVE_VERIFICATION_RUNBOOKS["STOCK:LIMIT"],
+                "historical_stock_pilot_policy": historical_stock_policy,
             },
             "ages_seconds": {
                 "balances": balances_age,
@@ -2618,31 +3154,67 @@ class SchwabProductionLinkService:
     ) -> list[str]:
         safety = as_dict(snapshot.get("manual_order_safety"))
         blockers = [str(item) for item in as_list(safety.get("blockers")) if str(item).strip()]
-        selected_account_hash = str(safety.get("selected_account_hash") or "")
+        selected_account_hash = str(safety.get("selected_account_id") or safety.get("selected_account_hash") or "")
+        is_futures_pilot_request = _is_futures_pilot_request(request)
 
-        if request.account_hash != selected_account_hash:
+        if request.account_id != selected_account_hash:
             blockers.append("Request account does not match the current live-selected broker account.")
-        if not request.operator_authenticated:
-            blockers.append("Manual live broker orders require a current authenticated local operator session.")
-        if request.asset_class not in set(self._config.features.supported_manual_asset_classes):
-            blockers.append(f"Asset class {request.asset_class} is not enabled for live manual submit.")
-        if request.order_type not in set(self._config.features.supported_manual_order_types):
-            blockers.append(
-                f"Order type {request.order_type} is not enabled for the first live-order safety mode. Allowed: {', '.join(self._config.features.supported_manual_order_types)}."
-            )
-        if request.quantity > self._config.features.manual_max_quantity:
-            blockers.append(f"Quantity {request.quantity} exceeds the configured manual max quantity {self._config.features.manual_max_quantity}.")
-        whitelist = set(self._config.features.manual_symbol_whitelist)
-        if whitelist and request.symbol not in whitelist:
-            blockers.append(f"Symbol {request.symbol} is not in the configured manual live-order whitelist.")
-        if not whitelist:
-            blockers.append("Manual live submit requires a non-empty manual symbol whitelist.")
-        if request.time_in_force != "DAY":
-            blockers.append("Only DAY time-in-force is enabled in the first live-order safety mode.")
-        if request.session != "NORMAL":
-            blockers.append("Only NORMAL session is enabled in the first live-order safety mode.")
-        if request.asset_class == "STOCK" and not _is_us_regular_hours(now):
-            blockers.append("Live stock manual orders are blocked outside regular US market hours in the first live-order safety mode.")
+        if not _manual_order_has_live_auth(request):
+            if _manual_order_is_reduce_only(request):
+                blockers.append("Reduce-only live broker orders require explicit reduce-only authorization when no active local operator auth session is present.")
+            else:
+                blockers.append("Manual live broker orders require a current authenticated local operator session.")
+        if is_futures_pilot_request:
+            if not self._config.features.futures_pilot_enabled:
+                blockers.append("Futures pilot live submit is disabled because MGC_PRODUCTION_FUTURES_PILOT_ENABLED is false.")
+            if request.asset_class not in set(self._config.features.futures_supported_asset_classes):
+                blockers.append(
+                    "Asset class "
+                    f"{request.asset_class} is not enabled for the futures pilot. Allowed: {', '.join(self._config.features.futures_supported_asset_classes)}."
+                )
+            if request.order_type not in set(self._config.features.futures_supported_order_types):
+                blockers.append(
+                    "Order type "
+                    f"{request.order_type} is not enabled for the futures pilot. Allowed: {', '.join(self._config.features.futures_supported_order_types)}."
+                )
+            if request.quantity > self._config.features.futures_max_quantity:
+                blockers.append(
+                    f"Quantity {request.quantity} exceeds the configured futures pilot max quantity {self._config.features.futures_max_quantity}."
+                )
+            futures_whitelist = set(self._config.features.futures_symbol_whitelist)
+            if futures_whitelist and request.symbol not in futures_whitelist:
+                blockers.append(f"Symbol {request.symbol} is not in the configured futures pilot whitelist.")
+            if not futures_whitelist:
+                blockers.append("Futures pilot live submit requires a non-empty futures symbol whitelist.")
+            if request.time_in_force not in set(self._config.features.futures_supported_time_in_force_values):
+                blockers.append(
+                    "Only "
+                    f"{', '.join(self._config.features.futures_supported_time_in_force_values)} time-in-force is enabled in the futures pilot."
+                )
+            if request.session not in set(self._config.features.futures_supported_session_values):
+                blockers.append(
+                    f"Only {', '.join(self._config.features.futures_supported_session_values)} session is enabled in the futures pilot."
+                )
+        else:
+            if request.asset_class not in set(self._config.features.supported_manual_asset_classes):
+                blockers.append(f"Asset class {request.asset_class} is not enabled for live manual submit.")
+            if request.order_type not in set(self._config.features.supported_manual_order_types):
+                blockers.append(
+                    f"Order type {request.order_type} is not enabled for the first live-order safety mode. Allowed: {', '.join(self._config.features.supported_manual_order_types)}."
+                )
+            if request.quantity > self._config.features.manual_max_quantity:
+                blockers.append(f"Quantity {request.quantity} exceeds the configured manual max quantity {self._config.features.manual_max_quantity}.")
+            whitelist = set(self._config.features.manual_symbol_whitelist)
+            if whitelist and request.symbol not in whitelist:
+                blockers.append(f"Symbol {request.symbol} is not in the configured manual live-order whitelist.")
+            if not whitelist:
+                blockers.append("Manual live submit requires a non-empty manual symbol whitelist.")
+            if request.time_in_force != "DAY":
+                blockers.append("Only DAY time-in-force is enabled in the first live-order safety mode.")
+            if request.session != "NORMAL":
+                blockers.append("Only NORMAL session is enabled in the first live-order safety mode.")
+            if request.asset_class == "STOCK" and not _is_us_regular_hours(now):
+                blockers.append("Live stock manual orders are blocked outside regular US market hours in the first live-order safety mode.")
         if not request.review_confirmed:
             blockers.append("Manual live broker orders require explicit review confirmation.")
         if request.asset_class == "STOCK" and request.order_type == "LIMIT":
@@ -2687,12 +3259,21 @@ class SchwabProductionLinkService:
                 blockers.append(
                     f"Broker already shows incompatible open order flow on {request.symbol}; resolve the pending broker order before sending this live manual ticket."
                 )
-        blockers.extend(
-            _locked_manual_live_pilot_route_blockers(
-                request=request,
-                broker_position=broker_position,
+        if is_futures_pilot_request:
+            blockers.extend(
+                _locked_futures_live_pilot_route_blockers(
+                    request=request,
+                    broker_position=broker_position,
+                    features=self._config.features,
+                )
             )
-        )
+        else:
+            blockers.extend(
+                _locked_manual_live_pilot_route_blockers(
+                    request=request,
+                    broker_position=broker_position,
+                )
+            )
         return blockers
 
     def _manual_order_live_submit_blockers(
@@ -2803,12 +3384,17 @@ class SchwabProductionLinkService:
         self._config.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         self._config.snapshot_path.write_text(_json_dumps(payload) + "\n", encoding="utf-8")
         pilot_status_path = self._config.snapshot_path.with_name("pilot_status_v1.json")
-        pilot_status_path.write_text(_json_dumps(_pilot_status_export_payload(payload)) + "\n", encoding="utf-8")
-        pilot_status_path = self._config.snapshot_path.with_name("pilot_status_v1.json")
-        pilot_status_path.write_text(_json_dumps(_pilot_status_export_payload(payload)) + "\n", encoding="utf-8")
+        pilot_status_payload = as_dict(payload.get("operator_status")) or _pilot_status_export_payload(payload)
+        pilot_status_path.write_text(_json_dumps(pilot_status_payload) + "\n", encoding="utf-8")
+        futures_policy_path = self._config.snapshot_path.with_name("futures_pilot_policy_snapshot.json")
+        futures_policy_payload = as_dict(payload.get("futures_pilot_policy")) or _futures_pilot_policy_snapshot(payload)
+        futures_policy_path.write_text(_json_dumps(futures_policy_payload) + "\n", encoding="utf-8")
+        futures_status_path = self._config.snapshot_path.with_name("futures_pilot_status.json")
+        futures_status_payload = as_dict(payload.get("futures_pilot_status")) or _futures_pilot_status_export_payload(payload)
+        futures_status_path.write_text(_json_dumps(futures_status_payload) + "\n", encoding="utf-8")
 
-    def _default_client_factory(self, config: SchwabProductionLinkConfig, oauth_client: SchwabOAuthClient) -> SchwabBrokerHttpClient:
-        return SchwabBrokerHttpClient(
+    def _default_client_factory(self, config: ProductionLinkConfig, oauth_client: SchwabOAuthClient) -> BrokerHttpClient:
+        return BrokerHttpClient(
             oauth_client=oauth_client,
             base_url=config.trader_api_base_url,
             timeout_seconds=config.request_timeout_seconds,
@@ -2857,6 +3443,7 @@ def _normalize_accounts(
     *,
     selected_account_hash: str | None,
     fetched_at: datetime,
+    broker_provider_id: str = "schwab",
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for raw_account in payload:
@@ -2881,13 +3468,13 @@ def _normalize_accounts(
         account_type = str(securities_account.get("type") or securities_account.get("accountType") or "").strip() or None
         display_name = f"{account_type or 'Account'} {account_number or account_hash}"
         identity = BrokerAccountIdentity(
-            broker_name="Schwab",
+            broker_name=_provider_label(broker_provider_id),
             account_hash=account_hash,
             account_number=account_number,
             display_name=display_name,
             account_type=account_type,
             selected=account_hash == selected_account_hash,
-            source="schwab_live",
+            source=_live_account_source(broker_provider_id),
             updated_at=fetched_at,
             raw_payload=securities_account,
         )
@@ -2985,7 +3572,13 @@ def _normalize_positions(rows: list[dict[str, Any]], *, account_hash: str, fetch
     return positions
 
 
-def _normalize_orders(rows: list[dict[str, Any]], *, account_hash: str, fetched_at: datetime) -> list[BrokerOrderRecord]:
+def _normalize_orders(
+    rows: list[dict[str, Any]],
+    *,
+    account_hash: str,
+    fetched_at: datetime,
+    broker_provider_id: str = "schwab",
+) -> list[BrokerOrderRecord]:
     normalized: list[BrokerOrderRecord] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -3016,7 +3609,7 @@ def _normalize_orders(rows: list[dict[str, Any]], *, account_hash: str, fetched_
                 updated_at=_iso_datetime(row.get("enteredTime")) or fetched_at,
                 limit_price=_decimal(row.get("price")),
                 stop_price=_decimal(row.get("stopPrice")),
-                source="schwab_live",
+                source=_live_account_source(broker_provider_id),
                 raw_payload=row,
             )
         )
@@ -3081,6 +3674,34 @@ def _normalize_quotes(
     return normalized
 
 
+def _provider_label(provider_id: str | None) -> str:
+    value = str(provider_id or "").strip().lower()
+    if value == "ibkr":
+        return "IBKR"
+    if value == "schwab":
+        return "Schwab"
+    return str(provider_id or "Broker").strip() or "Broker"
+
+
+def _live_account_source(provider_id: str | None) -> str:
+    value = str(provider_id or "").strip().lower()
+    if not value:
+        return "broker_live"
+    return f"{value}_live"
+
+
+def _selected_account_id_from_snapshot(snapshot: dict[str, Any]) -> str:
+    connection = as_dict(snapshot.get("connection"))
+    accounts = as_dict(snapshot.get("accounts"))
+    return str(
+        connection.get("selected_account_id")
+        or accounts.get("selected_account_id")
+        or connection.get("selected_account_hash")
+        or accounts.get("selected_account_hash")
+        or ""
+    ).strip()
+
+
 def _manual_order_request_from_payload(payload: dict[str, Any], *, features) -> ManualOrderRequest:
     structure_type = str(payload.get("structure_type") or "SINGLE").strip().upper()
     quantity = _decimal(payload.get("quantity"))
@@ -3092,7 +3713,7 @@ def _manual_order_request_from_payload(payload: dict[str, Any], *, features) -> 
     raw_oco_legs = payload.get("oco_legs")
     oco_legs = _manual_oco_legs_from_payload(raw_oco_legs)
     request = ManualOrderRequest(
-        account_hash=str(payload.get("account_hash") or "").strip(),
+        account_hash=str(payload.get("account_id") or payload.get("account_hash") or "").strip(),
         symbol=str(payload.get("symbol") or "").strip().upper(),
         asset_class=_normalize_asset_class(payload.get("asset_class") or "EQUITY"),
         structure_type=structure_type,
@@ -3115,6 +3736,9 @@ def _manual_order_request_from_payload(payload: dict[str, Any], *, features) -> 
         oco_group_id=str(payload.get("oco_group_id") or "").strip() or None,
         oco_legs=oco_legs,
         operator_authenticated=bool(payload.get("operator_authenticated")),
+        operator_reduce_only_authorized=bool(payload.get("operator_reduce_only_authorized")),
+        operator_auth_policy=str(payload.get("operator_auth_policy") or "").strip() or None,
+        operator_auth_risk_bucket=str(payload.get("operator_auth_risk_bucket") or "").strip() or None,
         local_operator_identity=str(payload.get("local_operator_identity") or "").strip() or None,
         auth_session_id=str(payload.get("auth_session_id") or "").strip() or None,
         auth_method=str(payload.get("auth_method") or "").strip() or None,
@@ -3122,20 +3746,36 @@ def _manual_order_request_from_payload(payload: dict[str, Any], *, features) -> 
     )
     if structure_type not in {"SINGLE", "OCO"}:
         raise ProductionLinkActionError("structure_type must be SINGLE or OCO.")
-    if not request.account_hash or not request.symbol:
-        raise ProductionLinkActionError("account_hash and symbol are required.")
-    if request.time_in_force not in set(features.supported_manual_time_in_force_values):
-        raise ProductionLinkActionError(
-            f"time_in_force {request.time_in_force} is not enabled. Supported values: {', '.join(features.supported_manual_time_in_force_values)}."
-        )
-    if request.session not in set(features.supported_manual_session_values):
-        raise ProductionLinkActionError(
-            f"session {request.session} is not enabled. Supported values: {', '.join(features.supported_manual_session_values)}."
-        )
-    if request.asset_class not in set(features.supported_manual_asset_classes):
-        raise ProductionLinkActionError(
-            f"Asset class {request.asset_class} is not enabled for manual live orders. Supported classes: {', '.join(features.supported_manual_asset_classes)}."
-        )
+    if not request.account_id or not request.symbol:
+        raise ProductionLinkActionError("account_id/account_hash and symbol are required.")
+    if _is_futures_pilot_request(request):
+        if request.time_in_force not in set(features.futures_supported_time_in_force_values):
+            raise ProductionLinkActionError(
+                "Futures pilot time_in_force "
+                f"{request.time_in_force} is not enabled. Supported values: {', '.join(features.futures_supported_time_in_force_values)}."
+            )
+        if request.session not in set(features.futures_supported_session_values):
+            raise ProductionLinkActionError(
+                f"Futures pilot session {request.session} is not enabled. Supported values: {', '.join(features.futures_supported_session_values)}."
+            )
+        if request.asset_class not in set(features.futures_supported_asset_classes):
+            raise ProductionLinkActionError(
+                "Futures pilot asset class "
+                f"{request.asset_class} is not enabled. Supported classes: {', '.join(features.futures_supported_asset_classes)}."
+            )
+    else:
+        if request.time_in_force not in set(features.supported_manual_time_in_force_values):
+            raise ProductionLinkActionError(
+                f"time_in_force {request.time_in_force} is not enabled. Supported values: {', '.join(features.supported_manual_time_in_force_values)}."
+            )
+        if request.session not in set(features.supported_manual_session_values):
+            raise ProductionLinkActionError(
+                f"session {request.session} is not enabled. Supported values: {', '.join(features.supported_manual_session_values)}."
+            )
+        if request.asset_class not in set(features.supported_manual_asset_classes):
+            raise ProductionLinkActionError(
+                f"Asset class {request.asset_class} is not enabled for manual live orders. Supported classes: {', '.join(features.supported_manual_asset_classes)}."
+            )
     if structure_type == "SINGLE":
         if not request.side or not request.order_type:
             raise ProductionLinkActionError("side and order_type are required for single orders.")
@@ -3185,7 +3825,7 @@ def _manual_flatten_request_from_payload(payload: dict[str, Any]) -> ManualFlatt
     if quantity is None or quantity <= 0:
         raise ProductionLinkActionError("Flatten requires a positive quantity.")
     request = ManualFlattenRequest(
-        account_hash=str(payload.get("account_hash") or "").strip(),
+        account_hash=str(payload.get("account_id") or payload.get("account_hash") or "").strip(),
         symbol=str(payload.get("symbol") or "").strip().upper(),
         asset_class=_normalize_asset_class(payload.get("asset_class") or "EQUITY"),
         quantity=quantity,
@@ -3193,19 +3833,33 @@ def _manual_flatten_request_from_payload(payload: dict[str, Any]) -> ManualFlatt
         time_in_force=str(payload.get("time_in_force") or "DAY").strip().upper(),
         session=str(payload.get("session") or "NORMAL").strip().upper(),
         operator_authenticated=bool(payload.get("operator_authenticated")),
+        operator_reduce_only_authorized=bool(payload.get("operator_reduce_only_authorized")),
+        operator_auth_policy=str(payload.get("operator_auth_policy") or "").strip() or None,
+        operator_auth_risk_bucket=str(payload.get("operator_auth_risk_bucket") or "").strip() or None,
         local_operator_identity=str(payload.get("local_operator_identity") or "").strip() or None,
         auth_session_id=str(payload.get("auth_session_id") or "").strip() or None,
         auth_method=str(payload.get("auth_method") or "").strip() or None,
         authenticated_at=str(payload.get("authenticated_at") or "").strip() or None,
     )
-    if not request.account_hash or not request.symbol or not request.side:
-        raise ProductionLinkActionError("Flatten requires account_hash, symbol, and side.")
+    if not request.account_id or not request.symbol or not request.side:
+        raise ProductionLinkActionError("Flatten requires account_id/account_hash, symbol, and side.")
     return request
 
 
-def _build_schwab_order_payload(request: ManualOrderRequest) -> dict[str, Any]:
+def _build_schwab_order_payload(
+    request: ManualOrderRequest,
+    *,
+    features: Any | None = None,
+    broker_symbol_override: str | None = None,
+    broker_order_type_override: str | None = None,
+    broker_limit_price_override: Decimal | None = None,
+) -> dict[str, Any]:
     asset_type = _schwab_asset_type(request.asset_class)
-    client_order_id = None if _omit_client_order_id_for_live_pilot(request) else request.client_order_id
+    futures_position_effect = _futures_position_effect_for_request(request) if request.asset_class == "FUTURE" else None
+    order_symbol = str(broker_symbol_override or "").strip() or _resolved_broker_symbol_for_request(request, features=features)
+    client_order_id = None if _omit_client_order_id_for_live_pilot(request, features=features) else request.client_order_id
+    transport_order_type = str(broker_order_type_override or request.order_type).strip().upper()
+    transport_limit_price = broker_limit_price_override if broker_limit_price_override is not None else request.limit_price
     if request.structure_type == "OCO":
         payload: dict[str, Any] = {
             "session": _schwab_session_value(request.session),
@@ -3213,12 +3867,12 @@ def _build_schwab_order_payload(request: ManualOrderRequest) -> dict[str, Any]:
             "orderStrategyType": "OCO",
             "childOrderStrategies": [
                 _single_leg_payload(
-                    symbol=request.symbol,
+                    symbol=order_symbol,
                     asset_type=asset_type,
                     side=leg.side,
                     quantity=leg.quantity,
-                    order_type=leg.order_type,
-                    limit_price=leg.limit_price,
+                    order_type=transport_order_type if request.asset_class == "FUTURE" else leg.order_type,
+                    limit_price=transport_limit_price if request.asset_class == "FUTURE" else leg.limit_price,
                     stop_price=leg.stop_price,
                     trail_value_type=leg.trail_value_type,
                     trail_value=leg.trail_value,
@@ -3227,6 +3881,11 @@ def _build_schwab_order_payload(request: ManualOrderRequest) -> dict[str, Any]:
                     client_order_id=None,
                     session=request.session,
                     time_in_force=request.time_in_force,
+                    complex_order_strategy_type="NONE" if request.asset_class == "FUTURE" else None,
+                    top_level_quantity=leg.quantity if request.asset_class == "FUTURE" else None,
+                    leg_id=1 if request.asset_class == "FUTURE" else None,
+                    order_leg_type=asset_type if request.asset_class == "FUTURE" else None,
+                    position_effect=futures_position_effect if request.asset_class == "FUTURE" else None,
                 )
                 for leg in request.oco_legs
             ],
@@ -3237,12 +3896,12 @@ def _build_schwab_order_payload(request: ManualOrderRequest) -> dict[str, Any]:
             payload["clientOrderId"] = client_order_id
         return payload
     return _single_leg_payload(
-        symbol=request.symbol,
+        symbol=order_symbol,
         asset_type=asset_type,
         side=request.side,
         quantity=request.quantity,
-        order_type=request.order_type,
-        limit_price=request.limit_price,
+        order_type=transport_order_type,
+        limit_price=transport_limit_price,
         stop_price=request.stop_price,
         trail_value_type=request.trail_value_type,
         trail_value=request.trail_value,
@@ -3251,11 +3910,67 @@ def _build_schwab_order_payload(request: ManualOrderRequest) -> dict[str, Any]:
         client_order_id=client_order_id,
         session=request.session,
         time_in_force=request.time_in_force,
+        complex_order_strategy_type="NONE" if request.asset_class == "FUTURE" else None,
+        top_level_quantity=request.quantity if request.asset_class == "FUTURE" else None,
+        leg_id=1 if request.asset_class == "FUTURE" else None,
+        order_leg_type=asset_type if request.asset_class == "FUTURE" else None,
+        position_effect=futures_position_effect if request.asset_class == "FUTURE" else None,
     )
 
 
-def _omit_client_order_id_for_live_pilot(request: ManualOrderRequest) -> bool:
+def _resolved_broker_symbol_for_request(request: ManualOrderRequest, *, features: Any | None = None) -> str:
+    if _is_futures_pilot_request(request):
+        return _futures_pilot_external_symbol(request.symbol, features=features)
+    return request.symbol
+
+
+def _futures_pilot_external_symbol(symbol: str, *, features: Any | None = None) -> str:
+    normalized = str(symbol or "").strip().upper()
+    if features is not None:
+        configured = str(getattr(features, "futures_market_data_symbol_map", {}).get(normalized, "") or "").strip()
+        if configured:
+            return configured
+    return normalized
+
+
+def _live_futures_contract_symbol_from_quote_payload(
+    payload: dict[str, Any],
+    *,
+    configured_external_symbol: str,
+) -> str | None:
+    candidates = [
+        payload.get("symbol"),
+        as_dict(payload.get("reference")).get("symbol"),
+        as_dict(payload.get("quote")).get("symbol"),
+    ]
+    for candidate in candidates:
+        normalized = str(candidate or "").strip().upper()
+        if normalized and _looks_like_specific_futures_contract_symbol(normalized):
+            return normalized
+    fallback = str(configured_external_symbol or "").strip().upper()
+    if _looks_like_specific_futures_contract_symbol(fallback):
+        return fallback
+    return None
+
+
+def _looks_like_specific_futures_contract_symbol(symbol: str) -> bool:
+    normalized = str(symbol or "").strip().upper().lstrip("/")
+    if len(normalized) < 3:
+        return False
+    index = len(normalized) - 1
+    digit_count = 0
+    while index >= 0 and normalized[index].isdigit():
+        digit_count += 1
+        index -= 1
+    if digit_count < 1 or index < 1:
+        return False
+    return normalized[index] in set("FGHJKMNQUVXZ")
+
+
+def _omit_client_order_id_for_live_pilot(request: ManualOrderRequest, *, features: Any | None = None) -> bool:
     intent_type = (request.intent_type or "").upper()
+    if _is_scoped_manual_futures_pilot_lane(request, features=features):
+        return True
     return (
         request.structure_type == "SINGLE"
         and request.asset_class == "STOCK"
@@ -3351,15 +4066,25 @@ def _single_leg_payload(
     client_order_id: str | None,
     session: str = "NORMAL",
     time_in_force: str = "DAY",
+    complex_order_strategy_type: str | None = None,
+    top_level_quantity: Decimal | None = None,
+    leg_id: int | None = None,
+    order_leg_type: str | None = None,
+    position_effect: str | None = None,
 ) -> dict[str, Any]:
     order_payload: dict[str, Any] = {
         "session": _schwab_session_value(session),
         "duration": _schwab_duration_value(time_in_force),
         "orderType": order_type,
         "orderStrategyType": "SINGLE",
+        "complexOrderStrategyType": complex_order_strategy_type,
+        "quantity": _schwab_quantity_value(top_level_quantity) if top_level_quantity is not None else None,
         "orderLegCollection": [
             {
+                "orderLegType": order_leg_type,
+                "legId": leg_id,
                 "instruction": side,
+                "positionEffect": position_effect,
                 "quantity": _schwab_quantity_value(quantity),
                 "instrument": {
                     "symbol": symbol,
@@ -3390,6 +4115,13 @@ def _schwab_quantity_value(quantity: Decimal) -> int | float:
     if quantity == quantity.to_integral_value():
         return int(quantity)
     return float(quantity)
+
+
+def _futures_position_effect_for_request(request: ManualOrderRequest) -> str:
+    intent_type = str(request.intent_type or "").strip().upper()
+    if intent_type == "FLATTEN":
+        return "CLOSING"
+    return "OPENING"
 
 
 def _manual_live_order_in_post_ack_grace(
@@ -3601,9 +4333,17 @@ def _verification_previewable(features: Any, entry: dict[str, Any]) -> tuple[boo
     asset_class = str(entry["asset_class"])
     order_type = str(entry["order_type"])
     reasons: list[str] = []
-    if asset_class in {"STOCK", "FUTURE"}:
+    if asset_class == "STOCK":
         if asset_class not in set(features.supported_manual_asset_classes):
             reasons.append(f"Asset class {asset_class} is not enabled for this environment.")
+        if order_type not in set(features.supported_manual_dry_run_order_types):
+            reasons.append(f"Order type {order_type} is not enabled for dry-run review in this environment.")
+        return len(reasons) == 0, reasons
+    if asset_class == "FUTURE":
+        if not features.futures_pilot_enabled:
+            reasons.append("Futures pilot preview is disabled because MGC_PRODUCTION_FUTURES_PILOT_ENABLED is false.")
+        if asset_class not in set(features.futures_supported_asset_classes):
+            reasons.append(f"Asset class {asset_class} is not enabled for the futures pilot environment.")
         if order_type not in set(features.supported_manual_dry_run_order_types):
             reasons.append(f"Order type {order_type} is not enabled for dry-run review in this environment.")
         return len(reasons) == 0, reasons
@@ -3659,10 +4399,14 @@ def _verification_live_gate_reasons(features: Any, entry: dict[str, Any]) -> lis
             reasons.append("Market-on-close / limit-on-close live submission remains disabled pending live Schwab verification.")
         return reasons
     if asset_class == "FUTURE":
-        if order_type not in set(features.supported_manual_order_types):
-            reasons.append(f"Order type {order_type} is not live-enabled for this environment.")
+        if not features.futures_pilot_enabled:
+            reasons.append("Futures pilot live submit is disabled because MGC_PRODUCTION_FUTURES_PILOT_ENABLED is false.")
+        if order_type not in set(features.futures_supported_order_types):
+            reasons.append(f"Order type {order_type} is not live-enabled for the futures pilot environment.")
         if not features.futures_live_submit_enabled:
             reasons.append("Futures live submission remains disabled pending live Schwab verification.")
+        if features.futures_pilot_enabled and order_type == _futures_pilot_order_type() and not _futures_pilot_live_verified(features):
+            reasons.append("Futures pilot live submit remains preview-only until FUTURE:MARKET is explicitly live-verified.")
         if order_type in {"TRAIL_STOP", "TRAIL_STOP_LIMIT"} and not features.trailing_live_submit_enabled:
             reasons.append("Trailing order live submission remains disabled pending live Schwab verification.")
         return reasons
@@ -3711,6 +4455,16 @@ def _manual_submit_status_summary(*, blockers: list[str]) -> dict[str, str]:
             "label": "WHITELIST REQUIRED",
             "detail": "Blocked because MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST is empty in the running dashboard environment.",
         }
+    if "Futures manual live submit is blocked because MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST is empty." in blocker_set:
+        return {
+            "label": "WHITELIST REQUIRED",
+            "detail": "Blocked because MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST is empty in the running dashboard environment.",
+        }
+    if "Futures live submission is disabled because MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED is false." in blocker_set:
+        return {
+            "label": "SUBMIT SAFETY OFF",
+            "detail": "Blocked because MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED is false in the running dashboard environment.",
+        }
     if "Reconciliation is not clear." in blocker_set:
         return {
             "label": "RECONCILIATION BLOCKED",
@@ -3734,6 +4488,8 @@ def _manual_submit_status_summary(*, blockers: list[str]) -> dict[str, str]:
 
 def _manual_live_pilot_policy_snapshot(features: Any) -> dict[str, Any]:
     return {
+        "capability_status": "HISTORICAL_PROVEN_STOCK_PILOT",
+        "policy_scope": "HISTORICAL_RECORD_ONLY",
         "asset_class": "STOCK",
         "submit_order_type": "LIMIT",
         "order_type": "LIMIT",
@@ -3756,33 +4512,837 @@ def _manual_live_pilot_policy_snapshot(features: Any) -> dict[str, Any]:
     }
 
 
-def _locked_manual_live_pilot_route_blockers(
+def _current_active_manual_lane_is_futures(features: Any) -> bool:
+    return bool(features.futures_pilot_enabled)
+
+
+def _current_active_manual_live_policy_snapshot(features: Any) -> dict[str, Any]:
+    if _current_active_manual_lane_is_futures(features):
+        return _futures_pilot_policy_snapshot_from_features(features)
+    return _manual_live_pilot_policy_snapshot(features)
+
+
+def _futures_pilot_order_type() -> str:
+    return "MARKET"
+
+
+def _futures_pilot_route_key() -> str:
+    return "FUTURES_MARKET_ONE_LOT_WHITELISTED_PILOT"
+
+
+def _is_futures_pilot_request(request: ManualOrderRequest) -> bool:
+    intent_type = (request.intent_type or "").upper()
+    return request.asset_class == "FUTURE" and intent_type in {"MANUAL_LIVE_FUTURES_PILOT", "FLATTEN"}
+
+
+def _futures_pilot_live_verified(features: Any) -> bool:
+    return _futures_pilot_verification_key() in set(features.live_verified_order_keys)
+
+
+def _futures_pilot_verification_key() -> str:
+    return "FUTURE:MARKET"
+
+
+def _configured_futures_symbol_whitelist(features: Any | None) -> list[str]:
+    if features is None:
+        return []
+    raw_values = getattr(features, "futures_symbol_whitelist", ()) or ()
+    normalized: list[str] = []
+    for item in raw_values:
+        symbol = str(item or "").strip().upper()
+        if symbol and symbol not in normalized:
+            normalized.append(symbol)
+    return normalized
+
+
+def _configured_futures_symbol_map(features: Any | None) -> dict[str, str]:
+    if features is None:
+        return {}
+    raw_map = getattr(features, "futures_market_data_symbol_map", {}) or {}
+    normalized: dict[str, str] = {}
+    for key, value in raw_map.items():
+        symbol = str(key or "").strip().upper()
+        resolved = str(value or "").strip()
+        if symbol and resolved:
+            normalized[symbol] = resolved
+    return normalized
+
+
+def _futures_pilot_representative_symbol(features: Any | None) -> str:
+    whitelist = _configured_futures_symbol_whitelist(features)
+    if whitelist:
+        return whitelist[0]
+    symbol_map = _configured_futures_symbol_map(features)
+    if symbol_map:
+        return next(iter(symbol_map))
+    return "UNCONFIGURED"
+
+
+def _futures_symbol_authorization_decision(symbol: str, *, features: Any | None) -> dict[str, Any]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    whitelist = _configured_futures_symbol_whitelist(features)
+    symbol_map = _configured_futures_symbol_map(features)
+    is_whitelisted = normalized_symbol in set(whitelist)
+    mapped_symbol = symbol_map.get(normalized_symbol)
+    allowed = bool(normalized_symbol) and is_whitelisted and bool(mapped_symbol)
+    if not normalized_symbol:
+        reason = "Blocked because no futures symbol was provided."
+    elif not whitelist:
+        reason = "Blocked because the futures symbol whitelist is empty."
+    elif not is_whitelisted:
+        reason = f"Blocked because {normalized_symbol} is not in the configured futures symbol whitelist."
+    elif not mapped_symbol:
+        reason = f"Blocked because {normalized_symbol} does not have a configured futures market-data mapping."
+    else:
+        reason = f"Allowed because {normalized_symbol} is whitelisted for the manual futures lane and resolves to {mapped_symbol}."
+    return {
+        "policy_mode": "WHITELIST_CONTROLLED",
+        "requested_symbol": normalized_symbol or None,
+        "allowed": allowed,
+        "is_whitelisted": is_whitelisted,
+        "resolved_external_symbol": mapped_symbol,
+        "whitelisted_symbols": whitelist,
+        "reason": reason,
+    }
+
+
+# This narrow lane is an intentional ongoing manual-entry capability for the
+# approved one-lot manual futures pilot. Symbol scope is controlled by the
+# configured futures whitelist and market-data mapping, not by a hardcoded
+# single-symbol assumption and not by a general futures session bypass.
+def _is_scoped_manual_futures_pilot_lane(request: ManualOrderRequest, *, features: Any | None = None) -> bool:
+    intent_type = (request.intent_type or "").upper()
+    symbol_authorization = _futures_symbol_authorization_decision(request.symbol, features=features)
+    return (
+        request.structure_type == "SINGLE"
+        and request.asset_class == "FUTURE"
+        and bool(symbol_authorization.get("allowed"))
+        and request.order_type == _futures_pilot_order_type()
+        and request.quantity == Decimal("1")
+        and request.time_in_force == "DAY"
+        and request.session == "NORMAL"
+        and (
+            (intent_type == "MANUAL_LIVE_FUTURES_PILOT" and request.side == "BUY")
+            or (intent_type == "FLATTEN" and request.side == "SELL")
+        )
+    )
+
+
+def _futures_pilot_time_session_policy_snapshot(features: Any | None = None) -> dict[str, Any]:
+    whitelist = _configured_futures_symbol_whitelist(features)
+    return {
+        "policy_mode": "SCOPED_POLICY_AMENDMENT",
+        "audit_label": "MANUAL_FUTURES_PILOT_TIME_SESSION_POLICY",
+        "capability_status": "DURABLE_NARROW_MANUAL_CAPABILITY",
+        "capability_intent": "Remain available for approved manual operator use until intentionally changed later.",
+        "submitted_time_in_force": "DAY",
+        "submitted_session": "NORMAL",
+        "current_clock_gate_applied": False,
+        "allowed_outside_current_clock_window": True,
+        "detail": (
+            "The narrow whitelist-controlled manual futures pilot lane keeps Schwab duration DAY and session NORMAL, "
+            "but production-link does not apply a separate current-clock session rejection to an approved lane request. "
+            "This is an explicit futures-pilot policy amendment, not a general routing bypass."
+        ),
+        "allowed_lane": {
+            "asset_class": "FUTURE",
+            "symbol_scope": "WHITELIST_CONTROLLED",
+            "allowed_symbols": whitelist,
+            "order_type": _futures_pilot_order_type(),
+            "quantity": "1",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "allowed_open_route": "MANUAL_LIVE_FUTURES_PILOT / BUY_TO_OPEN",
+            "allowed_close_route": "FLATTEN / SELL_TO_CLOSE",
+        },
+    }
+
+
+def _futures_pilot_time_session_policy_decision(
+    request: ManualOrderRequest,
+    *,
+    now: datetime,
+    features: Any | None = None,
+) -> dict[str, Any] | None:
+    if not _is_scoped_manual_futures_pilot_lane(request, features=features):
+        return None
+    eastern_now = now.astimezone(ZoneInfo("America/New_York"))
+    symbol_authorization = _futures_symbol_authorization_decision(request.symbol, features=features)
+    return {
+        **_futures_pilot_time_session_policy_snapshot(features),
+        "decision": "ALLOWED",
+        "allowed": True,
+        "evaluated_at": now.isoformat(),
+        "current_eastern_time": eastern_now.isoformat(),
+        "current_us_regular_hours": _is_us_regular_hours(now),
+        "symbol_authorization": symbol_authorization,
+        "allowed_reason": (
+            "Allowed because this request matches the narrow one-lot manual futures pilot lane, the requested symbol "
+            "is explicitly whitelisted and mapped, and that lane is exempt from a separate wall-clock DAY/NORMAL rejection."
+        ),
+    }
+
+
+def _futures_pilot_outside_sandbox_runbook(snapshot: dict[str, Any]) -> dict[str, Any]:
+    connection = as_dict(snapshot.get("connection"))
+    features = SimpleNamespace(**as_dict(snapshot.get("feature_flags")))
+    allowed_symbols = _configured_futures_symbol_whitelist(features)
+    representative_symbol = _futures_pilot_representative_symbol(features)
+    return {
+        "title": "Outside-Sandbox Manual Futures Live Validation",
+        "runbook_path": "docs/MANUAL_FUTURES_PILOT_RUNBOOK.md",
+        "launch_path": [
+            "Use the existing service-first host path only.",
+            "If the host is not already running, start it with bash scripts/run_headless_supervised_paper_service.sh --wait-timeout-seconds 120.",
+            "Verify host health at curl -sS http://127.0.0.1:8790/health.",
+            "Prime local operator auth with bash scripts/run_local_operator_auth.sh before preview or submit.",
+            "Use the running operator/dashboard surface at http://127.0.0.1:8790/ and Positions > Manual Order Ticket.",
+        ],
+        "symbol_scope": {
+            "mode": "WHITELIST_CONTROLLED",
+            "allowed_symbols": allowed_symbols,
+            "representative_symbol": representative_symbol,
+        },
+        "account_assumptions": {
+            "selected_account_id": connection.get("selected_account_id") or connection.get("selected_account_hash"),
+            "selected_account_hash": connection.get("selected_account_hash"),
+            "selected_account_number": connection.get("selected_account_number"),
+            "selected_account_display_name": connection.get("selected_account_display_name"),
+            "selection_source": connection.get("selection_source"),
+        },
+        "open_sequence": [
+            "Confirm the futures pilot status shows no live-submit blockers.",
+            f"Build MANUAL_LIVE_FUTURES_PILOT / BUY / FUTURE / MARKET / quantity 1 / a configured whitelisted futures symbol such as {representative_symbol} / DAY / NORMAL.",
+            "Preview first and require action_phase OPEN_PREVIEW, allowing_rule MANUAL_FUTURES_PILOT_TIME_SESSION_POLICY, and an empty blocker list.",
+            "Submit only after explicit operator review confirmation.",
+            "Capture broker order id, acknowledgement, lifecycle state, and broker/manual position truth.",
+        ],
+        "close_sequence": [
+            "Require an existing broker LONG 1 position in the same configured futures symbol before flatten.",
+            "Build FLATTEN / SELL / FUTURE / MARKET / quantity 1 / DAY / NORMAL.",
+            "Preview first and require action_phase FLATTEN_PREVIEW, allowing_rule MANUAL_FUTURES_PILOT_TIME_SESSION_POLICY, and an empty blocker list.",
+            "Submit only after explicit operator review confirmation.",
+            "Capture broker acknowledgement, fill, return-to-flat proof, and reconciliation CLEAR.",
+        ],
+        "expected_surfaces": [
+            "futures_pilot_status",
+            "futures_pilot_policy_snapshot",
+            "runtime_state.last_manual_order_preview",
+            "runtime_state.last_manual_order",
+            "manual_live_orders.recent_rows",
+            "broker_state_snapshot.positions_by_symbol",
+            "orders.open_rows",
+            "reconciliation",
+            "local_operator_auth",
+        ],
+        "abort_criteria": [
+            "Any live-submit blocker appears before submit.",
+            "Broker order id is missing after submit acknowledgement.",
+            "Broker/account/auth freshness turns degraded before the next irreversible step.",
+            "Same-symbol ambiguity appears between broker and tracked manual state.",
+            "Open leg does not resolve to broker-truth-backed LONG 1 before flatten.",
+            "Close leg does not restore flat state and CLEAR reconciliation.",
+        ],
+        "pass_fail_rule": "Pass only when a configured whitelisted one-lot futures lane opens, broker truth shows LONG 1 in that symbol, flatten closes it, flat state is restored, and reconciliation returns CLEAR with no residual same-symbol ambiguity.",
+    }
+
+
+def _futures_pilot_live_validation_checklist(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    connection = as_dict(snapshot.get("connection"))
+    health = as_dict(snapshot.get("health"))
+    reconciliation = as_dict(snapshot.get("reconciliation"))
+    local_operator_auth = as_dict(snapshot.get("local_operator_auth"))
+    gate_summary = _futures_pilot_gate_summary(snapshot)
+    return [
+        {"label": "Operator auth ready", "ok": gate_summary["local_operator_auth_ready"], "detail": local_operator_auth.get("detail")},
+        {"label": "Live broker account selected", "ok": bool(connection.get("selected_account_id") or connection.get("selected_account_hash")), "detail": connection.get("selected_account_display_name")},
+        {"label": "Broker reachable", "ok": gate_summary["broker_reachable"], "detail": as_dict(health.get("broker_reachable")).get("detail")},
+        {"label": "Balances freshness in bounds", "ok": gate_summary["balances_fresh"], "detail": as_dict(health.get("balances_fresh")).get("detail")},
+        {"label": "Positions freshness in bounds", "ok": gate_summary["positions_fresh"], "detail": as_dict(health.get("positions_fresh")).get("detail")},
+        {"label": "Orders freshness in bounds", "ok": gate_summary["orders_fresh"], "detail": as_dict(health.get("orders_fresh")).get("detail")},
+        {"label": "Reconciliation CLEAR before open", "ok": gate_summary["reconciliation_clear"], "detail": reconciliation.get("detail")},
+        {"label": "Manual open allowed for approved lane", "ok": True, "detail": "Approved open route is MANUAL_LIVE_FUTURES_PILOT / BUY_TO_OPEN for a whitelisted FUTURE MARKET quantity 1 DAY NORMAL symbol."},
+        {"label": "Broker accepted order", "ok": False, "detail": "Require submit acknowledgement with a broker order id."},
+        {"label": "Position established correctly", "ok": False, "detail": "Require broker truth to show LONG 1 in the selected futures symbol before flatten."},
+        {"label": "Flatten path allowed for approved lane", "ok": True, "detail": "Approved close route is FLATTEN / SELL_TO_CLOSE for a whitelisted FUTURE MARKET quantity 1 DAY NORMAL symbol."},
+        {"label": "Broker accepted flatten", "ok": False, "detail": "Require flatten acknowledgement with a broker order id."},
+        {"label": "Flat state restored", "ok": False, "detail": "Require no broker/manual position remaining in the selected futures symbol after close."},
+        {"label": "Reconciliation CLEAR after flatten", "ok": False, "detail": "Require reconciliation to return CLEAR after the close leg."},
+        {"label": "No unresolved same-symbol ambiguity", "ok": gate_summary["same_symbol_unresolved_ambiguity_absent"], "detail": "Broker/manual ambiguity must remain absent before, during, and after the cycle."},
+        {"label": "No stuck or residual state afterward", "ok": False, "detail": "Require no residual open orders, no unresolved manual-live row, and no stuck lifecycle state after the cycle."},
+    ]
+
+
+def _futures_pilot_proof_boundary() -> dict[str, Any]:
+    return {
+        "proven_inside_sandbox": [
+            "Whitelist-controlled one-lot manual futures lane is explicitly defined and durable by design.",
+            "Scoped manual futures time/session policy allows the narrow DAY + NORMAL lane without a separate wall-clock rejection.",
+            "Preview payload and live-submit gate can be modeled with a whitelisted FUTURE MARKET route and audited allowing rule.",
+            "Stock pilot remains unchanged and ANYTIME remains disabled/deferred.",
+        ],
+        "requires_outside_sandbox_live_validation": [
+            "Real Schwab broker acceptance for open submit.",
+            "Real broker/manual lifecycle progression through acknowledgement and fill.",
+            "Real broker position truth showing LONG 1 in the selected futures symbol after open.",
+            "Real flatten submit, return to flat, and reconciliation CLEAR after close.",
+        ],
+        "unsupported_claim_guardrail": "Do not claim end-to-end live Schwab execution is proven until the outside-sandbox operator run completes successfully.",
+    }
+
+
+def _futures_pilot_action_phase(request: ManualOrderRequest, *, preview: bool) -> str | None:
+    if not _is_futures_pilot_request(request):
+        return None
+    intent_type = (request.intent_type or "").upper()
+    if intent_type == "MANUAL_LIVE_FUTURES_PILOT":
+        return "OPEN_PREVIEW" if preview else "OPEN_SUBMIT"
+    if intent_type == "FLATTEN":
+        return "FLATTEN_PREVIEW" if preview else "FLATTEN_SUBMIT"
+    return "FUTURES_PILOT_ACTION"
+
+
+def _futures_pilot_gate_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
+    health = as_dict(snapshot.get("health"))
+    local_operator_auth = as_dict(snapshot.get("local_operator_auth"))
+    reconciliation = as_dict(snapshot.get("reconciliation"))
+    connection = as_dict(snapshot.get("connection"))
+    return {
+        "local_operator_auth_ready": bool(local_operator_auth.get("ready")),
+        "selected_account_present": bool(connection.get("selected_account_id") or connection.get("selected_account_hash")),
+        "broker_reachable": as_dict(health.get("broker_reachable")).get("ok") is True,
+        "auth_healthy": as_dict(health.get("auth_healthy")).get("ok") is True,
+        "balances_fresh": as_dict(health.get("balances_fresh")).get("ok") is True,
+        "positions_fresh": as_dict(health.get("positions_fresh")).get("ok") is True,
+        "orders_fresh": as_dict(health.get("orders_fresh")).get("ok") is True,
+        "reconciliation_clear": str(reconciliation.get("status") or "").lower() == "clear",
+        "same_symbol_unresolved_ambiguity_absent": str(reconciliation.get("mismatch_count") or "0") in {"0", "0.0", "0.00"},
+    }
+
+
+def _futures_pilot_durability_snapshot(features: Any) -> dict[str, Any]:
+    return {
+        "durable_by_design": True,
+        "capability_classification": "ONGOING_NARROW_MANUAL_FUTURES_PILOT",
+        "change_control": "Intentional configuration or code change required to remove or widen this lane.",
+        "not_a_temporary_exception": True,
+        "not_test_only": True,
+        "stable_rule_boundaries": {
+            "asset_class": "FUTURE",
+            "symbol_scope": "WHITELIST_CONTROLLED",
+            "order_type": _futures_pilot_order_type(),
+            "quantity": "1",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "open_route": "MANUAL_LIVE_FUTURES_PILOT / BUY_TO_OPEN",
+            "close_route": "FLATTEN / SELL_TO_CLOSE",
+        },
+        "required_feature_flags": {
+            "production_connectivity_enabled": bool(features.production_connectivity_enabled),
+            "manual_order_ticket_enabled": bool(features.manual_order_ticket_enabled),
+            "live_order_submit_enabled": bool(features.live_order_submit_enabled),
+            "futures_pilot_enabled": bool(features.futures_pilot_enabled),
+            "futures_live_submit_enabled": bool(features.futures_live_submit_enabled),
+            "live_verified_future_market_enabled": _futures_pilot_live_verified(features),
+        },
+        "hidden_dependency_check": {
+            "depends_on_stock_pilot_flags": False,
+            "depends_on_anytime_widening": False,
+            "depends_on_test_only_runtime_hook": False,
+            "depends_on_desktop_process_boundary": False,
+        },
+    }
+
+
+def _futures_pilot_policy_snapshot_from_features(features: Any) -> dict[str, Any]:
+    symbol_whitelist = _configured_futures_symbol_whitelist(features)
+    primary_symbol = _futures_pilot_representative_symbol(features)
+    symbol_map = _configured_futures_symbol_map(features)
+    external_symbol = str(symbol_map.get(primary_symbol, "")).strip() or primary_symbol
+    if not features.futures_pilot_enabled:
+        status = "DISABLED"
+    elif bool(features.futures_live_submit_enabled) and _futures_pilot_live_verified(features):
+        status = "PILOT READY"
+    else:
+        status = "PREVIEW READY"
+    return {
+        "lane_key": _futures_pilot_route_key(),
+        "separate_from_stock_pilot": True,
+        "enabled": bool(features.futures_pilot_enabled),
+        "status": status,
+        "capability_status": "DURABLE_NARROW_MANUAL_FUTURES_PILOT",
+        "asset_class": "FUTURE",
+        "symbol_scope": "WHITELIST_CONTROLLED",
+        "symbol": primary_symbol,
+        "representative_symbol": primary_symbol,
+        "symbol_whitelist": symbol_whitelist,
+        "submit_order_type": _futures_pilot_order_type(),
+        "order_type": _futures_pilot_order_type(),
+        "max_quantity": str(features.futures_max_quantity),
+        "time_in_force": "DAY",
+        "session": "NORMAL",
+        "operator_requested_market_hours": "DAY + NORMAL ONLY",
+        "recommended_first_market_hours": "DAY + NORMAL",
+        "regular_us_market_hours_only": False,
+        "time_session_policy": _futures_pilot_time_session_policy_snapshot(features),
+        "durability": _futures_pilot_durability_snapshot(features),
+        "allowed_open_route": {
+            "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+            "side": "BUY",
+            "operator_label": "BUY_TO_OPEN",
+        },
+        "allowed_close_route": {
+            "intent_type": "FLATTEN",
+            "side": "SELL",
+            "operator_label": "SELL_TO_CLOSE",
+            "existing_broker_position_required": "LONG 1",
+        },
+        "selected_account_requirements": {
+            "selected_live_schwab_account_required": True,
+            "account_live_verified_required": True,
+            "allowed_account_source": "schwab_live",
+        },
+        "market_data_requirements": {
+            "symbol_scope": "WHITELIST_CONTROLLED",
+            "representative_internal_symbol": primary_symbol,
+            "representative_resolved_external_symbol": external_symbol,
+            "market_data_symbol_map": symbol_map,
+            "mapping_must_resolve_external_futures_symbol": True,
+            "quote_payload_required": True,
+        },
+        "broker_truth_requirements": {
+            "broker_reachable_required": True,
+            "auth_healthy_required": True,
+            "balances_fresh_required": True,
+            "positions_fresh_required": True,
+            "orders_fresh_required": True,
+            "same_symbol_unresolved_broker_manual_ambiguity_allowed": False,
+        },
+        "reconciliation_requirements": {
+            "pre_entry_status_required": "CLEAR",
+            "post_close_status_required": "CLEAR",
+            "mismatch_count_required": 0,
+        },
+        "client_order_id_policy": {
+            "omit_for_approved_futures_pilot_route": True,
+            "existing_live_strategy_broker": "OMITTED",
+            "manual_futures_pilot_route": "OMITTED",
+            "detail": "The approved whitelist-controlled futures pilot route omits clientOrderId to match the existing one-lot futures broker helper behavior, without broadening that exception beyond the manual futures lane.",
+        },
+        "futures_config": {
+            "futures_pilot_enabled": bool(features.futures_pilot_enabled),
+            "futures_live_submit_enabled": bool(features.futures_live_submit_enabled),
+            "futures_symbol_whitelist": symbol_whitelist,
+            "futures_supported_asset_classes": list(features.futures_supported_asset_classes),
+            "futures_supported_order_types": list(features.futures_supported_order_types),
+            "futures_supported_time_in_force_values": list(features.futures_supported_time_in_force_values),
+            "futures_supported_session_values": list(features.futures_supported_session_values),
+            "futures_max_quantity": str(features.futures_max_quantity),
+            "futures_market_data_symbol_map": dict(features.futures_market_data_symbol_map),
+        },
+    }
+
+
+def _futures_pilot_policy_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    feature_flags = as_dict(snapshot.get("feature_flags"))
+    return _futures_pilot_policy_snapshot_from_features(SimpleNamespace(**feature_flags))
+
+
+def _futures_pilot_gap_analysis(snapshot: dict[str, Any]) -> dict[str, Any]:
+    feature_flags = as_dict(snapshot.get("feature_flags"))
+    return {
+        "current_stock_pilot": {
+            "already_exists": [
+                "Separate proven live pilot already exists for STOCK only.",
+                "Current operator workflow and production-link pilot snapshot are locked to the approved one-lot route, quantity 1, DAY, NORMAL, BUY_TO_OPEN / SELL_TO_CLOSE.",
+            ],
+            "hard_locks": [
+                "Current manual live pilot route only allows STOCK.",
+                "Current clientOrderId omission is limited to the exact stock pilot shape.",
+            ],
+        },
+        "existing_futures_broker_path": {
+            "already_exists": [
+                "LiveStrategyPilotBroker already supports the narrow one-lot futures manual-entry lane used by the operator path.",
+                "Existing futures broker helper already uses asset_type=FUTURE, quantity=1, session=NORMAL, time_in_force=DAY.",
+                "Existing futures broker helper omits clientOrderId.",
+            ],
+            "unverified_live_behavior": [
+                "Production-link manual futures submission has not yet been live-verified against Schwab.",
+                "Operator-facing futures submit/ack/fill/flatten surfaces are not yet separated from the stock pilot lane.",
+            ],
+        },
+        "current_production_link_restrictions": {
+            "blocked_only_by_policy": [
+                "Futures live verification matrix already models FUTURE MARKET preview and live-gate rows.",
+                "Futures exact-route preview can be enabled separately from stock without widening the stock pilot lane.",
+            ],
+            "blocked_by_hard_coded_route_checks": [
+                "Current stock pilot route remains hard-locked to STOCK and must stay separate.",
+                "Futures submit must remain preview-only until the first exact FUTURE MARKET live verification is explicitly requested.",
+            ],
+            "current_active_environment": {
+                "supported_manual_asset_classes": as_list(feature_flags.get("supported_manual_asset_classes")),
+                "supported_manual_order_types": as_list(feature_flags.get("supported_manual_order_types")),
+                "manual_symbol_whitelist": as_list(feature_flags.get("manual_symbol_whitelist")),
+                "futures_pilot_enabled": bool(feature_flags.get("futures_pilot_enabled")),
+                "futures_live_submit_enabled": bool(feature_flags.get("futures_live_submit_enabled")),
+                "futures_symbol_whitelist": as_list(feature_flags.get("futures_symbol_whitelist")),
+            },
+        },
+        "requested_operator_target": {
+            "requested_shape": "FUTURE + MARKET + quantity 1 + whitelisted futures symbol + DAY + NORMAL",
+            "reconciled_first_scope": "FUTURE + MARKET + quantity 1 + whitelisted futures symbol + DAY + NORMAL",
+            "anytime_delta_if_adopted": [
+                "ANYTIME would be a deliberate widening beyond the current futures broker implementation.",
+                "ANYTIME would require explicit futures session semantics in production-link policy and operator wording.",
+                "ANYTIME would require live Schwab verification for a whitelisted futures symbol outside the current DAY + NORMAL assumption before enablement.",
+            ],
+        },
+    }
+
+
+def _futures_pilot_preview_blockers(snapshot: dict[str, Any]) -> list[str]:
+    feature_flags = as_dict(snapshot.get("feature_flags"))
+    blockers: list[str] = []
+    whitelist = _configured_futures_symbol_whitelist(SimpleNamespace(**feature_flags))
+    symbol_map = _configured_futures_symbol_map(SimpleNamespace(**feature_flags))
+    if not bool(feature_flags.get("production_connectivity_enabled")):
+        blockers.append("Futures pilot preview is disabled because MGC_PRODUCTION_LINK_ENABLED is false.")
+    if not bool(feature_flags.get("manual_order_ticket_enabled")):
+        blockers.append("Futures pilot preview is disabled because MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED is false.")
+    if not bool(feature_flags.get("futures_pilot_enabled")):
+        blockers.append("Futures pilot preview is disabled because MGC_PRODUCTION_FUTURES_PILOT_ENABLED is false.")
+    if "FUTURE" not in set(as_list(feature_flags.get("futures_supported_asset_classes"))):
+        blockers.append("Futures pilot preview requires FUTURE in the futures-supported asset classes.")
+    if _futures_pilot_order_type() not in set(as_list(feature_flags.get("futures_supported_order_types"))):
+        blockers.append(f"Futures pilot preview requires {_futures_pilot_order_type()} in the futures-supported order types.")
+    if not whitelist:
+        blockers.append("Futures pilot preview requires a non-empty futures symbol whitelist.")
+    if "DAY" not in set(as_list(feature_flags.get("futures_supported_time_in_force_values"))):
+        blockers.append("Futures pilot preview requires DAY in the futures-supported time-in-force values.")
+    if "NORMAL" not in set(as_list(feature_flags.get("futures_supported_session_values"))):
+        blockers.append("Futures pilot preview requires NORMAL in the futures-supported session values.")
+    if (_decimal(feature_flags.get("futures_max_quantity")) or Decimal("0")) != Decimal("1"):
+        blockers.append("Futures pilot preview requires futures_max_quantity=1.")
+    if whitelist:
+        missing_symbols = [symbol for symbol in whitelist if not symbol_map.get(symbol)]
+        if missing_symbols:
+            blockers.append(
+                "Futures pilot preview requires market-data mappings for all whitelisted futures symbols: "
+                + ", ".join(missing_symbols)
+                + "."
+            )
+    latest_preview = as_dict(as_dict(snapshot.get("runtime_state")).get("last_manual_order_preview"))
+    broker_preview_result = as_dict(as_dict(latest_preview.get("payload_summary")).get("broker_preview_result"))
+    if broker_preview_result.get("ok") is False:
+        blockers.append(str(broker_preview_result.get("error") or "Latest broker preview rejected the futures payload."))
+    return list(dict.fromkeys(blockers))
+
+
+def _futures_pilot_live_submit_blockers(snapshot: dict[str, Any]) -> list[str]:
+    feature_flags = as_dict(snapshot.get("feature_flags"))
+    blockers = _futures_pilot_preview_blockers(snapshot)
+    for blocker in _production_link_current_live_blockers(snapshot):
+        blockers.append(blocker)
+    if not bool(feature_flags.get("futures_live_submit_enabled")):
+        blockers.append("Futures live submission is disabled because MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED is false.")
+    if _futures_pilot_verification_key() not in set(as_list(feature_flags.get("live_verified_order_keys"))):
+        blockers.append("Futures pilot live submit remains preview-only until FUTURE:MARKET is explicitly live-verified.")
+    return list(dict.fromkeys(blockers))
+
+
+def _futures_pilot_operator_workflow() -> list[dict[str, Any]]:
+    return [
+        {
+            "step": "A",
+            "label": "Authenticate Now",
+            "detail": "Prime the shared local Touch ID session before preview, open, or flatten actions, then reuse it throughout the active pilot window.",
+            "proof_surface": "futures_pilot_status.local_operator_auth",
+        },
+        {
+            "step": "B",
+            "label": "Pre-entry checklist",
+            "detail": "Confirm local operator auth is active, the selected Schwab account is live-verified, broker/auth health are green, freshness checks are in bounds, reconciliation is CLEAR, and the selected futures symbol is explicitly whitelisted and mapped.",
+            "proof_surface": "futures_pilot_status.prerequisites",
+        },
+        {
+            "step": "C",
+            "label": "Set long-entry ticket",
+            "detail": "Build the ticket as MANUAL_LIVE_FUTURES_PILOT / BUY / FUTURE / MARKET / quantity 1 / whitelisted futures symbol / DAY / NORMAL.",
+            "proof_surface": "futures_pilot_policy_snapshot.allowed_open_route",
+        },
+        {
+            "step": "D",
+            "label": "Preview",
+            "detail": "Run preview first and require the intended Schwab payload to stay one-lot whitelisted FUTURE MARKET with the futures pilot blockers cleared. The narrow lane keeps DAY + NORMAL in the Schwab payload, but does not apply a separate wall-clock session rejection.",
+            "proof_surface": "futures_pilot_status.next_live_verification_step",
+        },
+        {
+            "step": "E",
+            "label": "Review / confirm / send",
+            "detail": "Submit only after explicit operator review confirmation and only through the dedicated futures pilot lane.",
+            "proof_surface": "futures_pilot_status.live_submit_blockers",
+        },
+        {
+            "step": "F",
+            "label": "Broker ack / fill proof",
+            "detail": "Capture broker acknowledgement, order id, and transition to WORKING or FILLED from the dedicated futures proof surfaces.",
+            "proof_surface": "futures_pilot_status.proof_surfaces.last_submitted_futures_order",
+        },
+        {
+            "step": "G",
+            "label": "Position proof",
+            "detail": "Refresh broker truth and confirm the live futures position is LONG 1 in the selected symbol before preparing the flatten ticket.",
+            "proof_surface": "futures_pilot_status.proof_surfaces.live_futures_position",
+        },
+        {
+            "step": "H",
+            "label": "Flatten preview",
+            "detail": "Build and preview the close ticket exactly as FLATTEN / SELL / FUTURE / MARKET / quantity 1 / DAY / NORMAL with an existing LONG 1.",
+            "proof_surface": "futures_pilot_policy_snapshot.allowed_close_route",
+        },
+        {
+            "step": "I",
+            "label": "Flatten review / confirm / send",
+            "detail": "Submit the flatten leg only after explicit review confirmation and broker/manual state still agrees on the single open futures position.",
+            "proof_surface": "futures_pilot_status.live_submit_blockers",
+        },
+        {
+            "step": "J",
+            "label": "Flat + reconciliation clear proof",
+            "detail": "Refresh broker truth, confirm the selected futures symbol returns to flat, and require reconciliation to return CLEAR with no same-symbol open orders left behind.",
+            "proof_surface": "futures_pilot_status.proof_surfaces.reconciliation_after_close",
+        },
+    ]
+
+
+def _futures_pilot_status_export_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    manual_order_safety = as_dict(snapshot.get("manual_order_safety"))
+    local_operator_auth = as_dict(snapshot.get("local_operator_auth"))
+    health = as_dict(snapshot.get("health"))
+    connection = as_dict(snapshot.get("connection"))
+    reconciliation = as_dict(snapshot.get("reconciliation"))
+    policy = _futures_pilot_policy_snapshot(snapshot)
+    time_session_policy = as_dict(policy.get("time_session_policy")) or _futures_pilot_time_session_policy_snapshot(SimpleNamespace(**as_dict(snapshot.get("feature_flags"))))
+    preview_blockers = _futures_pilot_preview_blockers(snapshot)
+    live_submit_blockers = _futures_pilot_live_submit_blockers(snapshot)
+    preview_enabled = not preview_blockers and policy.get("enabled")
+    live_submit_enabled = len(live_submit_blockers) == 0
+    if live_submit_enabled:
+        status = "PILOT READY"
+        label = "FUTURES PILOT READY"
+    elif preview_enabled:
+        status = "PREVIEW READY"
+        label = "FUTURES PREVIEW READY"
+    else:
+        status = "NOT READY"
+        label = "FUTURES PREVIEW BLOCKED"
+    prerequisites = [
+        {
+            "label": "Local operator auth ready",
+            "ok": local_operator_auth.get("ready") is True,
+            "detail": local_operator_auth.get("detail"),
+        },
+        {
+            "label": "Selected Schwab account live-verified",
+            "ok": bool(manual_order_safety.get("selected_account_live_verified")),
+            "detail": as_dict(health.get("account_selected")).get("detail"),
+        },
+        {
+            "label": "Broker reachable",
+            "ok": as_dict(health.get("broker_reachable")).get("ok") is True,
+            "detail": as_dict(health.get("broker_reachable")).get("detail"),
+        },
+        {
+            "label": "Auth healthy",
+            "ok": as_dict(health.get("auth_healthy")).get("ok") is True,
+            "detail": as_dict(health.get("auth_healthy")).get("detail"),
+        },
+        {
+            "label": "Balances freshness in bounds",
+            "ok": as_dict(health.get("balances_fresh")).get("ok") is True,
+            "detail": as_dict(health.get("balances_fresh")).get("detail"),
+        },
+        {
+            "label": "Positions freshness in bounds",
+            "ok": as_dict(health.get("positions_fresh")).get("ok") is True,
+            "detail": as_dict(health.get("positions_fresh")).get("detail"),
+        },
+        {
+            "label": "Orders freshness in bounds",
+            "ok": as_dict(health.get("orders_fresh")).get("ok") is True,
+            "detail": as_dict(health.get("orders_fresh")).get("detail"),
+        },
+        {
+            "label": "Reconciliation CLEAR",
+            "ok": str(reconciliation.get("status") or "").lower() == "clear",
+            "detail": reconciliation.get("detail"),
+        },
+    ]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "label": label,
+        "capability_status": "DURABLE_NARROW_MANUAL_FUTURES_PILOT",
+        "separate_lane_required": True,
+        "preview_enabled": preview_enabled,
+        "preview_blockers": preview_blockers,
+        "live_submit_enabled": live_submit_enabled,
+        "live_submit_blocked_pending_first_verification": not live_submit_enabled,
+        "selected_account": {
+            "account_hash": connection.get("selected_account_hash"),
+            "account_number": connection.get("selected_account_number"),
+            "display_name": connection.get("selected_account_display_name"),
+            "selection_source": connection.get("selection_source"),
+        },
+        "local_operator_auth": local_operator_auth,
+        "prerequisites": prerequisites,
+        "requested_operator_target": {
+            "asset_class": "FUTURE",
+            "order_type": _futures_pilot_order_type(),
+            "quantity": "1",
+            "symbol_scope": "WHITELIST_CONTROLLED",
+            "representative_symbol": policy.get("representative_symbol"),
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "operator_requested_market_hours": "DAY + NORMAL ONLY",
+        },
+        "recommended_first_lane": {
+            "asset_class": "FUTURE",
+            "order_type": _futures_pilot_order_type(),
+            "quantity": "1",
+            "symbol_scope": "WHITELIST_CONTROLLED",
+            "representative_symbol": policy.get("representative_symbol"),
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "operator_requested_market_hours": "DAY + NORMAL ONLY",
+            "recommended_market_hours_policy": "Keep DAY + NORMAL only for the current live futures route.",
+        },
+        "time_session_policy": time_session_policy,
+        "durability": as_dict(policy.get("durability")),
+        "outside_sandbox_live_validation": _futures_pilot_outside_sandbox_runbook(snapshot),
+        "live_cycle_checklist": _futures_pilot_live_validation_checklist(snapshot),
+        "proof_boundary": _futures_pilot_proof_boundary(),
+        "policy_snapshot": policy,
+        "gap_analysis": _futures_pilot_gap_analysis(snapshot),
+        "live_submit_blockers": live_submit_blockers,
+        "next_live_verification_step": {
+            "route_key": _futures_pilot_route_key(),
+            "label": "First Futures Live Verification Lane",
+            "preview_allowed_now": preview_enabled,
+            "live_submit_allowed_now": live_submit_enabled,
+            "blocked_reason": (preview_blockers or live_submit_blockers or [None])[0],
+            "operator_path": "Positions > Manual Order Ticket",
+            "time_session_policy": time_session_policy,
+            "exact_open_shape": {
+                "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+                "operator_label": "BUY_TO_OPEN",
+                "side": "BUY",
+                "asset_class": "FUTURE",
+                "symbol": policy.get("representative_symbol"),
+                "allowed_symbols": policy.get("symbol_whitelist"),
+                "order_type": _futures_pilot_order_type(),
+                "quantity": policy.get("max_quantity"),
+                "time_in_force": policy.get("time_in_force"),
+                "session": policy.get("session"),
+                "omit_client_order_id": True,
+            },
+            "exact_close_shape": {
+                "intent_type": "FLATTEN",
+                "operator_label": "SELL_TO_CLOSE",
+                "side": "SELL",
+                "asset_class": "FUTURE",
+                "symbol": policy.get("representative_symbol"),
+                "allowed_symbols": policy.get("symbol_whitelist"),
+                "order_type": _futures_pilot_order_type(),
+                "quantity": policy.get("max_quantity"),
+                "time_in_force": policy.get("time_in_force"),
+                "session": policy.get("session"),
+                "existing_broker_position_required": "LONG 1",
+                "omit_client_order_id": True,
+            },
+        },
+        "proof_surfaces": {
+            "futures_pilot_policy_snapshot": "/api/operator-artifact/production-link-futures-pilot-policy",
+            "futures_pilot_status": "/api/operator-artifact/production-link-futures-pilot-status",
+            "futures_preview_blocker_list": preview_blockers,
+            "futures_live_submit_blocker_list": live_submit_blockers,
+            "next_live_verification_step": "futures_pilot_status.next_live_verification_step",
+            "last_futures_order_preview": as_dict(as_dict(snapshot.get("diagnostics")).get("last_manual_order_preview")),
+            "last_submitted_futures_order": {},
+            "live_futures_position": {},
+            "reconciliation_after_close": {},
+        },
+        "operator_workflow": _futures_pilot_operator_workflow(),
+    }
+
+
+def _locked_futures_live_pilot_route_blockers(
     *,
     request: ManualOrderRequest,
     broker_position: dict[str, Any],
+    features: Any,
 ) -> list[str]:
-    if request.asset_class != "STOCK":
-        return ["Locked manual-live pilot route only supports STOCK."]
-    if request.order_type != "LIMIT":
-        return ["Locked manual-live pilot route only supports LIMIT submit."]
+    if request.asset_class != "FUTURE":
+        return ["Locked futures pilot route only supports FUTURE."]
+    if request.order_type != _futures_pilot_order_type():
+        return [f"Locked futures pilot route only supports {_futures_pilot_order_type()} submit."]
     if request.quantity != Decimal("1"):
-        return ["Locked manual-live pilot route only supports quantity 1."]
+        return ["Locked futures pilot route only supports quantity 1."]
+    if request.time_in_force != "DAY":
+        return ["Locked futures pilot route only supports DAY time-in-force."]
+    if request.session != "NORMAL":
+        return ["Locked futures pilot route only supports NORMAL session."]
+    if request.symbol not in set(features.futures_symbol_whitelist):
+        return [f"Locked futures pilot route only supports whitelisted futures symbols: {', '.join(features.futures_symbol_whitelist) or 'none'}."]
+    if not bool(features.futures_market_data_symbol_map.get(request.symbol)):
+        return [f"Locked futures pilot route requires a market-data mapping for {request.symbol}."]
     intent_type = (request.intent_type or "").upper()
     side = request.side.upper()
-    if intent_type == "MANUAL_LIVE_PILOT":
+    if intent_type == "MANUAL_LIVE_FUTURES_PILOT":
         if side != "BUY":
-            return ["Locked manual-live pilot open route only supports BUY_TO_OPEN."]
+            return ["Locked futures pilot open route only supports BUY_TO_OPEN."]
         return []
     if intent_type == "FLATTEN":
         broker_side = str(broker_position.get("side") or "").strip().upper()
         broker_quantity = _decimal(broker_position.get("quantity")) or Decimal("0")
         blockers: list[str] = []
         if side != "SELL":
-            blockers.append("Locked manual-live pilot close route only supports SELL_TO_CLOSE.")
+            blockers.append("Locked futures pilot close route only supports SELL_TO_CLOSE.")
         if broker_side != "LONG" or broker_quantity != Decimal("1"):
-            blockers.append("Locked manual-live pilot close route requires an existing LONG 1 broker position.")
+            blockers.append("Locked futures pilot close route requires an existing LONG 1 broker position.")
         return blockers
-    return ["Locked manual-live pilot route only supports MANUAL_LIVE_PILOT BUY_TO_OPEN and FLATTEN SELL_TO_CLOSE."]
+    return ["Locked futures pilot route only supports MANUAL_LIVE_FUTURES_PILOT BUY_TO_OPEN and FLATTEN SELL_TO_CLOSE."]
+
+
+def _locked_manual_live_pilot_route_blockers(
+    *,
+    request: ManualOrderRequest,
+    broker_position: dict[str, Any],
+) -> list[str]:
+    if request.asset_class != "STOCK":
+        return ["Historical stock pilot route only supports STOCK."]
+    if request.order_type != "LIMIT":
+        return ["Historical stock pilot route only supports LIMIT submit."]
+    if request.quantity != Decimal("1"):
+        return ["Historical stock pilot route only supports quantity 1."]
+    intent_type = (request.intent_type or "").upper()
+    side = request.side.upper()
+    if intent_type == "MANUAL_LIVE_PILOT":
+        if side != "BUY":
+            return ["Historical stock pilot open route only supports BUY_TO_OPEN."]
+        return []
+    if intent_type == "FLATTEN":
+        broker_side = str(broker_position.get("side") or "").strip().upper()
+        broker_quantity = _decimal(broker_position.get("quantity")) or Decimal("0")
+        blockers: list[str] = []
+        if side != "SELL":
+            blockers.append("Historical stock pilot close route only supports SELL_TO_CLOSE.")
+        if broker_side != "LONG" or broker_quantity != Decimal("1"):
+            blockers.append("Historical stock pilot close route requires an existing LONG 1 broker position.")
+        return blockers
+    return ["Historical stock pilot route only supports MANUAL_LIVE_PILOT BUY_TO_OPEN and FLATTEN SELL_TO_CLOSE."]
 
 
 def _manual_live_fill_summary(row: dict[str, Any]) -> dict[str, Any]:
@@ -3827,6 +5387,8 @@ def _order_type_live_verification_bundle(features: Any) -> dict[str, Any]:
         previewable, preview_reasons = _verification_previewable(features, entry)
         gate_reasons = _verification_live_gate_reasons(features, entry)
         sequence_blocker = _verification_sequence_prerequisite_blocker(key, verified_keys=verified_keys)
+        if key == _futures_pilot_verification_key() and features.futures_pilot_enabled:
+            sequence_blocker = None
         combined_reasons = [*preview_reasons, *gate_reasons]
         if sequence_blocker and key not in verified_keys:
             combined_reasons.append(sequence_blocker)
@@ -3850,6 +5412,10 @@ def _order_type_live_verification_bundle(features: Any) -> dict[str, Any]:
         sequence_rows.append(status_row)
         if next_step is None and not live_verified:
             next_step = status_row
+    if features.futures_pilot_enabled:
+        active_row = next((row for row in sequence_rows if str(row.get("verification_key")) == _futures_pilot_verification_key()), None)
+        if active_row is not None:
+            next_step = active_row
 
     return {
         "by_asset_class": by_asset_class,
@@ -3862,19 +5428,38 @@ def _order_type_live_verification_bundle(features: Any) -> dict[str, Any]:
 
 def _capabilities_snapshot(features: Any) -> dict[str, Any]:
     verification = _order_type_live_verification_bundle(features)
-    locked_policy = _manual_live_pilot_policy_snapshot(features)
+    historical_stock_policy = _manual_live_pilot_policy_snapshot(features)
+    active_policy = _current_active_manual_live_policy_snapshot(features)
+    futures_policy = _futures_pilot_policy_snapshot_from_features(features)
     return {
         "manual_live_pilot": bool(features.manual_live_pilot_enabled),
+        "futures_pilot": bool(features.futures_pilot_enabled),
         "manual_order_submit": bool(features.manual_order_ticket_enabled and features.live_order_submit_enabled),
         "manual_order_cancel": bool(features.manual_order_ticket_enabled and features.live_order_submit_enabled),
         "manual_order_replace": bool(features.manual_order_ticket_enabled and features.live_order_submit_enabled and features.replace_order_enabled),
         "manual_order_preview": bool(features.manual_order_ticket_enabled),
         "sell_short": bool(features.sell_short_enabled),
-        "supported_manual_asset_classes": list(features.supported_manual_asset_classes),
-        "supported_manual_order_types": list(features.supported_manual_order_types),
+        "supported_manual_asset_classes": (
+            list(features.futures_supported_asset_classes)
+            if _current_active_manual_lane_is_futures(features)
+            else list(features.supported_manual_asset_classes)
+        ),
+        "supported_manual_order_types": (
+            list(features.futures_supported_order_types)
+            if _current_active_manual_lane_is_futures(features)
+            else list(features.supported_manual_order_types)
+        ),
         "supported_manual_dry_run_order_types": list(features.supported_manual_dry_run_order_types),
-        "supported_manual_time_in_force_values": list(features.supported_manual_time_in_force_values),
-        "supported_manual_session_values": list(features.supported_manual_session_values),
+        "supported_manual_time_in_force_values": (
+            list(features.futures_supported_time_in_force_values)
+            if _current_active_manual_lane_is_futures(features)
+            else list(features.supported_manual_time_in_force_values)
+        ),
+        "supported_manual_session_values": (
+            list(features.futures_supported_session_values)
+            if _current_active_manual_lane_is_futures(features)
+            else list(features.supported_manual_session_values)
+        ),
         "live_verified_order_keys": verification["live_verified_order_keys"],
         "advanced_tif_ticket_support": bool(features.advanced_tif_enabled and features.ext_exto_ticket_support_enabled),
         "oco_ticket_support": bool(features.oco_ticket_support_enabled),
@@ -3907,7 +5492,9 @@ def _capabilities_snapshot(features: Any) -> dict[str, Any]:
         "order_type_live_verification_sequence": verification["sequence"],
         "next_live_verification_step": verification["next_step"],
         "near_term_live_verification_runbooks": verification["runbooks"],
-        "manual_live_pilot_scope": locked_policy,
+        "manual_live_pilot_scope": active_policy,
+        "historical_stock_pilot_scope": historical_stock_policy,
+        "futures_pilot_scope": futures_policy,
     }
 
 
@@ -4070,6 +5657,9 @@ def _manual_order_request_json(request: ManualOrderRequest) -> dict[str, Any]:
         "client_order_id": request.client_order_id,
         "broker_account_number": request.broker_account_number,
         "operator_authenticated": request.operator_authenticated,
+        "operator_reduce_only_authorized": request.operator_reduce_only_authorized,
+        "operator_auth_policy": request.operator_auth_policy,
+        "operator_auth_risk_bucket": request.operator_auth_risk_bucket,
         "local_operator_identity": request.local_operator_identity,
         "auth_session_id": request.auth_session_id,
         "auth_method": request.auth_method,
@@ -4483,7 +6073,11 @@ def as_dict(value: Any) -> dict[str, Any]:
 
 
 def as_list(value: Any) -> list[Any]:
-    return value if isinstance(value, list) else []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
 
 
 def _first_decimal_with_source(*candidates: tuple[str, Any]) -> tuple[Decimal | None, str | None]:
@@ -4497,16 +6091,55 @@ def _first_decimal_with_source(*candidates: tuple[str, Any]) -> tuple[Decimal | 
 def _resolve_quote_payload(payload: dict[str, Any], external_symbol: str) -> dict[str, Any] | None:
     if external_symbol in payload and isinstance(payload[external_symbol], dict):
         return payload[external_symbol]
-    aliases = {external_symbol, external_symbol.upper(), external_symbol.lower()}
+
+    candidate_keys = _quote_symbol_aliases(external_symbol)
+    for candidate in candidate_keys:
+        resolved = payload.get(candidate)
+        if isinstance(resolved, dict):
+            return resolved
+
+    for key, value in payload.items():
+        if not isinstance(value, dict):
+            continue
+        reference = value.get("reference")
+        if not isinstance(reference, dict):
+            reference = {}
+        reference_symbol = reference.get("symbol")
+        reference_product = reference.get("product")
+        payload_symbol = value.get("symbol")
+        if isinstance(reference_symbol, str) and reference_symbol in candidate_keys:
+            return value
+        if isinstance(reference_product, str) and reference_product in candidate_keys:
+            return value
+        if isinstance(payload_symbol, str) and payload_symbol in candidate_keys:
+            return value
+        if isinstance(key, str) and key in candidate_keys:
+            return value
+    return None
+
+
+def _quote_symbol_aliases(external_symbol: str) -> set[str]:
+    aliases = {
+        external_symbol,
+        external_symbol.upper(),
+        external_symbol.lower(),
+    }
+    stripped = external_symbol.lstrip("/")
+    if stripped:
+        aliases.add(stripped)
+        aliases.add(stripped.upper())
+        aliases.add(stripped.lower())
+        aliases.add(f"/{stripped}")
+        aliases.add(f"/{stripped.upper()}")
+        aliases.add(f"/{stripped.lower()}")
     if external_symbol.startswith("$"):
         aliases.add(external_symbol[1:])
     else:
         aliases.add(f"${external_symbol}")
-    for candidate in aliases:
-        resolved = payload.get(candidate)
-        if isinstance(resolved, dict):
-            return resolved
-    return None
+    aliases.add(external_symbol.replace("/", ""))
+    aliases.add(external_symbol.replace("/", "").upper())
+    aliases.add(external_symbol.replace("/", "").lower())
+    return {alias for alias in aliases if alias}
 
 
 def _quote_delay_flag(payload: dict[str, Any], quote: dict[str, Any]) -> bool | None:
@@ -4551,30 +6184,361 @@ def _quote_timestamp(payload: dict[str, Any], quote: dict[str, Any]) -> datetime
     return None
 
 
+def _marketable_futures_limit_price_from_quote_payload(
+    payload: dict[str, Any],
+    *,
+    side: str,
+) -> tuple[Decimal | None, str | None]:
+    quote = as_dict(payload.get("quote"))
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side == "BUY":
+        candidates = (
+            (quote.get("askPrice"), "askPrice"),
+            (quote.get("lastPrice"), "lastPrice"),
+            (quote.get("mark"), "mark"),
+            (quote.get("closePrice"), "closePrice"),
+        )
+    else:
+        candidates = (
+            (quote.get("bidPrice"), "bidPrice"),
+            (quote.get("lastPrice"), "lastPrice"),
+            (quote.get("mark"), "mark"),
+            (quote.get("closePrice"), "closePrice"),
+        )
+    for raw_value, source in candidates:
+        decimal_value = _decimal(raw_value)
+        if decimal_value is not None and decimal_value > 0:
+            return decimal_value, source
+    return None, None
+
+
+def _manual_order_is_reduce_only(request: ManualOrderRequest) -> bool:
+    return str(request.intent_type or "").strip().upper() == "FLATTEN"
+
+
+def _manual_order_has_live_auth(request: ManualOrderRequest) -> bool:
+    if request.operator_authenticated:
+        return True
+    return bool(request.operator_reduce_only_authorized and _manual_order_is_reduce_only(request))
+
+
+def _production_link_current_live_blockers(snapshot: dict[str, Any]) -> list[str]:
+    manual_order_safety = as_dict(snapshot.get("manual_order_safety"))
+    local_operator_auth = as_dict(snapshot.get("local_operator_auth"))
+    blockers = [str(item).strip() for item in as_list(manual_order_safety.get("blockers")) if str(item).strip()]
+    operator_auth_blocker = str(local_operator_auth.get("blocker") or "").strip()
+    if operator_auth_blocker:
+        blockers.append(operator_auth_blocker)
+    return list(dict.fromkeys(blockers))
+
+
+def _production_link_first_live_verification_route(snapshot: dict[str, Any]) -> dict[str, Any]:
+    feature_flags = SimpleNamespace(**as_dict(snapshot.get("feature_flags")))
+    if _current_active_manual_lane_is_futures(feature_flags):
+        return as_dict(_futures_pilot_status_export_payload(snapshot).get("next_live_verification_step"))
+    manual_order_safety = as_dict(snapshot.get("manual_order_safety"))
+    constraints = as_dict(manual_order_safety.get("constraints"))
+    locked_policy = (
+        as_dict(as_dict(manual_order_safety.get("pilot_readiness")).get("locked_policy"))
+        or as_dict(as_dict(manual_order_safety.get("pilot_mode")).get("scope"))
+    )
+    next_step = as_dict(constraints.get("next_live_verification_step"))
+    stock_limit_runbook = as_dict(as_dict(constraints.get("near_term_live_verification_runbooks")).get("STOCK:LIMIT"))
+    blockers = _production_link_current_live_blockers(snapshot)
+    live_submit_eligible_now = len(blockers) == 0
+    blocked_reason = blockers[0] if blockers else str(next_step.get("blocker_reason") or "").strip() or None
+    prerequisites = [
+        {
+            "label": "Local operator auth ready",
+            "ok": as_dict(snapshot.get("local_operator_auth")).get("ready") is True,
+            "detail": as_dict(snapshot.get("local_operator_auth")).get("detail"),
+        },
+        {
+            "label": "Selected Schwab account live-verified",
+            "ok": bool(manual_order_safety.get("selected_account_live_verified")),
+            "detail": as_dict(as_dict(snapshot.get("health")).get("account_selected")).get("detail"),
+        },
+        {
+            "label": "Broker reachable",
+            "ok": as_dict(as_dict(snapshot.get("health")).get("broker_reachable")).get("ok") is True,
+            "detail": as_dict(as_dict(snapshot.get("health")).get("broker_reachable")).get("detail"),
+        },
+        {
+            "label": "Auth healthy",
+            "ok": as_dict(as_dict(snapshot.get("health")).get("auth_healthy")).get("ok") is True,
+            "detail": as_dict(as_dict(snapshot.get("health")).get("auth_healthy")).get("detail"),
+        },
+        {
+            "label": "Balances freshness in bounds",
+            "ok": as_dict(as_dict(snapshot.get("health")).get("balances_fresh")).get("ok") is True,
+            "detail": as_dict(as_dict(snapshot.get("health")).get("balances_fresh")).get("detail"),
+        },
+        {
+            "label": "Positions freshness in bounds",
+            "ok": as_dict(as_dict(snapshot.get("health")).get("positions_fresh")).get("ok") is True,
+            "detail": as_dict(as_dict(snapshot.get("health")).get("positions_fresh")).get("detail"),
+        },
+        {
+            "label": "Orders freshness in bounds",
+            "ok": as_dict(as_dict(snapshot.get("health")).get("orders_fresh")).get("ok") is True,
+            "detail": as_dict(as_dict(snapshot.get("health")).get("orders_fresh")).get("detail"),
+        },
+        {
+            "label": "Reconciliation CLEAR",
+            "ok": str(as_dict(snapshot.get("reconciliation")).get("status") or "").lower() == "clear",
+            "detail": as_dict(as_dict(snapshot.get("health")).get("reconciliation_fresh")).get("detail"),
+        },
+        {
+            "label": "Manual symbol whitelist non-empty",
+            "ok": bool(as_list(locked_policy.get("symbol_whitelist"))),
+            "detail": f"Configured whitelist: {', '.join(str(item) for item in as_list(locked_policy.get('symbol_whitelist'))) or 'none'}",
+        },
+        {
+            "label": "Pilot mode enabled",
+            "ok": bool(as_dict(manual_order_safety.get("pilot_mode")).get("enabled")),
+            "detail": as_dict(manual_order_safety.get("pilot_mode")).get("detail"),
+        },
+        {
+            "label": "Live submit safety mode enabled",
+            "ok": bool(snapshot.get("feature_flags", {}).get("live_order_submit_enabled")),
+            "detail": manual_order_safety.get("submit_status_detail"),
+        },
+        {
+            "label": "Same-symbol unresolved broker/manual ambiguity absent",
+            "ok": True,
+            "detail": "This is checked again at submit time against the requested symbol, broker open orders, and tracked manual live orders.",
+        },
+    ]
+    return {
+        "route_key": "MANUAL_LIVE_PILOT_STOCK_LIMIT_BUY",
+        "label": "First Live Verification Route",
+        "allowed_now": live_submit_eligible_now and str(next_step.get("verification_key") or "STOCK:LIMIT") == "STOCK:LIMIT",
+        "blocked_reason": blocked_reason,
+        "operator_path": "Positions > Manual Order Ticket",
+        "exact_open_shape": {
+            "intent_type": "MANUAL_LIVE_PILOT",
+            "operator_label": "BUY_TO_OPEN",
+            "side": "BUY",
+            "asset_class": locked_policy.get("asset_class"),
+            "order_type": locked_policy.get("submit_order_type") or locked_policy.get("order_type"),
+            "quantity": locked_policy.get("max_quantity"),
+            "time_in_force": locked_policy.get("time_in_force"),
+            "session": locked_policy.get("session"),
+            "regular_hours_only": locked_policy.get("regular_hours_only"),
+            "whitelist_only": True,
+            "review_confirmed_required": True,
+            "omit_client_order_id": bool(locked_policy.get("omit_client_order_id_for_proven_route")),
+        },
+        "exact_close_shape": {
+            "intent_type": "FLATTEN",
+            "operator_label": "SELL_TO_CLOSE",
+            "side": "SELL",
+            "asset_class": locked_policy.get("asset_class"),
+            "order_type": locked_policy.get("submit_order_type") or locked_policy.get("order_type"),
+            "quantity": locked_policy.get("max_quantity"),
+            "time_in_force": locked_policy.get("time_in_force"),
+            "session": locked_policy.get("session"),
+            "regular_hours_only": locked_policy.get("regular_hours_only"),
+            "existing_broker_position_required": "LONG 1",
+            "review_confirmed_required": True,
+            "omit_client_order_id": bool(locked_policy.get("omit_client_order_id_for_proven_route")),
+        },
+        "prerequisites": prerequisites,
+        "submit_path": as_list(stock_limit_runbook.get("submit_path")),
+        "runbook_checks": {
+            "expected_broker_response_states": as_list(stock_limit_runbook.get("expected_broker_response_states")),
+            "expected_post_submit_checks": as_list(stock_limit_runbook.get("expected_post_submit_checks")),
+            "expected_reconciliation_checks": as_list(stock_limit_runbook.get("expected_reconciliation_checks")),
+        },
+    }
+
+
+def _production_link_pilot_workflow(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    feature_flags = SimpleNamespace(**as_dict(snapshot.get("feature_flags")))
+    if _current_active_manual_lane_is_futures(feature_flags):
+        return _futures_pilot_operator_workflow()
+    first_route = _production_link_first_live_verification_route(snapshot)
+    return [
+        {
+            "step": "A",
+            "label": "Authenticate Now",
+            "detail": "Prime the shared local Touch ID session before preview, open, or flatten actions, then reuse it through the active live-pilot window.",
+            "proof_surface": "operator_status.local_operator_auth",
+        },
+        {
+            "step": "B",
+            "label": "Pre-entry checklist",
+            "detail": "Confirm local operator auth is active, selected account is live-verified, broker/auth are healthy, balances/positions/orders freshness are green, reconciliation is CLEAR, and the chosen symbol is in the whitelist.",
+            "proof_surface": "operator_status.first_live_verification.prerequisites",
+        },
+        {
+            "step": "C",
+            "label": "Set BUY_TO_OPEN ticket",
+            "detail": "Build the manual ticket exactly as MANUAL_LIVE_PILOT / BUY / STOCK / LIMIT / quantity 1 / DAY / NORMAL on a whitelisted symbol during regular US market hours.",
+            "proof_surface": "operator_status.first_live_verification.exact_open_shape",
+        },
+        {
+            "step": "D",
+            "label": "Review / confirm / send",
+            "detail": "Use dry-run preview first, verify the payload still matches the locked route, then send only after explicit operator review confirmation.",
+            "proof_surface": "proof_surfaces.last_manual_order_preview",
+        },
+        {
+            "step": "E",
+            "label": "Broker ack / working / filled truth",
+            "detail": "Verify broker acknowledgement and any WORKING or FILLED transition from the tracked manual-live order row and recent broker order events.",
+            "proof_surface": "proof_surfaces.last_submitted_manual_order",
+        },
+        {
+            "step": "F",
+            "label": "Verify live position",
+            "detail": "Refresh broker truth and confirm the live broker position appears on the intended symbol before preparing the close ticket.",
+            "proof_surface": "snapshot.portfolio.positions",
+        },
+        {
+            "step": "G",
+            "label": "Set SELL_TO_CLOSE ticket",
+            "detail": "Build the close ticket exactly as FLATTEN / SELL / STOCK / LIMIT / quantity 1 / DAY / NORMAL, only when the broker shows an existing LONG 1.",
+            "proof_surface": "operator_status.first_live_verification.exact_close_shape",
+        },
+        {
+            "step": "H",
+            "label": "Review / confirm / send close",
+            "detail": "Preview the close payload, confirm it remains on the locked pilot route, then send the close with explicit operator confirmation.",
+            "proof_surface": "proof_surfaces.last_manual_order_preview",
+        },
+        {
+            "step": "I",
+            "label": "Broker ack / filled / flat confirmed",
+            "detail": "Confirm the close order is acknowledged and filled, then verify broker positions and open orders return to flat on that symbol.",
+            "proof_surface": "proof_surfaces.last_completed_live_cycle",
+        },
+        {
+            "step": "J",
+            "label": "Reconciliation returns CLEAR",
+            "detail": "Refresh broker truth and require reconciliation to return CLEAR after the close cycle completes.",
+            "proof_surface": "proof_surfaces.reconciliation_after_close",
+        },
+        {
+            "step": "K",
+            "label": "Refresh / restart remains passive",
+            "detail": "Only passive refresh or passive restart confirmation is allowed after the cycle; there must be no autonomous follow-on submit.",
+            "proof_surface": "proof_surfaces.passive_refresh_restart_proof",
+        },
+    ]
+
+
 def _pilot_status_export_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     manual_order_safety = as_dict(snapshot.get("manual_order_safety"))
     pilot_readiness = as_dict(manual_order_safety.get("pilot_readiness"))
     pilot_mode = as_dict(manual_order_safety.get("pilot_mode"))
+    feature_flags = SimpleNamespace(**as_dict(snapshot.get("feature_flags")))
+    active_futures_lane = _current_active_manual_lane_is_futures(feature_flags)
+    active_policy = as_dict(pilot_readiness.get("locked_policy")) or as_dict(pilot_mode.get("scope"))
+    historical_stock_policy = as_dict(as_dict(pilot_readiness.get("historical_stock_policy"))) or _manual_live_pilot_policy_snapshot(feature_flags)
     pilot_cycle = as_dict(as_dict(snapshot.get("pilot_cycle")).get("last_completed"))
     runtime_state = as_dict(snapshot.get("runtime_state"))
     diagnostics = as_dict(snapshot.get("diagnostics"))
+    connection = as_dict(snapshot.get("connection"))
+    local_operator_auth = as_dict(snapshot.get("local_operator_auth"))
+    current_blockers = _production_link_current_live_blockers(snapshot)
+    first_live_verification = _production_link_first_live_verification_route(snapshot)
+    live_submit_eligible_now = len(current_blockers) == 0
+    last_submitted_row = next(
+        (
+            as_dict(row)
+            for row in as_list(as_dict(snapshot.get("manual_live_orders")).get("recent_rows"))
+            if as_dict(row)
+        ),
+        {},
+    )
+    last_completed_cycle = (
+        pilot_cycle
+        or as_dict(runtime_state.get("last_completed_pilot_cycle"))
+        or as_dict(diagnostics.get("last_completed_pilot_cycle"))
+    )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "status": snapshot.get("status"),
         "label": snapshot.get("label"),
         "operator_path": "Positions > Manual Order Ticket",
+        "selected_account": {
+            "account_hash": connection.get("selected_account_hash"),
+            "account_number": connection.get("selected_account_number"),
+            "display_name": connection.get("selected_account_display_name"),
+            "selection_source": connection.get("selection_source"),
+            "live_verified": bool(manual_order_safety.get("selected_account_live_verified")),
+        },
+        "health": {
+            "broker_reachable": as_dict(as_dict(snapshot.get("health")).get("broker_reachable")),
+            "auth_healthy": as_dict(as_dict(snapshot.get("health")).get("auth_healthy")),
+        },
+        "freshness": {
+            "balances": as_dict(as_dict(snapshot.get("health")).get("balances_fresh")),
+            "positions": as_dict(as_dict(snapshot.get("health")).get("positions_fresh")),
+            "orders": as_dict(as_dict(snapshot.get("health")).get("orders_fresh")),
+            "fills_events": as_dict(as_dict(snapshot.get("health")).get("fills_events_fresh")),
+        },
+        "reconciliation": as_dict(snapshot.get("reconciliation")),
+        "local_operator_auth": local_operator_auth,
+        "current_active_lane": "FUTURES" if active_futures_lane else "STOCK_HISTORICAL",
+        "manual_live_pilot_enabled": bool(pilot_mode.get("enabled")),
+        "live_submit_safety_mode_enabled": bool(as_dict(snapshot.get("feature_flags")).get("live_order_submit_enabled")),
+        "live_submit_eligible_now": live_submit_eligible_now,
         "pilot_readiness": {
             "enabled": pilot_readiness.get("enabled"),
-            "submit_eligible": pilot_readiness.get("submit_eligible"),
+            "submit_eligible": live_submit_eligible_now,
             "label": pilot_readiness.get("label"),
             "detail": pilot_readiness.get("detail"),
-            "blocked_reason": pilot_readiness.get("blocked_reason"),
+            "blocked_reason": current_blockers[0] if current_blockers else pilot_readiness.get("blocked_reason"),
             "reconciliation_status": pilot_readiness.get("reconciliation_status"),
             "reconciliation_mismatch_count": pilot_readiness.get("reconciliation_mismatch_count"),
         },
-        "allowed_scope": as_dict(pilot_readiness.get("locked_policy")) or as_dict(pilot_mode.get("scope")),
-        "current_blockers": as_list(manual_order_safety.get("blockers")),
-        "last_completed_cycle": pilot_cycle or as_dict(runtime_state.get("last_completed_pilot_cycle")) or as_dict(diagnostics.get("last_completed_pilot_cycle")),
+        "locked_pilot_policy": active_policy,
+        "allowed_scope": active_policy,
+        "historical_stock_pilot": {
+            "status": "HISTORICAL_RECORD",
+            "policy": historical_stock_policy,
+        },
+        "current_blockers": current_blockers,
+        "warning_list": as_list(manual_order_safety.get("warnings")),
+        "first_live_verification": first_live_verification,
+        "proof_surfaces": {
+            "live_manual_pilot_readiness": {
+                "submit_status_label": manual_order_safety.get("submit_status_label"),
+                "submit_status_detail": manual_order_safety.get("submit_status_detail"),
+                "current_blockers": current_blockers,
+                "warning_list": as_list(manual_order_safety.get("warnings")),
+            },
+            "last_manual_order_preview": as_dict(diagnostics.get("last_manual_order_preview")),
+            "last_submitted_manual_order": {
+                "request": as_dict(diagnostics.get("last_manual_order_request")),
+                "result": as_dict(diagnostics.get("last_manual_order_result")),
+                "latest_row": last_submitted_row,
+            },
+            "last_completed_live_cycle": last_completed_cycle,
+            "reconciliation_after_close": as_dict(last_completed_cycle.get("reconciliation_clear_confirmation")),
+            "passive_refresh_restart_proof": as_dict(last_completed_cycle.get("passive_refresh_restart_confirmation")),
+            "futures_pilot_policy_snapshot": "/api/operator-artifact/production-link-futures-pilot-policy",
+            "futures_pilot_status": "/api/operator-artifact/production-link-futures-pilot-status",
+        },
+        "operator_workflow": _production_link_pilot_workflow(snapshot),
+        "futures_pilot_status": _futures_pilot_status_export_payload(snapshot),
+        "broader_live_routing": {
+            "enabled": False,
+            "detail": (
+                "Live broker submit remains locked to the narrow current route only: MANUAL_LIVE_FUTURES_PILOT BUY_TO_OPEN "
+                "and FLATTEN SELL_TO_CLOSE on FUTURE MARKET quantity 1, DAY, NORMAL, whitelist-controlled symbols only."
+                if active_futures_lane
+                else "Historical stock pilot support remains locked to MANUAL_LIVE_PILOT BUY_TO_OPEN and FLATTEN SELL_TO_CLOSE on STOCK LIMIT quantity 1, DAY, NORMAL, regular-hours only, whitelist only."
+            ),
+            "guardrail": (
+                "Any request outside the current narrow futures route stays preview-only or is blocked fail-closed by the locked futures pilot route checks."
+                if active_futures_lane
+                else "Any request outside the historical stock route stays preview-only or is blocked fail-closed by the historical stock pilot route checks."
+            ),
+        },
+        "last_completed_cycle": last_completed_cycle,
     }
 
 
@@ -4633,3 +6597,6 @@ def os_env(key: str) -> str | None:
     import os
 
     return os.environ.get(key)
+
+
+ProductionLinkService = SchwabProductionLinkService

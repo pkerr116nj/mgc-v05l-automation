@@ -43,8 +43,38 @@ ATP_COMPANION_V1_ASIA_US = SharedStrategyIdentity(
 )
 
 
+ATP_COMPANION_V1_GC_ASIA_US = SharedStrategyIdentity(
+    identity_id="ATP_COMPANION_V1_GC_ASIA_US",
+    lane_id="atp_companion_v1_gc_asia_us",
+    display_name="ATP Companion Candidate v1 — GC / Asia + US Executable, London Diagnostic-Only",
+    internal_label="ATP_COMPANION_V1_GC_ASIA_US",
+    strategy_family="active_trend_participation_engine",
+    strategy_identity_root="ATP_COMPANION_V1",
+    symbol="GC",
+    allowed_sessions=("ASIA", "US"),
+    session_restriction="ASIA/US",
+)
+
+
+ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK = SharedStrategyIdentity(
+    identity_id="ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK",
+    lane_id="atp_companion_v1_gc_asia_us_production_track",
+    display_name="ATP Companion Production-Track Candidate v1 — GC / Asia + US / US_LATE Safeguard / Halt-Only 3000",
+    internal_label="ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK",
+    strategy_family="active_trend_participation_engine",
+    strategy_identity_root="ATP_COMPANION_V1",
+    symbol="GC",
+    allowed_sessions=("ASIA", "US"),
+    session_restriction="ASIA/US",
+)
+
+
 def shared_strategy_identities() -> tuple[SharedStrategyIdentity, ...]:
-    return (ATP_COMPANION_V1_ASIA_US,)
+    return (
+        ATP_COMPANION_V1_ASIA_US,
+        ATP_COMPANION_V1_GC_ASIA_US,
+        ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK,
+    )
 
 
 def get_shared_strategy_identity(identity_id: str) -> SharedStrategyIdentity:

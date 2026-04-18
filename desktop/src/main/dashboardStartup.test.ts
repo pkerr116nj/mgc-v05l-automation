@@ -90,7 +90,7 @@ test("only retries reconnect for transient startup failures", () => {
   );
   assert.equal(
     shouldAutoReconnectDashboardFailure(classifyStartupFailure("Live /health is reachable but /api/dashboard did not become responsive before timeout.", { dashboardApiTimedOut: true }), 0),
-    false,
+    true,
   );
   assert.equal(
     shouldAutoReconnectDashboardFailure(classifyStartupFailure("STARTUP_FAILURE_KIND=stale_listener_conflict"), 0),

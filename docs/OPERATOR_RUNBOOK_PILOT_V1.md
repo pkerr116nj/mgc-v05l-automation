@@ -2,7 +2,7 @@
 
 ## Lane Scope
 
-This runbook governs a narrow operator-controlled live pilot lane.
+This runbook governs the current narrow operator-controlled live futures pilot lane.
 
 It does not define:
 - legacy benchmark reproduction rules
@@ -13,14 +13,14 @@ Operational truth in this runbook is production-safety-oriented and intentionall
 
 ## Pre-Entry Checklist
 
-- Confirm `Live Manual Pilot Runbook` shows pilot readiness as ready
-- Confirm the symbol is whitelisted
+- Confirm [`MANUAL_FUTURES_PILOT_RUNBOOK.md`](/Users/patrick/Documents/MGC-v05l-automation/docs/MANUAL_FUTURES_PILOT_RUNBOOK.md) shows the lane as ready
+- Confirm the selected futures symbol is whitelisted and mapped
 - Confirm qty is `1`
-- Confirm route is `BUY_TO_OPEN`
+- Confirm route is `MANUAL_LIVE_FUTURES_PILOT / BUY_TO_OPEN`
 - Confirm broker/account/auth health are green
 - Confirm reconciliation is `CLEAR`
 - Confirm no same-symbol unresolved broker/manual order is active
-- Confirm regular US market hours are open
+- Confirm the ticket remains `DAY + NORMAL`
 
 ## Submit Expectations
 
@@ -43,7 +43,7 @@ Operational truth in this runbook is production-safety-oriented and intentionall
 
 - Use `Set SELL_TO_CLOSE Ticket`
 - Confirm selected broker position is `LONG 1`
-- Confirm route is `SELL_TO_CLOSE`
+- Confirm route is `FLATTEN / SELL_TO_CLOSE`
 - Expected lifecycle:
   - `submit_requested`
   - `ACKNOWLEDGED`
@@ -73,6 +73,11 @@ Operational truth in this runbook is production-safety-oriented and intentionall
 - A same-symbol order is unresolved
 - Broker truth is missing, conflicting, or stale
 - The route falls outside the narrow pilot scope
+
+## Historical Note
+
+- The prior stock-only pilot remains historical proof only in [`PILOT_V1_STATE.md`](/Users/patrick/Documents/MGC-v05l-automation/docs/PILOT_V1_STATE.md)
+- It is not the current active live-test lane
 
 ## How To Confirm Passive Refresh / Restart Behavior
 

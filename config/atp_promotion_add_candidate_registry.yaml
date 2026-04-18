@@ -3,11 +3,16 @@
 # Only the strongest branch is being advanced as an active research candidate in
 # this pass. Frozen ATP Companion Baseline v1 remains unchanged, while staged
 # ATP paper/research candidate lanes are supported through explicit lane configs.
+# This registry tracks ATP-derived research candidates on merit. It does not
+# imply that benchmark-local ATP assumptions are repo-wide law, and success here
+# does not promote a branch into benchmark status automatically.
 
 baseline_reference_label: "ATP_COMPANION_V1_ASIA_US"
 baseline_reference_config: "config/atp_companion_baseline_v1_asia_us.yaml"
 registry_status: "ACTIVE_RESEARCH_WITH_RETAINED_BRANCHES"
 advanced_candidate_id: "promotion_1_075r_favorable_only"
+registry_taxonomy_class: "RESEARCH_CANDIDATE_REGISTRY"
+benchmark_replacement_requires_explicit_promotion: true
 
 candidates:
   - candidate_id: "promotion_1_050r_neutral_plus"

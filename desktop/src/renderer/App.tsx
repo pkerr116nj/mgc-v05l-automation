@@ -10,12 +10,23 @@ import {
   formatValue,
   sentenceCase,
 } from "./lib/format";
+import {
+  deriveOperationalReadiness,
+  startupControlPlaneActionSpec,
+  startupControlPlaneTone,
+  type OperationalReadinessModel,
+} from "../main/shared/operationalReadiness";
+import { reportBootstrapEvent } from "./bootstrap";
 
 type PageId =
   | "home"
   | "calendar"
+  | "history"
   | "runtime"
   | "strategies"
+  | "drawdown-lab"
+  | "atp-performance"
+  | "atp-attribution"
   | "positions"
   | "market"
   | "replay"
@@ -25,6 +36,42 @@ type PageId =
   | "settings";
 
 type Tone = "good" | "warn" | "danger" | "muted";
+type AttentionActionKind =
+  | "start-dashboard"
+  | "start-paper"
+  | "restart-paper-with-temp-paper"
+  | "auth-gate-check"
+  | "complete-pre-session-review"
+  | "paper-force-reconcile"
+  | "paper-resume-entries"
+  | "research-runtime-bridge-start-supervisor"
+  | "research-runtime-bridge-stop-supervisor"
+  | "research-runtime-bridge-run-cycle-now"
+  | "research-runtime-bridge-acknowledge-anomaly"
+  | "research-runtime-bridge-mark-reviewed"
+  | "research-runtime-bridge-resolve-anomaly"
+  | "open-runtime-events"
+  | "refresh";
+
+interface AttentionActionSpec {
+  label: string;
+  description: string;
+  kind?: AttentionActionKind;
+  disabled?: boolean;
+  disabledReason?: string;
+}
+
+interface RuntimeAttentionModel {
+  title: string;
+  severityLabel: "INFORMATIONAL" | "WARNING" | "BLOCKING";
+  tone: Tone;
+  operatorActionRequired: boolean;
+  stateCode: string;
+  reason: string;
+  explanation: string;
+  primaryAction: AttentionActionSpec;
+  secondaryAction?: AttentionActionSpec;
+}
 
 interface AppSettings {
   refreshSeconds: number;
@@ -104,7 +151,8 @@ type SortDirection = "asc" | "desc";
 type PositionsSourceClass = "BROKER" | "PAPER" | "EXPERIMENTAL";
 type PnlCalendarPeriod = "monthly" | "weekly" | "quarterly" | "ytd" | "custom";
 type PnlCalendarViewMode = "calendar" | "line" | "bar";
-type PnlCalendarSource = "all" | "live" | "paper" | "benchmark_replay" | "research_execution";
+type PnlCalendarSource = "all" | "historical_backcast" | "live" | "paper" | "benchmark_replay" | "research_execution" | "research_analytics";
+type PlaybackCoverageSource = Extract<PnlCalendarSource, "historical_backcast" | "benchmark_replay" | "research_execution">;
 
 interface CalendarSourceEntry {
   source: Exclude<PnlCalendarSource, "all">;
@@ -114,6 +162,7 @@ interface CalendarSourceEntry {
   strategyName: string;
   pnl: number;
   tradeCount: number;
+  provisional?: boolean;
 }
 
 interface CalendarStrategyContribution {
@@ -123,6 +172,7 @@ interface CalendarStrategyContribution {
   strategyName: string;
   pnl: number;
   tradeCount: number;
+  provisional?: boolean;
 }
 
 interface CalendarDayPoint {
@@ -132,6 +182,24 @@ interface CalendarDayPoint {
   cumulative: number;
   contributions: CalendarStrategyContribution[];
   coveredSources: Array<Exclude<PnlCalendarSource, "all" | "live" | "paper">>;
+  hasIntradayPartial: boolean;
+  intradaySources: Array<Exclude<PnlCalendarSource, "all">>;
+}
+
+interface CalendarPlaybackVariantOption {
+  studyKey: string;
+  label: string;
+  coverageLabel: string;
+  tradeCount: number;
+}
+
+interface CalendarPlaybackStrategyOption {
+  strategyKey: string;
+  label: string;
+  coverageLabel: string;
+  tradeCount: number;
+  variantCount: number;
+  variants: CalendarPlaybackVariantOption[];
 }
 
 interface PositionsSortState {
@@ -148,6 +216,160 @@ interface PositionsMetricItem {
   label: string;
   value: ReactNode;
   tone?: Tone;
+}
+
+function researchAnalyticsSelectionKey(row: JsonRecord | null | undefined): string {
+  const record = asRecord(row);
+  const strategyKey = String(record.strategy_key ?? "").trim();
+  if (strategyKey) {
+    return strategyKey;
+  }
+  const family = String(record.strategy_family ?? "").trim();
+  const strategyId = String(record.strategy_id ?? record.target_id ?? "").trim();
+  if (!family) {
+    return strategyId;
+  }
+  if (!strategyId) {
+    return family;
+  }
+  return `${family}::${strategyId}`;
+}
+
+function researchAnalyticsMatches(row: JsonRecord | null | undefined, selectionKey: string): boolean {
+  const resolved = String(selectionKey ?? "").trim();
+  if (!resolved) {
+    return false;
+  }
+  const record = asRecord(row);
+  const strategyKey = researchAnalyticsSelectionKey(record);
+  const strategyId = String(record.strategy_id ?? record.target_id ?? "").trim();
+  return strategyKey === resolved || strategyId === resolved;
+}
+
+function nodeTitleValue(value: ReactNode): string | undefined {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return undefined;
+}
+
+function textOrFallback(value: unknown, fallback: string): string {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+  const text = String(value).trim();
+  return text ? text : fallback;
+}
+
+function fileSafeTimestamp(value: string | null | undefined): string {
+  const source = String(value ?? "").trim();
+  if (!source) {
+    return new Date().toISOString().replace(/[:.]/g, "-");
+  }
+  return source.replace(/[:.]/g, "-");
+}
+
+function downloadJsonSnapshot(filename: string, payload: unknown): DesktopCommandResult {
+  const serialized = JSON.stringify(payload, null, 2);
+  const blob = new Blob([serialized], { type: "application/json;charset=utf-8" });
+  const objectUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 0);
+  return {
+    ok: true,
+    message: `Downloaded ${filename}.`,
+    output: serialized,
+  };
+}
+
+function runtimeBridgeBlockedReasonLabel(reason: string): string {
+  const normalized = reason.trim().toUpperCase();
+  if (!normalized) {
+    return "Not blocked";
+  }
+  switch (normalized) {
+    case "OPERATOR_HALT":
+      return "Entries are paused by operator halt.";
+    case "ENTRIES_DISABLED":
+      return "Entries are disabled for this paper runtime.";
+    case "EXITS_DISABLED":
+      return "Exit processing is gated and needs operator review.";
+    case "ACTIVE_ALERTS_PRESENT":
+      return "Active bridge alerts are blocking the next prospective cycle.";
+    case "RECONCILIATION_ISSUES_PRESENT":
+      return "Reconciliation issues are blocking further bridge progress.";
+    default:
+      return sentenceCase(normalized.replaceAll("_", " "));
+  }
+}
+
+function runtimeBridgeBlockedReasonDetail(reason: string): string {
+  const normalized = reason.trim().toUpperCase();
+  switch (normalized) {
+    case "OPERATOR_HALT":
+      return "Expected when paper entries were halted intentionally. Resume entries when the halt is understood.";
+    case "ENTRIES_DISABLED":
+      return "Expected if the runtime is in paper-only monitoring mode. Enable entries only after the runtime is judged safe.";
+    case "EXITS_DISABLED":
+      return "Abnormal for the selected warehouse bridge subset. Review lifecycle state before clearing it.";
+    case "ACTIVE_ALERTS_PRESENT":
+      return "Actionable bridge anomalies are still active. Acknowledge or review them before expecting another cycle.";
+    case "RECONCILIATION_ISSUES_PRESENT":
+      return "Reconciliation is not clean. Treat this as blocking until the anomaly is reviewed.";
+    default:
+      return normalized ? "No explicit remediation mapping is published for this blocked state yet." : "The cadence runner is free to advance when the next cycle window opens.";
+  }
+}
+
+function runtimeBridgeLaneRuntimeStatusLabel(row: JsonRecord): string {
+  const runtimeStatus = String(row.runtime_status ?? "").trim();
+  if (runtimeStatus) {
+    return runtimeStatus;
+  }
+  if (Number(row.pending_intent_count ?? 0) > 0) {
+    return "PENDING PAPER LIFECYCLE";
+  }
+  if (String(row.position_side ?? "FLAT").toUpperCase() !== "FLAT") {
+    return "OPEN PAPER POSITION";
+  }
+  if (Number(row.closed_position_count ?? 0) > 0) {
+    return "MONITORING CLOSED LIFECYCLE";
+  }
+  return "Awaiting first eligible paper cycle.";
+}
+
+function runtimeBridgeReconciliationLabel(row: JsonRecord): string {
+  const classification = String(row.latest_reconciliation_classification ?? "").trim();
+  if (classification) {
+    return classification;
+  }
+  if (Number(row.active_alert_count ?? 0) > 0) {
+    return "Active bridge alert review required.";
+  }
+  return "No recent reconciliation anomaly published.";
+}
+
+function runtimeStartFlagLabel(value: unknown): string {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return "No runtime start flag published yet.";
+  }
+  return String(value);
+}
+
+function researchAnalyticsDisplayLabel(row: JsonRecord | null | undefined): string {
+  const record = asRecord(row);
+  const familyLabel = String(record.family_label ?? sentenceCase(String(record.strategy_family ?? "").trim()) ?? "").trim();
+  const strategyLabel = String(record.strategy_label ?? record.label ?? record.target_id ?? record.strategy_id ?? "Research analytics").trim();
+  if (!familyLabel) {
+    return strategyLabel;
+  }
+  return `${familyLabel} / ${strategyLabel}`;
 }
 
 interface PositionsMonitorRow {
@@ -367,9 +589,13 @@ const POSITIONS_AVAILABLE_COLUMNS: Record<PositionsViewMode, string[]> = {
 const NAV_ITEMS: Array<{ id: PageId; label: string }> = [
   { id: "home", label: "Dashboard" },
   { id: "calendar", label: "P&L Calendar" },
+  { id: "history", label: "Strategy History Review" },
   { id: "positions", label: "Live P&L" },
   { id: "market", label: "Trade Entry" },
   { id: "strategies", label: "Strategy Deep-Dive" },
+  { id: "drawdown-lab", label: "Drawdown Recovery Lab" },
+  { id: "atp-performance", label: "ATP Experimental Performance" },
+  { id: "atp-attribution", label: "ATP Attribution" },
   { id: "diagnostics", label: "Evidence" },
   { id: "settings", label: "Settings" },
 ];
@@ -394,12 +620,20 @@ const DEMOTED_PRIMARY_SECTION_TITLES = new Set([
   "Broker Orders and Fills",
 ]);
 
-const PRIMARY_WORKSTATION_PAGES = new Set<PageId>(["home", "calendar", "positions", "market", "strategies"]);
+const PRIMARY_WORKSTATION_PAGES = new Set<PageId>(["home", "calendar", "history", "positions", "market", "strategies", "drawdown-lab", "atp-performance", "atp-attribution"]);
+
+const PREFERRED_PLAYBACK_STRATEGY_IDS_BY_LANE: Record<string, string[]> = {
+  gc_asia_early_normal_breakout_retest_hold_long: [
+    "gc_asia_early_normal_breakout_retest_hold_turn__GC_checkpoint_no_traction_v1",
+    "gc_asia_early_normal_breakout_retest_hold_turn__GC",
+  ],
+};
 
 const ATP_PRODUCT_CATALOG: Array<{
   laneId: string;
   standaloneStrategyId: string;
   trackedStrategyId: string;
+  preferredPlaybackStrategyIds?: string[];
   displayName: string;
   instrument: string;
   designation: "benchmark" | "candidate";
@@ -411,7 +645,17 @@ const ATP_PRODUCT_CATALOG: Array<{
     laneId: "atp_companion_v1_asia_us",
     standaloneStrategyId: "atp_companion_v1__benchmark_mgc_asia_us",
     trackedStrategyId: "atp_companion_v1_asia_us",
-    displayName: "ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only",
+    displayName: "ATP Companion Baseline v1 [3m Live] — Asia + US Executable, London Diagnostic-Only",
+    instrument: "MGC",
+    designation: "benchmark",
+    experimentalStatus: "tracked_paper_benchmark",
+    participationPolicy: "SINGLE_ENTRY_ONLY",
+  },
+  {
+    laneId: "atp_companion_v1_asia_us_5m",
+    standaloneStrategyId: "atp_companion_v1__benchmark_mgc_asia_us_5m",
+    trackedStrategyId: "atp_companion_v1_asia_us_5m",
+    displayName: "ATP Companion Baseline v1 [5m Live / 5m History] — Asia + US Executable, London Diagnostic-Only",
     instrument: "MGC",
     designation: "benchmark",
     experimentalStatus: "tracked_paper_benchmark",
@@ -421,7 +665,21 @@ const ATP_PRODUCT_CATALOG: Array<{
     laneId: "atp_companion_v1_gc_asia_us",
     standaloneStrategyId: "atp_companion_v1__paper_gc_asia_us",
     trackedStrategyId: "atp_companion_v1__paper_gc_asia_us",
-    displayName: "ATP Companion Candidate v1 — GC / Asia + US Executable, London Diagnostic-Only",
+    displayName: "ATP Companion Candidate v1 [3m Live] — GC / Asia + US Executable, London Diagnostic-Only",
+    instrument: "GC",
+    designation: "candidate",
+    experimentalStatus: "paper_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
+  },
+  {
+    laneId: "atp_companion_v1_gc_asia_us_5m",
+    standaloneStrategyId: "atp_companion_v1__paper_gc_asia_us_5m",
+    trackedStrategyId: "atp_companion_v1__paper_gc_asia_us_5m",
+    preferredPlaybackStrategyIds: [
+      "atp_companion_v1__paper_gc_asia_us_loosened_v1",
+      "atp_companion_v1__paper_gc_asia_us",
+    ],
+    displayName: "ATP Companion Candidate v1 [5m Live / 5m History] — GC / Asia + US Executable, London Diagnostic-Only",
     instrument: "GC",
     designation: "candidate",
     experimentalStatus: "paper_candidate",
@@ -431,7 +689,27 @@ const ATP_PRODUCT_CATALOG: Array<{
     laneId: "atp_companion_v1_pl_asia_us",
     standaloneStrategyId: "atp_companion_v1__paper_pl_asia_us",
     trackedStrategyId: "atp_companion_v1__paper_pl_asia_us",
-    displayName: "ATP Companion Candidate v1 — PL / Asia + US Executable, London Diagnostic-Only",
+    preferredPlaybackStrategyIds: [
+      "atp_companion_v1__paper_pl_asia_us_continuous_backfill_20260416",
+      "atp_companion_v1__paper_pl_asia_us_loosened_v1",
+      "atp_companion_v1__paper_pl_asia_us",
+    ],
+    displayName: "ATP Companion Candidate v1 [3m Live / 5m History] — PL / Asia + US Executable, London Diagnostic-Only",
+    instrument: "PL",
+    designation: "candidate",
+    experimentalStatus: "paper_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
+  },
+  {
+    laneId: "atp_companion_v1_pl_asia_us_5m",
+    standaloneStrategyId: "atp_companion_v1__paper_pl_asia_us_5m",
+    trackedStrategyId: "atp_companion_v1__paper_pl_asia_us_5m",
+    preferredPlaybackStrategyIds: [
+      "atp_companion_v1__paper_pl_asia_us_continuous_backfill_20260416",
+      "atp_companion_v1__paper_pl_asia_us_loosened_v1",
+      "atp_companion_v1__paper_pl_asia_us",
+    ],
+    displayName: "ATP Companion Candidate v1 [5m Live / 5m History] — PL / Asia + US Executable, London Diagnostic-Only",
     instrument: "PL",
     designation: "candidate",
     experimentalStatus: "paper_candidate",
@@ -441,7 +719,28 @@ const ATP_PRODUCT_CATALOG: Array<{
     laneId: "atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only",
     standaloneStrategyId: "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only",
     trackedStrategyId: "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only",
-    displayName: "ATP Companion Candidate — MGC / Asia Only / Promotion 1 +0.75R Favorable Only",
+    preferredPlaybackStrategyIds: [
+      "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only_continuous_backfill_20260416",
+      "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only_loosened_v1",
+      "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only",
+    ],
+    displayName: "ATP Companion Candidate [3m Live / 5m History] — MGC / Asia Only / Promotion 1 +0.75R Favorable Only",
+    instrument: "MGC",
+    designation: "candidate",
+    experimentalStatus: "paper_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
+    candidateId: "promotion_1_075r_favorable_only",
+  },
+  {
+    laneId: "atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only_5m",
+    standaloneStrategyId: "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only_5m",
+    trackedStrategyId: "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only_5m",
+    preferredPlaybackStrategyIds: [
+      "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only_continuous_backfill_20260416",
+      "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only_loosened_v1",
+      "atp_companion_v1__paper_mgc_asia__promotion_1_075r_favorable_only",
+    ],
+    displayName: "ATP Companion Candidate [5m Live / 5m History] — MGC / Asia Only / Promotion 1 +0.75R Favorable Only",
     instrument: "MGC",
     designation: "candidate",
     experimentalStatus: "paper_candidate",
@@ -452,12 +751,65 @@ const ATP_PRODUCT_CATALOG: Array<{
     laneId: "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only",
     standaloneStrategyId: "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only",
     trackedStrategyId: "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only",
-    displayName: "ATP Companion Candidate — GC / Asia Only / Promotion 1 +0.75R Favorable Only",
+    preferredPlaybackStrategyIds: [
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_continuous_backfill_20260416",
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_checkpoint_exit_v1_probe_confirmation_v1",
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_checkpoint_exit_v1",
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_loosened_v1",
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only",
+    ],
+    displayName: "ATP Companion Candidate [3m Live / 5m History] — GC / Asia Only / Promotion 1 +0.75R Favorable Only",
     instrument: "GC",
     designation: "candidate",
     experimentalStatus: "paper_candidate",
     participationPolicy: "STAGED_SAME_DIRECTION",
     candidateId: "promotion_1_075r_favorable_only",
+  },
+  {
+    laneId: "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only_5m",
+    standaloneStrategyId: "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_5m",
+    trackedStrategyId: "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_5m",
+    preferredPlaybackStrategyIds: [
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_continuous_backfill_20260416",
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_checkpoint_exit_v1_probe_confirmation_v1",
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_checkpoint_exit_v1",
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_loosened_v1",
+      "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only",
+    ],
+    displayName: "ATP Companion Candidate [5m Live / 5m History] — GC / Asia Only / Promotion 1 +0.75R Favorable Only",
+    instrument: "GC",
+    designation: "candidate",
+    experimentalStatus: "paper_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
+    candidateId: "promotion_1_075r_favorable_only",
+  },
+  {
+    laneId: "atp_companion_v1_gc_asia_us_production_track",
+    standaloneStrategyId: "atp_companion_v1__production_track_gc_asia_us",
+    trackedStrategyId: "atp_companion_v1__production_track_gc_asia_us",
+    preferredPlaybackStrategyIds: [
+      "atp_companion_v1__production_track_gc_asia_us_continuous_backfill_20260416",
+      "atp_companion_v1__production_track_gc_asia_us_loosened_v1",
+    ],
+    displayName: "ATP Companion Production-Track Candidate v1 [3m Live / 5m History] — GC / Asia + US / US_LATE Safeguard / Halt-Only 3000",
+    instrument: "GC",
+    designation: "candidate",
+    experimentalStatus: "production_track_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
+  },
+  {
+    laneId: "atp_companion_v1_gc_asia_us_production_track_5m",
+    standaloneStrategyId: "atp_companion_v1__production_track_gc_asia_us_5m",
+    trackedStrategyId: "atp_companion_v1__production_track_gc_asia_us_5m",
+    preferredPlaybackStrategyIds: [
+      "atp_companion_v1__production_track_gc_asia_us_continuous_backfill_20260416",
+      "atp_companion_v1__production_track_gc_asia_us_loosened_v1",
+    ],
+    displayName: "ATP Companion Production-Track Candidate v1 [5m Live / 5m History] — GC / Asia + US / US_LATE Safeguard / Halt-Only 3000",
+    instrument: "GC",
+    designation: "candidate",
+    experimentalStatus: "production_track_candidate",
+    participationPolicy: "STAGED_SAME_DIRECTION",
   },
 ];
 
@@ -525,12 +877,12 @@ const SUNDAY_RUNBOOK_RELATIVE_PATH = "outputs/reports/sunday_evening_operator_ru
 const DEFAULT_MANUAL_ORDER_FORM: ManualOrderFormState = {
   accountHash: "",
   symbol: "",
-  assetClass: "STOCK",
+  assetClass: "FUTURE",
   structureType: "SINGLE",
-  intentType: "MANUAL_LIVE_PILOT",
+  intentType: "MANUAL_LIVE_FUTURES_PILOT",
   side: "BUY",
   quantity: "1",
-  orderType: "LIMIT",
+  orderType: "MARKET",
   limitPrice: "",
   stopPrice: "",
   trailValueType: "AMOUNT",
@@ -673,6 +1025,7 @@ const API_FALLBACK: OperatorDesktopApi = {
   async restartDashboard() {
     return { ok: false, message: "Electron preload bridge is unavailable." };
   },
+  reportBootstrapEvent() {},
   async runDashboardAction() {
     return { ok: false, message: "Electron preload bridge is unavailable." };
   },
@@ -745,7 +1098,7 @@ function getApi(): OperatorDesktopApi {
 }
 
 function hashPage(defaultPage: PageId): PageId {
-  const raw = window.location.hash.replace(/^#\/?/, "");
+  const raw = window.location.hash.replace(/^#\/?/, "").split("?", 1)[0] ?? "";
   const redirected =
     raw === "runtime"
       ? "home"
@@ -870,6 +1223,35 @@ function freshnessToneFromState(state: string): Tone {
   return state === "STALE" ? "danger" : state === "SNAPSHOT" || state === "DELAYED" ? "warn" : "good";
 }
 
+function dashboardTruthSourceLabel(sourceMode: DesktopState["source"]["mode"] | undefined): { label: string; tone: Tone } {
+  switch (sourceMode) {
+    case "live_api":
+      return { label: "Live Dashboard API", tone: "good" };
+    case "attached_snapshot_bridge":
+      return { label: "Attached Backend via Snapshot Bridge", tone: "warn" };
+    case "snapshot_fallback":
+      return { label: "Persisted Snapshot Fallback", tone: "warn" };
+    case "degraded_reconnecting":
+      return { label: "Recovering Live API", tone: "warn" };
+    case "backend_down":
+      return { label: "Backend Down / Snapshot Only", tone: "danger" };
+    default:
+      return { label: "Unknown Source", tone: "muted" };
+  }
+}
+
+function truthFreshnessLabel(updatedAt: unknown, fallbackUpdatedAt?: unknown): string {
+  const timestamp = typeof updatedAt === "string" && updatedAt.trim()
+    ? updatedAt
+    : typeof fallbackUpdatedAt === "string" && fallbackUpdatedAt.trim()
+      ? fallbackUpdatedAt
+      : null;
+  if (!timestamp) {
+    return "Unavailable";
+  }
+  return `${formatRelativeAge(timestamp)} • ${formatTimestamp(timestamp)}`;
+}
+
 function selectedManualVerificationStatusLabel(status: JsonRecord): string {
   if (status.live_verified === true) {
     return "LIVE VERIFIED";
@@ -901,7 +1283,7 @@ function selectedManualVerificationStatusLabel(status: JsonRecord): string {
 
 function manualIntentTypeLabel(intentType: string): string {
   const normalized = intentType.trim().toUpperCase();
-  if (normalized === "MANUAL_LIVE_PILOT") {
+  if (normalized === "MANUAL_LIVE_PILOT" || normalized === "MANUAL_LIVE_FUTURES_PILOT") {
     return "BUY_TO_OPEN";
   }
   if (normalized === "FLATTEN") {
@@ -976,6 +1358,60 @@ function runtimeStateLabel(row: JsonRecord): string {
   return "MISSING";
 }
 
+function runtimePresenceInfo(
+  row: JsonRecord | null | undefined,
+): { key: string; label: string; tone: Tone; summary: string } {
+  const explicitKey = String(row?.runtime_presence ?? "").trim().toUpperCase();
+  const explicitLabel = String(row?.runtime_presence_label ?? "").trim();
+  const explicitSummary = String(row?.runtime_presence_summary ?? "").trim();
+  const runtimePresent = row?.runtime_instance_present === true;
+  const stateLoaded = row?.runtime_state_loaded === true;
+  const canProcessBars = row?.can_process_bars === true;
+  const snapshotOnly = row?.snapshot_only === true || row?.audit_only === true;
+  let key = explicitKey;
+  if (!key) {
+    if (snapshotOnly) {
+      key = "HISTORICAL_SNAPSHOT_ONLY";
+    } else if (runtimePresent && (stateLoaded || canProcessBars)) {
+      key = "ACTIVE_RUNTIME";
+    } else if (runtimePresent) {
+      key = "ATTACH_PENDING";
+    } else {
+      key = "CONFIGURED_NOT_LOADED";
+    }
+  }
+  if (key === "ACTIVE_RUNTIME") {
+    return {
+      key,
+      label: explicitLabel || "Active Runtime",
+      tone: "good",
+      summary: explicitSummary || "Attached to the current runtime and contributing live operator truth.",
+    };
+  }
+  if (key === "ATTACH_PENDING") {
+    return {
+      key,
+      label: explicitLabel || "Attach Pending",
+      tone: "warn",
+      summary: explicitSummary || "Runtime identity is present, but full state load/convergence is still pending.",
+    };
+  }
+  if (key === "HISTORICAL_SNAPSHOT_ONLY") {
+    return {
+      key,
+      label: explicitLabel || "Historical / Snapshot",
+      tone: "warn",
+      summary: explicitSummary || "Visible from persisted or tracked truth only; not attached to the current runtime.",
+    };
+  }
+  return {
+    key,
+    label: explicitLabel || "Configured Only",
+    tone: "muted",
+    summary: explicitSummary || "Configured in the platform, but not loaded into the current runtime.",
+  };
+}
+
 function sameUnderlyingLabel(row: JsonRecord): string {
   return row.same_underlying_ambiguity === true ? "AMBIGUOUS" : "CLEAR";
 }
@@ -1037,16 +1473,21 @@ function designationLabel(row: JsonRecord | null | undefined): string {
 }
 
 function runtimeAttachmentLabel(row: JsonRecord | null | undefined): string {
-  if (row?.audit_only === true || row?.snapshot_only === true) {
-    return "Audit Only";
+  return runtimePresenceInfo(row).label;
+}
+
+function runtimePresenceCompactDetail(row: JsonRecord | null | undefined): string {
+  const key = runtimePresenceInfo(row).key;
+  if (key === "ACTIVE_RUNTIME") {
+    return "Current live lane truth";
   }
-  if (row?.runtime_instance_present === true && row?.runtime_state_loaded === true) {
-    return "Attached Live";
+  if (key === "ATTACH_PENDING") {
+    return "Runtime converging";
   }
-  if (row?.runtime_instance_present === true) {
-    return "Attached / State Pending";
+  if (key === "HISTORICAL_SNAPSHOT_ONLY") {
+    return "Persisted/tracked evidence only";
   }
-  return "Not Loaded";
+  return "Configured but not loaded";
 }
 
 function stagedPostureLabel(row: JsonRecord | null | undefined): string {
@@ -1084,6 +1525,24 @@ function compactBranchLabel(row: JsonRecord | null | undefined): string {
   return raw.replace(/\s*\/\s*/g, " / ");
 }
 
+function strategySelectorLabel(row: JsonRecord | null | undefined): string {
+  const base = compactBranchLabel(row);
+  const sessionRestriction = String(row?.session_restriction ?? "").trim();
+  if (!sessionRestriction) {
+    return base;
+  }
+  return `${base} • ${sessionRestriction}`;
+}
+
+function isInstrumentFirstCanonicalLane(row: JsonRecord | null | undefined): boolean {
+  const instrument = String(row?.instrument ?? "").trim().toUpperCase();
+  const branch = compactBranchLabel(row);
+  if (!instrument || !branch) {
+    return false;
+  }
+  return branch.startsWith(`${instrument} / `);
+}
+
 function trackedStrategyDisplayName(detail: JsonRecord | null | undefined): string {
   return String(
     detail?.display_name
@@ -1101,19 +1560,32 @@ function rosterStatusChip(row: JsonRecord | null | undefined): string {
   if (row?.candidate_designation) {
     return "CAND";
   }
+  const runtimePresence = runtimePresenceInfo(row).key;
   if (isTemporaryPaperStrategyRow(row)) {
-    return row?.runtime_instance_present === true ? "TEMP LIVE" : "TEMP";
+    if (runtimePresence === "ACTIVE_RUNTIME") {
+      return "TEMP LIVE";
+    }
+    if (runtimePresence === "ATTACH_PENDING") {
+      return "TEMP ATTACH";
+    }
+    if (runtimePresence === "HISTORICAL_SNAPSHOT_ONLY") {
+      return "TEMP SNAP";
+    }
+    return "TEMP CFG";
   }
-  if (runtimeAttachmentLabel(row) === "Attached Live") {
+  if (runtimePresence === "ACTIVE_RUNTIME") {
     return "LIVE";
   }
-  if (runtimeAttachmentLabel(row) === "Attached / State Pending") {
+  if (runtimePresence === "ATTACH_PENDING") {
     return "ATTACH";
+  }
+  if (runtimePresence === "HISTORICAL_SNAPSHOT_ONLY") {
+    return "SNAP";
   }
   if (String(row?.state ?? row?.strategy_status ?? "").toUpperCase().includes("PAUSE")) {
     return "PAUSED";
   }
-  return "PAPER";
+  return "CFG";
 }
 
 function rosterStatusTone(row: JsonRecord | null | undefined): Tone {
@@ -1121,7 +1593,7 @@ function rosterStatusTone(row: JsonRecord | null | undefined): Tone {
   if (chip === "LIVE" || chip === "ATTACH") {
     return "good";
   }
-  if (chip === "CAND" || chip === "TEMP" || chip === "TEMP LIVE") {
+  if (chip === "CAND" || chip === "TEMP LIVE" || chip === "TEMP ATTACH" || chip === "TEMP SNAP" || chip === "SNAP") {
     return "warn";
   }
   if (chip === "PAUSED") {
@@ -1216,19 +1688,320 @@ function mergeStrategyRows(baseRows: JsonRecord[], overlayRows: JsonRecord[]): J
 }
 
 function normalizeTemporaryPaperPerformanceRow(row: JsonRecord, runtimeRow?: JsonRecord): JsonRecord {
+  const sessionRealized = row.session_realized_pnl ?? row.realized_pnl ?? row.metrics_net_pnl_cash ?? null;
+  const sessionUnrealized = row.session_unrealized_pnl ?? row.unrealized_pnl ?? (row.open_position ? row.metrics_net_pnl_cash ?? null : null);
+  const sessionTotal =
+    row.session_total_pnl
+    ?? row.day_pnl
+    ?? (
+      numericOrNull(sessionRealized) !== null || numericOrNull(sessionUnrealized) !== null
+        ? (numericOrNull(sessionRealized) ?? 0) + (numericOrNull(sessionUnrealized) ?? 0)
+        : null
+    );
   return {
     ...normalizeTemporaryPaperRegistryRow(row, runtimeRow),
     strategy_name: String(row.display_name ?? row.branch ?? row.lane_id ?? "Temporary Paper Strategy"),
     instrument: String(row.instrument ?? "UNKNOWN"),
-    realized_pnl: row.realized_pnl ?? row.metrics_net_pnl_cash ?? null,
-    unrealized_pnl: row.open_position ? row.metrics_net_pnl_cash ?? null : null,
-    day_pnl: row.realized_pnl ?? row.metrics_net_pnl_cash ?? null,
-    cumulative_pnl: row.realized_pnl ?? row.metrics_net_pnl_cash ?? null,
+    realized_pnl: sessionRealized,
+    unrealized_pnl: sessionUnrealized,
+    day_pnl: sessionTotal,
+    session_realized_pnl: sessionRealized,
+    session_unrealized_pnl: sessionUnrealized,
+    session_total_pnl: sessionTotal,
+    current_day_pnl: sessionTotal,
+    cumulative_pnl: row.cumulative_pnl ?? sessionRealized,
     max_drawdown: row.metrics_max_drawdown ?? null,
     trade_count: row.trade_count ?? row.fill_count ?? 0,
+    fill_count: row.fill_count ?? null,
+    intent_count: row.intent_count ?? null,
+    latest_fill_timestamp: row.latest_fill_timestamp ?? null,
+    last_mark: row.last_mark ?? null,
+    entry_price: row.entry_price ?? null,
     pnl_unavailable_reason: "Temporary paper metrics bucket",
     latest_activity_timestamp: row.latest_activity_timestamp ?? row.last_update_timestamp ?? null,
     position_side: String(row.position_side ?? row.side ?? (row.open_position ? "OPEN" : "FLAT")),
+  };
+}
+
+function sourceListFromRow(...values: unknown[]): string[] {
+  const collected = new Set<string>();
+  for (const value of values) {
+    for (const item of asArray<unknown>(value)) {
+      const text = String(item ?? "").trim();
+      if (text) {
+        collected.add(text);
+      }
+    }
+  }
+  return [...collected];
+}
+
+function configuredSidesLabel(longEnabled: boolean, shortEnabled: boolean): string {
+  if (longEnabled && shortEnabled) {
+    return "LONG + SHORT";
+  }
+  if (longEnabled) {
+    return "LONG ONLY";
+  }
+  if (shortEnabled) {
+    return "SHORT ONLY";
+  }
+  return "UNSPECIFIED";
+}
+
+type AtpRiskControlMode = "daily_realized_loss_cap" | "daily_peak_drawdown_cap";
+
+const ATP_RISK_CONTROL_OPTIONS: Array<{ value: AtpRiskControlMode; label: string; note: string }> = [
+  {
+    value: "daily_realized_loss_cap",
+    label: "Daily Realized Loss Cap",
+    note: "Stop taking new replay trades once the day closes through the loss cap.",
+  },
+  {
+    value: "daily_peak_drawdown_cap",
+    label: "Daily Peak-to-Trough Cap",
+    note: "Stop taking new replay trades once the day gives back the configured amount from its realized peak.",
+  },
+];
+
+const ATP_RISK_LIMIT_OPTIONS = [2500, 5000, 7500, 10000, 15000];
+
+const NY_TRADING_DAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const NY_MONTH_TITLE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  month: "long",
+  year: "numeric",
+});
+
+const NY_LONG_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+  year: "numeric",
+});
+
+const NY_SHORT_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+});
+
+function nyDateKey(value: Date): string {
+  const parts = NY_TRADING_DAY_FORMATTER.formatToParts(value);
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const year = lookup.year;
+  const month = lookup.month;
+  const day = lookup.day;
+  if (!year || !month || !day) {
+    return value.toISOString().slice(0, 10);
+  }
+  return `${year}-${month}-${day}`;
+}
+
+function normalizedTradeSide(value: unknown): string {
+  const side = String(value ?? "").trim().toUpperCase();
+  if (side.includes("SHORT") || side.includes("SELL")) {
+    return "SHORT";
+  }
+  if (side.includes("LONG") || side.includes("BUY")) {
+    return "LONG";
+  }
+  return side || "UNKNOWN";
+}
+
+function atpTradingDayKey(timestamp: unknown): string | null {
+  const text = String(timestamp ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return NY_TRADING_DAY_FORMATTER.format(parsed);
+}
+
+function simulateAtpReplayRiskScenario(
+  trades: JsonRecord[],
+  options: {
+    mode: AtpRiskControlMode;
+    lossCap: number;
+  },
+): JsonRecord {
+  const { mode, lossCap } = options;
+  const normalized = trades
+    .map((trade) => {
+      const timestamp = String(trade.exit_timestamp ?? trade.entry_timestamp ?? "").trim();
+      const sortMs = parseTimestampMs(timestamp);
+      const pnl = numericOrNull(trade.realized_pnl ?? trade.pnl_cash ?? trade.pnl_points);
+      return {
+        timestamp,
+        sortMs,
+        pnl,
+      };
+    })
+    .filter((trade) => trade.timestamp && trade.sortMs !== 0 && trade.pnl !== null)
+    .sort((left, right) => left.sortMs - right.sortMs) as Array<{ timestamp: string; sortMs: number; pnl: number }>;
+  if (!normalized.length || !(lossCap > 0)) {
+    return {
+      risk_full_net_pnl: sumNullable(trades.map((trade) => numericOrNull(trade.realized_pnl ?? trade.pnl_cash ?? trade.pnl_points))),
+      risk_capped_net_pnl: sumNullable(trades.map((trade) => numericOrNull(trade.realized_pnl ?? trade.pnl_cash ?? trade.pnl_points))),
+      risk_retained_pct: 100,
+      risk_trade_count: trades.length,
+      risk_kept_trade_count: trades.length,
+      risk_skipped_trade_count: 0,
+      risk_halted_days: 0,
+      risk_first_halt_day: null,
+      risk_first_halt_timestamp: null,
+      risk_first_halt_trigger_value: null,
+      risk_first_halt_day_pnl: null,
+      risk_first_halt_day_peak: null,
+      risk_verdict_label: "No cap impact",
+      risk_verdict_tone: "muted",
+      risk_verdict_note: "No valid replay trade rows were available to simulate the selected risk-control scenario.",
+    } satisfies JsonRecord;
+  }
+
+  let currentDay = "";
+  let dayPnl = 0;
+  let dayPeak = 0;
+  let haltedForDay = false;
+  const keptTrades: Array<{ timestamp: string; sortMs: number; pnl: number }> = [];
+  const haltedDays: Array<{ day: string; timestamp: string; triggerValue: number; dayPnl: number; dayPeak: number }> = [];
+
+  for (const trade of normalized) {
+    const dayKey = atpTradingDayKey(trade.timestamp) ?? trade.timestamp.slice(0, 10);
+    if (dayKey !== currentDay) {
+      currentDay = dayKey;
+      dayPnl = 0;
+      dayPeak = 0;
+      haltedForDay = false;
+    }
+    if (haltedForDay) {
+      continue;
+    }
+    keptTrades.push(trade);
+    dayPnl += trade.pnl;
+    if (dayPnl > dayPeak) {
+      dayPeak = dayPnl;
+    }
+    const triggerValue = mode === "daily_realized_loss_cap" ? Math.abs(Math.min(dayPnl, 0)) : dayPeak - dayPnl;
+    const shouldHalt = mode === "daily_realized_loss_cap" ? dayPnl <= -lossCap : triggerValue >= lossCap;
+    if (shouldHalt) {
+      haltedForDay = true;
+      haltedDays.push({
+        day: dayKey,
+        timestamp: trade.timestamp,
+        triggerValue,
+        dayPnl,
+        dayPeak,
+      });
+    }
+  }
+
+  const fullNet = normalized.reduce((sum, trade) => sum + trade.pnl, 0);
+  const cappedNet = keptTrades.reduce((sum, trade) => sum + trade.pnl, 0);
+  const retainedPct = fullNet === 0 ? null : (cappedNet / fullNet) * 100;
+  const riskDelta = cappedNet - fullNet;
+  let verdictLabel = "Too little data";
+  let verdictTone: Tone = "muted";
+  let verdictNote = "The replay sample is too small to judge the selected risk-control scenario confidently.";
+  if (retainedPct !== null) {
+    if (riskDelta > 0.5) {
+      verdictLabel = "Improved by cap";
+      verdictTone = "good";
+      verdictNote = "The risk-control scenario improves replay net performance, which usually means the cap avoids costly late-day reversals.";
+    } else if (retainedPct >= 95) {
+      verdictLabel = "Held up well";
+      verdictTone = "good";
+      verdictNote = "The replay edge survives the selected cap with little degradation, so this control looks operationally plausible.";
+    } else if (retainedPct >= 85) {
+      verdictLabel = "Manageable trade-off";
+      verdictTone = "warn";
+      verdictNote = "The cap trims performance, but not enough to rule the lane out. This still looks like a realistic operator-facing control.";
+    } else {
+      verdictLabel = "Expensive cap";
+      verdictTone = "danger";
+      verdictNote = "The selected cap strips away too much replay edge to recommend this lane without additional redesign or smaller sizing.";
+    }
+  }
+
+  return {
+    risk_full_net_pnl: fullNet,
+    risk_capped_net_pnl: cappedNet,
+    risk_net_delta: riskDelta,
+    risk_retained_pct: retainedPct,
+    risk_trade_count: normalized.length,
+    risk_kept_trade_count: keptTrades.length,
+    risk_skipped_trade_count: normalized.length - keptTrades.length,
+    risk_halted_days: haltedDays.length,
+    risk_first_halt_day: haltedDays[0]?.day ?? null,
+    risk_first_halt_timestamp: haltedDays[0]?.timestamp ?? null,
+    risk_first_halt_trigger_value: haltedDays[0]?.triggerValue ?? null,
+    risk_first_halt_day_pnl: haltedDays[0]?.dayPnl ?? null,
+    risk_first_halt_day_peak: haltedDays[0]?.dayPeak ?? null,
+    risk_verdict_label: verdictLabel,
+    risk_verdict_tone: verdictTone,
+    risk_verdict_note: verdictNote,
+  } satisfies JsonRecord;
+}
+
+function atpOpportunityAssessment(options: {
+  signalCount: number;
+  intentCount: number;
+  fillCount: number;
+  eligibleNow: boolean | null;
+  blocker: string | null;
+}): { label: string; tone: Tone; note: string } {
+  const { signalCount, intentCount, fillCount, eligibleNow, blocker } = options;
+  if (signalCount <= 0) {
+    return {
+      label: "No setups yet",
+      tone: "muted",
+      note: "No actionable ATP setup has been persisted in the current surfaced window yet.",
+    };
+  }
+  if (fillCount > 0) {
+    const fillRate = signalCount > 0 ? fillCount / signalCount : 0;
+    if (fillRate >= 0.5) {
+      return {
+        label: "Converting well",
+        tone: "good",
+        note: "Observed setups are turning into fills often enough that participation looks healthy.",
+      };
+    }
+    return {
+      label: "Partial conversion",
+      tone: "warn",
+      note: "The lane is finding setups and getting some fills, but the setup-to-fill path is still leaving visible opportunities behind.",
+    };
+  }
+  if (intentCount > 0) {
+    return {
+      label: "Intent gap",
+      tone: "warn",
+      note: "The lane is creating order intents, but those intents are not resolving into fills yet.",
+    };
+  }
+  if (blocker) {
+    return {
+      label: "Gated opportunity",
+      tone: eligibleNow === false ? "danger" : "warn",
+      note: blocker,
+    };
+  }
+  return {
+    label: "Observed, not attempted",
+    tone: "danger",
+    note: "The lane saw actionable setups, but no order intent was created. This is the cleanest signal of an opportunity gap.",
   };
 }
 
@@ -1384,43 +2157,41 @@ function dateKeyFromTimestamp(value: unknown): string | null {
   if (!text) {
     return null;
   }
-  const isoMatch = text.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (isoMatch) {
-    return isoMatch[1];
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return text;
   }
   const parsed = new Date(text);
   if (Number.isNaN(parsed.getTime())) {
     return null;
   }
-  const year = parsed.getFullYear();
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return nyDateKey(parsed);
 }
 
 function dateFromKey(dateKey: string): Date {
-  const [year, month, day] = dateKey.split("-").map((part) => Number(part));
-  return new Date(year, Math.max(month - 1, 0), day || 1);
+  const match = String(dateKey).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    const [, yearText, monthText, dayText] = match;
+    return new Date(Date.UTC(Number(yearText), Math.max(Number(monthText) - 1, 0), Number(dayText) || 1, 12, 0, 0));
+  }
+  const fallback = new Date(dateKey);
+  if (!Number.isNaN(fallback.getTime())) {
+    return fallback;
+  }
+  return new Date(Date.UTC(1970, 0, 1, 12, 0, 0));
 }
 
 function formatMonthTitle(dateKey: string): string {
-  return new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(dateFromKey(dateKey));
+  return NY_MONTH_TITLE_FORMATTER.format(dateFromKey(dateKey));
 }
 
 function formatWeekTitle(dateKey: string): string {
   const start = startOfWeek(dateKey);
   const end = addDays(start, 4);
-  const formatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
-  return `Week of ${formatter.format(dateFromKey(start))} - ${formatter.format(dateFromKey(end))}`;
+  return `Week of ${NY_SHORT_DATE_FORMATTER.format(dateFromKey(start))} - ${NY_SHORT_DATE_FORMATTER.format(dateFromKey(end))}`;
 }
 
 function formatLongDate(dateKey: string): string {
-  return new Intl.DateTimeFormat(undefined, {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(dateFromKey(dateKey));
+  return NY_LONG_DATE_FORMATTER.format(dateFromKey(dateKey));
 }
 
 function addDays(dateKey: string, offset: number): string {
@@ -1500,6 +2271,8 @@ function formatRatioValue(value: number | null, digits = 2): string {
 
 function calendarSourceLabel(source: PnlCalendarSource): string {
   switch (source) {
+    case "historical_backcast":
+      return "Historical Backcast";
     case "live":
       return "Live";
     case "paper":
@@ -1508,6 +2281,8 @@ function calendarSourceLabel(source: PnlCalendarSource): string {
       return "Benchmark / Replay";
     case "research_execution":
       return "Research Execution";
+    case "research_analytics":
+      return "Research Analytics";
     default:
       return "All Accounts";
   }
@@ -1529,6 +2304,26 @@ function formatCompactCurrency(value: number | null): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+}
+
+function formatMarketNumber(value: unknown, digits = 2): string {
+  const numeric = numericOrNull(value);
+  if (numeric === null) {
+    return "—";
+  }
+  return numeric.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
+function formatSignedMarketNumber(value: unknown, digits = 2): string {
+  const numeric = numericOrNull(value);
+  if (numeric === null) {
+    return "—";
+  }
+  const formatted = formatMarketNumber(numeric, digits);
+  return numeric > 0 ? `+${formatted}` : formatted;
 }
 
 function sharpeTone(value: number | null): Tone {
@@ -1567,14 +2362,25 @@ function sourcePeriodLabel(period: PnlCalendarPeriod, anchorDate: string, startD
     return `${formatMonthTitle(start)} - ${formatMonthTitle(end)}`;
   }
   if (period === "ytd") {
-    const formatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
-    return `${formatter.format(dateFromKey(startDate))} - ${formatter.format(dateFromKey(endDate))}`;
+    return `${NY_SHORT_DATE_FORMATTER.format(dateFromKey(startDate))} - ${NY_SHORT_DATE_FORMATTER.format(dateFromKey(endDate))}`;
   }
   if (period === "custom") {
-    const formatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
-    return `${formatter.format(dateFromKey(startDate))} - ${formatter.format(dateFromKey(endDate))}`;
+    return `${NY_SHORT_DATE_FORMATTER.format(dateFromKey(startDate))} - ${NY_SHORT_DATE_FORMATTER.format(dateFromKey(endDate))}`;
   }
   return formatMonthTitle(anchorDate);
+}
+
+function maxDateKey(values: Iterable<string>): string | null {
+  let latest: string | null = null;
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    if (latest === null || value > latest) {
+      latest = value;
+    }
+  }
+  return latest;
 }
 
 interface ParsedOptionContract {
@@ -1951,6 +2757,27 @@ function buildStrategyPortfolioSnapshotFromRows(rows: JsonRecord[]): JsonRecord 
   };
 }
 
+function inferPaperFillSide(fillRow: JsonRecord, matchedTradeRow: JsonRecord | null): string {
+  const explicit = String(fillRow.intent_type ?? fillRow.side ?? fillRow.order_status ?? "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  if (!matchedTradeRow) {
+    return "";
+  }
+  const tradeSide = String(matchedTradeRow.side ?? "").toUpperCase();
+  const fillTimestamp = String(fillRow.fill_timestamp ?? "");
+  const entryTimestamp = String(matchedTradeRow.entry_timestamp ?? "");
+  const exitTimestamp = String(matchedTradeRow.exit_timestamp ?? "");
+  if (fillTimestamp && exitTimestamp && fillTimestamp === exitTimestamp) {
+    return tradeSide === "SHORT" ? "BUY_TO_CLOSE" : "SELL_TO_CLOSE";
+  }
+  if (fillTimestamp && entryTimestamp && fillTimestamp === entryTimestamp) {
+    return tradeSide === "SHORT" ? "SELL_TO_OPEN" : "BUY_TO_OPEN";
+  }
+  return tradeSide || "";
+}
+
 function truthBadgeTone(label: string): "good" | "warn" | "danger" | "muted" {
   switch (label) {
     case "REPLAY":
@@ -2169,16 +2996,27 @@ function pageTitle(page: PageId): string {
   return item?.label ?? "Home";
 }
 
-function ownershipLabel(ownership: DesktopState["startup"]["ownership"] | undefined): string {
-  switch (ownership) {
-    case "started_managed":
-      return "Started By Desktop";
-    case "attached_existing":
-      return "Attached To Existing Backend";
-    case "snapshot_only":
+function desktopModeLabel(startup: DesktopState["startup"] | null | undefined): string {
+  switch (startup?.mode) {
+    case "SERVICE_ATTACHED":
+      return "Service Attached";
+    case "DESKTOP_MANAGED_DIAGNOSTIC":
+      return "Desktop Managed (Diagnostic)";
+    case "SNAPSHOT_ONLY":
       return "Snapshot Only";
-    default:
+    case "UNAVAILABLE":
       return "Unavailable";
+    default:
+      switch (startup?.ownership) {
+        case "started_managed":
+          return "Desktop Managed (Diagnostic)";
+        case "attached_existing":
+          return "Service Attached";
+        case "snapshot_only":
+          return "Snapshot Only";
+        default:
+          return "Unavailable";
+      }
   }
 }
 
@@ -2247,6 +3085,120 @@ function laneHaltReasonLabel(value: unknown): string {
 
 function laneHaltLatchedLabel(row: JsonRecord | null | undefined): string {
   return String(row?.risk_state ?? "").toUpperCase() === "HALTED_DEGRADATION" ? "Yes - latched until cleared" : "Unknown";
+}
+
+function atpTimingStateLabel(row: JsonRecord | null | undefined): string {
+  const value = String(row?.atp_timing_state ?? "").trim();
+  if (!value) {
+    return "No ATP timing state";
+  }
+  return value.replace(/^ATP_TIMING_/, "").replace(/_/g, " ");
+}
+
+function topBlockerLabel(row: JsonRecord | null | undefined): string {
+  const blockers = asArray<JsonRecord>(row?.top_blockers);
+  const first = blockers[0] ?? null;
+  if (!first) {
+    const fallback = String(row?.latest_blocked_reason ?? row?.atp_timing_blocker ?? "").trim();
+    return fallback ? fallback.replace(/_/g, " ") : "No blocker recorded";
+  }
+  const code = String(first.code ?? "").trim() || String(row?.latest_blocked_reason ?? row?.atp_timing_blocker ?? "").trim() || "UNKNOWN";
+  const count = Number(first.count ?? 0) || 0;
+  return count > 0 ? `${code.replace(/_/g, " ")} (${count})` : code.replace(/_/g, " ");
+}
+
+function topBlockerSummary(row: JsonRecord | null | undefined): string {
+  const blockers = asArray<JsonRecord>(row?.top_blockers);
+  if (!blockers.length) {
+    const fallback = String(row?.latest_blocked_reason ?? row?.atp_timing_blocker ?? "").trim();
+    return fallback ? fallback.replace(/_/g, " ") : "No blocker mix recorded yet";
+  }
+  return blockers
+    .slice(0, 3)
+    .map((item) => {
+      const code = String(item.code ?? "").trim() || "UNKNOWN";
+      const count = Number(item.count ?? 0) || 0;
+      return count > 0 ? `${code.replace(/_/g, " ")} (${count})` : code.replace(/_/g, " ");
+    })
+    .join(" | ");
+}
+
+function blockerClassInfo(
+  row: JsonRecord | null | undefined,
+  readinessRow: JsonRecord | null | undefined,
+): { label: string; tone: Tone; reason: string } {
+  const runtimePresence = runtimePresenceInfo(row).key;
+  const tradabilityStatus = String(readinessRow?.tradability_status ?? "").trim().toUpperCase();
+  const eligibilityReason = String(readinessRow?.eligibility_reason ?? row?.eligibility_reason ?? "").trim().toLowerCase();
+  const haltReason = String(readinessRow?.halt_reason ?? row?.lane_halt_reason ?? row?.halt_reason ?? "").trim();
+  const blocker = String(row?.latest_blocked_reason ?? row?.atp_timing_blocker ?? "").trim().toUpperCase();
+
+  if (runtimePresence === "HISTORICAL_SNAPSHOT_ONLY") {
+    return { label: "Historical", tone: "warn", reason: "The selected lane is only present as persisted or tracked evidence right now." };
+  }
+  if (runtimePresence === "CONFIGURED_NOT_LOADED" || tradabilityStatus === "LOADED_CONFIG_ONLY") {
+    return { label: "Runtime", tone: "muted", reason: "The lane is configured in the platform, but it is not loaded into the active runtime." };
+  }
+  if (runtimePresence === "ATTACH_PENDING") {
+    return { label: "Runtime", tone: "warn", reason: "The lane is present in the runtime, but state load/convergence has not completed yet." };
+  }
+  if (tradabilityStatus === "FAULTED") {
+    return { label: "Fault", tone: "danger", reason: String(readinessRow?.tradability_reason ?? "The lane is faulted.") };
+  }
+  if (tradabilityStatus === "RECONCILING") {
+    return { label: "Reconciliation", tone: "danger", reason: String(readinessRow?.tradability_reason ?? "Reconciliation is unresolved.") };
+  }
+  if (tradabilityStatus === "HALTED_BY_RISK" || haltReason || String(row?.risk_state ?? "").toUpperCase() !== "OK") {
+    return { label: "Risk", tone: "danger", reason: String((readinessRow?.tradability_reason ?? haltReason) || "Risk gating is blocking new entries.") };
+  }
+  if (eligibilityReason === "wrong_session") {
+    return { label: "Session", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is outside its allowed session.") };
+  }
+  if (
+    blocker.includes("ATP_TIMING")
+    || blocker.includes("CONTINUATION")
+    || blocker.includes("VWAP")
+    || eligibilityReason === "warmup_incomplete"
+    || eligibilityReason === "no_new_completed_bar"
+  ) {
+    return { label: "Timing", tone: "warn", reason: String(readinessRow?.tradability_reason ?? topBlockerLabel(row)) };
+  }
+  if (eligibilityReason === "entries_disabled" || eligibilityReason === "operator_halt" || readinessRow?.manual_action_required === true) {
+    return { label: "Operator", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "Operator controls are currently blocking entries.") };
+  }
+  return { label: "Ready", tone: "good", reason: "No blocking condition is active for the selected lane right now." };
+}
+
+function operatorTimelineTone(input: { category?: unknown; severity?: unknown; badge?: unknown; provenance?: unknown }): Tone {
+  const severity = String(input.severity ?? "").trim().toUpperCase();
+  const category = String(input.category ?? "").trim().toUpperCase();
+  const badge = String(input.badge ?? "").trim().toUpperCase();
+  const provenance = String(input.provenance ?? "").trim().toUpperCase();
+
+  if (severity) {
+    return alertSeverityTone(severity);
+  }
+  if (category === "RISK" || category === "RECONCILIATION") {
+    return "warn";
+  }
+  if (category === "RUNTIME" || badge === "ALERT" || badge === "RECON") {
+    return "danger";
+  }
+  if (category === "OPERATOR" || badge === "CONTROL") {
+    return "good";
+  }
+  if (provenance === "RECONSTRUCTED" || category === "SHAPE" || category === "BRANCH") {
+    return "muted";
+  }
+  return "muted";
+}
+
+function operatorTimelineCategoryLabel(value: unknown): string {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return "Runtime";
+  }
+  return text.replace(/_/g, " ");
 }
 
 function runtimeFaultTitle(row: JsonRecord | null | undefined): string {
@@ -2478,7 +3430,7 @@ function buildDiagnosticsSummary(input: {
     `Backend URL: ${formatValue(desktopState?.backendUrl)}`,
     `Chosen Port: ${formatValue(desktopState?.startup.chosenPort)}`,
     `Preferred URL: ${formatValue(desktopState?.startup.preferredUrl)}`,
-    `Backend Ownership: ${ownershipLabel(desktopState?.startup.ownership)}`,
+        `Desktop Mode: ${desktopModeLabel(desktopState?.startup ?? null)}`,
     `Health Status: ${formatValue(desktopState?.backend.healthStatus)}`,
     `API Status: ${formatValue(desktopState?.backend.apiStatus)}`,
     `Source Mode: ${desktopState?.source.label ?? "Unknown"}`,
@@ -2507,9 +3459,9 @@ function buildDiagnosticsSummary(input: {
     `Production Live Submit Safety: ${formatValue(productionManualSafety.submit_enabled === true ? "READY" : "BLOCKED")}`,
     `Production Live-Verified Order Keys: ${liveVerifiedOrderKeys.length ? liveVerifiedOrderKeys.join(", ") : "None"}`,
     `Production Next Live Verification Step: ${formatValue(nextLiveVerificationStep.label ?? nextLiveVerificationStep.verification_key ?? "None")}`,
-    `Production First Live Stock Limit Flags: ${formatValue(asArray<string>(asRecord(productionManualSafety.constraints).first_live_stock_limit_test?.required_flags).join(", ") || "None")}`,
-    `Production First Live Stock Limit Whitelist: ${formatValue(asArray<string>(asRecord(asRecord(productionManualSafety.constraints).first_live_stock_limit_test?.required_config).manual_symbol_whitelist).join(", ") || "None configured")}`,
-    `Production First Live Stock Limit Runbook: See Manual Order Ticket and Production Link Diagnostics.`,
+    `Production Historical Stock Limit Flags: ${formatValue(asArray<string>(asRecord(productionManualSafety.constraints).first_live_stock_limit_test?.required_flags).join(", ") || "None")}`,
+    `Production Historical Stock Limit Whitelist: ${formatValue(asArray<string>(asRecord(asRecord(productionManualSafety.constraints).first_live_stock_limit_test?.required_config).manual_symbol_whitelist).join(", ") || "None configured")}`,
+    `Production Active Futures Runbook: See Manual Order Ticket and Production Link Diagnostics.`,
     `Production Advanced TIF UI: ${formatValue(productionCapabilities.advanced_tif_ticket_support === true ? "DRY_RUN_ENABLED" : "DISABLED")}`,
     `Production OCO UI: ${formatValue(productionCapabilities.oco_ticket_support === true ? "DRY_RUN_ENABLED" : "DISABLED")}`,
     `Production Advanced Live Submit: EXTO=${formatValue(productionCapabilities.ext_exto_live_submit === true ? "ENABLED" : "DISABLED")}, OCO=${formatValue(productionCapabilities.oco_live_submit === true ? "ENABLED" : "DISABLED")}`,
@@ -2577,9 +3529,16 @@ export function App() {
   const [selectedProductionPositionKey, setSelectedProductionPositionKey] = useState("");
   const [selectedAuditStrategyKey, setSelectedAuditStrategyKey] = useState("");
   const [selectedWorkspaceLaneId, setSelectedWorkspaceLaneId] = useState("");
+  const [selectedDrawdownStudyKey, setSelectedDrawdownStudyKey] = useState("");
+  const [selectedDrawdownEpisodeId, setSelectedDrawdownEpisodeId] = useState("");
+  const [selectedAtpAttributionLaneId, setSelectedAtpAttributionLaneId] = useState("");
+  const [selectedAtpRiskControlMode, setSelectedAtpRiskControlMode] = useState<AtpRiskControlMode>("daily_peak_drawdown_cap");
+  const [selectedAtpRiskLossCap, setSelectedAtpRiskLossCap] = useState("5000");
   const [calendarPeriod, setCalendarPeriod] = useState<PnlCalendarPeriod>("monthly");
   const [calendarViewMode, setCalendarViewMode] = useState<PnlCalendarViewMode>("calendar");
-  const [calendarSource, setCalendarSource] = useState<PnlCalendarSource>("all");
+  const [calendarSource, setCalendarSource] = useState<PnlCalendarSource>("historical_backcast");
+  const [calendarPlaybackStrategyKeys, setCalendarPlaybackStrategyKeys] = useState<string[] | null>(null);
+  const [calendarResearchStrategyIds, setCalendarResearchStrategyIds] = useState<string[]>([]);
   const [calendarAutoRangeApplied, setCalendarAutoRangeApplied] = useState(false);
   const [calendarAnchorDate, setCalendarAnchorDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [calendarCustomStart, setCalendarCustomStart] = useState(() => {
@@ -2594,6 +3553,9 @@ export function App() {
   const [sameUnderlyingOperatorLabel, setSameUnderlyingOperatorLabel] = useState("manual operator");
   const [sameUnderlyingReviewNote, setSameUnderlyingReviewNote] = useState("");
   const [sameUnderlyingHoldExpiresAt, setSameUnderlyingHoldExpiresAt] = useState("");
+  const [selectedResearchRuntimeBridgeAlertKey, setSelectedResearchRuntimeBridgeAlertKey] = useState("");
+  const [researchRuntimeBridgeOperatorLabel, setResearchRuntimeBridgeOperatorLabel] = useState("manual operator");
+  const [researchRuntimeBridgeReviewNote, setResearchRuntimeBridgeReviewNote] = useState("");
   const [sameUnderlyingEventInstrumentFilter, setSameUnderlyingEventInstrumentFilter] = useState("");
   const [sameUnderlyingEventTypeFilter, setSameUnderlyingEventTypeFilter] = useState("");
   const [strategyLensIdentityFilter, setStrategyLensIdentityFilter] = useState("");
@@ -2602,6 +3564,7 @@ export function App() {
   const [strategyLensStatusFilter, setStrategyLensStatusFilter] = useState("");
   const [strategyLensRuntimeStateFilter, setStrategyLensRuntimeStateFilter] = useState("");
   const [strategyLensAmbiguityFilter, setStrategyLensAmbiguityFilter] = useState("");
+  const [researchAnalyticsRowsByDataset, setResearchAnalyticsRowsByDataset] = useState<Record<string, JsonRecord[]>>({});
   const [auditStrategyIdentityFilter, setAuditStrategyIdentityFilter] = useState("");
   const [auditFamilyFilter, setAuditFamilyFilter] = useState("");
   const [auditInstrumentFilter, setAuditInstrumentFilter] = useState("");
@@ -2614,12 +3577,14 @@ export function App() {
   const [strategyTradeDateFilter, setStrategyTradeDateFilter] = useState("");
   const [strategyTradeSessionFilter, setStrategyTradeSessionFilter] = useState("");
   const [strategyTradeStatusFilter, setStrategyTradeStatusFilter] = useState("");
+  const [preferredAnalysisStrategyKey, setPreferredAnalysisStrategyKey] = useState("");
   const [clock, setClock] = useState(() => new Date());
   const [isVisible, setIsVisible] = useState(() => document.visibilityState !== "hidden");
   const refreshInFlightRef = useRef(false);
   const positionsBrokerRefreshInFlightRef = useRef(false);
   const positionsMenuContainerRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(true);
+  const reportedUsableStateRef = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -2646,6 +3611,37 @@ export function App() {
       window.location.hash = `#/${settings.defaultPage}`;
     }
   }, [settings.defaultPage]);
+
+  useEffect(() => {
+    if (page !== "calendar") {
+      return;
+    }
+    const raw = window.location.hash.replace(/^#\/?/, "");
+    const queryIndex = raw.indexOf("?");
+    if (queryIndex < 0) {
+      return;
+    }
+    const params = new URLSearchParams(raw.slice(queryIndex + 1));
+    const period = params.get("period");
+    if (period && ["monthly", "weekly", "quarterly", "ytd", "custom"].includes(period)) {
+      setCalendarPeriod(period as PnlCalendarPeriod);
+    }
+    const view = params.get("view");
+    if (view && ["calendar", "line", "bar"].includes(view)) {
+      setCalendarViewMode(view as PnlCalendarViewMode);
+    }
+    const anchor = params.get("anchor");
+    if (anchor && /^\d{4}-\d{2}-\d{2}$/.test(anchor)) {
+      setCalendarAnchorDate(anchor);
+    }
+    const source = params.get("source");
+    if (
+      source
+      && ["all", "historical_backcast", "live", "paper", "benchmark_replay", "research_execution", "research_analytics"].includes(source)
+    ) {
+      setCalendarSource(source as PnlCalendarSource);
+    }
+  }, [page]);
 
   useEffect(() => {
     if (!openPositionsMenuRowId) {
@@ -2682,13 +3678,13 @@ export function App() {
     return () => document.removeEventListener("visibilitychange", onVisibilityChange);
   }, []);
 
-  async function refreshState(): Promise<void> {
+  async function refreshState(options?: { includeHeavyPayload?: boolean }): Promise<void> {
     if (refreshInFlightRef.current) {
       return;
     }
     refreshInFlightRef.current = true;
     try {
-      const state = await api.getDesktopState();
+      const state = await api.getDesktopState(options);
       if (!mountedRef.current) {
         return;
       }
@@ -2702,7 +3698,7 @@ export function App() {
   async function manualRefresh(): Promise<void> {
     setBusyAction("refresh");
     try {
-      await refreshState();
+      await refreshState({ includeHeavyPayload: true });
       const result: DesktopCommandResult = {
         ok: true,
         message: "Operator state refreshed.",
@@ -2724,12 +3720,26 @@ export function App() {
   }
 
   useEffect(() => {
-    void refreshState();
+    let cancelled = false;
+    void (async () => {
+      await refreshState({ includeHeavyPayload: false });
+      if (cancelled || !mountedRef.current) {
+        return;
+      }
+      window.setTimeout(() => {
+        if (!cancelled && mountedRef.current && !refreshInFlightRef.current) {
+          void refreshState({ includeHeavyPayload: true });
+        }
+      }, 250);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
     if (isVisible && !refreshInFlightRef.current) {
-      void refreshState();
+      void refreshState({ includeHeavyPayload: true });
     }
   }, [isVisible]);
 
@@ -2741,7 +3751,7 @@ export function App() {
       if (!isVisible || busyAction || refreshInFlightRef.current) {
         return;
       }
-      void refreshState();
+      void refreshState({ includeHeavyPayload: true });
     }, settings.refreshSeconds * 1000);
     return () => window.clearInterval(timer);
   }, [busyAction, isVisible, settings.refreshSeconds]);
@@ -2754,7 +3764,7 @@ export function App() {
       if (busyAction || refreshInFlightRef.current || document.visibilityState === "hidden") {
         return;
       }
-      void refreshState();
+      void refreshState({ includeHeavyPayload: true });
     };
     runPositionsPagePoll();
     const timer = window.setInterval(runPositionsPagePoll, POSITIONS_PAGE_POLL_SECONDS * 1000);
@@ -2786,7 +3796,7 @@ export function App() {
         if (result.state) {
           setDesktopState(result.state);
         } else {
-          await refreshState();
+          await refreshState({ includeHeavyPayload: true });
         }
       } finally {
         positionsBrokerRefreshInFlightRef.current = false;
@@ -2804,12 +3814,44 @@ export function App() {
     setSameUnderlyingHoldExpiresAt("");
   }, [selectedSameUnderlyingConflictInstrument]);
 
+  function recordCommandResult(label: string, result: DesktopCommandResult): void {
+    setLastResult(result);
+    setRecentActions((current) => [
+      {
+        id: `${Date.now()}-${label}`,
+        label,
+        ok: result.ok,
+        message: result.message,
+        detail: result.detail,
+        occurredAt: new Date().toISOString(),
+      },
+      ...current,
+    ].slice(0, 8));
+  }
+
+  function commandFailureResult(label: string, error: unknown): DesktopCommandResult {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      message: `${sentenceCase(label.replaceAll("-", " "))} failed.`,
+      detail: detail || "Unknown desktop command failure.",
+      output: error instanceof Error && error.stack ? error.stack : undefined,
+      state: desktopState ?? undefined,
+    };
+  }
+
   async function runCommand(
     label: string,
     command: () => Promise<DesktopCommandResult>,
     options?: { confirmMessage?: string; requiresLive?: boolean },
   ): Promise<void> {
     if (options?.confirmMessage && !window.confirm(options.confirmMessage)) {
+      recordCommandResult(label, {
+        ok: false,
+        message: `${sentenceCase(label.replaceAll("-", " "))} canceled.`,
+        detail: "Operator canceled the confirmation dialog. No live order was sent.",
+        state: desktopState ?? undefined,
+      });
       return;
     }
     if (options?.requiresLive && !desktopState?.source.canRunLiveActions) {
@@ -2819,47 +3861,29 @@ export function App() {
         detail: desktopState?.source.detail ?? "Snapshot fallback is active.",
         state: desktopState ?? undefined,
       };
-      setLastResult(blockedResult);
-      setRecentActions((current) => [
-        {
-          id: `${Date.now()}-${label}`,
-          label,
-          ok: false,
-          message: blockedResult.message,
-          detail: blockedResult.detail,
-          occurredAt: new Date().toISOString(),
-        },
-        ...current,
-      ].slice(0, 8));
+      recordCommandResult(label, blockedResult);
       return;
     }
 
     setBusyAction(label);
     try {
       const result = await command();
-      setLastResult(result);
-      setRecentActions((current) => [
-        {
-          id: `${Date.now()}-${label}`,
-          label,
-          ok: result.ok,
-          message: result.message,
-          detail: result.detail,
-          occurredAt: new Date().toISOString(),
-        },
-        ...current,
-      ].slice(0, 8));
+      recordCommandResult(label, result);
       if (result.state) {
         setDesktopState(result.state);
       } else {
         await refreshState();
       }
+    } catch (error) {
+      const failureResult = commandFailureResult(label, error);
+      recordCommandResult(label, failureResult);
+      await refreshState();
     } finally {
       setBusyAction(null);
     }
   }
 
-  function sameUnderlyingActionPayload(): JsonRecord {
+function sameUnderlyingActionPayload(): JsonRecord {
     const note = sameUnderlyingReviewNote.trim();
     return {
       instrument: String(selectedSameUnderlyingConflict?.instrument ?? ""),
@@ -2871,6 +3895,107 @@ export function App() {
       hold_reason: note || undefined,
       hold_expires_at: sameUnderlyingHoldExpiresAt ? new Date(sameUnderlyingHoldExpiresAt).toISOString() : undefined,
   };
+}
+
+function researchRuntimeBridgeReviewPayload(reviewState: "ACKNOWLEDGED" | "REVIEWED" | "RESOLVED"): JsonRecord {
+  const note = researchRuntimeBridgeReviewNote.trim();
+  return {
+    dedup_key: String(selectedResearchRuntimeBridgeAlert?.dedup_key ?? selectedResearchRuntimeBridgeAlert?.review_key ?? ""),
+    review_key: String(selectedResearchRuntimeBridgeAlert?.review_key ?? selectedResearchRuntimeBridgeAlert?.dedup_key ?? ""),
+    review_state: reviewState,
+    operator_label: researchRuntimeBridgeOperatorLabel.trim() || "manual operator",
+    review_note: note || undefined,
+    acknowledgement_note: note || undefined,
+    note: note || undefined,
+    reason: note || undefined,
+  };
+}
+
+function openOperatorPage(targetPage: PageId): void {
+  window.location.hash = `#/${targetPage}`;
+  setPage(targetPage);
+}
+
+async function runAttentionAction(action: AttentionActionSpec | undefined): Promise<void> {
+  if (!action?.kind || action.disabled) {
+    return;
+  }
+  switch (action.kind) {
+    case "start-dashboard":
+      await runCommand("start-dashboard", () => api.startDashboard());
+      break;
+    case "start-paper":
+      await runCommand("start-paper", () => api.runDashboardAction("start-paper"), { requiresLive: true });
+      break;
+    case "restart-paper-with-temp-paper":
+      await runCommand("restart-paper-with-temp-paper", () => api.runDashboardAction("restart-paper-with-temp-paper"), {
+        confirmMessage: "Restart Runtime + Temp Paper will restart the paper soak with all enabled temporary paper lanes included. Proceed?",
+        requiresLive: true,
+      });
+      break;
+    case "auth-gate-check":
+      await runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"));
+      break;
+    case "complete-pre-session-review":
+      await runCommand("complete-pre-session-review", () => api.runDashboardAction("complete-pre-session-review"), { requiresLive: true });
+      break;
+    case "paper-force-reconcile":
+      await runCommand("paper-force-reconcile", () => api.runDashboardAction("paper-force-reconcile"), { requiresLive: true });
+      break;
+    case "paper-resume-entries":
+      await runCommand("paper-resume-entries", () => api.runDashboardAction("paper-resume-entries"), { requiresLive: true });
+      break;
+    case "research-runtime-bridge-start-supervisor":
+      await runCommand(
+        "research-runtime-bridge-start-supervisor",
+        () => api.runDashboardAction("research-runtime-bridge-start-supervisor"),
+      );
+      break;
+    case "research-runtime-bridge-stop-supervisor":
+      await runCommand(
+        "research-runtime-bridge-stop-supervisor",
+        () => api.runDashboardAction("research-runtime-bridge-stop-supervisor"),
+      );
+      break;
+    case "research-runtime-bridge-run-cycle-now":
+      await runCommand(
+        "research-runtime-bridge-run-cycle-now",
+        () => api.runDashboardAction("research-runtime-bridge-run-cycle-now"),
+      );
+      break;
+    case "research-runtime-bridge-acknowledge-anomaly":
+      if (selectedResearchRuntimeBridgeAlert) {
+        await runCommand(
+          `research-runtime-bridge-acknowledge-${String(selectedResearchRuntimeBridgeAlert.dedup_key ?? "")}`,
+          () => api.runDashboardAction("research-runtime-bridge-acknowledge-anomaly", researchRuntimeBridgeReviewPayload("ACKNOWLEDGED")),
+        );
+      }
+      break;
+    case "research-runtime-bridge-mark-reviewed":
+      if (selectedResearchRuntimeBridgeAlert) {
+        await runCommand(
+          `research-runtime-bridge-review-${String(selectedResearchRuntimeBridgeAlert.dedup_key ?? "")}`,
+          () => api.runDashboardAction("research-runtime-bridge-mark-reviewed", researchRuntimeBridgeReviewPayload("REVIEWED")),
+        );
+      }
+      break;
+    case "research-runtime-bridge-resolve-anomaly":
+      if (selectedResearchRuntimeBridgeAlert) {
+        await runCommand(
+          `research-runtime-bridge-resolve-${String(selectedResearchRuntimeBridgeAlert.dedup_key ?? "")}`,
+          () => api.runDashboardAction("research-runtime-bridge-resolve-anomaly", researchRuntimeBridgeReviewPayload("RESOLVED")),
+        );
+      }
+      break;
+    case "open-runtime-events":
+      openOperatorPage("logs");
+      break;
+    case "refresh":
+      await manualRefresh();
+      break;
+    default:
+      break;
+  }
 }
 
 function paperStartupCategoryFromReason(reason: string): string {
@@ -2919,6 +4044,28 @@ function paperStartupCategoryTone(category: string): Tone {
     return "danger";
   }
   return "muted";
+}
+
+function runtimeBridgeLastActivityLabel(lastActivityAt: unknown, hasBridgeHistory: boolean): string {
+  if (lastActivityAt) {
+    return formatTimestamp(lastActivityAt);
+  }
+  return hasBridgeHistory ? "Bridge artifacts exist, but no recent activity timestamp was published." : "No intents or fills have been published yet.";
+}
+
+function backendUrlStateLabel(backendUrl: string | null | undefined, backendState: string | null | undefined): string {
+  const trimmed = String(backendUrl ?? "").trim();
+  if (trimmed) {
+    return trimmed;
+  }
+  const state = String(backendState ?? "").trim().toUpperCase();
+  if (!state) {
+    return "Snapshot fallback only; dashboard URL is not available yet.";
+  }
+  if (state.includes("HEALTHY") || state.includes("LIVE")) {
+    return "Backend is live, but the bound URL was not published.";
+  }
+  return "Dashboard/API is not serving a live URL yet.";
 }
 
   function productionLinkEnabled(): boolean {
@@ -2980,6 +4127,7 @@ function paperStartupCategoryTone(category: string): Tone {
   }
 
   const dashboard = desktopState?.dashboard ?? null;
+  const dashboardRoot = asRecord(dashboard);
   const localOperatorAuth = asRecord(desktopState?.localAuth);
   const localAuthEvents = asArray<JsonRecord>(desktopState?.localAuth.recent_events);
   const latestLocalAuthEvent = asRecord(desktopState?.localAuth.latest_event);
@@ -2994,6 +4142,61 @@ function paperStartupCategoryTone(category: string): Tone {
   const currentPositions = asArray<JsonRecord>(asRecord(operatorSurface.current_active_positions).rows);
   const shadow = asRecord(dashboard?.shadow);
   const paper = asRecord(dashboard?.paper);
+  const researchRuntimeBridge = asRecord(dashboard?.research_runtime_bridge);
+  const researchRuntimeBridgeSummary = asRecord(researchRuntimeBridge.summary);
+  const researchRuntimeBridgeOperatorStatus = asRecord(researchRuntimeBridge.operator_status);
+  const researchRuntimeBridgeReconciliation = asRecord(researchRuntimeBridge.reconciliation);
+  const researchRuntimeBridgeAlerts = asRecord(researchRuntimeBridge.alerts);
+  const researchRuntimeBridgeAnomalies = asRecord(researchRuntimeBridge.anomalies);
+  const researchRuntimeBridgeAnomalyQueue = asRecord(researchRuntimeBridge.anomaly_queue);
+  const researchRuntimeBridgeCyclePolicy = asRecord(researchRuntimeBridge.cycle_policy);
+  const researchRuntimeBridgeCadence = asRecord(researchRuntimeBridge.cadence);
+  const researchRuntimeBridgeSupervisor = asRecord(researchRuntimeBridge.supervisor);
+  const researchRuntimeBridgeOperatorReviews = asRecord(researchRuntimeBridge.operator_reviews);
+  const researchRuntimeBridgeRuntimeEvents = asRecord(researchRuntimeBridge.runtime_events);
+  const researchRuntimeBridgeSeverityCounts = asRecord(researchRuntimeBridgeRuntimeEvents.severity_counts);
+  const researchRuntimeBridgeReviewStateCounts = asRecord(researchRuntimeBridgeAnomalies.review_state_counts);
+  const researchRuntimeBridgeSelectedTenants = asArray<JsonRecord>(researchRuntimeBridge.selected_tenants);
+  const researchRuntimeBridgeLaneRows = asArray<JsonRecord>(researchRuntimeBridge.lane_rows);
+  const researchRuntimeBridgePendingIntents = asArray<JsonRecord>(researchRuntimeBridge.pending_intents);
+  const researchRuntimeBridgeRecentIntents = asArray<JsonRecord>(researchRuntimeBridge.recent_intents);
+  const researchRuntimeBridgeRecentFills = asArray<JsonRecord>(researchRuntimeBridge.recent_fills);
+  const researchRuntimeBridgeRecentClosedPositions = asArray<JsonRecord>(researchRuntimeBridge.recent_closed_positions);
+  const researchRuntimeBridgeOpenPositions = asArray<JsonRecord>(researchRuntimeBridge.open_positions);
+  const researchRuntimeBridgeAlertRows = asArray<JsonRecord>(researchRuntimeBridgeAlerts.recent_rows);
+  const researchRuntimeBridgeAnomalyQueueRows = asArray<JsonRecord>(researchRuntimeBridgeAnomalyQueue.recent_rows);
+  const researchRuntimeBridgeReconciliationRows = asArray<JsonRecord>(researchRuntimeBridgeReconciliation.recent_rows);
+  const researchRuntimeBridgeAnomalyRows = asArray<JsonRecord>(researchRuntimeBridgeReconciliation.anomaly_rows);
+  const researchRuntimeBridgeRuntimeEventRows = asArray<JsonRecord>(researchRuntimeBridgeRuntimeEvents.recent_rows);
+  const researchRuntimeBridgeReviewRows = asArray<JsonRecord>(researchRuntimeBridgeOperatorReviews.recent_rows);
+  const researchRuntimeBridgeNeedsAttentionNowCount = Number(researchRuntimeBridgeAnomalyQueue.needs_attention_now_count ?? researchRuntimeBridgeSummary.needs_attention_now_count ?? 0);
+  const researchRuntimeBridgeUnresolvedCount = Number(researchRuntimeBridgeAnomalyQueue.unresolved_count ?? researchRuntimeBridgeSummary.unresolved_anomaly_count ?? 0);
+  const researchRuntimeBridgeAcknowledgedPendingCount = Number(researchRuntimeBridgeAnomalyQueue.acknowledged_pending_count ?? researchRuntimeBridgeSupervisor.acknowledged_pending_count ?? 0);
+  const researchRuntimeBridgeReviewedPendingCount = Number(researchRuntimeBridgeAnomalyQueue.reviewed_pending_count ?? researchRuntimeBridgeSupervisor.reviewed_pending_count ?? 0);
+  const actionableResearchRuntimeBridgeAlerts = researchRuntimeBridgeAnomalyQueueRows.filter((row) => {
+    const severity = String(row.severity ?? "").toUpperCase();
+    const queueStatus = String(row.queue_status ?? "").toUpperCase();
+    return (severity === "WARN" || severity === "ERROR") && (row.action_required_now === true || queueStatus === "NEEDS_ATTENTION_NOW" || queueStatus === "ESCALATED");
+  });
+  const monitoredResearchRuntimeBridgeAlerts = researchRuntimeBridgeAnomalyQueueRows.filter((row) => {
+    const queueStatus = String(row.queue_status ?? "").toUpperCase();
+    return queueStatus === "ACKNOWLEDGED_PENDING" || queueStatus === "REVIEWED_PENDING";
+  });
+  const selectedResearchRuntimeBridgeAlert =
+    actionableResearchRuntimeBridgeAlerts.find((row) => String(row.dedup_key ?? row.review_key ?? "") === selectedResearchRuntimeBridgeAlertKey)
+    ?? actionableResearchRuntimeBridgeAlerts[0]
+    ?? null;
+  const selectedMonitoredResearchRuntimeBridgeAlert = monitoredResearchRuntimeBridgeAlerts[0] ?? null;
+  const researchRuntimeBridgeAvailable = researchRuntimeBridge.available === true;
+  useEffect(() => {
+    if (!actionableResearchRuntimeBridgeAlerts.length) {
+      setSelectedResearchRuntimeBridgeAlertKey("");
+      return;
+    }
+    if (!actionableResearchRuntimeBridgeAlerts.some((row) => String(row.dedup_key ?? row.review_key ?? "") === selectedResearchRuntimeBridgeAlertKey)) {
+      setSelectedResearchRuntimeBridgeAlertKey(String(actionableResearchRuntimeBridgeAlerts[0]?.dedup_key ?? actionableResearchRuntimeBridgeAlerts[0]?.review_key ?? ""));
+    }
+  }, [actionableResearchRuntimeBridgeAlerts, selectedResearchRuntimeBridgeAlertKey]);
   const paperApprovedModels = asRecord(paper.approved_models);
   const approvedModelRows = asArray<JsonRecord>(paperApprovedModels.rows);
   const approvedModelDetailsByBranch = asRecord(paperApprovedModels.details_by_branch);
@@ -3001,6 +4204,8 @@ function paperStartupCategoryTone(category: string): Tone {
   const paperAlertEvents = asArray<JsonRecord>(paperEvents.alerts);
   const paperAlertsState = asRecord(paper.alerts_state);
   const paperActiveAlertRows = asArray<JsonRecord>(paperAlertsState.active_alerts);
+  const paperSessionEventTimeline = asRecord(paper.session_event_timeline);
+  const paperSessionTimelineEvents = asArray<JsonRecord>(paperSessionEventTimeline.events);
   const researchCapture = asRecord(dashboard?.research_capture);
   const paperReadiness = asRecord(paper.readiness);
   const paperEntryEligibility = asRecord(paper.entry_eligibility);
@@ -3020,6 +4225,7 @@ function paperStartupCategoryTone(category: string): Tone {
   const paperTrackedStrategies = asRecord(paper.tracked_strategies);
   const trackedStrategyRows = asArray<JsonRecord>(paperTrackedStrategies.rows);
   const trackedStrategyDetailsById = asRecord(paperTrackedStrategies.details_by_strategy_id);
+  const paperLatestFills = asArray<JsonRecord>(paper.latest_fills);
   const strategyRuntimeSummary = asRecord(paper.strategy_runtime_summary);
   const paperSignalIntentFillAudit = asRecord(paper.signal_intent_fill_audit);
   const paperExitParitySummary = asRecord(paper.exit_parity_summary);
@@ -3028,6 +4234,8 @@ function paperStartupCategoryTone(category: string): Tone {
   const signalSelectivityAnalysis = asRecord(shadow.signal_selectivity_analysis);
   const temporaryPaperStrategyRows = asArray<JsonRecord>(asRecord(paper.non_approved_lanes).rows).filter((row) => isTemporaryPaperStrategyRow(row));
   const temporaryPaperRuntimeIntegrity = asRecord(paper.temporary_paper_runtime_integrity);
+  const dashboardTruthSource = dashboardTruthSourceLabel(desktopState?.source.mode);
+  const dashboardGeneratedAt = dashboardRoot.generated_at ?? desktopState?.refreshedAt ?? null;
   const sameUnderlyingConflicts = asRecord(dashboard?.same_underlying_conflicts);
   const sameUnderlyingConflictRows = asArray<JsonRecord>(sameUnderlyingConflicts.rows);
   const sameUnderlyingConflictSummary = asRecord(sameUnderlyingConflicts.summary);
@@ -3088,6 +4296,23 @@ function paperStartupCategoryTone(category: string): Tone {
         ),
     [strategyTradeLogRows],
   );
+  const closedStrategyTradeLookup = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    for (const row of closedStrategyTradeRows) {
+      const laneId = String(row.lane_id ?? "");
+      const quantity = String(row.quantity ?? "");
+      const instrument = String(row.instrument ?? row.symbol ?? "").trim().toUpperCase();
+      const exitTimestamp = String(row.exit_timestamp ?? "");
+      const entryTimestamp = String(row.entry_timestamp ?? "");
+      if (laneId && quantity && instrument && exitTimestamp) {
+        lookup.set(`${laneId}|${exitTimestamp}|${instrument}|${quantity}|exit`, row);
+      }
+      if (laneId && quantity && instrument && entryTimestamp) {
+        lookup.set(`${laneId}|${entryTimestamp}|${instrument}|${quantity}|entry`, row);
+      }
+    }
+    return lookup;
+  }, [closedStrategyTradeRows]);
   const strategyAttributionRows = asArray<JsonRecord>(asRecord(paperStrategyPerformance.attribution).rows);
   const signalIntentFillAuditRows = useMemo(
     () =>
@@ -3160,6 +4385,66 @@ function paperStartupCategoryTone(category: string): Tone {
   const productionEndpointUncertainty = asArray<string>(productionDiagnostics.endpoint_uncertainty);
   const playback = asRecord(dashboard?.historical_playback);
   const strategyAnalysis = asRecord(dashboard?.strategy_analysis);
+  const researchAnalytics = asRecord(strategyAnalysis.research_analytics);
+  const researchAnalyticsAvailable = researchAnalytics.available === true;
+  const researchAnalyticsBackendUrl = String(desktopState?.backendUrl ?? "").trim();
+  const researchAnalyticsDatasetMeta = asRecord(researchAnalytics.datasets);
+  useEffect(() => {
+    if (!researchAnalyticsAvailable || !researchAnalyticsBackendUrl) {
+      setResearchAnalyticsRowsByDataset({});
+      return;
+    }
+    const datasetNames = [
+      "strategy_catalog",
+      "daily_pnl",
+      "strategy_summaries",
+      "equity_curve",
+      "drawdown_curve",
+      "trade_blotter",
+      "exit_reason_breakdown",
+      "session_breakdown",
+    ].filter((name) => Object.prototype.hasOwnProperty.call(researchAnalyticsDatasetMeta, name));
+    if (!datasetNames.length) {
+      setResearchAnalyticsRowsByDataset({});
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      datasetNames.map(async (datasetName) => {
+        const url = new URL(`api/research-analytics/${datasetName}`, researchAnalyticsBackendUrl).toString();
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Research analytics fetch failed (${datasetName} / ${response.status})`);
+        }
+        const payload = asRecord(await response.json());
+        return [datasetName, asArray<JsonRecord>(payload.rows)] as const;
+      }),
+    )
+      .then((entries) => {
+        if (cancelled) {
+          return;
+        }
+        setResearchAnalyticsRowsByDataset(
+          Object.fromEntries(entries.map(([datasetName, rows]) => [datasetName, rows])),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setResearchAnalyticsRowsByDataset({});
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [researchAnalyticsAvailable, researchAnalyticsBackendUrl, researchAnalytics.generated_at, researchAnalyticsDatasetMeta]);
+  const researchAnalyticsStrategyCatalog = asArray<JsonRecord>(researchAnalyticsRowsByDataset.strategy_catalog);
+  const researchAnalyticsStrategySummaries = asArray<JsonRecord>(researchAnalyticsRowsByDataset.strategy_summaries);
+  const researchAnalyticsDailyRows = asArray<JsonRecord>(researchAnalyticsRowsByDataset.daily_pnl);
+  const researchAnalyticsEquityRows = asArray<JsonRecord>(researchAnalyticsRowsByDataset.equity_curve);
+  const researchAnalyticsDrawdownRows = asArray<JsonRecord>(researchAnalyticsRowsByDataset.drawdown_curve);
+  const researchAnalyticsTradeRows = asArray<JsonRecord>(researchAnalyticsRowsByDataset.trade_blotter);
+  const researchAnalyticsExitReasonRows = asArray<JsonRecord>(researchAnalyticsRowsByDataset.exit_reason_breakdown);
+  const researchAnalyticsSessionRows = asArray<JsonRecord>(researchAnalyticsRowsByDataset.session_breakdown);
   const playbackStudyCatalog = asRecord(playback.study_catalog);
   const playbackStudyItems = asArray<JsonRecord>(playbackStudyCatalog.items);
   const playbackLatestStudyItems = useMemo(() => {
@@ -3175,6 +4460,66 @@ function paperStartupCategoryTone(category: string): Tone {
     }
     return uniqueItems;
   }, [playbackStudyItems]);
+  const calendarPlaybackStrategyOptions = useMemo<CalendarPlaybackStrategyOption[]>(() => {
+    const grouped = new Map<string, JsonRecord[]>();
+    for (const item of [...playbackLatestStudyItems].sort(comparePlaybackStudyItems)) {
+      const strategyKey = canonicalPlaybackStrategyId(item) || String(item.strategy_id ?? item.study_key ?? "").trim();
+      if (!strategyKey) {
+        continue;
+      }
+      const existing = grouped.get(strategyKey) ?? [];
+      existing.push(item);
+      grouped.set(strategyKey, existing);
+    }
+    const options: CalendarPlaybackStrategyOption[] = [];
+    for (const [strategyKey, items] of grouped.entries()) {
+      const sortedItems = [...items].sort(comparePlaybackStudyItems);
+      const representative =
+        sortedItems.find((item) => String(item.strategy_id ?? item.study_key ?? "").trim() === strategyKey)
+        ?? sortedItems[0];
+      const coverageStarts = sortedItems.map((item) => dateKeyFromTimestamp(item.coverage_start)).filter(Boolean) as string[];
+      const coverageEnds = sortedItems.map((item) => dateKeyFromTimestamp(item.coverage_end)).filter(Boolean) as string[];
+      const coverageStart = coverageStarts.length ? coverageStarts.sort()[0] : null;
+      const coverageEnd = coverageEnds.length ? coverageEnds.sort()[coverageEnds.length - 1] : null;
+      const variants = sortedItems.map((item) => {
+        const studyKey = String(item.study_key ?? "").trim();
+        const tradeCount = playbackStudyTradeCount(item);
+        const variantStart = dateKeyFromTimestamp(item.coverage_start);
+        const variantEnd = dateKeyFromTimestamp(item.coverage_end);
+        return {
+          studyKey,
+          label: playbackVariantLabel(item, strategyKey),
+          coverageLabel:
+            variantStart && variantEnd
+              ? `${NY_SHORT_DATE_FORMATTER.format(dateFromKey(variantStart))} - ${NY_SHORT_DATE_FORMATTER.format(dateFromKey(variantEnd))}`
+              : "Coverage unavailable",
+          tradeCount,
+        };
+      });
+      options.push({
+        strategyKey,
+        label: cleanedPlaybackStrategyLabel(String(representative?.label ?? representative?.strategy_id ?? representative?.study_key ?? "Historical Strategy")),
+        coverageLabel:
+          coverageStart && coverageEnd
+            ? `${NY_SHORT_DATE_FORMATTER.format(dateFromKey(coverageStart))} - ${NY_SHORT_DATE_FORMATTER.format(dateFromKey(coverageEnd))}`
+            : "Coverage unavailable",
+        tradeCount: variants.reduce((sum, variant) => sum + variant.tradeCount, 0),
+        variantCount: variants.length,
+        variants,
+      });
+    }
+    return options.sort((left, right) => left.label.localeCompare(right.label));
+  }, [playbackLatestStudyItems]);
+  useEffect(() => {
+    if (calendarPlaybackStrategyKeys === null) {
+      return;
+    }
+    const availableKeys = new Set(calendarPlaybackStrategyOptions.map((item) => item.strategyKey));
+    const filtered = calendarPlaybackStrategyKeys.filter((strategyKey) => availableKeys.has(strategyKey));
+    if (filtered.length !== calendarPlaybackStrategyKeys.length) {
+      setCalendarPlaybackStrategyKeys(filtered);
+    }
+  }, [calendarPlaybackStrategyKeys, calendarPlaybackStrategyOptions]);
   const playbackLatestRun = asRecord(playback.latest_run);
   const playbackLatestRunArtifacts = asRecord(playbackLatestRun.artifacts);
   const playbackSync = asRecord(dashboard?.historical_playback_sync);
@@ -3250,33 +4595,45 @@ function paperStartupCategoryTone(category: string): Tone {
       ? "Latest playback manifest loaded"
       : formatValue(playbackSync.detail ?? "Playback state is stale")
     : "Historical playback not loaded";
+  const selectedCalendarPlaybackStrategySet = useMemo(
+    () => (calendarPlaybackStrategyKeys === null ? null : new Set(calendarPlaybackStrategyKeys)),
+    [calendarPlaybackStrategyKeys],
+  );
+  const selectedCalendarPlaybackItems = useMemo(
+    () =>
+      playbackLatestStudyItems.filter((item) => {
+        const strategyKey = canonicalPlaybackStrategyId(item) || String(item.strategy_id ?? item.study_key ?? "").trim();
+        return selectedCalendarPlaybackStrategySet === null || selectedCalendarPlaybackStrategySet.has(strategyKey);
+      }),
+    [playbackLatestStudyItems, selectedCalendarPlaybackStrategySet],
+  );
   const playbackCoverageDateKeysBySource = useMemo(() => {
-    const coverage: Record<Exclude<PnlCalendarSource, "all" | "live" | "paper">, Set<string>> = {
+    const coverage: Record<PlaybackCoverageSource, Set<string>> = {
+      historical_backcast: new Set<string>(),
       benchmark_replay: new Set<string>(),
       research_execution: new Set<string>(),
     };
     for (const item of playbackLatestStudyItems) {
       const studyMode = String(item.study_mode ?? "").trim();
-      const source: Exclude<PnlCalendarSource, "all" | "live" | "paper"> =
+      const source: PlaybackCoverageSource =
         studyMode === "research_execution_mode" ? "research_execution" : "benchmark_replay";
       const startDate = dateKeyFromTimestamp(item.coverage_start);
       const endDate = dateKeyFromTimestamp(item.coverage_end);
       if (!startDate || !endDate) {
         continue;
       }
+      const includeInHistorical =
+        selectedCalendarPlaybackStrategySet === null
+        || selectedCalendarPlaybackStrategySet.has(canonicalPlaybackStrategyId(item) || String(item.strategy_id ?? item.study_key ?? "").trim());
       for (let cursor = startDate; cursor <= endDate; cursor = addDays(cursor, 1)) {
         coverage[source].add(cursor);
+        if (includeInHistorical) {
+          coverage.historical_backcast.add(cursor);
+        }
       }
     }
     return coverage;
-  }, [playbackLatestStudyItems]);
-  const earliestPlaybackCoverageDate = useMemo(() => {
-    const allDates = [
-      ...playbackCoverageDateKeysBySource.benchmark_replay,
-      ...playbackCoverageDateKeysBySource.research_execution,
-    ].sort();
-    return allDates[0] ?? null;
-  }, [playbackCoverageDateKeysBySource]);
+  }, [playbackLatestStudyItems, selectedCalendarPlaybackStrategySet]);
   const sortedSameUnderlyingConflictRows = useMemo(
     () =>
       [...sameUnderlyingConflictRows].sort((left, right) => {
@@ -3564,6 +4921,8 @@ function paperStartupCategoryTone(category: string): Tone {
   const researchCaptureFailedSymbols = asArray<JsonRecord>(researchCapture.failed_symbols);
   const actionLog = asArray<JsonRecord>(dashboard?.action_log);
   const dashboardMeta = asRecord(dashboard?.dashboard_meta);
+  const startupControlPlane = asRecord(dashboard?.startup_control_plane);
+  const supervisedPaperOperability = asRecord(dashboard?.supervised_paper_operability);
   const diagnosticsSummary = useMemo(
     () =>
       buildDiagnosticsSummary({
@@ -3587,7 +4946,7 @@ function paperStartupCategoryTone(category: string): Tone {
       }),
     [desktopState, global, paperReadiness, runtimeReadiness],
   );
-  const canRunLiveActions = Boolean(desktopState?.source.canRunLiveActions);
+  const sourceCanRunLiveActions = Boolean(desktopState?.source.canRunLiveActions);
   const authReadyForPaperStartup =
     runtimeValues.auth_readiness === undefined ? String(global.auth_label ?? "").toUpperCase().includes("READY") : runtimeValues.auth_readiness === true;
   const tempPaperMismatchActive = String(temporaryPaperRuntimeIntegrity.mismatch_status ?? "").toUpperCase() !== "MATCHED";
@@ -3626,7 +4985,7 @@ function paperStartupCategoryTone(category: string): Tone {
         ? paperStartupCategoryFromReason(paperRuntimeRecoveryMessage || latestPaperStartBlockReason)
         : paperRuntimeRecoveryState === "AUTO_RESTART_IN_PROGRESS"
           ? "runtime"
-      : !canRunLiveActions
+      : !sourceCanRunLiveActions
         ? "backend/api"
         : tempPaperMismatchActive
           ? "config mismatch"
@@ -3669,7 +5028,7 @@ function paperStartupCategoryTone(category: string): Tone {
         ? "Auto-Restart Backoff Active"
       : paperRuntimeRecoveryState === "AUTO_RESTART_IN_PROGRESS"
         ? "Auto-Restart In Progress"
-      : !canRunLiveActions
+      : !sourceCanRunLiveActions
       ? "Start Dashboard/API"
       : tempPaperMismatchActive
         ? "Restart Runtime + Temp Paper"
@@ -3692,14 +5051,391 @@ function paperStartupCategoryTone(category: string): Tone {
             : "Auto-start protections are satisfied and the paper runtime is already active.")
       : paperAutoStartEligible
         ? "The dashboard has classified this stopped-runtime condition as safe for automatic recovery."
-        : !canRunLiveActions
+        : !sourceCanRunLiveActions
           ? "The desktop app is not currently attached to the live backend/API, so paper soak cannot be started yet."
           : tempPaperMismatchActive
             ? "Enabled temp-paper lanes must match the runtime launch overlays before the paper soak can be trusted."
-            : !authReadyForPaperStartup
+          : !authReadyForPaperStartup
               ? "Broker/auth readiness is not yet green, so paper soak will not auto-start."
               : String(paperRuntimeRecoveryNextAction || paperEntryEligibility.clear_action || "Start Runtime");
+  const operationalReadiness = useMemo<OperationalReadinessModel>(
+    () =>
+      deriveOperationalReadiness({
+        connection: desktopState?.connection,
+        backendUrl: desktopState?.backendUrl,
+        source: desktopState?.source ?? null,
+        backend: desktopState?.backend ?? null,
+        startup: desktopState?.startup ?? null,
+        startupControlPlane,
+        supervisedPaperOperability,
+        paperReadiness,
+        temporaryPaperRuntimeIntegrity,
+        authReadyForPaperStartup,
+      }),
+    [
+      authReadyForPaperStartup,
+      desktopState?.backend,
+      desktopState?.backendUrl,
+      desktopState?.connection,
+      desktopState?.source,
+      desktopState?.startup,
+      paperReadiness,
+      startupControlPlane,
+      supervisedPaperOperability,
+      temporaryPaperRuntimeIntegrity,
+    ],
+  );
+  const canRunLiveActions = operationalReadiness.liveActionsAllowed;
+  useEffect(() => {
+    const sourceMode = String((desktopState?.source as JsonRecord | null | undefined)?.mode ?? "").trim().toLowerCase();
+    const reachedUsableState =
+      operationalReadiness.appUsableForSupervisedPaper &&
+      operationalReadiness.dashboardAttached &&
+      operationalReadiness.liveActionsAllowed &&
+      operationalReadiness.paperRuntimeReady &&
+      operationalReadiness.overallState === "READY";
+    if (!reachedUsableState) {
+      reportedUsableStateRef.current = false;
+      return;
+    }
+    if (reportedUsableStateRef.current) {
+      return;
+    }
+    reportedUsableStateRef.current = true;
+    reportBootstrapEvent("renderer:service-attached-usable", {
+      overall_state: operationalReadiness.overallState,
+      dashboard_attached: operationalReadiness.dashboardAttached,
+      live_actions_allowed: operationalReadiness.liveActionsAllowed,
+      paper_runtime_ready: operationalReadiness.paperRuntimeReady,
+      source_mode: sourceMode,
+      backend_url: desktopState?.backendUrl ?? null,
+    });
+  }, [
+    desktopState?.backendUrl,
+    desktopState?.source,
+    operationalReadiness.appUsableForSupervisedPaper,
+    operationalReadiness.dashboardAttached,
+    operationalReadiness.liveActionsAllowed,
+    operationalReadiness.overallState,
+    operationalReadiness.paperRuntimeReady,
+  ]);
+  const researchRuntimeAttention = useMemo<RuntimeAttentionModel>(() => {
+    if (operationalReadiness.overallState !== "READY") {
+      return {
+        title: operationalReadiness.primaryIssueTitle,
+        severityLabel: operationalReadiness.severityLabel,
+        tone: operationalReadiness.tone,
+        operatorActionRequired: operationalReadiness.severityLabel !== "INFORMATIONAL",
+        stateCode: operationalReadiness.primaryStateCode,
+        reason: operationalReadiness.primaryReason,
+        explanation: operationalReadiness.explanation,
+        primaryAction: operationalReadiness.primaryAction,
+        secondaryAction: operationalReadiness.secondaryAction,
+      };
+    }
+
+    const bridgeBlockedReason = String(researchRuntimeBridgeCadence.blocked_reason ?? "").trim().toUpperCase();
+    const selectedAlertSeverity = String(selectedResearchRuntimeBridgeAlert?.severity ?? "").trim().toUpperCase();
+    const selectedAlertClassification = String(selectedResearchRuntimeBridgeAlert?.classification ?? "").trim().toUpperCase();
+    const selectedAlertReviewState = String(selectedResearchRuntimeBridgeAlert?.review_state ?? "UNREVIEWED").trim().toUpperCase();
+    const supervisorStatus = String(researchRuntimeBridgeSupervisor.status ?? "STOPPED").trim().toUpperCase();
+    const supervisorDesiredState = String(researchRuntimeBridgeSupervisor.desired_state ?? "STOPPED").trim().toUpperCase();
+    const supervisorBlockedReason = String(researchRuntimeBridgeSupervisor.blocked_reason ?? "").trim().toUpperCase();
+    const supervisorNeedsAttentionNowCount = Number(researchRuntimeBridgeSupervisor.needs_attention_now_count ?? researchRuntimeBridgeNeedsAttentionNowCount ?? 0);
+    const supervisorAcknowledgedPendingCount = Number(researchRuntimeBridgeSupervisor.acknowledged_pending_count ?? researchRuntimeBridgeAcknowledgedPendingCount ?? 0);
+    const supervisorReviewedPendingCount = Number(researchRuntimeBridgeSupervisor.reviewed_pending_count ?? researchRuntimeBridgeReviewedPendingCount ?? 0);
+    const supervisorEscalatedCount = Number(researchRuntimeBridgeSupervisor.escalated_anomaly_count ?? researchRuntimeBridgeAnomalyQueue.escalated_count ?? 0);
+    const paperActionDisabledReason = !canRunLiveActions ? "Dashboard/API is not attached to a live operator backend yet." : undefined;
+
+    const paperActionKind =
+      paperStartupActionLabel === "Start Dashboard/API"
+        ? "start-dashboard"
+        : paperStartupActionLabel === "Restart Runtime + Temp Paper"
+          ? "restart-paper-with-temp-paper"
+          : paperStartupActionLabel === "Auth Gate Check"
+            ? "auth-gate-check"
+            : paperStartupActionLabel === "Complete Pre-Session Review"
+              ? "complete-pre-session-review"
+              : paperStartupActionLabel === "Runtime Active" || paperStartupActionLabel === "Auto-Restart In Progress"
+                ? undefined
+                : "start-paper";
+
+    if (supervisorDesiredState !== "RUNNING" || supervisorStatus === "STOPPED") {
+      return {
+        title: "Paper bridge supervision is not running.",
+        severityLabel: "WARNING",
+        tone: "warn",
+        operatorActionRequired: true,
+        stateCode: "BRIDGE_SUPERVISOR_STOPPED",
+        reason: "The runtime bridge can still be advanced manually, but the local cadence runner is not supervising cycles.",
+        explanation: "Start the paper-only supervisor when you want the warehouse bridge to keep polling and advancing without manual repeated runs.",
+        primaryAction: {
+          label: "Start Supervision",
+          description: "Start the local paper-only cadence runner for the selected warehouse bridge subset.",
+          kind: "research-runtime-bridge-start-supervisor",
+        },
+        secondaryAction: {
+          label: "Run Cycle Now",
+          description: "Advance one paper-only bridge cycle immediately without leaving the supervisor running.",
+          kind: "research-runtime-bridge-run-cycle-now",
+        },
+      };
+    }
+
+    if (supervisorBlockedReason || supervisorStatus === "BLOCKED" || supervisorStatus === "ATTENTION_REQUIRED") {
+      return {
+        title: supervisorBlockedReason ? runtimeBridgeBlockedReasonLabel(supervisorBlockedReason) : "Bridge supervision needs attention.",
+        severityLabel: supervisorEscalatedCount > 0 || supervisorNeedsAttentionNowCount > 0 ? "BLOCKING" : "WARNING",
+        tone: supervisorEscalatedCount > 0 || supervisorNeedsAttentionNowCount > 0 ? "danger" : "warn",
+        operatorActionRequired: true,
+        stateCode: supervisorBlockedReason || supervisorStatus || "BRIDGE_SUPERVISOR_ATTENTION",
+        reason: supervisorBlockedReason
+          ? runtimeBridgeBlockedReasonDetail(supervisorBlockedReason)
+          : supervisorEscalatedCount > 0
+            ? `${supervisorEscalatedCount} escalated paper-runtime anomalies still need explicit resolution.`
+            : `${supervisorNeedsAttentionNowCount} active paper-runtime anomalies still need acknowledgement or review.`,
+        explanation: "Review or resolve the active paper-runtime anomalies before expecting supervision to return to a boring settled loop.",
+        primaryAction: {
+          label: selectedResearchRuntimeBridgeAlert ? "Open Runtime Events" : "Run Cycle Now",
+          description: selectedResearchRuntimeBridgeAlert
+            ? "Open the evidence-heavy runtime view to work through the active anomaly queue."
+            : "Advance one manual bridge cycle after the blocking condition changes.",
+          kind: selectedResearchRuntimeBridgeAlert ? "open-runtime-events" : "research-runtime-bridge-run-cycle-now",
+        },
+        secondaryAction: {
+          label: "Stop Supervision",
+          description: "Stop the local cadence runner if you want to investigate or recover manually.",
+          kind: "research-runtime-bridge-stop-supervisor",
+        },
+      };
+    }
+
+    if (selectedResearchRuntimeBridgeAlert) {
+      const reviewActionKind =
+        selectedAlertClassification === "UNRESOLVED_PENDING_INTENT_ESCALATED"
+          ? "research-runtime-bridge-resolve-anomaly"
+          : selectedAlertReviewState === "ACKNOWLEDGED"
+          ? "research-runtime-bridge-mark-reviewed"
+          : "research-runtime-bridge-acknowledge-anomaly";
+      return {
+        title:
+          selectedAlertClassification === "UNRESOLVED_PENDING_INTENT_ESCALATED"
+            ? "Acknowledged bridge anomaly escalated and still needs resolution."
+            : textOrFallback(selectedResearchRuntimeBridgeAlert.classification ?? selectedResearchRuntimeBridgeAlert.title, "Bridge anomaly needs review."),
+        severityLabel: selectedAlertSeverity === "ERROR" ? "BLOCKING" : "WARNING",
+        tone: selectedAlertSeverity === "ERROR" ? "danger" : "warn",
+        operatorActionRequired: true,
+        stateCode: textOrFallback(selectedResearchRuntimeBridgeAlert.review_key ?? selectedResearchRuntimeBridgeAlert.dedup_key, "ANOMALY_REVIEW"),
+        reason: textOrFallback(
+          selectedResearchRuntimeBridgeAlert.message ?? selectedResearchRuntimeBridgeAlert.recommended_action,
+          "An actionable paper-runtime anomaly is active.",
+        ),
+        explanation:
+          selectedAlertClassification === "UNRESOLVED_PENDING_INTENT_ESCALATED"
+            ? "This paper-runtime anomaly was already acknowledged or reviewed and then remained unresolved across additional cadence cycles. It now needs explicit operator resolution."
+            : `Review state is ${selectedAlertReviewState || "UNREVIEWED"}. This is abnormal until the operator acknowledges or reviews the anomaly.`,
+        primaryAction: {
+          label:
+            reviewActionKind === "research-runtime-bridge-resolve-anomaly"
+              ? "Resolve Anomaly"
+              : reviewActionKind === "research-runtime-bridge-mark-reviewed"
+                ? "Mark Reviewed"
+                : "Acknowledge Anomaly",
+          description:
+            reviewActionKind === "research-runtime-bridge-resolve-anomaly"
+              ? "Record that the escalated paper-runtime anomaly has been worked through and is no longer an active blocker."
+              : reviewActionKind === "research-runtime-bridge-mark-reviewed"
+                ? "Record that the anomaly has been investigated and is no longer awaiting operator review."
+                : "Record that the anomaly is understood and intentionally being monitored in paper mode.",
+          kind: reviewActionKind,
+        },
+        secondaryAction: {
+          label: "Open Runtime Events",
+          description: "Open the evidence-heavy runtime event view for full lane, lifecycle, and review detail.",
+          kind: "open-runtime-events",
+        },
+      };
+    }
+
+    if (supervisorAcknowledgedPendingCount > 0 || supervisorReviewedPendingCount > 0 || selectedMonitoredResearchRuntimeBridgeAlert) {
+      return {
+        title: "Bridge anomalies remain unresolved but are already under review.",
+        severityLabel: "WARNING",
+        tone: "warn",
+        operatorActionRequired: false,
+        stateCode: "MONITORING_REVIEWED_ANOMALIES",
+        reason: textOrFallback(
+          selectedMonitoredResearchRuntimeBridgeAlert?.queue_status_detail,
+          "Acknowledged or reviewed paper-runtime anomalies are still being monitored across cadence cycles.",
+        ),
+        explanation: `The queue currently has ${supervisorAcknowledgedPendingCount || researchRuntimeBridgeAcknowledgedPendingCount} acknowledged pending and ${supervisorReviewedPendingCount || researchRuntimeBridgeReviewedPendingCount} reviewed pending anomalies. No immediate action is required unless one escalates or recurs as unreviewed.`,
+        primaryAction: {
+          label: "Open Runtime Events",
+          description: "Inspect the monitored anomaly queue and supporting evidence without changing runtime state.",
+          kind: "open-runtime-events",
+        },
+        secondaryAction: {
+          label: "Refresh",
+          description: "Refresh the operator snapshot after another cadence cycle completes.",
+          kind: "refresh",
+        },
+      };
+    }
+
+    if (bridgeBlockedReason) {
+      const blockedActionKind =
+        bridgeBlockedReason === "OPERATOR_HALT" || bridgeBlockedReason === "ENTRIES_DISABLED"
+          ? "paper-resume-entries"
+          : bridgeBlockedReason === "ACTIVE_ALERTS_PRESENT" || bridgeBlockedReason === "RECONCILIATION_ISSUES_PRESENT"
+            ? "open-runtime-events"
+            : paperActionKind;
+      return {
+        title: runtimeBridgeBlockedReasonLabel(bridgeBlockedReason),
+        severityLabel: bridgeBlockedReason === "ACTIVE_ALERTS_PRESENT" || bridgeBlockedReason === "RECONCILIATION_ISSUES_PRESENT" ? "BLOCKING" : "WARNING",
+        tone: bridgeBlockedReason === "ACTIVE_ALERTS_PRESENT" || bridgeBlockedReason === "RECONCILIATION_ISSUES_PRESENT" ? "danger" : "warn",
+        operatorActionRequired: true,
+        stateCode: bridgeBlockedReason,
+        reason: runtimeBridgeBlockedReasonDetail(bridgeBlockedReason),
+        explanation: "The cadence runner is intentionally blocked. This is expected only when the paper runtime is halted, entries are disabled, or unresolved anomalies remain.",
+        primaryAction: {
+          label:
+            blockedActionKind === "paper-resume-entries"
+              ? "Resume Entries"
+              : blockedActionKind === "open-runtime-events"
+                ? "Open Runtime Events"
+                : paperStartupActionLabel,
+          description:
+            blockedActionKind === "paper-resume-entries"
+              ? "Release the paper entry halt once the current block is understood."
+              : blockedActionKind === "open-runtime-events"
+                ? "Open the bridge evidence view to inspect the blocking runtime anomalies."
+                : paperStartupActionDescription,
+          kind: blockedActionKind,
+          disabled: blockedActionKind === "paper-resume-entries" && !canRunLiveActions,
+          disabledReason: blockedActionKind === "paper-resume-entries" ? paperActionDisabledReason : undefined,
+        },
+        secondaryAction: {
+          label: "Refresh",
+          description: "Refresh the operator state after the blocking condition changes.",
+          kind: "refresh",
+        },
+      };
+    }
+
+    if (paperStartupStateLabel !== "RUNNING") {
+      return {
+        title: paperStartupStateLabel,
+        severityLabel: paperStartupActionLabel === "Start Dashboard/API" ? "BLOCKING" : "WARNING",
+        tone: paperStartupActionLabel === "Start Dashboard/API" ? "danger" : "warn",
+        operatorActionRequired: paperStartupActionLabel !== "Auto-Restart In Progress",
+        stateCode: paperStartupCategory.toUpperCase().replaceAll(" ", "_"),
+        reason: paperStartupReasonText,
+        explanation: paperStartupActionDescription,
+        primaryAction: {
+          label: paperStartupActionLabel,
+          description: paperStartupActionDescription,
+          kind: paperActionKind,
+          disabled: (paperActionKind === "start-paper" || paperActionKind === "restart-paper-with-temp-paper" || paperActionKind === "complete-pre-session-review") && !canRunLiveActions,
+          disabledReason: paperActionDisabledReason,
+        },
+        secondaryAction: {
+          label: "Open Runtime Events",
+          description: "Inspect recent runtime events and anomalies before attempting recovery.",
+          kind: "open-runtime-events",
+        },
+      };
+    }
+
+    if (Number(researchRuntimeBridgeSummary.pending_intent_count ?? 0) > 0 || Number(researchRuntimeBridgeSummary.open_position_count ?? 0) > 0) {
+      return {
+        title: "Paper runtime is active and still advancing lifecycle state.",
+        severityLabel: "INFORMATIONAL",
+        tone: "good",
+        operatorActionRequired: false,
+        stateCode: "PAPER_LIFECYCLE_ACTIVE",
+        reason: `${textOrFallback(researchRuntimeBridgeSummary.pending_intent_count, "0")} pending intents and ${textOrFallback(researchRuntimeBridgeSummary.open_position_count, "0")} open positions are still being monitored.`,
+        explanation: "Expected while the prospective paper bridge is mid-cycle. No operator action is required unless a warning or error anomaly appears.",
+        primaryAction: {
+          label: "Open Runtime Events",
+          description: "Review pending intents, fills, and open positions without changing runtime state.",
+          kind: "open-runtime-events",
+        },
+        secondaryAction: {
+          label: "Refresh",
+          description: "Refresh the operator snapshot if you want to watch the lifecycle advance.",
+          kind: "refresh",
+        },
+      };
+    }
+
+    return {
+      title: "Paper runtime is settled and no operator action is required.",
+      severityLabel: "INFORMATIONAL",
+      tone: "good",
+      operatorActionRequired: false,
+      stateCode: "PAPER_READY",
+      reason: textOrFallback(researchRuntimeBridgeSummary.summary_line, "The warehouse paper bridge is settled and clean."),
+      explanation: "Expected steady-state behavior. Keep monitoring, but no remediation step is currently required.",
+      primaryAction: {
+        label: "Refresh",
+        description: "Refresh the operator snapshot when you want the latest cadence and anomaly state.",
+        kind: "refresh",
+      },
+      secondaryAction: {
+        label: "Open Runtime Events",
+        description: "Inspect detailed bridge evidence without changing runtime state.",
+        kind: "open-runtime-events",
+      },
+    };
+  }, [
+    canRunLiveActions,
+    desktopState?.backend.detail,
+    desktopState?.backend.healthStatus,
+    desktopState?.backendUrl,
+    paperStartupActionDescription,
+    paperStartupActionLabel,
+    paperStartupCategory,
+    paperStartupReasonText,
+    paperStartupStateLabel,
+    researchRuntimeBridgeAcknowledgedPendingCount,
+    researchRuntimeBridgeAnomalyQueue.escalated_count,
+    researchRuntimeBridgeCadence.blocked_reason,
+    researchRuntimeBridgeNeedsAttentionNowCount,
+    researchRuntimeBridgeReviewedPendingCount,
+    researchRuntimeBridgeSupervisor.blocked_reason,
+    researchRuntimeBridgeSupervisor.desired_state,
+    researchRuntimeBridgeSupervisor.escalated_anomaly_count,
+    researchRuntimeBridgeSupervisor.acknowledged_pending_count,
+    researchRuntimeBridgeSupervisor.reviewed_pending_count,
+    researchRuntimeBridgeSupervisor.status,
+    researchRuntimeBridgeSupervisor.needs_attention_now_count,
+    researchRuntimeBridgeSummary.pending_intent_count,
+    researchRuntimeBridgeSummary.open_position_count,
+    researchRuntimeBridgeSummary.summary_line,
+    operationalReadiness,
+    selectedMonitoredResearchRuntimeBridgeAlert,
+    selectedResearchRuntimeBridgeAlert,
+  ]);
+  const runStartupControlPlaneAction = async (row: JsonRecord | null | undefined): Promise<void> => {
+    await runAttentionAction(startupControlPlaneActionSpec(row, { canRunLiveActions }));
+  };
+  const openStartupControlPlaneEvidence = async (row: JsonRecord | null | undefined): Promise<void> => {
+    const evidenceTarget = row?.authoritative_artifact ?? startupControlPlane.authoritative_artifact;
+    if (!evidenceTarget) {
+      return;
+    }
+    const evidenceKey = String(row?.key ?? "startup-control-plane");
+    await runCommand(`open-startup-evidence-${evidenceKey}`, () => openArtifact(api, desktopState, evidenceTarget));
+  };
   const startup = desktopState?.startup ?? null;
+  const desktopModeLabelValue = desktopModeLabel(startup);
+  const desktopManagedDiagnosticMode = startup?.mode === "DESKTOP_MANAGED_DIAGNOSTIC";
+  const backendGenuinelyAbsent =
+    desktopState?.connection === "unavailable" ||
+    desktopState?.source.mode === "backend_down" ||
+    (!desktopState?.backendUrl && desktopState?.source.mode !== "live_api");
+  const showStartDashboardAction = desktopManagedDiagnosticMode || Boolean(backendGenuinelyAbsent);
+  const showRestartDashboardAction = desktopManagedDiagnosticMode;
   const playbackArtifacts = asRecord(playbackLatestRun.artifact_paths);
   const auditFiltersActive = Boolean(auditStrategyIdentityFilter || auditFamilyFilter || auditInstrumentFilter || auditSessionFilter || auditVerdictFilter);
   const selectedProductionAccount = productionAccounts.find((row) => row.selected === true) ?? productionAccounts[0] ?? null;
@@ -4264,23 +6000,25 @@ function paperStartupCategoryTone(category: string): Tone {
     positionsPagePollingActive &&
     desktopState?.source.mode === "live_api" &&
     paperReadiness.runtime_running === true;
+  const snapshotBackedDesktopSource =
+    desktopState?.source.mode === "snapshot_fallback" || desktopState?.source.mode === "attached_snapshot_bridge";
   const brokerPositionsFreshnessState = productionLinkEnabled()
-    ? freshnessState(brokerPositionsFreshness, desktopState?.source.mode === "snapshot_fallback" ? "SNAPSHOT" : "STALE")
+    ? freshnessState(brokerPositionsFreshness, snapshotBackedDesktopSource ? "SNAPSHOT" : "STALE")
     : "SNAPSHOT";
   const brokerQuotesFreshnessState = productionLinkEnabled()
-    ? freshnessState(brokerQuotesFreshness, desktopState?.source.mode === "snapshot_fallback" ? "SNAPSHOT" : "STALE")
+    ? freshnessState(brokerQuotesFreshness, snapshotBackedDesktopSource ? "SNAPSHOT" : "STALE")
     : "SNAPSHOT";
   const brokerDataStale = brokerPositionsFreshnessState === "STALE" || brokerPositionsFreshnessState === "SNAPSHOT";
   const paperFreshnessState = paperReadiness.runtime_running !== true
     ? "SNAPSHOT"
-    : desktopState?.source.mode === "snapshot_fallback"
+    : snapshotBackedDesktopSource
       ? "SNAPSHOT"
       : paperPollingActive
         ? "LIVE"
         : "DELAYED";
   const ordersFillsFreshnessState = productionLinkEnabled()
     ? (() => {
-        const orderState = freshnessState(brokerOrdersFreshness, desktopState?.source.mode === "snapshot_fallback" ? "SNAPSHOT" : "STALE");
+        const orderState = freshnessState(brokerOrdersFreshness, snapshotBackedDesktopSource ? "SNAPSHOT" : "STALE");
         const fillState = freshnessState(brokerFillsFreshness, orderState);
         if (orderState === "STALE" || fillState === "STALE") {
           return "STALE";
@@ -4297,15 +6035,19 @@ function paperStartupCategoryTone(category: string): Tone {
   const brokerFreshnessTone: Tone = freshnessToneFromState(brokerPositionsFreshnessState);
   const brokerFeedLabel = !productionLinkEnabled()
     ? "SNAPSHOT CACHE"
-    : desktopState?.source.mode === "snapshot_fallback"
-      ? "SNAPSHOT FALLBACK"
+    : snapshotBackedDesktopSource
+      ? desktopState?.source.mode === "attached_snapshot_bridge"
+        ? "ATTACHED SNAPSHOT BRIDGE"
+        : "SNAPSHOT FALLBACK"
       : "LIVE SCHWAB FEED";
   const brokerFreshnessMessage = brokerSnapshotTimestamp
     ? `Last broker positions refresh: ${formatTimestamp(brokerSnapshotTimestamp)} (${formatRelativeAge(brokerSnapshotTimestamp)}).`
     : "No broker positions refresh timestamp is available.";
   const brokerFreshnessDetail = productionLinkEnabled()
-    ? desktopState?.source.mode === "snapshot_fallback"
-      ? "The desktop app is running from persisted snapshots because the live dashboard API is unavailable."
+    ? snapshotBackedDesktopSource
+      ? desktopState?.source.mode === "attached_snapshot_bridge"
+        ? "The backend is attached, but this launch context is reading current operator state from the persisted snapshot bridge instead of direct localhost API transport."
+        : "The desktop app is running from persisted snapshots because the live dashboard API is unavailable."
       : brokerPositionsFreshnessState === "STALE"
         ? `Broker source is ${formatValue(productionLink.source_of_record ?? productionLink.status)} and is not currently fresh.`
         : brokerPollingActive
@@ -4947,7 +6689,14 @@ function paperStartupCategoryTone(category: string): Tone {
   const brokerOrdersOrFillsAvailable = productionOpenOrders.length > 0 || productionRecentFills.length > 0 || productionEvents.length > 0;
   const productionReconciliationFresh = asRecord(productionHealth.reconciliation_fresh).ok === true;
   const productionLinkDegraded = String(productionLink.status ?? "").toLowerCase() === "degraded";
-  const manualAssetClasses = supportedManualAssetClasses.length ? supportedManualAssetClasses : ["STOCK"];
+  const productionManualSafetyConstraints = asRecord(productionManualSafety.constraints);
+  const productionManualSafetyBlockers = asArray<string>(productionManualSafety.blockers);
+  const productionManualSafetyWarnings = asArray<string>(productionManualSafety.warnings);
+  const productionPilotLockedPolicy = asRecord(productionPilotReadiness.locked_policy ?? productionPilotScope);
+  const activePilotIsFutures =
+    String(productionPilotMode.current_active_lane ?? "").trim().toUpperCase() === "FUTURES"
+    || String(productionPilotLockedPolicy.asset_class ?? "").trim().toUpperCase() === "FUTURE";
+  const manualAssetClasses = supportedManualAssetClasses.length ? supportedManualAssetClasses : [activePilotIsFutures ? "FUTURE" : "STOCK"];
   const assetScopedOrderTypes = asArray<string>(orderTypeMatrixByAssetClass[manualOrderForm.assetClass]);
   const manualOrderTypes = assetScopedOrderTypes.length
     ? assetScopedOrderTypes
@@ -4957,10 +6706,6 @@ function paperStartupCategoryTone(category: string): Tone {
   const manualTimeInForceOptions = supportedManualTimeInForceValues.length ? supportedManualTimeInForceValues : ["DAY", "GTC"];
   const manualSessionOptions = supportedManualSessionValues.length ? supportedManualSessionValues : ["NORMAL"];
   const manualSideOptions = productionCapabilities.sell_short === true ? ["BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER"] : ["BUY", "SELL", "BUY_TO_COVER"];
-  const productionManualSafetyConstraints = asRecord(productionManualSafety.constraints);
-  const productionManualSafetyBlockers = asArray<string>(productionManualSafety.blockers);
-  const productionManualSafetyWarnings = asArray<string>(productionManualSafety.warnings);
-  const productionPilotLockedPolicy = asRecord(productionPilotReadiness.locked_policy ?? productionPilotScope);
   const firstLiveStockLimitTest = asRecord(productionManualSafetyConstraints.first_live_stock_limit_test);
   const advancedTifTicketSupport = productionCapabilities.advanced_tif_ticket_support === true;
   const ocoTicketSupport = productionCapabilities.oco_ticket_support === true;
@@ -4990,7 +6735,7 @@ function paperStartupCategoryTone(category: string): Tone {
     || String(productionPilotCycle.symbol ?? "").trim().toUpperCase()
     || manualSymbolWhitelist[0]
     || "";
-  const selectedProductionPositionIsLongOneShare =
+  const selectedProductionPositionIsLongOneLot =
     String(selectedProductionPosition?.side ?? "").trim().toUpperCase() === "LONG"
     && Number(selectedProductionPosition?.quantity ?? 0) === 1;
   const selectedProductionPositionIsWhitelisted =
@@ -4998,24 +6743,24 @@ function paperStartupCategoryTone(category: string): Tone {
   const pilotRunbookEntryEligible =
     productionPilotReadiness.submit_eligible === true
     && Boolean(preferredPilotSymbol)
-    && !(selectedProductionPositionIsLongOneShare && selectedProductionSymbol === preferredPilotSymbol);
+    && !(selectedProductionPositionIsLongOneLot && selectedProductionSymbol === preferredPilotSymbol);
   const pilotRunbookEntryDetail =
     productionPilotReadiness.submit_eligible !== true
       ? String(productionPilotReadiness.blocked_reason ?? productionPilotReadiness.detail ?? "Pilot submit is not currently eligible.")
       : !preferredPilotSymbol
         ? "No whitelisted pilot symbol is currently selected in the operator ticket."
-        : selectedProductionPositionIsLongOneShare && selectedProductionSymbol === preferredPilotSymbol
+        : selectedProductionPositionIsLongOneLot && selectedProductionSymbol === preferredPilotSymbol
           ? `An existing LONG 1 ${preferredPilotSymbol} broker position is open. Use SELL_TO_CLOSE before another BUY_TO_OPEN pilot submit.`
           : `BUY_TO_OPEN is eligible now for ${preferredPilotSymbol}.`
   const pilotRunbookCloseEligible =
     productionPilotReadiness.submit_eligible === true
-    && selectedProductionPositionIsLongOneShare
+    && selectedProductionPositionIsLongOneLot
     && selectedProductionPositionIsWhitelisted;
   const pilotRunbookCloseDetail =
     productionPilotReadiness.submit_eligible !== true
       ? String(productionPilotReadiness.blocked_reason ?? productionPilotReadiness.detail ?? "Pilot submit is not currently eligible.")
-      : !selectedProductionPositionIsLongOneShare
-        ? "SELL_TO_CLOSE requires a selected live broker position of LONG 1 share."
+      : !selectedProductionPositionIsLongOneLot
+        ? "SELL_TO_CLOSE requires a selected live broker position of LONG 1 contract."
         : !selectedProductionPositionIsWhitelisted
           ? `Selected position ${selectedProductionSymbol || "UNKNOWN"} is outside the locked pilot whitelist.`
           : `SELL_TO_CLOSE is eligible now for ${selectedProductionSymbol}.`
@@ -5362,6 +7107,35 @@ function paperStartupCategoryTone(category: string): Tone {
   }, [manualSideOptions]);
 
   useEffect(() => {
+    if (!activePilotIsFutures) {
+      return;
+    }
+    setManualOrderForm((current) => {
+      const preferredSymbol = (current.symbol.trim() || preferredPilotSymbol).toUpperCase();
+      const nextOrderType = String(productionPilotLockedPolicy.submit_order_type ?? productionPilotLockedPolicy.order_type ?? "MARKET");
+      const next = {
+        ...current,
+        assetClass: "FUTURE",
+        intentType: current.intentType === "FLATTEN" ? "FLATTEN" : "MANUAL_LIVE_FUTURES_PILOT",
+        orderType: nextOrderType,
+        quantity: String(productionPilotLockedPolicy.max_quantity ?? "1"),
+        timeInForce: String(productionPilotLockedPolicy.time_in_force ?? "DAY"),
+        session: String(productionPilotLockedPolicy.session ?? "NORMAL"),
+        symbol: preferredSymbol,
+      };
+      return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+    });
+  }, [
+    activePilotIsFutures,
+    preferredPilotSymbol,
+    productionPilotLockedPolicy.max_quantity,
+    productionPilotLockedPolicy.order_type,
+    productionPilotLockedPolicy.session,
+    productionPilotLockedPolicy.submit_order_type,
+    productionPilotLockedPolicy.time_in_force,
+  ]);
+
+  useEffect(() => {
     if (!manualTimeInForceOptions.length) {
       return;
     }
@@ -5476,6 +7250,7 @@ function paperStartupCategoryTone(category: string): Tone {
   ];
   const paperStatus = asRecord(paper.status);
   const rawPaperOperatorStatus = asRecord(paper.raw_operator_status);
+  const rawPaperOperatorLaneRows = asArray<JsonRecord>(rawPaperOperatorStatus.lanes);
   const latestRuntimeCaptureTimestamp =
     String(rawPaperOperatorStatus.updated_at ?? paperStatus.updated_at ?? paperReadiness.generated_at ?? "") || null;
   const latestStrategyActivityTimestamp = strategyPerformanceRows.reduce<string | null>((latest, row) => {
@@ -5505,6 +7280,37 @@ function paperStartupCategoryTone(category: string): Tone {
           : "CAPTURE HEALTHY";
   const captureHealthTone: Tone =
     captureHealthLabel === "CAPTURE HEALTHY" ? "good" : captureHealthLabel === "STALE / NOT REFRESHING" ? "warn" : "danger";
+  const backendUrlLabel = backendUrlStateLabel(desktopState?.backendUrl, desktopState?.backend.state);
+  const bridgeHasAnyHistory =
+    Number(researchRuntimeBridgeSummary.intent_count ?? 0) > 0
+    || Number(researchRuntimeBridgeSummary.fill_count ?? 0) > 0
+    || Number(researchRuntimeBridgeSummary.closed_position_count ?? 0) > 0;
+  const researchRuntimeBridgeLastActivityDisplay = runtimeBridgeLastActivityLabel(
+    researchRuntimeBridgeSummary.last_activity_at,
+    bridgeHasAnyHistory,
+  );
+  const researchRuntimeBridgeSupervisorStatus = String(researchRuntimeBridgeSupervisor.status ?? "STOPPED").trim().toUpperCase();
+  const researchRuntimeBridgeSupervisorDesiredState = String(researchRuntimeBridgeSupervisor.desired_state ?? "STOPPED").trim().toUpperCase();
+  const researchRuntimeBridgeSupervisorBlockedReason = String(researchRuntimeBridgeSupervisor.blocked_reason ?? "").trim();
+  const researchRuntimeBridgeEscalatedCount = Number(researchRuntimeBridgeAnomalyQueue.escalated_count ?? 0);
+  const researchRuntimeBridgeSupervisorNextCycleDisplay = researchRuntimeBridgeSupervisor.next_cycle_not_before
+    ? formatTimestamp(researchRuntimeBridgeSupervisor.next_cycle_not_before)
+    : researchRuntimeBridgeSupervisorStatus === "STOPPED"
+      ? "Supervisor is stopped."
+      : researchRuntimeBridgeSupervisorBlockedReason
+        ? runtimeBridgeBlockedReasonLabel(researchRuntimeBridgeSupervisorBlockedReason)
+        : "Next cycle has not been scheduled yet.";
+  const latestRuntimeCaptureLabel = latestRuntimeCaptureTimestamp
+    ? formatRelativeAge(latestRuntimeCaptureTimestamp)
+    : paperRuntimeStopped
+      ? "Runtime is stopped; no fresh capture is expected."
+      : "Runtime capture artifact is not available yet.";
+  const latestStrategyActivityLabel = latestStrategyActivityTimestamp
+    ? formatRelativeAge(latestStrategyActivityTimestamp)
+    : "No strategy activity artifact is available yet.";
+  const bridgeSelectedScopeLabel = researchRuntimeBridgeSelectedTenants.length
+    ? researchRuntimeBridgeSelectedTenants.map((row) => String(row.family_label ?? row.strategy_family ?? row.family ?? row.label ?? "warehouse")).join(", ")
+    : "Warehouse-only bridge scope";
   const paperCaptureIntegrityMetrics: Array<{ label: string; value: string; tone?: Tone }> = [
     { label: "Runtime", value: paperRuntimeStopped ? "STOPPED" : "RUNNING", tone: paperRuntimeStopped ? "danger" : "good" },
     { label: "Capture Health", value: captureHealthLabel, tone: captureHealthTone },
@@ -5689,9 +7495,24 @@ function paperStartupCategoryTone(category: string): Tone {
       const liveApprovedRows = [...approvedModelRows].map((row) => ({
         ...asRecord(approvedModelDetailsByBranch[String(row.branch ?? "")]),
         ...row,
+        preferred_playback_strategy_ids:
+          PREFERRED_PLAYBACK_STRATEGY_IDS_BY_LANE[String(row.lane_id ?? "").trim()]
+          ?? asArray<string>(row.preferred_playback_strategy_ids),
       }));
       const liveLookup = new Map<string, JsonRecord>();
-      for (const row of [...liveApprovedRows, ...runtimeRegistryRows, ...temporaryPaperStrategyRows]) {
+      const operatorLaneLookup = new Map<string, JsonRecord>();
+      for (const row of rawPaperOperatorLaneRows) {
+        for (const key of [
+          String(row.lane_id ?? ""),
+          String(row.standalone_strategy_id ?? ""),
+          String(row.tracked_strategy_id ?? ""),
+        ]) {
+          if (key) {
+            operatorLaneLookup.set(key, row);
+          }
+        }
+      }
+      for (const row of [...liveApprovedRows, ...runtimeRegistryRows, ...temporaryPaperStrategyRows, ...rawPaperOperatorLaneRows]) {
         for (const key of [
           String(row.lane_id ?? ""),
           String(row.standalone_strategy_id ?? ""),
@@ -5714,11 +7535,23 @@ function paperStartupCategoryTone(category: string): Tone {
         roster.set(String(row.lane_id ?? row.standalone_strategy_id ?? row.branch ?? strategyRowIdentity(row)), row);
       }
       for (const meta of ATP_PRODUCT_CATALOG) {
-        const liveRow =
+        const runtimeRow =
           liveLookup.get(meta.laneId)
           ?? liveLookup.get(meta.standaloneStrategyId)
           ?? liveLookup.get(meta.trackedStrategyId)
           ?? null;
+        const operatorLaneRow =
+          operatorLaneLookup.get(meta.laneId)
+          ?? operatorLaneLookup.get(meta.standaloneStrategyId)
+          ?? operatorLaneLookup.get(meta.trackedStrategyId)
+          ?? null;
+        const liveRow =
+          runtimeRow || operatorLaneRow
+            ? {
+                ...(runtimeRow ?? {}),
+                ...(operatorLaneRow ?? {}),
+              }
+            : null;
         const trackedDetail = asRecord(trackedStrategyDetailsById[meta.trackedStrategyId] ?? trackedStrategyDetailsById[meta.laneId]);
         const trackedRow = trackedLookup.get(meta.trackedStrategyId) ?? trackedLookup.get(meta.laneId) ?? null;
         const mergedRow: JsonRecord = {
@@ -5731,6 +7564,7 @@ function paperStartupCategoryTone(category: string): Tone {
           strategy_name: meta.displayName,
           tracked_strategy_id: meta.trackedStrategyId,
           standalone_strategy_id: String(liveRow?.standalone_strategy_id ?? meta.standaloneStrategyId),
+          preferred_playback_strategy_ids: meta.preferredPlaybackStrategyIds ?? [],
           instrument: String(liveRow?.instrument ?? meta.instrument),
           observed_instruments: liveRow?.observed_instruments ?? [meta.instrument],
           strategy_family: String(liveRow?.strategy_family ?? "active_trend_participation_engine"),
@@ -5760,6 +7594,26 @@ function paperStartupCategoryTone(category: string): Tone {
           can_process_bars: liveRow?.can_process_bars === true,
           audit_only: liveRow ? false : true,
           snapshot_only: liveRow ? false : true,
+          runtime_presence: String(
+            liveRow?.runtime_presence
+              ?? (liveRow
+                ? (liveRow?.runtime_state_loaded === true || liveRow?.can_process_bars === true ? "ACTIVE_RUNTIME" : "ATTACH_PENDING")
+                : trackedDetail.runtime_attached === true
+                  ? "ATTACH_PENDING"
+                  : trackedRow || trackedDetail
+                    ? "HISTORICAL_SNAPSHOT_ONLY"
+                    : "CONFIGURED_NOT_LOADED"),
+          ),
+          runtime_presence_label: String(
+            liveRow?.runtime_presence_label
+              ?? (liveRow
+                ? (liveRow?.runtime_state_loaded === true || liveRow?.can_process_bars === true ? "Active Runtime" : "Attach Pending")
+                : trackedDetail.runtime_attached === true
+                  ? "Attach Pending"
+                  : trackedRow || trackedDetail
+                    ? "Historical / Snapshot"
+                    : "Configured Only"),
+          ),
           truth_label: liveRow ? "LIVE_SHARED_PAPER_ROSTER" : "CONFIGURED_ATP_UNIVERSE",
           current_strategy_status: String(
             liveRow?.current_strategy_status
@@ -5806,10 +7660,23 @@ function paperStartupCategoryTone(category: string): Tone {
         if (leftBench !== rightBench) {
           return leftBench - rightBench;
         }
+        const leftCanonical = isInstrumentFirstCanonicalLane(left) ? 0 : 1;
+        const rightCanonical = isInstrumentFirstCanonicalLane(right) ? 0 : 1;
+        if (leftCanonical !== rightCanonical) {
+          return leftCanonical - rightCanonical;
+        }
         return String(left.branch ?? left.display_name ?? "").localeCompare(String(right.branch ?? right.display_name ?? ""));
       });
     },
-    [approvedModelDetailsByBranch, approvedModelRows, runtimeRegistryRows, temporaryPaperStrategyRows, trackedStrategyRows, trackedStrategyDetailsById],
+    [
+      approvedModelDetailsByBranch,
+      approvedModelRows,
+      rawPaperOperatorLaneRows,
+      runtimeRegistryRows,
+      temporaryPaperStrategyRows,
+      trackedStrategyRows,
+      trackedStrategyDetailsById,
+    ],
   );
   useEffect(() => {
     if (!dashboardRosterRows.length) {
@@ -5823,15 +7690,6 @@ function paperStartupCategoryTone(category: string): Tone {
     () => dashboardRosterRows.find((row) => String(row.lane_id ?? "") === selectedWorkspaceLaneId) ?? dashboardRosterRows[0] ?? null,
     [dashboardRosterRows, selectedWorkspaceLaneId],
   );
-  useEffect(() => {
-    if (calendarAutoRangeApplied || !playback.available || !earliestPlaybackCoverageDate) {
-      return;
-    }
-    if (earliestPlaybackCoverageDate < startOfMonth(new Date().toISOString().slice(0, 10))) {
-      setCalendarPeriod("ytd");
-    }
-    setCalendarAutoRangeApplied(true);
-  }, [calendarAutoRangeApplied, earliestPlaybackCoverageDate, playback.available]);
   const selectedWorkspaceInstrument = String(selectedWorkspaceRow?.instrument ?? "").trim().toUpperCase();
   const selectedWorkspacePerformanceRow = useMemo(
     () =>
@@ -5853,15 +7711,23 @@ function paperStartupCategoryTone(category: string): Tone {
     if (!playbackLatestStudyItems.length) {
       return null;
     }
+    const preferredPlaybackIds = asArray(selectedWorkspaceRow?.preferred_playback_strategy_ids).map((value) => String(value ?? "").trim()).filter(Boolean);
     const exactStrategyIds = [
+      ...preferredPlaybackIds,
       String(selectedWorkspaceRow?.tracked_strategy_id ?? "").trim(),
       String(selectedWorkspaceRow?.standalone_strategy_id ?? "").trim(),
     ].filter(Boolean);
-    const exactMatch = playbackLatestStudyItems.find((item) => {
-      return exactStrategyIds.includes(String(item.strategy_id ?? "").trim());
-    });
-    if (exactMatch) {
-      return exactMatch;
+    const exactMatches = playbackLatestStudyItems
+      .filter((item) => {
+        return exactStrategyIds.includes(String(item.strategy_id ?? "").trim());
+      })
+      .sort(comparePlaybackStudyItems);
+    const preferredExactMatch = firstPreferredPlaybackStudyItem(exactMatches, preferredPlaybackIds);
+    if (preferredExactMatch) {
+      return preferredExactMatch;
+    }
+    if (exactMatches.length) {
+      return exactMatches[0];
     }
     const preferredMode = selectedWorkspaceRow?.candidate_designation ? "research_execution_mode" : "baseline_parity_mode";
     const instrumentMatches = playbackLatestStudyItems
@@ -5871,22 +7737,7 @@ function paperStartupCategoryTone(category: string): Tone {
           && String(item.study_mode ?? "").trim() === preferredMode
         );
       })
-      .sort((left, right) => {
-        const leftSpan = Math.max(
-          0,
-          parseTimestampMs(String(left.coverage_end ?? "")) - parseTimestampMs(String(left.coverage_start ?? "")),
-        );
-        const rightSpan = Math.max(
-          0,
-          parseTimestampMs(String(right.coverage_end ?? "")) - parseTimestampMs(String(right.coverage_start ?? "")),
-        );
-        if (rightSpan !== leftSpan) {
-          return rightSpan - leftSpan;
-        }
-        const leftTrades = asArray<JsonRecord>(asRecord(left.summary).closed_trade_breakdown).length;
-        const rightTrades = asArray<JsonRecord>(asRecord(right.summary).closed_trade_breakdown).length;
-        return rightTrades - leftTrades;
-      });
+      .sort(comparePlaybackStudyItems);
     if (instrumentMatches.length) {
       return instrumentMatches[0];
     }
@@ -5899,18 +7750,10 @@ function paperStartupCategoryTone(category: string): Tone {
       ?? null;
     const preferredStudyKey = String(asRecord(asRecord(preferredReplayRow?.evidence).bars).ref?.study_key ?? "").trim();
     if (preferredStudyKey) {
-      return playbackLatestStudyItems.find((item) => String(item.study_key ?? "").trim() === preferredStudyKey) ?? playbackLatestStudyItems[0];
+      return playbackLatestStudyItems.find((item) => String(item.study_key ?? "").trim() === preferredStudyKey) ?? [...playbackLatestStudyItems].sort(comparePlaybackStudyItems)[0];
     }
-    return playbackLatestStudyItems[0];
+    return [...playbackLatestStudyItems].sort(comparePlaybackStudyItems)[0];
   }, [playbackLatestStudyItems, selectedWorkspaceInstrument, selectedWorkspaceRow, strategyAnalysis.results_board]);
-  const selectedWorkspacePlaybackSummary = asRecord(selectedWorkspacePlaybackStudyItem?.summary);
-  const selectedWorkspacePlaybackCoverage = useMemo(
-    () => ({
-      start_timestamp: selectedWorkspacePlaybackStudyItem?.coverage_start ?? null,
-      end_timestamp: selectedWorkspacePlaybackStudyItem?.coverage_end ?? null,
-    }),
-    [selectedWorkspacePlaybackStudyItem],
-  );
   const [selectedWorkspacePlaybackStudyLoaded, setSelectedWorkspacePlaybackStudyLoaded] = useState<JsonRecord | null>(null);
   useEffect(() => {
     const artifactTarget = String(asRecord(selectedWorkspacePlaybackStudyItem?.artifact_paths).strategy_study_json ?? "").trim();
@@ -5945,6 +7788,21 @@ function paperStartupCategoryTone(category: string): Tone {
     };
   }, [desktopState?.backendUrl, selectedWorkspacePlaybackStudyItem]);
   const selectedWorkspacePlaybackStudy = selectedWorkspacePlaybackStudyLoaded ?? asRecord(selectedWorkspacePlaybackStudyItem?.study_preview);
+  const selectedWorkspacePlaybackSummary = asRecord(
+    selectedWorkspacePlaybackStudy.summary ?? selectedWorkspacePlaybackStudyItem?.summary,
+  );
+  const selectedWorkspacePlaybackTrades = useMemo(
+    () => replayStudyTradeRows(selectedWorkspacePlaybackStudy),
+    [selectedWorkspacePlaybackStudy],
+  );
+  const selectedWorkspaceDisplayTrades = selectedWorkspaceTrades.length ? selectedWorkspaceTrades : selectedWorkspacePlaybackTrades;
+  const selectedWorkspacePlaybackCoverage = useMemo(
+    () => ({
+      start_timestamp: selectedWorkspacePlaybackStudyItem?.coverage_start ?? null,
+      end_timestamp: selectedWorkspacePlaybackStudyItem?.coverage_end ?? null,
+    }),
+    [selectedWorkspacePlaybackStudyItem],
+  );
   const selectedWorkspacePlaybackStudyRows = asArray<JsonRecord>(
     selectedWorkspacePlaybackStudy.bars ?? selectedWorkspacePlaybackStudy.rows,
   );
@@ -5952,7 +7810,7 @@ function paperStartupCategoryTone(category: string): Tone {
     Boolean(selectedWorkspacePlaybackStudyItem) && selectedWorkspacePlaybackStudyRows.length > 0;
   const selectedWorkspaceEquityCurve = useMemo(() => {
     let running = 0;
-    const ordered = [...selectedWorkspaceTrades].sort(
+    const ordered = [...selectedWorkspaceDisplayTrades].sort(
       (left, right) => parseTimestampMs(left.exit_timestamp ?? left.entry_timestamp) - parseTimestampMs(right.exit_timestamp ?? right.entry_timestamp),
     );
     return ordered.map((row) => {
@@ -5962,7 +7820,282 @@ function paperStartupCategoryTone(category: string): Tone {
         value: running,
       };
     });
-  }, [selectedWorkspaceTrades]);
+  }, [selectedWorkspaceDisplayTrades]);
+  const selectedWorkspaceEquitySummary = useMemo(() => {
+    const tradePnls = selectedWorkspaceDisplayTrades
+      .map((row) => Number(row.realized_pnl ?? 0))
+      .filter((value) => Number.isFinite(value));
+    const curveValues = selectedWorkspaceEquityCurve.map((point) => point.value).filter((value) => Number.isFinite(value));
+    const realized = tradePnls.reduce((sum, value) => sum + value, 0);
+    const bestTrade = tradePnls.length ? Math.max(...tradePnls) : null;
+    const worstTrade = tradePnls.length ? Math.min(...tradePnls) : null;
+    const curveMin = curveValues.length ? Math.min(...curveValues) : null;
+    const curveMax = curveValues.length ? Math.max(...curveValues) : null;
+    const lastTimestamp = selectedWorkspaceDisplayTrades.length
+      ? String(selectedWorkspaceDisplayTrades[selectedWorkspaceDisplayTrades.length - 1]?.exit_timestamp ?? selectedWorkspaceDisplayTrades[selectedWorkspaceDisplayTrades.length - 1]?.entry_timestamp ?? "")
+      : "";
+    return {
+      realized,
+      bestTrade,
+      worstTrade,
+      curveMin,
+      curveMax,
+      curveSpan: curveMin !== null && curveMax !== null ? curveMax - curveMin : null,
+      lastTimestamp,
+    };
+  }, [selectedWorkspaceDisplayTrades, selectedWorkspaceEquityCurve]);
+  const drawdownStudyOptions = useMemo<JsonRecord[]>(
+    () =>
+      [...playbackLatestStudyItems]
+        .sort(comparePlaybackStudyItems)
+        .map((item) => {
+          const studyLabel = String(item.label ?? item.strategy_id ?? item.symbol ?? "Study");
+          const tradeCount = playbackStudyTradeCount(item);
+          const coverageStart = String(item.coverage_start ?? "").trim();
+          const coverageEnd = String(item.coverage_end ?? "").trim();
+          return {
+            ...item,
+            option_label: `${studyLabel} / ${String(item.symbol ?? "N/A").trim().toUpperCase()} / ${coverageStart || "?"} -> ${coverageEnd || "?"} / ${formatShortNumber(tradeCount)} trades`,
+          };
+        }),
+    [playbackLatestStudyItems],
+  );
+  useEffect(() => {
+    if (!drawdownStudyOptions.length) {
+      if (selectedDrawdownStudyKey) {
+        setSelectedDrawdownStudyKey("");
+      }
+      return;
+    }
+    const preferredStudyKey = String(selectedWorkspacePlaybackStudyItem?.study_key ?? drawdownStudyOptions[0]?.study_key ?? "");
+    if (!selectedDrawdownStudyKey || !drawdownStudyOptions.some((item) => String(item.study_key ?? "") === selectedDrawdownStudyKey)) {
+      setSelectedDrawdownStudyKey(preferredStudyKey);
+    }
+  }, [drawdownStudyOptions, selectedDrawdownStudyKey, selectedWorkspacePlaybackStudyItem?.study_key]);
+  const selectedDrawdownStudyItem = useMemo<JsonRecord | null>(
+    () => drawdownStudyOptions.find((item) => String(item.study_key ?? "") === selectedDrawdownStudyKey) ?? drawdownStudyOptions[0] ?? null,
+    [drawdownStudyOptions, selectedDrawdownStudyKey],
+  );
+  const [selectedDrawdownStudyLoaded, setSelectedDrawdownStudyLoaded] = useState<JsonRecord | null>(null);
+  useEffect(() => {
+    const artifactTarget = String(asRecord(selectedDrawdownStudyItem?.artifact_paths).strategy_study_json ?? "").trim();
+    const backendUrl = String(desktopState?.backendUrl ?? "").trim();
+    if (!artifactTarget || !backendUrl) {
+      setSelectedDrawdownStudyLoaded(asRecord(selectedDrawdownStudyItem?.study_preview));
+      return;
+    }
+    let cancelled = false;
+    const artifactUrl = artifactTarget.startsWith("/api/")
+      ? new URL(artifactTarget.replace(/^\//, ""), backendUrl).toString()
+      : artifactTarget;
+    void fetch(artifactUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Drawdown study fetch failed (${response.status})`);
+        }
+        return response.json() as Promise<JsonRecord>;
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setSelectedDrawdownStudyLoaded(asRecord(payload));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSelectedDrawdownStudyLoaded(asRecord(selectedDrawdownStudyItem?.study_preview));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [desktopState?.backendUrl, selectedDrawdownStudyItem]);
+  const selectedDrawdownStudy = selectedDrawdownStudyLoaded ?? asRecord(selectedDrawdownStudyItem?.study_preview);
+  const drawdownAnalysis = useMemo(
+    () => buildDrawdownRecoveryAnalysis(selectedDrawdownStudy),
+    [selectedDrawdownStudy],
+  );
+  const drawdownEpisodes = useMemo(
+    () => asArray<JsonRecord>(drawdownAnalysis.episodes),
+    [drawdownAnalysis.episodes],
+  );
+  useEffect(() => {
+    if (!drawdownEpisodes.length) {
+      if (selectedDrawdownEpisodeId) {
+        setSelectedDrawdownEpisodeId("");
+      }
+      return;
+    }
+    if (!selectedDrawdownEpisodeId || !drawdownEpisodes.some((episode) => String(episode.id ?? "") === selectedDrawdownEpisodeId)) {
+      setSelectedDrawdownEpisodeId(String(drawdownEpisodes[0]?.id ?? ""));
+    }
+  }, [drawdownEpisodes, selectedDrawdownEpisodeId]);
+  const selectedDrawdownEpisode = useMemo(
+    () => drawdownEpisodes.find((episode) => String(episode.id ?? "") === selectedDrawdownEpisodeId) ?? drawdownEpisodes[0] ?? null,
+    [drawdownEpisodes, selectedDrawdownEpisodeId],
+  );
+  const drawdownSnapshot = useMemo(
+    () =>
+      ({
+        generated_at: dashboardGeneratedAt,
+        study: {
+          study_key: selectedDrawdownStudyItem?.study_key ?? null,
+          strategy_id: drawdownAnalysis.strategy_id,
+          label: selectedDrawdownStudyItem?.label ?? drawdownAnalysis.study_label,
+          symbol: selectedDrawdownStudyItem?.symbol ?? null,
+          coverage_start: selectedDrawdownStudyItem?.coverage_start ?? null,
+          coverage_end: selectedDrawdownStudyItem?.coverage_end ?? null,
+          trade_count: drawdownAnalysis.trade_count,
+          net_pnl: drawdownAnalysis.net_pnl,
+          max_drawdown: drawdownAnalysis.max_drawdown,
+          episode_count: drawdownAnalysis.episode_count,
+          resolved_episode_count: drawdownAnalysis.resolved_episode_count,
+          unresolved_episode_count: drawdownAnalysis.unresolved_episode_count,
+          time_stop_share_pct: drawdownAnalysis.time_stop_share_pct,
+          dominant_pain_fingerprint: drawdownAnalysis.dominant_pain_fingerprint,
+          dominant_recovery_fingerprint: drawdownAnalysis.dominant_recovery_fingerprint,
+        },
+        episodes: drawdownEpisodes,
+        selected_episode: selectedDrawdownEpisode,
+        global_pain_fingerprints: asArray<JsonRecord>(drawdownAnalysis.global_pain_fingerprints),
+        global_recovery_fingerprints: asArray<JsonRecord>(drawdownAnalysis.global_recovery_fingerprints),
+      }) satisfies JsonRecord,
+    [dashboardGeneratedAt, drawdownAnalysis, drawdownEpisodes, selectedDrawdownEpisode, selectedDrawdownStudyItem],
+  );
+  const drawdownSnapshotFilename = useMemo(() => {
+    const studySlug = String(selectedDrawdownStudyItem?.strategy_id ?? selectedDrawdownStudyItem?.study_key ?? "study")
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      || "study";
+    return `drawdown_recovery_snapshot_${studySlug}_${fileSafeTimestamp(drawdownSnapshot.generated_at)}.json`;
+  }, [drawdownSnapshot.generated_at, selectedDrawdownStudyItem?.strategy_id, selectedDrawdownStudyItem?.study_key]);
+  const handleExportDrawdownSnapshot = useCallback(async () => {
+    await runCommand("export-drawdown-snapshot", async () => downloadJsonSnapshot(drawdownSnapshotFilename, drawdownSnapshot));
+  }, [drawdownSnapshot, drawdownSnapshotFilename]);
+  const handleCopyDrawdownSnapshot = useCallback(async () => {
+    await runCommand("copy-drawdown-snapshot", () => api.copyText(JSON.stringify(drawdownSnapshot, null, 2)));
+  }, [api, drawdownSnapshot]);
+  const currentPaperUniverseIdentityKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const row of dashboardRosterRows) {
+      for (const value of [
+        String(row.lane_id ?? "").trim(),
+        String(row.standalone_strategy_id ?? "").trim(),
+        String(row.tracked_strategy_id ?? "").trim(),
+      ]) {
+        if (value) {
+          keys.add(value);
+        }
+      }
+    }
+    return keys;
+  }, [dashboardRosterRows]);
+  const isRiskHaltedAuditRow = useCallback((row: JsonRecord | null | undefined): boolean => {
+    const gating = asRecord(row?.latest_gating_state);
+    const riskState = String(gating.risk_state ?? row?.risk_state ?? "").trim().toUpperCase();
+    const haltReason = String(gating.halt_reason ?? row?.halt_reason ?? "").trim();
+    const latestBlocker = String(gating.latest_fault_or_blocker ?? row?.latest_fault_or_blocker ?? "").trim().toUpperCase();
+    if (haltReason) {
+      return true;
+    }
+    if (riskState && riskState !== "OK" && riskState !== "CLEAR" && riskState !== "READY") {
+      return true;
+    }
+    return latestBlocker.includes("HALT") || latestBlocker.includes("RISK");
+  }, []);
+  const dashboardRosterLookup = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    for (const row of dashboardRosterRows) {
+      for (const key of [
+        String(row.lane_id ?? "").trim(),
+        String(row.standalone_strategy_id ?? "").trim(),
+        String(row.tracked_strategy_id ?? "").trim(),
+      ]) {
+        if (key) {
+          lookup.set(key, row);
+        }
+      }
+    }
+    return lookup;
+  }, [dashboardRosterRows]);
+  const livePaperExpressionRows = useMemo(
+    () =>
+      [...signalIntentFillAuditRows]
+        .filter((row) => {
+          const keys = [
+            String(row.lane_id ?? "").trim(),
+            String(row.standalone_strategy_id ?? "").trim(),
+            String(row.strategy_key ?? "").trim(),
+          ].filter(Boolean);
+          return keys.some((key) => currentPaperUniverseIdentityKeys.has(key));
+        })
+        .map((row) => {
+          const rosterRow =
+            dashboardRosterLookup.get(String(row.lane_id ?? "").trim())
+            ?? dashboardRosterLookup.get(String(row.standalone_strategy_id ?? "").trim())
+            ?? dashboardRosterLookup.get(String(row.strategy_key ?? "").trim())
+            ?? null;
+          const latestActivityTimestamp = latestTimestamp([
+            rosterRow?.latest_activity_timestamp,
+            row.latest_activity_timestamp,
+            row.last_update_timestamp,
+            asRecord(row.strategy_performance_summary).latest_activity_timestamp,
+          ]);
+          return {
+            ...row,
+            ...rosterRow,
+            latest_activity_timestamp: latestActivityTimestamp,
+            latest_fault_or_blocker:
+              rosterRow?.latest_fault_or_blocker
+              ?? row.latest_fault_or_blocker
+              ?? asRecord(row.latest_gating_state).latest_fault_or_blocker
+              ?? null,
+            eligible_now: rosterRow?.eligible_now ?? row.eligible_now,
+            entries_enabled: rosterRow?.entries_enabled ?? row.entries_enabled,
+            operator_halt: rosterRow?.operator_halt ?? row.operator_halt,
+            risk_state:
+              rosterRow?.risk_state
+              ?? asRecord(rosterRow?.latest_gating_state).risk_state
+              ?? row.risk_state
+              ?? asRecord(row.latest_gating_state).risk_state
+              ?? "OK",
+          } satisfies JsonRecord;
+        })
+        .sort((left, right) => {
+          const leftOperatorHalt = left.operator_halt === true ? 1 : 0;
+          const rightOperatorHalt = right.operator_halt === true ? 1 : 0;
+          if (leftOperatorHalt !== rightOperatorHalt) {
+            return rightOperatorHalt - leftOperatorHalt;
+          }
+          const leftRiskHalt = isRiskHaltedAuditRow(left) ? 1 : 0;
+          const rightRiskHalt = isRiskHaltedAuditRow(right) ? 1 : 0;
+          if (leftRiskHalt !== rightRiskHalt) {
+            return rightRiskHalt - leftRiskHalt;
+          }
+          const leftVerdictRank = String(left.audit_verdict ?? "") === "SETUP_GATED" ? 0 : String(left.audit_verdict ?? "") === "INTENT_NO_FILL_YET" ? 1 : 2;
+          const rightVerdictRank = String(right.audit_verdict ?? "") === "SETUP_GATED" ? 0 : String(right.audit_verdict ?? "") === "INTENT_NO_FILL_YET" ? 1 : 2;
+          if (leftVerdictRank !== rightVerdictRank) {
+            return leftVerdictRank - rightVerdictRank;
+          }
+          return String(left.strategy_name ?? left.standalone_strategy_id ?? "").localeCompare(
+            String(right.strategy_name ?? right.standalone_strategy_id ?? ""),
+          );
+        }),
+    [currentPaperUniverseIdentityKeys, dashboardRosterLookup, isRiskHaltedAuditRow, signalIntentFillAuditRows],
+  );
+  const livePaperExpressionSummary = useMemo(() => {
+    const rows = livePaperExpressionRows;
+    return {
+      laneCount: rows.length,
+      eligibleNow: rows.filter((row) => row.eligible_now === true).length,
+      operatorHalts: rows.filter((row) => row.operator_halt === true).length,
+      riskHalts: rows.filter((row) => isRiskHaltedAuditRow(row)).length,
+      setupGated: rows.filter((row) => String(row.audit_verdict ?? "") === "SETUP_GATED").length,
+      actionableSignals: rows.reduce((sum, row) => sum + (numericOrNull(row.actionable_entry_signal_count) ?? 0), 0),
+      intents: rows.reduce((sum, row) => sum + (numericOrNull(row.total_intent_count) ?? 0), 0),
+      fills: rows.reduce((sum, row) => sum + (numericOrNull(row.total_fill_count) ?? 0), 0),
+    };
+  }, [isRiskHaltedAuditRow, livePaperExpressionRows]);
   const atpStrategyRows = useMemo(
     () =>
       [...runtimeRegistryRows, ...approvedModelRows, ...temporaryPaperStrategyRows].filter((row, index, rows) => {
@@ -5982,6 +8115,640 @@ function paperStartupCategoryTone(category: string): Tone {
     () => atpStrategyRows.filter((row) => !atpBenchmarkRows.includes(row)),
     [atpBenchmarkRows, atpStrategyRows],
   );
+  const atpExperimentalPerformanceRows = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    const tradeRowsByLane = new Map<string, JsonRecord[]>();
+    for (const tradeRow of strategyTradeLogRows) {
+      const laneId = String(tradeRow.lane_id ?? "").trim();
+      if (!laneId.startsWith("atp_companion_v1")) {
+        continue;
+      }
+      const current = tradeRowsByLane.get(laneId) ?? [];
+      current.push(tradeRow);
+      tradeRowsByLane.set(laneId, current);
+    }
+    const preferredNumeric = (...values: unknown[]): number | null => {
+      for (const value of values) {
+        const numeric = numericOrNull(value);
+        if (numeric !== null) {
+          return numeric;
+        }
+      }
+      return null;
+    };
+    const ytdPnlForTrades = (trades: JsonRecord[]): number | null => {
+      const matched = trades
+        .filter((trade) => {
+          const timestamp = String(trade.exit_timestamp ?? trade.exit_ts ?? trade.entry_timestamp ?? trade.entry_ts ?? "").trim();
+          if (!timestamp) {
+            return false;
+          }
+          const parsed = new Date(timestamp);
+          return !Number.isNaN(parsed.getTime()) && parsed.getFullYear() === currentYear;
+        })
+        .map((trade) => numericOrNull(trade.realized_pnl ?? trade.pnl_cash ?? trade.pnl_points))
+        .filter((value): value is number => value !== null);
+      if (!matched.length) {
+        return null;
+      }
+      return matched.reduce((sum, value) => sum + value, 0);
+    };
+    return dashboardRosterRows
+      .filter((row) => isAtpRow(row))
+      .map((row) => {
+        const trackedStrategyId = String(row.tracked_strategy_id ?? row.strategy_id ?? row.lane_id ?? "").trim();
+        const standaloneStrategyId = String(row.standalone_strategy_id ?? row.strategy_id ?? "").trim();
+        const performanceRow =
+          strategyPerformanceRows.find(
+            (candidate) =>
+              String(candidate.lane_id ?? "").trim() === String(row.lane_id ?? "").trim()
+              || String(candidate.standalone_strategy_id ?? candidate.strategy_id ?? "").trim() === standaloneStrategyId
+              || String(candidate.strategy_id ?? "").trim() === trackedStrategyId,
+          ) ?? null;
+        const trackedDetail = asRecord(trackedStrategyDetailsById[trackedStrategyId] ?? trackedStrategyDetailsById[String(row.lane_id ?? "")]);
+        const temporaryRow =
+          temporaryPaperStrategyRows.find((candidate) => String(candidate.lane_id ?? "").trim() === String(row.lane_id ?? "").trim()) ?? null;
+        const merged = {
+          ...trackedDetail,
+          ...temporaryRow,
+          ...performanceRow,
+          ...row,
+        };
+        const exactStrategyIds = new Set(
+          [
+            ...asArray(row.preferred_playback_strategy_ids).map((value) => String(value ?? "").trim()),
+            trackedStrategyId,
+            standaloneStrategyId,
+            String(row.strategy_id ?? "").trim(),
+          ].filter(Boolean),
+        );
+        const preferredStudyMode = row.candidate_designation ? "research_execution_mode" : "baseline_parity_mode";
+        const exactPlaybackMatches = playbackLatestStudyItems
+          .filter((item) => exactStrategyIds.has(String(item.strategy_id ?? "").trim()))
+          .sort(comparePlaybackStudyItems);
+        const preferredPlaybackIds = asArray(row.preferred_playback_strategy_ids).map((value) => String(value ?? "").trim()).filter(Boolean);
+        const preferredExactPlaybackItem = firstPreferredPlaybackStudyItem(exactPlaybackMatches, preferredPlaybackIds);
+        const instrument = String(merged.instrument ?? row.instrument ?? "").trim().toUpperCase();
+        const fallbackPlaybackMatches = playbackLatestStudyItems
+          .filter((item) => {
+            const itemSymbol = String(item.symbol ?? "").trim().toUpperCase();
+            if (!instrument || itemSymbol !== instrument) {
+              return false;
+            }
+            const studyMode = String(item.study_mode ?? "").trim();
+            return studyMode === preferredStudyMode;
+          })
+          .sort(comparePlaybackStudyItems);
+        const playbackItem = preferredExactPlaybackItem ?? exactPlaybackMatches[0] ?? fallbackPlaybackMatches[0] ?? null;
+        const playbackSummary = asRecord(playbackItem?.summary);
+        const playbackTrades = asArray<JsonRecord>(playbackSummary.closed_trade_breakdown);
+        const playbackTradeCount = playbackStudyTradeCount(playbackItem);
+        const latestFill = asRecord(merged.latest_fill);
+        const quantity = preferredNumeric(
+          merged.current_position_qty,
+          merged.current_quantity,
+          merged.quantity,
+          merged.total_quantity,
+        );
+        const absoluteQuantity = quantity === null ? 0 : Math.abs(quantity);
+        const side = String(
+          merged.current_position_side
+          ?? merged.position_side
+          ?? merged.net_side
+          ?? trackedDetail.current_position_side
+          ?? "FLAT",
+        ).trim().toUpperCase();
+        const normalizedSide = absoluteQuantity > 0
+          ? (side && side !== "FLAT" ? side : quantity && quantity < 0 ? "SHORT" : "LONG")
+          : "FLAT";
+        const tradePrice = preferredNumeric(
+          merged.avg_entry_price,
+          merged.average_entry_price,
+          merged.entry_price,
+          merged.last_fill_price,
+          trackedDetail.avg_entry_price,
+          latestFill.fill_price,
+          latestFill.price,
+        );
+        const mark = preferredNumeric(
+          merged.mark_price,
+          merged.last_mark,
+          merged.current_mark,
+          trackedDetail.mark_price,
+        );
+        const publishedMarkChange = preferredNumeric(merged.mark_change, trackedDetail.mark_change);
+        const markChange = publishedMarkChange ?? (mark !== null && tradePrice !== null && absoluteQuantity > 0 ? mark - tradePrice : null);
+        const openPnl = preferredNumeric(
+          merged.open_trade_pnl,
+          merged.open_pnl,
+          merged.unrealized_pnl,
+          trackedDetail.open_pnl,
+        );
+        const dayPnl = preferredNumeric(
+          merged.day_pnl,
+          merged.current_day_pnl,
+          trackedDetail.current_day_pnl,
+        );
+        const realizedPnl = preferredNumeric(
+          merged.realized_pnl,
+          trackedDetail.realized_pnl,
+          trackedDetail.session_realized_pnl,
+        );
+        const computedTotal = realizedPnl !== null || openPnl !== null ? (realizedPnl ?? 0) + (openPnl ?? 0) : null;
+        const lifetimePnl = preferredNumeric(
+          playbackSummary.cumulative_total_pnl,
+          playbackSummary.cumulative_realized_pnl,
+          trackedDetail.lifetime_realized_pnl,
+          merged.cumulative_pnl,
+          realizedPnl,
+        );
+        const totalPnl = preferredNumeric(
+          merged.total_pnl,
+          merged.cumulative_pnl,
+          trackedDetail.total_pnl,
+          computedTotal,
+          lifetimePnl,
+        );
+        const cost = preferredNumeric(
+          merged.cost_basis,
+          trackedDetail.cost_basis,
+          tradePrice !== null && absoluteQuantity > 0 ? tradePrice * absoluteQuantity : null,
+        );
+        const laneTrades = tradeRowsByLane.get(String(row.lane_id ?? "").trim()) ?? [];
+        const longSources = sourceListFromRow(
+          merged.approved_long_entry_sources,
+          merged.long_sources,
+          trackedDetail.approved_long_entry_sources,
+          trackedDetail.long_sources,
+          row.approved_long_entry_sources,
+          row.long_sources,
+        );
+        const shortSources = sourceListFromRow(
+          merged.approved_short_entry_sources,
+          merged.short_sources,
+          trackedDetail.approved_short_entry_sources,
+          trackedDetail.short_sources,
+          row.approved_short_entry_sources,
+          row.short_sources,
+        );
+        const longEnabled = longSources.length > 0;
+        const shortEnabled = shortSources.length > 0;
+        const longTrades = laneTrades.filter((trade) => normalizedTradeSide(trade.side ?? trade.position_side) === "LONG");
+        const shortTrades = laneTrades.filter((trade) => normalizedTradeSide(trade.side ?? trade.position_side) === "SHORT");
+        const longRealized = sumNullable(longTrades.map((trade) => numericOrNull(trade.realized_pnl ?? trade.net_pnl ?? trade.gross_pnl)));
+        const shortRealized = sumNullable(shortTrades.map((trade) => numericOrNull(trade.realized_pnl ?? trade.net_pnl ?? trade.gross_pnl)));
+        const signalCount = preferredNumeric(
+          merged.recent_signal_count,
+          merged.signal_count,
+          trackedDetail.recent_signal_count,
+          trackedDetail.signal_count,
+          row.recent_signal_count,
+          row.signal_count,
+        ) ?? 0;
+        const intentCount = preferredNumeric(
+          merged.intent_count,
+          trackedDetail.intent_count,
+          row.intent_count,
+        ) ?? 0;
+        const fillCount = preferredNumeric(
+          merged.fill_count,
+          trackedDetail.fill_count,
+          row.fill_count,
+        ) ?? 0;
+        const eligibleNowValue = merged.eligible_now ?? trackedDetail.eligible_now ?? row.eligible_now;
+        const eligibleNow = typeof eligibleNowValue === "boolean" ? eligibleNowValue : null;
+        const opportunityBlocker =
+          String(
+            merged.status_reason
+            ?? merged.eligibility_detail
+            ?? merged.eligibility_reason
+            ?? merged.latest_fault_or_blocker
+            ?? merged.halt_reason
+            ?? row.status_reason
+            ?? row.eligibility_detail
+            ?? row.eligibility_reason
+            ?? row.latest_fault_or_blocker
+            ?? row.halt_reason
+            ?? "",
+          ).trim() || null;
+        const missedOpportunityCount = Math.max(signalCount - intentCount, 0);
+        const unfilledIntentCount = Math.max(intentCount - fillCount, 0);
+        const attemptRate = signalCount > 0 ? intentCount / signalCount : null;
+        const fillRate = signalCount > 0 ? fillCount / signalCount : null;
+        const opportunityAssessment = atpOpportunityAssessment({
+          signalCount,
+          intentCount,
+          fillCount,
+          eligibleNow,
+          blocker: opportunityBlocker,
+        });
+        const latestSideTrade = [...laneTrades].sort(
+          (left, right) =>
+            (parseSortTimestamp(right.exit_timestamp ?? right.entry_timestamp ?? right.latest_activity_timestamp) ?? 0)
+            - (parseSortTimestamp(left.exit_timestamp ?? left.entry_timestamp ?? left.latest_activity_timestamp) ?? 0),
+        )[0];
+        const latestPaperSide = latestSideTrade
+          ? normalizedTradeSide(latestSideTrade.side ?? latestSideTrade.position_side)
+          : absoluteQuantity > 0
+            ? normalizedSide
+            : "NONE YET";
+        return {
+          id: String(row.lane_id ?? trackedStrategyId ?? standaloneStrategyId ?? instrument),
+          lane_id: String(row.lane_id ?? ""),
+          strategy_name: compactBranchLabel(row),
+          instrument,
+          designation: designationLabel(row),
+          runtime: runtimePresenceInfo(row).label,
+          runtime_tone: runtimePresenceInfo(row).tone,
+          status: String(merged.current_strategy_status ?? merged.status ?? merged.strategy_status ?? "UNKNOWN"),
+          participation_policy: formatValue(merged.participation_policy ?? "Unavailable"),
+          current_position: absoluteQuantity > 0 ? `${normalizedSide} ${formatShortNumber(absoluteQuantity)}` : "FLAT",
+          current_position_qty: quantity,
+          trade_price: tradePrice,
+          mark,
+          mark_change: markChange,
+          pnl: totalPnl,
+          pnl_ytd: playbackSummaryYtdPnl(playbackSummary),
+          pnl_lifetime: lifetimePnl,
+          cost,
+          pnl_open: openPnl,
+          pnl_day: dayPnl,
+          configured_sides_label: configuredSidesLabel(longEnabled, shortEnabled),
+          configured_long_enabled: longEnabled,
+          configured_short_enabled: shortEnabled,
+          paper_long_trade_count: longTrades.length,
+          paper_short_trade_count: shortTrades.length,
+          paper_long_realized_pnl: longRealized,
+          paper_short_realized_pnl: shortRealized,
+          latest_paper_side: latestPaperSide,
+          signal_count: signalCount,
+          intent_count: intentCount,
+          fill_count: fillCount,
+          missed_opportunity_count: missedOpportunityCount,
+          unfilled_intent_count: unfilledIntentCount,
+          attempt_rate: attemptRate,
+          fill_rate: fillRate,
+          eligible_now: eligibleNow,
+          opportunity_blocker: opportunityBlocker,
+          opportunity_label: opportunityAssessment.label,
+          opportunity_tone: opportunityAssessment.tone,
+          opportunity_note: opportunityAssessment.note,
+          latest_signal_label: String(
+            merged.latest_signal_label
+            ?? trackedDetail.latest_signal_label
+            ?? row.latest_signal_label
+            ?? "Unavailable",
+          ),
+          latest_activity_timestamp: latestTimestamp([
+            merged.latest_activity_timestamp,
+            trackedDetail.latest_activity_timestamp,
+            trackedDetail.last_update_timestamp,
+            playbackItem?.run_timestamp,
+          ]),
+          latest_fill_timestamp: latestTimestamp([merged.latest_fill_timestamp, trackedDetail.latest_fill_timestamp]),
+          latest_event_timestamp: latestTimestamp([
+            merged.latest_fill_timestamp,
+            trackedDetail.latest_fill_timestamp,
+            merged.latest_activity_timestamp,
+            trackedDetail.latest_activity_timestamp,
+            trackedDetail.last_update_timestamp,
+            playbackItem?.run_timestamp,
+          ]),
+          coverage_start: playbackItem?.coverage_start ?? null,
+          coverage_end: playbackItem?.coverage_end ?? null,
+          coverage_label: strategyLaneDateRangeLabel({
+            start_timestamp: playbackItem?.coverage_start ?? null,
+            end_timestamp: playbackItem?.coverage_end ?? null,
+          }),
+          playback_trade_count: preferredNumeric(playbackSummary.total_trades, playbackTradeCount, merged.trade_count),
+          playback_trade_rows: playbackTrades,
+          study_mode: String(playbackItem?.study_mode ?? preferredStudyMode),
+          mark_change_basis: publishedMarkChange !== null ? "published" : "mark-minus-trade-price",
+        } satisfies JsonRecord;
+      })
+      .sort(
+        (left, right) =>
+          (parseSortTimestamp(right.latest_event_timestamp ?? right.latest_fill_timestamp ?? right.latest_activity_timestamp) ?? 0)
+          - (parseSortTimestamp(left.latest_event_timestamp ?? left.latest_fill_timestamp ?? left.latest_activity_timestamp) ?? 0),
+      );
+  }, [dashboardRosterRows, playbackLatestStudyItems, strategyPerformanceRows, strategyTradeLogRows, temporaryPaperStrategyRows, trackedStrategyDetailsById]);
+  const atpExperimentalSummary = useMemo(() => {
+    const openPositions = atpExperimentalPerformanceRows.filter((row) => Math.abs(numericOrNull(row.current_position_qty) ?? 0) > 0.000001).length;
+    const shortEnabledCount = atpExperimentalPerformanceRows.filter((row) => row.configured_short_enabled === true).length;
+    const longActiveCount = atpExperimentalPerformanceRows.filter((row) => (numericOrNull(row.paper_long_trade_count) ?? 0) > 0).length;
+    const shortActiveCount = atpExperimentalPerformanceRows.filter((row) => (numericOrNull(row.paper_short_trade_count) ?? 0) > 0).length;
+    return {
+      rowCount: atpExperimentalPerformanceRows.length,
+      activeRuntimeCount: atpExperimentalPerformanceRows.filter((row) => String(row.runtime ?? "").toUpperCase() === "ACTIVE RUNTIME").length,
+      openPositionCount: openPositions,
+      shortEnabledCount,
+      longActiveCount,
+      shortActiveCount,
+      totalDayPnl: sumNullable(atpExperimentalPerformanceRows.map((row) => numericOrNull(row.pnl_day))),
+      totalOpenPnl: sumNullable(atpExperimentalPerformanceRows.map((row) => numericOrNull(row.pnl_open))),
+      totalYtdPnl: sumNullable(atpExperimentalPerformanceRows.map((row) => numericOrNull(row.pnl_ytd))),
+      totalLifetimePnl: sumNullable(atpExperimentalPerformanceRows.map((row) => numericOrNull(row.pnl_lifetime))),
+      totalLongRealized: sumNullable(atpExperimentalPerformanceRows.map((row) => numericOrNull(row.paper_long_realized_pnl))),
+      totalShortRealized: sumNullable(atpExperimentalPerformanceRows.map((row) => numericOrNull(row.paper_short_realized_pnl))),
+    };
+  }, [atpExperimentalPerformanceRows]);
+  const atpAttributionRows = useMemo(() => {
+    const group = new Map<string, JsonRecord[]>();
+    for (const row of strategyTradeLogRows) {
+      const laneId = String(row.lane_id ?? "").trim();
+      if (!laneId.startsWith("atp_companion_v1")) {
+        continue;
+      }
+      const current = group.get(laneId) ?? [];
+      current.push(row);
+      group.set(laneId, current);
+    }
+    const buildAssessment = (paperTradeCount: number, playbackTradeCount: number | null, avgPaperPnl: number | null, avgPlaybackPnl: number | null): { label: string; tone: Tone; note: string } => {
+      if (paperTradeCount === 0) {
+        return {
+          label: "No paper sample yet",
+          tone: "muted",
+          note: "The lane is running, but there are no closed paper trades to attribute yet.",
+        };
+      }
+      if (paperTradeCount < 5) {
+        return {
+          label: "Tiny sample",
+          tone: "warn",
+          note: "Paper activity exists, but the sample is still too small to call the paper-vs-back-cast gap stable.",
+        };
+      }
+      if (playbackTradeCount !== null && playbackTradeCount > 0 && paperTradeCount < Math.max(5, Math.round(playbackTradeCount * 0.01))) {
+        return {
+          label: "Activity gap",
+          tone: "warn",
+          note: "The paper lane is active, but its realized sample is far smaller than the linked back-cast trade population.",
+        };
+      }
+      if (avgPaperPnl !== null && avgPlaybackPnl !== null && avgPaperPnl < avgPlaybackPnl) {
+        return {
+          label: "Paper lagging",
+          tone: "danger",
+          note: "Per-trade paper economics are under the linked back-cast average, so fill quality, gating, or path dependence likely deserve review.",
+        };
+      }
+      return {
+        label: "Tracking acceptably",
+        tone: "good",
+        note: "Paper sample and back-cast averages are directionally aligned enough for routine monitoring.",
+      };
+    };
+    return atpExperimentalPerformanceRows.map((row) => {
+      const laneId = String(row.lane_id ?? "");
+      const trades = [...(group.get(laneId) ?? [])].sort((left, right) => {
+        const leftTs = parseSortTimestamp(left.exit_timestamp ?? left.entry_timestamp ?? left.latest_activity_timestamp) ?? 0;
+        const rightTs = parseSortTimestamp(right.exit_timestamp ?? right.entry_timestamp ?? right.latest_activity_timestamp) ?? 0;
+        return rightTs - leftTs;
+      });
+      const paperTradeCount = trades.length;
+      const longTrades = trades.filter((trade) => normalizedTradeSide(trade.side ?? trade.position_side) === "LONG");
+      const shortTrades = trades.filter((trade) => normalizedTradeSide(trade.side ?? trade.position_side) === "SHORT");
+      const paperRealizedValues = trades
+        .map((trade) => numericOrNull(trade.realized_pnl ?? trade.net_pnl ?? trade.gross_pnl))
+        .filter((value): value is number => value !== null);
+      const longRealizedValues = longTrades
+        .map((trade) => numericOrNull(trade.realized_pnl ?? trade.net_pnl ?? trade.gross_pnl))
+        .filter((value): value is number => value !== null);
+      const shortRealizedValues = shortTrades
+        .map((trade) => numericOrNull(trade.realized_pnl ?? trade.net_pnl ?? trade.gross_pnl))
+        .filter((value): value is number => value !== null);
+      const paperRealizedPnl = paperRealizedValues.length ? paperRealizedValues.reduce((sum, value) => sum + value, 0) : numericOrNull(row.pnl);
+      const paperAvgTradePnl = paperRealizedValues.length ? paperRealizedPnl! / paperRealizedValues.length : null;
+      const paperWinCount = paperRealizedValues.filter((value) => value > 0).length;
+      const paperLossCount = paperRealizedValues.filter((value) => value < 0).length;
+      const playbackTradeCount = numericOrNull(row.playback_trade_count);
+      const playbackLifetimePnl = numericOrNull(row.pnl_lifetime);
+      const playbackAvgTradePnl = playbackTradeCount && playbackTradeCount > 0 && playbackLifetimePnl !== null
+        ? playbackLifetimePnl / playbackTradeCount
+        : null;
+      const avgTradeGap = paperAvgTradePnl !== null && playbackAvgTradePnl !== null
+        ? paperAvgTradePnl - playbackAvgTradePnl
+        : null;
+      const activityRatio = playbackTradeCount && playbackTradeCount > 0
+        ? paperTradeCount / playbackTradeCount
+        : null;
+      const recentSlipValues = trades
+        .map((trade) => numericOrNull(trade.slippage))
+        .filter((value): value is number => value !== null);
+      const averageSlippage = averageNullable(recentSlipValues);
+      const longTradeCount = longTrades.length;
+      const shortTradeCount = shortTrades.length;
+      const longRealizedPnl = longRealizedValues.length ? longRealizedValues.reduce((sum, value) => sum + value, 0) : null;
+      const shortRealizedPnl = shortRealizedValues.length ? shortRealizedValues.reduce((sum, value) => sum + value, 0) : null;
+      const netSideBias = longTradeCount > shortTradeCount ? "LONG TILTED" : shortTradeCount > longTradeCount ? "SHORT TILTED" : "BALANCED / NONE";
+      const laneLatestTradeTimestamp = latestTimestamp(trades.map((trade) => trade.exit_timestamp ?? trade.entry_timestamp ?? trade.latest_activity_timestamp));
+      const laneLatestFillTimestamp = latestTimestamp([
+        row.latest_fill_timestamp,
+        row.latest_activity_timestamp,
+      ]);
+      const assessment = buildAssessment(paperTradeCount, playbackTradeCount, paperAvgTradePnl, playbackAvgTradePnl);
+      return {
+        ...row,
+        paper_trade_count: paperTradeCount,
+        paper_long_trade_count: longTradeCount,
+        paper_short_trade_count: shortTradeCount,
+        paper_long_realized_pnl: longRealizedPnl,
+        paper_short_realized_pnl: shortRealizedPnl,
+        net_side_bias: netSideBias,
+        paper_win_count: paperWinCount,
+        paper_loss_count: paperLossCount,
+        paper_realized_pnl: paperRealizedPnl,
+        paper_avg_trade_pnl: paperAvgTradePnl,
+        playback_avg_trade_pnl: playbackAvgTradePnl,
+        avg_trade_gap: avgTradeGap,
+        activity_ratio: activityRatio,
+        average_slippage: averageSlippage,
+        last_closed_trade_timestamp: laneLatestTradeTimestamp,
+        last_fill_or_activity_timestamp: laneLatestFillTimestamp,
+        latest_attribution_timestamp: latestTimestamp([laneLatestTradeTimestamp, laneLatestFillTimestamp]),
+        attribution_label: assessment.label,
+        attribution_tone: assessment.tone,
+        attribution_note: assessment.note,
+        recent_trade_rows: trades.slice(0, 12),
+      } satisfies JsonRecord;
+    }).sort(
+      (left, right) =>
+        (parseSortTimestamp(right.latest_attribution_timestamp ?? right.last_fill_or_activity_timestamp ?? right.last_closed_trade_timestamp) ?? 0)
+        - (parseSortTimestamp(left.latest_attribution_timestamp ?? left.last_fill_or_activity_timestamp ?? left.last_closed_trade_timestamp) ?? 0),
+    );
+  }, [atpExperimentalPerformanceRows, strategyTradeLogRows]);
+  const atpAttributionSummary = useMemo(() => {
+    const activeRows = atpAttributionRows.filter((row) => String(row.runtime ?? "").toUpperCase() === "ACTIVE RUNTIME");
+    const attributedRows = atpAttributionRows.filter((row) => numericOrNull(row.paper_trade_count) !== null && (numericOrNull(row.paper_trade_count) ?? 0) > 0);
+    return {
+      rowCount: atpAttributionRows.length,
+      activeRuntimeCount: activeRows.length,
+      attributedRowCount: attributedRows.length,
+      totalPaperRealized: sumNullable(atpAttributionRows.map((row) => numericOrNull(row.paper_realized_pnl))),
+      totalPaperSession: sumNullable(atpAttributionRows.map((row) => numericOrNull(row.pnl_day))),
+      totalPlaybackLifetime: sumNullable(atpAttributionRows.map((row) => numericOrNull(row.pnl_lifetime))),
+      averageTradeGap: averageNullable(atpAttributionRows.map((row) => numericOrNull(row.avg_trade_gap))),
+      averageActivityRatio: averageNullable(atpAttributionRows.map((row) => numericOrNull(row.activity_ratio))),
+    };
+  }, [atpAttributionRows]);
+  const atpOpportunityGapSummary = useMemo(() => {
+    return {
+      rowCount: atpExperimentalPerformanceRows.length,
+      totalSignals: atpExperimentalPerformanceRows.reduce((sum, row) => sum + (numericOrNull(row.signal_count) ?? 0), 0),
+      totalIntents: atpExperimentalPerformanceRows.reduce((sum, row) => sum + (numericOrNull(row.intent_count) ?? 0), 0),
+      totalFills: atpExperimentalPerformanceRows.reduce((sum, row) => sum + (numericOrNull(row.fill_count) ?? 0), 0),
+      totalMissed: atpExperimentalPerformanceRows.reduce((sum, row) => sum + (numericOrNull(row.missed_opportunity_count) ?? 0), 0),
+      totalUnfilledIntents: atpExperimentalPerformanceRows.reduce((sum, row) => sum + (numericOrNull(row.unfilled_intent_count) ?? 0), 0),
+      gatedRowCount: atpExperimentalPerformanceRows.filter((row) => String(row.opportunity_label ?? "") === "Gated opportunity").length,
+      attemptRate: averageNullable(atpExperimentalPerformanceRows.map((row) => numericOrNull(row.attempt_rate))),
+      fillRate: averageNullable(atpExperimentalPerformanceRows.map((row) => numericOrNull(row.fill_rate))),
+    };
+  }, [atpExperimentalPerformanceRows]);
+  const atpOpportunityGapRows = useMemo(() => {
+    return [...atpExperimentalPerformanceRows].sort(
+      (left, right) =>
+        ((numericOrNull(right.missed_opportunity_count) ?? 0) - (numericOrNull(left.missed_opportunity_count) ?? 0))
+        || ((numericOrNull(right.signal_count) ?? 0) - (numericOrNull(left.signal_count) ?? 0))
+        || ((parseSortTimestamp(right.latest_activity_timestamp) ?? 0) - (parseSortTimestamp(left.latest_activity_timestamp) ?? 0)),
+    );
+  }, [atpExperimentalPerformanceRows]);
+  const atpRiskControlLossCap = Math.max(0, numericOrNull(selectedAtpRiskLossCap) ?? 5000);
+  const selectedAtpRiskControlOption = ATP_RISK_CONTROL_OPTIONS.find((option) => option.value === selectedAtpRiskControlMode) ?? ATP_RISK_CONTROL_OPTIONS[0];
+  const atpRiskControlRows = useMemo(() => {
+    return atpAttributionRows
+      .map((row) => ({
+        ...row,
+        ...simulateAtpReplayRiskScenario(asArray<JsonRecord>(row.playback_trade_rows), {
+          mode: selectedAtpRiskControlMode,
+          lossCap: atpRiskControlLossCap,
+        }),
+      }))
+      .sort(
+        (left, right) =>
+          (numericOrNull(right.risk_capped_net_pnl) ?? Number.NEGATIVE_INFINITY)
+          - (numericOrNull(left.risk_capped_net_pnl) ?? Number.NEGATIVE_INFINITY),
+      );
+  }, [atpAttributionRows, atpRiskControlLossCap, selectedAtpRiskControlMode]);
+  const atpRiskControlSummary = useMemo(() => {
+    const fullNet = sumNullable(atpRiskControlRows.map((row) => numericOrNull(row.risk_full_net_pnl)));
+    const cappedNet = sumNullable(atpRiskControlRows.map((row) => numericOrNull(row.risk_capped_net_pnl)));
+    return {
+      laneCount: atpRiskControlRows.length,
+      fullNet,
+      cappedNet,
+      retainedPct: fullNet && fullNet !== 0 && cappedNet !== null ? (cappedNet / fullNet) * 100 : null,
+      improvedLaneCount: atpRiskControlRows.filter((row) => (numericOrNull(row.risk_net_delta) ?? 0) > 0).length,
+      haltedLaneCount: atpRiskControlRows.filter((row) => (numericOrNull(row.risk_halted_days) ?? 0) > 0).length,
+      totalHaltedDays: atpRiskControlRows.reduce((sum, row) => sum + (numericOrNull(row.risk_halted_days) ?? 0), 0),
+      totalSkippedTrades: atpRiskControlRows.reduce((sum, row) => sum + (numericOrNull(row.risk_skipped_trade_count) ?? 0), 0),
+    };
+  }, [atpRiskControlRows]);
+  const atpRecentTradeRows = useMemo(() => {
+    return strategyTradeLogRows
+      .filter((row) => String(row.lane_id ?? "").trim().startsWith("atp_companion_v1"))
+      .slice()
+      .sort((left, right) => {
+        const leftTs = parseSortTimestamp(left.exit_timestamp ?? left.entry_timestamp ?? left.latest_activity_timestamp) ?? 0;
+        const rightTs = parseSortTimestamp(right.exit_timestamp ?? right.entry_timestamp ?? right.latest_activity_timestamp) ?? 0;
+        return rightTs - leftTs;
+      })
+      .slice(0, 20);
+  }, [strategyTradeLogRows]);
+  useEffect(() => {
+    if (!atpAttributionRows.length) {
+      if (selectedAtpAttributionLaneId) {
+        setSelectedAtpAttributionLaneId("");
+      }
+      return;
+    }
+    if (!atpAttributionRows.some((row) => String(row.lane_id ?? "") === selectedAtpAttributionLaneId)) {
+      setSelectedAtpAttributionLaneId(String(atpAttributionRows[0]?.lane_id ?? ""));
+    }
+  }, [atpAttributionRows, selectedAtpAttributionLaneId]);
+  const selectedAtpAttributionRow = useMemo(
+    () =>
+      atpAttributionRows.find((row) => String(row.lane_id ?? "") === selectedAtpAttributionLaneId)
+      ?? atpAttributionRows[0]
+      ?? null,
+    [atpAttributionRows, selectedAtpAttributionLaneId],
+  );
+  const selectedAtpRiskControlRow = useMemo(
+    () =>
+      atpRiskControlRows.find((row) => String(row.lane_id ?? "") === selectedAtpAttributionLaneId)
+      ?? atpRiskControlRows[0]
+      ?? null,
+    [atpRiskControlRows, selectedAtpAttributionLaneId],
+  );
+  const atpAnalyticsSnapshot = useMemo(() => {
+    const generatedAt = new Date().toISOString();
+    return {
+      generated_at: generatedAt,
+      dashboard_generated_at: dashboardGeneratedAt,
+      truth_source: {
+        label: dashboardTruthSource.label,
+        tone: dashboardTruthSource.tone,
+      },
+      selected_lane_id: selectedAtpAttributionLaneId || String(selectedAtpAttributionRow?.lane_id ?? ""),
+      selected_risk_control: {
+        mode: selectedAtpRiskControlMode,
+        label: selectedAtpRiskControlOption.label,
+        note: selectedAtpRiskControlOption.note,
+        loss_cap: atpRiskControlLossCap,
+      },
+      summaries: {
+        experimental_performance: atpExperimentalSummary,
+        attribution: atpAttributionSummary,
+        opportunity_gap: atpOpportunityGapSummary,
+        risk_control: atpRiskControlSummary,
+      },
+      rows: {
+        experimental_performance: atpExperimentalPerformanceRows,
+        attribution: atpAttributionRows,
+        opportunity_gap: atpOpportunityGapRows,
+        risk_control: atpRiskControlRows,
+        recent_activity: atpRecentTradeRows,
+      },
+      selected_lane: {
+        attribution: selectedAtpAttributionRow,
+        risk_control: selectedAtpRiskControlRow,
+        recent_trades: asArray<JsonRecord>(selectedAtpAttributionRow?.recent_trade_rows),
+      },
+    } satisfies JsonRecord;
+  }, [
+    atpAttributionRows,
+    atpAttributionSummary,
+    atpExperimentalPerformanceRows,
+    atpExperimentalSummary,
+    atpOpportunityGapRows,
+    atpOpportunityGapSummary,
+    atpRecentTradeRows,
+    atpRiskControlLossCap,
+    atpRiskControlRows,
+    atpRiskControlSummary,
+    dashboardGeneratedAt,
+    dashboardTruthSource.label,
+    dashboardTruthSource.tone,
+    selectedAtpAttributionLaneId,
+    selectedAtpAttributionRow,
+    selectedAtpRiskControlMode,
+    selectedAtpRiskControlOption.label,
+    selectedAtpRiskControlOption.note,
+    selectedAtpRiskControlRow,
+  ]);
+  const atpAnalyticsSnapshotFilename = useMemo(() => {
+    const laneSlug = String(selectedAtpAttributionRow?.lane_id ?? "all-lanes")
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      || "all-lanes";
+    return `atp_analytics_snapshot_${laneSlug}_${fileSafeTimestamp(atpAnalyticsSnapshot.generated_at)}.json`;
+  }, [atpAnalyticsSnapshot.generated_at, selectedAtpAttributionRow?.lane_id]);
+  const handleExportAtpAnalyticsSnapshot = useCallback(async () => {
+    await runCommand("export-atp-analytics-snapshot", async () => downloadJsonSnapshot(atpAnalyticsSnapshotFilename, atpAnalyticsSnapshot));
+  }, [atpAnalyticsSnapshot, atpAnalyticsSnapshotFilename]);
+  const handleCopyAtpAnalyticsSnapshot = useCallback(async () => {
+    await runCommand("copy-atp-analytics-snapshot", () => api.copyText(JSON.stringify(atpAnalyticsSnapshot, null, 2)));
+  }, [api, atpAnalyticsSnapshot]);
   const selectWorkspaceLane = useCallback(
     (laneId: string, options?: { navigateTo?: PageId; syncTradeEntry?: boolean }) => {
       const nextRow =
@@ -5991,6 +8758,7 @@ function paperStartupCategoryTone(category: string): Tone {
       const nextLaneId = String(nextRow?.lane_id ?? laneId ?? "");
       const nextInstrument = String(nextRow?.instrument ?? "").trim().toUpperCase();
       setSelectedWorkspaceLaneId(nextLaneId);
+      setPreferredAnalysisStrategyKey("");
       if (options?.syncTradeEntry !== false && nextInstrument) {
         setManualOrderForm((current) => ({ ...current, symbol: nextInstrument }));
         const matchingProductionPosition = productionPositions.find(
@@ -6015,13 +8783,56 @@ function paperStartupCategoryTone(category: string): Tone {
         ?? dashboardRosterRows.find((row) => String(row.display_name ?? row.branch ?? "").trim() === contribution.strategyName.trim())
         ?? null;
       if (!matched) {
+        if ((contribution.source === "research_analytics" || contribution.source === "historical_backcast") && contribution.strategyId) {
+          setCalendarContextLabel(`${selectedCalendarDay ?? "Selected Day"} • ${calendarSourceLabel(calendarSource)}`);
+          setPreferredAnalysisStrategyKey(String(contribution.strategyId));
+          window.location.hash = "#/strategies";
+          setPage("strategies");
+        }
         return;
       }
+      setPreferredAnalysisStrategyKey("");
       setCalendarContextLabel(`${selectedCalendarDay ?? "Selected Day"} • ${calendarSourceLabel(calendarSource)}`);
       selectWorkspaceLane(String(matched.lane_id ?? ""), { navigateTo: "strategies" });
     },
     [calendarSource, dashboardRosterRows, selectWorkspaceLane, selectedCalendarDay],
   );
+  const calendarPlaybackSelectionSummary = useMemo(() => {
+    if (!calendarPlaybackStrategyOptions.length) {
+      return "No historical playback studies are loaded.";
+    }
+    if (calendarPlaybackStrategyKeys === null) {
+      return `All ${calendarPlaybackStrategyOptions.length} loaded backcast strategies are included.`;
+    }
+    if (!calendarPlaybackStrategyKeys.length) {
+      return "No backcast strategies are selected.";
+    }
+    return `${calendarPlaybackStrategyKeys.length} of ${calendarPlaybackStrategyOptions.length} backcast strategies selected.`;
+  }, [calendarPlaybackStrategyKeys, calendarPlaybackStrategyOptions.length]);
+  const toggleCalendarPlaybackStrategy = useCallback(
+    (strategyKey: string) => {
+      setCalendarPlaybackStrategyKeys((current) => {
+        const allKeys = calendarPlaybackStrategyOptions.map((item) => item.strategyKey);
+        const base = current === null ? new Set(allKeys) : new Set(current);
+        if (base.has(strategyKey)) {
+          base.delete(strategyKey);
+        } else {
+          base.add(strategyKey);
+        }
+        if (base.size === allKeys.length) {
+          return null;
+        }
+        return allKeys.filter((key) => base.has(key));
+      });
+    },
+    [calendarPlaybackStrategyOptions],
+  );
+  const selectAllCalendarPlaybackStrategies = useCallback(() => {
+    setCalendarPlaybackStrategyKeys(null);
+  }, []);
+  const clearCalendarPlaybackStrategies = useCallback(() => {
+    setCalendarPlaybackStrategyKeys([]);
+  }, []);
   const tradeEntrySymbol = (manualOrderForm.symbol.trim() || selectedWorkspaceInstrument || selectedProductionSymbol || "").toUpperCase();
   const tradeEntryQuoteRow = useMemo(
     () => productionQuoteRows.find((row) => String(row.symbol ?? row.instrument ?? "").trim().toUpperCase() === tradeEntrySymbol) ?? null,
@@ -6041,6 +8852,64 @@ function paperStartupCategoryTone(category: string): Tone {
   const selectedWorkspaceDesignation = designationLabel(selectedWorkspaceRow);
   const selectedWorkspaceRuntimeLabel = runtimeAttachmentLabel(selectedWorkspaceRow);
   const selectedWorkspaceContextTimes = asArray<string>(selectedWorkspaceRow?.context_timeframes).join(" / ") || "5m";
+  const selectedWorkspaceReadinessRow = useMemo(
+    () =>
+      asArray<JsonRecord>(paperReadiness.lane_status_rows).find(
+        (row) => String(row.lane_id ?? "") === String(selectedWorkspaceRow?.lane_id ?? ""),
+      ) ?? null,
+    [paperReadiness.lane_status_rows, selectedWorkspaceRow],
+  );
+  const selectedWorkspaceBlockerClass = blockerClassInfo(selectedWorkspaceRow, selectedWorkspaceReadinessRow);
+  const selectedWorkspaceWhyNotTrading = useMemo(() => {
+    const row = selectedWorkspaceRow;
+    const readinessRow = selectedWorkspaceReadinessRow;
+    if (!row) {
+      return {
+        title: "No Selected Workspace",
+        summary: "Select a lane from the roster to see why it is or isn’t trading right now.",
+        nextUnlock: "Select a lane.",
+        blockerLabel: "Unavailable",
+        blockerMix: "No lane selected",
+        tone: "muted" as Tone,
+        latestEligible: "—",
+        latestBlocked: "—",
+        freshness: formatTimestamp(paperReadiness.generated_at ?? desktopState?.refreshedAt),
+        provenance: "Dashboard snapshot",
+      };
+    }
+    const runtimePresence = runtimePresenceInfo(row);
+    const tradabilityStatus = String(readinessRow?.tradability_status ?? "").toUpperCase();
+    const latestEligible = formatTimestamp(row.latest_eligible_timestamp ?? readinessRow?.latest_eligible_timestamp);
+    const latestBlocked = formatTimestamp(row.latest_blocked_timestamp ?? readinessRow?.latest_blocked_timestamp);
+    if (selectedWorkspaceBlockerClass.label === "Ready" || tradabilityStatus === "ELIGIBLE_TO_TRADE") {
+      return {
+        title: "Tradable Now",
+        summary: "The selected lane is active in the runtime and currently eligible to participate.",
+        nextUnlock: "No action needed; already tradable.",
+        blockerLabel: "None",
+        blockerMix: "No blocker mix recorded",
+        tone: "good" as Tone,
+        latestEligible,
+        latestBlocked,
+        freshness: formatTimestamp(paperReadiness.generated_at ?? desktopState?.refreshedAt),
+        provenance: runtimePresence.summary,
+      };
+    }
+    return {
+      title: `Blocked by ${selectedWorkspaceBlockerClass.label}`,
+      summary:
+        selectedWorkspaceBlockerClass.reason
+        || String(readinessRow?.tradability_reason ?? row.latest_blocked_reason ?? row.atp_timing_blocker ?? "No blocker recorded."),
+      nextUnlock: String(readinessRow?.next_action ?? "Wait for the current blocker to clear."),
+      blockerLabel: topBlockerLabel(row),
+      blockerMix: topBlockerSummary(row),
+      tone: selectedWorkspaceBlockerClass.tone,
+      latestEligible,
+      latestBlocked,
+      freshness: formatTimestamp(paperReadiness.generated_at ?? desktopState?.refreshedAt),
+      provenance: runtimePresence.summary,
+    };
+  }, [desktopState?.refreshedAt, paperReadiness.generated_at, selectedWorkspaceBlockerClass.label, selectedWorkspaceBlockerClass.reason, selectedWorkspaceBlockerClass.tone, selectedWorkspaceReadinessRow, selectedWorkspaceRow]);
   const tradeEntryPaperRows = useMemo(
     () => {
       const matched = strategyPerformanceRows.filter(
@@ -6060,20 +8929,142 @@ function paperStartupCategoryTone(category: string): Tone {
     },
     [selectedWorkspaceRow, strategyPerformanceRows, tradeEntrySymbol],
   );
+  const tradeEntryProductionPosition = useMemo(
+    () => productionPositions.find((row) => String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol) ?? null,
+    [productionPositions, tradeEntrySymbol],
+  );
+  const tradeEntryOpenOrders = useMemo(
+    () => productionOpenOrders.filter((row) => String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol),
+    [productionOpenOrders, tradeEntrySymbol],
+  );
+  const tradeEntryRecentFills = useMemo(
+    () => productionRecentFills.filter((row) => String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol),
+    [productionRecentFills, tradeEntrySymbol],
+  );
+  const combinedRecentFillRows = useMemo(
+    () =>
+      [
+        ...productionRecentFills.map((row) => ({
+          ...row,
+          activity_timestamp: String(row.updated_at ?? row.occurred_at ?? ""),
+          activity_symbol: String(row.symbol ?? row.instrument ?? ""),
+          activity_side: String(row.instruction ?? row.side ?? ""),
+          activity_quantity: row.quantity,
+          activity_price: row.price ?? row.execution_price,
+          activity_source: "live",
+          activity_realized_pnl: null,
+        })),
+        ...paperLatestFills.map((row) => {
+          const laneId = String(row.lane_id ?? "");
+          const quantity = String(row.quantity ?? "");
+          const fillTimestamp = String(row.fill_timestamp ?? "");
+          const directInstrument = String(row.instrument ?? row.symbol ?? "").trim().toUpperCase();
+          const matchedTradeRow =
+            (directInstrument
+              ? closedStrategyTradeLookup.get(`${laneId}|${fillTimestamp}|${directInstrument}|${quantity}|exit`)
+                ?? closedStrategyTradeLookup.get(`${laneId}|${fillTimestamp}|${directInstrument}|${quantity}|entry`)
+              : null)
+            ?? closedStrategyTradeRows.find((tradeRow) =>
+              String(tradeRow.lane_id ?? "") === laneId
+              && String(tradeRow.quantity ?? "") === quantity
+              && (
+                String(tradeRow.exit_timestamp ?? "") === fillTimestamp
+                || String(tradeRow.entry_timestamp ?? "") === fillTimestamp
+              ),
+            )
+            ?? null;
+          const matchedInstrument = String(matchedTradeRow?.instrument ?? matchedTradeRow?.symbol ?? "").trim().toUpperCase();
+          return {
+            ...row,
+            activity_timestamp: fillTimestamp,
+            activity_symbol: String(row.instrument ?? row.symbol ?? matchedTradeRow?.instrument ?? matchedTradeRow?.symbol ?? ""),
+            activity_side: inferPaperFillSide(row, matchedTradeRow),
+            activity_quantity: row.quantity,
+            activity_price: row.fill_price ?? row.price ?? matchedTradeRow?.exit_price ?? matchedTradeRow?.entry_price,
+            activity_source: "paper",
+            activity_realized_pnl:
+              matchedTradeRow
+              && fillTimestamp === String(matchedTradeRow.exit_timestamp ?? "")
+              && quantity === String(matchedTradeRow.quantity ?? "")
+              && (!directInstrument || !matchedInstrument || directInstrument === matchedInstrument)
+                ? (matchedTradeRow.realized_pnl ?? matchedTradeRow.net_pnl ?? matchedTradeRow.gross_pnl ?? null)
+                : null,
+          };
+        }),
+      ].sort((left, right) => parseTimestampMs(right.activity_timestamp) - parseTimestampMs(left.activity_timestamp)),
+    [closedStrategyTradeLookup, closedStrategyTradeRows, paperLatestFills, productionRecentFills],
+  );
   const paperIntradayCurveRows = useMemo(() => {
-    const today = new Date().toISOString().slice(0, 10);
+    const latestClosedPaperDate =
+      String(closedStrategyTradeRows[0]?.exit_timestamp ?? closedStrategyTradeRows[0]?.entry_timestamp ?? "").slice(0, 10) || "";
+    const latestPaperFillDate =
+      String(paperLatestFills[0]?.fill_timestamp ?? "").slice(0, 10) || "";
+    const targetDate = latestClosedPaperDate || latestPaperFillDate;
+    if (!targetDate) {
+      return [];
+    }
     const rows = closedStrategyTradeRows
-      .filter((row) => String(row.exit_timestamp ?? row.entry_timestamp ?? "").slice(0, 10) === today)
+      .filter((row) => String(row.exit_timestamp ?? row.entry_timestamp ?? "").slice(0, 10) === targetDate)
       .sort((left, right) => parseTimestampMs(left.exit_timestamp ?? left.entry_timestamp) - parseTimestampMs(right.exit_timestamp ?? right.entry_timestamp));
     let running = 0;
-    return rows.map((row) => {
-      running += Number(row.realized_pnl ?? 0) || 0;
-      return {
-        timestamp: String(row.exit_timestamp ?? row.entry_timestamp ?? ""),
-        value: running,
-      };
-    });
-  }, [closedStrategyTradeRows]);
+    if (rows.length) {
+      return rows.map((row) => {
+        running += Number(row.realized_pnl ?? 0) || 0;
+        return {
+          timestamp: String(row.exit_timestamp ?? row.entry_timestamp ?? ""),
+          value: running,
+        };
+      });
+    }
+    const fillRows = [...paperLatestFills]
+      .filter((row) => String(row.fill_timestamp ?? "").slice(0, 10) === targetDate)
+      .sort((left, right) => parseTimestampMs(left.fill_timestamp) - parseTimestampMs(right.fill_timestamp));
+    return fillRows.map((row) => ({
+      timestamp: String(row.fill_timestamp ?? ""),
+      value: 0,
+    }));
+  }, [closedStrategyTradeRows, paperLatestFills]);
+  const paperLatestVisibleDateLabel = useMemo(() => {
+    const latestClosedPaperDate =
+      String(closedStrategyTradeRows[0]?.exit_timestamp ?? closedStrategyTradeRows[0]?.entry_timestamp ?? "").slice(0, 10) || "";
+    const latestPaperFillDate =
+      String(paperLatestFills[0]?.fill_timestamp ?? "").slice(0, 10) || "";
+    const targetDate = latestClosedPaperDate || latestPaperFillDate;
+    return targetDate ? formatLongDate(targetDate) : null;
+  }, [closedStrategyTradeRows, paperLatestFills]);
+  const paperIntradayCurveNet = paperIntradayCurveRows.length ? paperIntradayCurveRows[paperIntradayCurveRows.length - 1]?.value ?? 0 : 0;
+  const currentWallClockDateKey =
+    dateKeyFromTimestamp(desktopState?.refreshedAt ?? new Date().toISOString()) ??
+    new Date().toISOString().slice(0, 10);
+  const latestClosedPaperDateKey =
+    dateKeyFromTimestamp(closedStrategyTradeRows[0]?.exit_timestamp ?? closedStrategyTradeRows[0]?.entry_timestamp) || null;
+  const latestPaperFillDateKey =
+    dateKeyFromTimestamp(paperLatestFills[0]?.fill_timestamp) || null;
+  const publishedPaperSessionDateKey =
+    dateKeyFromTimestamp(
+      paperStrategyPerformance.session_date
+      ?? strategyPortfolioSnapshot.session_date
+      ?? paperReadiness.session_date
+      ?? paperReadiness.current_session_date
+      ?? null,
+    );
+  const currentPaperCalendarDateKey =
+    publishedPaperSessionDateKey
+    || latestClosedPaperDateKey
+    || latestPaperFillDateKey
+    || currentWallClockDateKey;
+  const paperDerivedSessionRealizedPnl = useMemo(() => {
+    return closedStrategyTradeRows
+      .filter((row) => dateKeyFromTimestamp(row.exit_timestamp ?? row.entry_timestamp) === currentPaperCalendarDateKey)
+      .reduce((sum, row) => sum + (numericOrNull(row.realized_pnl ?? row.net_pnl ?? row.gross_pnl) ?? 0), 0);
+  }, [closedStrategyTradeRows, currentPaperCalendarDateKey]);
+  const paperDisplayedDayPnl = useMemo(() => {
+    const snapshotDayPnl = numericOrNull(combinedStrategyPortfolioSnapshot.total_day_pnl);
+    if (snapshotDayPnl !== null && Math.abs(snapshotDayPnl) > 0.009) {
+      return snapshotDayPnl;
+    }
+    return paperDerivedSessionRealizedPnl;
+  }, [combinedStrategyPortfolioSnapshot.total_day_pnl, paperDerivedSessionRealizedPnl]);
   const liveIntradayCurveRows = useMemo(() => {
     const fills = [...productionRecentFills]
       .sort((left, right) => parseTimestampMs(left.updated_at ?? left.occurred_at) - parseTimestampMs(right.updated_at ?? right.occurred_at));
@@ -6091,11 +9082,15 @@ function paperStartupCategoryTone(category: string): Tone {
   const paperCalendarEntries = useMemo<CalendarSourceEntry[]>(
     () => {
       const entries: CalendarSourceEntry[] = [];
+      let todayClosedPnl = 0;
       for (const row of closedStrategyTradeRows) {
           const date = dateKeyFromTimestamp(row.exit_timestamp ?? row.entry_timestamp);
           const pnl = numericOrNull(row.realized_pnl ?? row.gross_pnl);
           if (!date || pnl === null) {
             continue;
+          }
+          if (date === currentPaperCalendarDateKey) {
+            todayClosedPnl += pnl;
           }
           entries.push({
             source: "paper",
@@ -6107,18 +9102,36 @@ function paperStartupCategoryTone(category: string): Tone {
             tradeCount: Math.max(1, numericOrNull(row.trade_count) ?? 1),
           });
       }
+      const paperDayPnl = paperDisplayedDayPnl;
+      const intradayDelta = paperDayPnl === null ? null : paperDayPnl - todayClosedPnl;
+      if (intradayDelta !== null && Math.abs(intradayDelta) > 0.01) {
+        entries.push({
+          source: "paper",
+          date: currentPaperCalendarDateKey,
+          laneId: null,
+          strategyId: "__paper_intraday_partial__",
+          strategyName: "Paper Intraday Partial",
+          pnl: intradayDelta,
+          tradeCount: 0,
+          provisional: true,
+        });
+      }
       return entries;
     },
-    [closedStrategyTradeRows],
+    [closedStrategyTradeRows, currentPaperCalendarDateKey, paperDisplayedDayPnl],
   );
   const liveCalendarEntries = useMemo<CalendarSourceEntry[]>(
     () => {
       const entries: CalendarSourceEntry[] = [];
+      let todayRealizedPnl = 0;
       for (const row of productionRecentFills) {
           const date = dateKeyFromTimestamp(row.updated_at ?? row.occurred_at ?? row.fill_timestamp);
           const pnl = numericOrNull(row.realized_pnl ?? row.fill_pnl ?? row.pnl ?? row.net_pnl ?? row.profit_loss);
           if (!date || pnl === null) {
             continue;
+          }
+          if (date === currentWallClockDateKey) {
+            todayRealizedPnl += pnl;
           }
           entries.push({
             source: "live",
@@ -6130,9 +9143,49 @@ function paperStartupCategoryTone(category: string): Tone {
             tradeCount: Math.max(1, numericOrNull(row.trade_count ?? row.filled_quantity ?? row.quantity) ?? 1),
           });
       }
+      const liveDayPnl = numericOrNull(productionTotals.total_current_day_pnl);
+      const intradayDelta = liveDayPnl === null ? null : liveDayPnl - todayRealizedPnl;
+      if (intradayDelta !== null && Math.abs(intradayDelta) > 0.01) {
+        entries.push({
+          source: "live",
+          date: currentWallClockDateKey,
+          laneId: null,
+          strategyId: "__live_intraday_partial__",
+          strategyName: "Live Intraday Partial",
+          pnl: intradayDelta,
+          tradeCount: 0,
+          provisional: true,
+        });
+      }
       return entries;
     },
-    [productionRecentFills],
+    [currentWallClockDateKey, productionRecentFills, productionTotals.total_current_day_pnl],
+  );
+  const historicalBackcastCalendarEntries = useMemo<CalendarSourceEntry[]>(
+    () => {
+      const entries: CalendarSourceEntry[] = [];
+      for (const item of selectedCalendarPlaybackItems) {
+        const summary = asRecord(item.summary);
+        for (const trade of playbackCalendarBreakdownRows(summary)) {
+          const date = String(trade.date ?? "").trim();
+          const pnl = numericOrNull(trade.realized_pnl);
+          if (!date || pnl === null) {
+            continue;
+          }
+          entries.push({
+            source: "historical_backcast",
+            date,
+            laneId: String(item.study_key ?? "") || null,
+            strategyId: String(item.strategy_id ?? item.study_key ?? item.symbol ?? "historical_backcast"),
+            strategyName: String(item.label ?? item.strategy_id ?? item.symbol ?? "Historical Backcast"),
+            pnl,
+            tradeCount: Math.max(1, Number(trade.trade_count ?? 0) || 0),
+          });
+        }
+      }
+      return entries;
+    },
+    [selectedCalendarPlaybackItems],
   );
   const benchmarkReplayCalendarEntries = useMemo<CalendarSourceEntry[]>(
     () => {
@@ -6143,8 +9196,8 @@ function paperStartupCategoryTone(category: string): Tone {
         if (studyMode !== "baseline_parity_mode") {
           continue;
         }
-        for (const trade of asArray<JsonRecord>(summary.closed_trade_breakdown)) {
-          const date = dateKeyFromTimestamp(trade.exit_timestamp ?? trade.entry_timestamp);
+        for (const trade of playbackCalendarBreakdownRows(summary)) {
+          const date = String(trade.date ?? "").trim();
           const pnl = numericOrNull(trade.realized_pnl);
           if (!date || pnl === null) {
             continue;
@@ -6156,7 +9209,7 @@ function paperStartupCategoryTone(category: string): Tone {
             strategyId: String(item.strategy_id ?? item.study_key ?? item.symbol ?? "benchmark_replay"),
             strategyName: String(item.label ?? item.strategy_id ?? item.symbol ?? "Benchmark Replay"),
             pnl,
-            tradeCount: 1,
+            tradeCount: Math.max(1, Number(trade.trade_count ?? 0) || 0),
           });
         }
       }
@@ -6173,8 +9226,8 @@ function paperStartupCategoryTone(category: string): Tone {
         if (studyMode !== "research_execution_mode") {
           continue;
         }
-        for (const trade of asArray<JsonRecord>(summary.closed_trade_breakdown)) {
-          const date = dateKeyFromTimestamp(trade.exit_timestamp ?? trade.entry_timestamp);
+        for (const trade of playbackCalendarBreakdownRows(summary)) {
+          const date = String(trade.date ?? "").trim();
           const pnl = numericOrNull(trade.realized_pnl);
           if (!date || pnl === null) {
             continue;
@@ -6186,7 +9239,7 @@ function paperStartupCategoryTone(category: string): Tone {
             strategyId: String(item.strategy_id ?? item.study_key ?? item.symbol ?? "research_execution"),
             strategyName: String(item.label ?? item.strategy_id ?? item.symbol ?? "Research Execution"),
             pnl,
-            tradeCount: 1,
+            tradeCount: Math.max(1, Number(trade.trade_count ?? 0) || 0),
           });
         }
       }
@@ -6194,25 +9247,128 @@ function paperStartupCategoryTone(category: string): Tone {
     },
     [playbackLatestStudyItems],
   );
+  const researchAnalyticsStrategyLabelById = useMemo(() => {
+    const lookup = new Map<string, string>();
+    for (const row of researchAnalyticsStrategyCatalog) {
+      const selectionKey = researchAnalyticsSelectionKey(row);
+      if (!selectionKey) {
+        continue;
+      }
+      lookup.set(selectionKey, researchAnalyticsDisplayLabel(row));
+    }
+    for (const row of researchAnalyticsStrategySummaries) {
+      const selectionKey = researchAnalyticsSelectionKey(row);
+      if (!selectionKey) {
+        continue;
+      }
+      lookup.set(selectionKey, researchAnalyticsDisplayLabel(row));
+    }
+    return lookup;
+  }, [researchAnalyticsStrategyCatalog, researchAnalyticsStrategySummaries]);
+  const calendarResearchStrategyOptions = useMemo(
+    () =>
+      researchAnalyticsStrategyCatalog
+        .map((row) => ({
+          strategyId: researchAnalyticsSelectionKey(row),
+          label: researchAnalyticsStrategyLabelById.get(researchAnalyticsSelectionKey(row)) ?? researchAnalyticsDisplayLabel(row),
+        }))
+        .filter((row) => row.strategyId)
+        .sort((left, right) => left.label.localeCompare(right.label)),
+    [researchAnalyticsStrategyCatalog, researchAnalyticsStrategyLabelById],
+  );
+  useEffect(() => {
+    if (!calendarResearchStrategyIds.length) {
+      return;
+    }
+    const availableIds = new Set(calendarResearchStrategyOptions.map((row) => row.strategyId));
+    const filtered = calendarResearchStrategyIds.filter((strategyId) => availableIds.has(strategyId));
+    if (filtered.length !== calendarResearchStrategyIds.length) {
+      setCalendarResearchStrategyIds(filtered);
+    }
+  }, [calendarResearchStrategyIds, calendarResearchStrategyOptions]);
+  const researchAnalyticsCalendarEntries = useMemo<CalendarSourceEntry[]>(
+    () => {
+      const selectedIds = calendarResearchStrategyIds.length ? new Set(calendarResearchStrategyIds) : null;
+      return researchAnalyticsDailyRows
+        .filter((row) => {
+          const strategyKey = researchAnalyticsSelectionKey(row);
+          if (!strategyKey) {
+            return false;
+          }
+          return selectedIds === null || selectedIds.has(strategyKey);
+        })
+        .map((row) => ({
+          source: "research_analytics",
+          date: String(row.date ?? ""),
+          laneId: String(row.target_id ?? row.strategy_id ?? "") || null,
+          strategyId: researchAnalyticsSelectionKey(row) || "research_analytics",
+          strategyName: researchAnalyticsStrategyLabelById.get(researchAnalyticsSelectionKey(row)) ?? researchAnalyticsDisplayLabel(row),
+          pnl: Number(row.net_pnl_day ?? 0) || 0,
+          tradeCount: Math.max(0, Number(row.trade_count_day ?? 0) || 0),
+        }))
+        .filter((row) => Boolean(row.date));
+    },
+    [calendarResearchStrategyIds, researchAnalyticsDailyRows, researchAnalyticsStrategyLabelById],
+  );
   const calendarEntriesBySource = useMemo(
     () => ({
+      historical_backcast: historicalBackcastCalendarEntries,
       live: liveCalendarEntries,
       paper: paperCalendarEntries,
       benchmark_replay: benchmarkReplayCalendarEntries,
       research_execution: researchExecutionCalendarEntries,
+      research_analytics: researchAnalyticsCalendarEntries,
     }),
-    [benchmarkReplayCalendarEntries, liveCalendarEntries, paperCalendarEntries, researchExecutionCalendarEntries],
+    [benchmarkReplayCalendarEntries, historicalBackcastCalendarEntries, liveCalendarEntries, paperCalendarEntries, researchAnalyticsCalendarEntries, researchExecutionCalendarEntries],
   );
+  const calendarSelectedPlaybackCount = calendarPlaybackStrategyKeys === null ? calendarPlaybackStrategyOptions.length : calendarPlaybackStrategyKeys.length;
   const calendarAvailableSources = useMemo(
-    () =>
-      (Object.entries(calendarEntriesBySource) as Array<[Exclude<PnlCalendarSource, "all">, CalendarSourceEntry[]]>)
-        .filter(([, entries]) => entries.length > 0)
-        .map(([source]) => source),
-    [calendarEntriesBySource],
+    () => {
+      const sources: Array<Exclude<PnlCalendarSource, "all">> = [];
+      if (playbackLatestStudyItems.length > 0) {
+        sources.push("historical_backcast");
+      }
+      if (liveCalendarEntries.length > 0) {
+        sources.push("live");
+      }
+      if (paperCalendarEntries.length > 0) {
+        sources.push("paper");
+      }
+      if (researchAnalyticsCalendarEntries.length > 0) {
+        sources.push("research_analytics");
+      }
+      return sources;
+    },
+    [
+      liveCalendarEntries.length,
+      paperCalendarEntries.length,
+      playbackLatestStudyItems.length,
+      researchAnalyticsCalendarEntries.length,
+    ],
   );
-  const calendarSourceSelection = useMemo(() => {
+  const effectiveCalendarSource = useMemo<PnlCalendarSource>(() => {
     if (calendarSource === "all") {
-      const includedSources = calendarAvailableSources.length ? calendarAvailableSources : ["paper"];
+      return "all";
+    }
+    if (calendarAvailableSources.includes(calendarSource as Exclude<PnlCalendarSource, "all">)) {
+      return calendarSource;
+    }
+    if (paperCalendarEntries.length > 0) {
+      return "paper";
+    }
+    if (calendarAvailableSources.length > 0) {
+      return calendarAvailableSources[0];
+    }
+    return calendarSource;
+  }, [calendarAvailableSources, calendarSource, paperCalendarEntries.length]);
+  useEffect(() => {
+    if (calendarSource !== effectiveCalendarSource) {
+      setCalendarSource(effectiveCalendarSource);
+    }
+  }, [calendarSource, effectiveCalendarSource]);
+  const calendarSourceSelection = useMemo(() => {
+    if (effectiveCalendarSource === "all") {
+      const includedSources = calendarAvailableSources.length ? calendarAvailableSources : ["historical_backcast"];
       const uniqueSources = [...new Set(includedSources)];
       const mergedEntries = uniqueSources.flatMap((source) => calendarEntriesBySource[source as Exclude<PnlCalendarSource, "all">] ?? []);
       return {
@@ -6225,20 +9381,95 @@ function paperStartupCategoryTone(category: string): Tone {
             : `Only ${uniqueSources[0].replace(/_/g, " ")} currently exposes closed-trade daily history in the loaded workstation snapshot.`,
       };
     }
-    const entries = calendarEntriesBySource[calendarSource] ?? [];
-      return {
-        selectedSourceLabel: calendarSourceLabel(calendarSource),
-        includedSources: [calendarSource],
+    const baseEntries = calendarEntriesBySource[effectiveCalendarSource] ?? [];
+    const historicalBackcastPaperOverlayEntries =
+      effectiveCalendarSource === "historical_backcast"
+        ? paperCalendarEntries.filter((entry) => entry.date >= currentPaperCalendarDateKey)
+        : [];
+    const entries = [...baseEntries, ...historicalBackcastPaperOverlayEntries];
+    const includedSources =
+      effectiveCalendarSource === "historical_backcast" && historicalBackcastPaperOverlayEntries.length > 0
+        ? ["historical_backcast", "paper"] as Array<Exclude<PnlCalendarSource, "all">>
+        : [effectiveCalendarSource];
+    return {
+        selectedSourceLabel: calendarSourceLabel(effectiveCalendarSource),
+        includedSources,
         entries,
       note:
+        effectiveCalendarSource === "historical_backcast" && calendarSelectedPlaybackCount === 0
+          ? "No backcast strategies are selected."
+          :
         entries.length > 0
-          ? `${calendarSource === "paper" ? "Persisted paper/runtime trade ledger." : calendarSource === "live" ? "Broker/live closed-fill stream." : calendarSource === "benchmark_replay" ? "Replay/backtest artifact stream." : "Research execution artifact stream."}`
-          : `${calendarSource === "benchmark_replay" ? "Replay" : calendarSource === "research_execution" ? "Research-execution" : sentenceCase(calendarSource)} daily history is not loaded in the current workstation snapshot.`,
+          ? `${
+              effectiveCalendarSource === "historical_backcast"
+                ? historicalBackcastPaperOverlayEntries.length > 0
+                  ? `Loaded historical playback studies with current New York paper-session overlay. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
+                  : `Loaded historical playback studies. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
+                : effectiveCalendarSource === "paper"
+                  ? "Persisted paper/runtime trade ledger."
+                  : effectiveCalendarSource === "live"
+                    ? "Broker/live closed-fill stream."
+                    : effectiveCalendarSource === "benchmark_replay"
+                      ? "Replay/backtest artifact stream."
+                      : effectiveCalendarSource === "research_execution"
+                        ? "Research execution artifact stream."
+                        : "Published research analytics daily P&L dataset."
+            }`
+          : `${
+              effectiveCalendarSource === "historical_backcast"
+                ? "Historical backcast"
+                : effectiveCalendarSource === "benchmark_replay"
+                  ? "Replay"
+                  : effectiveCalendarSource === "research_execution"
+                    ? "Research-execution"
+                    : effectiveCalendarSource === "research_analytics"
+                      ? "Research analytics"
+                      : sentenceCase(effectiveCalendarSource)
+            } daily history is not loaded in the current workstation snapshot.`,
     };
-  }, [calendarAvailableSources, calendarEntriesBySource, calendarSource]);
+  }, [calendarAvailableSources, calendarEntriesBySource, calendarPlaybackStrategyOptions.length, calendarSelectedPlaybackCount, currentPaperCalendarDateKey, effectiveCalendarSource, paperCalendarEntries]);
+  const calendarSourceAvailableRange = useMemo(() => {
+    const dates = new Set<string>();
+    for (const entry of calendarSourceSelection.entries) {
+      if (entry.date) {
+        dates.add(entry.date);
+      }
+    }
+    for (const source of calendarSourceSelection.includedSources) {
+      if (source === "historical_backcast" || source === "benchmark_replay" || source === "research_execution") {
+        for (const dateKey of playbackCoverageDateKeysBySource[source]) {
+          dates.add(dateKey);
+        }
+      }
+    }
+    const ordered = [...dates].sort();
+    if (!ordered.length) {
+      return null;
+    }
+    return {
+      start: ordered[0],
+      end: ordered[ordered.length - 1],
+      hasTradeRows: calendarSourceSelection.entries.length > 0,
+      dayCount: ordered.length,
+    };
+  }, [calendarSourceSelection.entries, calendarSourceSelection.includedSources, playbackCoverageDateKeysBySource]);
+  const paperCalendarLatestDate = useMemo(() => {
+    const ordered = paperCalendarEntries.map((entry) => entry.date).filter(Boolean).sort();
+    return ordered.length ? ordered[ordered.length - 1] : null;
+  }, [paperCalendarEntries]);
+  const calendarPaperRecencyNote = useMemo(() => {
+    if (effectiveCalendarSource !== "paper") {
+      return null;
+    }
+    const today = currentPaperCalendarDateKey;
+    if (!paperCalendarLatestDate || paperCalendarLatestDate >= today) {
+      return null;
+    }
+    return `Latest persisted paper fill / closed-trade day is ${formatLongDate(paperCalendarLatestDate)}. Runtime activity after midnight does not count toward the paper calendar until a paper fill or closed trade is published.`;
+  }, [currentPaperCalendarDateKey, effectiveCalendarSource, paperCalendarLatestDate]);
   const effectiveCalendarViewMode = calendarPeriod === "ytd" ? "line" : calendarViewMode;
   const calendarRange = useMemo(() => {
-    const today = new Date().toISOString().slice(0, 10);
+    const anchoredToday = calendarAnchorDate || new Date().toISOString().slice(0, 10);
     if (calendarPeriod === "weekly") {
       const start = startOfWeek(calendarAnchorDate);
       return { start, end: addDays(start, 4) };
@@ -6247,7 +9478,7 @@ function paperStartupCategoryTone(category: string): Tone {
       return { start: startOfQuarter(calendarAnchorDate), end: endOfQuarter(calendarAnchorDate) };
     }
     if (calendarPeriod === "ytd") {
-      return { start: startOfYear(today), end: today };
+      return { start: startOfYear(anchoredToday), end: anchoredToday };
     }
     if (calendarPeriod === "custom") {
       return {
@@ -6261,15 +9492,45 @@ function paperStartupCategoryTone(category: string): Tone {
     () => sourcePeriodLabel(calendarPeriod, calendarAnchorDate, calendarRange.start, calendarRange.end),
     [calendarAnchorDate, calendarPeriod, calendarRange.end, calendarRange.start],
   );
+  const calendarRangeOutsideLoadedHistory = useMemo(() => {
+    if (!calendarSourceAvailableRange) {
+      return false;
+    }
+    return calendarRange.end < calendarSourceAvailableRange.start || calendarRange.start > calendarSourceAvailableRange.end;
+  }, [calendarRange.end, calendarRange.start, calendarSourceAvailableRange]);
+  const calendarCoverageNote = useMemo(() => {
+    if (!calendarSourceAvailableRange) {
+      return null;
+    }
+    const coverageLabel = `${NY_SHORT_DATE_FORMATTER.format(dateFromKey(calendarSourceAvailableRange.start))} - ${NY_SHORT_DATE_FORMATTER.format(dateFromKey(calendarSourceAvailableRange.end))}`;
+    if (calendarRange.start < calendarSourceAvailableRange.start || calendarRange.end > calendarSourceAvailableRange.end) {
+      return `Selected range extends beyond loaded ${calendarSourceSelection.selectedSourceLabel.toLowerCase()} history. Available coverage is only ${coverageLabel}, so the calendar is incomplete outside that window.`;
+    }
+    return `${calendarSourceSelection.selectedSourceLabel} coverage in the current workstation is ${coverageLabel}.`;
+  }, [calendarRange.end, calendarRange.start, calendarSourceAvailableRange, calendarSourceSelection.selectedSourceLabel]);
   const calendarDayPoints = useMemo<CalendarDayPoint[]>(() => {
-    const grouped = new Map<string, { pnl: number; tradeCount: number; contributions: Map<string, CalendarStrategyContribution>; coveredSources: Set<Exclude<PnlCalendarSource, "all" | "live" | "paper">> }>();
+    const grouped = new Map<string, {
+      pnl: number;
+      tradeCount: number;
+      contributions: Map<string, CalendarStrategyContribution>;
+      coveredSources: Set<Exclude<PnlCalendarSource, "all" | "live" | "paper">>;
+      hasIntradayPartial: boolean;
+      intradaySources: Set<Exclude<PnlCalendarSource, "all">>;
+    }>();
     const coverageDates = new Set<string>();
     for (const source of calendarSourceSelection.includedSources) {
-      if (source === "benchmark_replay" || source === "research_execution") {
+      if (source === "historical_backcast" || source === "benchmark_replay" || source === "research_execution") {
         for (const dateKey of playbackCoverageDateKeysBySource[source]) {
           if (dateKey >= calendarRange.start && dateKey <= calendarRange.end) {
             coverageDates.add(dateKey);
-            const existing = grouped.get(dateKey) ?? { pnl: 0, tradeCount: 0, contributions: new Map(), coveredSources: new Set() };
+            const existing = grouped.get(dateKey) ?? {
+              pnl: 0,
+              tradeCount: 0,
+              contributions: new Map(),
+              coveredSources: new Set(),
+              hasIntradayPartial: false,
+              intradaySources: new Set(),
+            };
             existing.coveredSources.add(source);
             grouped.set(dateKey, existing);
           }
@@ -6280,7 +9541,14 @@ function paperStartupCategoryTone(category: string): Tone {
       .filter((entry) => entry.date >= calendarRange.start && entry.date <= calendarRange.end)
       .sort((left, right) => left.date.localeCompare(right.date));
     for (const entry of filteredEntries) {
-      const day = grouped.get(entry.date) ?? { pnl: 0, tradeCount: 0, contributions: new Map(), coveredSources: new Set() };
+      const day = grouped.get(entry.date) ?? {
+        pnl: 0,
+        tradeCount: 0,
+        contributions: new Map(),
+        coveredSources: new Set(),
+        hasIntradayPartial: false,
+        intradaySources: new Set(),
+      };
       day.pnl += entry.pnl;
       day.tradeCount += entry.tradeCount;
       const contributionKey = `${entry.source}:${entry.strategyId}:${entry.laneId ?? ""}`;
@@ -6291,15 +9559,28 @@ function paperStartupCategoryTone(category: string): Tone {
         strategyName: entry.strategyName,
         pnl: 0,
         tradeCount: 0,
+        provisional: entry.provisional === true,
       };
       existing.pnl += entry.pnl;
       existing.tradeCount += entry.tradeCount;
+      existing.provisional = existing.provisional === true || entry.provisional === true;
       day.contributions.set(contributionKey, existing);
+      if (entry.provisional === true) {
+        day.hasIntradayPartial = true;
+        day.intradaySources.add(entry.source);
+      }
       grouped.set(entry.date, day);
     }
     for (const dateKey of coverageDates) {
       if (!grouped.has(dateKey)) {
-        grouped.set(dateKey, { pnl: 0, tradeCount: 0, contributions: new Map(), coveredSources: new Set() });
+        grouped.set(dateKey, {
+          pnl: 0,
+          tradeCount: 0,
+          contributions: new Map(),
+          coveredSources: new Set(),
+          hasIntradayPartial: false,
+          intradaySources: new Set(),
+        });
       }
     }
     let running = 0;
@@ -6314,6 +9595,8 @@ function paperStartupCategoryTone(category: string): Tone {
           cumulative: running,
           contributions: [...payload.contributions.values()].sort((left, right) => Math.abs(right.pnl) - Math.abs(left.pnl)),
           coveredSources: [...payload.coveredSources.values()].sort(),
+          hasIntradayPartial: payload.hasIntradayPartial,
+          intradaySources: [...payload.intradaySources.values()].sort(),
         };
       });
   }, [calendarRange.end, calendarRange.start, calendarSourceSelection.entries, calendarSourceSelection.includedSources, playbackCoverageDateKeysBySource]);
@@ -6364,10 +9647,10 @@ function paperStartupCategoryTone(category: string): Tone {
     return maxDrawdown === 0 ? 0 : -maxDrawdown;
   }, [calendarDailyPnls]);
   const calendarPortfolioBase = useMemo(() => {
-    if (calendarSource === "live") {
+    if (effectiveCalendarSource === "live") {
       return numericOrNull(productionBalances.liquidation_value ?? productionBalances.cash_balance ?? productionTotals.buying_power);
     }
-    if (calendarSource === "paper" || calendarSource === "all") {
+    if (effectiveCalendarSource === "paper" || effectiveCalendarSource === "all") {
       return numericOrNull(
         asRecord(paperStrategyPerformance.portfolio_snapshot).starting_equity
         ?? asRecord(paperStrategyPerformance.portfolio_snapshot).account_basis
@@ -6376,7 +9659,7 @@ function paperStartupCategoryTone(category: string): Tone {
     }
     return null;
   }, [
-    calendarSource,
+    effectiveCalendarSource,
     paperStrategyPerformance.portfolio_snapshot,
     productionBalances.cash_balance,
     productionBalances.liquidation_value,
@@ -6482,7 +9765,63 @@ function paperStartupCategoryTone(category: string): Tone {
     }
   }, [calendarContextLabel, page]);
 
-  const primaryNavItems = NAV_ITEMS.filter((item) => ["home", "calendar", "positions", "market", "strategies"].includes(item.id));
+  useEffect(() => {
+    if (page !== "calendar" || !calendarSourceAvailableRange) {
+      return;
+    }
+    const latestAvailableDate = calendarSourceAvailableRange.end;
+    if (!calendarAutoRangeApplied) {
+      if (calendarAnchorDate !== latestAvailableDate) {
+        setCalendarAnchorDate(latestAvailableDate);
+      }
+      if (calendarSourceAvailableRange.start < startOfMonth(latestAvailableDate)) {
+        setCalendarPeriod("ytd");
+      }
+      setCalendarAutoRangeApplied(true);
+      return;
+    }
+    if (calendarRangeOutsideLoadedHistory && calendarAnchorDate !== latestAvailableDate) {
+      setCalendarAnchorDate(latestAvailableDate);
+    }
+  }, [
+    calendarAnchorDate,
+    calendarAutoRangeApplied,
+    calendarRangeOutsideLoadedHistory,
+    calendarSourceAvailableRange,
+    page,
+  ]);
+
+  const calendarHistoryEmptyReason = useMemo(() => {
+    if (calendarDayPoints.length) {
+      return null;
+    }
+    if (effectiveCalendarSource === "historical_backcast" && calendarSelectedPlaybackCount === 0) {
+      return "Historical Backcast is selected, but no strategies are currently checked.";
+    }
+    if (!calendarSourceAvailableRange) {
+      return `${calendarSourceSelection.selectedSourceLabel} does not currently expose persisted closed-trade daily history in the loaded workstation snapshot.`;
+    }
+    if (calendarRangeOutsideLoadedHistory) {
+      return `${calendarSourceSelection.selectedSourceLabel} has persisted history from ${calendarSourceAvailableRange.start} through ${calendarSourceAvailableRange.end}, but the current view is filtered to ${calendarRange.start} through ${calendarRange.end}.`;
+    }
+    if (!calendarSourceAvailableRange.hasTradeRows) {
+      return `${calendarSourceSelection.selectedSourceLabel} exposes coverage from ${calendarSourceAvailableRange.start} through ${calendarSourceAvailableRange.end}, but the persisted artifacts do not publish closed-trade daily P/L for this view.`;
+    }
+    return `${calendarSourceSelection.selectedSourceLabel} is loaded, but no closed-trade daily history was published for ${calendarRange.start} through ${calendarRange.end}.`;
+  }, [
+    calendarDayPoints.length,
+    calendarSelectedPlaybackCount,
+    calendarRange.end,
+    calendarRange.start,
+    calendarRangeOutsideLoadedHistory,
+    effectiveCalendarSource,
+    calendarSourceAvailableRange,
+    calendarSourceSelection.selectedSourceLabel,
+  ]);
+
+  const primaryNavItems = NAV_ITEMS.filter((item) =>
+    ["home", "calendar", "positions", "market", "strategies", "drawdown-lab", "atp-performance", "atp-attribution"].includes(item.id),
+  );
   const utilityNavItems = NAV_ITEMS.filter((item) => !primaryNavItems.includes(item));
   const processControlCards = [
     {
@@ -6506,8 +9845,8 @@ function paperStartupCategoryTone(category: string): Tone {
       label: "Auth Gate",
       status: authReadyForPaperStartup ? "READY" : "BLOCKED",
       tone: authReadyForPaperStartup ? "good" : "warn",
-      onClick: () => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true }),
-      disabled: busyAction !== null || !canRunLiveActions,
+      onClick: () => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check")),
+      disabled: busyAction !== null,
     },
     {
       label: "Entries",
@@ -6538,8 +9877,11 @@ function paperStartupCategoryTone(category: string): Tone {
     },
   ];
   const rosterSummaryCounts = {
-    live: dashboardRosterRows.filter((row) => rosterStatusChip(row) === "LIVE" || rosterStatusChip(row) === "ATTACH").length,
-    paper: dashboardRosterRows.filter((row) => rosterStatusChip(row) === "PAPER" || rosterStatusChip(row) === "BENCH").length,
+    live: dashboardRosterRows.filter((row) => runtimePresenceInfo(row).key === "ACTIVE_RUNTIME").length,
+    attach: dashboardRosterRows.filter((row) => runtimePresenceInfo(row).key === "ATTACH_PENDING").length,
+    configured: dashboardRosterRows.filter((row) => runtimePresenceInfo(row).key === "CONFIGURED_NOT_LOADED").length,
+    historical: dashboardRosterRows.filter((row) => runtimePresenceInfo(row).key === "HISTORICAL_SNAPSHOT_ONLY").length,
+    paper: dashboardRosterRows.filter((row) => rosterStatusChip(row) === "CFG" || rosterStatusChip(row) === "BENCH").length,
     candidate: dashboardRosterRows.filter((row) => rosterStatusChip(row) === "CAND").length,
     paused: dashboardRosterRows.filter((row) => rosterStatusChip(row) === "PAUSED").length,
   };
@@ -6709,6 +10051,97 @@ function paperStartupCategoryTone(category: string): Tone {
   const operatorAlertsStatusLine = operatorActiveAlertRows.length
     ? `${operatorActiveAlertRows.length} active operator alert${operatorActiveAlertRows.length === 1 ? "" : "s"} currently require visibility.`
     : "No active operator alerts are currently open.";
+  const unifiedOperatorTimelineRows = useMemo(
+    () => {
+      const timelineRows = paperSessionTimelineEvents.map((event, index) => {
+        const details = asArray<unknown>(event.details)
+          .map((item) => formatValue(item))
+          .filter((item) => item && item !== "—");
+        const title = formatValue(event.title ?? event.badge ?? event.category ?? "Timeline event");
+        return {
+          row_key: `paper-session-${String(event.timestamp ?? "unknown")}-${String(event.category ?? "timeline")}-${index}`,
+          timestamp: event.timestamp,
+          category: operatorTimelineCategoryLabel(event.category),
+          title,
+          summary: details[0] ?? title,
+          next_action: details[1] ?? "Continue monitoring the current runtime state.",
+          badge: formatValue(event.badge ?? "EVENT"),
+          provenance: formatValue(event.provenance ?? "DIRECT"),
+          tone: operatorTimelineTone({
+            category: event.category,
+            badge: event.badge,
+            provenance: event.provenance,
+          }),
+          source: "paper_session_timeline",
+        };
+      });
+      const alertRows = operatorRecentAlertRows.map((row, index) => {
+        const severity = String(row.severity ?? "INFO").trim().toUpperCase();
+        const title = formatValue(row.title ?? row.code ?? severity);
+        return {
+          row_key: `operator-alert-${String(row.alert_id ?? row.dedup_key ?? row.code ?? title)}-${index}`,
+          timestamp: row.occurred_at ?? row.logged_at,
+          category: operatorTimelineCategoryLabel(row.category ?? row.source_subsystem ?? "runtime"),
+          title,
+          summary: formatValue(row.message ?? title),
+          next_action: formatValue(row.recommended_action ?? "Continue monitoring the current runtime state."),
+          badge: severity,
+          provenance: "DIRECT",
+          tone: operatorTimelineTone({
+            category: row.category,
+            severity,
+            provenance: "DIRECT",
+          }),
+          source: "operator_alerts",
+        };
+      });
+      const merged = [...timelineRows, ...alertRows]
+        .filter((row) => row.timestamp || row.summary)
+        .sort((left, right) => parseTimestampMs(right.timestamp) - parseTimestampMs(left.timestamp));
+      const deduped: typeof merged = [];
+      const seen = new Set<string>();
+      for (const row of merged) {
+        const key = `${String(row.timestamp ?? "")}::${row.category}::${row.title}::${row.summary}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        deduped.push(row);
+      }
+      return deduped.slice(0, 14);
+    },
+    [operatorRecentAlertRows, paperSessionTimelineEvents],
+  );
+  const unifiedOperatorTimelineMetrics: Array<{ label: string; value: string; tone?: Tone }> = [
+    {
+      label: "Timeline Events",
+      value: formatShortNumber(unifiedOperatorTimelineRows.length),
+      tone: unifiedOperatorTimelineRows.length ? "good" : "muted",
+    },
+    {
+      label: "Direct Events",
+      value: formatShortNumber(unifiedOperatorTimelineRows.filter((row) => row.provenance === "DIRECT").length),
+      tone: unifiedOperatorTimelineRows.some((row) => row.provenance === "DIRECT") ? "good" : "muted",
+    },
+    {
+      label: "Reconstructed",
+      value: formatShortNumber(unifiedOperatorTimelineRows.filter((row) => row.provenance === "RECONSTRUCTED").length),
+      tone: unifiedOperatorTimelineRows.some((row) => row.provenance === "RECONSTRUCTED") ? "warn" : "muted",
+    },
+    {
+      label: "Active Alerts",
+      value: formatShortNumber(operatorActiveAlertRows.length),
+      tone: operatorActiveAlertRows.length ? "warn" : "good",
+    },
+    {
+      label: "Latest Event",
+      value: formatRelativeAge(unifiedOperatorTimelineRows[0]?.timestamp),
+      tone: unifiedOperatorTimelineRows.length ? "muted" : "good",
+    },
+  ];
+  const unifiedOperatorTimelineStatusLine = unifiedOperatorTimelineRows.length
+    ? `${unifiedOperatorTimelineRows.length} recent runtime, risk, operator, recovery, and reconstructed session events are visible for this paper session.`
+    : "No runtime or session timeline events are available yet.";
   const strategyBrokerDriftSummary = productionLinkEnabled()
     ? `Strategy ledger shows ${formatShortNumber(strategyPortfolioSnapshot.active_strategy_count)} active standalone strategies across ${formatShortNumber(strategyPortfolioSnapshot.active_instrument_count)} instruments. Broker truth currently shows ${formatShortNumber(productionPositions.length)} broker positions. Reconciliation: ${formatValue(productionReconciliation.label ?? productionReconciliation.status)}.`
     : "Broker production-link is disabled, so only strategy-ledger paper truth is available in this session.";
@@ -6884,6 +10317,7 @@ function paperStartupCategoryTone(category: string): Tone {
   const liveStrategyPilotLatestSignal = asRecord(liveStrategyPilotSummary.latest_signal_decision);
   const liveStrategyPilotLatestIntent = asRecord(liveStrategyPilotSummary.latest_live_strategy_intent);
   const liveStrategyPilotSignalObservability = asRecord(liveStrategyPilotSummary.signal_observability);
+  const liveStrategyPilotAllowedScope = asRecord(liveStrategyPilotSummary.allowed_scope);
   const liveStrategyPilotSignalCounts = asRecord(liveStrategyPilotSignalObservability.session_counts);
   const liveStrategyPilotSignalRawVsFinal = asRecord(liveStrategyPilotSignalObservability.raw_candidates_seen_vs_final_entries);
   const liveStrategyPilotSignalRawVsFinalLong = asRecord(liveStrategyPilotSignalRawVsFinal.long);
@@ -6894,6 +10328,32 @@ function paperStartupCategoryTone(category: string): Tone {
   const liveStrategyPilotAsiaTopFailures = asArray<JsonRecord>(liveStrategyPilotSignalTopFailedPredicates.asiaVWAPLong);
   const liveStrategyPilotBearTopFailures = asArray<JsonRecord>(liveStrategyPilotSignalTopFailedPredicates.bearSnapShort);
   const liveStrategyPilotRecentNoTradeRows = [...asArray<JsonRecord>(liveStrategyPilotSignalObservability.per_bar_rows)].slice(-8).reverse();
+  const liveStrategyPilotRuntimeRunning = liveStrategyPilotSummary.runtime_running === true;
+  const liveStrategyPilotSingleCycleMode = liveStrategyPilotSummary.live_strategy_single_cycle_mode === true;
+  const liveStrategyPilotHealthySingleCycleIdle =
+    !liveStrategyPilotRuntimeRunning &&
+    liveStrategyPilotSingleCycleMode &&
+    (liveStrategyPilotSummary.pilot_armed === true ||
+      liveStrategyPilotSummary.current_strategy_readiness === true ||
+      String(liveStrategyPilotSummary.current_runtime_phase ?? "").trim().toUpperCase() === "READY");
+  const liveStrategyPilotRuntimeLabel = liveStrategyPilotRuntimeRunning
+    ? "RUNNING"
+    : liveStrategyPilotHealthySingleCycleIdle
+      ? "ARMED (SINGLE-CYCLE)"
+      : "STOPPED";
+  const liveStrategyPilotRuntimeTone: Tone = liveStrategyPilotRuntimeRunning || liveStrategyPilotHealthySingleCycleIdle ? "good" : "warn";
+  const liveStrategyPilotEntriesEnabled = liveStrategyPilotSummary.submit_currently_enabled === true;
+  const liveStrategyPilotEntryAutomationEnabled = liveStrategyPilotAllowedScope.entry_automation_enabled === true;
+  const liveStrategyPilotOperatorFlattenEnabled = liveStrategyPilotAllowedScope.operator_flatten_enabled !== false;
+  const liveStrategyPilotStrategyExitAutomationEnabled = liveStrategyPilotAllowedScope.strategy_exit_automation_enabled === true;
+  const liveStrategyPilotBrokerTruthAuthoritative = liveStrategyPilotAllowedScope.broker_truth_authoritative !== false;
+  const liveStrategyPilotScopeLabel = [
+    formatValue(liveStrategyPilotAllowedScope.shared_strategy_identity ?? liveStrategyPilotSummary.shared_strategy_identity ?? "ATP_COMPANION_V1_GC_ASIA_US"),
+    formatValue(liveStrategyPilotAllowedScope.lane_id ?? liveStrategyPilotSummary.lane_id ?? "atp_companion_v1_gc_asia_us"),
+    formatValue(liveStrategyPilotAllowedScope.symbol ?? "GC"),
+    formatValue(liveStrategyPilotAllowedScope.timeframe ?? "5m/1m"),
+    formatValue(liveStrategyPilotAllowedScope.mode ?? liveStrategyPilotSummary.execution_scope ?? "ATP_LIVE_ENTRY_PILOT"),
+  ].join(" / ");
   const signalSelectivityLiveFocus = asRecord(signalSelectivityAnalysis.live_pilot_focus);
   const signalSelectivityTopFailed = asRecord(signalSelectivityLiveFocus.top_failed_predicates);
   const signalSelectivityRangeLadder = asRecord(signalSelectivityAnalysis.bear_snap_range_ladder);
@@ -6916,6 +10376,12 @@ function paperStartupCategoryTone(category: string): Tone {
     { label: "Position State", value: `${formatValue(shadowPositionState.side ?? "UNKNOWN")} / ${formatValue(shadowPositionState.internal_qty ?? 0)}`, tone: statusTone(shadowPositionState.side) },
   ];
   const liveStrategyPilotMetrics: Array<{ label: string; value: string; tone?: Tone }> = [
+    { label: "Runtime", value: liveStrategyPilotRuntimeLabel, tone: liveStrategyPilotRuntimeTone },
+    { label: "Mode", value: formatValue(liveStrategyPilotSummary.runtime_label ?? "ATP GC Live Entry Pilot"), tone: "good" },
+    { label: "Scope", value: formatValue(liveStrategyPilotSummary.execution_scope ?? "ATP_LIVE_ENTRY_PILOT"), tone: "warn" },
+    { label: "Automation", value: formatValue(liveStrategyPilotSummary.automation_scope ?? "ENTRY_ONLY_BROKER_AUTOMATION"), tone: "warn" },
+    { label: "Symbol", value: formatValue(liveStrategyPilotAllowedScope.symbol ?? "GC"), tone: "good" },
+    { label: "Point Value", value: formatValue(liveStrategyPilotAllowedScope.point_value ?? "100"), tone: "muted" },
     { label: "Pilot Mode", value: liveStrategyPilotSummary.live_strategy_pilot_enabled ? "ENABLED" : "DISABLED", tone: liveStrategyPilotSummary.live_strategy_pilot_enabled ? "good" : "warn" },
     { label: "Submit Flag", value: liveStrategyPilotSummary.live_strategy_submit_enabled ? "ENABLED" : "DISABLED", tone: liveStrategyPilotSummary.live_strategy_submit_enabled ? "good" : "warn" },
     { label: "Pilot Armed", value: liveStrategyPilotSummary.pilot_armed ? "ARMED" : "DISARMED", tone: liveStrategyPilotSummary.pilot_armed ? "good" : "warn" },
@@ -6928,6 +10394,7 @@ function paperStartupCategoryTone(category: string): Tone {
     { label: "Blocker", value: formatValue(liveStrategyPilotSummary.entries_disabled_blocker ?? "None"), tone: liveStrategyPilotSummary.entries_disabled_blocker ? "warn" : "good" },
     { label: "Broker Truth", value: formatValue(liveStrategyPilotBrokerTruthSummary.classification ?? "UNKNOWN"), tone: statusTone(liveStrategyPilotBrokerTruthSummary.classification) },
     { label: "Position State", value: `${formatValue(liveStrategyPilotPositionState.side ?? "UNKNOWN")} / ${formatValue(liveStrategyPilotPositionState.internal_qty ?? 0)}`, tone: statusTone(liveStrategyPilotPositionState.side) },
+    { label: "Selected Account", value: formatValue(liveStrategyPilotBrokerTruthSummary.selected_account_hash ?? "Unavailable"), tone: liveStrategyPilotBrokerTruthSummary.selected_account_hash ? "good" : "warn" },
   ];
   const liveStrategyPilotSignalMetrics: Array<{ label: string; value: string; tone?: Tone }> = [
     { label: "Why No Trade", value: formatValue(liveStrategyPilotSignalObservability.why_no_trade_so_far ?? "Unavailable"), tone: Number(liveStrategyPilotSignalCounts.longEntry ?? 0) === 0 && Number(liveStrategyPilotSignalCounts.shortEntry ?? 0) === 0 ? "warn" : "good" },
@@ -7072,10 +10539,13 @@ function paperStartupCategoryTone(category: string): Tone {
     { label: "Current Session", value: paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date ?? "Unknown", tone: statusTone(paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date) },
     { label: "Last Refresh", value: formatRelativeAge(desktopState?.refreshedAt), tone: "muted" as const },
   ];
-  const showGlobalStatusBanner = !PRIMARY_WORKSTATION_PAGES.has(page);
+  const healthyAttachedBridge =
+    desktopState?.source.mode === "attached_snapshot_bridge" &&
+    desktopState?.backend.state === "healthy";
+  const showGlobalStatusBanner = !PRIMARY_WORKSTATION_PAGES.has(page) && !healthyAttachedBridge;
   const showGlobalCommandStrip = !PRIMARY_WORKSTATION_PAGES.has(page);
   const showWorkspaceContextBar = false;
-  const showPrimaryCommandResult = page === "home" || page === "market" || page === "diagnostics";
+  const showPrimaryCommandResult = page === "home" || page === "market" || page === "positions" || page === "diagnostics";
 
   currentSectionPageContext = page;
 
@@ -7183,9 +10653,9 @@ function paperStartupCategoryTone(category: string): Tone {
             ) : null}
           </div>
           <div className="status-banner-meta">
-            <MetricMini label="Backend URL" value={desktopState?.backendUrl ?? "Unavailable"} />
+            <MetricMini label="Backend URL" value={backendUrlLabel} />
             <MetricMini label="Chosen Port" value={formatValue(startup?.chosenPort)} />
-            <MetricMini label="Ownership" value={ownershipLabel(startup?.ownership)} />
+            <MetricMini label="Desktop Mode" value={desktopModeLabelValue} />
             <MetricMini label="PID" value={formatValue(desktopState?.backend.pid)} />
             <MetricMini label="API Status" value={formatValue(desktopState?.backend.apiStatus)} tone={statusTone(desktopState?.backend.apiStatus)} />
             <MetricMini label="Health" value={formatValue(desktopState?.backend.healthStatus)} tone={statusTone(desktopState?.backend.healthStatus)} />
@@ -7213,20 +10683,24 @@ function paperStartupCategoryTone(category: string): Tone {
           <button className="panel-button" disabled={busyAction !== null} onClick={() => void manualRefresh()}>
             Refresh
           </button>
-          <button className="panel-button" disabled={busyAction !== null || desktopState?.backend.state === "starting"} onClick={() => void runCommand("start-dashboard", () => api.startDashboard())}>
-            {busyAction === "start-dashboard" ? "Starting..." : "Start Dashboard/API"}
-          </button>
-          <button
-            className="panel-button"
-            disabled={busyAction !== null || desktopState?.backend.state === "starting" || desktopState?.backend.state === "reconnecting"}
-            onClick={() =>
-              void runCommand("restart-dashboard", () => api.restartDashboard(), {
-                confirmMessage: "Restart Dashboard/API will interrupt live operator refresh briefly. Proceed?",
-              })
-            }
-          >
-            {busyAction === "restart-dashboard" ? "Restarting..." : "Restart Dashboard/API"}
-          </button>
+          {showStartDashboardAction ? (
+            <button className="panel-button" disabled={busyAction !== null || desktopState?.backend.state === "starting"} onClick={() => void runCommand("start-dashboard", () => api.startDashboard())}>
+              {busyAction === "start-dashboard" ? "Starting..." : "Start Dashboard/API"}
+            </button>
+          ) : null}
+          {showRestartDashboardAction ? (
+            <button
+              className="panel-button"
+              disabled={busyAction !== null || desktopState?.backend.state === "starting" || desktopState?.backend.state === "reconnecting"}
+              onClick={() =>
+                void runCommand("restart-dashboard", () => api.restartDashboard(), {
+                  confirmMessage: "Restart Dashboard/API will interrupt live operator refresh briefly. Proceed?",
+                })
+              }
+            >
+              {busyAction === "restart-dashboard" ? "Restarting..." : "Restart Dashboard/API"}
+            </button>
+          ) : null}
           <button
             className="panel-button"
             disabled={busyAction !== null || !canRunLiveActions}
@@ -7260,8 +10734,8 @@ function paperStartupCategoryTone(category: string): Tone {
           </button>
           <button
             className="panel-button"
-            disabled={busyAction !== null || !canRunLiveActions}
-            onClick={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true })}
+            disabled={busyAction !== null}
+            onClick={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"))}
           >
             {busyAction === "auth-gate-check" ? "Checking..." : "Auth Gate Check"}
           </button>
@@ -7277,7 +10751,7 @@ function paperStartupCategoryTone(category: string): Tone {
             <div className="workspace-context-meta">
               <Badge label={laneClassLabel(selectedWorkspaceRow)} tone={paperStrategyClassTone(selectedWorkspaceRow)} />
               <Badge label={selectedWorkspaceDesignation} tone={selectedWorkspaceRow?.benchmark_designation ? "warn" : selectedWorkspaceRow?.candidate_designation ? "good" : "muted"} />
-              <Badge label={selectedWorkspaceRuntimeLabel} tone={selectedWorkspaceRuntimeLabel === "Attached Live" ? "good" : selectedWorkspaceRuntimeLabel === "Audit Only" ? "warn" : "muted"} />
+              <Badge label={selectedWorkspaceRuntimeLabel} tone={runtimePresenceInfo(selectedWorkspaceRow).tone} />
               <span>{selectedWorkspaceInstrument || "No instrument"}</span>
               <span>Exec {formatValue(selectedWorkspaceRow?.execution_timeframe ?? "1m")}</span>
               <span>Context {selectedWorkspaceContextTimes}</span>
@@ -7355,11 +10829,69 @@ function paperStartupCategoryTone(category: string): Tone {
           {!loading && page === "home" ? (
             <>
               <Section
+                title={`Strategy Roster — ${dashboardRosterRows.length} Lanes`}
+                subtitle="Benchmark, candidate, temporary, and admitted lanes in a scan-first grid. Click any card to jump into Strategy Deep-Dive."
+                className="dashboard-roster-section"
+                headerClassName="section-header-tight"
+              >
+                <div className="strategy-roster-grid">
+                  {dashboardRosterRows.map((row) => {
+                    const performance = strategyPerformanceRows.find((candidate) => String(candidate.lane_id ?? "") === String(row.lane_id ?? "")) ?? null;
+                    const pnlValue = Number(
+                      performance?.day_pnl ?? performance?.realized_pnl ?? row.realized_pnl ?? row.unrealized_pnl ?? 0,
+                    ) || 0;
+                    return (
+                      <button
+                        key={String(row.lane_id ?? row.branch)}
+                        className={`strategy-card strategy-card-${rosterCardAccentClass(row)} ${String(selectedWorkspaceLaneId) === String(row.lane_id ?? "") ? "active" : ""}`}
+                        onClick={() => {
+                          selectWorkspaceLane(String(row.lane_id ?? ""), { navigateTo: "strategies" });
+                        }}
+                      >
+                        <div className="strategy-card-header">
+                          <div className="strategy-card-kicker">{formatValue(row.instrument ?? performance?.instrument ?? "Lane")}</div>
+                          <Badge label={rosterStatusChip(row)} tone={rosterStatusTone(row)} />
+                        </div>
+                        <div className="strategy-card-title">{compactBranchLabel(row)}</div>
+                        <div className={`strategy-card-pnl ${pnlTone(pnlValue)}`}>{renderPnlValue(pnlValue)}</div>
+                        <div className="strategy-card-meta">
+                          <span>{designationLabel(row)}</span>
+                          <span>{stagedPostureLabel(row)}</span>
+                        </div>
+                        <div className="strategy-card-meta">
+                          <span>{runtimePresenceInfo(row).label}</span>
+                          <span>{runtimePresenceCompactDetail(row)}</span>
+                        </div>
+                        {isAtpRow(row) ? (
+                          <div className="strategy-card-meta">
+                            <span>{atpTimingStateLabel(row)}</span>
+                            <span>{topBlockerLabel(row)}</span>
+                          </div>
+                        ) : null}
+                        <div className="strategy-card-footer">
+                          <span>{cadenceLabel(row)}</span>
+                          <span>{runtimePresenceInfo(row).label}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </Section>
+
+              <Section
                 title="Control Center"
                 subtitle="Shared-paper runtime control, operating posture, and strategy-universe summary"
                 className="dashboard-command-center"
                 headerClassName="section-header-tight"
               >
+                <SectionTruthStrip
+                  updatedAt={global.last_update_timestamp}
+                  fallbackUpdatedAt={dashboardGeneratedAt}
+                  sourceLabel={dashboardTruthSource.label}
+                  sourceTone={dashboardTruthSource.tone}
+                  scopeLabel="Shared-paper runtime control plane and assembled operator snapshot"
+                  provenance="Live dashboard/API state merged with runtime readiness, lane roster classification, and operator control posture."
+                />
                 <div className="dashboard-command-grid">
                   <div className="dashboard-command-column">
                     <div className="process-control-grid">
@@ -7396,7 +10928,7 @@ function paperStartupCategoryTone(category: string): Tone {
                       />
                       <ControlButton
                         label="Auth Gate Check"
-                        onClick={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true })}
+                        onClick={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"))}
                         busyAction={busyAction}
                         disabled={!canRunLiveActions}
                       />
@@ -7415,7 +10947,9 @@ function paperStartupCategoryTone(category: string): Tone {
                     </div>
                     <div className="status-chip-row dashboard-status-chip-row">
                       <Badge label={`LIVE ${rosterSummaryCounts.live}`} tone="good" />
-                      <Badge label={`PAPER ${rosterSummaryCounts.paper}`} tone="muted" />
+                      <Badge label={`ATTACH ${rosterSummaryCounts.attach}`} tone={rosterSummaryCounts.attach > 0 ? "warn" : "muted"} />
+                      <Badge label={`CONFIG ${rosterSummaryCounts.configured}`} tone={rosterSummaryCounts.configured > 0 ? "muted" : "good"} />
+                      <Badge label={`SNAP ${rosterSummaryCounts.historical}`} tone={rosterSummaryCounts.historical > 0 ? "warn" : "good"} />
                       <Badge label={`CAND ${rosterSummaryCounts.candidate}`} tone="warn" />
                       <Badge label={`PAUSED ${rosterSummaryCounts.paused}`} tone="muted" />
                       <Badge label={tempPaperMismatchActive ? "TEMP PAPER BLOCKED" : "TEMP PAPER CLEAR"} tone={tempPaperMismatchActive ? "danger" : "good"} />
@@ -7425,43 +10959,161 @@ function paperStartupCategoryTone(category: string): Tone {
               </Section>
 
               <Section
-                title={`Strategy Roster — ${dashboardRosterRows.length} Lanes`}
-                subtitle="Benchmark, candidate, temporary, and admitted lanes in a scan-first grid. Click any card to jump into Strategy Deep-Dive."
-                className="dashboard-roster-section"
+                title="What Needs Attention Now"
+                subtitle="Decision-first paper/runtime summary with the clearest next step and the reason behind it"
+                className="operator-attention-section"
                 headerClassName="section-header-tight"
               >
-                <div className="strategy-roster-grid">
-                  {dashboardRosterRows.map((row) => {
-                    const performance = strategyPerformanceRows.find((candidate) => String(candidate.lane_id ?? "") === String(row.lane_id ?? "")) ?? null;
-                    const pnlValue = Number(
-                      performance?.day_pnl ?? performance?.realized_pnl ?? row.realized_pnl ?? row.unrealized_pnl ?? 0,
-                    ) || 0;
-                    return (
-                      <button
-                        key={String(row.lane_id ?? row.branch)}
-                        className={`strategy-card strategy-card-${rosterCardAccentClass(row)} ${String(selectedWorkspaceLaneId) === String(row.lane_id ?? "") ? "active" : ""}`}
-                        onClick={() => {
-                          selectWorkspaceLane(String(row.lane_id ?? ""), { navigateTo: "strategies" });
-                        }}
-                      >
-                        <div className="strategy-card-header">
-                          <div className="strategy-card-kicker">{formatValue(row.instrument ?? performance?.instrument ?? "Lane")}</div>
-                          <Badge label={rosterStatusChip(row)} tone={rosterStatusTone(row)} />
-                        </div>
-                        <div className="strategy-card-title">{compactBranchLabel(row)}</div>
-                        <div className={`strategy-card-pnl ${pnlTone(pnlValue)}`}>{renderPnlValue(pnlValue)}</div>
-                        <div className="strategy-card-meta">
-                          <span>{designationLabel(row)}</span>
-                          <span>{stagedPostureLabel(row)}</span>
-                        </div>
-                        <div className="strategy-card-footer">
-                          <span>{cadenceLabel(row)}</span>
-                          <span>{runtimeAttachmentLabel(row)}</span>
-                        </div>
-                      </button>
-                    );
-                  })}
+                <AttentionPanel
+                  model={researchRuntimeAttention}
+                  onPrimaryAction={() => void runAttentionAction(researchRuntimeAttention.primaryAction)}
+                  onSecondaryAction={() => void runAttentionAction(researchRuntimeAttention.secondaryAction)}
+                />
+              </Section>
+
+              <Section title="Startup Control Plane" subtitle="Authoritative startup dependency truth for paper-only launch, reconciliation, and packaged-launch refusal">
+                <SectionTruthStrip
+                  updatedAt={startupControlPlane.generated_at}
+                  fallbackUpdatedAt={dashboardGeneratedAt}
+                  sourceLabel={dashboardTruthSource.label}
+                  sourceTone={dashboardTruthSource.tone}
+                  scopeLabel="Startup dependency contract for dashboard attach, paper runtime, auth, and reconciliation"
+                  provenance="Backend-published startup dependency rows with authoritative next actions, recovery state, and evidence targets."
+                />
+                <StartupControlPlanePanel
+                  controlPlane={startupControlPlane}
+                  operationalReadiness={operationalReadiness}
+                  canRunLiveActions={canRunLiveActions}
+                  busyAction={busyAction}
+                  onRunPrimaryAction={() => void runAttentionAction(operationalReadiness.primaryAction)}
+                  onRunAction={(row) => void runStartupControlPlaneAction(row)}
+                  onOpenEvidence={(row) => void openStartupControlPlaneEvidence(row)}
+                />
+              </Section>
+
+              <Section title="ATP / Temp Paper Truth" subtitle="Unambiguous view of whether ATP and temporary paper lanes exist, attach live, stay audit-only, or are not loaded">
+                <SectionTruthStrip
+                  updatedAt={temporaryPaperRuntimeIntegrity.generated_at ?? paperReadiness.generated_at}
+                  fallbackUpdatedAt={dashboardGeneratedAt}
+                  sourceLabel={dashboardTruthSource.label}
+                  sourceTone={dashboardTruthSource.tone}
+                  scopeLabel="ATP lane roster truth plus temporary-paper runtime integrity"
+                  provenance="Lane roster classification, ATP timing/blocker telemetry, and temp-paper integrity snapshots published by the backend."
+                />
+                <div className="metric-grid">
+                  <MetricCard label="ATP Benchmark Lanes" value={formatShortNumber(atpBenchmarkRows.length)} tone={atpBenchmarkRows.length ? "warn" : "muted"} />
+                  <MetricCard label="ATP Candidate Lanes" value={formatShortNumber(atpCandidateRows.length)} tone={atpCandidateRows.length ? "good" : "muted"} />
+                  <MetricCard label="ATP Active Runtime" value={formatShortNumber(atpStrategyRows.filter((row) => runtimePresenceInfo(row).key === "ACTIVE_RUNTIME").length)} tone={atpStrategyRows.some((row) => runtimePresenceInfo(row).key === "ACTIVE_RUNTIME") ? "good" : "muted"} />
+                  <MetricCard label="Temp Paper Enabled" value={formatShortNumber(temporaryPaperRuntimeIntegrity.enabled_in_app_count ?? temporaryPaperStrategyRows.length)} tone={Number(temporaryPaperRuntimeIntegrity.enabled_in_app_count ?? temporaryPaperStrategyRows.length ?? 0) > 0 ? "warn" : "good"} />
+                  <MetricCard label="Temp Paper Loaded" value={formatShortNumber(temporaryPaperRuntimeIntegrity.loaded_in_runtime_count ?? 0)} tone={Number(temporaryPaperRuntimeIntegrity.loaded_in_runtime_count ?? 0) > 0 ? "good" : "muted"} />
+                  <MetricCard label="Temp Paper Audit-Only" value={formatShortNumber(temporaryPaperRuntimeIntegrity.snapshot_only_count ?? 0)} tone={Number(temporaryPaperRuntimeIntegrity.snapshot_only_count ?? 0) > 0 ? "warn" : "good"} />
                 </div>
+                <div className="notice-strip compact">
+                  <div>ATP benchmark lanes remain explicit benchmark truth. ATP candidate lanes remain separate candidate-staged identities. Temporary paper rows are secondary audit/runtime-integrity surfaces, not the main operator path.</div>
+                  <div>Current temp-paper integrity: {formatValue(temporaryPaperRuntimeIntegrity.mismatch_status ?? "UNKNOWN")} | Enabled {formatShortNumber(temporaryPaperRuntimeIntegrity.enabled_in_app_count ?? 0)} | Loaded {formatShortNumber(temporaryPaperRuntimeIntegrity.loaded_in_runtime_count ?? 0)}.</div>
+                </div>
+                <DataTable
+                  columns={[
+                    { key: "branch", label: "Lane", render: (row) => formatValue(row.branch ?? row.display_name ?? row.lane_id) },
+                    { key: "designation_label", label: "Designation", render: (row) => formatValue(row.designation_label ?? row.lane_class_label) },
+                    { key: "current_strategy_status", label: "Status", render: (row) => formatValue(row.current_strategy_status ?? row.strategy_status) },
+                    { key: "atp_timing_state", label: "Timing", render: (row) => atpTimingStateLabel(row) },
+                    { key: "atp_vwap_price_quality_state", label: "VWAP", render: (row) => formatValue(row.atp_vwap_price_quality_state ?? "Unavailable") },
+                    { key: "top_blockers", label: "Top Blocker", render: (row) => topBlockerLabel(row) },
+                    { key: "latest_eligible_timestamp", label: "Last Eligible", render: (row) => formatTimestamp(row.latest_eligible_timestamp) },
+                    { key: "latest_blocked_timestamp", label: "Last Blocked", render: (row) => formatTimestamp(row.latest_blocked_timestamp) },
+                    { key: "latest_fill_timestamp", label: "Last Fill", render: (row) => formatTimestamp(row.latest_fill_timestamp) },
+                    { key: "latest_activity_timestamp", label: "Last Activity", render: (row) => formatTimestamp(row.latest_activity_timestamp) },
+                  ]}
+                  rows={dashboardRosterRows.filter((row) => isAtpRow(row))}
+                  emptyLabel="No ATP lanes are currently visible in the roster."
+                />
+              </Section>
+
+              <Section
+                title="Why Not Trading Now?"
+                subtitle="Selected workspace lane blocker, unlock condition, and truth source at a glance"
+                className="operator-attention-section"
+                headerClassName="section-header-tight"
+              >
+                <div className={`command-result ${selectedWorkspaceWhyNotTrading.tone === "good" ? "success" : selectedWorkspaceWhyNotTrading.tone === "danger" ? "failure" : ""}`}>
+                  <div className="command-result-title">
+                    {compactBranchLabel(selectedWorkspaceRow)} • {selectedWorkspaceWhyNotTrading.title}
+                  </div>
+                  <div className="command-result-body">{selectedWorkspaceWhyNotTrading.summary}</div>
+                </div>
+                <div className="metric-grid">
+                  <MetricCard label="Blocker Class" value={selectedWorkspaceBlockerClass.label} tone={selectedWorkspaceBlockerClass.tone} />
+                  <MetricCard label="Primary Blocker" value={selectedWorkspaceWhyNotTrading.blockerLabel} tone={selectedWorkspaceWhyNotTrading.tone} />
+                  <MetricCard label="Last Eligible" value={selectedWorkspaceWhyNotTrading.latestEligible} />
+                  <MetricCard label="Last Blocked" value={selectedWorkspaceWhyNotTrading.latestBlocked} />
+                  <MetricCard label="Freshness" value={selectedWorkspaceWhyNotTrading.freshness} tone="muted" />
+                  <MetricCard label="Runtime Truth" value={runtimePresenceInfo(selectedWorkspaceRow).label} tone={runtimePresenceInfo(selectedWorkspaceRow).tone} />
+                </div>
+                <div className="notice-strip compact">
+                  <div><strong>Next unlock condition:</strong> {selectedWorkspaceWhyNotTrading.nextUnlock}</div>
+                  <div><strong>Blocker mix:</strong> {selectedWorkspaceWhyNotTrading.blockerMix}</div>
+                  <div><strong>Provenance:</strong> {selectedWorkspaceWhyNotTrading.provenance}</div>
+                </div>
+              </Section>
+
+              <Section title="Operator Timeline" subtitle="Unified runtime, risk, operator-control, recovery, and session-shape activity for the current paper session">
+                <SectionTruthStrip
+                  updatedAt={paperSessionEventTimeline.generated_at}
+                  fallbackUpdatedAt={paperReadiness.generated_at ?? dashboardGeneratedAt}
+                  sourceLabel={dashboardTruthSource.label}
+                  sourceTone={dashboardTruthSource.tone}
+                  scopeLabel="Current paper-session event chronology"
+                  provenance="Merged direct runtime/operator alerts and controls with reconstructed session-shape timing markers for the active paper session."
+                />
+                <div className="badge-row">
+                  <Badge label="UNIFIED TIMELINE" tone="muted" />
+                  {operatorActiveAlertRows.length ? <Badge label="ACTIVE ALERTS PRESENT" tone="warn" /> : <Badge label="NO ACTIVE ALERTS" tone="good" />}
+                </div>
+                <div className="metric-grid">
+                  {unifiedOperatorTimelineMetrics.map((item) => (
+                    <MetricCard key={item.label} label={item.label} value={item.value} tone={item.tone ?? statusTone(item.value)} />
+                  ))}
+                </div>
+                <div className="status-line">{unifiedOperatorTimelineStatusLine}</div>
+                {unifiedOperatorTimelineRows.length ? (
+                  <div className="table-shell">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Time</th>
+                          <th>Category</th>
+                          <th>Event</th>
+                          <th>Summary</th>
+                          <th>Next / Context</th>
+                          <th>Truth</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {unifiedOperatorTimelineRows.map((row) => (
+                          <tr key={row.row_key}>
+                            <td>{formatTimestamp(row.timestamp)}</td>
+                            <td>
+                              <Badge label={row.category} tone={row.tone} />
+                            </td>
+                            <td>
+                              <div>{row.title}</div>
+                              <div className="table-note">{row.badge}</div>
+                            </td>
+                            <td>{row.summary}</td>
+                            <td>{row.next_action}</td>
+                            <td>
+                              <div>{row.provenance}</div>
+                              <div className="table-note">{row.source.replace(/_/g, " ")}</div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="notice-strip compact">No operator timeline events have been recorded yet for the current paper session.</div>
+                )}
               </Section>
 
               <Section title="Strategy Roster Table" subtitle="Dense secondary table retained for scan-heavy operator workflows and audit cross-checks">
@@ -7474,7 +11126,11 @@ function paperStartupCategoryTone(category: string): Tone {
                     { key: "participation_policy", label: "Participation", render: (row) => formatValue(row.participation_policy ?? "Unavailable") },
                     { key: "posture", label: "Current Posture", render: (row) => stagedPostureLabel(row) },
                     { key: "cadence", label: "Cadence", render: (row) => cadenceLabel(row) },
-                    { key: "runtime_attachment", label: "Runtime", render: (row) => <Badge label={runtimeAttachmentLabel(row)} tone={runtimeAttachmentLabel(row) === "Attached Live" ? "good" : runtimeAttachmentLabel(row) === "Audit Only" ? "warn" : "muted"} /> },
+                    { key: "atp_timing_state", label: "ATP Timing", render: (row) => isAtpRow(row) ? atpTimingStateLabel(row) : "—" },
+                    { key: "top_blockers", label: "Top Blocker", render: (row) => isAtpRow(row) ? topBlockerLabel(row) : "—" },
+                    { key: "latest_eligible_timestamp", label: "Last Eligible", render: (row) => formatTimestamp(row.latest_eligible_timestamp) },
+                    { key: "latest_blocked_timestamp", label: "Last Blocked", render: (row) => formatTimestamp(row.latest_blocked_timestamp) },
+                    { key: "runtime_attachment", label: "Runtime", render: (row) => <Badge label={runtimePresenceInfo(row).label} tone={runtimePresenceInfo(row).tone} /> },
                     { key: "last_execution_bar_evaluated_at", label: "Last 1m Eval", render: (row) => formatTimestamp(row.last_execution_bar_evaluated_at) },
                     {
                       key: "detail",
@@ -7495,21 +11151,6 @@ function paperStartupCategoryTone(category: string): Tone {
                   rows={dashboardRosterRows.slice(0, 14)}
                   emptyLabel="No shared paper lanes are currently available in the roster."
                 />
-              </Section>
-
-              <Section title="ATP / Temp Paper Truth" subtitle="Unambiguous view of whether ATP and temporary paper lanes exist, attach live, stay audit-only, or are not loaded">
-                <div className="metric-grid">
-                  <MetricCard label="ATP Benchmark Lanes" value={formatShortNumber(atpBenchmarkRows.length)} tone={atpBenchmarkRows.length ? "warn" : "muted"} />
-                  <MetricCard label="ATP Candidate Lanes" value={formatShortNumber(atpCandidateRows.length)} tone={atpCandidateRows.length ? "good" : "muted"} />
-                  <MetricCard label="ATP Attached Live" value={formatShortNumber(atpStrategyRows.filter((row) => runtimeAttachmentLabel(row) === "Attached Live").length)} tone={atpStrategyRows.some((row) => runtimeAttachmentLabel(row) === "Attached Live") ? "good" : "muted"} />
-                  <MetricCard label="Temp Paper Enabled" value={formatShortNumber(temporaryPaperRuntimeIntegrity.enabled_in_app_count ?? temporaryPaperStrategyRows.length)} tone={Number(temporaryPaperRuntimeIntegrity.enabled_in_app_count ?? temporaryPaperStrategyRows.length ?? 0) > 0 ? "warn" : "good"} />
-                  <MetricCard label="Temp Paper Loaded" value={formatShortNumber(temporaryPaperRuntimeIntegrity.loaded_in_runtime_count ?? 0)} tone={Number(temporaryPaperRuntimeIntegrity.loaded_in_runtime_count ?? 0) > 0 ? "good" : "muted"} />
-                  <MetricCard label="Temp Paper Audit-Only" value={formatShortNumber(temporaryPaperRuntimeIntegrity.snapshot_only_count ?? 0)} tone={Number(temporaryPaperRuntimeIntegrity.snapshot_only_count ?? 0) > 0 ? "warn" : "good"} />
-                </div>
-                <div className="notice-strip compact">
-                  <div>ATP benchmark lanes remain explicit benchmark truth. ATP candidate lanes remain separate candidate-staged identities. Temporary paper rows are secondary audit/runtime-integrity surfaces, not the main operator path.</div>
-                  <div>Current temp-paper integrity: {formatValue(temporaryPaperRuntimeIntegrity.mismatch_status ?? "UNKNOWN")} | Enabled {formatShortNumber(temporaryPaperRuntimeIntegrity.enabled_in_app_count ?? 0)} | Loaded {formatShortNumber(temporaryPaperRuntimeIntegrity.loaded_in_runtime_count ?? 0)}.</div>
-                </div>
               </Section>
 
               <Section title="Desktop Startup" subtitle="Backend bind, chosen URL, and ownership">
@@ -7537,7 +11178,7 @@ function paperStartupCategoryTone(category: string): Tone {
                       requiresLive: true,
                     })
                   }
-                  onAuthGateCheck={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true })}
+                  onAuthGateCheck={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"))}
                   onCompletePreSessionReview={() =>
                     void runCommand("complete-pre-session-review", () => api.runDashboardAction("complete-pre-session-review"), { requiresLive: true })
                   }
@@ -7618,7 +11259,7 @@ function paperStartupCategoryTone(category: string): Tone {
                 </div>
               </Section>
 
-              <Section title="Live Strategy Pilot" subtitle="First tightly gated real MGC live-submit runtime path with fill-only state transitions and fail-closed broker-truth handling">
+              <Section title="ATP GC Live Entry Pilot" subtitle="Dedicated ATP Companion live-entry bridge for the explicit GC Asia + US candidate lane. Broker truth is authoritative, entry automation is one-lot only, and strategy exits remain outside automation scope.">
                 <div className="metric-grid">
                   {liveStrategyPilotMetrics.map((item) => (
                     <MetricCard key={String(item.label)} label={String(item.label)} value={item.value} tone={item.tone} />
@@ -7627,7 +11268,92 @@ function paperStartupCategoryTone(category: string): Tone {
                 <div className="status-line">{formatValue(liveStrategyPilotSummary.summary_line ?? "No live strategy pilot summary artifact is available yet.")}</div>
                 <div className="notice-strip compact">
                   <div>Operator path: {formatValue(liveStrategyPilotSummary.operator_path ?? "mgc-v05l probationary-live-strategy-pilot")}</div>
-                  <div>Allowed scope: {formatValue(asRecord(liveStrategyPilotSummary.allowed_scope).symbol ?? "MGC")} / {formatValue(asRecord(liveStrategyPilotSummary.allowed_scope).timeframe ?? "5m")} / {formatValue(asRecord(liveStrategyPilotSummary.allowed_scope).mode ?? "LIVE_STRATEGY_PILOT")}</div>
+                  <div>Exact pilot scope: {liveStrategyPilotScopeLabel}</div>
+                  <div>Selected account: {formatValue(liveStrategyPilotBrokerTruthSummary.selected_account_hash ?? "Unavailable")}</div>
+                  <div>Runtime distinction: ATP paper runtime remains separate from this GC live pilot.</div>
+                </div>
+                <div className="notice-strip compact">
+                  <div>Automation scope: {formatValue(liveStrategyPilotSummary.automation_scope ?? "ENTRY_ONLY_BROKER_AUTOMATION")}</div>
+                  <div>Entry automation: {liveStrategyPilotEntryAutomationEnabled ? "ENABLED" : "DISABLED"}</div>
+                  <div>Strategy exit automation: {liveStrategyPilotStrategyExitAutomationEnabled ? "ENABLED" : "DISABLED"}</div>
+                  <div>Operator flatten: {liveStrategyPilotOperatorFlattenEnabled ? "ENABLED" : "DISABLED"}</div>
+                  <div>Broker truth authoritative: {liveStrategyPilotBrokerTruthAuthoritative ? "YES" : "NO"}</div>
+                </div>
+                <div className="notice-strip compact">
+                  <div>Runtime: {liveStrategyPilotRuntimeLabel}</div>
+                  <div>Entries enabled: {liveStrategyPilotEntriesEnabled ? "YES" : "NO"}</div>
+                  <div>Pilot armed: {liveStrategyPilotSummary.pilot_armed ? "YES" : "NO"}</div>
+                  <div>One-lot limit: {formatValue(liveStrategyPilotAllowedScope.max_quantity ?? liveStrategyPilotSummary.remaining_allowed_live_submits ?? 1)}</div>
+                  <div>Observed instrument: {formatValue(asArray<string>(liveStrategyPilotAllowedScope.observed_instruments).join(", ") || "GC")}</div>
+                </div>
+                <div className="action-row inline">
+                  <ControlButton
+                    label={busyAction === "start-live-strategy-pilot" ? "Starting..." : "Start ATP GC Live Pilot"}
+                    onClick={() => void runCommand("start-live-strategy-pilot", () => api.runDashboardAction("start-live-strategy-pilot"), { requiresLive: true })}
+                    busyAction={busyAction}
+                    disabled={!canRunLiveActions}
+                  />
+                  <ControlButton
+                    label={busyAction === "stop-live-strategy-pilot" ? "Stopping..." : "Stop ATP GC Live Pilot"}
+                    onClick={() =>
+                      void runCommand("stop-live-strategy-pilot", () => api.runDashboardAction("stop-live-strategy-pilot"), {
+                        confirmMessage: "Stop ATP Live Pilot will stop the dedicated live-entry runtime. Proceed?",
+                        requiresLive: true,
+                      })
+                    }
+                    busyAction={busyAction}
+                    disabled={!canRunLiveActions}
+                    danger
+                  />
+                  <ControlButton
+                    label="Halt GC Entries"
+                    onClick={() =>
+                      void runCommand("live-pilot-halt-entries", () => api.runDashboardAction("live-pilot-halt-entries"), {
+                        confirmMessage: "Halt ATP live entries and cancel any working pilot broker orders? Proceed?",
+                        requiresLive: true,
+                      })
+                    }
+                    busyAction={busyAction}
+                    disabled={!canRunLiveActions || !liveStrategyPilotRuntimeRunning}
+                    danger
+                  />
+                  <ControlButton
+                    label="Resume GC Entries"
+                    onClick={() => void runCommand("live-pilot-resume-entries", () => api.runDashboardAction("live-pilot-resume-entries"), { requiresLive: true })}
+                    busyAction={busyAction}
+                    disabled={!canRunLiveActions || !liveStrategyPilotRuntimeRunning}
+                  />
+                  <ControlButton
+                    label="Flatten GC + Halt"
+                    onClick={() =>
+                      void runCommand("live-pilot-flatten-and-halt", () => api.runDashboardAction("live-pilot-flatten-and-halt"), {
+                        confirmMessage: "Flatten and halt will stop new ATP live entries and attempt broker cleanup for the pilot. Proceed?",
+                        requiresLive: true,
+                      })
+                    }
+                    busyAction={busyAction}
+                    disabled={!canRunLiveActions || !liveStrategyPilotRuntimeRunning}
+                    danger
+                  />
+                  <ControlButton
+                    label="Stop GC After Cycle"
+                    onClick={() =>
+                      void runCommand("live-pilot-stop-after-cycle", () => api.runDashboardAction("live-pilot-stop-after-cycle"), {
+                        confirmMessage: "Stop ATP live pilot after the current cycle finishes? Proceed?",
+                        requiresLive: true,
+                      })
+                    }
+                    busyAction={busyAction}
+                    disabled={!canRunLiveActions || !liveStrategyPilotRuntimeRunning}
+                  />
+                  <ControlButton
+                    label="Re-arm GC Cycle"
+                    onClick={() => void runCommand("live-pilot-rearm", () => api.runDashboardAction("live-pilot-rearm"), { requiresLive: true })}
+                    busyAction={busyAction}
+                    disabled={!canRunLiveActions || !liveStrategyPilotRuntimeRunning}
+                  />
+                </div>
+                <div className="notice-strip compact">
                   <div>Latest bar: {formatValue(liveStrategyPilotLatestBar.bar_id ?? "None")}</div>
                   <div>Latest signal: {formatValue(liveStrategyPilotLatestSignal.long_entry_source ?? liveStrategyPilotLatestSignal.short_entry_source ?? "None")}</div>
                 </div>
@@ -7883,6 +11609,7 @@ function paperStartupCategoryTone(category: string): Tone {
                   <Badge label="RUNTIME TRUTH" tone={truthBadgeTone("RUNTIME TRUTH")} />
                   <Badge label="PAPER" tone={truthBadgeTone("PAPER")} />
                   {desktopState?.source.mode === "snapshot_fallback" ? <Badge label="SNAPSHOT FALLBACK" tone={truthBadgeTone("SNAPSHOT FALLBACK")} /> : null}
+                  {desktopState?.source.mode === "attached_snapshot_bridge" ? <Badge label="ATTACHED SNAPSHOT BRIDGE" tone="warn" /> : null}
                 </div>
                 <div className="metric-grid">
                   {strategyRuntimeMetrics.map((item) => (
@@ -7969,6 +11696,7 @@ function paperStartupCategoryTone(category: string): Tone {
                   <Badge label="STRATEGY LEDGER" tone={truthBadgeTone("STRATEGY LEDGER")} />
                   <Badge label="PAPER" tone={truthBadgeTone("PAPER")} />
                   {desktopState?.source.mode === "snapshot_fallback" ? <Badge label="SNAPSHOT FALLBACK" tone={truthBadgeTone("SNAPSHOT FALLBACK")} /> : null}
+                  {desktopState?.source.mode === "attached_snapshot_bridge" ? <Badge label="ATTACHED SNAPSHOT BRIDGE" tone="warn" /> : null}
                 </div>
                 <div className="metric-grid">
                   {portfolioSnapshotMetrics.map((item) => (
@@ -8098,6 +11826,7 @@ function paperStartupCategoryTone(category: string): Tone {
                 <div className="badge-row">
                   <Badge label="LIVE BROKER" tone={truthBadgeTone("LIVE BROKER")} />
                   {desktopState?.source.mode === "snapshot_fallback" ? <Badge label="SNAPSHOT FALLBACK" tone={truthBadgeTone("SNAPSHOT FALLBACK")} /> : null}
+                  {desktopState?.source.mode === "attached_snapshot_bridge" ? <Badge label="ATTACHED SNAPSHOT BRIDGE" tone="warn" /> : null}
                 </div>
                 <div className="metric-grid">
                   {brokerSummaryMetrics.map((item) => (
@@ -8519,6 +12248,26 @@ function paperStartupCategoryTone(category: string): Tone {
 
           {!loading && page === "runtime" ? (
             <>
+              <Section title="What Needs Attention Now" subtitle="Operator-first runtime summary with recommended paper-only remediation">
+                <AttentionPanel
+                  model={researchRuntimeAttention}
+                  onPrimaryAction={() => void runAttentionAction(researchRuntimeAttention.primaryAction)}
+                  onSecondaryAction={() => void runAttentionAction(researchRuntimeAttention.secondaryAction)}
+                />
+              </Section>
+
+              <Section title="Startup Control Plane" subtitle="Authoritative startup dependency truth for paper-only launch, reconciliation, and packaged-launch refusal">
+                <StartupControlPlanePanel
+                  controlPlane={startupControlPlane}
+                  operationalReadiness={operationalReadiness}
+                  canRunLiveActions={canRunLiveActions}
+                  busyAction={busyAction}
+                  onRunPrimaryAction={() => void runAttentionAction(operationalReadiness.primaryAction)}
+                  onRunAction={(row) => void runStartupControlPlaneAction(row)}
+                  onOpenEvidence={(row) => void openStartupControlPlaneEvidence(row)}
+                />
+              </Section>
+
               <Section title="Startup / Bind" subtitle="Local dashboard URL, chosen port, and startup errors">
                 <StartupPanel
                   desktopState={desktopState}
@@ -8544,7 +12293,7 @@ function paperStartupCategoryTone(category: string): Tone {
                       requiresLive: true,
                     })
                   }
-                  onAuthGateCheck={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true })}
+                  onAuthGateCheck={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"))}
                   onCompletePreSessionReview={() =>
                     void runCommand("complete-pre-session-review", () => api.runDashboardAction("complete-pre-session-review"), { requiresLive: true })
                   }
@@ -8557,27 +12306,33 @@ function paperStartupCategoryTone(category: string): Tone {
 
               <Section title="Process Control" subtitle="Local Python service lifecycle">
                 <div className="control-grid">
-                  <ControlButton label="Start Dashboard/API" onClick={() => void runCommand("start-dashboard", () => api.startDashboard())} busyAction={busyAction} />
-                  <ControlButton
-                    label="Stop Dashboard/API"
-                    onClick={() =>
-                      void runCommand("stop-dashboard", () => api.stopDashboard(), {
-                        confirmMessage: "Stop Dashboard/API will take the operator surface offline. Proceed?",
-                      })
-                    }
-                    busyAction={busyAction}
-                    danger
-                  />
-                  <ControlButton
-                    label="Restart Dashboard/API"
-                    onClick={() =>
-                      void runCommand("restart-dashboard", () => api.restartDashboard(), {
-                        confirmMessage: "Restart Dashboard/API will interrupt live operator refresh briefly. Proceed?",
-                      })
-                    }
-                    busyAction={busyAction}
-                    danger
-                  />
+                  {showStartDashboardAction ? (
+                    <ControlButton label="Start Dashboard/API" onClick={() => void runCommand("start-dashboard", () => api.startDashboard())} busyAction={busyAction} />
+                  ) : null}
+                  {desktopManagedDiagnosticMode ? (
+                    <ControlButton
+                      label="Stop Dashboard/API"
+                      onClick={() =>
+                        void runCommand("stop-dashboard", () => api.stopDashboard(), {
+                          confirmMessage: "Stop Dashboard/API will take the operator surface offline. Proceed?",
+                        })
+                      }
+                      busyAction={busyAction}
+                      danger
+                    />
+                  ) : null}
+                  {desktopManagedDiagnosticMode ? (
+                    <ControlButton
+                      label="Restart Dashboard/API"
+                      onClick={() =>
+                        void runCommand("restart-dashboard", () => api.restartDashboard(), {
+                          confirmMessage: "Restart Dashboard/API will interrupt live operator refresh briefly. Proceed?",
+                        })
+                      }
+                      busyAction={busyAction}
+                      danger
+                    />
+                  ) : null}
                   <ControlButton
                     label="Start Runtime"
                     onClick={() => void runCommand("start-paper", () => api.runDashboardAction("start-paper"), { requiresLive: true })}
@@ -8627,7 +12382,7 @@ function paperStartupCategoryTone(category: string): Tone {
                   />
                   <ControlButton
                     label="Auth Gate Check"
-                    onClick={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true })}
+                    onClick={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"))}
                     busyAction={busyAction}
                     disabled={!canRunLiveActions}
                   />
@@ -8653,8 +12408,8 @@ function paperStartupCategoryTone(category: string): Tone {
                     { key: "enabled_in_app", label: "Enabled In App", render: (row) => formatValue(row.enabled_in_app ?? false) },
                     { key: "runtime_instance_present", label: "Loaded In Runtime", render: (row) => formatValue(row.runtime_instance_present ?? false) },
                     { key: "runtime_state_loaded", label: "Runtime State Loaded", render: (row) => formatValue(row.runtime_state_loaded ?? false) },
-                    { key: "truth_label", label: "Truth" },
-                    { key: "start_flag", label: "Start Flag", render: (row) => formatValue(row.start_flag ?? "Unavailable") },
+                    { key: "truth_label", label: "Runtime Truth", render: (row) => runtimePresenceInfo(row).label },
+                    { key: "start_flag", label: "Start Flag", render: (row) => runtimeStartFlagLabel(row.start_flag) },
                     { key: "last_update_timestamp", label: "Latest Snapshot", render: (row) => formatTimestamp(row.last_update_timestamp) },
                   ]}
                   rows={temporaryPaperIntegrityRows}
@@ -8676,18 +12431,214 @@ function paperStartupCategoryTone(category: string): Tone {
                       : "Live operator visibility is degraded. Review runtime status, stale rows, and temp-paper mismatch before trusting recent activity timestamps."}
                 </div>
                 <div className="notice-strip">
-                  <div>Latest runtime update: {latestRuntimeCaptureTimestamp ? formatRelativeAge(latestRuntimeCaptureTimestamp) : "Unavailable"}.</div>
-                  <div>Latest strategy activity: {latestStrategyActivityTimestamp ? formatRelativeAge(latestStrategyActivityTimestamp) : "Unavailable"}.</div>
+                  <div>Latest runtime update: {latestRuntimeCaptureLabel}.</div>
+                  <div>Latest strategy activity: {latestStrategyActivityLabel}.</div>
                   <div>Stale strategy rows: {staleStrategyRows.length ? staleStrategyRows.slice(0, 6).map((row) => String(row.strategy_name ?? row.display_name ?? row.lane_id ?? "")).join(", ") : "None"}.</div>
                 </div>
               </Section>
 
+              <Section title="Research Runtime Bridge" subtitle="Paper-only bridge from selected warehouse research truth into prospective or replayed intents, fills, positions, and reconciliation">
+                <div className="metric-grid">
+                  <MetricCard label="Bridge Availability" value={researchRuntimeBridgeAvailable ? "AVAILABLE" : "NOT BUILT"} tone={statusTone(researchRuntimeBridgeAvailable ? "ready" : "blocked")} />
+                  <MetricCard label="Bridge Mode" value={formatValue(researchRuntimeBridge.bridge_mode ?? "PAPER_DRY_RUN_ONLY")} tone="warn" />
+                  <MetricCard label="Supervisor" value={formatValue(researchRuntimeBridgeSupervisor.status ?? "STOPPED")} tone={statusTone(researchRuntimeBridgeSupervisor.status ?? "STOPPED")} />
+                  <MetricCard label="Desired State" value={formatValue(researchRuntimeBridgeSupervisor.desired_state ?? "STOPPED")} tone={statusTone(researchRuntimeBridgeSupervisor.desired_state ?? "STOPPED")} />
+                  <MetricCard label="Cadence State" value={formatValue(researchRuntimeBridgeCadence.cycle_state ?? "IDLE")} tone={statusTone(researchRuntimeBridgeCadence.cycle_state)} />
+                  <MetricCard label="Operator Status" value={formatValue(researchRuntimeBridgeOperatorStatus.status ?? researchRuntimeBridgeSummary.status ?? "Unknown")} tone={statusTone(researchRuntimeBridgeOperatorStatus.status ?? researchRuntimeBridgeSummary.status)} />
+                  <MetricCard label="Paper-Only Safety" value={researchRuntimeBridge.paper_only === true ? "ENFORCED" : "UNKNOWN"} tone={researchRuntimeBridge.paper_only === true ? "good" : "danger"} />
+                  <MetricCard label="Selected Lanes" value={formatValue(researchRuntimeBridgeSummary.selected_lane_count ?? researchRuntimeBridgeLaneRows.length)} />
+                  <MetricCard label="Cycle Index" value={formatValue(researchRuntimeBridgeSummary.bridge_cycle_index ?? researchRuntimeBridge.bridge_cycle_index ?? 0)} />
+                  <MetricCard label="Pending Intents" value={formatValue(researchRuntimeBridgeSummary.pending_intent_count ?? researchRuntimeBridgePendingIntents.length)} tone={Number(researchRuntimeBridgeSummary.pending_intent_count ?? researchRuntimeBridgePendingIntents.length) > 0 ? "warn" : "good"} />
+                  <MetricCard label="Open Positions" value={formatValue(researchRuntimeBridgeSummary.open_position_count ?? researchRuntimeBridgeOpenPositions.length)} tone={Number(researchRuntimeBridgeSummary.open_position_count ?? researchRuntimeBridgeOpenPositions.length) > 0 ? "warn" : "good"} />
+                  <MetricCard label="Closed Positions" value={formatValue(researchRuntimeBridgeSummary.closed_position_count ?? researchRuntimeBridgeRecentClosedPositions.length)} />
+                  <MetricCard label="Reconciliation Issues" value={formatValue(researchRuntimeBridgeSummary.reconciliation_issue_count ?? researchRuntimeBridgeAnomalyRows.length)} tone={Number(researchRuntimeBridgeSummary.reconciliation_issue_count ?? researchRuntimeBridgeAnomalyRows.length) > 0 ? "danger" : "good"} />
+                  <MetricCard label="Alerts" value={formatValue(researchRuntimeBridgeAlerts.count ?? researchRuntimeBridgeAlertRows.length)} tone={Number(researchRuntimeBridgeAlerts.count ?? researchRuntimeBridgeAlertRows.length) > 0 ? "warn" : "good"} />
+                  <MetricCard label="Needs Attention Now" value={formatValue(researchRuntimeBridgeNeedsAttentionNowCount)} tone={researchRuntimeBridgeNeedsAttentionNowCount > 0 ? "danger" : "good"} />
+                  <MetricCard label="Unresolved Anomalies" value={formatValue(researchRuntimeBridgeUnresolvedCount)} tone={researchRuntimeBridgeUnresolvedCount > 0 ? "warn" : "good"} />
+                  <MetricCard label="Escalated Anomalies" value={formatValue(researchRuntimeBridgeEscalatedCount)} tone={researchRuntimeBridgeEscalatedCount > 0 ? "danger" : "good"} />
+                  <MetricCard label="Ack Pending" value={formatValue(researchRuntimeBridgeAcknowledgedPendingCount)} tone={researchRuntimeBridgeAcknowledgedPendingCount > 0 ? "warn" : "muted"} />
+                  <MetricCard label="Reviewed Pending" value={formatValue(researchRuntimeBridgeReviewedPendingCount)} tone={researchRuntimeBridgeReviewedPendingCount > 0 ? "warn" : "muted"} />
+                  <MetricCard label="Warn Events" value={formatValue(researchRuntimeBridgeSeverityCounts.WARN ?? 0)} tone={Number(researchRuntimeBridgeSeverityCounts.WARN ?? 0) > 0 ? "warn" : "good"} />
+                  <MetricCard label="Error Events" value={formatValue(researchRuntimeBridgeSeverityCounts.ERROR ?? 0)} tone={Number(researchRuntimeBridgeSeverityCounts.ERROR ?? 0) > 0 ? "danger" : "good"} />
+                  <MetricCard label="Realized P&L" value={formatMaybePnL(researchRuntimeBridgeSummary.realized_pnl_cash)} />
+                  <MetricCard label="Next Cycle" value={researchRuntimeBridgeSupervisorNextCycleDisplay} tone={String(researchRuntimeBridgeSupervisor.blocked_reason ?? researchRuntimeBridgeCadence.blocked_reason ?? "").trim() ? "warn" : "muted"} />
+                  <MetricCard label="Last Activity" value={researchRuntimeBridgeLastActivityDisplay} />
+                </div>
+                <div className="attention-support-strip">
+                  <div className="attention-support-item">
+                    <span className="attention-support-label">Current summary</span>
+                    <span className="attention-support-value">{formatValue(researchRuntimeBridgeSummary.summary_line ?? "Research runtime bridge summary is unavailable.")}</span>
+                  </div>
+                  <div className="attention-support-item">
+                    <span className="attention-support-label">Attention queue</span>
+                    <span className="attention-support-value">{formatValue(researchRuntimeBridgeSupervisor.attention_summary_line ?? `${researchRuntimeBridgeNeedsAttentionNowCount} needs attention now, ${researchRuntimeBridgeAcknowledgedPendingCount} acknowledged pending, ${researchRuntimeBridgeReviewedPendingCount} reviewed pending, ${researchRuntimeBridgeEscalatedCount} escalated.`)}</span>
+                  </div>
+                  <div className="attention-support-item">
+                    <span className="attention-support-label">Blocked reason</span>
+                    <span className="attention-support-value">{runtimeBridgeBlockedReasonLabel(String(researchRuntimeBridgeSupervisor.blocked_reason ?? researchRuntimeBridgeCadence.blocked_reason ?? ""))}</span>
+                  </div>
+                  <div className="attention-support-item">
+                    <span className="attention-support-label">Selected tenant scope</span>
+                    <span className="attention-support-value">{bridgeSelectedScopeLabel}</span>
+                  </div>
+                </div>
+                <div className="operator-remediation-card">
+                  <div className="operator-remediation-copy">
+                    <div className="operator-remediation-title">Supervised cadence</div>
+                    <div className="operator-remediation-body">
+                      {researchRuntimeBridgeSupervisorStatus === "STOPPED"
+                        ? "The local paper-only supervisor is stopped. The bridge can still be advanced manually, but cadence is not being supervised."
+                        : textOrFallback(
+                            researchRuntimeBridgeSupervisor.status_detail ?? researchRuntimeBridgeSupervisor.attention_summary_line ?? researchRuntimeBridgeSupervisor.last_result_summary_line,
+                            "The local paper-only supervisor is monitoring the warehouse bridge cadence.",
+                          )}
+                    </div>
+                    <div className="operator-remediation-meta">
+                      <Badge label={formatValue(researchRuntimeBridgeSupervisor.status ?? "STOPPED")} tone={statusTone(researchRuntimeBridgeSupervisor.status ?? "STOPPED")} />
+                      <Badge label={formatValue(researchRuntimeBridgeSupervisor.status_reason ?? "SUPERVISOR_STOPPED")} tone={statusTone(researchRuntimeBridgeSupervisor.status ?? "STOPPED")} />
+                      <Badge label={formatValue(researchRuntimeBridgeSupervisor.desired_state ?? "STOPPED")} tone={statusTone(researchRuntimeBridgeSupervisor.desired_state ?? "STOPPED")} />
+                      <Badge label={formatValue(researchRuntimeBridgeSupervisor.liveness_state ?? "NO_HEARTBEAT")} tone={statusTone(researchRuntimeBridgeSupervisor.liveness_state ?? "NO_HEARTBEAT")} />
+                      <span>Heartbeat: {formatTimestamp(researchRuntimeBridgeSupervisor.heartbeat_at)}</span>
+                      <span>Heartbeat age: {researchRuntimeBridgeSupervisor.heartbeat_age_seconds != null ? formatDuration(Number(researchRuntimeBridgeSupervisor.heartbeat_age_seconds)) : "No heartbeat yet"}</span>
+                      <span>Last successful cycle: {formatTimestamp(researchRuntimeBridgeSupervisor.last_successful_cycle_at)}</span>
+                    </div>
+                  </div>
+                  <div className="operator-remediation-actions">
+                    <button
+                      className="panel-button"
+                      disabled={busyAction !== null || researchRuntimeBridgeSupervisorStatus === "RUNNING"}
+                      onClick={() =>
+                        void runCommand(
+                          "research-runtime-bridge-start-supervisor",
+                          () => api.runDashboardAction("research-runtime-bridge-start-supervisor"),
+                        )
+                      }
+                    >
+                      Start Supervision
+                    </button>
+                    <button
+                      className="panel-button subtle"
+                      disabled={busyAction !== null}
+                      onClick={() =>
+                        void runCommand(
+                          "research-runtime-bridge-run-cycle-now",
+                          () => api.runDashboardAction("research-runtime-bridge-run-cycle-now"),
+                        )
+                      }
+                    >
+                      Run Cycle Now
+                    </button>
+                    <button
+                      className="panel-button subtle"
+                      disabled={busyAction !== null || researchRuntimeBridgeSupervisorStatus === "STOPPED"}
+                      onClick={() =>
+                        void runCommand(
+                          "research-runtime-bridge-stop-supervisor",
+                          () => api.runDashboardAction("research-runtime-bridge-stop-supervisor"),
+                        )
+                      }
+                    >
+                      Stop Supervision
+                    </button>
+                  </div>
+                </div>
+                {selectedResearchRuntimeBridgeAlert ? (
+                  <div className="operator-remediation-card">
+                    <div className="operator-remediation-copy">
+                      <div className="operator-remediation-title">Active bridge anomaly</div>
+                      <div className="operator-remediation-body">
+                        {textOrFallback(selectedResearchRuntimeBridgeAlert.queue_status_detail ?? selectedResearchRuntimeBridgeAlert.message ?? selectedResearchRuntimeBridgeAlert.title, "An actionable runtime anomaly is active.")}
+                      </div>
+                      <div className="operator-remediation-meta">
+                        <Badge label={textOrFallback(selectedResearchRuntimeBridgeAlert.severity, "WARN")} tone={alertSeverityTone(selectedResearchRuntimeBridgeAlert.severity)} />
+                        <Badge label={textOrFallback(selectedResearchRuntimeBridgeAlert.review_state, "UNREVIEWED")} tone={String(selectedResearchRuntimeBridgeAlert.review_state ?? "").toUpperCase() === "REVIEWED" ? "good" : "warn"} />
+                        <Badge label={textOrFallback(selectedResearchRuntimeBridgeAlert.queue_status, "NEEDS_ATTENTION_NOW")} tone={selectedResearchRuntimeBridgeAlert.escalated === true ? "danger" : "warn"} />
+                        <span>Lane: {textOrFallback(selectedResearchRuntimeBridgeAlert.lane_id, "Warehouse bridge lane not published.")}</span>
+                        <span>Occurrences: {formatValue(selectedResearchRuntimeBridgeAlert.occurrence_count ?? 1)}</span>
+                        <span>{textOrFallback(selectedResearchRuntimeBridgeAlert.review_state_detail, "Review state detail is not yet available.")}</span>
+                      </div>
+                    </div>
+                    <div className="operator-remediation-actions">
+                      <button
+                        className="panel-button"
+                        disabled={busyAction !== null || !selectedResearchRuntimeBridgeAlert}
+                        onClick={() =>
+                          void runCommand(
+                            `research-runtime-bridge-acknowledge-${String(selectedResearchRuntimeBridgeAlert?.dedup_key ?? "")}`,
+                            () => api.runDashboardAction("research-runtime-bridge-acknowledge-anomaly", researchRuntimeBridgeReviewPayload("ACKNOWLEDGED")),
+                          )
+                        }
+                      >
+                        Acknowledge Anomaly
+                      </button>
+                      <button
+                        className="panel-button subtle"
+                        disabled={busyAction !== null || !selectedResearchRuntimeBridgeAlert}
+                        onClick={() =>
+                          void runCommand(
+                            `research-runtime-bridge-review-${String(selectedResearchRuntimeBridgeAlert?.dedup_key ?? "")}`,
+                            () => api.runDashboardAction("research-runtime-bridge-mark-reviewed", researchRuntimeBridgeReviewPayload("REVIEWED")),
+                          )
+                        }
+                      >
+                        Mark Reviewed
+                      </button>
+                      <button
+                        className="panel-button subtle"
+                        disabled={busyAction !== null || !selectedResearchRuntimeBridgeAlert}
+                        onClick={() =>
+                          void runCommand(
+                            `research-runtime-bridge-resolve-${String(selectedResearchRuntimeBridgeAlert?.dedup_key ?? "")}`,
+                            () => api.runDashboardAction("research-runtime-bridge-resolve-anomaly", researchRuntimeBridgeReviewPayload("RESOLVED")),
+                          )
+                        }
+                      >
+                        Resolve Anomaly
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                <details className="secondary-evidence-shell ticket-gate-shell">
+                  <summary className="secondary-evidence-summary">
+                    <span className="secondary-evidence-title">Bridge cadence policy and lane detail</span>
+                    <span className="secondary-evidence-note">Expanded audit detail, selected-lane state, and cadence policy</span>
+                  </summary>
+                  <div className="section-card secondary-evidence-card">
+                    <div className="notice-strip compact">
+                      <div>Paper-only restriction: this bridge emits deterministic paper intents and fills from research truth and does not route broker orders live.</div>
+                      <div>Cadence runner: {formatValue(researchRuntimeBridgeCadence.scheduler_mode ?? "MANUAL_SINGLE_CYCLE")} polling every {formatValue(researchRuntimeBridgeCadence.poll_interval_seconds ?? researchRuntimeBridgeCyclePolicy.poll_interval_seconds ?? 30)} seconds.</div>
+                      <div>Prospective cadence: stale after {formatValue(researchRuntimeBridgeCyclePolicy.stale_after_cycles ?? "2")} cycles, expire after {formatValue(researchRuntimeBridgeCyclePolicy.expire_after_cycles ?? "3")} cycles, min fill delay {formatValue(researchRuntimeBridgeCyclePolicy.min_fill_delay_cycles ?? "1")} cycle.</div>
+                      <div>Blocked-state guidance: {runtimeBridgeBlockedReasonDetail(String(researchRuntimeBridgeCadence.blocked_reason ?? ""))}</div>
+                    </div>
+                    <DataTable
+                      columns={[
+                        { key: "lane_id", label: "Lane ID", render: (row) => <OverflowValue value={formatValue(row.lane_id)} /> },
+                        { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument) },
+                        { key: "runtime_view", label: "Runtime View", render: (row) => textOrFallback(row.runtime_view ?? row.bridge_mode, "Prospective paper bridge view not published yet.") },
+                        { key: "trade_count", label: "Research Trades", render: (row) => formatValue(row.trade_count) },
+                        { key: "pending_intent_count", label: "Pending", render: (row) => formatValue(row.pending_intent_count ?? 0) },
+                        { key: "closed_position_count", label: "Closed Positions", render: (row) => formatValue(row.closed_position_count) },
+                        { key: "position_side", label: "Current Position", render: (row) => formatValue(row.position_side ?? "FLAT") },
+                        { key: "runtime_status", label: "Runtime Status", render: (row) => runtimeBridgeLaneRuntimeStatusLabel(row) },
+                        { key: "operator_action_required", label: "Operator Action", render: (row) => (row.operator_action_required === true ? "Required" : "Clear") },
+                        { key: "active_alert_count", label: "Alerts", render: (row) => formatValue(row.active_alert_count ?? 0) },
+                        { key: "latest_reconciliation_classification", label: "Reconciliation", render: (row) => runtimeBridgeReconciliationLabel(row) },
+                        { key: "realized_pnl_cash", label: "Realized P&L", render: (row) => formatMaybePnL(row.realized_pnl_cash) },
+                        { key: "latest_fill_timestamp", label: "Last Fill", render: (row) => formatTimestamp(row.latest_fill_timestamp) },
+                      ]}
+                      rows={researchRuntimeBridgeLaneRows}
+                      emptyLabel="Research runtime bridge has not published any lane rows yet."
+                    />
+                  </div>
+                </details>
+              </Section>
+
               <Section title="Runtime Identity" subtitle="Current dashboard process and bridge state">
                 <div className="metric-grid">
-                  <MetricCard label="Backend URL" value={desktopState?.backendUrl ?? "Unavailable"} />
+                  <MetricCard label="Backend URL" value={backendUrlLabel} />
                   <MetricCard label="Preferred URL" value={formatValue(startup?.preferredUrl)} />
                   <MetricCard label="Chosen Port" value={formatValue(startup?.chosenPort)} />
-                  <MetricCard label="Ownership" value={ownershipLabel(startup?.ownership)} />
+                  <MetricCard label="Desktop Mode" value={desktopModeLabel(startup ?? null)} />
                   <MetricCard label="Backend State" value={desktopState?.backend.label ?? "Unknown"} tone={statusTone(desktopState?.backend.label)} />
                   <MetricCard label="Source Mode" value={desktopState?.source.label ?? "Unknown"} tone={statusTone(desktopState?.source.label)} />
                   <MetricCard label="Port Policy" value={startup?.allowPortFallback ? "Explicit fallback enabled" : "Fixed preferred port"} />
@@ -8774,6 +12725,8 @@ function paperStartupCategoryTone(category: string): Tone {
                               ? addDays(current, -7)
                               : calendarPeriod === "quarterly"
                                 ? addMonths(current, -3)
+                                : calendarPeriod === "ytd"
+                                  ? addMonths(current, -12)
                                 : addMonths(current, -1),
                           )
                         }
@@ -8790,6 +12743,8 @@ function paperStartupCategoryTone(category: string): Tone {
                               ? addDays(current, 7)
                               : calendarPeriod === "quarterly"
                                 ? addMonths(current, 3)
+                                : calendarPeriod === "ytd"
+                                  ? addMonths(current, 12)
                                 : addMonths(current, 1),
                           )
                         }
@@ -8799,21 +12754,29 @@ function paperStartupCategoryTone(category: string): Tone {
                       </button>
                     </div>
                   </div>
-                  <div className="calendar-filter-row">
-                    <label className="settings-field compact">
-                      <span>Truth Basis</span>
-                      <select value={calendarSource} onChange={(event) => setCalendarSource(event.target.value as PnlCalendarSource)} data-calendar-source>
-                        <option value="all">All Accounts</option>
-                        <option value="live">Live</option>
-                        <option value="paper">Paper</option>
-                        <option value="benchmark_replay">Benchmark / Replay</option>
-                        <option value="research_execution">Research Execution</option>
-                      </select>
-                    </label>
-                    {calendarPeriod === "custom" ? (
-                      <div className="calendar-custom-range">
-                        <label className="settings-field compact">
-                          <span>From</span>
+                <div className="calendar-filter-row">
+                  <label className="settings-field compact">
+                    <span>Truth Basis</span>
+                    <select value={effectiveCalendarSource} onChange={(event) => setCalendarSource(event.target.value as PnlCalendarSource)}>
+                      {[
+                        ["historical_backcast", "Historical Backcast"],
+                        ["paper", "Paper Ledger"],
+                        ["live", "Live Broker"],
+                        ["research_analytics", "Research Analytics"],
+                        ["all", "All Accounts"],
+                      ]
+                        .filter(([value]) => value === "all" || calendarAvailableSources.includes(value as Exclude<PnlCalendarSource, "all">))
+                        .map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  {calendarPeriod === "custom" ? (
+                    <div className="calendar-custom-range">
+                      <label className="settings-field compact">
+                        <span>From</span>
                           <input type="date" value={calendarCustomStart} onChange={(event) => setCalendarCustomStart(event.target.value)} />
                         </label>
                         <label className="settings-field compact">
@@ -8837,11 +12800,66 @@ function paperStartupCategoryTone(category: string): Tone {
                     </div>
                   </div>
                 </div>
+                {effectiveCalendarSource === "historical_backcast" ? (
+                  <div className="calendar-strategy-picker">
+                    <div className="calendar-strategy-picker-header">
+                      <div>
+                        <div className="page-eyebrow">Strategy Selection</div>
+                        <div className="section-subtitle">{calendarPlaybackSelectionSummary}</div>
+                      </div>
+                      <div className="calendar-strategy-picker-actions">
+                        <button className="panel-button subtle" onClick={selectAllCalendarPlaybackStrategies}>Select All</button>
+                        <button className="panel-button subtle" onClick={clearCalendarPlaybackStrategies}>Clear All</button>
+                      </div>
+                    </div>
+                    <div className="calendar-strategy-checklist">
+                      {calendarPlaybackStrategyOptions.map((item) => {
+                        const checked = calendarPlaybackStrategyKeys === null || calendarPlaybackStrategyKeys.includes(item.strategyKey);
+                        return (
+                          <label key={item.strategyKey} className={`calendar-strategy-option ${checked ? "selected" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleCalendarPlaybackStrategy(item.strategyKey)}
+                            />
+                            <span className="calendar-strategy-option-copy">
+                              <span className="calendar-strategy-option-label">{item.label}</span>
+                              <span className="calendar-strategy-option-meta">
+                                <span>{item.coverageLabel}</span>
+                                <span>{formatShortNumber(item.tradeCount)} trades</span>
+                                <span>{formatShortNumber(item.variantCount)} variants</span>
+                              </span>
+                              {item.variantCount > 1 ? (
+                                <span className="calendar-strategy-variant-list">
+                                  {item.variants.map((variant) => variant.label).join(" • ")}
+                                </span>
+                              ) : null}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
 
                 <div className="notice-strip compact calendar-provenance-strip">
                   <div><strong>Source:</strong> {calendarSourceSelection.selectedSourceLabel}</div>
                   <div>{calendarSourceSelection.note}</div>
                 </div>
+                {calendarCoverageNote ? (
+                  <div className="notice-strip compact calendar-provenance-strip">
+                    <div><strong>Coverage:</strong> {calendarCoverageNote}</div>
+                  </div>
+                ) : null}
+                {calendarPaperRecencyNote ? (
+                  <div className="notice-strip compact calendar-provenance-strip">
+                    <div><strong>Session Note:</strong> {calendarPaperRecencyNote}</div>
+                  </div>
+                ) : null}
+
+                {!calendarDayPoints.length && calendarHistoryEmptyReason ? (
+                  <div className="placeholder-note">{calendarHistoryEmptyReason}</div>
+                ) : null}
 
                 {calendarAlertRows.length ? (
                   <div className="calendar-alert-strip">
@@ -8896,7 +12914,9 @@ function paperStartupCategoryTone(category: string): Tone {
                                 <div className="calendar-day-meta">
                                   <span>
                                     {point
-                                      ? point.tradeCount > 0
+                                      ? point.hasIntradayPartial && point.tradeCount === 0
+                                        ? "Intraday"
+                                        : point.tradeCount > 0
                                         ? `${point.tradeCount}T`
                                         : point.coveredSources.length
                                           ? "Covered"
@@ -8918,6 +12938,7 @@ function paperStartupCategoryTone(category: string): Tone {
                     title={effectiveCalendarViewMode === "line" ? "Cumulative + Daily Progression" : "Daily P&L Bars"}
                     subtitle={effectiveCalendarViewMode === "line" ? "Cumulative curve uses completed day totals; daily series stays provenance-safe to the selected source." : "Daily P&L bars for the currently selected source and period."}
                     points={calendarDayPoints}
+                    emptyLabel={calendarHistoryEmptyReason}
                   />
                 )}
 
@@ -8949,7 +12970,7 @@ function paperStartupCategoryTone(category: string): Tone {
                       <div className="local-workspace-meta">
                         <Badge label={laneClassLabel(selectedWorkspaceRow)} tone={paperStrategyClassTone(selectedWorkspaceRow)} />
                         <Badge label={selectedWorkspaceDesignation} tone={selectedWorkspaceRow?.benchmark_designation ? "warn" : selectedWorkspaceRow?.candidate_designation ? "good" : "muted"} />
-                        <Badge label={runtimeAttachmentLabel(selectedWorkspaceRow)} tone={runtimeAttachmentLabel(selectedWorkspaceRow) === "Attached Live" ? "good" : runtimeAttachmentLabel(selectedWorkspaceRow) === "Audit Only" ? "warn" : "muted"} />
+                        <Badge label={runtimeAttachmentLabel(selectedWorkspaceRow)} tone={runtimePresenceInfo(selectedWorkspaceRow).tone} />
                         <span>{selectedWorkspaceInstrument || "No instrument"}</span>
                         <span>Exec {formatValue(selectedWorkspaceRow?.execution_timeframe ?? "1m")}</span>
                         <span>Context {selectedWorkspaceContextTimes}</span>
@@ -8957,6 +12978,15 @@ function paperStartupCategoryTone(category: string): Tone {
                       </div>
                     </div>
                     <div className="local-workspace-actions">
+                      <button
+                        className="panel-button subtle"
+                        onClick={() => {
+                          window.location.hash = "#/history";
+                          setPage("history");
+                        }}
+                      >
+                        Open History Review
+                      </button>
                       <button className="panel-button subtle" onClick={() => selectWorkspaceLane(String(selectedWorkspaceRow?.lane_id ?? ""), { navigateTo: "market" })}>
                         Open Trade Entry
                       </button>
@@ -8988,7 +13018,7 @@ function paperStartupCategoryTone(category: string): Tone {
                       <select value={selectedWorkspaceLaneId} onChange={(event) => selectWorkspaceLane(event.target.value)}>
                         {dashboardRosterRows.map((row) => (
                           <option key={String(row.lane_id ?? row.branch)} value={String(row.lane_id ?? "")}>
-                            {compactBranchLabel(row)}
+                            {strategySelectorLabel(row)}
                           </option>
                         ))}
                       </select>
@@ -9002,46 +13032,105 @@ function paperStartupCategoryTone(category: string): Tone {
                     <div className="metric-grid compact strategy-metric-grid">
                       <MetricCard label="Sharpe Proxy" value={formatValue(selectedWorkspacePerformanceRow?.operator_interpretation_state ?? "—")} />
                       <MetricCard label="Win Rate" value={formatValue(selectedWorkspacePerformanceRow?.operator_interpretation ?? "Sparse history")} />
-                      <MetricCard label="Trade Count" value={formatShortNumber(selectedWorkspacePerformanceRow?.trade_count ?? selectedWorkspaceTrades.length)} />
-                      <MetricCard label="Avg Trade P&L" value={renderPnlValue(selectedWorkspaceTrades.length ? selectedWorkspaceTrades.reduce((sum, row) => sum + (Number(row.realized_pnl ?? 0) || 0), 0) / selectedWorkspaceTrades.length : 0)} tone={pnlTone(selectedWorkspaceTrades.length ? selectedWorkspaceTrades.reduce((sum, row) => sum + (Number(row.realized_pnl ?? 0) || 0), 0) / selectedWorkspaceTrades.length : 0)} />
+                      <MetricCard label="Trade Count" value={formatShortNumber(selectedWorkspacePerformanceRow?.trade_count ?? selectedWorkspaceDisplayTrades.length)} />
+                      <MetricCard label="Avg Trade P&L" value={renderPnlValue(selectedWorkspaceDisplayTrades.length ? selectedWorkspaceDisplayTrades.reduce((sum, row) => sum + (Number(row.realized_pnl ?? 0) || 0), 0) / selectedWorkspaceDisplayTrades.length : 0)} tone={pnlTone(selectedWorkspaceDisplayTrades.length ? selectedWorkspaceDisplayTrades.reduce((sum, row) => sum + (Number(row.realized_pnl ?? 0) || 0), 0) / selectedWorkspaceDisplayTrades.length : 0)} />
                       <MetricCard label="Status" value={formatValue(selectedWorkspaceRow?.strategy_status ?? selectedWorkspacePerformanceRow?.status ?? "Unknown")} tone={statusTone(selectedWorkspaceRow?.strategy_status ?? selectedWorkspacePerformanceRow?.status)} />
                       <MetricCard label="30D Est P&L" value={renderPnlValue(selectedWorkspacePerformanceRow?.cumulative_pnl ?? selectedWorkspacePerformanceRow?.realized_pnl)} tone={pnlTone(selectedWorkspacePerformanceRow?.cumulative_pnl ?? selectedWorkspacePerformanceRow?.realized_pnl)} />
                       <MetricCard label="Participation" value={formatValue(selectedWorkspaceRow?.participation_policy ?? "Unavailable")} />
                       <MetricCard label="Can Add More" value={selectedWorkspaceRow?.additional_entry_allowed === true ? "YES" : "NO"} tone={selectedWorkspaceRow?.additional_entry_allowed === true ? "good" : "muted"} />
                     </div>
+                    {isAtpRow(selectedWorkspaceRow) ? (
+                      <>
+                        <div className="notice-strip compact strategy-context-strip">
+                          <div><strong>ATP Timing</strong> {atpTimingStateLabel(selectedWorkspaceRow)}</div>
+                          <div><strong>Primary Blocker</strong> {topBlockerLabel(selectedWorkspaceRow)}</div>
+                          <div><strong>Blocker Mix</strong> {topBlockerSummary(selectedWorkspaceRow)}</div>
+                        </div>
+                        <div className="metric-grid compact strategy-metric-grid">
+                          <MetricCard label="ATP Timing" value={atpTimingStateLabel(selectedWorkspaceRow)} tone={String(selectedWorkspaceRow?.atp_timing_state ?? "").includes("CONFIRMED") || String(selectedWorkspaceRow?.atp_timing_state ?? "").includes("EARLY_PARTICIPATION") ? "good" : "warn"} />
+                          <MetricCard label="VWAP Quality" value={formatValue(selectedWorkspaceRow?.atp_vwap_price_quality_state ?? "Unavailable")} tone={String(selectedWorkspaceRow?.atp_vwap_price_quality_state ?? "").toUpperCase() === "ATP_VWAP_PRICE_QUALITY_OK" ? "good" : "warn"} />
+                          <MetricCard label="Last Eligible" value={formatTimestamp(selectedWorkspaceRow?.latest_eligible_timestamp)} />
+                          <MetricCard label="Last Blocked" value={formatTimestamp(selectedWorkspaceRow?.latest_blocked_timestamp)} />
+                        </div>
+                      </>
+                    ) : null}
                   </div>
                   <div className="strategy-focus-main">
+                    <div className="strategy-focus-overview-grid">
+                      <MetricCard
+                        label="Closed P&L"
+                        value={renderPnlValue(selectedWorkspaceEquitySummary.realized)}
+                        tone={pnlTone(selectedWorkspaceEquitySummary.realized)}
+                      />
+                      <MetricCard
+                        label="Curve Span"
+                        value={formatMaybePnL(selectedWorkspaceEquitySummary.curveSpan)}
+                        tone={pnlTone(selectedWorkspaceEquitySummary.curveSpan)}
+                      />
+                      <MetricCard
+                        label="Best Trade"
+                        value={formatMaybePnL(selectedWorkspaceEquitySummary.bestTrade)}
+                        tone={pnlTone(selectedWorkspaceEquitySummary.bestTrade)}
+                      />
+                      <MetricCard
+                        label="Worst Trade"
+                        value={formatMaybePnL(selectedWorkspaceEquitySummary.worstTrade)}
+                        tone={pnlTone(selectedWorkspaceEquitySummary.worstTrade)}
+                      />
+                      <MetricCard
+                        label="Last Closed"
+                        value={formatTimestamp(selectedWorkspaceEquitySummary.lastTimestamp)}
+                      />
+                      <MetricCard
+                        label="Playback Net P&L"
+                        value={renderPnlValue(selectedWorkspacePlaybackSummary.net_pnl ?? selectedWorkspacePlaybackSummary.realized_pnl)}
+                        tone={pnlTone(selectedWorkspacePlaybackSummary.net_pnl ?? selectedWorkspacePlaybackSummary.realized_pnl)}
+                      />
+                    </div>
                     <TrendPanel
                       title="Equity Curve"
                       subtitle="Strategy-level realized equity progression from the persisted trade ledger."
                       points={selectedWorkspaceEquityCurve}
                       tone={pnlTone(selectedWorkspacePerformanceRow?.realized_pnl)}
+                      resizable
+                      summaryItems={[
+                        { label: "Net", value: renderPnlValue(selectedWorkspaceEquitySummary.realized), tone: pnlTone(selectedWorkspaceEquitySummary.realized) },
+                        { label: "Peak", value: formatMaybePnL(selectedWorkspaceEquitySummary.curveMax), tone: pnlTone(selectedWorkspaceEquitySummary.curveMax) },
+                        { label: "Trough", value: formatMaybePnL(selectedWorkspaceEquitySummary.curveMin), tone: pnlTone(selectedWorkspaceEquitySummary.curveMin) },
+                        { label: "Trades", value: formatShortNumber(selectedWorkspaceDisplayTrades.length) },
+                      ]}
                       footer={`Execution ${formatValue(selectedWorkspaceRow?.execution_timeframe ?? "1m")} | Context ${(asArray<string>(selectedWorkspaceRow?.context_timeframes).join(" / ") || "5m")} | Last eval ${formatTimestamp(selectedWorkspaceRow?.last_execution_bar_evaluated_at)}`}
                       className="strategy-primary-trend"
                     />
-                    <div>
-                      <h3 className="subsection-title">Trade Log</h3>
-                      <DataTable
-                        columns={[
-                          { key: "entry_timestamp", label: "Date", render: (row) => formatTimestamp(row.entry_timestamp ?? row.exit_timestamp) },
-                          { key: "side", label: "Side", render: (row) => formatValue(row.side) },
-                          { key: "entry_price", label: "Entry", render: (row) => formatValue(row.entry_price) },
-                          { key: "exit_price", label: "Exit", render: (row) => formatValue(row.exit_price) },
-                          { key: "realized_pnl", label: "P&L", render: (row) => renderPnlValue(row.realized_pnl) },
-                          { key: "exit_reason", label: "Reason", render: (row) => formatValue(row.exit_reason) },
-                        ]}
-                        rows={selectedWorkspaceTrades}
-                        emptyLabel="No trade log rows are available for the selected lane yet."
-                      />
-                    </div>
                   </div>
+                </div>
+                <div className="strategy-trade-log-panel strategy-focus-trade-log">
+                  <h3 className="subsection-title">Trade Log</h3>
+                  {!selectedWorkspaceTrades.length && selectedWorkspacePlaybackTrades.length ? (
+                    <div className="notice-strip compact strategy-context-strip">
+                      <div><strong>Source</strong> Historical playback trade ledger</div>
+                      <div><strong>Coverage</strong> {strategyLaneDateRangeLabel(selectedWorkspacePlaybackCoverage)}</div>
+                    </div>
+                  ) : null}
+                  <DataTable
+                    columns={[
+                      { key: "entry_timestamp", label: "Date", render: (row) => formatTimestamp(row.entry_timestamp ?? row.exit_timestamp) },
+                      { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+                      { key: "entry_price", label: "Entry", render: (row) => formatValue(row.entry_price) },
+                      { key: "exit_price", label: "Exit", render: (row) => formatValue(row.exit_price) },
+                      { key: "realized_pnl", label: "P&L", render: (row) => renderPnlValue(row.realized_pnl) },
+                      { key: "exit_reason", label: "Reason", render: (row) => formatValue(row.exit_reason) },
+                    ]}
+                    rows={selectedWorkspaceDisplayTrades}
+                    emptyLabel="No trade log rows are available for the selected lane yet."
+                  />
                 </div>
                 {selectedWorkspacePlaybackStudyItem ? (
                   <div className="strategy-playback-preview">
                     <div className="notice-strip compact strategy-context-strip">
                       <div><strong>Historical Study Preview</strong> {formatValue(selectedWorkspacePlaybackStudyItem.label ?? selectedWorkspacePlaybackStudyItem.strategy_id ?? "Loaded")}</div>
                       <div><strong>Coverage</strong> {strategyLaneDateRangeLabel(selectedWorkspacePlaybackCoverage)}</div>
-                      <div><strong>Closed Trades</strong> {formatShortNumber(asArray<JsonRecord>(selectedWorkspacePlaybackSummary.closed_trade_breakdown).length)}</div>
+                      <div><strong>Closed Trades</strong> {formatShortNumber(playbackStudyTradeCount({ summary: selectedWorkspacePlaybackSummary }))}</div>
                       <div><strong>Net P&L</strong> {renderPnlValue(selectedWorkspacePlaybackSummary.net_pnl ?? selectedWorkspacePlaybackSummary.realized_pnl)}</div>
                     </div>
                     {selectedWorkspacePlaybackCanRenderStudy ? (
@@ -9058,7 +13147,7 @@ function paperStartupCategoryTone(category: string): Tone {
                   <UnifiedStrategyAnalysis
                     analysis={strategyAnalysis}
                     replayStudyItems={playbackLatestStudyItems}
-                    preferredStrategyKey={String(selectedWorkspacePerformanceRow?.strategy_key ?? "")}
+                    preferredStrategyKey={preferredAnalysisStrategyKey || String(selectedWorkspacePerformanceRow?.strategy_key ?? "")}
                     studyPanel={(
                       <>
                         <div className="notice-strip compact">
@@ -9195,7 +13284,7 @@ function paperStartupCategoryTone(category: string): Tone {
                     { key: "enabled_in_app", label: "Enabled In App", render: (row) => formatValue(row.enabled_in_app ?? false) },
                     { key: "runtime_instance_present", label: "Loaded In Runtime", render: (row) => formatValue(row.runtime_instance_present ?? false) },
                     { key: "runtime_state_loaded", label: "Runtime State Loaded", render: (row) => formatValue(row.runtime_state_loaded ?? false) },
-                    { key: "truth_label", label: "Truth" },
+                    { key: "truth_label", label: "Runtime Truth", render: (row) => runtimePresenceInfo(row).label },
                     { key: "start_flag", label: "Start Flag", render: (row) => formatValue(row.start_flag ?? "Unavailable") },
                   ]}
                   rows={temporaryPaperIntegrityRows}
@@ -10080,6 +14169,772 @@ function paperStartupCategoryTone(category: string): Tone {
             </>
           ) : null}
 
+          {!loading && page === "drawdown-lab" ? (
+            <>
+              <Section
+                title="Drawdown Recovery Lab"
+                subtitle="Reusable drawdown forensics for any published strategy study, with pain-window fingerprints, recovery-window fingerprints, and trade-level recovery evidence."
+                className="atp-performance-section"
+                headerClassName="section-header-tight"
+              >
+                <div className="study-workbench-controls drawdown-lab-controls">
+                  <label className="study-select-field drawdown-lab-study-field">
+                    <span>Study</span>
+                    <select
+                      value={selectedDrawdownStudyKey}
+                      onChange={(event) => {
+                        setSelectedDrawdownStudyKey(event.target.value);
+                        setSelectedDrawdownEpisodeId("");
+                      }}
+                    >
+                      {drawdownStudyOptions.map((item) => (
+                        <option key={String(item.study_key ?? item.strategy_id ?? "")} value={String(item.study_key ?? "")}>
+                          {String(item.option_label ?? item.label ?? item.strategy_id ?? "Study")}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="study-select-field study-date-field">
+                    <span>Episode</span>
+                    <select value={selectedDrawdownEpisodeId} onChange={(event) => setSelectedDrawdownEpisodeId(event.target.value)}>
+                      {drawdownEpisodes.map((episode) => (
+                        <option key={String(episode.id ?? "")} value={String(episode.id ?? "")}>
+                          {`#${formatValue(episode.episode_number)} / DD ${formatMaybePnL(episode.drawdown_amount)} / Peak ${studyDateLabel(String(episode.peak_timestamp ?? "")) || "?"} / Trough ${studyDateLabel(String(episode.trough_timestamp ?? "")) || "?"}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="study-workbench-filter-group">
+                    <label className="field-label" htmlFor="drawdown-snapshot-filename">Snapshot</label>
+                    <div className="compact-note" id="drawdown-snapshot-filename">{drawdownSnapshotFilename}</div>
+                  </div>
+                  <div className="study-workbench-filter-group">
+                    <label className="field-label">Actions</label>
+                    <div className="calendar-toolbar-actions">
+                      <button className="panel-button subtle" disabled={busyAction !== null} onClick={() => void handleCopyDrawdownSnapshot()}>
+                        Copy JSON
+                      </button>
+                      <button className="panel-button subtle" disabled={busyAction !== null} onClick={() => void handleExportDrawdownSnapshot()}>
+                        Export Snapshot
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <SectionTruthStrip
+                  updatedAt={selectedDrawdownStudyItem?.generated_at ?? playback.generated_at}
+                  fallbackUpdatedAt={dashboardGeneratedAt}
+                  sourceLabel={dashboardTruthSource.label}
+                  sourceTone={dashboardTruthSource.tone}
+                  scopeLabel="Drawdown analysis uses the selected historical playback study and rebuilds peak-to-trough / trough-to-recovery episodes directly from closed-trade history."
+                  provenance="Pain windows run from the first equity break below a prior peak to the trough. Recovery windows run from the trough to the peak reclaim, or to the latest trade if the episode remains unresolved."
+                />
+                <div className="metric-grid atp-performance-summary-grid">
+                  <MetricCard label="Closed Trades" value={formatShortNumber(drawdownAnalysis.trade_count)} tone="muted" />
+                  <MetricCard label="Net P&L" value={renderPnlValue(drawdownAnalysis.net_pnl)} tone={pnlTone(drawdownAnalysis.net_pnl)} />
+                  <MetricCard label="Max Drawdown" value={renderPnlValue(-(numericOrNull(drawdownAnalysis.max_drawdown) ?? 0))} tone="danger" />
+                  <MetricCard label="Episodes" value={formatShortNumber(drawdownAnalysis.episode_count)} tone={drawdownAnalysis.episode_count ? "warn" : "muted"} />
+                  <MetricCard label="Recovered" value={formatShortNumber(drawdownAnalysis.resolved_episode_count)} tone={drawdownAnalysis.resolved_episode_count ? "good" : "muted"} />
+                  <MetricCard label="Unresolved" value={formatShortNumber(drawdownAnalysis.unresolved_episode_count)} tone={drawdownAnalysis.unresolved_episode_count ? "warn" : "muted"} />
+                  <MetricCard label="Median DD" value={renderPnlValue(-(numericOrNull(drawdownAnalysis.median_drawdown) ?? 0))} tone="warn" />
+                  <MetricCard label="Avg Recovery Days" value={formatValue(drawdownAnalysis.average_days_to_recover !== null ? Number(drawdownAnalysis.average_days_to_recover).toFixed(1) : "—")} tone="muted" />
+                  <MetricCard label="Time-Stop Share" value={formatPercentValue(drawdownAnalysis.time_stop_share_pct, 1)} tone={(numericOrNull(drawdownAnalysis.time_stop_share_pct) ?? 0) >= 40 ? "warn" : "good"} />
+                </div>
+                <div className="notice-strip compact">
+                  <div>
+                    <strong>Dominant Pain Fingerprint</strong> {formatValue(drawdownAnalysis.dominant_pain_fingerprint ?? "Unavailable")}
+                  </div>
+                  <div>
+                    <strong>Dominant Recovery Fingerprint</strong> {formatValue(drawdownAnalysis.dominant_recovery_fingerprint ?? "Unavailable")}
+                  </div>
+                  <div>
+                    <strong>Design Use</strong> Compare the pain fingerprint against the recovery fingerprint to decide whether the strategy’s rescue trades are genuinely separable, or whether the edge only exists as broad participation.
+                  </div>
+                  <div>
+                    <strong>Caveat</strong> This is closed-trade forensics, not intraday mark-to-market pain. It answers which setups paid for the drawdown, not how unpleasant the open excursion felt in real time.
+                  </div>
+                </div>
+                <DataTable
+                  columns={[
+                    { key: "episode_number", label: "Episode" },
+                    { key: "peak_timestamp", label: "Peak", render: (row) => formatTimestamp(row.peak_timestamp) },
+                    { key: "trough_timestamp", label: "Trough", render: (row) => formatTimestamp(row.trough_timestamp) },
+                    { key: "recovery_timestamp", label: "Recovered", render: (row) => row.fully_recovered === true ? formatTimestamp(row.recovery_timestamp) : "Unrecovered" },
+                    { key: "drawdown_amount", label: "Drawdown", render: (row) => renderPnlValue(-(numericOrNull(row.drawdown_amount) ?? 0)) },
+                    { key: "recovered_amount", label: "Recovered", render: (row) => renderPnlValue(row.recovered_amount) },
+                    { key: "pain_trade_count", label: "Pain Trades", render: (row) => formatShortNumber(row.pain_trade_count) },
+                    { key: "recovery_trade_count", label: "Recovery Trades", render: (row) => formatShortNumber(row.recovery_trade_count) },
+                    { key: "calendar_days_to_recover", label: "Days", render: (row) => formatShortNumber(row.calendar_days_to_recover) },
+                    { key: "retained_pct", label: "Recovered %", render: (row) => formatPercentValue(row.retained_pct, 1) },
+                    { key: "insight", label: "Insight", render: (row) => formatValue(row.insight) },
+                  ]}
+                  rows={drawdownEpisodes}
+                  emptyLabel="No drawdown episodes were found for the selected study."
+                  onRowClick={(row) => setSelectedDrawdownEpisodeId(String(row.id ?? ""))}
+                  selectedRowKey={selectedDrawdownEpisodeId}
+                  rowKey={(row) => String(row.id ?? "")}
+                />
+              </Section>
+
+              {selectedDrawdownEpisode ? (
+                <>
+                  <Section
+                    title="Selected Episode"
+                    subtitle="Focused episode detail so we can tell whether the drawdown damage and the recovery engine came from the same fingerprints."
+                    className="atp-performance-section"
+                    headerClassName="section-header-tight"
+                  >
+                    <div className="metric-grid account-metric-grid">
+                      <MetricCard label="Episode" value={formatValue(selectedDrawdownEpisode.episode_number)} tone="muted" />
+                      <MetricCard label="Drawdown" value={renderPnlValue(-(numericOrNull(selectedDrawdownEpisode.drawdown_amount) ?? 0))} tone="danger" />
+                      <MetricCard label="Recovered" value={renderPnlValue(selectedDrawdownEpisode.recovered_amount)} tone={pnlTone(selectedDrawdownEpisode.recovered_amount)} />
+                      <MetricCard label="Recovered %" value={formatPercentValue(selectedDrawdownEpisode.retained_pct, 1)} tone={(numericOrNull(selectedDrawdownEpisode.retained_pct) ?? 0) >= 100 ? "good" : "warn"} />
+                      <MetricCard label="Pain Trades" value={formatShortNumber(selectedDrawdownEpisode.pain_trade_count)} tone="warn" />
+                      <MetricCard label="Recovery Trades" value={formatShortNumber(selectedDrawdownEpisode.recovery_trade_count)} tone="good" />
+                      <MetricCard label="Peak" value={formatTimestamp(selectedDrawdownEpisode.peak_timestamp)} tone="muted" />
+                      <MetricCard label="Trough" value={formatTimestamp(selectedDrawdownEpisode.trough_timestamp)} tone="danger" />
+                      <MetricCard label="Recovered" value={selectedDrawdownEpisode.fully_recovered === true ? formatTimestamp(selectedDrawdownEpisode.recovery_timestamp) : "Unrecovered"} tone={selectedDrawdownEpisode.fully_recovered === true ? "good" : "warn"} />
+                      <MetricCard label="Days" value={formatShortNumber(selectedDrawdownEpisode.calendar_days_to_recover)} tone="muted" />
+                    </div>
+                    <div className="notice-strip compact">
+                      <div>{formatValue(selectedDrawdownEpisode.insight)}</div>
+                    </div>
+                    <div className="split-panel pnl-table-grid">
+                      <div className="table-panel-shell">
+                        <h3 className="subsection-title">Pain Fingerprints</h3>
+                        <DataTable
+                          columns={[
+                            { key: "fingerprint_label", label: "Fingerprint" },
+                            { key: "exit_reason", label: "Exit", render: (row) => formatValue(row.exit_reason) },
+                            { key: "trade_count", label: "Trades", render: (row) => formatShortNumber(row.trade_count) },
+                            { key: "total_realized_pnl", label: "Total P&L", render: (row) => renderPnlValue(row.total_realized_pnl) },
+                            { key: "average_realized_pnl", label: "Avg/Trade", render: (row) => renderPnlValue(row.average_realized_pnl) },
+                            { key: "win_rate", label: "Win Rate", render: (row) => formatPercentValue(row.win_rate, 1) },
+                            { key: "last_timestamp", label: "Last", render: (row) => formatTimestamp(row.last_timestamp) },
+                          ]}
+                          rows={asArray<JsonRecord>(selectedDrawdownEpisode.pain_fingerprint_rows)}
+                          emptyLabel="No pain fingerprint rows are available for this episode."
+                          rowKey={(row) => String(row.id ?? "")}
+                        />
+                      </div>
+                      <div className="table-panel-shell">
+                        <h3 className="subsection-title">Recovery Fingerprints</h3>
+                        <DataTable
+                          columns={[
+                            { key: "fingerprint_label", label: "Fingerprint" },
+                            { key: "exit_reason", label: "Exit", render: (row) => formatValue(row.exit_reason) },
+                            { key: "trade_count", label: "Trades", render: (row) => formatShortNumber(row.trade_count) },
+                            { key: "total_realized_pnl", label: "Total P&L", render: (row) => renderPnlValue(row.total_realized_pnl) },
+                            { key: "average_realized_pnl", label: "Avg/Trade", render: (row) => renderPnlValue(row.average_realized_pnl) },
+                            { key: "win_rate", label: "Win Rate", render: (row) => formatPercentValue(row.win_rate, 1) },
+                            { key: "last_timestamp", label: "Last", render: (row) => formatTimestamp(row.last_timestamp) },
+                          ]}
+                          rows={asArray<JsonRecord>(selectedDrawdownEpisode.recovery_fingerprint_rows)}
+                          emptyLabel="No recovery fingerprint rows are available for this episode."
+                          rowKey={(row) => String(row.id ?? "")}
+                        />
+                      </div>
+                    </div>
+                    <div className="split-panel pnl-table-grid">
+                      <div className="table-panel-shell">
+                        <h3 className="subsection-title">Pain Trades</h3>
+                        <DataTable
+                          columns={[
+                            { key: "family", label: "Family", render: (row) => formatValue(row.family) },
+                            { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+                            { key: "entry_session_phase", label: "Session", render: (row) => formatValue(row.entry_session_phase) },
+                            { key: "entry_timestamp", label: "Entry", render: (row) => formatTimestamp(row.entry_timestamp) },
+                            { key: "exit_timestamp", label: "Exit", render: (row) => formatTimestamp(row.exit_timestamp) },
+                            { key: "realized_pnl", label: "Realized", render: (row) => renderPnlValue(row.realized_pnl) },
+                            { key: "exit_reason", label: "Exit", render: (row) => formatValue(row.exit_reason) },
+                          ]}
+                          rows={asArray<JsonRecord>(selectedDrawdownEpisode.pain_trade_rows)}
+                          emptyLabel="No pain trades are available for this episode."
+                          rowKey={(row, index) => String(row.trade_id ?? `pain-${index}`)}
+                        />
+                      </div>
+                      <div className="table-panel-shell">
+                        <h3 className="subsection-title">Recovery Trades</h3>
+                        <DataTable
+                          columns={[
+                            { key: "family", label: "Family", render: (row) => formatValue(row.family) },
+                            { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+                            { key: "entry_session_phase", label: "Session", render: (row) => formatValue(row.entry_session_phase) },
+                            { key: "entry_timestamp", label: "Entry", render: (row) => formatTimestamp(row.entry_timestamp) },
+                            { key: "exit_timestamp", label: "Exit", render: (row) => formatTimestamp(row.exit_timestamp) },
+                            { key: "realized_pnl", label: "Realized", render: (row) => renderPnlValue(row.realized_pnl) },
+                            { key: "exit_reason", label: "Exit", render: (row) => formatValue(row.exit_reason) },
+                          ]}
+                          rows={asArray<JsonRecord>(selectedDrawdownEpisode.recovery_trade_rows)}
+                          emptyLabel="No recovery trades are available for this episode."
+                          rowKey={(row, index) => String(row.trade_id ?? `recovery-${index}`)}
+                        />
+                      </div>
+                    </div>
+                  </Section>
+
+                  <Section
+                    title="Cross-Episode Fingerprints"
+                    subtitle="Aggregated pain and recovery fingerprints across the full study, so we can see whether the drawdown engine and the recovery engine are globally separable."
+                    className="atp-performance-section"
+                    headerClassName="section-header-tight"
+                  >
+                    <div className="split-panel pnl-table-grid">
+                      <div className="table-panel-shell">
+                        <h3 className="subsection-title">Global Pain Fingerprints</h3>
+                        <DataTable
+                          columns={[
+                            { key: "fingerprint_label", label: "Fingerprint" },
+                            { key: "exit_reason", label: "Exit", render: (row) => formatValue(row.exit_reason) },
+                            { key: "trade_count", label: "Trades", render: (row) => formatShortNumber(row.trade_count) },
+                            { key: "total_realized_pnl", label: "Total P&L", render: (row) => renderPnlValue(row.total_realized_pnl) },
+                            { key: "average_realized_pnl", label: "Avg/Trade", render: (row) => renderPnlValue(row.average_realized_pnl) },
+                            { key: "win_rate", label: "Win Rate", render: (row) => formatPercentValue(row.win_rate, 1) },
+                          ]}
+                          rows={asArray<JsonRecord>(drawdownAnalysis.global_pain_fingerprints)}
+                          emptyLabel="No global pain fingerprint rows are available."
+                          rowKey={(row) => String(row.id ?? "")}
+                        />
+                      </div>
+                      <div className="table-panel-shell">
+                        <h3 className="subsection-title">Global Recovery Fingerprints</h3>
+                        <DataTable
+                          columns={[
+                            { key: "fingerprint_label", label: "Fingerprint" },
+                            { key: "exit_reason", label: "Exit", render: (row) => formatValue(row.exit_reason) },
+                            { key: "trade_count", label: "Trades", render: (row) => formatShortNumber(row.trade_count) },
+                            { key: "total_realized_pnl", label: "Total P&L", render: (row) => renderPnlValue(row.total_realized_pnl) },
+                            { key: "average_realized_pnl", label: "Avg/Trade", render: (row) => renderPnlValue(row.average_realized_pnl) },
+                            { key: "win_rate", label: "Win Rate", render: (row) => formatPercentValue(row.win_rate, 1) },
+                          ]}
+                          rows={asArray<JsonRecord>(drawdownAnalysis.global_recovery_fingerprints)}
+                          emptyLabel="No global recovery fingerprint rows are available."
+                          rowKey={(row) => String(row.id ?? "")}
+                        />
+                      </div>
+                    </div>
+                  </Section>
+                </>
+              ) : null}
+            </>
+          ) : null}
+
+          {!loading && page === "atp-performance" ? (
+            <>
+              <Section
+                title="ATP Experimental Performance"
+                subtitle="Row-oriented ATP benchmark and candidate performance with live posture, current marks, and longer-horizon playback economics."
+                className="atp-performance-section"
+                headerClassName="section-header-tight"
+              >
+                <SectionTruthStrip
+                  updatedAt={paperStrategyPerformance.generated_at ?? paperTrackedStrategies.generated_at ?? playback.generated_at}
+                  fallbackUpdatedAt={dashboardGeneratedAt}
+                  sourceLabel={dashboardTruthSource.label}
+                  sourceTone={dashboardTruthSource.tone}
+                  scopeLabel="ATP benchmark and candidate rows assembled from live paper/runtime truth plus historical playback studies"
+                  provenance="Current position, mark, cost, and short-horizon P/L come from paper/runtime snapshots. YTD and lifetime P/L come from the linked historical playback study summaries."
+                />
+                <div className="metric-grid atp-performance-summary-grid">
+                  <MetricCard label="ATP Rows" value={formatShortNumber(atpExperimentalSummary.rowCount)} tone="muted" />
+                  <MetricCard label="Active Runtime" value={formatShortNumber(atpExperimentalSummary.activeRuntimeCount)} tone={atpExperimentalSummary.activeRuntimeCount > 0 ? "good" : "muted"} />
+                  <MetricCard label="Open Positions" value={formatShortNumber(atpExperimentalSummary.openPositionCount)} tone={atpExperimentalSummary.openPositionCount > 0 ? "warn" : "muted"} />
+                  <MetricCard label="Short Enabled" value={formatShortNumber(atpExperimentalSummary.shortEnabledCount)} tone={atpExperimentalSummary.shortEnabledCount > 0 ? "good" : "muted"} />
+                  <MetricCard label="Long Active" value={formatShortNumber(atpExperimentalSummary.longActiveCount)} tone={atpExperimentalSummary.longActiveCount > 0 ? "good" : "muted"} />
+                  <MetricCard label="Short Active" value={formatShortNumber(atpExperimentalSummary.shortActiveCount)} tone={atpExperimentalSummary.shortActiveCount > 0 ? "warn" : "muted"} />
+                  <MetricCard label="Long Realized" value={renderPnlValue(atpExperimentalSummary.totalLongRealized)} tone={pnlTone(atpExperimentalSummary.totalLongRealized)} />
+                  <MetricCard label="Short Realized" value={renderPnlValue(atpExperimentalSummary.totalShortRealized)} tone={pnlTone(atpExperimentalSummary.totalShortRealized)} />
+                  <MetricCard label="P/L Day" value={renderPnlValue(atpExperimentalSummary.totalDayPnl)} tone={pnlTone(atpExperimentalSummary.totalDayPnl)} />
+                  <MetricCard label="P/L Open" value={renderPnlValue(atpExperimentalSummary.totalOpenPnl)} tone={pnlTone(atpExperimentalSummary.totalOpenPnl)} />
+                  <MetricCard label="P/L YTD" value={renderPnlValue(atpExperimentalSummary.totalYtdPnl)} tone={pnlTone(atpExperimentalSummary.totalYtdPnl)} />
+                  <MetricCard label="P/L Lifetime" value={renderPnlValue(atpExperimentalSummary.totalLifetimePnl)} tone={pnlTone(atpExperimentalSummary.totalLifetimePnl)} />
+                </div>
+                <div className="notice-strip compact">
+                  <div>
+                    <strong>Current posture</strong> uses live shared-paper and tracked-strategy truth when published.
+                  </div>
+                  <div>
+                    <strong>Long-horizon P&amp;L</strong> uses the linked playback study for each ATP lane, so the rows can still speak about YTD and lifetime performance even when the live runtime is flat.
+                  </div>
+                  <div>
+                    <strong>Mark Change</strong> uses the published mark delta when available; otherwise it falls back to mark minus trade price for open positions.
+                  </div>
+                  <div>
+                    <strong>Configured Sides</strong> shows whether each ATP lane is allowed to participate long-only or in both directions, while the long/short trade columns show what has actually happened in paper.
+                  </div>
+                </div>
+                <DataTable
+                  columns={[
+                    {
+                      key: "strategy_name",
+                      label: "Strategy",
+                      render: (row) => (
+                        <div className="atp-performance-strategy-cell">
+                          <div className="atp-performance-strategy-title">{formatValue(row.strategy_name)}</div>
+                          <div className="atp-performance-strategy-meta">
+                            <span>{formatValue(row.instrument)}</span>
+                            <span>{formatValue(row.designation)}</span>
+                            <span>{formatValue(row.participation_policy)}</span>
+                          </div>
+                        </div>
+                      ),
+                    },
+                    { key: "runtime", label: "Runtime", render: (row) => <Badge label={formatValue(row.runtime)} tone={statusTone(row.runtime)} /> },
+                    { key: "status", label: "Status", render: (row) => formatValue(row.status) },
+                    { key: "configured_sides_label", label: "Configured Sides", render: (row) => <Badge label={formatValue(row.configured_sides_label)} tone={row.configured_short_enabled === true ? "warn" : "muted"} /> },
+                    { key: "latest_paper_side", label: "Latest Side", render: (row) => formatValue(row.latest_paper_side) },
+                    { key: "paper_long_trade_count", label: "Long Trades", render: (row) => formatShortNumber(row.paper_long_trade_count) },
+                    { key: "paper_short_trade_count", label: "Short Trades", render: (row) => formatShortNumber(row.paper_short_trade_count) },
+                    { key: "current_position", label: "Current Position", render: (row) => formatValue(row.current_position) },
+                    { key: "trade_price", label: "Trade Price", render: (row) => formatMarketNumber(row.trade_price) },
+                    { key: "mark", label: "Mark", render: (row) => formatMarketNumber(row.mark) },
+                    {
+                      key: "mark_change",
+                      label: "Mark Chg",
+                      render: (row) => (
+                        <span title={String(row.mark_change_basis ?? "") === "published" ? "Published mark change" : "Fallback: mark minus trade price"}>
+                          {renderPnlValue(row.mark_change)}
+                        </span>
+                      ),
+                    },
+                    { key: "cost", label: "Cost", render: (row) => formatCompactCurrency(numericOrNull(row.cost)) },
+                    { key: "pnl_open", label: "P/L Open", render: (row) => renderPnlValue(row.pnl_open) },
+                    { key: "pnl_day", label: "P/L Day", render: (row) => renderPnlValue(row.pnl_day) },
+                    { key: "paper_long_realized_pnl", label: "Long Realized", render: (row) => renderPnlValue(row.paper_long_realized_pnl) },
+                    { key: "paper_short_realized_pnl", label: "Short Realized", render: (row) => renderPnlValue(row.paper_short_realized_pnl) },
+                    { key: "pnl", label: "P/L", render: (row) => renderPnlValue(row.pnl) },
+                    { key: "pnl_ytd", label: "P/L YTD", render: (row) => renderPnlValue(row.pnl_ytd) },
+                    { key: "pnl_lifetime", label: "P/L Lifetime", render: (row) => renderPnlValue(row.pnl_lifetime) },
+                    { key: "playback_trade_count", label: "Trades", render: (row) => formatShortNumber(row.playback_trade_count) },
+                    { key: "latest_activity_timestamp", label: "Last Activity", render: (row) => formatTimestamp(row.latest_activity_timestamp) },
+                    { key: "coverage_label", label: "Coverage", render: (row) => formatValue(row.coverage_label) },
+                    {
+                      key: "open",
+                      label: "Open",
+                      render: (row) => (
+                        <button
+                          className="panel-button subtle"
+                          onClick={() => selectWorkspaceLane(String(row.lane_id ?? ""), { navigateTo: "strategies" })}
+                        >
+                          Deep-Dive
+                        </button>
+                      ),
+                    },
+                  ]}
+                  rows={atpExperimentalPerformanceRows}
+                  emptyLabel="No ATP benchmark or candidate rows are currently published in the workstation snapshot."
+                  rowKey={(row) => String(row.id ?? row.lane_id ?? row.strategy_name ?? "")}
+                />
+              </Section>
+            </>
+          ) : null}
+
+          {!loading && page === "atp-attribution" ? (
+            <>
+              <Section
+                title="ATP Attribution"
+                subtitle="Reusable paper-vs-back-cast ATP analytics with lane-level gap analysis, sample-size context, and recent paper trade evidence."
+                className="atp-performance-section"
+                headerClassName="section-header-tight"
+              >
+                <div className="study-workbench-controls atp-export-controls">
+                  <div className="study-workbench-filter-group">
+                    <label className="field-label" htmlFor="atp-analytics-snapshot-target">ATP Snapshot</label>
+                    <div className="placeholder-note">Save the current attribution, opportunity-gap, and risk-control view as a reusable JSON artifact.</div>
+                  </div>
+                  <div className="study-workbench-filter-group">
+                    <label className="field-label" htmlFor="atp-analytics-snapshot-filename">Filename</label>
+                    <div className="compact-note" id="atp-analytics-snapshot-filename">{atpAnalyticsSnapshotFilename}</div>
+                  </div>
+                  <div className="study-workbench-filter-group">
+                    <label className="field-label">Actions</label>
+                    <div className="calendar-toolbar-actions">
+                      <button className="panel-button subtle" disabled={busyAction !== null} onClick={() => void handleCopyAtpAnalyticsSnapshot()}>
+                        Copy JSON
+                      </button>
+                      <button className="panel-button subtle" disabled={busyAction !== null} onClick={() => void handleExportAtpAnalyticsSnapshot()}>
+                        Export Snapshot
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <SectionTruthStrip
+                  updatedAt={paperStrategyPerformance.generated_at ?? paperTrackedStrategies.generated_at ?? playback.generated_at}
+                  fallbackUpdatedAt={dashboardGeneratedAt}
+                  sourceLabel={dashboardTruthSource.label}
+                  sourceTone={dashboardTruthSource.tone}
+                  scopeLabel="ATP attribution compares current paper execution sample against the linked back-cast study for each ATP lane"
+                  provenance="Paper economics come from the shared paper runtime and persisted ATP trade log. Back-cast economics come from the linked playback study summaries already wired into the ATP rows."
+                />
+                <div className="metric-grid atp-performance-summary-grid">
+                  <MetricCard label="ATP Rows" value={formatShortNumber(atpAttributionSummary.rowCount)} tone="muted" />
+                  <MetricCard label="Active Runtime" value={formatShortNumber(atpAttributionSummary.activeRuntimeCount)} tone={atpAttributionSummary.activeRuntimeCount > 0 ? "good" : "muted"} />
+                  <MetricCard label="Attributed Rows" value={formatShortNumber(atpAttributionSummary.attributedRowCount)} tone={atpAttributionSummary.attributedRowCount > 0 ? "good" : "warn"} />
+                  <MetricCard label="Paper Realized" value={renderPnlValue(atpAttributionSummary.totalPaperRealized)} tone={pnlTone(atpAttributionSummary.totalPaperRealized)} />
+                  <MetricCard label="Paper Session" value={renderPnlValue(atpAttributionSummary.totalPaperSession)} tone={pnlTone(atpAttributionSummary.totalPaperSession)} />
+                  <MetricCard label="Back-cast Lifetime" value={renderPnlValue(atpAttributionSummary.totalPlaybackLifetime)} tone={pnlTone(atpAttributionSummary.totalPlaybackLifetime)} />
+                  <MetricCard label="Avg Trade Gap" value={renderPnlValue(atpAttributionSummary.averageTradeGap)} tone={pnlTone(atpAttributionSummary.averageTradeGap)} />
+                  <MetricCard label="Activity Ratio" value={formatPercentValue((atpAttributionSummary.averageActivityRatio ?? 0) * 100, 2)} tone={(atpAttributionSummary.averageActivityRatio ?? 0) > 0.05 ? "good" : "warn"} />
+                </div>
+                <div className="notice-strip compact">
+                  <div>
+                    <strong>Paper Realized</strong> is the closed-trade paper sample we have actually observed for the lane.
+                  </div>
+                  <div>
+                    <strong>Back-cast Lifetime</strong> is the linked study economics over the full playback coverage window, not a paper fill simulation.
+                  </div>
+                  <div>
+                    <strong>Avg Trade Gap</strong> compares paper realized per closed trade against the linked back-cast average per closed trade, so it helps separate sample quality from raw trade count.
+                  </div>
+                  <div>
+                    <strong>Long vs Short</strong> breaks the paper sample into directional buckets, so we can tell whether ATP is underparticipating on the short side or simply not finding valid downside continuation.
+                  </div>
+                </div>
+                <div className="metric-grid atp-performance-summary-grid">
+                  <MetricCard label="Observed Setups" value={formatShortNumber(atpOpportunityGapSummary.totalSignals)} tone={atpOpportunityGapSummary.totalSignals > 0 ? "good" : "muted"} />
+                  <MetricCard label="Order Intents" value={formatShortNumber(atpOpportunityGapSummary.totalIntents)} tone={atpOpportunityGapSummary.totalIntents > 0 ? "good" : "muted"} />
+                  <MetricCard label="Fills" value={formatShortNumber(atpOpportunityGapSummary.totalFills)} tone={atpOpportunityGapSummary.totalFills > 0 ? "good" : "muted"} />
+                  <MetricCard label="Missed Setups" value={formatShortNumber(atpOpportunityGapSummary.totalMissed)} tone={atpOpportunityGapSummary.totalMissed > 0 ? "warn" : "muted"} />
+                  <MetricCard label="Unfilled Intents" value={formatShortNumber(atpOpportunityGapSummary.totalUnfilledIntents)} tone={atpOpportunityGapSummary.totalUnfilledIntents > 0 ? "warn" : "muted"} />
+                  <MetricCard label="Gated Lanes" value={formatShortNumber(atpOpportunityGapSummary.gatedRowCount)} tone={atpOpportunityGapSummary.gatedRowCount > 0 ? "danger" : "good"} />
+                  <MetricCard label="Attempt Rate" value={formatPercentValue((atpOpportunityGapSummary.attemptRate ?? 0) * 100, 2)} tone={(atpOpportunityGapSummary.attemptRate ?? 0) >= 0.6 ? "good" : (atpOpportunityGapSummary.attemptRate ?? 0) >= 0.3 ? "warn" : "danger"} />
+                  <MetricCard label="Fill Rate" value={formatPercentValue((atpOpportunityGapSummary.fillRate ?? 0) * 100, 2)} tone={(atpOpportunityGapSummary.fillRate ?? 0) >= 0.4 ? "good" : (atpOpportunityGapSummary.fillRate ?? 0) >= 0.2 ? "warn" : "danger"} />
+                </div>
+                <Section
+                  title="ATP Opportunity Gap"
+                  subtitle="Lane-level setup -> intent -> fill conversion, with explicit blocker context when observed ATP setups do not turn into paper trades."
+                  className="atp-performance-section"
+                  headerClassName="section-header-tight"
+                >
+                  <div className="notice-strip compact">
+                    <div>
+                      <strong>Observed Setups</strong> uses the ATP lane signal count currently published by the paper/runtime surface.
+                    </div>
+                    <div>
+                      <strong>Missed Setups</strong> means persisted ATP setups exceeded order intents in the current surfaced window.
+                    </div>
+                    <div>
+                      <strong>Unfilled Intents</strong> means the lane attempted the trade path, but fill persistence still lagged behind intent creation.
+                    </div>
+                  </div>
+                  <DataTable
+                    columns={[
+                      {
+                        key: "strategy_name",
+                        label: "Strategy",
+                        render: (row) => (
+                          <div className="atp-performance-strategy-cell">
+                            <div className="atp-performance-strategy-title">{formatValue(row.strategy_name)}</div>
+                            <div className="atp-performance-strategy-meta">
+                              <span>{formatValue(row.instrument)}</span>
+                              <span>{formatValue(row.designation)}</span>
+                              <span>{formatValue(row.runtime)}</span>
+                            </div>
+                          </div>
+                        ),
+                      },
+                      {
+                        key: "opportunity_label",
+                        label: "Opportunity Verdict",
+                        render: (row) => <Badge label={formatValue(row.opportunity_label)} tone={String(row.opportunity_tone ?? "muted") as Tone} />,
+                      },
+                      { key: "signal_count", label: "Observed Setups", render: (row) => formatShortNumber(row.signal_count) },
+                      { key: "intent_count", label: "Order Intents", render: (row) => formatShortNumber(row.intent_count) },
+                      { key: "fill_count", label: "Fills", render: (row) => formatShortNumber(row.fill_count) },
+                      { key: "missed_opportunity_count", label: "Missed Setups", render: (row) => formatShortNumber(row.missed_opportunity_count) },
+                      { key: "unfilled_intent_count", label: "Unfilled Intents", render: (row) => formatShortNumber(row.unfilled_intent_count) },
+                      { key: "attempt_rate", label: "Attempt Rate", render: (row) => formatPercentValue((numericOrNull(row.attempt_rate) ?? 0) * 100, 2) },
+                      { key: "fill_rate", label: "Fill Rate", render: (row) => formatPercentValue((numericOrNull(row.fill_rate) ?? 0) * 100, 2) },
+                      { key: "eligible_now", label: "Eligible Now", render: (row) => formatValue(row.eligible_now ?? "Unavailable") },
+                      { key: "latest_signal_label", label: "Latest Signal", render: (row) => formatValue(row.latest_signal_label) },
+                      { key: "opportunity_blocker", label: "Blocker", render: (row) => formatValue(row.opportunity_blocker) },
+                      {
+                        key: "open",
+                        label: "Open",
+                        render: (row) => (
+                          <button
+                            className="panel-button subtle"
+                            onClick={() => setSelectedAtpAttributionLaneId(String(row.lane_id ?? ""))}
+                          >
+                            Review
+                          </button>
+                        ),
+                      },
+                    ]}
+                    rows={atpOpportunityGapRows}
+                    emptyLabel="No ATP opportunity-gap rows are available yet."
+                    rowKey={(row) => `opportunity:${String(row.lane_id ?? row.strategy_name ?? "")}`}
+                  />
+                </Section>
+                <DataTable
+                  columns={[
+                    {
+                      key: "strategy_name",
+                      label: "Strategy",
+                      render: (row) => (
+                        <div className="atp-performance-strategy-cell">
+                          <div className="atp-performance-strategy-title">{formatValue(row.strategy_name)}</div>
+                          <div className="atp-performance-strategy-meta">
+                            <span>{formatValue(row.instrument)}</span>
+                            <span>{formatValue(row.designation)}</span>
+                            <span>{formatValue(row.runtime)}</span>
+                          </div>
+                        </div>
+                      ),
+                    },
+                    {
+                      key: "attribution_label",
+                      label: "Assessment",
+                      render: (row) => <Badge label={formatValue(row.attribution_label)} tone={String(row.attribution_tone ?? "muted") as Tone} />,
+                    },
+                    { key: "paper_trade_count", label: "Paper Trades", render: (row) => formatShortNumber(row.paper_trade_count) },
+                    { key: "paper_long_trade_count", label: "Long Trades", render: (row) => formatShortNumber(row.paper_long_trade_count) },
+                    { key: "paper_short_trade_count", label: "Short Trades", render: (row) => formatShortNumber(row.paper_short_trade_count) },
+                    { key: "net_side_bias", label: "Side Mix", render: (row) => formatValue(row.net_side_bias) },
+                    { key: "paper_realized_pnl", label: "Paper Realized", render: (row) => renderPnlValue(row.paper_realized_pnl) },
+                    { key: "paper_long_realized_pnl", label: "Long Realized", render: (row) => renderPnlValue(row.paper_long_realized_pnl) },
+                    { key: "paper_short_realized_pnl", label: "Short Realized", render: (row) => renderPnlValue(row.paper_short_realized_pnl) },
+                    { key: "pnl_day", label: "Paper Session", render: (row) => renderPnlValue(row.pnl_day) },
+                    { key: "pnl_lifetime", label: "Back-cast Lifetime", render: (row) => renderPnlValue(row.pnl_lifetime) },
+                    { key: "paper_avg_trade_pnl", label: "Paper Avg/Trade", render: (row) => renderPnlValue(row.paper_avg_trade_pnl) },
+                    { key: "playback_avg_trade_pnl", label: "Back-cast Avg/Trade", render: (row) => renderPnlValue(row.playback_avg_trade_pnl) },
+                    { key: "avg_trade_gap", label: "Avg Trade Gap", render: (row) => renderPnlValue(row.avg_trade_gap) },
+                    { key: "activity_ratio", label: "Activity Ratio", render: (row) => formatPercentValue((numericOrNull(row.activity_ratio) ?? 0) * 100, 2) },
+                    { key: "average_slippage", label: "Avg Slippage", render: (row) => renderPnlValue(row.average_slippage) },
+                    { key: "last_closed_trade_timestamp", label: "Last Closed Trade", render: (row) => formatTimestamp(row.last_closed_trade_timestamp) },
+                    { key: "last_fill_or_activity_timestamp", label: "Last Fill / Activity", render: (row) => formatTimestamp(row.last_fill_or_activity_timestamp) },
+                    {
+                      key: "open",
+                      label: "Open",
+                      render: (row) => (
+                        <button
+                          className="panel-button subtle"
+                          onClick={() => setSelectedAtpAttributionLaneId(String(row.lane_id ?? ""))}
+                        >
+                          Analyze
+                        </button>
+                      ),
+                    },
+                  ]}
+                  rows={atpAttributionRows}
+                  emptyLabel="No ATP attribution rows are available yet."
+                  rowKey={(row) => String(row.lane_id ?? row.id ?? row.strategy_name ?? "")}
+                />
+              </Section>
+
+              <Section
+                title="Risk-Control Lab"
+                subtitle="Reusable replay what-if analysis for ATP lanes under daily loss caps and daily realized drawdown caps."
+                className="atp-performance-section"
+                headerClassName="section-header-tight"
+              >
+                <div className="study-workbench-controls atp-risk-controls">
+                  <label className="study-select-field">
+                    <span>Risk Scenario</span>
+                    <select value={selectedAtpRiskControlMode} onChange={(event) => setSelectedAtpRiskControlMode(event.target.value as AtpRiskControlMode)}>
+                      {ATP_RISK_CONTROL_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="study-select-field study-date-field">
+                    <span>Loss Cap</span>
+                    <select value={selectedAtpRiskLossCap} onChange={(event) => setSelectedAtpRiskLossCap(event.target.value)}>
+                      {ATP_RISK_LIMIT_OPTIONS.map((option) => (
+                        <option key={option} value={String(option)}>
+                          {formatCompactCurrency(option)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="notice-strip compact">
+                  <div>
+                    <strong>Risk-Control Lab</strong> reruns the replay closed-trade sequence for each ATP lane under the selected daily cap.
+                  </div>
+                  <div>
+                    <strong>Scenario:</strong> {selectedAtpRiskControlOption.label} at {formatCompactCurrency(atpRiskControlLossCap)}.
+                  </div>
+                  <div>
+                    <strong>Interpretation:</strong> {selectedAtpRiskControlOption.note}
+                  </div>
+                  <div>
+                    <strong>Caveat:</strong> This uses replay realized trades, not intraday mark-to-market pain, so real live discomfort can still be worse.
+                  </div>
+                </div>
+                <div className="metric-grid atp-performance-summary-grid">
+                  <MetricCard label="Replay Lanes" value={formatShortNumber(atpRiskControlSummary.laneCount)} tone="muted" />
+                  <MetricCard label="Replay Net" value={renderPnlValue(atpRiskControlSummary.fullNet)} tone={pnlTone(atpRiskControlSummary.fullNet)} />
+                  <MetricCard label="Capped Net" value={renderPnlValue(atpRiskControlSummary.cappedNet)} tone={pnlTone(atpRiskControlSummary.cappedNet)} />
+                  <MetricCard label="Retained" value={formatPercentValue(atpRiskControlSummary.retainedPct, 2)} tone={(numericOrNull(atpRiskControlSummary.retainedPct) ?? 0) >= 90 ? "good" : (numericOrNull(atpRiskControlSummary.retainedPct) ?? 0) >= 75 ? "warn" : "danger"} />
+                  <MetricCard label="Improved Lanes" value={formatShortNumber(atpRiskControlSummary.improvedLaneCount)} tone={atpRiskControlSummary.improvedLaneCount > 0 ? "good" : "muted"} />
+                  <MetricCard label="Halted Lanes" value={formatShortNumber(atpRiskControlSummary.haltedLaneCount)} tone={atpRiskControlSummary.haltedLaneCount > 0 ? "warn" : "muted"} />
+                  <MetricCard label="Halted Days" value={formatShortNumber(atpRiskControlSummary.totalHaltedDays)} tone={atpRiskControlSummary.totalHaltedDays > 0 ? "warn" : "muted"} />
+                  <MetricCard label="Skipped Trades" value={formatShortNumber(atpRiskControlSummary.totalSkippedTrades)} tone={atpRiskControlSummary.totalSkippedTrades > 0 ? "warn" : "muted"} />
+                </div>
+                <DataTable
+                  columns={[
+                    {
+                      key: "strategy_name",
+                      label: "Strategy",
+                      render: (row) => (
+                        <div className="atp-performance-strategy-cell">
+                          <div className="atp-performance-strategy-title">{formatValue(row.strategy_name)}</div>
+                          <div className="atp-performance-strategy-meta">
+                            <span>{formatValue(row.instrument)}</span>
+                            <span>{formatValue(row.designation)}</span>
+                            <span>{formatValue(row.runtime)}</span>
+                          </div>
+                        </div>
+                      ),
+                    },
+                    {
+                      key: "risk_verdict_label",
+                      label: "Risk Verdict",
+                      render: (row) => <Badge label={formatValue(row.risk_verdict_label)} tone={String(row.risk_verdict_tone ?? "muted") as Tone} />,
+                    },
+                    { key: "risk_full_net_pnl", label: "Replay Net", render: (row) => renderPnlValue(row.risk_full_net_pnl) },
+                    { key: "risk_capped_net_pnl", label: "Capped Net", render: (row) => renderPnlValue(row.risk_capped_net_pnl) },
+                    { key: "risk_net_delta", label: "Delta", render: (row) => renderPnlValue(row.risk_net_delta) },
+                    { key: "risk_retained_pct", label: "Retained", render: (row) => formatPercentValue(row.risk_retained_pct, 2) },
+                    { key: "risk_halted_days", label: "Halted Days", render: (row) => formatShortNumber(row.risk_halted_days) },
+                    { key: "risk_skipped_trade_count", label: "Skipped Trades", render: (row) => formatShortNumber(row.risk_skipped_trade_count) },
+                    { key: "risk_first_halt_day", label: "First Halt Day", render: (row) => formatValue(row.risk_first_halt_day) },
+                    { key: "risk_first_halt_trigger_value", label: "First Trigger", render: (row) => renderPnlValue(row.risk_first_halt_trigger_value) },
+                    {
+                      key: "open",
+                      label: "Open",
+                      render: (row) => (
+                        <button
+                          className="panel-button subtle"
+                          onClick={() => setSelectedAtpAttributionLaneId(String(row.lane_id ?? ""))}
+                        >
+                          Review
+                        </button>
+                      ),
+                    },
+                  ]}
+                  rows={atpRiskControlRows}
+                  emptyLabel="No ATP replay risk-control rows are available yet."
+                  rowKey={(row) => `risk:${String(row.lane_id ?? row.strategy_name ?? "")}`}
+                />
+              </Section>
+
+              <Section
+                title="Recent ATP Activity"
+                subtitle="Most recent ATP closed trades across all ATP lanes, sorted globally by the actual latest trade timestamp."
+                className="atp-performance-section"
+                headerClassName="section-header-tight"
+              >
+                <DataTable
+                  columns={[
+                    { key: "lane_id", label: "Lane", render: (row) => formatValue(row.lane_id) },
+                    { key: "signal_family_label", label: "Pattern", render: (row) => formatValue(row.signal_family_label) },
+                    { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+                    { key: "entry_timestamp", label: "Entry", render: (row) => formatTimestamp(row.entry_timestamp) },
+                    { key: "exit_timestamp", label: "Exit", render: (row) => formatTimestamp(row.exit_timestamp) },
+                    { key: "realized_pnl", label: "Realized", render: (row) => renderPnlValue(row.realized_pnl ?? row.net_pnl) },
+                    { key: "slippage", label: "Slippage", render: (row) => renderPnlValue(row.slippage) },
+                  ]}
+                  rows={atpRecentTradeRows}
+                  emptyLabel="No ATP closed trades are available yet."
+                />
+              </Section>
+
+              {selectedAtpAttributionRow ? (
+                <div className="split-panel pnl-table-grid">
+                  <div className="table-panel-shell">
+                    <h3 className="subsection-title">Selected ATP Lane</h3>
+                    <div className="metric-grid account-metric-grid">
+                      <MetricCard label="Strategy" value={formatValue(selectedAtpAttributionRow.strategy_name)} tone="muted" />
+                      <MetricCard label="Paper Trades" value={formatShortNumber(selectedAtpAttributionRow.paper_trade_count)} tone="muted" />
+                      <MetricCard label="Long Trades" value={formatShortNumber(selectedAtpAttributionRow.paper_long_trade_count)} tone="good" />
+                      <MetricCard label="Short Trades" value={formatShortNumber(selectedAtpAttributionRow.paper_short_trade_count)} tone="warn" />
+                      <MetricCard label="Paper Wins" value={formatShortNumber(selectedAtpAttributionRow.paper_win_count)} tone="good" />
+                      <MetricCard label="Paper Losses" value={formatShortNumber(selectedAtpAttributionRow.paper_loss_count)} tone="danger" />
+                      <MetricCard label="Paper Realized" value={renderPnlValue(selectedAtpAttributionRow.paper_realized_pnl)} tone={pnlTone(selectedAtpAttributionRow.paper_realized_pnl)} />
+                      <MetricCard label="Long Realized" value={renderPnlValue(selectedAtpAttributionRow.paper_long_realized_pnl)} tone={pnlTone(selectedAtpAttributionRow.paper_long_realized_pnl)} />
+                      <MetricCard label="Short Realized" value={renderPnlValue(selectedAtpAttributionRow.paper_short_realized_pnl)} tone={pnlTone(selectedAtpAttributionRow.paper_short_realized_pnl)} />
+                      <MetricCard label="Paper Session" value={renderPnlValue(selectedAtpAttributionRow.pnl_day)} tone={pnlTone(selectedAtpAttributionRow.pnl_day)} />
+                      <MetricCard label="Back-cast Lifetime" value={renderPnlValue(selectedAtpAttributionRow.pnl_lifetime)} tone={pnlTone(selectedAtpAttributionRow.pnl_lifetime)} />
+                      <MetricCard label="Playback Trades" value={formatShortNumber(selectedAtpAttributionRow.playback_trade_count)} tone="muted" />
+                      <MetricCard label="Observed Setups" value={formatShortNumber(selectedAtpAttributionRow.signal_count)} tone={(numericOrNull(selectedAtpAttributionRow.signal_count) ?? 0) > 0 ? "good" : "muted"} />
+                      <MetricCard label="Order Intents" value={formatShortNumber(selectedAtpAttributionRow.intent_count)} tone={(numericOrNull(selectedAtpAttributionRow.intent_count) ?? 0) > 0 ? "good" : "muted"} />
+                      <MetricCard label="Fills" value={formatShortNumber(selectedAtpAttributionRow.fill_count)} tone={(numericOrNull(selectedAtpAttributionRow.fill_count) ?? 0) > 0 ? "good" : "muted"} />
+                      <MetricCard label="Missed Setups" value={formatShortNumber(selectedAtpAttributionRow.missed_opportunity_count)} tone={(numericOrNull(selectedAtpAttributionRow.missed_opportunity_count) ?? 0) > 0 ? "warn" : "muted"} />
+                      <MetricCard label="Unfilled Intents" value={formatShortNumber(selectedAtpAttributionRow.unfilled_intent_count)} tone={(numericOrNull(selectedAtpAttributionRow.unfilled_intent_count) ?? 0) > 0 ? "warn" : "muted"} />
+                      <MetricCard label="Attempt Rate" value={formatPercentValue((numericOrNull(selectedAtpAttributionRow.attempt_rate) ?? 0) * 100, 2)} tone={(numericOrNull(selectedAtpAttributionRow.attempt_rate) ?? 0) >= 0.6 ? "good" : (numericOrNull(selectedAtpAttributionRow.attempt_rate) ?? 0) >= 0.3 ? "warn" : "danger"} />
+                      <MetricCard label="Fill Rate" value={formatPercentValue((numericOrNull(selectedAtpAttributionRow.fill_rate) ?? 0) * 100, 2)} tone={(numericOrNull(selectedAtpAttributionRow.fill_rate) ?? 0) >= 0.4 ? "good" : (numericOrNull(selectedAtpAttributionRow.fill_rate) ?? 0) >= 0.2 ? "warn" : "danger"} />
+                      <MetricCard label="Opportunity Verdict" value={formatValue(selectedAtpAttributionRow.opportunity_label)} tone={String(selectedAtpAttributionRow.opportunity_tone ?? "muted") as Tone} />
+                    </div>
+                    {selectedAtpRiskControlRow ? (
+                      <div className="metric-grid account-metric-grid atp-risk-detail-grid">
+                        <MetricCard label="Replay Net" value={renderPnlValue(selectedAtpRiskControlRow.risk_full_net_pnl)} tone={pnlTone(selectedAtpRiskControlRow.risk_full_net_pnl)} />
+                        <MetricCard label="Capped Net" value={renderPnlValue(selectedAtpRiskControlRow.risk_capped_net_pnl)} tone={pnlTone(selectedAtpRiskControlRow.risk_capped_net_pnl)} />
+                        <MetricCard label="Retained" value={formatPercentValue(selectedAtpRiskControlRow.risk_retained_pct, 2)} tone={(numericOrNull(selectedAtpRiskControlRow.risk_retained_pct) ?? 0) >= 90 ? "good" : (numericOrNull(selectedAtpRiskControlRow.risk_retained_pct) ?? 0) >= 75 ? "warn" : "danger"} />
+                        <MetricCard label="Halted Days" value={formatShortNumber(selectedAtpRiskControlRow.risk_halted_days)} tone={(numericOrNull(selectedAtpRiskControlRow.risk_halted_days) ?? 0) > 0 ? "warn" : "muted"} />
+                        <MetricCard label="Skipped Trades" value={formatShortNumber(selectedAtpRiskControlRow.risk_skipped_trade_count)} tone={(numericOrNull(selectedAtpRiskControlRow.risk_skipped_trade_count) ?? 0) > 0 ? "warn" : "muted"} />
+                        <MetricCard label="Risk Verdict" value={formatValue(selectedAtpRiskControlRow.risk_verdict_label)} tone={String(selectedAtpRiskControlRow.risk_verdict_tone ?? "muted") as Tone} />
+                      </div>
+                    ) : null}
+                    <div className="notice-strip compact">
+                      <div>
+                        <strong>Selected lane:</strong> {formatValue(selectedAtpAttributionRow.lane_id)}
+                      </div>
+                      <div>
+                        <strong>Assessment:</strong> {formatValue(selectedAtpAttributionRow.attribution_note)}
+                      </div>
+                      <div>
+                        <strong>Coverage:</strong> {formatValue(selectedAtpAttributionRow.coverage_label)}
+                      </div>
+                      <div>
+                        <strong>Paper side mix:</strong> {formatValue(selectedAtpAttributionRow.net_side_bias)}
+                      </div>
+                      <div>
+                        <strong>Opportunity note:</strong> {formatValue(selectedAtpAttributionRow.opportunity_note)}
+                      </div>
+                      <div>
+                        <strong>Latest ATP signal:</strong> {formatValue(selectedAtpAttributionRow.latest_signal_label)}
+                      </div>
+                      {selectedAtpAttributionRow.opportunity_blocker ? (
+                        <div>
+                          <strong>Current blocker:</strong> {formatValue(selectedAtpAttributionRow.opportunity_blocker)}
+                        </div>
+                      ) : null}
+                      {selectedAtpRiskControlRow ? (
+                        <div>
+                          <strong>Risk control:</strong> {selectedAtpRiskControlOption.label} at {formatCompactCurrency(atpRiskControlLossCap)}. {formatValue(selectedAtpRiskControlRow.risk_verdict_note)}
+                        </div>
+                      ) : null}
+                      <div>
+                        <strong>Latest fill / activity:</strong> {formatTimestamp(selectedAtpAttributionRow.last_fill_or_activity_timestamp ?? selectedAtpAttributionRow.latest_activity_timestamp)}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="table-panel-shell">
+                    <h3 className="subsection-title">Recent Paper Trades</h3>
+                    <DataTable
+                      columns={[
+                        { key: "entry_timestamp", label: "Entry", render: (row) => formatTimestamp(row.entry_timestamp) },
+                        { key: "exit_timestamp", label: "Exit", render: (row) => formatTimestamp(row.exit_timestamp) },
+                        { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+                        { key: "entry_price", label: "Entry Px", render: (row) => formatMarketNumber(row.entry_price) },
+                        { key: "exit_price", label: "Exit Px", render: (row) => formatMarketNumber(row.exit_price) },
+                        { key: "realized_pnl", label: "Realized", render: (row) => renderPnlValue(row.realized_pnl ?? row.net_pnl) },
+                        { key: "slippage", label: "Slippage", render: (row) => renderPnlValue(row.slippage) },
+                        { key: "exit_reason", label: "Exit Reason", render: (row) => formatValue(row.exit_reason) },
+                        { key: "signal_family_label", label: "Pattern", render: (row) => formatValue(row.signal_family_label) },
+                      ]}
+                      rows={asArray<JsonRecord>(selectedAtpAttributionRow.recent_trade_rows)}
+                      emptyLabel="No closed ATP paper trades are available for this lane yet."
+                    />
+                  </div>
+                </div>
+              ) : null}
+            </>
+          ) : null}
+
           {!loading && page === "positions" ? (
             <>
               <Section
@@ -10115,12 +14970,15 @@ function paperStartupCategoryTone(category: string): Tone {
                   <div className="account-panel-shell">
                     <div className="subsection-title">Paper / Simulated</div>
                     <div className="metric-grid account-metric-grid">
-                      <MetricCard label="Paper Realized" value={renderPnlValue(combinedStrategyPortfolioSnapshot.total_realized_pnl)} tone={pnlTone(combinedStrategyPortfolioSnapshot.total_realized_pnl)} />
+                      <MetricCard label="Paper Realized (Lifetime)" value={renderPnlValue(combinedStrategyPortfolioSnapshot.total_realized_pnl)} tone={pnlTone(combinedStrategyPortfolioSnapshot.total_realized_pnl)} />
                       <MetricCard label="Paper Open P&L" value={renderPnlValue(combinedStrategyPortfolioSnapshot.total_unrealized_pnl)} tone={pnlTone(combinedStrategyPortfolioSnapshot.total_unrealized_pnl)} />
-                      <MetricCard label="Paper Day P&L" value={renderPnlValue(combinedStrategyPortfolioSnapshot.total_day_pnl)} tone={pnlTone(combinedStrategyPortfolioSnapshot.total_day_pnl)} />
+                      <MetricCard label="Paper Day P&L (Current Session)" value={renderPnlValue(paperDisplayedDayPnl)} tone={pnlTone(paperDisplayedDayPnl)} />
                       <MetricCard label="Open Positions" value={formatShortNumber(sortedPositionsRows.filter((row) => row.paperRows.some((paperRow) => String(paperRow.position_side ?? "").toUpperCase() !== "FLAT")).length)} />
                       <MetricCard label="Tracked Strategies" value={formatShortNumber(combinedStrategyPortfolioSnapshot.active_strategy_count)} />
-                      <MetricCard label="Recent Fills" value={formatShortNumber(closedStrategyTradeRows.length)} />
+                      <MetricCard label="Recent Fills" value={formatShortNumber(combinedRecentFillRows.filter((row) => String(row.activity_source ?? "") === "paper").length)} />
+                    </div>
+                    <div className="notice-strip compact">
+                      <div><strong>Lifetime vs Session</strong> Paper Realized is cumulative across the loaded paper ledger. Paper Day P&amp;L is only the current New York paper-fill session. Runtime activity timestamps do not count until a paper fill or closed trade is published.</div>
                     </div>
                     <DataTable
                       columns={[
@@ -10129,12 +14987,79 @@ function paperStartupCategoryTone(category: string): Tone {
                         { key: "position_side", label: "Side", render: (row) => formatValue(row.position_side ?? row.net_side ?? "FLAT") },
                         { key: "realized_pnl", label: "Realized", render: (row) => formatMaybePnL(row.realized_pnl) },
                         { key: "unrealized_pnl", label: "Open P&L", render: (row) => formatMaybePnL(row.unrealized_pnl) },
-                        { key: "latest_activity_timestamp", label: "Latest", render: (row) => formatTimestamp(row.latest_activity_timestamp) },
+                        { key: "latest_fill_timestamp", label: "Latest Paper Fill", render: (row) => formatTimestamp(row.latest_fill_timestamp) },
+                        { key: "latest_activity_timestamp", label: "Latest Runtime Activity", render: (row) => formatTimestamp(row.latest_activity_timestamp) },
                       ]}
                       rows={strategyPerformanceRows.slice(0, 5)}
                       emptyLabel="No paper strategy positions are currently surfaced."
                     />
                   </div>
+                </div>
+                <div className="table-panel-shell">
+                  <h3 className="subsection-title">Paper Expression Diagnostic</h3>
+                  <div className="notice-strip compact">
+                    <div>Use this to separate “no setup,” “setup gated,” “intent emitted but not filled,” and “halted/risk-halted.”</div>
+                    <div>Risk halts can recur whenever a lane re-trips its lane-specific catastrophic or risk logic. A lane can also stay quiet without any halt if it is session-blocked, health-blocked, or simply sees no actionable setup.</div>
+                  </div>
+                  <div className="metric-grid account-metric-grid">
+                    <MetricCard label="Lanes Monitored" value={formatShortNumber(livePaperExpressionSummary.laneCount)} />
+                    <MetricCard label="Eligible Now" value={formatShortNumber(livePaperExpressionSummary.eligibleNow)} tone={livePaperExpressionSummary.eligibleNow > 0 ? "good" : "warn"} />
+                    <MetricCard label="Operator Halts" value={formatShortNumber(livePaperExpressionSummary.operatorHalts)} tone={livePaperExpressionSummary.operatorHalts > 0 ? "danger" : "good"} />
+                    <MetricCard label="Risk Halts" value={formatShortNumber(livePaperExpressionSummary.riskHalts)} tone={livePaperExpressionSummary.riskHalts > 0 ? "danger" : "good"} />
+                    <MetricCard label="Setup-Gated Lanes" value={formatShortNumber(livePaperExpressionSummary.setupGated)} tone={livePaperExpressionSummary.setupGated > 0 ? "warn" : "good"} />
+                    <MetricCard label="Actionable Signals" value={formatShortNumber(livePaperExpressionSummary.actionableSignals)} tone={livePaperExpressionSummary.actionableSignals > 0 ? "good" : "muted"} />
+                    <MetricCard label="Order Intents" value={formatShortNumber(livePaperExpressionSummary.intents)} tone={livePaperExpressionSummary.intents > 0 ? "good" : "muted"} />
+                    <MetricCard label="Fills" value={formatShortNumber(livePaperExpressionSummary.fills)} tone={livePaperExpressionSummary.fills > 0 ? "good" : "muted"} />
+                  </div>
+                  <DataTable
+                    columns={[
+                      { key: "strategy_name", label: "Strategy", render: (row) => formatValue(row.strategy_name ?? row.standalone_strategy_id) },
+                      { key: "instrument", label: "Symbol", render: (row) => formatValue(row.instrument) },
+                      { key: "audit_verdict", label: "Verdict", render: (row) => <Badge label={formatValue(row.audit_verdict)} tone={auditVerdictTone(row.audit_verdict)} /> },
+                      { key: "eligible_now", label: "Eligible", render: (row) => formatValue(row.eligible_now ?? false) },
+                      { key: "entries_enabled", label: "Entries", render: (row) => formatValue(row.entries_enabled ?? false) },
+                      { key: "operator_halt", label: "Operator Halt", render: (row) => <Badge label={row.operator_halt === true ? "HALTED" : "CLEAR"} tone={row.operator_halt === true ? "danger" : "good"} /> },
+                      {
+                        key: "risk_state",
+                        label: "Risk State",
+                        render: (row) => {
+                          const gating = asRecord(row.latest_gating_state);
+                          const riskState = String(gating.risk_state ?? row.risk_state ?? "OK");
+                          return <Badge label={formatValue(riskState)} tone={isRiskHaltedAuditRow(row) ? "danger" : statusTone(riskState)} />;
+                        },
+                      },
+                      { key: "latest_fault_or_blocker", label: "Latest Blocker", render: (row) => formatValue(row.latest_fault_or_blocker ?? asRecord(row.latest_gating_state).latest_fault_or_blocker) },
+                      { key: "actionable_entry_signal_count", label: "Signals", render: (row) => formatShortNumber(row.actionable_entry_signal_count) },
+                      { key: "total_intent_count", label: "Intents", render: (row) => formatShortNumber(row.total_intent_count) },
+                      { key: "total_fill_count", label: "Fills", render: (row) => formatShortNumber(row.total_fill_count) },
+                      { key: "last_actionable_signal_timestamp", label: "Last Signal", render: (row) => formatTimestamp(row.last_actionable_signal_timestamp) },
+                      { key: "last_intent_timestamp", label: "Last Intent", render: (row) => formatTimestamp(row.last_intent_timestamp) },
+                      { key: "last_fill_timestamp", label: "Last Fill", render: (row) => formatTimestamp(row.last_fill_timestamp) },
+                      { key: "latest_activity_timestamp", label: "Latest Activity", render: (row) => formatTimestamp(row.latest_activity_timestamp ?? asRecord(row.strategy_performance_summary).latest_activity_timestamp) },
+                      {
+                        key: "select",
+                        label: "Detail",
+                        render: (row) => (
+                          <button
+                            className="panel-button"
+                            disabled={standaloneStrategyId(row) === standaloneStrategyId(selectedSignalIntentFillAuditRow)}
+                            onClick={() => setSelectedAuditStrategyKey(standaloneStrategyId(row))}
+                          >
+                            {standaloneStrategyId(row) === standaloneStrategyId(selectedSignalIntentFillAuditRow) ? "Selected" : "View"}
+                          </button>
+                        ),
+                      },
+                    ]}
+                    rows={livePaperExpressionRows}
+                    emptyLabel="No current paper-universe expression rows are available yet."
+                  />
+                  {selectedSignalIntentFillAuditRow && livePaperExpressionRows.some((row) => standaloneStrategyId(row) === standaloneStrategyId(selectedSignalIntentFillAuditRow)) ? (
+                    <div className="notice-strip compact">
+                      <div><strong>Selected lane:</strong> {standaloneStrategyLabel(selectedSignalIntentFillAuditRow)} | {formatValue(selectedSignalIntentFillAuditRow.audit_reason)}</div>
+                      <div><strong>Current blocker:</strong> {formatValue(selectedSignalIntentFillAuditRow.latest_fault_or_blocker ?? asRecord(selectedSignalIntentFillAuditRow.latest_gating_state).latest_fault_or_blocker ?? "None recorded")}</div>
+                      <div><strong>Latest gating state:</strong> entries_enabled={formatValue(selectedSignalIntentFillAuditRow.entries_enabled)} | operator_halt={formatValue(selectedSignalIntentFillAuditRow.operator_halt)} | risk_state={formatValue(asRecord(selectedSignalIntentFillAuditRow.latest_gating_state).risk_state ?? selectedSignalIntentFillAuditRow.risk_state ?? "OK")}</div>
+                    </div>
+                  ) : null}
                 </div>
                 <div className="split-panel pnl-chart-grid">
                   <TrendPanel
@@ -10147,10 +15072,14 @@ function paperStartupCategoryTone(category: string): Tone {
                   />
                   <TrendPanel
                     title="Paper / Simulated Equity Curve"
-                    subtitle={paperIntradayCurveRows.length > 1 ? "Built from today’s realized trade ledger so the operator can see paper progression without opening raw artifacts." : "No intraday paper trade ladder has been recorded yet in the current session."}
+                    subtitle={
+                      paperIntradayCurveRows.length > 1
+                        ? `Showing the latest available paper session (${paperLatestVisibleDateLabel ?? "latest session"}) from the paper trade ledger / fill snapshot.`
+                        : "No paper fills have been published yet in the latest loaded paper session."
+                    }
                     points={paperIntradayCurveRows}
-                    tone={pnlTone(combinedStrategyPortfolioSnapshot.total_day_pnl)}
-                    footer={`Runtime ${formatTimestamp(paperRuntimeTimestamp)} | Last fill ${formatTimestamp(closedStrategyTradeRows[0]?.exit_timestamp ?? closedStrategyTradeRows[0]?.entry_timestamp)}`}
+                    tone={pnlTone(paperIntradayCurveNet)}
+                    footer={`Runtime ${formatTimestamp(paperRuntimeTimestamp)} | Last paper fill ${formatTimestamp(combinedRecentFillRows.find((row) => String(row.activity_source ?? "") === "paper")?.activity_timestamp ?? paperLatestFills[0]?.fill_timestamp ?? closedStrategyTradeRows[0]?.exit_timestamp ?? closedStrategyTradeRows[0]?.entry_timestamp)}`}
                     className="pnl-trend-panel"
                   />
                 </div>
@@ -10174,14 +15103,16 @@ function paperStartupCategoryTone(category: string): Tone {
                     <h3 className="subsection-title">Recent Fills</h3>
                     <DataTable
                       columns={[
-                        { key: "updated_at", label: "Time", render: (row) => formatTimestamp(row.updated_at ?? row.occurred_at) },
-                        { key: "symbol", label: "Symbol", render: (row) => formatValue(row.symbol) },
-                        { key: "instruction", label: "Side", render: (row) => formatValue(row.instruction ?? row.side) },
-                        { key: "quantity", label: "Qty", render: (row) => formatValue(row.quantity) },
-                        { key: "price", label: "Price", render: (row) => formatValue(row.price ?? row.execution_price) },
+                        { key: "activity_source", label: "Source", render: (row) => <Badge label={String(row.activity_source ?? "").toUpperCase() || "UNKNOWN"} tone={String(row.activity_source ?? "") === "paper" ? "muted" : "good"} /> },
+                        { key: "activity_timestamp", label: "Time", render: (row) => formatTimestamp(row.activity_timestamp) },
+                        { key: "activity_symbol", label: "Symbol", render: (row) => formatValue(row.activity_symbol) },
+                        { key: "activity_side", label: "Side", render: (row) => formatValue(row.activity_side) },
+                        { key: "activity_quantity", label: "Qty", render: (row) => formatValue(row.activity_quantity) },
+                        { key: "activity_price", label: "Price", render: (row) => formatValue(row.activity_price) },
+                        { key: "activity_realized_pnl", label: "P&L", render: (row) => row.activity_realized_pnl == null ? "—" : renderPnlValue(row.activity_realized_pnl) },
                       ]}
-                      rows={productionRecentFills.slice(0, 8)}
-                      emptyLabel="No recent broker fills are available."
+                      rows={combinedRecentFillRows.slice(0, 8)}
+                      emptyLabel="No recent live or paper fills are available."
                     />
                   </div>
                 </div>
@@ -10460,10 +15391,10 @@ function paperStartupCategoryTone(category: string): Tone {
                           <MetricCard label="Submit Eligible" value={productionPilotReadiness.submit_eligible === true ? "YES" : "NO"} tone={statusTone(productionPilotReadiness.submit_eligible === true ? "ready" : "blocked")} />
                         </div>
                         <div className="status-line">
-                          Locked route: {formatValue(productionPilotLockedPolicy.asset_class ?? "STOCK")} {formatValue(productionPilotLockedPolicy.submit_order_type ?? "LIMIT")} | qty {formatValue(productionPilotLockedPolicy.max_quantity ?? "1")} | TIF {formatValue(productionPilotLockedPolicy.time_in_force ?? "DAY")} | session {formatValue(productionPilotLockedPolicy.session ?? "NORMAL")} | regular hours only {productionPilotLockedPolicy.regular_hours_only === false ? "No" : "Yes"}.
+                          Locked route: {formatValue(productionPilotLockedPolicy.asset_class ?? "FUTURE")} {formatValue(productionPilotLockedPolicy.submit_order_type ?? productionPilotLockedPolicy.order_type ?? "MARKET")} | qty {formatValue(productionPilotLockedPolicy.max_quantity ?? "1")} | TIF {formatValue(productionPilotLockedPolicy.time_in_force ?? "DAY")} | session {formatValue(productionPilotLockedPolicy.session ?? "NORMAL")} | regular hours only {(productionPilotLockedPolicy.regular_hours_only ?? productionPilotLockedPolicy.regular_us_market_hours_only) === false ? "No" : "Yes"}.
                         </div>
                         <div className="status-line">
-                          Open route: {formatValue(productionPilotOpenRoute.operator_label ?? "BUY_TO_OPEN")} via {formatValue(productionPilotOpenRoute.intent_type ?? "MANUAL_LIVE_PILOT")} / {formatValue(productionPilotOpenRoute.side ?? "BUY")}. Close route: {formatValue(productionPilotCloseRoute.operator_label ?? "SELL_TO_CLOSE")} via {formatValue(productionPilotCloseRoute.intent_type ?? "FLATTEN")} / {formatValue(productionPilotCloseRoute.side ?? "SELL")}.
+                          Open route: {formatValue(productionPilotOpenRoute.operator_label ?? "BUY_TO_OPEN")} via {formatValue(productionPilotOpenRoute.intent_type ?? "MANUAL_LIVE_FUTURES_PILOT")} / {formatValue(productionPilotOpenRoute.side ?? "BUY")}. Close route: {formatValue(productionPilotCloseRoute.operator_label ?? "SELL_TO_CLOSE")} via {formatValue(productionPilotCloseRoute.intent_type ?? "FLATTEN")} / {formatValue(productionPilotCloseRoute.side ?? "SELL")}.
                         </div>
                         <div className="status-line">
                           Submit eligibility reason: {formatValue(productionPilotReadiness.detail ?? productionManualSubmitStatusDetail)}.
@@ -10475,10 +15406,10 @@ function paperStartupCategoryTone(category: string): Tone {
                           Close route: {pilotRunbookCloseEligible ? "eligible now" : "not eligible"} | {formatValue(pilotRunbookCloseDetail)}.
                         </div>
                         <div className="status-line">
-                          Expected lifecycle: submit_requested {"->"} ACKNOWLEDGED {"->"} WORKING or FILLED. A completed SELL_TO_CLOSE cycle then requires flat broker confirmation, reconciliation CLEAR, and passive refresh/restart proof with no extra submit.
+                          Expected lifecycle: submit_requested {"->"} ACKNOWLEDGED {"->"} FILLED. A completed SELL_TO_CLOSE cycle then requires flat broker confirmation, reconciliation CLEAR, and passive refresh/restart proof with no extra submit.
                         </div>
                         <div className="status-line">
-                          Ticket presets below load the proven live-manual pilot route directly into the standard manual ticket. No ad hoc proof harness is required for the validated stock pilot path.
+                          Ticket presets below load the active live-manual futures pilot route directly into the standard manual ticket. No stock-specific proof harness is required for the current futures path.
                         </div>
                         {productionPilotReadiness.blocked_reason ? (
                           <div className="status-line">
@@ -10493,12 +15424,12 @@ function paperStartupCategoryTone(category: string): Tone {
                               setManualOrderForm((current) => ({
                                 ...current,
                                 symbol: preferredPilotSymbol,
-                                assetClass: "STOCK",
+                                assetClass: String(productionPilotLockedPolicy.asset_class ?? "FUTURE"),
                                 structureType: "SINGLE",
-                                intentType: "MANUAL_LIVE_PILOT",
-                                side: "BUY",
+                                intentType: String(productionPilotOpenRoute.intent_type ?? "MANUAL_LIVE_FUTURES_PILOT"),
+                                side: String(productionPilotOpenRoute.side ?? "BUY"),
                                 quantity: String(productionPilotLockedPolicy.max_quantity ?? "1"),
-                                orderType: String(productionPilotLockedPolicy.submit_order_type ?? productionPilotLockedPolicy.order_type ?? "LIMIT"),
+                                orderType: String(productionPilotLockedPolicy.submit_order_type ?? productionPilotLockedPolicy.order_type ?? "MARKET"),
                                 timeInForce: String(productionPilotLockedPolicy.time_in_force ?? "DAY"),
                                 session: String(productionPilotLockedPolicy.session ?? "NORMAL"),
                                 reviewConfirmed: false,
@@ -10509,17 +15440,17 @@ function paperStartupCategoryTone(category: string): Tone {
                           </button>
                           <button
                             className="panel-button subtle"
-                            disabled={busyAction !== null || !selectedProductionPositionIsLongOneShare}
+                            disabled={busyAction !== null || !selectedProductionPositionIsLongOneLot}
                             onClick={() =>
                               setManualOrderForm((current) => ({
                                 ...current,
                                 symbol: selectedProductionSymbol,
-                                assetClass: "STOCK",
+                                assetClass: String(productionPilotLockedPolicy.asset_class ?? "FUTURE"),
                                 structureType: "SINGLE",
                                 intentType: "FLATTEN",
-                                side: "SELL",
+                                side: String(productionPilotCloseRoute.side ?? "SELL"),
                                 quantity: "1",
-                                orderType: String(productionPilotLockedPolicy.submit_order_type ?? productionPilotLockedPolicy.order_type ?? "LIMIT"),
+                                orderType: String(productionPilotLockedPolicy.submit_order_type ?? productionPilotLockedPolicy.order_type ?? "MARKET"),
                                 timeInForce: String(productionPilotLockedPolicy.time_in_force ?? "DAY"),
                                 session: String(productionPilotLockedPolicy.session ?? "NORMAL"),
                                 reviewConfirmed: false,
@@ -10691,7 +15622,7 @@ function paperStartupCategoryTone(category: string): Tone {
                       <div>Supported TIF values: {manualTimeInForceOptions.join(", ") || "None configured"}.</div>
                       <div>Supported session values: {manualSessionOptions.join(", ") || "None configured"}.</div>
                       <div>Symbol whitelist: {manualSymbolWhitelist.length ? manualSymbolWhitelist.join(", ") : "No symbols whitelisted; submit stays blocked."}</div>
-                      <div>Max quantity: {manualMaxQuantity}. Only `DAY` + `NORMAL` is enabled in the first live-order safety mode.</div>
+                      <div>Max quantity: {manualMaxQuantity}. Only `DAY` + `NORMAL` is enabled in the current narrow futures live-order safety mode.</div>
                       <div>{advancedTifTicketSupport ? "EXTO / GTC_EXTO review is available in dry-run mode only." : "EXTO / GTC_EXTO review is disabled for this environment."}</div>
                       <div>{ocoTicketSupport ? "OCO review is available in dry-run mode only." : "OCO review is disabled for this environment."}</div>
                       <div>{extExtoLiveSubmitEnabled ? "EXTO / GTC_EXTO live submit is enabled." : "EXTO / GTC_EXTO live submit remains disabled pending live broker verification."}</div>
@@ -10704,7 +15635,7 @@ function paperStartupCategoryTone(category: string): Tone {
                     </div>
                     {firstLiveStockLimitActive ? (
                       <div className="notice-strip">
-                        <div>First live order path: STOCK LIMIT only.</div>
+                        <div>Historical first live order path: STOCK LIMIT only.</div>
                         <div>Readiness now: {firstLiveStockLimitReadyNow ? "READY TO SUBMIT" : "BLOCKED"}.</div>
                         <div>Required flags: {asArray<string>(firstLiveStockLimitTest.required_flags).join(", ") || "None published"}.</div>
                         <div>Required whitelist: {asArray<string>(asRecord(firstLiveStockLimitTest.required_config).manual_symbol_whitelist).join(", ") || "Set one safe stock symbol before submit."}.</div>
@@ -10785,7 +15716,7 @@ function paperStartupCategoryTone(category: string): Tone {
                       <label className="settings-field">
                         <span>Intent type</span>
                         <select disabled={busyAction !== null} value={manualOrderForm.intentType} onChange={(event) => setManualOrderForm((current) => ({ ...current, intentType: event.target.value }))}>
-                          {["MANUAL_LIVE_PILOT", "FLATTEN", "ENTRY", "EXIT", "ADJUSTMENT", "MANUAL"].map((intentType) => (
+                          {["MANUAL_LIVE_FUTURES_PILOT", "FLATTEN", "ENTRY", "EXIT", "ADJUSTMENT", "MANUAL", "MANUAL_LIVE_PILOT"].map((intentType) => (
                             <option key={intentType} value={intentType}>
                               {manualIntentTypeLabel(intentType)}
                             </option>
@@ -11256,7 +16187,7 @@ function paperStartupCategoryTone(category: string): Tone {
                       <div className="local-workspace-meta">
                         <Badge label={laneClassLabel(selectedWorkspaceRow)} tone={paperStrategyClassTone(selectedWorkspaceRow)} />
                         <Badge label={selectedWorkspaceDesignation} tone={selectedWorkspaceRow?.benchmark_designation ? "warn" : selectedWorkspaceRow?.candidate_designation ? "good" : "muted"} />
-                        <Badge label={runtimeAttachmentLabel(selectedWorkspaceRow)} tone={runtimeAttachmentLabel(selectedWorkspaceRow) === "Attached Live" ? "good" : runtimeAttachmentLabel(selectedWorkspaceRow) === "Audit Only" ? "warn" : "muted"} />
+                        <Badge label={runtimeAttachmentLabel(selectedWorkspaceRow)} tone={runtimePresenceInfo(selectedWorkspaceRow).tone} />
                         <span>{selectedWorkspaceInstrument || "No instrument"}</span>
                         <span>Exec {formatValue(selectedWorkspaceRow?.execution_timeframe ?? "1m")}</span>
                         <span>Context {selectedWorkspaceContextTimes}</span>
@@ -11304,7 +16235,7 @@ function paperStartupCategoryTone(category: string): Tone {
                       <label className="settings-field">
                         <span>Intent / Tag</span>
                         <select disabled={busyAction !== null} value={manualOrderForm.intentType} onChange={(event) => setManualOrderForm((current) => ({ ...current, intentType: event.target.value }))}>
-                          {["MANUAL_LIVE_PILOT", "FLATTEN", "ENTRY", "EXIT", "ADJUSTMENT", "MANUAL"].map((intentType) => (
+                          {["MANUAL_LIVE_FUTURES_PILOT", "FLATTEN", "ENTRY", "EXIT", "ADJUSTMENT", "MANUAL", "MANUAL_LIVE_PILOT"].map((intentType) => (
                             <option key={intentType} value={intentType}>
                               {manualIntentTypeLabel(intentType)}
                             </option>
@@ -11450,7 +16381,17 @@ function paperStartupCategoryTone(category: string): Tone {
                     <div className="trade-entry-position-shell">
                       <div className="subsection-title">Current Position & Attribution</div>
                       <div className="metric-grid trade-entry-position-grid">
-                        <MetricCard label="Broker Position" value={selectedProductionPosition ? `${formatValue(selectedProductionPosition.side)} ${formatValue(selectedProductionPosition.quantity)} ${formatValue(selectedProductionPosition.symbol)}` : "Flat / None selected"} tone={selectedProductionPosition ? "warn" : "good"} />
+                        <MetricCard
+                          label="Broker Position"
+                          value={
+                            tradeEntryProductionPosition
+                              ? `${formatValue(tradeEntryProductionPosition.side)} ${formatValue(tradeEntryProductionPosition.quantity)} ${formatValue(tradeEntryProductionPosition.symbol)}`
+                              : tradeEntrySymbol
+                                ? `Flat / ${tradeEntrySymbol}`
+                                : "Flat / None selected"
+                          }
+                          tone={tradeEntryProductionPosition ? "warn" : "good"}
+                        />
                         <MetricCard label="Paper Strategy Rows" value={formatShortNumber(tradeEntryPaperRows.length)} tone={tradeEntryPaperRows.length ? "good" : "muted"} />
                         <MetricCard label="Strategy Tag" value={manualIntentTypeLabel(manualOrderForm.intentType)} />
                         <MetricCard label="Participation" value={formatValue(tradeEntryPaperRows[0]?.participation_policy ?? "Unavailable")} />
@@ -11478,7 +16419,7 @@ function paperStartupCategoryTone(category: string): Tone {
                           { key: "filled_quantity", label: "Filled" },
                           { key: "updated_at", label: "Updated", render: (row) => formatTimestamp(row.updated_at) },
                         ]}
-                        rows={productionRecentFills.filter((row) => !tradeEntrySymbol || String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol).slice(0, 6)}
+                        rows={tradeEntryRecentFills.slice(0, 6)}
                         emptyLabel="No recent fills match the current symbol filter."
                       />
                     </div>
@@ -11496,17 +16437,17 @@ function paperStartupCategoryTone(category: string): Tone {
                         { key: "status", label: "Status" },
                         { key: "updated_at", label: "Updated", render: (row) => formatTimestamp(row.updated_at) },
                       ]}
-                      rows={productionOpenOrders.filter((row) => !tradeEntrySymbol || String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol).slice(0, 8)}
+                      rows={tradeEntryOpenOrders.slice(0, 8)}
                       emptyLabel="No working broker orders match the current symbol filter."
                     />
                   </div>
                   <div className="table-panel-shell trade-entry-working-summary">
                     <div className="subsection-title">Symbol Activity</div>
                     <div className="metric-grid compact trade-entry-activity-grid">
-                      <MetricCard label="Recent Fills" value={formatShortNumber(productionRecentFills.filter((row) => !tradeEntrySymbol || String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol).length)} tone={productionRecentFills.length ? "good" : "muted"} />
-                      <MetricCard label="Working Orders" value={formatShortNumber(productionOpenOrders.filter((row) => !tradeEntrySymbol || String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol).length)} tone={productionOpenOrders.length ? "warn" : "muted"} />
+                      <MetricCard label="Recent Fills" value={formatShortNumber(tradeEntryRecentFills.length)} tone={tradeEntryRecentFills.length ? "good" : "muted"} />
+                      <MetricCard label="Working Orders" value={formatShortNumber(tradeEntryOpenOrders.length)} tone={tradeEntryOpenOrders.length ? "warn" : "muted"} />
                       <MetricCard label="Quote Updated" value={formatTimestamp(tradeEntryQuoteRow?.updated_at ?? productionQuotes.updated_at)} />
-                      <MetricCard label="Broker Position" value={selectedProductionPosition ? "OPEN" : "FLAT"} tone={selectedProductionPosition ? "warn" : "good"} />
+                      <MetricCard label="Broker Position" value={tradeEntryProductionPosition ? "OPEN" : "FLAT"} tone={tradeEntryProductionPosition ? "warn" : "good"} />
                     </div>
                   </div>
                 </div>
@@ -11525,6 +16466,7 @@ function paperStartupCategoryTone(category: string): Tone {
                 {strategyAnalysis.available === true ? (
                   <UnifiedStrategyAnalysis
                     analysis={strategyAnalysis}
+                    preferredStrategyKey={preferredAnalysisStrategyKey || String(selectedWorkspacePerformanceRow?.strategy_key ?? "")}
                     replayStudyItems={playbackLatestStudyItems}
                     studyPanel={(
                       <>
@@ -11588,7 +16530,7 @@ function paperStartupCategoryTone(category: string): Tone {
                               requiresLive: true,
                             })
                           }
-                          onAuthGateCheck={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true })}
+                          onAuthGateCheck={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"))}
                           onCompletePreSessionReview={() =>
                             void runCommand("complete-pre-session-review", () => api.runDashboardAction("complete-pre-session-review"), { requiresLive: true })
                           }
@@ -11625,7 +16567,7 @@ function paperStartupCategoryTone(category: string): Tone {
                           />
                           <ControlButton
                             label="Auth Gate Check"
-                            onClick={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"), { requiresLive: true })}
+                            onClick={() => void runCommand("auth-gate-check", () => api.runDashboardAction("auth-gate-check"))}
                             busyAction={busyAction}
                             disabled={!canRunLiveActions}
                           />
@@ -11816,15 +16758,240 @@ function paperStartupCategoryTone(category: string): Tone {
 
               <Section title="Signals / Intents / Fills" subtitle="Latest paper-run event surfaces">
                 <div className="split-panel">
-                  <div>
-                    <h3 className="subsection-title">Latest Intents</h3>
-                    <JsonBlock value={paper.latest_intents ?? []} />
+                  <details className="secondary-evidence-shell">
+                    <summary className="secondary-evidence-summary">
+                      <span className="secondary-evidence-title">Latest Intents</span>
+                      <span className="secondary-evidence-note">Raw paper intent evidence</span>
+                    </summary>
+                    <div className="section-card secondary-evidence-card">
+                      <JsonBlock value={paper.latest_intents ?? []} />
+                    </div>
+                  </details>
+                  <details className="secondary-evidence-shell">
+                    <summary className="secondary-evidence-summary">
+                      <span className="secondary-evidence-title">Latest Fills</span>
+                      <span className="secondary-evidence-note">Raw paper fill evidence</span>
+                    </summary>
+                    <div className="section-card secondary-evidence-card">
+                      <JsonBlock value={paper.latest_fills ?? []} />
+                    </div>
+                  </details>
+                </div>
+              </Section>
+
+              <Section title="Research Runtime Bridge Events" subtitle="Recent pending intents, fills, runtime events, closed positions, and reconciliation anomalies">
+                <div className="notice-strip">
+                  <div>Selected tenant(s): warehouse-only in this tranche, with explicit paper/dry-run restriction.</div>
+                  <div>Supervisor: {formatValue(researchRuntimeBridgeSupervisor.status ?? "STOPPED")} | Heartbeat: {formatTimestamp(researchRuntimeBridgeSupervisor.heartbeat_at)}.</div>
+                  <div>Pending intents: {formatShortNumber(researchRuntimeBridgePendingIntents.length)} | Open positions: {formatShortNumber(researchRuntimeBridgeOpenPositions.length)}.</div>
+                  <div>Runtime event severities: INFO {formatShortNumber(researchRuntimeBridgeSeverityCounts.INFO ?? 0)} / WARN {formatShortNumber(researchRuntimeBridgeSeverityCounts.WARN ?? 0)} / ERROR {formatShortNumber(researchRuntimeBridgeSeverityCounts.ERROR ?? 0)}.</div>
+                  <div>Needs attention now: {formatShortNumber(Number(researchRuntimeBridgeAnomalyQueue.needs_attention_now_count ?? 0))} | Unresolved: {formatShortNumber(Number(researchRuntimeBridgeAnomalyQueue.unresolved_count ?? 0))}.</div>
+                  <div>Recent reconciliation anomalies: {formatShortNumber(researchRuntimeBridgeAnomalyRows.length)}.</div>
+                </div>
+                <div className="workflow-panel">
+                  <div className="workflow-grid">
+                    <label className="workflow-field workflow-field-wide">
+                      <span className="workflow-label">Selected Anomaly</span>
+                      <select
+                        className="workflow-select"
+                        value={selectedResearchRuntimeBridgeAlertKey}
+                        onChange={(event) => setSelectedResearchRuntimeBridgeAlertKey(event.target.value)}
+                      >
+                        {actionableResearchRuntimeBridgeAlerts.length ? actionableResearchRuntimeBridgeAlerts.map((row) => (
+                          <option key={String(row.dedup_key ?? row.review_key ?? row.lane_id ?? "")} value={String(row.dedup_key ?? row.review_key ?? "")}>
+                            {String(row.severity ?? "WARN")} | {String(row.lane_id ?? "unknown lane")} | {String(row.classification ?? row.title ?? "anomaly")}
+                          </option>
+                        )) : <option value="">No actionable anomalies</option>}
+                      </select>
+                    </label>
+                    <label className="workflow-field">
+                      <span className="workflow-label">Operator Label</span>
+                      <input
+                        className="workflow-input"
+                        value={researchRuntimeBridgeOperatorLabel}
+                        onChange={(event) => setResearchRuntimeBridgeOperatorLabel(event.target.value)}
+                        placeholder="manual operator"
+                      />
+                    </label>
+                    <label className="workflow-field workflow-field-wide">
+                      <span className="workflow-label">Review Note</span>
+                      <textarea
+                        className="workflow-textarea"
+                        value={researchRuntimeBridgeReviewNote}
+                        onChange={(event) => setResearchRuntimeBridgeReviewNote(event.target.value)}
+                        placeholder="Why this paper/runtime anomaly is understood, acknowledged, or reviewed."
+                        rows={3}
+                      />
+                    </label>
                   </div>
-                  <div>
-                    <h3 className="subsection-title">Latest Fills</h3>
-                    <JsonBlock value={paper.latest_fills ?? []} />
+                  <div className="notice-strip">
+                    <div>Selected anomaly review state: {formatValue(selectedResearchRuntimeBridgeAlert?.review_state ?? "None")}.</div>
+                    <div>Severity: {formatValue(selectedResearchRuntimeBridgeAlert?.severity ?? "None")}.</div>
+                    <div>Guidance: {formatValue(selectedResearchRuntimeBridgeAlert?.message ?? selectedResearchRuntimeBridgeAlert?.title ?? "Select an anomaly to review.")}.</div>
+                  </div>
+                  <div className="action-row inline">
+                    <button
+                      className="panel-button subtle"
+                      disabled={busyAction !== null}
+                      onClick={() =>
+                        void runCommand(
+                          "research-runtime-bridge-run-cycle-now",
+                          () => api.runDashboardAction("research-runtime-bridge-run-cycle-now"),
+                        )
+                      }
+                    >
+                      Run Cycle Now
+                    </button>
+                    <button
+                      className="panel-button"
+                      disabled={busyAction !== null || !selectedResearchRuntimeBridgeAlert}
+                      onClick={() =>
+                        void runCommand(
+                          `research-runtime-bridge-acknowledge-${String(selectedResearchRuntimeBridgeAlert?.dedup_key ?? "")}`,
+                          () => api.runDashboardAction("research-runtime-bridge-acknowledge-anomaly", researchRuntimeBridgeReviewPayload("ACKNOWLEDGED")),
+                        )
+                      }
+                    >
+                      Acknowledge Anomaly
+                    </button>
+                    <button
+                      className="panel-button subtle"
+                      disabled={busyAction !== null || !selectedResearchRuntimeBridgeAlert}
+                      onClick={() =>
+                        void runCommand(
+                          `research-runtime-bridge-review-${String(selectedResearchRuntimeBridgeAlert?.dedup_key ?? "")}`,
+                          () => api.runDashboardAction("research-runtime-bridge-mark-reviewed", researchRuntimeBridgeReviewPayload("REVIEWED")),
+                        )
+                      }
+                    >
+                      Mark Reviewed
+                    </button>
+                    <button
+                      className="panel-button subtle"
+                      disabled={busyAction !== null || !selectedResearchRuntimeBridgeAlert}
+                      onClick={() =>
+                        void runCommand(
+                          `research-runtime-bridge-resolve-${String(selectedResearchRuntimeBridgeAlert?.dedup_key ?? "")}`,
+                          () => api.runDashboardAction("research-runtime-bridge-resolve-anomaly", researchRuntimeBridgeReviewPayload("RESOLVED")),
+                        )
+                      }
+                    >
+                      Resolve Anomaly
+                    </button>
                   </div>
                 </div>
+                <div className="split-panel">
+                  <div>
+                    <h3 className="subsection-title">Pending Intents</h3>
+                    <DataTable
+                      columns={[
+                        { key: "created_at", label: "Created", render: (row) => formatTimestamp(row.created_at) },
+                        { key: "lane_id", label: "Lane", render: (row) => <OverflowValue value={formatValue(row.lane_id)} /> },
+                        { key: "phase", label: "Phase", render: (row) => formatValue(row.phase ?? "entry") },
+                        { key: "lifecycle_state", label: "Lifecycle", render: (row) => formatValue(row.lifecycle_state ?? row.order_status ?? "Unknown") },
+                        { key: "intent_type", label: "Intent Type" },
+                        { key: "symbol", label: "Symbol" },
+                        { key: "research_entry_id", label: "Research Entry", render: (row) => <OverflowValue value={formatValue(row.research_entry_id ?? "Entry lineage not published yet.")} /> },
+                      ]}
+                      rows={researchRuntimeBridgePendingIntents.slice(0, 12)}
+                      emptyLabel="No bridge intents are currently pending."
+                    />
+                  </div>
+                  <div>
+                    <h3 className="subsection-title">Open Runtime Positions</h3>
+                    <DataTable
+                      columns={[
+                        { key: "entry_ts", label: "Opened", render: (row) => formatTimestamp(row.entry_ts) },
+                        { key: "lane_id", label: "Lane", render: (row) => <OverflowValue value={formatValue(row.lane_id)} /> },
+                        { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+                        { key: "entry_price", label: "Entry Price", render: (row) => formatValue(row.entry_price) },
+                        { key: "expected_exit_ts", label: "Expected Exit", render: (row) => formatTimestamp(row.expected_exit_ts) },
+                        { key: "research_trade_id", label: "Research Trade", render: (row) => <OverflowValue value={formatValue(row.research_trade_id ?? "Trade lineage not published yet.")} /> },
+                      ]}
+                      rows={researchRuntimeBridgeOpenPositions.slice(0, 12)}
+                      emptyLabel="No runtime positions are currently open."
+                    />
+                  </div>
+                </div>
+                <div className="split-panel">
+                  <div>
+                    <h3 className="subsection-title">Recent Bridge Intents</h3>
+                    <DataTable
+                      columns={[
+                        { key: "created_at", label: "Created", render: (row) => formatTimestamp(row.created_at) },
+                        { key: "lane_id", label: "Lane", render: (row) => <OverflowValue value={formatValue(row.lane_id)} /> },
+                        { key: "phase", label: "Phase", render: (row) => formatValue(row.phase ?? "entry") },
+                        { key: "lifecycle_state", label: "Lifecycle", render: (row) => formatValue(row.lifecycle_state ?? row.order_status ?? "Unknown") },
+                        { key: "intent_type", label: "Intent Type" },
+                        { key: "research_trade_id", label: "Research Trade", render: (row) => <OverflowValue value={formatValue(row.research_trade_id ?? "Trade lineage not published yet.")} /> },
+                      ]}
+                      rows={researchRuntimeBridgeRecentIntents.slice(0, 12)}
+                      emptyLabel="No bridge intents have been published yet."
+                    />
+                  </div>
+                  <div>
+                    <h3 className="subsection-title">Recent Bridge Fills</h3>
+                    <DataTable
+                      columns={[
+                        { key: "fill_timestamp", label: "Filled", render: (row) => formatTimestamp(row.fill_timestamp) },
+                        { key: "lane_id", label: "Lane", render: (row) => <OverflowValue value={formatValue(row.lane_id)} /> },
+                        { key: "phase", label: "Phase", render: (row) => formatValue(row.phase ?? "entry") },
+                        { key: "intent_type", label: "Intent Type" },
+                        { key: "fill_price", label: "Fill Price", render: (row) => formatValue(row.fill_price) },
+                        { key: "research_trade_id", label: "Research Trade", render: (row) => <OverflowValue value={formatValue(row.research_trade_id ?? "Trade lineage not published yet.")} /> },
+                      ]}
+                      rows={researchRuntimeBridgeRecentFills.slice(0, 12)}
+                      emptyLabel="No bridge fills have been published yet."
+                    />
+                  </div>
+                </div>
+                <div className="split-panel">
+                  <div>
+                    <h3 className="subsection-title">Closed Runtime Positions</h3>
+                    <DataTable
+                      columns={[
+                        { key: "exit_ts", label: "Closed", render: (row) => formatTimestamp(row.exit_ts) },
+                        { key: "lane_id", label: "Lane", render: (row) => <OverflowValue value={formatValue(row.lane_id)} /> },
+                        { key: "side", label: "Side" },
+                        { key: "instrument", label: "Instrument" },
+                        { key: "realized_pnl_cash", label: "Realized P&L", render: (row) => formatMaybePnL(row.realized_pnl_cash) },
+                        { key: "exit_reason", label: "Exit Reason", render: (row) => formatValue(row.exit_reason) },
+                      ]}
+                      rows={researchRuntimeBridgeRecentClosedPositions.slice(0, 12)}
+                      emptyLabel="No closed runtime positions have been published yet."
+                    />
+                  </div>
+                  <div>
+                    <h3 className="subsection-title">Runtime Events / Anomalies</h3>
+                    <DataTable
+                      columns={[
+                        { key: "occurred_at", label: "Occurred", render: (row) => formatTimestamp(row.occurred_at) },
+                        { key: "lane_id", label: "Lane", render: (row) => <OverflowValue value={formatValue(row.lane_id)} /> },
+                        { key: "severity", label: "Severity", render: (row) => <Badge label={formatValue(row.severity ?? "INFO")} tone={alertSeverityTone(row.severity)} /> },
+                        { key: "event_type", label: "Event Type", render: (row) => formatValue(row.event_type ?? row.classification ?? "Unknown") },
+                        { key: "classification", label: "Classification", render: (row) => formatValue(row.classification ?? row.severity) },
+                        { key: "review_state", label: "Review", render: (row) => formatValue(row.review_state ?? (row.acknowledged === true ? "ACKNOWLEDGED" : row.severity ? "UNREVIEWED" : "INFO_ONLY")) },
+                        { key: "message", label: "Action / Message", render: (row) => <OverflowValue value={formatValue(row.message ?? row.recommended_action ?? "No remediation message published.")} /> },
+                      ]}
+                      rows={[...researchRuntimeBridgeRuntimeEventRows.slice(0, 8), ...researchRuntimeBridgeAlertRows.slice(0, 8), ...researchRuntimeBridgeAnomalyRows.slice(0, 8)]}
+                      emptyLabel="No bridge runtime events, alerts, or reconciliation anomalies are present."
+                    />
+                  </div>
+                </div>
+                <Section title="Runtime Anomaly Reviews" subtitle="Operator acknowledgement and review events for actionable paper-runtime anomalies">
+                  <DataTable
+                    columns={[
+                      { key: "occurred_at", label: "Reviewed", render: (row) => formatTimestamp(row.occurred_at) },
+                      { key: "lane_id", label: "Lane", render: (row) => <OverflowValue value={formatValue(row.lane_id)} /> },
+                      { key: "review_state", label: "Review State", render: (row) => formatValue(row.review_state) },
+                      { key: "severity", label: "Severity", render: (row) => <Badge label={formatValue(row.severity ?? "WARN")} tone={alertSeverityTone(row.severity)} /> },
+                      { key: "operator_label", label: "Operator", render: (row) => formatValue(row.operator_label) },
+                      { key: "note", label: "Note", render: (row) => <OverflowValue value={formatValue(row.note ?? "No review note recorded.")} /> },
+                    ]}
+                    rows={researchRuntimeBridgeReviewRows.slice(0, 12)}
+                    emptyLabel="No runtime anomaly reviews have been recorded yet."
+                  />
+                </Section>
               </Section>
             </>
           ) : null}
@@ -11927,6 +17094,32 @@ function paperStartupCategoryTone(category: string): Tone {
                 </div>
               </Section>
             </>
+          ) : null}
+
+          {!loading && page === "history" ? (
+            <Section
+              title="Strategy History Review"
+              subtitle="Cross-strategy back-cast review, ranking, and drill-down focused on what actually traded and what earned or lost money"
+              className="strategy-deep-dive-section"
+              headerClassName="section-header-tight"
+            >
+              {strategyAnalysis.available === true ? (
+                <StrategyHistoryReviewPage
+                  analysis={strategyAnalysis}
+                  replayStudyItems={playbackLatestStudyItems}
+                  preferredStrategyKey={preferredAnalysisStrategyKey || String(selectedWorkspacePerformanceRow?.strategy_key ?? "")}
+                  backendUrl={desktopState?.backendUrl}
+                  researchAnalyticsStrategySummaries={researchAnalyticsStrategySummaries}
+                  researchAnalyticsEquityRows={researchAnalyticsEquityRows}
+                  researchAnalyticsDrawdownRows={researchAnalyticsDrawdownRows}
+                  researchAnalyticsTradeRows={researchAnalyticsTradeRows}
+                  researchAnalyticsExitReasonRows={researchAnalyticsExitReasonRows}
+                  researchAnalyticsSessionRows={researchAnalyticsSessionRows}
+                />
+              ) : (
+                <div className="placeholder-note">Strategy history review is not yet available from the current snapshot.</div>
+              )}
+            </Section>
           ) : null}
 
           {!loading && page === "diagnostics" ? (
@@ -12396,20 +17589,47 @@ function TrendPanel(props: {
   tone?: Tone;
   footer?: string;
   className?: string;
+  resizable?: boolean;
+  summaryItems?: Array<{ label: string; value: ReactNode; tone?: Tone }>;
 }) {
-  const width = 420;
-  const height = 180;
+  const width = 560;
+  const height = 260;
+  const marginLeft = 62;
+  const marginRight = 18;
+  const marginTop = 18;
+  const marginBottom = 52;
   const values = props.points.map((point) => point.value).filter((value) => Number.isFinite(value));
-  const min = values.length ? Math.min(...values) : 0;
-  const max = values.length ? Math.max(...values) : 0;
+  const valueMin = values.length ? Math.min(...values) : 0;
+  const valueMax = values.length ? Math.max(...values) : 0;
+  const rawRange = valueMax - valueMin;
+  const paddedMin = valueMin - Math.max(rawRange * 0.12, Math.abs(valueMin || 1) * 0.04, 1);
+  const paddedMax = valueMax + Math.max(rawRange * 0.12, Math.abs(valueMax || 1) * 0.04, 1);
+  const min = paddedMin;
+  const max = paddedMax;
   const range = max - min || 1;
+  const plotWidth = width - marginLeft - marginRight;
+  const plotHeight = height - marginTop - marginBottom;
+  const xForIndex = (index: number) =>
+    marginLeft + (props.points.length === 1 ? plotWidth / 2 : (index / Math.max(props.points.length - 1, 1)) * plotWidth);
+  const yForValue = (value: number) => marginTop + ((max - value) / range) * plotHeight;
+  const lastValue = values.length ? values[values.length - 1] : null;
+  const firstValue = values.length ? values[0] : null;
+  const deltaValue = lastValue !== null && firstValue !== null ? lastValue - firstValue : null;
+  const tickValues = Array.from({ length: 4 }, (_, index) => max - (range * index) / 3);
+  const xLabelIndices = studyTickIndices(props.points.length, props.points.length > 20 ? 5 : 4);
+  const startTimestamp = props.points[0]?.timestamp ?? "";
+  const endTimestamp = props.points[props.points.length - 1]?.timestamp ?? "";
+  const timeline = timelineLabels(props.points.map((point) => point.timestamp), 5);
   const path = props.points
     .map((point, index) => {
-      const x = props.points.length === 1 ? width / 2 : (index / Math.max(props.points.length - 1, 1)) * (width - 24) + 12;
-      const y = height - (((point.value - min) / range) * (height - 36) + 18);
+      const x = xForIndex(index);
+      const y = yForValue(point.value);
       return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
     .join(" ");
+  const areaPath = props.points.length
+    ? `${path} L ${xForIndex(props.points.length - 1).toFixed(2)} ${(height - marginBottom).toFixed(2)} L ${xForIndex(0).toFixed(2)} ${(height - marginBottom).toFixed(2)} Z`
+    : "";
   return (
     <div className={`trend-panel ${props.className ?? ""}`.trim()}>
       <div className="trend-panel-header">
@@ -12417,22 +17637,74 @@ function TrendPanel(props: {
           <div className="subsection-title">{props.title}</div>
           <div className="section-subtitle">{props.subtitle}</div>
         </div>
-        <Badge label={props.points.length > 1 ? "LIVE SERIES" : "SNAPSHOT"} tone={props.tone ?? "muted"} />
+        <div className="trend-panel-header-meta">
+          {deltaValue !== null ? <Badge label={`Move ${formatMaybePnL(deltaValue)}`} tone={pnlTone(deltaValue)} /> : null}
+          <Badge label={props.points.length > 1 ? "LIVE SERIES" : "SNAPSHOT"} tone={props.tone ?? "muted"} />
+        </div>
       </div>
-      <div className="trend-panel-shell">
+      {props.summaryItems?.length ? (
+        <div className="trend-panel-summary-grid">
+          {props.summaryItems.map((item) => (
+            <MetricMini key={item.label} label={item.label} value={item.value} tone={item.tone} />
+          ))}
+        </div>
+      ) : null}
+      <div className={`trend-panel-shell ${props.resizable ? "resizable" : ""}`.trim()}>
         {props.points.length ? (
           <svg className="trend-panel-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={props.title}>
-            <line x1="12" y1={height - 18} x2={width - 12} y2={height - 18} className="trend-panel-axis" />
-            <line x1="12" y1="18" x2="12" y2={height - 18} className="trend-panel-axis" />
+            {tickValues.map((tick) => {
+              const y = yForValue(tick);
+              return (
+                <g key={`trend-y-${tick.toFixed(3)}`}>
+                  <line x1={marginLeft} y1={y} x2={width - marginRight} y2={y} className="trend-panel-grid" />
+                  <text x={marginLeft - 10} y={y + 4} className="trend-panel-label" textAnchor="end">
+                    {formatMaybePnL(tick)}
+                  </text>
+                </g>
+              );
+            })}
+            {xLabelIndices.map((index) => (
+              <g key={`trend-x-${index}`}>
+                <line x1={xForIndex(index)} y1={marginTop} x2={xForIndex(index)} y2={height - marginBottom} className="trend-panel-grid vertical" />
+                <text x={xForIndex(index)} y={height - 26} className="trend-panel-label" textAnchor="middle">
+                  {studyAxisLabelForRange(props.points[index]?.timestamp, startTimestamp, endTimestamp)}
+                </text>
+              </g>
+            ))}
+            {min < 0 && max > 0 ? (
+              <line x1={marginLeft} y1={yForValue(0)} x2={width - marginRight} y2={yForValue(0)} className="trend-panel-zero" />
+            ) : null}
+            <line x1={marginLeft} y1={marginTop} x2={marginLeft} y2={height - marginBottom} className="trend-panel-axis" />
+            <line x1={marginLeft} y1={height - marginBottom} x2={width - marginRight} y2={height - marginBottom} className="trend-panel-axis" />
+            <text x={(marginLeft + width - marginRight) / 2} y={height - 8} className="trend-panel-axis-title" textAnchor="middle">
+              Time
+            </text>
+            <text x={marginLeft} y={14} className="trend-panel-axis-title">
+              Cumulative P&L
+            </text>
+            <path d={areaPath} className={`trend-panel-area ${props.tone ?? "muted"}`} />
             <path d={path} className={`trend-panel-line ${props.tone ?? "muted"}`} />
+            <circle
+              cx={xForIndex(props.points.length - 1)}
+              cy={yForValue(props.points[props.points.length - 1]?.value ?? 0)}
+              r={4}
+              className={`trend-panel-point ${props.tone ?? "muted"}`}
+            />
           </svg>
         ) : (
           <div className="placeholder-note">No intraday points are available yet.</div>
         )}
       </div>
+      {timeline.length ? (
+        <div className="chart-timeline-strip">
+          {timeline.map((item) => (
+            <span key={item.key} className="chart-timeline-label">{item.label}</span>
+          ))}
+        </div>
+      ) : null}
       <div className="trend-panel-footer">
-        <span>{props.points.length ? `${formatShortNumber(props.points.length)} points` : "0 points"}</span>
-        <span>{props.footer ?? "Waiting for fresh activity."}</span>
+        <span>{props.points.length ? `${formatShortNumber(props.points.length)} points • Range ${formatMaybePnL(valueMin)} to ${formatMaybePnL(valueMax)}` : "0 points"}</span>
+        <span>{props.points.length ? `${studyAxisLabelForRange(startTimestamp, startTimestamp, endTimestamp)} -> ${studyAxisLabelForRange(endTimestamp, startTimestamp, endTimestamp)} • ${props.footer ?? "Waiting for fresh activity."}` : props.footer ?? "Waiting for fresh activity."}</span>
       </div>
     </div>
   );
@@ -12443,6 +17715,7 @@ function CalendarHistoryChart(props: {
   title: string;
   subtitle: string;
   points: CalendarDayPoint[];
+  emptyLabel?: string | null;
 }) {
   const width = 1080;
   const height = 340;
@@ -12461,7 +17734,7 @@ function CalendarHistoryChart(props: {
             <div className="section-subtitle">{props.subtitle}</div>
           </div>
         </div>
-        <div className="placeholder-note">No closed-trade daily history is available for this source and period yet.</div>
+        <div className="placeholder-note">{props.emptyLabel ?? "No closed-trade daily history is available for this source and period yet."}</div>
       </div>
     );
   }
@@ -12569,6 +17842,12 @@ function CalendarDayDetailPanel(props: {
         <MetricCard label="Trade Count" value={formatShortNumber(props.day.tradeCount)} tone="muted" />
         <MetricCard label="Cumulative P&L" value={formatCompactCurrency(props.day.cumulative)} tone={pnlTone(props.day.cumulative)} />
       </div>
+      {props.day.hasIntradayPartial ? (
+        <div className="notice-strip compact">
+          <div><strong>Intraday Partial</strong> {props.day.intradaySources.map((source) => source.replace(/_/g, " ")).join(" + ")}</div>
+          <div>Today includes provisional day-P&amp;L from the active intraday source and may change until the session closes.</div>
+        </div>
+      ) : null}
       {props.day.tradeCount === 0 && props.day.coveredSources.length ? (
         <div className="notice-strip compact">
           <div><strong>Historical Coverage</strong> {props.day.coveredSources.map((source) => source.replace(/_/g, " ")).join(" + ")}</div>
@@ -12593,7 +17872,12 @@ function CalendarDayDetailPanel(props: {
                 onClick={() => props.onOpenStrategy(contribution)}
               >
                 <td>{contribution.strategyName}</td>
-                <td><Badge label={contribution.source.replace(/_/g, " ")} tone={contribution.source === "paper" ? "muted" : contribution.source === "live" ? "good" : "warn"} /></td>
+                <td>
+                  <Badge
+                    label={`${contribution.source.replace(/_/g, " ")}${contribution.provisional === true ? " intraday" : ""}`}
+                    tone={contribution.source === "paper" ? "muted" : contribution.source === "live" ? "good" : "warn"}
+                  />
+                </td>
                 <td>{formatShortNumber(contribution.tradeCount)}</td>
                 <td>{renderPnlValue(contribution.pnl)}</td>
               </tr>
@@ -13016,7 +18300,9 @@ function MetricCard(props: { label: string; value: ReactNode; tone?: "good" | "w
   return (
     <div className={`metric-card ${props.tone ?? "muted"}`}>
       <div className="metric-label">{props.label}</div>
-      <div className="metric-value">{props.value}</div>
+      <div className="metric-value" title={nodeTitleValue(props.value)}>
+        {props.value}
+      </div>
     </div>
   );
 }
@@ -13025,7 +18311,9 @@ function MetricMini(props: { label: string; value: ReactNode; tone?: "good" | "w
   return (
     <div className={`metric-mini ${props.tone ?? "muted"}`}>
       <div className="metric-mini-label">{props.label}</div>
-      <div className="metric-mini-value">{props.value}</div>
+      <div className="metric-mini-value" title={nodeTitleValue(props.value)}>
+        {props.value}
+      </div>
     </div>
   );
 }
@@ -13039,6 +18327,229 @@ function ControlButton(props: { label: string; onClick: () => void; busyAction: 
     <button className={`control-button ${props.danger ? "danger" : ""}`} disabled={props.busyAction !== null || props.disabled} onClick={props.onClick}>
       {props.label}
     </button>
+  );
+}
+
+function AttentionPanel(props: {
+  model: RuntimeAttentionModel;
+  onPrimaryAction: () => void;
+  onSecondaryAction: () => void;
+}) {
+  return (
+    <div className={`attention-panel ${props.model.tone}`}>
+      <div className="attention-panel-header">
+        <div>
+          <div className="attention-panel-kicker">What Needs Attention Now</div>
+          <div className="attention-panel-title">{props.model.title}</div>
+        </div>
+        <div className="badge-row compact">
+          <Badge label={props.model.severityLabel} tone={props.model.tone} />
+          <Badge label={props.model.operatorActionRequired ? "OPERATOR ACTION REQUIRED" : "MONITOR ONLY"} tone={props.model.operatorActionRequired ? props.model.tone : "good"} />
+          <Badge label="PAPER ONLY" tone="warn" />
+        </div>
+      </div>
+      <div className="attention-panel-grid">
+        <div className="attention-panel-card">
+          <div className="attention-panel-card-label">Primary issue</div>
+          <div className="attention-panel-card-value">{props.model.reason}</div>
+          <div className="attention-panel-card-note">State code: {props.model.stateCode}</div>
+        </div>
+        <div className="attention-panel-card">
+          <div className="attention-panel-card-label">Primary next action</div>
+          <div className="attention-panel-card-value">{props.model.primaryAction.label}</div>
+          <div className="attention-panel-card-note">
+            {props.model.primaryAction.disabled && props.model.primaryAction.disabledReason
+              ? props.model.primaryAction.disabledReason
+              : props.model.primaryAction.description}
+          </div>
+        </div>
+        {props.model.secondaryAction ? (
+          <div className="attention-panel-card">
+            <div className="attention-panel-card-label">Fallback action</div>
+            <div className="attention-panel-card-value">{props.model.secondaryAction.label}</div>
+            <div className="attention-panel-card-note">
+              {props.model.secondaryAction.disabled && props.model.secondaryAction.disabledReason
+                ? props.model.secondaryAction.disabledReason
+                : props.model.secondaryAction.description}
+            </div>
+          </div>
+        ) : null}
+      </div>
+      <div className="attention-panel-explanation">{props.model.explanation}</div>
+      <div className="action-row inline">
+        <button className="panel-button" disabled={props.model.primaryAction.disabled} onClick={props.onPrimaryAction}>
+          {props.model.primaryAction.label}
+        </button>
+        {props.model.secondaryAction ? (
+          <button className="panel-button subtle" disabled={props.model.secondaryAction.disabled} onClick={props.onSecondaryAction}>
+            {props.model.secondaryAction.label}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function StartupControlPlanePanel(props: {
+  controlPlane: JsonRecord;
+  operationalReadiness: OperationalReadinessModel;
+  canRunLiveActions: boolean;
+  busyAction: string | null;
+  onRunPrimaryAction: () => void;
+  onRunAction: (row: JsonRecord) => void;
+  onOpenEvidence: (row: JsonRecord) => void;
+}) {
+  const counts = asRecord(props.controlPlane.counts);
+  const dependencies = asArray<JsonRecord>(props.controlPlane.dependencies);
+  const primaryDependency = asRecord(props.controlPlane.primary_dependency);
+  const overallState = String(props.operationalReadiness.overallState ?? "UNKNOWN").trim().toUpperCase();
+  const evidenceTarget = props.operationalReadiness.evidenceTarget ?? primaryDependency.authoritative_artifact ?? props.controlPlane.authoritative_artifact;
+
+  return (
+    <div className="startup-panel">
+      <div className="badge-row">
+        <Badge label={overallState || "UNKNOWN"} tone={startupControlPlaneTone(overallState)} />
+        <Badge label={props.operationalReadiness.launchAllowed ? "Launch Allowed" : "Launch Refused"} tone={props.operationalReadiness.launchAllowed ? "good" : "danger"} />
+        <Badge label={props.operationalReadiness.dashboardAttached ? "Dashboard Attached" : "Attach Incomplete"} tone={props.operationalReadiness.dashboardAttached ? "good" : "danger"} />
+        <Badge label={`Paper ${props.operationalReadiness.paperRuntimeState}`} tone={startupControlPlaneTone(props.operationalReadiness.paperRuntimeState)} />
+        <Badge
+          label={props.operationalReadiness.appUsableForSupervisedPaper ? "Usable Now" : "Not Usable"}
+          tone={props.operationalReadiness.appUsableForSupervisedPaper ? "good" : "danger"}
+        />
+        <Badge label="PAPER ONLY" tone="warn" />
+      </div>
+      <div className="metric-grid">
+        <MetricCard label="Ready" value={formatShortNumber(counts.ready ?? 0)} tone="good" />
+        <MetricCard label="Warming" value={formatShortNumber(counts.warming ?? 0)} tone={Number(counts.warming ?? 0) > 0 ? "warn" : "muted"} />
+        <MetricCard label="Blocked" value={formatShortNumber(counts.blocked ?? 0)} tone={Number(counts.blocked ?? 0) > 0 ? "danger" : "good"} />
+        <MetricCard label="Degraded" value={formatShortNumber(counts.degraded ?? 0)} tone={Number(counts.degraded ?? 0) > 0 ? "warn" : "good"} />
+        <MetricCard label="Reconcile Required" value={formatShortNumber(counts.reconciliation_required ?? 0)} tone={Number(counts.reconciliation_required ?? 0) > 0 ? "danger" : "good"} />
+        <MetricCard label="Needs Attention Now" value={formatShortNumber(counts.needs_attention_now ?? 0)} tone={Number(counts.needs_attention_now ?? 0) > 0 ? "danger" : "good"} />
+      </div>
+      <div className="notice-strip">
+        <div>{textOrFallback(props.operationalReadiness.summaryLine, "Startup dependency summary is unavailable.")}</div>
+        <div>
+          Supervised paper usability: {props.operationalReadiness.appUsableForSupervisedPaper ? "YES" : "NO"}
+          {props.operationalReadiness.unusableReason ? ` | Reason: ${props.operationalReadiness.unusableReason}` : ""}
+        </div>
+        <div>
+          Primary issue: {textOrFallback(props.operationalReadiness.primaryIssueTitle, "Unknown")} | Reason: {textOrFallback(props.operationalReadiness.primaryReason, "No reason published.")}
+        </div>
+        <div>
+          Next action: {props.operationalReadiness.primaryAction.label}. Evidence: {textOrFallback(props.operationalReadiness.evidenceLabel, "Startup control plane artifact")}.
+        </div>
+      </div>
+      <div className="action-row inline">
+        <button
+          className="panel-button"
+          disabled={props.busyAction !== null || props.operationalReadiness.primaryAction.disabled}
+          onClick={props.onRunPrimaryAction}
+          title={props.operationalReadiness.primaryAction.disabledReason}
+        >
+          {props.operationalReadiness.primaryAction.label}
+        </button>
+        <button
+          className="panel-button subtle"
+          disabled={props.busyAction !== null || !evidenceTarget}
+          onClick={() => props.onOpenEvidence(primaryDependency)}
+        >
+          Open Evidence
+        </button>
+      </div>
+      <DataTable
+        columns={[
+          { key: "label", label: "Dependency", render: (row) => formatValue(row.label ?? row.key) },
+          { key: "state", label: "State", render: (row) => <Badge label={formatValue(row.state ?? "UNKNOWN")} tone={startupControlPlaneTone(row.state)} /> },
+          {
+            key: "reason",
+            label: "Why",
+            render: (row) => (
+              <div>
+                <div>{formatValue(row.reason ?? row.summary_line)}</div>
+                <div className="attention-panel-card-note">{formatValue(row.detail ?? row.reason_code)}</div>
+              </div>
+            ),
+          },
+          {
+            key: "next_action",
+            label: "Next Action",
+            render: (row) => {
+              const action = startupControlPlaneActionSpec(row, { canRunLiveActions: props.canRunLiveActions });
+              return (
+                <div>
+                  <div>{action.label}</div>
+                  <div className="attention-panel-card-note">{action.disabled && action.disabledReason ? action.disabledReason : action.description}</div>
+                </div>
+              );
+            },
+          },
+          {
+            key: "controls",
+            label: "Controls",
+            render: (row) => {
+              const action = startupControlPlaneActionSpec(row, { canRunLiveActions: props.canRunLiveActions });
+              const rowEvidenceTarget = row.authoritative_artifact ?? props.controlPlane.authoritative_artifact;
+              return (
+                <div className="action-row inline">
+                  <button
+                    className="panel-button subtle"
+                    disabled={props.busyAction !== null || action.disabled}
+                    onClick={() => props.onRunAction(row)}
+                    title={action.disabledReason}
+                  >
+                    {action.label}
+                  </button>
+                  <button
+                    className="panel-button subtle"
+                    disabled={props.busyAction !== null || !rowEvidenceTarget}
+                    onClick={() => props.onOpenEvidence(row)}
+                  >
+                    Open Evidence
+                  </button>
+                </div>
+              );
+            },
+          },
+        ]}
+        rows={dependencies}
+        emptyLabel="Startup dependencies have not been published yet."
+      />
+    </div>
+  );
+}
+
+function OverflowValue(props: { value: ReactNode; title?: string }) {
+  const title = props.title ?? nodeTitleValue(props.value);
+  return (
+    <span className="overflow-value" title={title}>
+      {props.value}
+    </span>
+  );
+}
+
+function SectionTruthStrip(props: {
+  updatedAt: unknown;
+  fallbackUpdatedAt?: unknown;
+  sourceLabel: string;
+  sourceTone: Tone;
+  scopeLabel: string;
+  provenance: string;
+}) {
+  return (
+    <div className="notice-strip compact">
+      <div>
+        <strong>Truth Source:</strong> <span className={`tone-${props.sourceTone}`}>{props.sourceLabel}</span>
+      </div>
+      <div>
+        <strong>Freshness:</strong> {truthFreshnessLabel(props.updatedAt, props.fallbackUpdatedAt)}
+      </div>
+      <div>
+        <strong>Scope:</strong> {props.scopeLabel}
+      </div>
+      <div>
+        <strong>Provenance:</strong> {props.provenance}
+      </div>
+    </div>
   );
 }
 
@@ -13057,7 +18568,10 @@ function StartupPanel(props: {
 }) {
   const startup = props.desktopState?.startup;
   const backend = props.desktopState?.backend;
-  const canRetry = backend?.state !== "healthy" && props.busyAction === null;
+  const canRetry =
+    (startup?.mode === "DESKTOP_MANAGED_DIAGNOSTIC" || startup?.mode === "UNAVAILABLE" || startup?.mode === "SNAPSHOT_ONLY")
+    && backend?.state !== "healthy"
+    && props.busyAction === null;
 
   return (
     <div className="startup-panel">
@@ -13065,7 +18579,7 @@ function StartupPanel(props: {
         <MetricCard label="Preferred URL" value={formatValue(startup?.preferredUrl)} />
         <MetricCard label="Chosen URL" value={formatValue(startup?.chosenUrl ?? props.desktopState?.backendUrl)} />
         <MetricCard label="Chosen Port" value={formatValue(startup?.chosenPort)} />
-        <MetricCard label="Ownership" value={ownershipLabel(startup?.ownership)} tone={statusTone(ownershipLabel(startup?.ownership))} />
+        <MetricCard label="Desktop Mode" value={desktopModeLabel(startup ?? null)} tone={statusTone(desktopModeLabel(startup ?? null))} />
         <MetricCard label="Startup State" value={backend?.label ?? "Unknown"} tone={statusTone(backend?.label)} />
         <MetricCard label="Port Policy" value={startup?.allowPortFallback ? "Explicit fallback enabled" : "Fixed preferred port"} />
         <MetricCard label="Failure Kind" value={startupFailureLabel(backend?.startupFailureKind)} tone={statusTone(backend?.startupFailureKind)} />
@@ -13081,11 +18595,13 @@ function StartupPanel(props: {
       {startup?.recommendedAction || backend?.actionHint ? (
         <div className="startup-hint">Next Action: {startup?.recommendedAction ?? backend?.actionHint}</div>
       ) : null}
-      <div className="action-row inline">
-        <button className="panel-button" disabled={!canRetry} onClick={props.onRetryStart}>
-          Retry Start
-        </button>
-      </div>
+      {startup?.mode !== "SERVICE_ATTACHED" ? (
+        <div className="action-row inline">
+          <button className="panel-button" disabled={!canRetry} onClick={props.onRetryStart}>
+            Retry Start
+          </button>
+        </div>
+      ) : null}
       <div className="startup-events">
         <div className="subsection-title">Recent Backend Events</div>
         <CodeBlock lines={startup?.recentEvents ?? []} emptyLabel="No startup events have been recorded in this desktop session." />
@@ -13601,25 +19117,23 @@ function ReplayStrategyStudy(props: { studies: JsonRecord[] }) {
   const paneGap = layout.paneGap;
   const executionStripHeight = showExecutionDetail && hasExecutionDetail ? 62 : 0;
   const totalHeight = topPaneHeight + lowerPaneHeight + paneGap;
-  const svgHeight = totalHeight + 26;
+  const svgHeight = totalHeight + 56;
   const plotWidth = Math.max(width - marginLeft - marginRight, 1);
   const topPlotHeight = topPaneHeight - panePaddingTop - panePaddingBottom - (executionStripHeight ? executionStripHeight + 12 : 0);
   const executionStripTop = panePaddingTop + topPlotHeight + 12;
   const lowerPlotHeight = lowerPaneHeight - panePaddingTop - panePaddingBottom;
   const priceRows = bars.filter((row) => row.high !== null && row.low !== null && row.open !== null && row.close !== null);
-  const priceValues = priceRows.flatMap((row) => [row.high as number, row.low as number, row.vwap].filter((value): value is number => value !== null));
-  const priceMinRaw = priceValues.length ? Math.min(...priceValues) : 0;
-  const priceMaxRaw = priceValues.length ? Math.max(...priceValues) : 1;
-  const pricePadding = Math.max((priceMaxRaw - priceMinRaw) * 0.08, 0.25);
-  const priceMin = priceMinRaw - pricePadding;
-  const priceMax = priceMaxRaw + pricePadding;
   const pnlSeries = bars.map((row) => studyPnlValue(pnlMode, pnlByBarId.get(row.barId), row));
-  const pnlValues = pnlSeries.filter((value): value is number => value !== null);
-  const pnlMinRaw = pnlValues.length ? Math.min(...pnlValues, 0) : -1;
-  const pnlMaxRaw = pnlValues.length ? Math.max(...pnlValues, 0) : 1;
-  const pnlPadding = Math.max((pnlMaxRaw - pnlMinRaw) * 0.12, 1);
-  const pnlMin = pnlMinRaw - pnlPadding;
-  const pnlMax = pnlMaxRaw + pnlPadding;
+  const firstVisiblePnl = pnlSeries.find((value): value is number => value !== null) ?? 0;
+  const pnlDeltaSeries = pnlSeries.map((value) => (value === null ? null : value - firstVisiblePnl));
+  const pnlValues = pnlDeltaSeries.filter((value): value is number => value !== null);
+  const pnlMinRaw = pnlValues.length ? Math.min(...pnlValues) : -1;
+  const pnlMaxRaw = pnlValues.length ? Math.max(...pnlValues) : 1;
+  const pnlRangeRaw = Math.max(pnlMaxRaw - pnlMinRaw, 0.0001);
+  const pnlPadding = Math.max(pnlRangeRaw * 0.18, 0.5);
+  const pnlShouldIncludeZero = pnlMinRaw <= 0 && pnlMaxRaw >= 0;
+  const pnlMin = pnlShouldIncludeZero ? Math.min(pnlMinRaw - pnlPadding, 0) : pnlMinRaw - pnlPadding;
+  const pnlMax = pnlShouldIncludeZero ? Math.max(pnlMaxRaw + pnlPadding, 0) : pnlMaxRaw + pnlPadding;
   const legacyBlockerSummary = asArray<JsonRecord>(summary.most_common_legacy_blocker_codes ?? summary.most_common_blocker_codes)
     .slice(0, 3)
     .map((row) => `${formatValue(row.code)} (${formatShortNumber(row.count)})`)
@@ -13628,9 +19142,23 @@ function ReplayStrategyStudy(props: { studies: JsonRecord[] }) {
     .slice(0, 3)
     .map((row) => `${formatValue(row.code)} (${formatShortNumber(row.count)})`)
     .join(" • ");
-  const tickIndices = studyTickIndices(bars.length, 6);
+  const tickIndices = studyTickIndices(bars.length, Math.min(10, Math.max(6, Math.floor(width / 160))));
   const xForIndex = (index: number) => marginLeft + (plotWidth * (bars.length <= 1 ? 0.5 : index / (bars.length - 1)));
-  const priceY = (value: number) => panePaddingTop + ((priceMax - value) / Math.max(priceMax - priceMin, 0.0001)) * topPlotHeight;
+  const firstVisiblePrice =
+    bars.find((row) => row.close !== null)?.close
+    ?? bars.find((row) => row.open !== null)?.open
+    ?? 0;
+  const normalizedPrice = (value: number | null) => (value === null ? null : value - firstVisiblePrice);
+  const normalizedPriceValues = priceRows.flatMap((row) =>
+    [normalizedPrice(row.high), normalizedPrice(row.low), normalizedPrice(row.vwap)].filter((value): value is number => value !== null),
+  );
+  const normalizedPriceMinRaw = normalizedPriceValues.length ? Math.min(...normalizedPriceValues) : -1;
+  const normalizedPriceMaxRaw = normalizedPriceValues.length ? Math.max(...normalizedPriceValues) : 1;
+  const normalizedPricePadding = Math.max((normalizedPriceMaxRaw - normalizedPriceMinRaw) * 0.08, 0.25);
+  const normalizedPriceMin = normalizedPriceMinRaw - normalizedPricePadding;
+  const normalizedPriceMax = normalizedPriceMaxRaw + normalizedPricePadding;
+  const priceY = (value: number) =>
+    panePaddingTop + ((normalizedPriceMax - (value - firstVisiblePrice)) / Math.max(normalizedPriceMax - normalizedPriceMin, 0.0001)) * topPlotHeight;
   const lowerTop = topPaneHeight + paneGap;
   const pnlY = (value: number) => lowerTop + panePaddingTop + ((pnlMax - value) / Math.max(pnlMax - pnlMin, 0.0001)) * lowerPlotHeight;
   const zeroY = pnlY(0);
@@ -13641,8 +19169,8 @@ function ReplayStrategyStudy(props: { studies: JsonRecord[] }) {
     })),
   );
   const pnlPath = buildStudyPath(
-    bars.map((row, index) => {
-      const value = studyPnlValue(pnlMode, pnlByBarId.get(row.barId), row);
+    bars.map((_, index) => {
+      const value = pnlDeltaSeries[index];
       return { x: xForIndex(index), y: value === null ? null : pnlY(value) };
     }),
   );
@@ -13653,13 +19181,14 @@ function ReplayStrategyStudy(props: { studies: JsonRecord[] }) {
     xForIndex,
   });
   const executionValues = executionCoords.flatMap((item) => [item.high, item.low, item.close].filter((value): value is number => value !== null));
-  const executionMinRaw = executionValues.length ? Math.min(...executionValues) : priceMinRaw;
-  const executionMaxRaw = executionValues.length ? Math.max(...executionValues) : priceMaxRaw;
+  const normalizedExecutionValues = executionValues.map((value) => value - firstVisiblePrice);
+  const executionMinRaw = normalizedExecutionValues.length ? Math.min(...normalizedExecutionValues) : normalizedPriceMinRaw;
+  const executionMaxRaw = normalizedExecutionValues.length ? Math.max(...normalizedExecutionValues) : normalizedPriceMaxRaw;
   const executionPadding = Math.max((executionMaxRaw - executionMinRaw) * 0.15, 0.12);
   const executionMin = executionMinRaw - executionPadding;
   const executionMax = executionMaxRaw + executionPadding;
   const executionY = (value: number) =>
-    executionStripTop + ((executionMax - value) / Math.max(executionMax - executionMin, 0.0001)) * Math.max(executionStripHeight - 10, 1);
+    executionStripTop + ((executionMax - (value - firstVisiblePrice)) / Math.max(executionMax - executionMin, 0.0001)) * Math.max(executionStripHeight - 10, 1);
   const executionPath = buildStudyPath(
     executionCoords.map((item) => ({
       x: item.x,
@@ -13703,6 +19232,13 @@ function ReplayStrategyStudy(props: { studies: JsonRecord[] }) {
   const conversionSummary = timingAvailable
     ? `${formatShortNumber(studyNumber(atpSummary.ready_to_timing_confirmed_percent) ?? 0)}% -> ${formatShortNumber(studyNumber(atpSummary.timing_confirmed_to_executed_percent) ?? 0)}%`
     : "Timing unavailable";
+  const priceTickValues = studyValueTicks(normalizedPriceMin, normalizedPriceMax, 4);
+  const pnlTickValues = studyValueTicks(pnlMin, pnlMax, 4);
+  const latestVisiblePnl = bars.length
+    ? studyPnlValue(pnlMode, pnlByBarId.get(bars[bars.length - 1]?.barId), bars[bars.length - 1])
+    : null;
+  const latestVisiblePnlDelta = bars.length ? pnlDeltaSeries[pnlDeltaSeries.length - 1] : null;
+  const studyTimeline = timelineLabels(bars.map((row) => row.timestamp), 6);
   const studySurfaceStyle = {
     "--study-shell-min-height": `${layout.shellMinHeight}px`,
     "--study-pane-price-min-height": `${layout.topPaneHeight}px`,
@@ -13843,6 +19379,15 @@ function ReplayStrategyStudy(props: { studies: JsonRecord[] }) {
           <div className="metric-value">{atpBlockerSummary || "None"}</div>
         </div>
       </div>
+      <div className="study-chart-legend">
+        <div className="study-legend-item"><span className="study-legend-swatch price" /> Price candles</div>
+        <div className="study-legend-item"><span className="study-legend-swatch vwap" /> VWAP</div>
+        <div className="study-legend-item"><span className={`study-legend-swatch pnl ${studyPnlClass(pnlMode)}`} /> Rolling P&amp;L</div>
+        <div className="study-legend-item"><span className="study-legend-swatch execution" /> Execution detail</div>
+        <div className="study-legend-note">
+          Price normalized to visible-range start ({studyNumericLabel(firstVisiblePrice)} base) • visible move range {formatMaybePnL(normalizedPriceMin)} to {formatMaybePnL(normalizedPriceMax)} • {formatMaybePnL(latestVisiblePnl)} latest visible P&amp;L • {formatMaybePnL(latestVisiblePnlDelta)} from visible-range start
+        </div>
+      </div>
       <div className="study-chart-shell">
         <div className="study-chart-scroll">
           <svg
@@ -13856,18 +19401,61 @@ function ReplayStrategyStudy(props: { studies: JsonRecord[] }) {
           >
             <rect x={0} y={0} width={width} height={topPaneHeight} rx={16} className="study-pane study-pane-price" />
             <rect x={0} y={lowerTop} width={width} height={lowerPaneHeight} rx={16} className="study-pane study-pane-lower" />
-            <line x1={marginLeft} y1={zeroY} x2={width - marginRight} y2={zeroY} className="study-zero-line" />
-            <text x={18} y={36} className="study-pane-label">Price / Decisions</text>
-            <text x={18} y={lowerTop + 36} className="study-pane-label">Rolling P&amp;L</text>
+            {pnlShouldIncludeZero ? (
+              <line x1={marginLeft} y1={zeroY} x2={width - marginRight} y2={zeroY} className="study-zero-line" />
+            ) : null}
+            <text x={18} y={36} className="study-pane-label">Price / Decisions (normalized move)</text>
+            <text x={18} y={lowerTop + 36} className="study-pane-label">Rolling P&amp;L Change</text>
+            <text x={width - marginRight} y={36} className="study-axis-label prominent" textAnchor="end">
+              {`Base ${studyNumericLabel(firstVisiblePrice)}`}
+            </text>
+
+            {priceTickValues.map((value) => {
+              const y = priceY(value);
+              return (
+                <g key={`price-axis-${value.toFixed(4)}`}>
+                  <line x1={marginLeft} y1={y} x2={width - marginRight} y2={y} className="study-grid-line horizontal" />
+                  <text x={marginLeft - 10} y={y + 4} className="study-axis-label" textAnchor="end">
+                    {formatMaybePnL(value)}
+                  </text>
+                </g>
+              );
+            })}
+
+            {pnlTickValues.map((value) => {
+              const y = pnlY(value);
+              return (
+                <g key={`pnl-axis-${value.toFixed(4)}`}>
+                  <line x1={marginLeft} y1={y} x2={width - marginRight} y2={y} className="study-grid-line horizontal" />
+                  <text x={marginLeft - 10} y={y + 4} className="study-axis-label" textAnchor="end">
+                    {formatMaybePnL(value)}
+                  </text>
+                </g>
+              );
+            })}
 
             {tickIndices.map((index) => (
               <g key={`grid-${index}`}>
                 <line x1={xForIndex(index)} y1={14} x2={xForIndex(index)} y2={totalHeight - 8} className="study-grid-line" />
-                <text x={xForIndex(index)} y={totalHeight + 14} className="study-axis-label" textAnchor="middle">
-                  {studyAxisLabel(bars[index]?.timestamp)}
+                <text x={xForIndex(index)} y={totalHeight + 20} className="study-axis-label prominent" textAnchor="middle">
+                  {studyAxisLabelForRange(bars[index]?.timestamp, bars[0]?.timestamp, bars[bars.length - 1]?.timestamp)}
                 </text>
               </g>
             ))}
+            {tickIndices.map((index) => (
+              <text
+                key={`top-time-${index}`}
+                x={xForIndex(index)}
+                y={topPaneHeight - 10}
+                className="study-axis-label prominent"
+                textAnchor="middle"
+              >
+                {studyAxisLabelForRange(bars[index]?.timestamp, bars[0]?.timestamp, bars[bars.length - 1]?.timestamp)}
+              </text>
+            ))}
+            <text x={(marginLeft + width - marginRight) / 2} y={svgHeight - 10} className="study-axis-label prominent" textAnchor="middle">
+              Time
+            </text>
 
             {bars.map((row, index) => {
               const currentX = xForIndex(index);
@@ -14001,8 +19589,8 @@ function ReplayStrategyStudy(props: { studies: JsonRecord[] }) {
 
             {bars.map((row, index) => {
               const x = xForIndex(index);
-              const pnlValue = studyPnlValue(pnlMode, pnlByBarId.get(row.barId), row);
-              const pointY = pnlValue === null ? null : pnlY(pnlValue);
+                  const pnlValue = pnlDeltaSeries[index];
+                  const pointY = pnlValue === null ? null : pnlY(pnlValue);
               const rowEvents = eventsByBarId.get(row.barId) ?? [];
               const hasEntryEvent = rowEvents.some((event) =>
                 event.eventType.includes("ENTRY_EXECUTED") || event.eventType.includes("ENTRY_FILL"),
@@ -14033,6 +19621,13 @@ function ReplayStrategyStudy(props: { studies: JsonRecord[] }) {
           </svg>
         </div>
       </div>
+      {studyTimeline.length ? (
+        <div className="chart-timeline-strip study-timeline-strip">
+          {studyTimeline.map((item) => (
+            <span key={item.key} className="chart-timeline-label">{item.label}</span>
+          ))}
+        </div>
+      ) : null}
       <div className="status-line">
         {meta.unsupported_reason ? `Unsupported entry-model combination: ${formatValue(meta.unsupported_reason)}` : hasAtpData
           ? "Bar-context strategy state stays separate from execution-detail truth. Tooltips label source resolution, decision-context time, and event time so replay bars and intrabar slices are not collapsed into one timestamp."
@@ -14093,6 +19688,34 @@ function UnifiedStrategyAnalysis({
   const laneOptions = asArray<JsonRecord>(discovery.lanes);
   const sourceTypeOptions = asArray<JsonRecord>(discovery.source_types);
   const candidateStatusOptions = asArray<JsonRecord>(discovery.candidate_statuses);
+  const reviewStatusOptions = useMemo(() => {
+    const explicit = asArray<JsonRecord>(discovery.review_statuses);
+    if (explicit.length) {
+      return explicit;
+    }
+    const grouped = new Map<string, JsonRecord>();
+    boardRows.forEach((row) => {
+      const id = strategyHistoryReviewStatusId(row);
+      if (!grouped.has(id)) {
+        grouped.set(id, { id, label: strategyHistoryReviewStatusLabel(row), has_data: true });
+      }
+    });
+    return Array.from(grouped.values());
+  }, [boardRows, discovery.review_statuses]);
+  const activityStatusOptions = useMemo(() => {
+    const explicit = asArray<JsonRecord>(discovery.activity_statuses);
+    if (explicit.length) {
+      return explicit;
+    }
+    const grouped = new Map<string, JsonRecord>();
+    boardRows.forEach((row) => {
+      const id = strategyHistoryActivityStatusId(row);
+      if (!grouped.has(id)) {
+        grouped.set(id, { id, label: strategyHistoryActivityStatusLabel(row), has_data: true });
+      }
+    });
+    return Array.from(grouped.values());
+  }, [boardRows, discovery.activity_statuses]);
   const lifecycleTruthOptions = asArray<JsonRecord>(discovery.lifecycle_truth_classes);
   const sortFieldOptions = asArray<JsonRecord>(resultsBoard.sort_fields);
   const runScopeOptions = asArray<JsonRecord>(resultsBoard.run_scope_presets);
@@ -14111,6 +19734,8 @@ function UnifiedStrategyAnalysis({
   const [selectedLaneFilterId, setSelectedLaneFilterId] = useState(String(defaults.lane_id ?? "all"));
   const [selectedSourceType, setSelectedSourceType] = useState(String(defaults.source_type ?? "all"));
   const [selectedCandidateStatus, setSelectedCandidateStatus] = useState(String(defaults.candidate_status ?? "all"));
+  const [selectedReviewStatus, setSelectedReviewStatus] = useState(String(defaults.review_status ?? "all"));
+  const [selectedActivityStatus, setSelectedActivityStatus] = useState(String(defaults.activity_status ?? "all"));
   const [selectedLifecycleTruthClass, setSelectedLifecycleTruthClass] = useState(String(defaults.lifecycle_truth_class ?? "all"));
   const [selectedDateWindow, setSelectedDateWindow] = useState(String(defaults.date_window ?? "all_dates"));
   const [selectedRunScope, setSelectedRunScope] = useState(String(defaults.run_scope ?? "top"));
@@ -14177,6 +19802,8 @@ function UnifiedStrategyAnalysis({
         const rowLaneId = String(row.lane_id ?? row.id ?? "");
         const rowSourceType = String(row.source_type ?? "");
         const rowCandidateStatus = String(row.candidate_status_id ?? asRecord(row.candidate_status).id ?? "");
+        const rowReviewStatus = strategyHistoryReviewStatusId(row);
+        const rowActivityStatus = strategyHistoryActivityStatusId(row);
         const rowLifecycleTruth = String(row.lifecycle_truth_class ?? asRecord(row.lifecycle_truth).class ?? "");
         if (selectedStrategyKey !== "all" && rowStrategyKey !== selectedStrategyKey) {
           return false;
@@ -14188,6 +19815,12 @@ function UnifiedStrategyAnalysis({
           return false;
         }
         if (selectedCandidateStatus !== "all" && rowCandidateStatus !== selectedCandidateStatus) {
+          return false;
+        }
+        if (selectedReviewStatus !== "all" && rowReviewStatus !== selectedReviewStatus) {
+          return false;
+        }
+        if (selectedActivityStatus !== "all" && rowActivityStatus !== selectedActivityStatus) {
           return false;
         }
         if (selectedLifecycleTruthClass !== "all" && rowLifecycleTruth !== selectedLifecycleTruthClass) {
@@ -14205,6 +19838,8 @@ function UnifiedStrategyAnalysis({
       activeSavedViewSourceTypes,
       boardRows,
       selectedCandidateStatus,
+      selectedReviewStatus,
+      selectedActivityStatus,
       selectedDateWindow,
       selectedLaneFilterId,
       selectedLifecycleTruthClass,
@@ -14295,6 +19930,96 @@ function UnifiedStrategyAnalysis({
   const selectedStrategyKeyForDetail = String(selectedLane?.strategy_key ?? (selectedStrategyKey === "all" ? defaultStrategyKey : selectedStrategyKey) ?? "");
   const strategyDetail = asRecord(detailsByStrategyKey[selectedStrategyKeyForDetail]);
   const strategyIdentity = asRecord(strategyDetail.strategy_identity);
+  const selectedAnalyticsStrategyId = String(
+    selectedLane?.target_id
+      ?? selectedLane?.strategy_key
+      ?? selectedStrategyKeyForDetail
+      ?? "",
+  ).trim();
+  const selectedAnalyticsSummary = useMemo(
+    () =>
+      researchAnalyticsStrategySummaries.find(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ) ?? null,
+    [researchAnalyticsStrategySummaries, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsEquityRows = useMemo(
+    () =>
+      researchAnalyticsEquityRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsEquityRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsDrawdownRows = useMemo(
+    () =>
+      researchAnalyticsDrawdownRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsDrawdownRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsTradeRows = useMemo(
+    () =>
+      researchAnalyticsTradeRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsTradeRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsExitReasonRows = useMemo(
+    () =>
+      researchAnalyticsExitReasonRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsExitReasonRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsSessionRows = useMemo(
+    () =>
+      researchAnalyticsSessionRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsSessionRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsEquityPoints = useMemo(
+    () => {
+      let prior = 0;
+      return selectedAnalyticsEquityRows
+        .map((row) => {
+          const cumulative = Number(row.equity_pnl_cash ?? 0) || 0;
+          const point = {
+            date: dateKeyFromTimestamp(row.timestamp),
+            pnl: cumulative - prior,
+            tradeCount: 1,
+            cumulative,
+            contributions: [],
+            coveredSources: [] as Array<Exclude<PnlCalendarSource, "all" | "live" | "paper">>,
+          };
+          prior = cumulative;
+          return point;
+        })
+        .filter((row) => row.date);
+    },
+    [selectedAnalyticsEquityRows],
+  );
+  const selectedAnalyticsDrawdownTableRows = useMemo(
+    () =>
+      selectedAnalyticsDrawdownRows.map((row) => ({
+        date: row.timestamp ?? "—",
+        equity_peak: "—",
+        equity_value: row.equity_pnl_cash ?? "—",
+        drawdown_value: row.drawdown_cash ?? "—",
+      })),
+    [selectedAnalyticsDrawdownRows],
+  );
+  const selectedAnalyticsTradeActivityRows = useMemo(
+    () =>
+      selectedAnalyticsTradeRows.map((row) => ({
+        ...row,
+        entry_timestamp: row.entry_ts ?? row.entry_timestamp,
+        exit_timestamp: row.exit_ts ?? row.exit_timestamp,
+        realized_pnl: row.pnl_cash ?? row.realized_pnl,
+      })),
+    [selectedAnalyticsTradeRows],
+  );
+  const selectedAnalyticsAvailable = Boolean(selectedAnalyticsSummary) || selectedAnalyticsTradeRows.length > 0;
   const lanes = asArray<JsonRecord>(strategyDetail.lanes);
   const comparisonPresets = asArray<JsonRecord>(strategyDetail.comparison_presets);
   const comparisonOptions = useMemo(
@@ -14368,6 +20093,18 @@ function UnifiedStrategyAnalysis({
         study: selectedReplayStudyPayload,
       }
     : null;
+  const selectedReplayTradeRows = useMemo(
+    () => (selectedReplayStudy ? replayStudyTradeRows(selectedReplayStudy) : []),
+    [selectedReplayStudy],
+  );
+  const selectedReplayTradeActivityBuckets = useMemo(
+    () => tradeActivityBuckets(selectedReplayTradeRows),
+    [selectedReplayTradeRows],
+  );
+  const selectedHistorySupportRows = useMemo(
+    () => strategyHistorySupportRows(selectedBoardRow),
+    [selectedBoardRow],
+  );
   const comparisonMetrics = useMemo(
     () => (selectedLane && comparisonLane ? strategyComparisonMetricRows(selectedLane, comparisonLane) : []),
     [comparisonLane, selectedLane],
@@ -14376,6 +20113,8 @@ function UnifiedStrategyAnalysis({
   const selectedLaneCandidateLabel = selectedLane
     ? formatValue(asRecord(selectedLane.candidate_status).label ?? selectedLane.candidate_status_label ?? "—")
     : "—";
+  const selectedLaneReviewLabel = selectedBoardRow ? strategyHistoryReviewStatusLabel(selectedBoardRow) : "—";
+  const selectedLaneActivityLabel = selectedBoardRow ? strategyHistoryActivityStatusLabel(selectedBoardRow) : "—";
   const selectedLaneDateRangeLabel = selectedLane ? strategyLaneDateRangeLabel(asRecord(selectedLane.date_range)) : "—";
   const selectedLaneProvenanceLabel = selectedLane
     ? formatValue(selectedLane.source_label ?? selectedLane.source_lane ?? "—")
@@ -14440,6 +20179,8 @@ function UnifiedStrategyAnalysis({
           <div className="metric-grid">
             <MetricCard label="Strategy" value={formatValue(strategyIdentity.display_name ?? (selectedStrategyKey === "all" ? "All strategies" : selectedStrategyKey))} />
             <MetricCard label="Lane / Candidate" value={`${selectedLaneTitle} | ${selectedLaneCandidateLabel}`} tone="good" />
+            <MetricCard label="History Review Status" value={selectedLaneReviewLabel} tone={strategyHistoryStatusTone(strategyHistoryReviewStatusId(selectedBoardRow))} />
+            <MetricCard label="Activity Status" value={selectedLaneActivityLabel} tone={strategyHistoryStatusTone(strategyHistoryActivityStatusId(selectedBoardRow))} />
             <MetricCard label="Date Range" value={selectedLaneDateRangeLabel} />
             <MetricCard label="Report Status" value={reportStatusLabel} tone={reportStatusLabel === "Report Ready" ? "good" : "warn"} />
             <MetricCard label="P/L Status" value={pnlStatusLabel} tone={strategyMetricAvailable(selectedLane, "net_pnl") ? "good" : "warn"} />
@@ -14487,6 +20228,8 @@ function UnifiedStrategyAnalysis({
                     setSelectedLaneFilterId("all");
                     setSelectedSourceType(String(view.source_type ?? "all"));
                     setSelectedCandidateStatus(String(view.candidate_status ?? "all"));
+                    setSelectedReviewStatus("all");
+                    setSelectedActivityStatus("all");
                     setSelectedLifecycleTruthClass(String(view.lifecycle_truth_class ?? "all"));
                     setSelectedDateWindow("all_dates");
                     setSelectedRunScope(String(view.run_scope ?? "top"));
@@ -14539,6 +20282,28 @@ function UnifiedStrategyAnalysis({
                 <select value={selectedCandidateStatus} onChange={(event) => setSelectedCandidateStatus(event.target.value)}>
                   <option value="all">All statuses</option>
                   {candidateStatusOptions.map((row) => (
+                    <option key={String(row.id ?? "")} value={String(row.id ?? "")}>
+                      {formatValue(row.label ?? row.id)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="study-select-field">
+                <span>Review Status</span>
+                <select value={selectedReviewStatus} onChange={(event) => setSelectedReviewStatus(event.target.value)}>
+                  <option value="all">All review states</option>
+                  {reviewStatusOptions.map((row) => (
+                    <option key={String(row.id ?? "")} value={String(row.id ?? "")}>
+                      {formatValue(row.label ?? row.id)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="study-select-field">
+                <span>Activity</span>
+                <select value={selectedActivityStatus} onChange={(event) => setSelectedActivityStatus(event.target.value)}>
+                  <option value="all">All activity</option>
+                  {activityStatusOptions.map((row) => (
                     <option key={String(row.id ?? "")} value={String(row.id ?? "")}>
                       {formatValue(row.label ?? row.id)}
                     </option>
@@ -14600,6 +20365,7 @@ function UnifiedStrategyAnalysis({
           </div>
           <div className="notice-strip compact">
             <div><strong>Report View:</strong> Compact ranked results first, with evidence drill-down kept in separate tabs.</div>
+            <div><strong>History Review:</strong> Zero-trade and insufficient-history rows stay explicit so dormant experiments do not read like active candidates.</div>
             <div><strong>Sort:</strong> {formatValue(effectiveSortMeta.label ?? effectiveSortField)} | <strong>Scope:</strong> {formatValue(effectiveRunScope.label ?? selectedRunScope)}</div>
             <div><strong>Saved View:</strong> {formatValue(selectedSavedView.label ?? "Custom")}</div>
             {selectedSavedView.unavailable_reason ? <div><strong>Saved View Note:</strong> {formatValue(selectedSavedView.unavailable_reason)}</div> : null}
@@ -14610,6 +20376,8 @@ function UnifiedStrategyAnalysis({
               { key: "strategy_display_name", label: "Strategy", render: (row) => formatValue(row.strategy_display_name ?? row.strategy_key) },
               { key: "lane_label", label: "Lane", render: (row) => formatValue(row.lane_label ?? row.source_type) },
               { key: "candidate_status", label: "Candidate", render: (row) => formatValue(row.candidate_status_label ?? asRecord(row.candidate_status).label ?? "—") },
+              { key: "review_status", label: "Review Status", render: (row) => <Badge label={strategyHistoryReviewStatusLabel(row)} tone={strategyHistoryStatusTone(strategyHistoryReviewStatusId(row))} /> },
+              { key: "activity_status", label: "Activity", render: (row) => <Badge label={strategyHistoryActivityStatusLabel(row)} tone={strategyHistoryStatusTone(strategyHistoryActivityStatusId(row))} /> },
               { key: "run_study_identity", label: "Run / Study", render: (row) => formatValue(row.run_study_identity ?? row.display_name ?? row.strategy_key) },
               { key: "date_range_label", label: "Date Range", render: (row) => formatValue(row.date_range_label ?? "—") },
               { key: "trade_count", label: "Trades", render: (row) => strategyMetricLabel(row, "trade_count") },
@@ -14774,16 +20542,190 @@ function UnifiedStrategyAnalysis({
             <span><strong>Strategy</strong> {formatValue(strategyIdentity.display_name ?? selectedStrategyKeyForDetail ?? "—")}</span>
             <span><strong>Selected lane</strong> {selectedLaneTitle}</span>
             <span><strong>Candidate</strong> {selectedLaneCandidateLabel}</span>
+            <span><strong>Review Status</strong> {selectedLaneReviewLabel}</span>
+            <span><strong>Activity</strong> {selectedLaneActivityLabel}</span>
             <span><strong>Lifecycle</strong> {selectedLaneLifecycleLabel}</span>
             <span><strong>Provenance</strong> {selectedLaneProvenanceLabel}</span>
           </div>
-          {selectedLane?.source_lane === "historical_playback" && selectedReplayStudy && selectedReplayStudyRows.length > 0 ? (
+          <div className="metric-grid">
+            <MetricCard label="Review Status" value={selectedLaneReviewLabel} tone={strategyHistoryStatusTone(strategyHistoryReviewStatusId(selectedBoardRow))} />
+            <MetricCard label="Activity" value={selectedLaneActivityLabel} tone={strategyHistoryStatusTone(strategyHistoryActivityStatusId(selectedBoardRow))} />
+            <MetricCard label="Trades" value={selectedLane ? strategyMetricLabel(selectedLane, "trade_count") : "Unavailable"} tone={strategyMetricAvailable(selectedLane, "trade_count") ? "good" : "warn"} />
+            <MetricCard label="Net P/L" value={selectedLane ? strategyMetricLabel(selectedLane, "net_pnl") : "Unavailable"} tone={strategyMetricAvailable(selectedLane, "net_pnl") ? "good" : "warn"} />
+            <MetricCard label="Win Rate" value={selectedLane ? strategyMetricLabel(selectedLane, "win_rate") : "Unavailable"} tone={strategyMetricAvailable(selectedLane, "win_rate") ? "good" : "warn"} />
+            <MetricCard label="Profit Factor" value={selectedLane ? strategyMetricLabel(selectedLane, "profit_factor") : "Unavailable"} tone={strategyMetricAvailable(selectedLane, "profit_factor") ? "good" : "warn"} />
+          </div>
+          <div className="notice-strip compact">
+            {selectedHistorySupportRows.map((item) => (
+              <div key={item.label}><strong>{item.label}:</strong> {item.value}</div>
+            ))}
+          </div>
+          {selectedAnalyticsAvailable ? (
+            <>
+              <div className="notice-strip compact">
+                <div><strong>Research Analytics:</strong> Published strategy analytics are driving this deep dive directly.</div>
+                <div><strong>Strategy ID:</strong> {formatValue(selectedAnalyticsStrategyId || "Unavailable")}</div>
+                <div><strong>Summary Source:</strong> Reusable strategy summary, curve, blotter, exit-reason, and session datasets.</div>
+              </div>
+              <CalendarHistoryChart
+                mode="line"
+                title="Research Equity Curve"
+                subtitle="Published research analytics equity progression for the selected strategy."
+                points={selectedAnalyticsEquityPoints}
+                emptyLabel="Research analytics equity history has not been published for this strategy yet."
+              />
+              <div className="split-panel">
+                <div>
+                  <h3 className="subsection-title">Trade Activity Over Time</h3>
+                  <TradeActivityChart
+                    trades={selectedAnalyticsTradeActivityRows}
+                    emptyLabel="Published analytics did not include a closed-trade blotter for this strategy."
+                  />
+                </div>
+                <div>
+                  <h3 className="subsection-title">Trade Blotter</h3>
+                  {selectedAnalyticsTradeRows.length ? (
+                    <DataTable
+                      columns={[
+                        { key: "family", label: "Family", render: (row) => formatValue(row.family ?? "—") },
+                        { key: "side", label: "Side", render: (row) => formatValue(row.side ?? "—") },
+                        { key: "entry_ts", label: "Entry", render: (row) => formatValue(row.entry_ts ?? "—") },
+                        { key: "exit_ts", label: "Exit", render: (row) => formatValue(row.exit_ts ?? "—") },
+                        { key: "pnl_cash", label: "P/L", render: (row) => formatMaybePnL(row.pnl_cash) },
+                        { key: "exit_reason", label: "Exit Reason", render: (row) => formatValue(row.exit_reason ?? "—") },
+                        { key: "session_segment", label: "Session", render: (row) => formatValue(row.session_segment ?? "—") },
+                      ]}
+                      rows={selectedAnalyticsTradeRows.slice(0, 40)}
+                      emptyLabel="No closed trades were published for this strategy."
+                      rowKey={(row, index) => String(row.decision_id ?? row.trade_id ?? row.entry_ts ?? index)}
+                    />
+                  ) : (
+                    <div className="placeholder-note">No published blotter rows are available for this strategy yet.</div>
+                  )}
+                </div>
+              </div>
+              <div className="split-panel">
+                <div>
+                  <h3 className="subsection-title">Session Breakdown</h3>
+                  {selectedAnalyticsSessionRows.length ? (
+                    <DataTable
+                      columns={[
+                        { key: "session_segment", label: "Session", render: (row) => formatValue(row.session_segment ?? "—") },
+                        { key: "trade_count", label: "Trades", render: (row) => formatValue(row.trade_count ?? "—") },
+                        { key: "net_pnl_cash", label: "Net P/L", render: (row) => formatMaybePnL(row.net_pnl_cash) },
+                        { key: "win_rate", label: "Win Rate", render: (row) => row.win_rate === undefined ? "Unavailable" : `${Number(row.win_rate).toFixed(1)}%` },
+                      ]}
+                      rows={selectedAnalyticsSessionRows}
+                      emptyLabel="No published session breakdown rows are available."
+                    />
+                  ) : (
+                    <div className="placeholder-note">Published analytics did not include session segmentation for this strategy.</div>
+                  )}
+                </div>
+                <div>
+                  <h3 className="subsection-title">Exit Reason Breakdown</h3>
+                  {selectedAnalyticsExitReasonRows.length ? (
+                    <DataTable
+                      columns={[
+                        { key: "exit_reason", label: "Exit Reason", render: (row) => formatValue(row.exit_reason ?? "—") },
+                        { key: "trade_count", label: "Trades", render: (row) => formatValue(row.trade_count ?? "—") },
+                        { key: "net_pnl_cash", label: "Net P/L", render: (row) => formatMaybePnL(row.net_pnl_cash) },
+                      ]}
+                      rows={selectedAnalyticsExitReasonRows}
+                      emptyLabel="No published exit-reason breakdown rows are available."
+                    />
+                  ) : (
+                    <div className="placeholder-note">Published analytics did not include an exit-reason breakdown for this strategy.</div>
+                  )}
+                </div>
+              </div>
+              {selectedAnalyticsDrawdownTableRows.length ? (
+                <div>
+                  <h3 className="subsection-title">Drawdown Curve</h3>
+                  <DataTable
+                    columns={[
+                      { key: "date", label: "Date", render: (row) => formatValue(row.date ?? "—") },
+                      { key: "equity_peak", label: "Peak", render: (row) => formatMaybePnL(row.equity_peak) },
+                      { key: "equity_value", label: "Equity", render: (row) => formatMaybePnL(row.equity_value) },
+                      { key: "drawdown_value", label: "Drawdown", render: (row) => formatMaybePnL(row.drawdown_value) },
+                    ]}
+                    rows={selectedAnalyticsDrawdownTableRows.slice(-40)}
+                    emptyLabel="No published drawdown rows are available."
+                  />
+                </div>
+              ) : null}
+            </>
+          ) : selectedLane?.source_lane === "historical_playback" && selectedReplayStudy && selectedReplayStudyRows.length > 0 ? (
             <>
               <div className="notice-strip compact">
                 <div><strong>Study Available:</strong> Linked replay study published for the selected lane.</div>
                 <div><strong>Timing Detail:</strong> Study view keeps ATP and execution detail separate from baseline bar context.</div>
+                <div><strong>Trade Activity Windows:</strong> {selectedReplayTradeActivityBuckets.length ? `${selectedReplayTradeActivityBuckets.length} buckets with executed trades in the visible artifact.` : "Unavailable"}</div>
               </div>
               <ReplayStrategyStudy studies={[selectedReplayStudy]} />
+              <div className="split-panel">
+                <div>
+                  <h3 className="subsection-title">Trade Activity Over Time</h3>
+                  <TradeActivityChart trades={selectedReplayTradeRows} emptyLabel="Trade activity chart unavailable because the replay artifact does not expose a closed-trade history." />
+                </div>
+                <div>
+                  <h3 className="subsection-title">Trade History</h3>
+                  {selectedReplayTradeRows.length ? (
+                    <DataTable
+                      columns={[
+                        { key: "family", label: "Family", render: (row) => formatValue(row.family) },
+                        { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+                        { key: "entry_timestamp", label: "Entry", render: (row) => formatValue(row.entry_timestamp) },
+                        { key: "exit_timestamp", label: "Exit", render: (row) => formatValue(row.exit_timestamp) },
+                        { key: "realized_pnl", label: "P/L", render: (row) => formatMaybePnL(row.realized_pnl) },
+                        { key: "exit_reason", label: "Exit Reason", render: (row) => formatValue(row.exit_reason ?? "—") },
+                        { key: "truth_source", label: "Truth", render: (row) => formatValue(row.truth_source ?? "—") },
+                      ]}
+                      rows={selectedReplayTradeRows.slice(0, 40)}
+                      emptyLabel="No closed trades were emitted for this study."
+                      rowKey={(row, index) => String(row.trade_id ?? row.entry_timestamp ?? index)}
+                    />
+                  ) : (
+                    <div className="placeholder-note">Trade history is unavailable because the study did not publish or reconstruct closed-trade rows.</div>
+                  )}
+                </div>
+              </div>
+              <div className="split-panel">
+                <div>
+                  <h3 className="subsection-title">Session Breakdown</h3>
+                  {asRecord(asRecord(selectedLane.metrics).session_breakdown).available === true ? (
+                    <DataTable
+                      columns={[
+                        { key: "session", label: "Session", render: (row) => formatValue(row.session ?? row.session_name ?? row.session_segment ?? "—") },
+                        { key: "trade_count", label: "Trades", render: (row) => formatValue(row.trade_count ?? row.count ?? "—") },
+                        { key: "net_pnl", label: "Net P/L", render: (row) => formatMaybePnL(row.net_pnl ?? row.realized_pnl) },
+                        { key: "win_rate", label: "Win Rate", render: (row) => row.win_rate === undefined ? "Unavailable" : `${Number(row.win_rate).toFixed(1)}%` },
+                      ]}
+                      rows={asArray<JsonRecord>(asRecord(asRecord(selectedLane.metrics).session_breakdown).value)}
+                      emptyLabel="No session breakdown rows were published."
+                    />
+                  ) : (
+                    <div className="placeholder-note">{formatValue(asRecord(asRecord(selectedLane.metrics).session_breakdown).reason ?? "Session breakdown unavailable.")}</div>
+                  )}
+                </div>
+                <div>
+                  <h3 className="subsection-title">Trade Family Breakdown</h3>
+                  {asRecord(asRecord(selectedLane.metrics).trade_family_breakdown).available === true ? (
+                    <DataTable
+                      columns={[
+                        { key: "family", label: "Family", render: (row) => formatValue(row.family ?? row.label ?? "—") },
+                        { key: "trade_count", label: "Trades", render: (row) => formatValue(row.trade_count ?? row.count ?? "—") },
+                        { key: "net_pnl", label: "Net P/L", render: (row) => formatMaybePnL(row.net_pnl ?? row.realized_pnl) },
+                        { key: "win_rate", label: "Win Rate", render: (row) => row.win_rate === undefined ? "Unavailable" : `${Number(row.win_rate).toFixed(1)}%` },
+                      ]}
+                      rows={asArray<JsonRecord>(asRecord(asRecord(selectedLane.metrics).trade_family_breakdown).value)}
+                      emptyLabel="No trade-family breakdown rows were published."
+                    />
+                  ) : (
+                    <div className="placeholder-note">{formatValue(asRecord(asRecord(selectedLane.metrics).trade_family_breakdown).reason ?? "Trade-family breakdown unavailable.")}</div>
+                  )}
+                </div>
+              </div>
             </>
           ) : selectedLane?.source_lane === "historical_playback" && selectedReplayStudy ? (
             <div className="placeholder-note">Replay study metadata is attached to this lane and the full artifact is loading.</div>
@@ -14889,6 +20831,788 @@ function UnifiedStrategyAnalysis({
   );
 }
 
+function StrategyHistoryReviewPage({
+  analysis,
+  replayStudyItems,
+  preferredStrategyKey,
+  backendUrl,
+  researchAnalyticsStrategySummaries,
+  researchAnalyticsEquityRows,
+  researchAnalyticsDrawdownRows,
+  researchAnalyticsTradeRows,
+  researchAnalyticsExitReasonRows,
+  researchAnalyticsSessionRows,
+}: {
+  analysis: JsonRecord;
+  replayStudyItems: JsonRecord[];
+  preferredStrategyKey?: string;
+  backendUrl?: string | null;
+  researchAnalyticsStrategySummaries: JsonRecord[];
+  researchAnalyticsEquityRows: JsonRecord[];
+  researchAnalyticsDrawdownRows: JsonRecord[];
+  researchAnalyticsTradeRows: JsonRecord[];
+  researchAnalyticsExitReasonRows: JsonRecord[];
+  researchAnalyticsSessionRows: JsonRecord[];
+}) {
+  const resultsBoard = asRecord(analysis.results_board);
+  const boardRows = asArray<JsonRecord>(resultsBoard.rows);
+  const detailsByStrategyKey = asRecord(analysis.details_by_strategy_key);
+  const discovery = asRecord(resultsBoard.discovery);
+  const strategyOptions = asArray<JsonRecord>(discovery.strategies);
+  const sourceTypeOptions = asArray<JsonRecord>(discovery.source_types);
+  const candidateStatusOptions = asArray<JsonRecord>(discovery.candidate_statuses);
+  const lifecycleTruthOptions = asArray<JsonRecord>(discovery.lifecycle_truth_classes);
+  const sortFieldOptions = asArray<JsonRecord>(resultsBoard.sort_fields);
+  const runScopeOptions = asArray<JsonRecord>(resultsBoard.run_scope_presets);
+  const dateWindowOptions = asArray<JsonRecord>(resultsBoard.date_windows);
+  const rankLimitOptions = asArray<JsonRecord>(resultsBoard.rank_limit_options);
+  const defaults = asRecord(resultsBoard.defaults);
+  const reviewStatusOptions = useMemo(() => {
+    const explicit = asArray<JsonRecord>(discovery.review_statuses);
+    if (explicit.length) {
+      return explicit;
+    }
+    const grouped = new Map<string, JsonRecord>();
+    boardRows.forEach((row) => {
+      const id = strategyHistoryReviewStatusId(row);
+      if (!grouped.has(id)) {
+        grouped.set(id, { id, label: strategyHistoryReviewStatusLabel(row), has_data: true });
+      }
+    });
+    return Array.from(grouped.values());
+  }, [boardRows, discovery.review_statuses]);
+  const activityStatusOptions = useMemo(() => {
+    const explicit = asArray<JsonRecord>(discovery.activity_statuses);
+    if (explicit.length) {
+      return explicit;
+    }
+    const grouped = new Map<string, JsonRecord>();
+    boardRows.forEach((row) => {
+      const id = strategyHistoryActivityStatusId(row);
+      if (!grouped.has(id)) {
+        grouped.set(id, { id, label: strategyHistoryActivityStatusLabel(row), has_data: true });
+      }
+    });
+    return Array.from(grouped.values());
+  }, [boardRows, discovery.activity_statuses]);
+  const allLanes = useMemo(
+    () => Object.values(detailsByStrategyKey).flatMap((detail) => asArray<JsonRecord>(asRecord(detail).lanes)),
+    [detailsByStrategyKey],
+  );
+  const laneById = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    allLanes.forEach((lane) => {
+      const key = String(lane.lane_id ?? "");
+      if (key && !lookup.has(key)) {
+        lookup.set(key, lane);
+      }
+    });
+    return lookup;
+  }, [allLanes]);
+  const replayStudyItemByKey = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    replayStudyItems.forEach((item) => {
+      const key = String(item.study_key ?? "").trim();
+      if (key && !lookup.has(key)) {
+        lookup.set(key, item);
+      }
+    });
+    return lookup;
+  }, [replayStudyItems]);
+  const [selectedStrategyKey, setSelectedStrategyKey] = useState("all");
+  const [selectedSourceType, setSelectedSourceType] = useState("all");
+  const [selectedCandidateStatus, setSelectedCandidateStatus] = useState("all");
+  const [selectedReviewStatus, setSelectedReviewStatus] = useState("all");
+  const [selectedActivityStatus, setSelectedActivityStatus] = useState(
+    activityStatusOptions.some((row) => String(row.id ?? "") === "HAS_TRADES") ? "HAS_TRADES" : "all",
+  );
+  const [selectedLifecycleTruthClass, setSelectedLifecycleTruthClass] = useState(String(defaults.lifecycle_truth_class ?? "all"));
+  const [selectedDateWindow, setSelectedDateWindow] = useState(String(defaults.date_window ?? "all_dates"));
+  const [selectedRunScope, setSelectedRunScope] = useState("top");
+  const [selectedSortField, setSelectedSortField] = useState("net_pnl");
+  const [selectedRankLimit, setSelectedRankLimit] = useState("25");
+  const filteredBoardRows = useMemo(
+    () =>
+      boardRows.filter((row) => {
+        if (selectedStrategyKey !== "all" && String(row.strategy_key ?? "") !== selectedStrategyKey) {
+          return false;
+        }
+        if (selectedSourceType !== "all" && String(row.source_type ?? "") !== selectedSourceType) {
+          return false;
+        }
+        if (selectedCandidateStatus !== "all" && String(row.candidate_status_id ?? "") !== selectedCandidateStatus) {
+          return false;
+        }
+        if (selectedReviewStatus !== "all" && strategyHistoryReviewStatusId(row) !== selectedReviewStatus) {
+          return false;
+        }
+        if (selectedActivityStatus !== "all" && strategyHistoryActivityStatusId(row) !== selectedActivityStatus) {
+          return false;
+        }
+        if (selectedLifecycleTruthClass !== "all" && String(row.lifecycle_truth_class ?? "") !== selectedLifecycleTruthClass) {
+          return false;
+        }
+        if (!strategyAnalysisMatchesDateWindow(row, selectedDateWindow)) {
+          return false;
+        }
+        return true;
+      }),
+    [
+      boardRows,
+      selectedActivityStatus,
+      selectedCandidateStatus,
+      selectedDateWindow,
+      selectedLifecycleTruthClass,
+      selectedReviewStatus,
+      selectedSourceType,
+      selectedStrategyKey,
+    ],
+  );
+  const sortFieldLookup = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    sortFieldOptions.forEach((row) => {
+      const key = String(row.id ?? "");
+      if (key) {
+        lookup.set(key, row);
+      }
+    });
+    return lookup;
+  }, [sortFieldOptions]);
+  const runScopeLookup = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    runScopeOptions.forEach((row) => {
+      const key = String(row.id ?? "");
+      if (key) {
+        lookup.set(key, row);
+      }
+    });
+    return lookup;
+  }, [runScopeOptions]);
+  const effectiveSortField = selectedRunScope === "latest"
+    ? "latest_update_timestamp"
+    : selectedRunScope === "lowest_drawdown"
+      ? "max_drawdown"
+      : selectedSortField;
+  const effectiveSortMeta = sortFieldLookup.get(effectiveSortField) ?? asRecord(sortFieldOptions[0]);
+  const runScopeUnavailableReason = strategyAnalysisRunScopeUnavailableReason({
+    runScope: selectedRunScope,
+    sortField: effectiveSortField,
+    sortFieldMeta: effectiveSortMeta,
+  });
+  const rankedBoardRows = useMemo(() => {
+    if (runScopeUnavailableReason) {
+      return [];
+    }
+    const rows = [...filteredBoardRows];
+    const direction = selectedRunScope === "lowest_drawdown" ? "asc" : String(effectiveSortMeta.default_direction ?? "desc");
+    rows.sort((left, right) => strategyAnalysisCompareBoardRows(left, right, effectiveSortField, direction));
+    const limit = selectedRankLimit === "all" ? null : Number(selectedRankLimit);
+    if (limit !== null && Number.isFinite(limit) && limit > 0) {
+      return rows.slice(0, limit);
+    }
+    return rows;
+  }, [effectiveSortField, effectiveSortMeta, filteredBoardRows, runScopeUnavailableReason, selectedRankLimit, selectedRunScope]);
+  const [selectedLaneId, setSelectedLaneId] = useState(String(rankedBoardRows[0]?.lane_id ?? ""));
+  useEffect(() => {
+    if (!rankedBoardRows.length) {
+      setSelectedLaneId("");
+      return;
+    }
+    if (!selectedLaneId || !rankedBoardRows.some((row) => String(row.lane_id ?? "") === selectedLaneId)) {
+      setSelectedLaneId(String(rankedBoardRows[0]?.lane_id ?? ""));
+    }
+  }, [rankedBoardRows, selectedLaneId]);
+  const selectedBoardRow = rankedBoardRows.find((row) => String(row.lane_id ?? "") === selectedLaneId) ?? rankedBoardRows[0] ?? null;
+  const selectedLane = useMemo(() => {
+    if (!selectedBoardRow) {
+      return null;
+    }
+    const detailLane = laneById.get(String(selectedBoardRow.lane_id ?? "")) ?? null;
+    if (!detailLane) {
+      return selectedBoardRow;
+    }
+    return {
+      ...detailLane,
+      ...selectedBoardRow,
+      evidence: {
+        ...asRecord(detailLane.evidence),
+        ...asRecord(selectedBoardRow.evidence),
+      },
+      metrics: {
+        ...asRecord(detailLane.metrics),
+        ...asRecord(selectedBoardRow.metrics),
+      },
+      history_review_support: {
+        ...asRecord(detailLane.history_review_support),
+        ...asRecord(selectedBoardRow.history_review_support),
+      },
+      lifecycle_truth: {
+        ...asRecord(detailLane.lifecycle_truth),
+        ...asRecord(selectedBoardRow.lifecycle_truth),
+      },
+      date_range: {
+        ...asRecord(detailLane.date_range),
+        ...asRecord(selectedBoardRow.date_range),
+      },
+      candidate_status: {
+        ...asRecord(detailLane.candidate_status),
+        ...asRecord(selectedBoardRow.candidate_status),
+      },
+      review_status: {
+        ...asRecord(detailLane.review_status),
+        ...asRecord(selectedBoardRow.review_status),
+      },
+      activity_status: {
+        ...asRecord(detailLane.activity_status),
+        ...asRecord(selectedBoardRow.activity_status),
+      },
+    };
+  }, [laneById, selectedBoardRow]);
+  const selectedAnalyticsStrategyId = String(
+    selectedLane?.target_id
+      ?? selectedLane?.strategy_key
+      ?? "",
+  ).trim();
+  const selectedAnalyticsSummary = useMemo(
+    () =>
+      researchAnalyticsStrategySummaries.find(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ) ?? null,
+    [researchAnalyticsStrategySummaries, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsEquityRows = useMemo(
+    () =>
+      researchAnalyticsEquityRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsEquityRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsDrawdownRows = useMemo(
+    () =>
+      researchAnalyticsDrawdownRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsDrawdownRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsTradeRows = useMemo(
+    () =>
+      researchAnalyticsTradeRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsTradeRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsExitReasonRows = useMemo(
+    () =>
+      researchAnalyticsExitReasonRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsExitReasonRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsSessionRows = useMemo(
+    () =>
+      researchAnalyticsSessionRows.filter(
+        (row) => researchAnalyticsMatches(row, selectedAnalyticsStrategyId),
+      ),
+    [researchAnalyticsSessionRows, selectedAnalyticsStrategyId],
+  );
+  const selectedAnalyticsAvailable = Boolean(selectedAnalyticsSummary) || selectedAnalyticsTradeRows.length > 0;
+  const selectedReplayStudyKey = String(asRecord(asRecord(selectedLane?.evidence).bars).ref?.study_key ?? "");
+  const selectedReplayStudyItem = selectedReplayStudyKey ? replayStudyItemByKey.get(selectedReplayStudyKey) ?? null : null;
+  const [selectedReplayStudyLoaded, setSelectedReplayStudyLoaded] = useState<JsonRecord | null>(null);
+  const [selectedReplayStudyLoadState, setSelectedReplayStudyLoadState] = useState<"idle" | "loading" | "loaded" | "error">("idle");
+  const [selectedReplayStudyLoadReason, setSelectedReplayStudyLoadReason] = useState("");
+  useEffect(() => {
+    const artifactTarget = String(asRecord(selectedReplayStudyItem?.artifact_paths).strategy_study_json ?? "").trim();
+    const resolvedBackendUrl = String(backendUrl ?? "").trim();
+    if (selectedAnalyticsAvailable) {
+      setSelectedReplayStudyLoaded(null);
+      setSelectedReplayStudyLoadState("idle");
+      setSelectedReplayStudyLoadReason("");
+      return;
+    }
+    if (!selectedReplayStudyKey) {
+      setSelectedReplayStudyLoaded(null);
+      setSelectedReplayStudyLoadState("idle");
+      setSelectedReplayStudyLoadReason("");
+      return;
+    }
+    if (!selectedReplayStudyItem) {
+      setSelectedReplayStudyLoaded(null);
+      setSelectedReplayStudyLoadState("error");
+      setSelectedReplayStudyLoadReason("Linked strategy-study key is not present in the current playback study catalog.");
+      return;
+    }
+    if (!artifactTarget) {
+      setSelectedReplayStudyLoaded(null);
+      setSelectedReplayStudyLoadState("error");
+      setSelectedReplayStudyLoadReason("Linked strategy-study artifact path is missing from the playback study catalog.");
+      return;
+    }
+    if (!resolvedBackendUrl) {
+      setSelectedReplayStudyLoaded(null);
+      setSelectedReplayStudyLoadState("error");
+      setSelectedReplayStudyLoadReason("Desktop backend URL is unavailable, so the linked strategy-study artifact cannot be loaded.");
+      return;
+    }
+    let cancelled = false;
+    setSelectedReplayStudyLoadState("loading");
+    setSelectedReplayStudyLoadReason("");
+    const artifactUrl = artifactTarget.startsWith("/api/")
+      ? new URL(artifactTarget.replace(/^\//, ""), resolvedBackendUrl).toString()
+      : artifactTarget;
+    void fetch(artifactUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Replay study fetch failed (${response.status})`);
+        }
+        return response.json() as Promise<JsonRecord>;
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setSelectedReplayStudyLoaded(asRecord(payload));
+          setSelectedReplayStudyLoadState("loaded");
+          setSelectedReplayStudyLoadReason("");
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setSelectedReplayStudyLoaded(null);
+          setSelectedReplayStudyLoadState("error");
+          setSelectedReplayStudyLoadReason(
+            error instanceof Error && error.message
+              ? error.message
+              : "Linked strategy-study artifact could not be loaded from the backend.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [backendUrl, selectedAnalyticsAvailable, selectedReplayStudyItem, selectedReplayStudyKey]);
+  const selectedReplayStudyPayload = selectedReplayStudyLoaded ?? asRecord(selectedReplayStudyItem?.study_preview);
+  const selectedReplayStudyRows = asArray<JsonRecord>(selectedReplayStudyPayload.bars ?? selectedReplayStudyPayload.rows);
+  const selectedReplayStudy = selectedReplayStudyKey && selectedReplayStudyPayload
+    ? { study_key: selectedReplayStudyKey, label: String(selectedReplayStudyItem?.label ?? selectedReplayStudyItem?.strategy_id ?? "Replay Study"), study: selectedReplayStudyPayload }
+    : null;
+  const selectedReplayTradeRows = useMemo(() => (selectedReplayStudy ? replayStudyTradeRows(selectedReplayStudy) : []), [selectedReplayStudy]);
+  const selectedReplayStudyChartReason = useMemo(() => {
+    const supportRow = selectedBoardRow ?? selectedLane;
+    const defaultReason =
+      strategyHistorySupportRows(supportRow).find((item) => item.label === "P/L Over Time")?.value
+      ?? "P/L-over-time review is unavailable for this lane.";
+    if (selectedLane?.source_lane !== "historical_playback") {
+      return defaultReason;
+    }
+    if (!selectedReplayStudyKey) {
+      return defaultReason;
+    }
+    if (!selectedReplayStudyItem) {
+      return "This row still has a linked study key, but the current playback study catalog does not include that study. Refresh historical playback state or reload the backend.";
+    }
+    if (selectedReplayStudyLoadState === "loading") {
+      return "Loading linked strategy-study artifact for P/L-over-time review.";
+    }
+    if (selectedReplayStudyLoadState === "error") {
+      return selectedReplayStudyLoadReason || "Linked strategy-study artifact could not be loaded from the backend.";
+    }
+    if (!selectedReplayStudy) {
+      return "Linked strategy-study preview is unavailable for this row.";
+    }
+    if (!selectedReplayStudyRows.length) {
+      return selectedReplayStudyLoaded
+        ? "Linked strategy-study artifact loaded, but it did not publish chartable bars or rows."
+        : "Linked strategy-study preview is present, but full chart rows are unavailable until the backend study artifact loads.";
+    }
+    return "";
+  }, [
+    selectedLane,
+    selectedBoardRow,
+    selectedReplayStudy,
+    selectedReplayStudyItem,
+    selectedReplayStudyKey,
+    selectedReplayStudyLoadReason,
+    selectedReplayStudyLoadState,
+    selectedReplayStudyLoaded,
+    selectedReplayStudyRows.length,
+  ]);
+  const selectedHistorySupportRows = useMemo(() => strategyHistorySupportRows(selectedBoardRow), [selectedBoardRow]);
+  const selectedReviewLabel = selectedBoardRow ? strategyHistoryReviewStatusLabel(selectedBoardRow) : "—";
+  const selectedActivityLabel = selectedBoardRow ? strategyHistoryActivityStatusLabel(selectedBoardRow) : "—";
+  const selectedDateRangeLabel = selectedLane ? strategyLaneDateRangeLabel(asRecord(selectedLane.date_range)) : "—";
+  const selectedLifecycleLabel = selectedLane ? strategyLifecycleTruthLabel(asRecord(selectedLane.lifecycle_truth)) : "Lifecycle Detail Not Available";
+  const selectedProvenanceLabel = selectedLane ? formatValue(selectedLane.source_label ?? selectedLane.source_lane ?? "—") : "—";
+  const selectedTitle = selectedLane ? `${formatValue(selectedLane.display_name ?? selectedLane.strategy_label ?? selectedLane.strategy_key)} | ${formatValue(selectedLane.lane_label ?? selectedLane.source_type)}` : "Choose a row";
+  const selectedAnalyticsEquityPoints = useMemo(
+    () => {
+      let prior = 0;
+      return selectedAnalyticsEquityRows
+        .map((row) => {
+          const cumulative = Number(row.equity_pnl_cash ?? 0) || 0;
+          const point = {
+            date: dateKeyFromTimestamp(row.timestamp),
+            pnl: cumulative - prior,
+            tradeCount: 1,
+            cumulative,
+            contributions: [],
+            coveredSources: [] as Array<Exclude<PnlCalendarSource, "all" | "live" | "paper">>,
+          };
+          prior = cumulative;
+          return point;
+        })
+        .filter((row) => row.date);
+    },
+    [selectedAnalyticsEquityRows],
+  );
+  const selectedAnalyticsDrawdownTableRows = useMemo(
+    () =>
+      selectedAnalyticsDrawdownRows.map((row) => ({
+        date: row.timestamp ?? "—",
+        equity_peak: "—",
+        equity_value: row.equity_pnl_cash ?? "—",
+        drawdown_value: row.drawdown_cash ?? "—",
+      })),
+    [selectedAnalyticsDrawdownRows],
+  );
+  const selectedAnalyticsTradeActivityRows = useMemo(
+    () =>
+      selectedAnalyticsTradeRows.map((row) => ({
+        ...row,
+        entry_timestamp: row.entry_ts ?? row.entry_timestamp,
+        exit_timestamp: row.exit_ts ?? row.exit_timestamp,
+        realized_pnl: row.pnl_cash ?? row.realized_pnl,
+      })),
+    [selectedAnalyticsTradeRows],
+  );
+  const selectedSessionBreakdown = asArray<JsonRecord>(asRecord(asRecord(selectedLane?.metrics).session_breakdown).value);
+  const selectedTradeFamilyBreakdown = asArray<JsonRecord>(asRecord(asRecord(selectedLane?.metrics).trade_family_breakdown).value);
+
+  if (!strategyOptions.length) {
+    return <div className="placeholder-note">No strategy history review rows are available yet.</div>;
+  }
+
+  return (
+    <div className="results-board-panel">
+      <div className="metric-grid">
+        <MetricCard label="Rows In Review" value={formatShortNumber(rankedBoardRows.length)} tone={rankedBoardRows.length ? "good" : "warn"} />
+        <MetricCard label="Showing" value={selectedActivityStatus === "all" ? "All activity states" : strategyHistoryActivityStatusLabel({ activity_status_id: selectedActivityStatus })} tone={selectedActivityStatus === "HAS_TRADES" ? "good" : "muted"} />
+        <MetricCard label="Sort" value={formatValue(effectiveSortMeta.label ?? effectiveSortField)} />
+        <MetricCard label="Scope" value={formatValue(asRecord(runScopeLookup.get(selectedRunScope)).label ?? selectedRunScope)} />
+        <MetricCard label="Selected Review Status" value={selectedReviewLabel} tone={strategyHistoryStatusTone(strategyHistoryReviewStatusId(selectedBoardRow))} />
+        <MetricCard label="Selected Activity" value={selectedActivityLabel} tone={strategyHistoryStatusTone(strategyHistoryActivityStatusId(selectedBoardRow))} />
+      </div>
+      <div className="notice-strip compact">
+        <div><strong>Review-first default:</strong> this page starts biased toward strategies that actually traded.</div>
+        <div><strong>Demotion rule:</strong> zero-trade and insufficient-history rows stay explicit and filterable instead of reading like viable active candidates.</div>
+        {runScopeUnavailableReason ? <div><strong>Scope Note:</strong> {runScopeUnavailableReason}</div> : null}
+      </div>
+      <div className="study-toolbar">
+        <div className="study-workbench-controls">
+          <label className="study-select-field">
+            <span>Strategy</span>
+            <select value={selectedStrategyKey} onChange={(event) => setSelectedStrategyKey(event.target.value)}>
+              <option value="all">All strategies</option>
+              {strategyOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Review Status</span>
+            <select value={selectedReviewStatus} onChange={(event) => setSelectedReviewStatus(event.target.value)}>
+              <option value="all">All review states</option>
+              {reviewStatusOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Activity</span>
+            <select value={selectedActivityStatus} onChange={(event) => setSelectedActivityStatus(event.target.value)}>
+              <option value="all">All activity</option>
+              {activityStatusOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Provenance</span>
+            <select value={selectedSourceType} onChange={(event) => setSelectedSourceType(event.target.value)}>
+              <option value="all">All provenance lanes</option>
+              {sourceTypeOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Lifecycle Truth</span>
+            <select value={selectedLifecycleTruthClass} onChange={(event) => setSelectedLifecycleTruthClass(event.target.value)}>
+              <option value="all">All lifecycle classes</option>
+              {lifecycleTruthOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Candidate Status</span>
+            <select value={selectedCandidateStatus} onChange={(event) => setSelectedCandidateStatus(event.target.value)}>
+              <option value="all">All candidate states</option>
+              {candidateStatusOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Date Window</span>
+            <select value={selectedDateWindow} onChange={(event) => setSelectedDateWindow(event.target.value)}>
+              {dateWindowOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Run Scope</span>
+            <select value={selectedRunScope} onChange={(event) => setSelectedRunScope(event.target.value)}>
+              {runScopeOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")} disabled={row.available === false}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Sort Field</span>
+            <select value={selectedSortField} onChange={(event) => setSelectedSortField(event.target.value)}>
+              {sortFieldOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")} disabled={row.available === false}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Rank Limit</span>
+            <select value={selectedRankLimit} onChange={(event) => setSelectedRankLimit(event.target.value)}>
+              <option value="25">Top 25</option>
+              {rankLimitOptions.map((row) => (
+                <option key={String(row.id ?? "")} value={String(row.id ?? "")}>{formatValue(row.label ?? row.id)}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
+      <DataTable
+        columns={[
+          { key: "strategy_display_name", label: "Strategy", render: (row) => formatValue(row.strategy_display_name ?? row.strategy_key) },
+          { key: "lane_label", label: "Lane", render: (row) => formatValue(row.lane_label ?? row.source_type) },
+          { key: "run_study_identity", label: "Run / Study", render: (row) => formatValue(row.run_study_identity ?? "—") },
+          { key: "review_status", label: "Review Status", render: (row) => <Badge label={strategyHistoryReviewStatusLabel(row)} tone={strategyHistoryStatusTone(strategyHistoryReviewStatusId(row))} /> },
+          { key: "activity_status", label: "Activity", render: (row) => <Badge label={strategyHistoryActivityStatusLabel(row)} tone={strategyHistoryStatusTone(strategyHistoryActivityStatusId(row))} /> },
+          { key: "date_range_label", label: "Date Range", render: (row) => formatValue(row.date_range_label ?? "—") },
+          { key: "trade_count", label: "Trades", render: (row) => strategyMetricLabel(row, "trade_count") },
+          { key: "net_pnl", label: "Net P/L", render: (row) => strategyMetricLabel(row, "net_pnl") },
+          { key: "average_trade", label: "Avg Trade", render: (row) => strategyMetricLabel(row, "average_trade") },
+          { key: "profit_factor", label: "Profit Factor", render: (row) => strategyMetricLabel(row, "profit_factor") },
+          { key: "max_drawdown", label: "Max Drawdown", render: (row) => strategyMetricLabel(row, "max_drawdown") },
+          { key: "win_rate", label: "Win Rate", render: (row) => strategyMetricLabel(row, "win_rate") },
+          { key: "lifecycle_truth", label: "Lifecycle Truth", render: (row) => strategyLifecycleTruthLabel(asRecord(row.lifecycle_truth)) },
+          { key: "source_lane", label: "Provenance", render: (row) => formatValue(row.source_label ?? row.source_lane ?? "—") },
+        ]}
+        rows={rankedBoardRows}
+        emptyLabel={runScopeUnavailableReason || "No review rows match the current filters. Expand activity or review status to inspect zero-trade and insufficient-history rows."}
+        onRowClick={(row) => setSelectedLaneId(String(row.lane_id ?? row.id ?? ""))}
+        rowKey={(row) => String(row.lane_id ?? row.id ?? "")}
+        selectedRowKey={selectedLaneId}
+      />
+      {selectedLane ? (
+        <div className="results-board-panel">
+          <div className="study-meta-strip">
+            <span><strong>Strategy</strong> {selectedTitle}</span>
+            <span><strong>Review Status</strong> {selectedReviewLabel}</span>
+            <span><strong>Activity</strong> {selectedActivityLabel}</span>
+            <span><strong>Date Range</strong> {selectedDateRangeLabel}</span>
+            <span><strong>Lifecycle</strong> {selectedLifecycleLabel}</span>
+            <span><strong>Provenance</strong> {selectedProvenanceLabel}</span>
+          </div>
+          <div className="metric-grid">
+            <MetricCard label="Trades" value={strategyMetricLabel(selectedLane, "trade_count")} tone={strategyMetricAvailable(selectedLane, "trade_count") ? "good" : "warn"} />
+            <MetricCard label="Net P/L" value={strategyMetricLabel(selectedLane, "net_pnl")} tone={strategyMetricAvailable(selectedLane, "net_pnl") ? "good" : "warn"} />
+            <MetricCard label="Average Trade" value={strategyMetricLabel(selectedLane, "average_trade")} tone={strategyMetricAvailable(selectedLane, "average_trade") ? "good" : "warn"} />
+            <MetricCard label="Profit Factor" value={strategyMetricLabel(selectedLane, "profit_factor")} tone={strategyMetricAvailable(selectedLane, "profit_factor") ? "good" : "warn"} />
+            <MetricCard label="Max Drawdown" value={strategyMetricLabel(selectedLane, "max_drawdown")} tone={strategyMetricAvailable(selectedLane, "max_drawdown") ? "good" : "warn"} />
+            <MetricCard label="Win Rate" value={strategyMetricLabel(selectedLane, "win_rate")} tone={strategyMetricAvailable(selectedLane, "win_rate") ? "good" : "warn"} />
+          </div>
+          <div className="notice-strip compact">
+            {selectedHistorySupportRows.map((item) => (
+              <div key={item.label}><strong>{item.label}:</strong> {item.value}</div>
+            ))}
+          </div>
+          {selectedAnalyticsAvailable ? (
+            <>
+              <div className="notice-strip compact">
+                <div><strong>Research Analytics:</strong> Published historical analytics are driving this review detail directly.</div>
+                <div><strong>Strategy ID:</strong> {formatValue(selectedAnalyticsStrategyId || "Unavailable")}</div>
+                <div><strong>Fallback Policy:</strong> Replay-linked study loading is only used when published analytics are unavailable.</div>
+              </div>
+              <CalendarHistoryChart
+                mode="line"
+                title="Research Equity Curve"
+                subtitle="Published research analytics equity progression for the selected strategy."
+                points={selectedAnalyticsEquityPoints}
+                emptyLabel="Research analytics equity history has not been published for this strategy yet."
+              />
+              <div className="split-panel">
+                <div>
+                  <h3 className="subsection-title">Trade Activity Over Time</h3>
+                  <TradeActivityChart
+                    trades={selectedAnalyticsTradeActivityRows}
+                    emptyLabel="Published analytics did not include a closed-trade blotter for this strategy."
+                  />
+                </div>
+                <div>
+                  <h3 className="subsection-title">Trade History</h3>
+                  {selectedAnalyticsTradeRows.length ? (
+                    <DataTable
+                      columns={[
+                        { key: "family", label: "Family", render: (row) => formatValue(row.family ?? "—") },
+                        { key: "side", label: "Side", render: (row) => formatValue(row.side ?? "—") },
+                        { key: "entry_ts", label: "Entry", render: (row) => formatValue(row.entry_ts ?? "—") },
+                        { key: "exit_ts", label: "Exit", render: (row) => formatValue(row.exit_ts ?? "—") },
+                        { key: "pnl_cash", label: "P/L", render: (row) => formatMaybePnL(row.pnl_cash) },
+                        { key: "exit_reason", label: "Exit Reason", render: (row) => formatValue(row.exit_reason ?? "—") },
+                        { key: "session_segment", label: "Session", render: (row) => formatValue(row.session_segment ?? "—") },
+                      ]}
+                      rows={selectedAnalyticsTradeRows.slice(0, 40)}
+                      emptyLabel="No published closed trades are available for this strategy."
+                      rowKey={(row, index) => String(row.decision_id ?? row.trade_id ?? row.entry_ts ?? index)}
+                    />
+                  ) : (
+                    <div className="placeholder-note">Published analytics did not include trade-history rows for this strategy.</div>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : selectedLane?.source_lane === "historical_playback" && selectedReplayStudy ? (
+            <>
+              {selectedReplayStudyRows.length > 0 ? (
+                <ReplayStrategyStudy studies={[selectedReplayStudy]} />
+              ) : (
+                <div className="placeholder-note">{selectedReplayStudyChartReason}</div>
+              )}
+              <div className="split-panel">
+                <div>
+                  <h3 className="subsection-title">Trade Activity Over Time</h3>
+                  <TradeActivityChart trades={selectedReplayTradeRows} emptyLabel="Trade activity chart unavailable because the replay artifact does not expose a closed-trade history." />
+                </div>
+                <div>
+                  <h3 className="subsection-title">Trade History</h3>
+                  {selectedReplayTradeRows.length ? (
+                    <DataTable
+                      columns={[
+                        { key: "family", label: "Family", render: (row) => formatValue(row.family ?? "—") },
+                        { key: "side", label: "Side", render: (row) => formatValue(row.side ?? "—") },
+                        { key: "entry_timestamp", label: "Entry", render: (row) => formatValue(row.entry_timestamp ?? "—") },
+                        { key: "exit_timestamp", label: "Exit", render: (row) => formatValue(row.exit_timestamp ?? "—") },
+                        { key: "realized_pnl", label: "P/L", render: (row) => formatMaybePnL(row.realized_pnl) },
+                        { key: "exit_reason", label: "Exit Reason", render: (row) => formatValue(row.exit_reason ?? "—") },
+                        { key: "truth_source", label: "Truth", render: (row) => formatValue(row.truth_source ?? "—") },
+                      ]}
+                      rows={selectedReplayTradeRows.slice(0, 40)}
+                      emptyLabel="No closed trades were emitted for this study."
+                      rowKey={(row, index) => String(row.trade_id ?? row.entry_timestamp ?? index)}
+                    />
+                  ) : (
+                    <div className="placeholder-note">Trade history is unavailable because the study did not publish or reconstruct closed-trade rows.</div>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="placeholder-note">
+              {selectedReplayStudyChartReason}
+            </div>
+          )}
+          <div className="split-panel">
+            <div>
+              <h3 className="subsection-title">Session Breakdown</h3>
+              {selectedAnalyticsAvailable ? (
+                selectedAnalyticsSessionRows.length ? (
+                  <DataTable
+                    columns={[
+                      { key: "session_segment", label: "Session", render: (row) => formatValue(row.session_segment ?? "—") },
+                      { key: "trade_count", label: "Trades", render: (row) => formatValue(row.trade_count ?? "—") },
+                      { key: "net_pnl_cash", label: "Net P/L", render: (row) => formatMaybePnL(row.net_pnl_cash) },
+                      { key: "win_rate", label: "Win Rate", render: (row) => row.win_rate === undefined ? "Unavailable" : `${Number(row.win_rate).toFixed(1)}%` },
+                    ]}
+                    rows={selectedAnalyticsSessionRows}
+                    emptyLabel="No published session breakdown rows are available."
+                  />
+                ) : (
+                  <div className="placeholder-note">Published analytics did not include session segmentation for this strategy.</div>
+                )
+              ) : asRecord(asRecord(selectedLane.metrics).session_breakdown).available === true ? (
+                <DataTable
+                  columns={[
+                    { key: "session", label: "Session", render: (row) => formatValue(row.session ?? row.session_name ?? row.session_segment ?? "—") },
+                    { key: "trade_count", label: "Trades", render: (row) => formatValue(row.trade_count ?? row.count ?? "—") },
+                    { key: "net_pnl", label: "Net P/L", render: (row) => formatMaybePnL(row.net_pnl ?? row.realized_pnl) },
+                    { key: "win_rate", label: "Win Rate", render: (row) => row.win_rate === undefined ? "Unavailable" : `${Number(row.win_rate).toFixed(1)}%` },
+                  ]}
+                  rows={selectedSessionBreakdown}
+                  emptyLabel="No session breakdown rows were published."
+                />
+              ) : (
+                <div className="placeholder-note">{formatValue(asRecord(asRecord(selectedLane.metrics).session_breakdown).reason ?? "Session breakdown unavailable.")}</div>
+              )}
+            </div>
+            <div>
+              <h3 className="subsection-title">{selectedAnalyticsAvailable ? "Exit Reason Breakdown" : "Trade-Family Breakdown"}</h3>
+              {selectedAnalyticsAvailable ? (
+                selectedAnalyticsExitReasonRows.length ? (
+                  <DataTable
+                    columns={[
+                      { key: "exit_reason", label: "Exit Reason", render: (row) => formatValue(row.exit_reason ?? "—") },
+                      { key: "trade_count", label: "Trades", render: (row) => formatValue(row.trade_count ?? "—") },
+                      { key: "net_pnl_cash", label: "Net P/L", render: (row) => formatMaybePnL(row.net_pnl_cash) },
+                    ]}
+                    rows={selectedAnalyticsExitReasonRows}
+                    emptyLabel="No published exit-reason breakdown rows are available."
+                  />
+                ) : (
+                  <div className="placeholder-note">Published analytics did not include an exit-reason breakdown for this strategy.</div>
+                )
+              ) : asRecord(asRecord(selectedLane.metrics).trade_family_breakdown).available === true ? (
+                <DataTable
+                  columns={[
+                    { key: "family", label: "Family", render: (row) => formatValue(row.family ?? row.label ?? "—") },
+                    { key: "trade_count", label: "Trades", render: (row) => formatValue(row.trade_count ?? row.count ?? "—") },
+                    { key: "net_pnl", label: "Net P/L", render: (row) => formatMaybePnL(row.net_pnl ?? row.realized_pnl) },
+                    { key: "win_rate", label: "Win Rate", render: (row) => row.win_rate === undefined ? "Unavailable" : `${Number(row.win_rate).toFixed(1)}%` },
+                  ]}
+                  rows={selectedTradeFamilyBreakdown}
+                  emptyLabel="No trade-family breakdown rows were published."
+                />
+              ) : (
+                <div className="placeholder-note">{formatValue(asRecord(asRecord(selectedLane.metrics).trade_family_breakdown).reason ?? "Trade-family breakdown unavailable.")}</div>
+              )}
+            </div>
+          </div>
+          {selectedAnalyticsAvailable && selectedAnalyticsDrawdownTableRows.length ? (
+            <div>
+              <h3 className="subsection-title">Drawdown Curve</h3>
+              <DataTable
+                columns={[
+                  { key: "date", label: "Date", render: (row) => formatValue(row.date ?? "—") },
+                  { key: "equity_peak", label: "Peak", render: (row) => formatMaybePnL(row.equity_peak) },
+                  { key: "equity_value", label: "Equity", render: (row) => formatMaybePnL(row.equity_value) },
+                  { key: "drawdown_value", label: "Drawdown", render: (row) => formatMaybePnL(row.drawdown_value) },
+                ]}
+                rows={selectedAnalyticsDrawdownTableRows.slice(-40)}
+                emptyLabel="No published drawdown rows are available."
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 type StudyPnlMode = "cumulative_total" | "cumulative_realized" | "unrealized";
 
 type StudyHeightPreset = "compact" | "standard" | "expanded";
@@ -14914,6 +21638,586 @@ function strategyMetricLabel(lane: JsonRecord, metricKey: string): string {
     return Number.isFinite(value) ? `${value.toFixed(1)}%` : formatValue(metric.value);
   }
   return formatValue(metric.value);
+}
+
+function strategyHistoryStatusTone(statusId: unknown): "good" | "warn" | "danger" | "muted" {
+  switch (String(statusId ?? "").trim().toUpperCase()) {
+    case "ACTIVE_RETAINED":
+    case "HAS_TRADES":
+      return "good";
+    case "ZERO_TRADE_HISTORICAL":
+    case "ZERO_TRADES":
+      return "warn";
+    case "INSUFFICIENT_HISTORY":
+      return "danger";
+    case "INACTIVE_ARCHIVED":
+      return "muted";
+    default:
+      return "muted";
+  }
+}
+
+function strategyMetricNumber(lane: JsonRecord | null | undefined, metricKey: string): number | null {
+  const metric = asRecord(asRecord(lane?.metrics)[metricKey]);
+  if (metric.available !== true) {
+    return null;
+  }
+  const numeric = Number(metric.value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function strategyHistoryActivityStatusId(row: JsonRecord | null | undefined): string {
+  const explicit = String(row?.activity_status_id ?? asRecord(row?.activity_status).id ?? "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  const tradeCount = strategyMetricNumber(row, "trade_count");
+  if (tradeCount === null) {
+    return "INSUFFICIENT_HISTORY";
+  }
+  if (tradeCount <= 0) {
+    return "ZERO_TRADES";
+  }
+  return "HAS_TRADES";
+}
+
+function strategyHistoryActivityStatusLabel(row: JsonRecord | null | undefined): string {
+  const explicit = String(row?.activity_status_label ?? asRecord(row?.activity_status).label ?? "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  switch (strategyHistoryActivityStatusId(row)) {
+    case "ZERO_TRADES":
+      return "Zero-Trade Historical";
+    case "HAS_TRADES":
+      return "Has Trades";
+    case "INSUFFICIENT_HISTORY":
+    default:
+      return "Insufficient History";
+  }
+}
+
+function strategyHistoryReviewStatusId(row: JsonRecord | null | undefined): string {
+  const explicit = String(row?.review_status_id ?? asRecord(row?.review_status).id ?? "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  const activityStatus = strategyHistoryActivityStatusId(row);
+  if (activityStatus === "INSUFFICIENT_HISTORY") {
+    return "INSUFFICIENT_HISTORY";
+  }
+  if (activityStatus === "ZERO_TRADES") {
+    return "ZERO_TRADE_HISTORICAL";
+  }
+  const sourceType = String(row?.source_type ?? row?.lane_type ?? row?.source_lane ?? "").trim();
+  const candidateStatusId = String(row?.candidate_status_id ?? asRecord(row?.candidate_status).id ?? "").trim();
+  if (sourceType === "benchmark_replay" || candidateStatusId === "BENCHMARK_REFERENCE" || candidateStatusId === "HISTORICAL_REFERENCE") {
+    return "INACTIVE_ARCHIVED";
+  }
+  return "ACTIVE_RETAINED";
+}
+
+function strategyHistoryReviewStatusLabel(row: JsonRecord | null | undefined): string {
+  const explicit = String(row?.review_status_label ?? asRecord(row?.review_status).label ?? "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  switch (strategyHistoryReviewStatusId(row)) {
+    case "ACTIVE_RETAINED":
+      return "Active / Retained";
+    case "ZERO_TRADE_HISTORICAL":
+      return "Zero-Trade Historical";
+    case "INACTIVE_ARCHIVED":
+      return "Inactive / Archived";
+    case "INSUFFICIENT_HISTORY":
+    default:
+      return "Insufficient History";
+  }
+}
+
+function strategyHistorySupportRows(row: JsonRecord | null | undefined): Array<{ label: string; value: string; tone: "good" | "warn" | "danger" | "muted" }> {
+  const support = asRecord(row?.history_review_support);
+  return [
+    ["P/L Over Time", asRecord(support.pnl_over_time)],
+    ["Trade Activity", asRecord(support.trade_activity_over_time)],
+    ["Trade History", asRecord(support.trade_history)],
+    ["Session Breakdown", asRecord(support.session_breakdown)],
+    ["Trade Family Breakdown", asRecord(support.trade_family_breakdown)],
+  ].map(([label, payload]) => {
+    const fallback =
+      label === "P/L Over Time" || label === "Trade Activity"
+        ? strategyAnalysisIsHistoricalReplayLane(row)
+          ? "Available when a linked strategy study is present"
+          : "Unavailable for this lane"
+        : label === "Trade History"
+          ? strategyMetricNumber(row, "trade_count") !== null
+            ? "Available when closed-trade lifecycle rows are published"
+            : "Unavailable"
+          : label === "Session Breakdown"
+            ? formatValue(asRecord(asRecord(row?.metrics).session_breakdown).reason ?? "Unavailable")
+            : formatValue(asRecord(asRecord(row?.metrics).trade_family_breakdown).reason ?? "Unavailable");
+    return {
+      label,
+      value: payload.available === true ? "Available" : formatValue(payload.reason ?? fallback),
+      tone: payload.available === true ? "good" : "warn",
+    };
+  });
+}
+
+function replayStudyTradeRows(studyPayload: JsonRecord | null | undefined): JsonRecord[] {
+  const study = asRecord(asRecord(studyPayload).study ?? studyPayload);
+  const summary = asRecord(study.summary);
+  const meta = asRecord(study.meta);
+  const pointValue = Number(study.point_value);
+  const scaledCash = (row: JsonRecord): number | null => {
+    const realized = studyNumber(row.realized_pnl ?? row.pnl_cash);
+    if (realized !== null) {
+      return realized;
+    }
+    const points = studyNumber(row.pnl_points);
+    if (points !== null && Number.isFinite(pointValue)) {
+      return points * pointValue;
+    }
+    return null;
+  };
+  const normalizeSummaryTrade = (row: JsonRecord): JsonRecord => ({
+    trade_id: String(row.trade_id ?? row.decision_id ?? row.entry_ts ?? ""),
+    family: String(row.family ?? row.family_name ?? ""),
+    side: String(row.side ?? ""),
+    entry_timestamp: String(row.entry_timestamp ?? row.entry_ts ?? ""),
+    exit_timestamp: String(row.exit_timestamp ?? row.exit_ts ?? ""),
+    entry_price: studyNumber(row.entry_price),
+    exit_price: studyNumber(row.exit_price),
+    realized_pnl: scaledCash(row),
+    exit_reason: String(row.exit_reason ?? ""),
+    entry_session_phase: String(row.entry_session_phase ?? ""),
+    exit_session_phase: String(row.exit_session_phase ?? ""),
+    truth_source: String(row.truth_source ?? "closed_trade_breakdown"),
+  });
+  const summaryRows = asArray<JsonRecord>(summary.closed_trade_breakdown);
+  if (summaryRows.length) {
+    return summaryRows.map(normalizeSummaryTrade);
+  }
+  const authoritativeRows = asArray<JsonRecord>(meta.authoritative_trade_lifecycle_records);
+  if (authoritativeRows.length) {
+    return authoritativeRows.map(normalizeSummaryTrade);
+  }
+  const events = asArray<JsonRecord>(study.trade_events)
+    .map((event) => ({
+      event_id: String(event.event_id ?? ""),
+      event_type: String(event.event_type ?? "").toUpperCase(),
+      execution_event_type: String(event.execution_event_type ?? "").toUpperCase(),
+      side: String(event.side ?? "").toUpperCase(),
+      family: String(event.family ?? ""),
+      reason: String(event.reason ?? ""),
+      event_timestamp: String(event.event_timestamp ?? event.decision_context_timestamp ?? ""),
+      event_price: studyNumber(event.event_price),
+    }))
+    .sort((left, right) => String(left.event_timestamp).localeCompare(String(right.event_timestamp)) || String(left.event_id).localeCompare(String(right.event_id)));
+  const trades: JsonRecord[] = [];
+  let openTrade: JsonRecord | null = null;
+  events.forEach((event) => {
+    const isEntry = event.event_type === "ENTRY_FILL" || event.execution_event_type === "ENTRY_EXECUTED";
+    const isExit = event.event_type === "EXIT_FILL" || event.execution_event_type === "EXIT_TRIGGERED";
+    if (isEntry) {
+      openTrade = {
+        trade_id: event.event_id,
+        family: event.family,
+        side: event.side,
+        entry_timestamp: event.event_timestamp,
+        entry_price: event.event_price,
+        truth_source: "trade_events",
+      };
+      return;
+    }
+    if (!isExit || !openTrade) {
+      return;
+    }
+    const entryPrice = studyNumber(openTrade.entry_price);
+    const exitPrice = studyNumber(event.event_price);
+    let realized = null;
+    if (entryPrice !== null && exitPrice !== null && Number.isFinite(pointValue)) {
+      realized = String(openTrade.side).toUpperCase() === "SHORT"
+        ? (entryPrice - exitPrice) * pointValue
+        : (exitPrice - entryPrice) * pointValue;
+    }
+    trades.push({
+      trade_id: openTrade.trade_id,
+      family: openTrade.family ?? event.family,
+      side: openTrade.side ?? event.side,
+      entry_timestamp: openTrade.entry_timestamp,
+      exit_timestamp: event.event_timestamp,
+      entry_price: entryPrice,
+      exit_price: exitPrice,
+      realized_pnl: realized,
+      exit_reason: event.reason,
+      entry_session_phase: "",
+      exit_session_phase: "",
+      truth_source: "trade_events",
+    });
+    openTrade = null;
+  });
+  return trades;
+}
+
+interface ActiveDrawdownEpisode {
+  peak_equity: number;
+  peak_trade_index: number;
+  peak_timestamp: string | null;
+  first_drawdown_trade_index: number;
+  trough_equity: number;
+  trough_trade_index: number;
+  trough_timestamp: string | null;
+}
+
+function sortReplayTradesChronologically(trades: JsonRecord[]): JsonRecord[] {
+  return [...trades]
+    .map((row, index) => ({
+      ...row,
+      trade_id: String(row.trade_id ?? row.decision_id ?? row.entry_timestamp ?? row.exit_timestamp ?? `trade-${index}`),
+    }))
+    .sort((left, right) => {
+      const leftTimestamp = parseTimestampMs(String(left.exit_timestamp ?? left.entry_timestamp ?? ""));
+      const rightTimestamp = parseTimestampMs(String(right.exit_timestamp ?? right.entry_timestamp ?? ""));
+      if (leftTimestamp !== rightTimestamp) {
+        return leftTimestamp - rightTimestamp;
+      }
+      return String(left.trade_id ?? "").localeCompare(String(right.trade_id ?? ""));
+    });
+}
+
+function drawdownFingerprintRows(trades: JsonRecord[], mode: "pain" | "recovery"): JsonRecord[] {
+  const grouped = new Map<string, JsonRecord>();
+  trades.forEach((trade) => {
+    const family = String(trade.family ?? trade.family_name ?? "Unspecified").trim() || "Unspecified";
+    const side = String(trade.side ?? "UNKNOWN").trim().toUpperCase() || "UNKNOWN";
+    const session = String(trade.entry_session_phase ?? trade.exit_session_phase ?? "UNKNOWN").trim() || "UNKNOWN";
+    const exitReason = String(trade.exit_reason ?? "UNKNOWN").trim() || "UNKNOWN";
+    const tradeTimestamp = String(trade.exit_timestamp ?? trade.entry_timestamp ?? "");
+    const realized = studyNumber(trade.realized_pnl) ?? 0;
+    const key = `${family}__${side}__${session}__${exitReason}`;
+    const bucket: JsonRecord = grouped.get(key) ?? {
+      id: key,
+      fingerprint_label: `${family} / ${side} / ${session}`,
+      family,
+      side,
+      entry_session_phase: session,
+      exit_reason: exitReason,
+      trade_count: 0,
+      total_realized_pnl: 0,
+      positive_trade_count: 0,
+      negative_trade_count: 0,
+      first_timestamp: tradeTimestamp || null,
+      last_timestamp: tradeTimestamp || null,
+    };
+    bucket.trade_count = Number(bucket.trade_count ?? 0) + 1;
+    bucket.total_realized_pnl = (studyNumber(bucket.total_realized_pnl) ?? 0) + realized;
+    if (realized > 0) {
+      bucket.positive_trade_count = Number(bucket.positive_trade_count ?? 0) + 1;
+    }
+    if (realized < 0) {
+      bucket.negative_trade_count = Number(bucket.negative_trade_count ?? 0) + 1;
+    }
+    if (!bucket.first_timestamp || parseTimestampMs(String(tradeTimestamp)) < parseTimestampMs(String(bucket.first_timestamp))) {
+      bucket.first_timestamp = tradeTimestamp || null;
+    }
+    if (!bucket.last_timestamp || parseTimestampMs(String(tradeTimestamp)) > parseTimestampMs(String(bucket.last_timestamp))) {
+      bucket.last_timestamp = tradeTimestamp || null;
+    }
+    grouped.set(key, bucket);
+  });
+  const rows: JsonRecord[] = Array.from(grouped.values()).map((row) => {
+    const tradeCount = Number(row.trade_count ?? 0);
+    const total = studyNumber(row.total_realized_pnl) ?? 0;
+    const wins = Number(row.positive_trade_count ?? 0);
+    return {
+      ...row,
+      average_realized_pnl: tradeCount > 0 ? total / tradeCount : null,
+      win_rate: tradeCount > 0 ? (wins / tradeCount) * 100 : null,
+    };
+  });
+  return rows.sort((left, right) => {
+    const leftTotal = studyNumber(left.total_realized_pnl) ?? 0;
+    const rightTotal = studyNumber(right.total_realized_pnl) ?? 0;
+    if (leftTotal !== rightTotal) {
+      return mode === "pain" ? leftTotal - rightTotal : rightTotal - leftTotal;
+    }
+    return (Number(right.trade_count ?? 0) || 0) - (Number(left.trade_count ?? 0) || 0);
+  });
+}
+
+function drawdownEpisodeInsight(episode: JsonRecord): string {
+  const painTop = asArray<JsonRecord>(episode.pain_fingerprint_rows)[0] ?? null;
+  const recoveryTop = asArray<JsonRecord>(episode.recovery_fingerprint_rows)[0] ?? null;
+  if (!painTop && !recoveryTop) {
+    return "No closed-trade fingerprint is available for this episode yet.";
+  }
+  const painFamily = String(painTop?.family ?? "Unspecified");
+  const recoveryFamily = String(recoveryTop?.family ?? "Unspecified");
+  const painSide = String(painTop?.side ?? "UNKNOWN");
+  const recoverySide = String(recoveryTop?.side ?? "UNKNOWN");
+  const painSession = String(painTop?.entry_session_phase ?? "UNKNOWN");
+  const recoverySession = String(recoveryTop?.entry_session_phase ?? "UNKNOWN");
+  if (painFamily !== recoveryFamily || painSide !== recoverySide || painSession !== recoverySession) {
+    return `Pain concentrated in ${painFamily} / ${painSide} / ${painSession}, while recovery leaned on ${recoveryFamily} / ${recoverySide} / ${recoverySession}. That is a good sign the rescue trades may be separable.`;
+  }
+  if (String(episode.fully_recovered ?? "") === "true") {
+    return `The same broad fingerprint both hurt and repaired equity here (${painFamily} / ${painSide} / ${painSession}), which suggests this strategy earns by broad participation rather than a clean rescue subset.`;
+  }
+  return `This episode never fully recovered, and the dominant pain fingerprint remained ${painFamily} / ${painSide} / ${painSession}. That points more toward structural selectivity or sizing work than exit polish alone.`;
+}
+
+function buildDrawdownEpisodes(trades: JsonRecord[]): JsonRecord[] {
+  const ordered = sortReplayTradesChronologically(trades);
+  if (!ordered.length) {
+    return [];
+  }
+  const equityAfterTrade: number[] = [];
+  let runningEquity = 0;
+  ordered.forEach((trade) => {
+    runningEquity += studyNumber(trade.realized_pnl) ?? 0;
+    equityAfterTrade.push(runningEquity);
+  });
+  const episodes: JsonRecord[] = [];
+  let peakEquity = 0;
+  let peakTradeIndex = -1;
+  let activeEpisode: ActiveDrawdownEpisode | null = null;
+
+  ordered.forEach((trade, index) => {
+    const equity = equityAfterTrade[index] ?? 0;
+    const timestamp = String(trade.exit_timestamp ?? trade.entry_timestamp ?? "");
+    if (!activeEpisode && equity >= peakEquity) {
+      peakEquity = equity;
+      peakTradeIndex = index;
+      return;
+    }
+    if (!activeEpisode && equity < peakEquity) {
+      activeEpisode = {
+        peak_equity: peakEquity,
+        peak_trade_index: peakTradeIndex,
+        peak_timestamp:
+          peakTradeIndex >= 0
+            ? String(ordered[peakTradeIndex]?.exit_timestamp ?? ordered[peakTradeIndex]?.entry_timestamp ?? timestamp)
+            : timestamp || null,
+        first_drawdown_trade_index: index,
+        trough_equity: equity,
+        trough_trade_index: index,
+        trough_timestamp: timestamp || null,
+      };
+    } else if (activeEpisode && equity < activeEpisode.trough_equity) {
+      activeEpisode.trough_equity = equity;
+      activeEpisode.trough_trade_index = index;
+      activeEpisode.trough_timestamp = timestamp || null;
+    }
+    if (activeEpisode && equity >= activeEpisode.peak_equity) {
+      const painTradeRows = ordered.slice(activeEpisode.first_drawdown_trade_index, activeEpisode.trough_trade_index + 1);
+      const recoveryTradeRows = ordered.slice(activeEpisode.trough_trade_index + 1, index + 1);
+      const painFingerprints = drawdownFingerprintRows(painTradeRows, "pain");
+      const recoveryFingerprints = drawdownFingerprintRows(recoveryTradeRows, "recovery");
+      const episode: JsonRecord = {
+        id: `episode-${episodes.length + 1}`,
+        episode_number: episodes.length + 1,
+        peak_timestamp: activeEpisode.peak_timestamp,
+        trough_timestamp: activeEpisode.trough_timestamp,
+        recovery_timestamp: timestamp || null,
+        peak_equity: activeEpisode.peak_equity,
+        trough_equity: activeEpisode.trough_equity,
+        recovery_equity: equity,
+        drawdown_amount: activeEpisode.peak_equity - activeEpisode.trough_equity,
+        recovered_amount: equity - activeEpisode.trough_equity,
+        retained_pct:
+          activeEpisode.peak_equity - activeEpisode.trough_equity > 0
+            ? ((equity - activeEpisode.trough_equity) / (activeEpisode.peak_equity - activeEpisode.trough_equity)) * 100
+            : null,
+        pain_trade_count: painTradeRows.length,
+        recovery_trade_count: recoveryTradeRows.length,
+        calendar_days_to_recover: Math.max(
+          0,
+          Math.round(
+            (parseTimestampMs(timestamp) - parseTimestampMs(String(activeEpisode.peak_timestamp ?? timestamp))) / (24 * 60 * 60 * 1000),
+          ),
+        ),
+        fully_recovered: true,
+        pain_trade_rows: painTradeRows,
+        recovery_trade_rows: recoveryTradeRows,
+        pain_fingerprint_rows: painFingerprints,
+        recovery_fingerprint_rows: recoveryFingerprints,
+      };
+      episode.insight = drawdownEpisodeInsight(episode);
+      episodes.push(episode);
+      activeEpisode = null;
+      peakEquity = equity;
+      peakTradeIndex = index;
+    }
+  });
+
+  if (activeEpisode) {
+    const unresolvedEpisode = activeEpisode;
+    const lastTrade = ordered[ordered.length - 1] ?? null;
+    const lastEquity = equityAfterTrade[equityAfterTrade.length - 1] ?? unresolvedEpisode.trough_equity;
+    const recoveryTradeRows = ordered.slice(unresolvedEpisode.trough_trade_index + 1);
+    const episode: JsonRecord = {
+      id: `episode-${episodes.length + 1}`,
+      episode_number: episodes.length + 1,
+      peak_timestamp: unresolvedEpisode.peak_timestamp,
+      trough_timestamp: unresolvedEpisode.trough_timestamp,
+      recovery_timestamp: null,
+      peak_equity: unresolvedEpisode.peak_equity,
+      trough_equity: unresolvedEpisode.trough_equity,
+      recovery_equity: lastEquity,
+      drawdown_amount: unresolvedEpisode.peak_equity - unresolvedEpisode.trough_equity,
+      recovered_amount: lastEquity - unresolvedEpisode.trough_equity,
+      retained_pct:
+        unresolvedEpisode.peak_equity - unresolvedEpisode.trough_equity > 0
+          ? ((lastEquity - unresolvedEpisode.trough_equity) / (unresolvedEpisode.peak_equity - unresolvedEpisode.trough_equity)) * 100
+          : null,
+      pain_trade_count: unresolvedEpisode.trough_trade_index - unresolvedEpisode.first_drawdown_trade_index + 1,
+      recovery_trade_count: recoveryTradeRows.length,
+      calendar_days_to_recover: Math.max(
+        0,
+        Math.round(
+          (parseTimestampMs(String(lastTrade?.exit_timestamp ?? lastTrade?.entry_timestamp ?? "")) - parseTimestampMs(String(unresolvedEpisode.peak_timestamp ?? ""))) / (24 * 60 * 60 * 1000),
+        ),
+      ),
+      fully_recovered: false,
+      pain_trade_rows: ordered.slice(unresolvedEpisode.first_drawdown_trade_index, unresolvedEpisode.trough_trade_index + 1),
+      recovery_trade_rows: recoveryTradeRows,
+      pain_fingerprint_rows: drawdownFingerprintRows(
+        ordered.slice(unresolvedEpisode.first_drawdown_trade_index, unresolvedEpisode.trough_trade_index + 1),
+        "pain",
+      ),
+      recovery_fingerprint_rows: drawdownFingerprintRows(recoveryTradeRows, "recovery"),
+    };
+    episode.insight = drawdownEpisodeInsight(episode);
+    episodes.push(episode);
+  }
+  return episodes.sort((left, right) => (studyNumber(right.drawdown_amount) ?? 0) - (studyNumber(left.drawdown_amount) ?? 0));
+}
+
+function buildDrawdownRecoveryAnalysis(studyPayload: JsonRecord | null | undefined): JsonRecord {
+  const trades = sortReplayTradesChronologically(replayStudyTradeRows(studyPayload));
+  const episodes = buildDrawdownEpisodes(trades);
+  const summary = asRecord(asRecord(studyPayload).summary);
+  const meta = asRecord(asRecord(studyPayload).meta);
+  const allPainTrades = episodes.flatMap((episode) => asArray<JsonRecord>(episode.pain_trade_rows));
+  const allRecoveryTrades = episodes.flatMap((episode) => asArray<JsonRecord>(episode.recovery_trade_rows));
+  const resolvedCount = episodes.filter((episode) => episode.fully_recovered === true).length;
+  const unresolvedCount = episodes.length - resolvedCount;
+  const worstEpisode = episodes[0] ?? null;
+  const timeStopCount = trades.filter((trade) => String(trade.exit_reason ?? "").trim() === "time_stop").length;
+  const netPnl = trades.reduce((sum, trade) => sum + (studyNumber(trade.realized_pnl) ?? 0), 0);
+  const globalPainFingerprints = drawdownFingerprintRows(allPainTrades, "pain");
+  const globalRecoveryFingerprints = drawdownFingerprintRows(allRecoveryTrades, "recovery");
+  return {
+    strategy_id: String(
+      studyPayload?.strategy_id
+        ?? meta.strategy_id
+        ?? studyPayload?.standalone_strategy_id
+        ?? meta.study_id
+        ?? "unknown_strategy",
+    ),
+    study_label: String(
+      studyPayload?.label
+        ?? meta.study_id
+        ?? meta.strategy_id
+        ?? studyPayload?.strategy_id
+        ?? "Study",
+    ),
+    trade_count: trades.length,
+    net_pnl: netPnl,
+    episode_count: episodes.length,
+    resolved_episode_count: resolvedCount,
+    unresolved_episode_count: unresolvedCount,
+    max_drawdown: studyNumber(worstEpisode?.drawdown_amount) ?? 0,
+    worst_episode_id: String(worstEpisode?.id ?? ""),
+    median_drawdown:
+      episodes.length
+        ? (() => {
+            const values = episodes.map((episode) => studyNumber(episode.drawdown_amount) ?? 0).sort((left, right) => left - right);
+            const middle = Math.floor(values.length / 2);
+            return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+          })()
+        : null,
+    average_days_to_recover:
+      episodes.length
+        ? episodes.reduce((sum, episode) => sum + (Number(episode.calendar_days_to_recover ?? 0) || 0), 0) / episodes.length
+        : null,
+    time_stop_share_pct: trades.length ? (timeStopCount / trades.length) * 100 : null,
+    dominant_pain_fingerprint: globalPainFingerprints[0]?.fingerprint_label ?? null,
+    dominant_recovery_fingerprint: globalRecoveryFingerprints[0]?.fingerprint_label ?? null,
+    episodes,
+    trades,
+    global_pain_fingerprints: globalPainFingerprints,
+    global_recovery_fingerprints: globalRecoveryFingerprints,
+  };
+}
+
+function tradeActivityBuckets(trades: JsonRecord[]): Array<{ date: string; count: number; pnl: number }> {
+  const grouped = new Map<string, { date: string; count: number; pnl: number }>();
+  trades.forEach((trade) => {
+    const date = studyDateLabel(String(trade.exit_timestamp ?? trade.entry_timestamp ?? ""));
+    if (!date) {
+      return;
+    }
+    const bucket = grouped.get(date) ?? { date, count: 0, pnl: 0 };
+    bucket.count += 1;
+    bucket.pnl += Number(trade.realized_pnl ?? 0) || 0;
+    grouped.set(date, bucket);
+  });
+  return Array.from(grouped.values()).sort((left, right) => left.date.localeCompare(right.date));
+}
+
+function TradeActivityChart(props: { trades: JsonRecord[]; emptyLabel: string }) {
+  const buckets = useMemo(() => tradeActivityBuckets(props.trades), [props.trades]);
+  if (!buckets.length) {
+    return <div className="placeholder-note">{props.emptyLabel}</div>;
+  }
+  const width = 720;
+  const height = 180;
+  const margin = { top: 12, right: 16, bottom: 34, left: 40 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const maxCount = Math.max(...buckets.map((bucket) => bucket.count), 1);
+  const barWidth = Math.max(Math.min(plotWidth / Math.max(buckets.length, 1) - 4, 22), 4);
+  const xForIndex = (index: number) => margin.left + (plotWidth * (buckets.length <= 1 ? 0.5 : index / Math.max(buckets.length - 1, 1)));
+  const yForCount = (count: number) => margin.top + ((maxCount - count) / maxCount) * plotHeight;
+  const tickIndices = studyTickIndices(buckets.length, Math.min(6, buckets.length));
+  return (
+    <div className="study-chart-shell">
+      <div className="study-chart-scroll">
+        <svg viewBox={`0 0 ${width} ${height}`} width={width} height={height} style={{ width: `${width}px`, height: `${height}px` }} role="img" aria-label="Trade activity over time">
+          <rect x={0} y={0} width={width} height={height} rx={16} className="study-pane study-pane-lower" />
+          <text x={18} y={28} className="study-pane-label">Trade Activity</text>
+          {tickIndices.map((index) => (
+            <g key={`trade-bucket-tick-${index}`}>
+              <line x1={xForIndex(index)} y1={margin.top} x2={xForIndex(index)} y2={height - margin.bottom + 4} className="study-grid-line" />
+              <text x={xForIndex(index)} y={height - 10} className="study-axis-label" textAnchor="middle">
+                {buckets[index]?.date ?? ""}
+              </text>
+            </g>
+          ))}
+          {buckets.map((bucket, index) => {
+            const x = xForIndex(index);
+            const y = yForCount(bucket.count);
+            const barHeight = Math.max(height - margin.bottom - y, 2);
+            return (
+              <g key={`${bucket.date}-${index}`}>
+                <title>{`${bucket.date} | ${bucket.count} trades | ${formatMaybePnL(bucket.pnl)}`}</title>
+                <rect
+                  x={x - barWidth / 2}
+                  y={y}
+                  width={barWidth}
+                  height={barHeight}
+                  rx={3}
+                  className={bucket.pnl >= 0 ? "study-candle up" : "study-candle down"}
+                />
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
 }
 
 function strategyLaneTimeframeLabel(timeframeTruth: JsonRecord): string {
@@ -15264,6 +22568,162 @@ function strategyAnalysisRunScopeUnavailableReason({
   return null;
 }
 
+function comparePlaybackStudyItems(left: JsonRecord, right: JsonRecord): number {
+  const rightCoverageEnd = parseTimestampMs(String(right.coverage_end ?? ""));
+  const leftCoverageEnd = parseTimestampMs(String(left.coverage_end ?? ""));
+  if (rightCoverageEnd !== leftCoverageEnd) {
+    return rightCoverageEnd - leftCoverageEnd;
+  }
+  const rightSpan = Math.max(
+    0,
+    parseTimestampMs(String(right.coverage_end ?? "")) - parseTimestampMs(String(right.coverage_start ?? "")),
+  );
+  const leftSpan = Math.max(
+    0,
+    parseTimestampMs(String(left.coverage_end ?? "")) - parseTimestampMs(String(left.coverage_start ?? "")),
+  );
+  if (rightSpan !== leftSpan) {
+    return rightSpan - leftSpan;
+  }
+  const rightTrades = playbackStudyTradeCount(right);
+  const leftTrades = playbackStudyTradeCount(left);
+  if (rightTrades !== leftTrades) {
+    return rightTrades - leftTrades;
+  }
+  return String(right.study_key ?? "").localeCompare(String(left.study_key ?? ""));
+}
+
+function playbackStudyTradeCount(item: JsonRecord | null | undefined): number {
+  const summary = asRecord(item?.summary);
+  return (
+    numericOrNull(item?.closed_trade_count)
+    ?? numericOrNull(summary.closed_trade_count)
+    ?? asArray<JsonRecord>(summary.closed_trade_breakdown).length
+    ?? 0
+  );
+}
+
+function playbackCalendarBreakdownRows(summaryLike: JsonRecord | null | undefined): JsonRecord[] {
+  const summary = asRecord(summaryLike);
+  const compactRows = asArray<JsonRecord>(summary.calendar_breakdown)
+    .map((row) => ({
+      date: row.date ?? dateKeyFromTimestamp(row.exit_timestamp ?? row.entry_timestamp),
+      realized_pnl: row.realized_pnl ?? row.pnl ?? null,
+      trade_count: row.trade_count ?? row.count ?? 0,
+    }))
+    .filter((row) => String(row.date ?? "").trim());
+  if (compactRows.length) {
+    return compactRows;
+  }
+
+  const grouped = new Map<string, { date: string; realized_pnl: number; trade_count: number }>();
+  for (const trade of asArray<JsonRecord>(summary.closed_trade_breakdown)) {
+    const date = dateKeyFromTimestamp(trade.exit_timestamp ?? trade.entry_timestamp);
+    const pnl = numericOrNull(trade.realized_pnl);
+    if (!date || pnl === null) {
+      continue;
+    }
+    const existing = grouped.get(date) ?? { date, realized_pnl: 0, trade_count: 0 };
+    existing.realized_pnl += pnl;
+    existing.trade_count += 1;
+    grouped.set(date, existing);
+  }
+  return [...grouped.values()]
+    .sort((left, right) => String(left.date).localeCompare(String(right.date)))
+    .map((row) => ({
+      date: row.date,
+      realized_pnl: row.realized_pnl,
+      trade_count: row.trade_count,
+    }));
+}
+
+function playbackSummaryYtdPnl(summaryLike: JsonRecord | null | undefined): number | null {
+  const currentYear = new Date().getFullYear();
+  const rows = playbackCalendarBreakdownRows(summaryLike);
+  let sawValue = false;
+  let total = 0;
+  for (const row of rows) {
+    const date = String(row.date ?? "").trim();
+    if (!date.startsWith(`${currentYear}-`)) {
+      continue;
+    }
+    const pnl = numericOrNull(row.realized_pnl);
+    if (pnl === null) {
+      continue;
+    }
+    sawValue = true;
+    total += pnl;
+  }
+  return sawValue ? total : null;
+}
+
+function firstPreferredPlaybackStudyItem(
+  items: JsonRecord[],
+  preferredIds: string[],
+): JsonRecord | null {
+  if (!items.length || !preferredIds.length) {
+    return null;
+  }
+  const itemsById = new Map<string, JsonRecord>();
+  for (const item of items) {
+    const key = String(item.strategy_id ?? "").trim();
+    if (key) {
+      itemsById.set(key, item);
+    }
+  }
+  for (const preferredId of preferredIds) {
+    const match = itemsById.get(String(preferredId ?? "").trim());
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+}
+
+function canonicalPlaybackStrategyId(item: JsonRecord): string {
+  const raw = String(item.strategy_id ?? item.study_key ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  return raw
+    .replace(/_checkpoint_exit_v1_probe_confirmation_v1$/i, "")
+    .replace(/_checkpoint_exit_v1_risk_shaped_[a-z0-9_]+$/i, "")
+    .replace(/_checkpoint_exit_v1$/i, "")
+    .replace(/_checkpoint_no_traction_v1$/i, "")
+    .replace(/_continuous_backfill_\d+$/i, "")
+    .replace(/_risk_shaped_[a-z0-9_]+$/i, "")
+    .replace(/_probe_confirmation_v1$/i, "")
+    .replace(/_loosened_v1$/i, "")
+    .replace(/_selective_v1$/i, "")
+    .replace(/_edge_v1$/i, "");
+}
+
+function cleanedPlaybackStrategyLabel(label: string): string {
+  return String(label)
+    .replace(/\s*\[[^\]]+\]\s*$/g, "")
+    .replace(/\s*\/\s*Risk-?Shaped\s+.+$/i, "")
+    .replace(/\s*\/\s*Selective\s+.+$/i, "")
+    .replace(/\s*\/\s*Edge\s+.+$/i, "")
+    .trim();
+}
+
+function playbackVariantLabel(item: JsonRecord, canonicalId: string): string {
+  const explicitLabel = String(item.label ?? "").trim();
+  const bracketMatch = explicitLabel.match(/\[([^\]]+)\]\s*$/);
+  if (bracketMatch) {
+    return bracketMatch[1].trim();
+  }
+  const strategyId = String(item.strategy_id ?? item.study_key ?? "").trim();
+  if (strategyId === canonicalId) {
+    return "Primary";
+  }
+  const suffix = strategyId.startsWith(`${canonicalId}_`) ? strategyId.slice(canonicalId.length + 1) : "";
+  if (suffix) {
+    return sentenceCase(suffix.replaceAll("_", " "));
+  }
+  return explicitLabel || "Variant";
+}
+
 function resolveStudyLayout(rowCount: number, preset: StudyHeightPreset): {
   surfaceWidth: number;
   shellMinHeight: number;
@@ -15372,6 +22832,33 @@ function studyTickIndices(length: number, desiredCount: number): number[] {
   return Array.from(indices).sort((left, right) => left - right);
 }
 
+function studyValueTicks(min: number, max: number, desiredCount: number): number[] {
+  const safeMin = Number.isFinite(min) ? min : 0;
+  const safeMax = Number.isFinite(max) ? max : 0;
+  const range = safeMax - safeMin;
+  if (Math.abs(range) < 0.000001) {
+    return [safeMax];
+  }
+  return Array.from({ length: Math.max(desiredCount, 2) }, (_, index) => safeMax - (range * index) / Math.max(desiredCount - 1, 1));
+}
+
+function studyNumericLabel(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "—";
+  }
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1000) {
+    return value.toFixed(0);
+  }
+  if (magnitude >= 100) {
+    return value.toFixed(1);
+  }
+  if (magnitude >= 1) {
+    return value.toFixed(2);
+  }
+  return value.toFixed(4);
+}
+
 function studyAxisLabel(timestamp: string | undefined): string {
   if (!timestamp) {
     return "-";
@@ -15381,6 +22868,46 @@ function studyAxisLabel(timestamp: string | undefined): string {
     return timestamp;
   }
   return value.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function studyAxisLabelForRange(
+  timestamp: string | undefined,
+  rangeStart: string | undefined,
+  rangeEnd: string | undefined,
+): string {
+  if (!timestamp) {
+    return "-";
+  }
+  const value = new Date(timestamp);
+  if (Number.isNaN(value.getTime())) {
+    return timestamp;
+  }
+  const start = rangeStart ? new Date(rangeStart) : null;
+  const end = rangeEnd ? new Date(rangeEnd) : null;
+  const spanMs =
+    start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())
+      ? Math.abs(end.getTime() - start.getTime())
+      : 0;
+  if (spanMs >= 120 * 24 * 60 * 60 * 1000) {
+    return value.toLocaleDateString([], { month: "short", year: "2-digit" });
+  }
+  if (spanMs >= 2 * 24 * 60 * 60 * 1000) {
+    return value.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+  return value.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function timelineLabels(
+  timestamps: string[],
+  maxLabels: number,
+): Array<{ key: string; label: string }> {
+  if (!timestamps.length) {
+    return [];
+  }
+  return studyTickIndices(timestamps.length, maxLabels).map((index) => ({
+    key: `${index}:${timestamps[index] ?? ""}`,
+    label: studyAxisLabelForRange(timestamps[index], timestamps[0], timestamps[timestamps.length - 1]),
+  }));
 }
 
 function buildStudyPath(points: Array<{ x: number; y: number | null }>): string | null {

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from zoneinfo import ZoneInfo
 
 from .execution_truth import (
     AUTHORITATIVE_INTRABAR_ENTRY_ONLY,
@@ -28,6 +29,7 @@ TRACKED_ATP_DISPLAY_NAME = "ATP Companion Baseline v1 — Asia + US Executable, 
 TRACKED_ATP_BENCHMARK_DESIGNATION = "CURRENT_ATP_COMPANION_BENCHMARK"
 TRACKED_ATP_STRATEGY_FAMILY = "active_trend_participation_engine"
 TRACKED_ATP_RUNTIME_KIND = "atp_companion_benchmark_paper"
+NEW_YORK_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -750,7 +752,7 @@ def _performance_summary(*, strategy_trades: Sequence[dict[str, Any]], session_d
         _decimal_or_none(row.get("realized_pnl") or row.get("net_pnl") or row.get("gross_pnl"))
         for row in closed_trades
         if session_date
-        and str(row.get("exit_timestamp") or row.get("entry_timestamp") or "")[:10] == session_date
+        and _ny_session_date_key(str(row.get("exit_timestamp") or row.get("entry_timestamp") or "")) == session_date
     ]
     current_day_pnl = sum((value for value in current_day_values if value is not None), Decimal("0"))
     max_drawdown = _max_drawdown(realized_values)
@@ -1368,6 +1370,15 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
         return datetime.fromisoformat(str(value))
     except ValueError:
         return None
+
+
+def _ny_session_date_key(timestamp: str | None) -> str | None:
+    parsed = _parse_iso_datetime(timestamp)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(NEW_YORK_TZ).date().isoformat()
 
 
 def _string_or_none(value: Any) -> str | None:

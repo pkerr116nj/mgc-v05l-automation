@@ -3,14 +3,19 @@
 # promotion/add review pass. It does not modify frozen ATP Companion Baseline v1
 # semantics. Shared paper/runtime support for staged ATP candidate lanes now
 # exists separately through explicit candidate lane configs.
+# Benchmark-local ATP assumptions remain comparison anchors only. This candidate
+# is judged on explicit research merit and does not become the benchmark unless
+# an explicit benchmark-promotion decision is made later.
 
 candidate_name: "ATP Companion Candidate — Promotion 1 at +0.75R, VWAP Favorable Only"
 candidate_label: "ATP_PROMOTION_1_075R_FAVORABLE_ONLY"
 candidate_status: "RESEARCH_CANDIDATE_ONLY"
+candidate_taxonomy_class: "RESEARCH_CANDIDATE_LANE"
 candidate_origin: "atp_promotion_add_review"
 candidate_id: "promotion_1_075r_favorable_only"
 baseline_reference_label: "ATP_COMPANION_V1_ASIA_US"
 baseline_reference_config: "config/atp_companion_baseline_v1_asia_us.yaml"
+benchmark_replacement_requires_explicit_promotion: true
 
 identity:
   replay_strategy_id: "atp_companion_v1_asia_us__promotion_1_075r_favorable_only"
@@ -56,3 +61,7 @@ does_not_change:
   - "ATP Companion Baseline v1 exit behavior"
   - "Asia + US executable coverage"
   - "London diagnostic-only posture"
+
+taxonomy_note:
+  benchmark_local_assumptions_only: true
+  candidate_success_is_not_benchmark_replacement: true

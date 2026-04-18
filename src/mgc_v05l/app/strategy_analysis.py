@@ -18,6 +18,7 @@ LANE_TYPE_BENCHMARK_REPLAY = "benchmark_replay"
 LANE_TYPE_PAPER_RUNTIME = "paper_runtime"
 LANE_TYPE_HISTORICAL_PLAYBACK = "historical_playback"
 LANE_TYPE_RESEARCH_EXECUTION = "research_execution"
+LANE_TYPE_RESEARCH_ANALYTICS = "research_analytics"
 LIFECYCLE_TRUTH_FULL = "FULL_LIFECYCLE_TRUTH"
 LIFECYCLE_TRUTH_HYBRID = "HYBRID_ENTRY_BASELINE_EXIT_TRUTH"
 LIFECYCLE_TRUTH_BASELINE_ONLY = "BASELINE_ONLY"
@@ -35,6 +36,7 @@ def build_strategy_analysis_payload(
     paper: dict[str, Any],
     runtime_registry: dict[str, Any] | None = None,
     lane_registry: dict[str, Any] | None = None,
+    research_analytics: dict[str, Any] | None = None,
     generated_at: str,
 ) -> dict[str, Any]:
     """Build a strategy-centric analysis surface across replay and paper lanes."""
@@ -44,7 +46,8 @@ def build_strategy_analysis_payload(
 
     replay_lanes = _replay_strategy_lanes(historical_playback)
     paper_lanes = _paper_strategy_lanes(paper, generated_at=generated_at)
-    evidence_lanes = [*replay_lanes, *paper_lanes]
+    analytics_lanes = _research_analytics_strategy_lanes(research_analytics)
+    evidence_lanes = [*replay_lanes, *paper_lanes, *analytics_lanes]
     runtime_registry = dict(runtime_registry or {})
     lane_registry = dict(lane_registry or {})
 
@@ -125,6 +128,7 @@ def build_strategy_analysis_payload(
                 "has_benchmark_replay": lane_presence.get(LANE_TYPE_BENCHMARK_REPLAY, 0) > 0,
                 "has_paper_runtime": lane_presence.get(LANE_TYPE_PAPER_RUNTIME, 0) > 0,
                 "has_research_execution": lane_presence.get(LANE_TYPE_RESEARCH_EXECUTION, 0) > 0,
+                "has_research_analytics": lane_presence.get(LANE_TYPE_RESEARCH_ANALYTICS, 0) > 0,
                 "has_historical_playback": lane_presence.get(LANE_TYPE_HISTORICAL_PLAYBACK, 0) > 0,
                 "default_lane_id": default_lane_id,
                 "comparison_preset_count": len(comparison_presets),
@@ -212,6 +216,7 @@ def build_strategy_analysis_payload(
             "notes": [
                 "Metrics are rendered only when the underlying lane publishes enough truth to support them.",
                 "Replay, paper-runtime, and research-execution lanes stay provenance-separated in this surface.",
+                "Published research-analytics lanes are read-only summaries derived from registered research truth.",
                 "Unavailable metrics include an explicit reason instead of synthetic placeholders.",
             ],
         },
@@ -225,8 +230,10 @@ def build_strategy_analysis_payload(
             "benchmark_replay": "Historical playback manifests, replay summary artifacts, and strategy-study artifacts under outputs/historical_playback.",
             "paper_runtime": "Current paper dashboard snapshots, lane-local SQLite truth, and tracked paper detail artifacts under outputs/operator_dashboard and paper lane stores.",
             "research_execution": "Strategy-study artifacts whose study_mode is research_execution_mode.",
+            "research_analytics": "Published research-platform analytics datasets built from registered strategy scope bundles and persisted trade truth.",
             "historical_playback": "Legacy/backfilled strategy-study artifacts where benchmark/research semantics are not explicit.",
         },
+        "research_analytics": dict(research_analytics or {"available": False, "reason": "research analytics payload not published"}),
         "notes": [
             "This surface is strategy-centric: choose a strategy first, then inspect lane-specific evidence and comparisons.",
             "Benchmark/replay truth is kept separate from paper/runtime truth and broker truth.",
@@ -370,6 +377,88 @@ def _register_strategy_discovery(
     payload["source_types"] = set(payload["source_types"])
 
 
+def _research_analytics_strategy_lanes(research_analytics: dict[str, Any] | None) -> list[dict[str, Any]]:
+    payload = dict(research_analytics or {})
+    if payload.get("available") is not True:
+        return []
+    summary_rows = {
+        str(row.get("strategy_key") or row.get("strategy_id") or row.get("target_id") or "").strip(): dict(row)
+        for row in list(payload.get("strategy_summaries") or [])
+        if str(row.get("strategy_key") or row.get("strategy_id") or row.get("target_id") or "").strip()
+    }
+    lanes: list[dict[str, Any]] = []
+    for row in list(payload.get("strategy_catalog") or []):
+        strategy_key = str(row.get("strategy_key") or row.get("strategy_id") or row.get("target_id") or "").strip()
+        if not strategy_key:
+            continue
+        summary = summary_rows.get(strategy_key, {})
+        trade_count = summary.get("trade_count")
+        has_trades = False
+        try:
+            has_trades = int(trade_count or 0) > 0
+        except (TypeError, ValueError):
+            has_trades = False
+        lanes.append(
+            {
+                "lane_id": f"research_analytics:{strategy_key}",
+                "lane_type": LANE_TYPE_RESEARCH_ANALYTICS,
+                "lane_label": _lane_type_label(LANE_TYPE_RESEARCH_ANALYTICS),
+                "source_lane": LANE_TYPE_RESEARCH_ANALYTICS,
+                "display_name": row.get("strategy_label") or row.get("label") or row.get("strategy_id") or strategy_key,
+                "strategy_key": strategy_key,
+                "strategy_label": row.get("strategy_label") or row.get("label") or row.get("strategy_id") or strategy_key,
+                "standalone_strategy_id": row.get("strategy_id") or strategy_key,
+                "strategy_family": row.get("strategy_family"),
+                "instrument": row.get("symbol"),
+                "target_id": row.get("target_id"),
+                "run_identity": {
+                    "run_id": row.get("run_id"),
+                    "target_id": row.get("target_id"),
+                    "study_key": None,
+                },
+                "date_range": {},
+                "lifecycle_truth": {
+                    "class": LIFECYCLE_TRUTH_FULL,
+                    "label": "Published research analytics truth",
+                },
+                "metrics": {
+                    "net_pnl": _metric_value(summary.get("net_pnl_cash")),
+                    "realized_pnl": _metric_value(summary.get("net_pnl_cash")),
+                    "trade_count": _metric_value(summary.get("trade_count")),
+                    "average_trade": _metric_value(summary.get("average_trade_pnl_cash")),
+                    "profit_factor": _metric_value(summary.get("profit_factor")),
+                    "max_drawdown": _metric_value(summary.get("max_drawdown")),
+                    "win_rate": _metric_value(summary.get("win_rate")),
+                    "latest_update_timestamp": _metric_value(payload.get("generated_at")),
+                    "session_breakdown": {
+                        "available": has_trades,
+                        "reason": None if has_trades else "Published session breakdown rows are unavailable because the selected strategy has no closed trades in the current analytics slice.",
+                    },
+                    "trade_family_breakdown": {
+                        "available": False,
+                        "reason": "Research analytics publishes family-neutral trade summaries; family-specific trade breakdowns are strategy-specific and not part of the shared contract.",
+                    },
+                    "latest_trade_summary": {
+                        "available": False,
+                        "reason": "Published research analytics does not currently materialize one-row latest-trade summaries in the shared contract.",
+                    },
+                },
+                "evidence": {
+                    "trade_lifecycle": {
+                        "available": has_trades,
+                        "reason": None if has_trades else "Published analytics rows exist, but the current strategy has no closed trades in the materialized slice.",
+                    },
+                    "bars": {
+                        "available": False,
+                        "reason": "Published research analytics is a read model and does not include raw study-bar artifacts.",
+                        "ref": {},
+                    },
+                },
+            }
+        )
+    return lanes
+
+
 def _build_results_board_payload(
     *,
     strategies: dict[str, dict[str, Any]],
@@ -428,6 +517,8 @@ def _build_results_board_payload(
     source_types = _selector_value_options(lane_options, key="source_type", label_key="source_label")
     candidate_statuses = _selector_value_options(lane_options, key="candidate_status_id", label_key="candidate_status_label")
     lifecycle_truth_classes = _selector_value_options(lane_options, key="lifecycle_truth_class", label_key="lifecycle_truth_label")
+    review_statuses = _selector_value_options(board_rows, key="review_status_id", label_key="review_status_label")
+    activity_statuses = _selector_value_options(board_rows, key="activity_status_id", label_key="activity_status_label")
     sort_fields = _results_board_sort_fields(board_rows)
     run_scope_presets = _results_board_run_scope_presets(board_rows=board_rows, sort_fields=sort_fields)
     rank_limit_options = [
@@ -455,6 +546,7 @@ def _build_results_board_payload(
         "default_columns": [
             {"key": "strategy_display_name", "label": "Strategy"},
             {"key": "lane_label", "label": "Lane"},
+            {"key": "review_status", "label": "Review Status"},
             {"key": "run_study_identity", "label": "Run / Study"},
             {"key": "date_range_label", "label": "Date Range"},
             {"key": "trade_count", "label": "Trades"},
@@ -476,6 +568,8 @@ def _build_results_board_payload(
             "lanes": lane_options,
             "source_types": source_types,
             "candidate_statuses": candidate_statuses,
+            "review_statuses": review_statuses,
+            "activity_statuses": activity_statuses,
             "lifecycle_truth_classes": lifecycle_truth_classes,
             "sources": [
                 {
@@ -514,6 +608,8 @@ def _build_results_board_payload(
             "lane_id": "all",
             "source_type": "all",
             "candidate_status": "all",
+            "review_status": "all",
+            "activity_status": "all",
             "lifecycle_truth_class": "all",
             "date_window": "all_dates",
             "run_scope": "top",
@@ -538,6 +634,12 @@ def _build_results_board_payload(
 def _results_board_row(*, lane: dict[str, Any], strategy_display_name: Any) -> dict[str, Any]:
     latest_trade_summary = dict(_nested_get(lane, "metrics", "latest_trade_summary") or {})
     latest_update_metric = dict(_nested_get(lane, "metrics", "latest_update_timestamp") or {})
+    review_status = _results_board_review_status(lane)
+    activity_status = _results_board_activity_status(lane)
+    has_replay_study = bool(str(_nested_get(lane, "evidence", "bars", "ref", "study_key") or "").strip())
+    trade_lifecycle_evidence = dict(_nested_get(lane, "evidence", "trade_lifecycle") or {})
+    session_breakdown = dict(_nested_get(lane, "metrics", "session_breakdown") or {})
+    trade_family_breakdown = dict(_nested_get(lane, "metrics", "trade_family_breakdown") or {})
     return {
         **lane,
         "id": lane.get("lane_id"),
@@ -552,8 +654,36 @@ def _results_board_row(*, lane: dict[str, Any], strategy_display_name: Any) -> d
         "candidate_status": _results_board_candidate_status(lane),
         "candidate_status_id": _results_board_candidate_status(lane)["id"],
         "candidate_status_label": _results_board_candidate_status(lane)["label"],
+        "review_status": review_status,
+        "review_status_id": review_status["id"],
+        "review_status_label": review_status["label"],
+        "activity_status": activity_status,
+        "activity_status_id": activity_status["id"],
+        "activity_status_label": activity_status["label"],
         "lifecycle_truth_class": str(_nested_get(lane, "lifecycle_truth", "class") or "").strip() or None,
         "lifecycle_truth_label": str(_nested_get(lane, "lifecycle_truth", "label") or _nested_get(lane, "lifecycle_truth", "class") or "").strip() or None,
+        "history_review_support": {
+            "pnl_over_time": {
+                "available": has_replay_study,
+                "reason": None if has_replay_study else "P/L over time requires a linked strategy-study artifact.",
+            },
+            "trade_activity_over_time": {
+                "available": has_replay_study or trade_lifecycle_evidence.get("available") is True,
+                "reason": None if (has_replay_study or trade_lifecycle_evidence.get("available") is True) else "Trade activity over time requires a linked strategy-study artifact or closed-trade lifecycle rows.",
+            },
+            "trade_history": {
+                "available": trade_lifecycle_evidence.get("available") is True,
+                "reason": None if trade_lifecycle_evidence.get("available") is True else trade_lifecycle_evidence.get("reason") or "Closed-trade history is unavailable for this lane.",
+            },
+            "session_breakdown": {
+                "available": session_breakdown.get("available") is True,
+                "reason": None if session_breakdown.get("available") is True else session_breakdown.get("reason"),
+            },
+            "trade_family_breakdown": {
+                "available": trade_family_breakdown.get("available") is True,
+                "reason": None if trade_family_breakdown.get("available") is True else trade_family_breakdown.get("reason"),
+            },
+        },
         "sort_values": {
             "net_pnl": _metric_sort_value(_nested_get(lane, "metrics", "net_pnl")),
             "average_trade": _metric_sort_value(_nested_get(lane, "metrics", "average_trade")),
@@ -902,6 +1032,8 @@ def _results_board_candidate_status(lane: dict[str, Any]) -> dict[str, str]:
         return {"id": "BENCHMARK_REFERENCE", "label": "Benchmark Reference"}
     if lane_type == LANE_TYPE_RESEARCH_EXECUTION:
         return {"id": "RESEARCH_CANDIDATE" if candidate_id else "RESEARCH_EXECUTION", "label": "Research Candidate" if candidate_id else "Research Execution"}
+    if lane_type == LANE_TYPE_RESEARCH_ANALYTICS:
+        return {"id": "RESEARCH_ANALYTICS", "label": "Research Analytics"}
     if lane_type == LANE_TYPE_PAPER_RUNTIME:
         return {
             "id": "PAPER_BENCHMARK" if benchmark_designation else "PAPER_RUNTIME",
@@ -913,6 +1045,47 @@ def _results_board_candidate_status(lane: dict[str, Any]) -> dict[str, str]:
             "label": "Historical Candidate" if candidate_id else "Historical Reference",
         }
     return {"id": "UNKNOWN", "label": "Unknown"}
+
+
+def _metric_available(metric: Any) -> bool:
+    return dict(metric or {}).get("available") is True
+
+
+def _metric_numeric_value(metric: Any) -> float | None:
+    metric_dict = dict(metric or {})
+    if metric_dict.get("available") is not True:
+        return None
+    value = _decimal_or_none(metric_dict.get("value"))
+    if value is None or not value.is_finite():
+        return None
+    return float(value)
+
+
+def _lane_has_coverage_window(lane: dict[str, Any]) -> bool:
+    date_range = dict(lane.get("date_range") or {})
+    return bool(str(date_range.get("start_timestamp") or "").strip() or str(date_range.get("end_timestamp") or "").strip())
+
+
+def _results_board_activity_status(lane: dict[str, Any]) -> dict[str, str]:
+    trade_count = _metric_numeric_value(_nested_get(lane, "metrics", "trade_count"))
+    if trade_count is None:
+        return {"id": "INSUFFICIENT_HISTORY", "label": "Insufficient History"}
+    if trade_count <= 0:
+        return {"id": "ZERO_TRADES", "label": "Zero-Trade Historical"}
+    return {"id": "HAS_TRADES", "label": "Has Trades"}
+
+
+def _results_board_review_status(lane: dict[str, Any]) -> dict[str, str]:
+    activity_status = _results_board_activity_status(lane)
+    if activity_status["id"] == "INSUFFICIENT_HISTORY":
+        return {"id": "INSUFFICIENT_HISTORY", "label": "Insufficient History"}
+    if activity_status["id"] == "ZERO_TRADES":
+        return {"id": "ZERO_TRADE_HISTORICAL", "label": "Zero-Trade Historical"}
+    lane_type = str(lane.get("lane_type") or "").strip()
+    candidate_status = _results_board_candidate_status(lane)
+    if lane_type == LANE_TYPE_BENCHMARK_REPLAY or candidate_status["id"] in {"BENCHMARK_REFERENCE", "HISTORICAL_REFERENCE"}:
+        return {"id": "INACTIVE_ARCHIVED", "label": "Inactive / Archived"}
+    return {"id": "ACTIVE_RETAINED", "label": "Active / Retained"}
 
 
 def _metric_sort_value(metric: Any) -> float | None:
@@ -1180,6 +1353,15 @@ def _replay_strategy_lanes(historical_playback: dict[str, Any]) -> list[dict[str
                         preview_rows=list(_nested_get(summary, "atp_summary", "top_atp_blocker_codes") or []),
                         ref={"study_key": item.get("study_key")},
                         unavailable_reason=_nested_get(summary, "atp_summary", "unavailable_reason"),
+                    ),
+                    "trade_lifecycle": _evidence_ref(
+                        available=bool(replay_trade_rows),
+                        count=len(replay_trade_rows),
+                        preview_rows=replay_trade_rows[:_PREVIEW_ROW_LIMIT],
+                        ref={"study_key": item.get("study_key")},
+                        unavailable_reason="Replay artifact did not expose enough closed-trade lifecycle truth to reconstruct a trade history."
+                        if not replay_trade_rows
+                        else None,
                     ),
                 },
                 "provenance": {
@@ -2098,6 +2280,7 @@ def _lane_type_label(lane_type: str) -> str:
         LANE_TYPE_PAPER_RUNTIME: "Paper Runtime",
         LANE_TYPE_HISTORICAL_PLAYBACK: "Historical Playback",
         LANE_TYPE_RESEARCH_EXECUTION: "Research Execution",
+        LANE_TYPE_RESEARCH_ANALYTICS: "Research Analytics",
     }
     return mapping.get(lane_type, lane_type.replace("_", " ").title())
 
@@ -2107,7 +2290,8 @@ def _lane_priority(lane_type: str) -> int:
         LANE_TYPE_BENCHMARK_REPLAY: 0,
         LANE_TYPE_PAPER_RUNTIME: 1,
         LANE_TYPE_RESEARCH_EXECUTION: 2,
-        LANE_TYPE_HISTORICAL_PLAYBACK: 3,
+        LANE_TYPE_RESEARCH_ANALYTICS: 3,
+        LANE_TYPE_HISTORICAL_PLAYBACK: 4,
     }
     return order.get(lane_type, 99)
 
@@ -2115,7 +2299,13 @@ def _lane_priority(lane_type: str) -> int:
 def _default_lane_id(lanes: Sequence[dict[str, Any]]) -> str | None:
     if not lanes:
         return None
-    for desired in (LANE_TYPE_BENCHMARK_REPLAY, LANE_TYPE_PAPER_RUNTIME, LANE_TYPE_RESEARCH_EXECUTION, LANE_TYPE_HISTORICAL_PLAYBACK):
+    for desired in (
+        LANE_TYPE_BENCHMARK_REPLAY,
+        LANE_TYPE_PAPER_RUNTIME,
+        LANE_TYPE_RESEARCH_EXECUTION,
+        LANE_TYPE_RESEARCH_ANALYTICS,
+        LANE_TYPE_HISTORICAL_PLAYBACK,
+    ):
         match = next((lane for lane in lanes if lane.get("lane_type") == desired), None)
         if match is not None:
             return str(match.get("lane_id") or "")

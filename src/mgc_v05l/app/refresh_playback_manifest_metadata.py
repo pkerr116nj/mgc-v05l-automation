@@ -25,6 +25,7 @@ def refresh_playback_manifest_metadata(*, manifest_path: str | Path | None = Non
     run_stamp = str(payload.get("run_stamp") or resolved_manifest_path.stem)
     run_timestamp = datetime.fromtimestamp(resolved_manifest_path.stat().st_mtime, tz=UTC).isoformat()
     changed = False
+    refreshed_studies: list[dict[str, object]] = []
     for entry in list(payload.get("symbols") or []):
         study_json_path = entry.get("strategy_study_json_path")
         if not study_json_path:
@@ -47,6 +48,28 @@ def refresh_playback_manifest_metadata(*, manifest_path: str | Path | None = Non
         if entry.get("catalog_entry") != catalog_entry:
             entry["catalog_entry"] = catalog_entry
             changed = True
+        refreshed_studies.append(
+            {
+                **dict(catalog_entry),
+                "local_artifact_paths": {
+                    **dict(catalog_entry.get("local_artifact_paths") or {}),
+                    "manifest": str(resolved_manifest_path),
+                    "summary": entry.get("summary_path"),
+                    "strategy_study_json": entry.get("strategy_study_json_path"),
+                    "strategy_study_markdown": entry.get("strategy_study_markdown_path"),
+                },
+                "artifact_paths": {
+                    **dict(catalog_entry.get("artifact_paths") or {}),
+                    "manifest": str(resolved_manifest_path),
+                    "summary": entry.get("summary_path"),
+                    "strategy_study_json": entry.get("strategy_study_json_path"),
+                    "strategy_study_markdown": entry.get("strategy_study_markdown_path"),
+                },
+            }
+        )
+    if payload.get("studies") != refreshed_studies:
+        payload["studies"] = refreshed_studies
+        changed = True
     if changed:
         resolved_manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return resolved_manifest_path

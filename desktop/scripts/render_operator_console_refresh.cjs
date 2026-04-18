@@ -8,6 +8,9 @@ const rendererDir = path.join(desktopRoot, "dist", "renderer");
 const outputDir = path.join(repoRoot, "outputs", "operator_console_refresh");
 const mockHtmlPath = path.join(rendererDir, "mock-index.html");
 const harnessLogPath = path.join(outputDir, "renderer_harness.log");
+const desktopStateFixturePath = process.env.MGC_RENDER_DESKTOP_STATE_FIXTURE_PATH
+  ? path.resolve(process.env.MGC_RENDER_DESKTOP_STATE_FIXTURE_PATH)
+  : null;
 
 function logStep(message) {
   fs.appendFileSync(harnessLogPath, `[${new Date().toISOString()}] ${message}\n`);
@@ -15,6 +18,14 @@ function logStep(message) {
 
 function readJson(relativePath, fallback = {}) {
   const filePath = path.join(repoRoot, relativePath);
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function readJsonAbsolute(filePath, fallback = {}) {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch {
@@ -153,6 +164,9 @@ function buildDashboardPayload() {
 }
 
 function buildDesktopState() {
+  if (desktopStateFixturePath) {
+    return readJsonAbsolute(desktopStateFixturePath, {});
+  }
   const dashboard = buildDashboardPayload();
   return {
     connection: "live",
@@ -177,7 +191,7 @@ function buildDesktopState() {
       pid: 15144,
       apiStatus: "responding",
       healthStatus: "ok",
-      managerOwned: true,
+      managerOwned: false,
       startupFailureKind: "none",
       actionHint: null,
       staleListenerDetected: false,
@@ -193,7 +207,8 @@ function buildDesktopState() {
       chosenHost: "127.0.0.1",
       chosenPort: 8790,
       chosenUrl: "http://127.0.0.1:8790/",
-      ownership: "started_managed",
+      mode: "SERVICE_ATTACHED",
+      ownership: "attached_existing",
       latestEvent: "Renderer mock harness attached.",
       recentEvents: ["Renderer mock harness attached."],
       failureKind: "none",

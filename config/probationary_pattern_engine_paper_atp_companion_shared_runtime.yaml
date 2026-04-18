@@ -1,0 +1,3 @@
+mode: "paper"
+probationary_paper_runtime_exclusive_config: false
+probationary_operator_control_path: "./outputs/probationary_pattern_engine/paper_session/runtime/operator_control.json"

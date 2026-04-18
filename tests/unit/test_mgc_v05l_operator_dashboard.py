@@ -6,9 +6,10 @@ import json
 import sqlite3
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
+from http import HTTPStatus
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 import mgc_v05l.app.operator_dashboard as operator_dashboard_module
 from mgc_v05l.app.experimental_canaries_dashboard_payloads import load_experimental_canaries_snapshot
 from mgc_v05l.app.operator_dashboard import (
+    DASHBOARD_PAYLOAD_SCHEMA_VERSION,
     DashboardServerInfo,
     OperatorDashboardService,
     _bind_dashboard_server,
@@ -616,6 +618,64 @@ def _write_jsonl_rows(path: Path, rows: list[dict[str, object]]) -> None:
             handle.write("\n")
 
 
+def _write_dashboard_local_operator_auth_state(
+    repo_root: Path,
+    *,
+    active: bool,
+    auth_available: bool = True,
+    touch_id_available: bool = True,
+) -> Path:
+    path = repo_root / "outputs" / "operator_dashboard" / "local_operator_auth_state.json"
+    events_path = repo_root / "outputs" / "operator_dashboard" / "local_operator_auth_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    ttl_seconds = 28800
+    authenticated_at = now - timedelta(minutes=5 if active else 600)
+    expires_at = authenticated_at + timedelta(seconds=ttl_seconds)
+    payload = {
+        "auth_available": auth_available,
+        "touch_id_available": touch_id_available,
+        "auth_method": "TOUCH_ID" if auth_available else "NONE",
+        "last_authenticated_at": authenticated_at.isoformat(),
+        "last_auth_result": "SUCCESS" if active else ("UNAVAILABLE" if not auth_available or not touch_id_available else "EXPIRED"),
+        "last_auth_detail": (
+            "Local operator auth session is active for live broker actions."
+            if active
+            else (
+                "Touch ID is unavailable or not enrolled on this Mac."
+                if not auth_available or not touch_id_available
+                else "Local operator auth session expired and must be renewed before live broker actions."
+            )
+        ),
+        "auth_session_expires_at": expires_at.isoformat(),
+        "auth_session_ttl_seconds": ttl_seconds,
+        "auth_session_active": active,
+        "local_operator_identity": "pilot_operator" if auth_available else None,
+        "auth_session_id": "auth-session-1" if active else None,
+        "updated_at": now.isoformat(),
+        "artifacts": {
+            "state_path": str(path),
+            "events_path": str(events_path),
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    rows: list[dict[str, object]] = []
+    if auth_available and active:
+        rows.append(
+            {
+                "event_type": "local_operator_auth_succeeded",
+                "occurred_at": authenticated_at.isoformat(),
+                "authenticated_at": authenticated_at.isoformat(),
+                "auth_method": "TOUCH_ID",
+                "local_operator_identity": "pilot_operator",
+                "auth_session_id": "auth-session-1",
+                "auth_result": "SUCCEEDED",
+            }
+        )
+    _write_jsonl_rows(events_path, rows)
+    return path
+
+
 def _same_underlying_snapshot(
     tmp_path: Path,
     *,
@@ -1092,6 +1152,382 @@ def test_same_underlying_conflicts_ignore_different_instruments(tmp_path: Path) 
 
     assert snapshot["same_underlying_conflicts"]["summary"]["conflict_count"] == 0
     assert snapshot["same_underlying_conflicts"]["rows"] == []
+
+
+def test_same_underlying_snapshot_exposes_production_link_pilot_artifacts(tmp_path: Path) -> None:
+    gc_db = tmp_path / "gc.sqlite3"
+    _init_empty_dashboard_db(gc_db)
+
+    snapshot = _same_underlying_snapshot(
+        tmp_path,
+        lanes=[
+            {
+                "lane_id": "gc_lane",
+                "display_name": "GC Bull",
+                "symbol": "GC",
+                "approved_long_entry_sources": ["bullSnap"],
+                "approved_short_entry_sources": [],
+                "position_side": "FLAT",
+                "strategy_status": "READY",
+                "entries_enabled": True,
+                "operator_halt": False,
+                "warmup_complete": True,
+                "risk_state": "OK",
+                "database_url": f"sqlite:///{gc_db}",
+            }
+        ],
+        production_link_snapshot={
+            "status": "ready",
+            "label": "CONNECTED",
+            "portfolio": {"positions": []},
+            "orders": {"open_rows": []},
+            "reconciliation": {"status": "CLEAR", "label": "CLEAR"},
+        },
+    )
+
+    assert snapshot["production_link"]["artifacts"]["snapshot"] == "/api/operator-artifact/production-link-snapshot"
+    assert snapshot["production_link"]["artifacts"]["pilot_status"] == "/api/operator-artifact/production-link-pilot-status"
+    assert snapshot["production_link"]["artifacts"]["futures_pilot_policy"] == "/api/operator-artifact/production-link-futures-pilot-policy"
+    assert snapshot["production_link"]["artifacts"]["futures_pilot_status"] == "/api/operator-artifact/production-link-futures-pilot-status"
+
+
+def test_operator_artifact_file_exposes_futures_pilot_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = OperatorDashboardService(tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_runtime_paths",
+        lambda runtime_name: {
+            "artifacts_dir": tmp_path / "outputs" / runtime_name,
+            "pid_file": tmp_path / "outputs" / runtime_name / "runtime.pid",
+            "log_file": tmp_path / "outputs" / runtime_name / "runtime.log",
+            "db_path": tmp_path / "outputs" / runtime_name / "runtime.sqlite3",
+            "operator_control_path": tmp_path / "outputs" / runtime_name / "control.jsonl",
+        },
+    )
+
+    futures_policy_path = service._production_link_service.config.snapshot_path.with_name("futures_pilot_policy_snapshot.json")
+    futures_status_path = service._production_link_service.config.snapshot_path.with_name("futures_pilot_status.json")
+
+    assert service.operator_artifact_file("production-link-futures-pilot-policy")[0] == futures_policy_path
+    assert service.operator_artifact_file("production-link-futures-pilot-status")[0] == futures_status_path
+
+
+def test_run_production_action_blocks_without_active_local_operator_auth(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=False)
+    run_action_called = False
+
+    def _unexpected_run_action(action: str, payload: dict[str, object]) -> dict[str, object]:
+        nonlocal run_action_called
+        run_action_called = True
+        return {"ok": True, "message": "unexpected"}
+
+    service._production_link_service.run_action = _unexpected_run_action  # type: ignore[method-assign]
+    service._production_link_service.snapshot = lambda: {"status": "ready", "label": "CONNECTED"}  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("submit-order", {"symbol": "ABBV"})
+
+    assert result["ok"] is False
+    assert "Production live action blocked because" in result["message"]
+    assert result["auth"]["auth_session_active"] is False
+    assert result["auth"]["entry_allowed"] is False
+    assert result["auth"]["flatten_allowed"] is True
+    assert result["auth"]["cancel_allowed"] is True
+    assert "expired" in result["auth"]["detail"].lower()
+    assert run_action_called is False
+
+
+def test_run_production_action_uses_current_local_operator_auth_for_live_submit(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=True)
+    captured: dict[str, object] = {}
+
+    def _run_action(action: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["action"] = action
+        captured["payload"] = dict(payload)
+        return {
+            "ok": True,
+            "message": "submitted",
+            "production_link": {"status": "ready", "label": "CONNECTED"},
+        }
+
+    service._production_link_service.run_action = _run_action  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("submit-order", {"symbol": "ABBV"})
+
+    assert result["ok"] is True
+    assert captured["action"] == "submit-order"
+    submitted_payload = captured["payload"]
+    assert submitted_payload["symbol"] == "ABBV"
+    assert submitted_payload["operator_authenticated"] is True
+    assert submitted_payload["local_operator_identity"] == "pilot_operator"
+    assert submitted_payload["auth_method"] == "TOUCH_ID"
+    assert str(submitted_payload["authenticated_at"]).endswith("+00:00")
+    assert submitted_payload["auth_session_id"] == "auth-session-1"
+    assert submitted_payload["operator_label"] == "pilot_operator"
+    assert result["auth"]["next_action_label"] == "Ready"
+    assert result["auth"]["time_remaining_seconds"] > 0
+    assert result["auth"]["entry_allowed"] is True
+    assert result["auth"]["flatten_allowed"] is True
+    assert result["auth"]["cancel_allowed"] is True
+
+
+def test_run_production_action_surfaces_broker_http_error_in_result_payload(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=True)
+
+    def _raise_broker_error(action: str, payload: dict[str, object]) -> dict[str, object]:
+        raise operator_dashboard_module.SchwabBrokerHttpError(
+            "Schwab trader HTTP error 400 for POST /accounts/hash-123/orders: Invalid request data"
+        )
+
+    service._production_link_service.run_action = _raise_broker_error  # type: ignore[method-assign]
+    service._production_link_service.snapshot = lambda: {"status": "ready", "label": "CONNECTED"}  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("submit-order", {"symbol": "MGC", "asset_class": "FUTURE"})
+
+    assert result["ok"] is False
+    assert result["message"] == "Production-link action submit-order failed."
+    assert "Invalid request data" in result["output"]
+    assert result["production_link"]["status"] == "ready"
+    assert result["auth"]["entry_allowed"] is True
+
+
+def test_run_production_action_uses_current_local_operator_auth_for_preview_when_available(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=True)
+    captured: dict[str, object] = {}
+
+    def _run_action(action: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["action"] = action
+        captured["payload"] = dict(payload)
+        return {
+            "ok": True,
+            "message": "previewed",
+            "production_link": {"status": "ready", "label": "CONNECTED"},
+        }
+
+    service._production_link_service.run_action = _run_action  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("preview-order", {"symbol": "MGC", "asset_class": "FUTURE"})
+
+    assert result["ok"] is True
+    assert captured["action"] == "preview-order"
+    preview_payload = captured["payload"]
+    assert preview_payload["symbol"] == "MGC"
+    assert preview_payload["asset_class"] == "FUTURE"
+    assert preview_payload["operator_authenticated"] is True
+    assert preview_payload["local_operator_identity"] == "pilot_operator"
+    assert preview_payload["auth_method"] == "TOUCH_ID"
+    assert str(preview_payload["authenticated_at"]).endswith("+00:00")
+    assert preview_payload["auth_session_id"] == "auth-session-1"
+    assert preview_payload["operator_label"] == "pilot_operator"
+    assert result["auth"]["next_action_label"] == "Ready"
+    assert result["auth"]["time_remaining_seconds"] > 0
+
+
+def test_run_production_action_logs_decimal_bearing_production_link_payloads(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=True)
+
+    def _run_action(action: str, payload: dict[str, object]) -> dict[str, object]:
+        return {
+            "ok": True,
+            "message": "previewed",
+            "output": "previewed",
+            "production_link": {
+                "status": "ready",
+                "label": "CONNECTED",
+                "quotes": [{"last_price": Decimal("2500.25")}],
+            },
+        }
+
+    service._production_link_service.run_action = _run_action  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("preview-order", {"symbol": "MGC", "asset_class": "FUTURE"})
+
+    assert result["ok"] is True
+    action_rows = [
+        json.loads(line)
+        for line in service._action_log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert action_rows
+    assert action_rows[-1]["production_link"]["quotes"][0]["last_price"] == "2500.25"
+
+
+def test_run_production_action_uses_current_local_operator_auth_for_flatten_when_available(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=True)
+    captured: dict[str, object] = {}
+
+    def _run_action(action: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["action"] = action
+        captured["payload"] = dict(payload)
+        return {
+            "ok": True,
+            "message": "flattened",
+            "production_link": {"status": "ready", "label": "CONNECTED"},
+        }
+
+    service._production_link_service.run_action = _run_action  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("flatten-position", {"symbol": "ABBV"})
+
+    assert result["ok"] is True
+    assert captured["action"] == "flatten-position"
+    flatten_payload = captured["payload"]
+    assert flatten_payload["symbol"] == "ABBV"
+    assert flatten_payload["operator_authenticated"] is True
+    assert flatten_payload["local_operator_identity"] == "pilot_operator"
+    assert flatten_payload["auth_method"] == "TOUCH_ID"
+    assert flatten_payload["auth_session_id"] == "auth-session-1"
+    assert flatten_payload["operator_label"] == "pilot_operator"
+    assert result["auth"]["next_action_label"] == "Ready"
+    assert result["auth"]["time_remaining_seconds"] > 0
+
+
+def test_run_production_action_allows_reduce_only_flatten_with_expired_session(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=False)
+    captured: dict[str, object] = {}
+
+    def _run_action(action: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["action"] = action
+        captured["payload"] = dict(payload)
+        return {
+            "ok": True,
+            "message": "flatten submitted",
+            "production_link": {"status": "ready", "label": "CONNECTED"},
+        }
+
+    service._production_link_service.run_action = _run_action  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action(
+        "flatten-position",
+        {"symbol": "ABBV", "account_hash": "hash-123", "asset_class": "STOCK", "quantity": "1", "side": "LONG"},
+    )
+
+    assert result["ok"] is True
+    assert captured["action"] == "flatten-position"
+    flatten_payload = captured["payload"]
+    assert flatten_payload["operator_authenticated"] is False
+    assert flatten_payload["operator_reduce_only_authorized"] is True
+    assert flatten_payload["operator_auth_policy"] == "REDUCE_ONLY_POLICY"
+    assert flatten_payload["operator_auth_risk_bucket"] == "REDUCE_RISK"
+    assert result["auth"]["authorized_for_action"] is True
+    assert result["auth"]["authorization_policy"] == "REDUCE_ONLY_POLICY"
+    assert result["auth"]["entry_allowed"] is False
+    assert result["auth"]["flatten_allowed"] is True
+
+
+def test_run_production_action_allows_reduce_only_cancel_with_expired_session(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=False)
+    captured: dict[str, object] = {}
+
+    def _run_action(action: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["action"] = action
+        captured["payload"] = dict(payload)
+        return {
+            "ok": True,
+            "message": "cancel submitted",
+            "production_link": {"status": "ready", "label": "CONNECTED"},
+        }
+
+    service._production_link_service.run_action = _run_action  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("cancel-order", {"account_hash": "hash-123", "broker_order_id": "broker-1"})
+
+    assert result["ok"] is True
+    assert captured["action"] == "cancel-order"
+    cancel_payload = captured["payload"]
+    assert cancel_payload["operator_authenticated"] is False
+    assert cancel_payload["operator_reduce_only_authorized"] is True
+    assert cancel_payload["operator_auth_policy"] == "REDUCE_ONLY_POLICY"
+    assert cancel_payload["operator_auth_risk_bucket"] == "REDUCE_RISK"
+    assert result["auth"]["authorized_for_action"] is True
+    assert result["auth"]["authorization_policy"] == "REDUCE_ONLY_POLICY"
+    assert result["auth"]["cancel_allowed"] is True
+
+
+def test_run_production_action_blocks_new_risk_when_touch_id_is_unavailable(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=False, auth_available=False, touch_id_available=False)
+    run_action_called = False
+
+    def _unexpected_run_action(action: str, payload: dict[str, object]) -> dict[str, object]:
+        nonlocal run_action_called
+        run_action_called = True
+        return {"ok": True, "message": "unexpected"}
+
+    service._production_link_service.run_action = _unexpected_run_action  # type: ignore[method-assign]
+    service._production_link_service.snapshot = lambda: {"status": "ready", "label": "CONNECTED"}  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("submit-order", {"symbol": "ABBV"})
+
+    assert result["ok"] is False
+    assert "Production live action blocked because" in result["message"]
+    assert result["auth"]["entry_allowed"] is False
+    assert result["auth"]["flatten_allowed"] is True
+    assert result["auth"]["cancel_allowed"] is True
+    assert "unavailable" in str(result["auth"]["detail"]).lower()
+    assert run_action_called is False
+
+
+def test_run_production_action_prime_local_auth_reuses_existing_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=True)
+
+    def _unexpected_run(*args, **kwargs):
+        raise AssertionError("prime-local-auth should not spawn the helper when the session is already active")
+
+    monkeypatch.setattr(operator_dashboard_module.subprocess, "run", _unexpected_run)
+    service._production_link_service.snapshot = lambda: {"status": "ready", "label": "CONNECTED"}  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("prime-local-auth", {})
+
+    assert result["ok"] is True
+    assert result["message"] == "Local operator auth session already active."
+    assert result["auth"]["operator_authenticated"] is True
+    assert result["auth"]["next_action_label"] == "Ready"
+    assert result["auth"]["time_remaining_seconds"] > 0
+
+
+def test_run_production_action_prime_local_auth_front_loads_touch_id_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_dashboard_local_operator_auth_state(tmp_path, active=False)
+    executed: dict[str, object] = {}
+
+    def _fake_run(command, cwd, text, capture_output, check):
+        executed["command"] = command
+        executed["cwd"] = cwd
+        _write_dashboard_local_operator_auth_state(tmp_path, active=True)
+        return subprocess.CompletedProcess(command, 0, stdout="Touch ID authenticated", stderr="")
+
+    monkeypatch.setattr(operator_dashboard_module.subprocess, "run", _fake_run)
+    service._production_link_service.snapshot = lambda: {"status": "ready", "label": "CONNECTED"}  # type: ignore[method-assign]
+    service.snapshot = lambda: {"production_link": {"status": "ready"}}  # type: ignore[method-assign]
+
+    result = service.run_production_action("prime-local-auth", {})
+
+    assert executed["command"] == ["bash", "scripts/run_local_operator_auth.sh"]
+    assert executed["cwd"] == tmp_path
+    assert result["ok"] is True
+    assert result["message"] == "Local operator auth session primed for the live-pilot workflow."
+    assert result["auth"]["operator_authenticated"] is True
+    assert result["auth"]["next_action_label"] == "Ready"
+    assert result["auth"]["time_remaining_seconds"] > 0
 
 
 def test_same_underlying_conflict_acknowledgement_persists_by_instrument(tmp_path: Path) -> None:
@@ -1923,6 +2359,207 @@ def test_dashboard_bind_reports_permission_denied_truthfully(tmp_path: Path, mon
         _bind_dashboard_server("127.0.0.1", 8790, handler, allow_port_fallback=False)
 
     assert "permission was denied" in str(excinfo.value)
+
+
+def test_api_dashboard_serves_degraded_cached_snapshot_before_inline_live_generation(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    service._server_info = DashboardServerInfo(
+        host="127.0.0.1",
+        port=8790,
+        url="http://127.0.0.1:8790/",
+        pid=12345,
+        started_at="2026-04-09T12:00:00+00:00",
+        build_stamp="abc123def456",
+        instance_id="instance-current",
+        info_file=str(tmp_path / "dashboard.json"),
+    )
+    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
+        json.dumps(
+            {
+                "payload_version": 2,
+                "generated_at": "2026-04-09T12:00:05+00:00",
+                "dashboard_meta": {"server_instance_id": "instance-stale"},
+                "operator_surface": {"ok": True},
+                "startup_control_plane": {"overall_state": "READY", "counts": {"ready": 1}},
+                "supervised_paper_operability": {"app_usable_for_supervised_paper": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    service._record_dashboard_probe(snapshot=None, error=RuntimeError("api dashboard still warming"))  # noqa: SLF001
+
+    inline_generation_attempted = False
+
+    def _unexpected_live_snapshot() -> dict[str, object]:
+        nonlocal inline_generation_attempted
+        inline_generation_attempted = True
+        raise AssertionError("degraded cached payload should be served before inline regeneration")
+
+    service.dashboard_snapshot = _unexpected_live_snapshot  # type: ignore[method-assign]
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes
+    status, payload = writes[0]
+    assert status == HTTPStatus.OK
+    assert inline_generation_attempted is False
+    assert payload["dashboard_meta"]["snapshot_fallback_active"] is True
+    assert payload["dashboard_meta"]["snapshot_instance_stale"] is True
+
+
+def test_api_dashboard_prefers_inline_regeneration_over_stale_same_instance_cache(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    service._server_info = DashboardServerInfo(
+        host="127.0.0.1",
+        port=8790,
+        url="http://127.0.0.1:8790/",
+        pid=12345,
+        started_at="2026-04-09T12:00:00+00:00",
+        build_stamp="abc123def456",
+        instance_id="instance-current",
+        info_file=str(tmp_path / "dashboard.json"),
+    )
+    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
+        json.dumps(
+            {
+                "payload_version": 2,
+                "generated_at": "2026-04-09T12:00:05+00:00",
+                "dashboard_meta": {"server_instance_id": "instance-stale"},
+                "operator_surface": {"ok": True},
+                "startup_control_plane": {"overall_state": "READY", "counts": {"ready": 1}},
+                "supervised_paper_operability": {"app_usable_for_supervised_paper": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    service._record_dashboard_probe(snapshot=None, error=RuntimeError("api dashboard still warming"))  # noqa: SLF001
+
+    live_payload = {
+        "generated_at": "2026-04-09T12:00:08+00:00",
+        "dashboard_meta": {"server_instance_id": "instance-current"},
+        "operator_surface": {"ok": True, "lane_count": 26},
+    }
+
+    service.dashboard_snapshot = lambda: live_payload  # type: ignore[method-assign]
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes
+    status, payload = writes[0]
+    assert status == HTTPStatus.OK
+    assert payload == live_payload
+
+
+def test_api_dashboard_uses_degraded_stale_cache_when_inline_regeneration_fails(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    service._server_info = DashboardServerInfo(
+        host="127.0.0.1",
+        port=8790,
+        url="http://127.0.0.1:8790/",
+        pid=12345,
+        started_at="2026-04-09T12:00:00+00:00",
+        build_stamp="abc123def456",
+        instance_id="instance-current",
+        info_file=str(tmp_path / "dashboard.json"),
+    )
+    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
+        json.dumps(
+            {
+                "payload_version": 2,
+                "generated_at": "2026-04-09T12:00:05+00:00",
+                "dashboard_meta": {"server_instance_id": "instance-stale"},
+                "operator_surface": {"ok": True},
+                "startup_control_plane": {"overall_state": "READY", "counts": {"ready": 1}},
+                "supervised_paper_operability": {"app_usable_for_supervised_paper": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    service._record_dashboard_probe(snapshot=None, error=RuntimeError("api dashboard still warming"))  # noqa: SLF001
+
+    def _failing_live_snapshot() -> dict[str, object]:
+        raise RuntimeError("live generation failed")
+
+    service.dashboard_snapshot = _failing_live_snapshot  # type: ignore[method-assign]
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes
+    status, payload = writes[0]
+    assert status == HTTPStatus.OK
+    assert payload["dashboard_meta"]["snapshot_fallback_active"] is True
+    assert payload["dashboard_meta"]["snapshot_instance_stale"] is True
+    assert payload["startup_control_plane"]["overall_state"] == "DEGRADED"
+    assert payload["supervised_paper_operability"]["app_usable_for_supervised_paper"] is False
+
+
+def test_api_dashboard_ignores_stale_same_instance_cache_when_runtime_artifacts_advance(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    service._server_info = DashboardServerInfo(
+        host="127.0.0.1",
+        port=8790,
+        url="http://127.0.0.1:8790/",
+        pid=12345,
+        started_at="2026-04-09T12:00:00+00:00",
+        build_stamp="abc123def456",
+        instance_id="instance-current",
+        info_file=str(tmp_path / "dashboard.json"),
+    )
+    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
+        json.dumps(
+            {
+                "generated_at": "2026-04-17T11:56:07+00:00",
+                "dashboard_meta": {"server_instance_id": "instance-current"},
+                "operator_surface": {"ok": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_path = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "operator_status.json"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text('{"updated_at":"2026-04-17T12:47:37+00:00"}', encoding="utf-8")
+
+    live_payload = {
+        "generated_at": "2026-04-17T12:48:00+00:00",
+        "dashboard_meta": {"server_instance_id": "instance-current"},
+        "operator_surface": {"ok": True, "lane_count": 26},
+    }
+    service.dashboard_snapshot = lambda: live_payload  # type: ignore[method-assign]
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes
+    status, payload = writes[0]
+    assert status == HTTPStatus.OK
+    assert payload == live_payload
 
 
 def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surfaces() -> None:
@@ -2886,8 +3523,13 @@ def test_dashboard_snapshot_reads_real_artifacts(tmp_path: Path) -> None:
     assert blocked_detail["chain_state"] == "BLOCKED"
     assert blocked_detail["latest_activity_type"] == "BLOCK"
     assert blocked_detail["latest_blocked_reason"] in {"daily_pause_condition", "probationary_long_source_not_allowlisted"}
+    assert blocked_detail["latest_eligible_timestamp"] is None
+    assert blocked_detail["top_blockers"][0]["code"] in {"daily_pause_condition", "probationary_long_source_not_allowlisted"}
     assert snapshot["paper"]["approved_models"]["details_by_branch"]["PL / usLatePauseResumeLongTurn"]["chain_state"] == "NO_SIGNAL"
-    assert snapshot["paper"]["approved_models"]["details_by_branch"]["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["chain_state"] == "DECISION_WITHOUT_INTENT"
+    gc_detail = snapshot["paper"]["approved_models"]["details_by_branch"]["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]
+    assert gc_detail["chain_state"] == "DECISION_WITHOUT_INTENT"
+    assert gc_detail["latest_eligible_timestamp"] == "2026-03-18T14:10:00-04:00"
+    assert gc_detail["atp_timing_state"] == "ATP_TIMING_CONFIRMED"
     assert snapshot["paper"]["approved_models"]["out_of_scope_blocked_count"] == 0
     assert snapshot["paper"]["activity_proof"]["verdict"] == "PAPER DESK NOT ACTUALLY RUNNING / NOT POLLING"
     assert snapshot["paper"]["activity_proof"]["session_summary"]["approved_models_seen_count"] == 3
@@ -2916,10 +3558,12 @@ def test_dashboard_snapshot_reads_real_artifacts(tmp_path: Path) -> None:
     assert lane_activity_rows["MGC / asiaEarlyNormalBreakoutRetestHoldTurn"]["open_position"] is True
     assert lane_activity_rows["MGC / usLatePauseResumeLongTurn"]["verdict"] == "BLOCKED"
     assert lane_activity_rows["MGC / usLatePauseResumeLongTurn"]["blocked"] is True
+    assert lane_activity_rows["MGC / usLatePauseResumeLongTurn"]["top_blockers"][0]["code"] in {"daily_pause_condition", "probationary_long_source_not_allowlisted"}
     assert lane_activity_rows["PL / usLatePauseResumeLongTurn"]["verdict"] == "NO_ACTIVITY_YET"
     assert lane_activity_rows["PL / usLatePauseResumeLongTurn"]["filled"] is False
     assert lane_activity_rows["PL / usLatePauseResumeLongTurn"]["blocked"] is False
     assert lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["verdict"] == "SIGNAL_ONLY"
+    assert lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["atp_timing_state"] == "ATP_TIMING_CONFIRMED"
     assert lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["filled"] is False
     assert lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["has_signal_or_decision"] is True
     assert "branch_sources.jsonl" in lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["used_sources"]
@@ -3551,10 +4195,13 @@ def test_dashboard_paper_readiness_surfaces_lane_eligibility_rows_and_stale_over
     assert status_rows["mgc_us_late_pause_resume_long"]["loaded_in_runtime"] is True
     assert status_rows["mgc_us_late_pause_resume_long"]["eligible_to_trade"] is False
     assert status_rows["mgc_us_late_pause_resume_long"]["tradability_status"] == "LOADED_NOT_ELIGIBLE"
+    assert status_rows["mgc_us_late_pause_resume_long"]["runtime_presence"] == "ACTIVE_RUNTIME"
+    assert status_rows["mgc_us_late_pause_resume_long"]["runtime_presence_label"] == "Active Runtime"
     assert status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligible_to_trade"] is True
     assert status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["tradability_status"] == "ELIGIBLE_TO_TRADE"
     assert payload["lane_status_summary"]["loaded_in_runtime_count"] == 2
     assert payload["lane_status_summary"]["eligible_to_trade_count"] == 1
+    assert payload["lane_status_summary"]["runtime_presence_counts"]["ACTIVE_RUNTIME"] == 2
 
     paper["status"]["stale"] = True
     stale_payload = service._paper_readiness_payload(paper)
@@ -4338,6 +4985,7 @@ def test_dashboard_falls_back_to_configured_paper_lanes_when_runtime_lane_artifa
         "symbols": [],
     }
     service._paper_config_in_force_fallback = lambda artifacts_dir, db_path: {  # type: ignore[method-assign]
+        "loss_halts_disabled": True,
         "desk_halt_new_entries_loss": "-1500",
         "desk_flatten_and_halt_loss": "-2500",
         "lane_realized_loser_limit_per_session": 2,
@@ -5053,6 +5701,24 @@ def test_restart_paper_with_temp_paper_ignores_missing_pid_and_surfaces_auth_blo
     monkeypatch.setattr(service, "_paper_carry_forward_state", lambda paper, review: {"active": False})
     monkeypatch.setattr(service, "_paper_pre_session_review_state", lambda carry: {"ready_for_run": True})
     monkeypatch.setattr(service, "_launch_gate_auth_status", lambda: {"runtime_ready": False, "next_action": "Auth Gate Check"})
+    monkeypatch.setattr(
+        service,
+        "_prechecked_action_result",
+        lambda action: (
+            {
+                **service._result_record(
+                    action="start-paper",
+                    ok=False,
+                    command=None,
+                    output="Paper runtime start is blocked because broker/auth readiness is not green yet.",
+                ),
+                "reason_code": "AUTH_NOT_READY",
+                "next_action": "Auth Gate Check",
+            }
+            if action == "start-paper"
+            else None
+        ),
+    )
 
     def _fake_run(command, **kwargs):
         if command == ["bash", "scripts/stop_probationary_paper_soak.sh"]:
@@ -5102,6 +5768,184 @@ def test_launch_gate_auth_status_refreshes_when_cached_status_is_not_ready(
     assert calls == [False]
     assert result["runtime_ready"] is True
     assert result["source"] == "fresh_auth_gate"
+
+
+def test_load_or_refresh_auth_gate_result_rechecks_stale_unready_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    stale_checked_at = "2026-04-10T11:00:00+00:00"
+    service._auth_cache_path.write_text(  # noqa: SLF001
+        json.dumps(
+            {
+                "runtime_ready": False,
+                "refresh_checked_at": stale_checked_at,
+                "detail": "refresh_token_authentication_error",
+                "next_action": "Auth Gate Check",
+            }
+        ),
+        encoding="utf-8",
+    )
+    fresh_payload = {
+        "runtime_ready": False,
+        "refresh_checked_at": "2026-04-10T11:01:00+00:00",
+        "detail": "refresh_token_authentication_error",
+        "next_action": "Auth Gate Check",
+        "source": "fresh_auth_gate",
+    }
+    monkeypatch.setattr(service, "_run_auth_gate_result", lambda: fresh_payload)
+
+    result = service._load_or_refresh_auth_gate_result(run_if_missing=True)  # noqa: SLF001
+
+    assert result["source"] == "fresh_auth_gate"
+    assert result["refresh_checked_at"] == "2026-04-10T11:01:00+00:00"
+
+
+def test_snapshot_exposes_dashboard_recovery_metadata_when_auth_is_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(Path.cwd())
+    monkeypatch.setattr(
+        service,
+        "_load_or_refresh_auth_gate_result",
+        lambda run_if_missing: {
+            "runtime_ready": False,
+            "refresh_checked_at": "2026-04-10T11:00:00+00:00",
+            "detail": "refresh_token_authentication_error",
+            "next_action": "Auth Gate Check",
+            "source": "test_fixture",
+        },
+    )
+
+    snapshot = service.snapshot()
+
+    recovery = snapshot["dashboard_recovery"]
+    assert recovery["state"] == "RECOVERING"
+    assert recovery["active"] is True
+    assert recovery["recommended_action"] == "Wait for recovery"
+    assert recovery["next_recovery_attempt_at"] == "2026-04-10T11:00:30+00:00"
+    assert recovery["primary_target"] == "auth_gate"
+    auth_target = next(target for target in recovery["targets"] if target["target"] == "auth_gate")
+    assert auth_target["state"] == "RECOVERING"
+    assert auth_target["recommended_action"] == "Wait for recovery"
+    assert snapshot["dashboard_meta"]["recovery"]["state"] == "RECOVERING"
+
+
+def test_snapshot_marks_auth_dependency_as_warming_when_auto_recovery_is_scheduled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(Path.cwd())
+    monkeypatch.setattr(
+        service,
+        "_load_or_refresh_auth_gate_result",
+        lambda run_if_missing: {
+            "runtime_ready": False,
+            "refresh_checked_at": "2026-04-10T11:00:00+00:00",
+            "detail": "refresh_token_authentication_error",
+            "next_action": "Auth Gate Check",
+            "source": "test_fixture",
+        },
+    )
+
+    snapshot = service.snapshot()
+    auth_row = next(
+        row for row in snapshot["startup_control_plane"]["dependencies"] if row["key"] == "schwab_connectivity"
+    )
+
+    assert auth_row["state"] == "WARMING"
+    assert auth_row["action_required_now"] is False
+    assert auth_row["clears_automatically"] is True
+    assert auth_row["next_action_label"] == "Wait for recovery"
+    assert auth_row["next_recovery_attempt_at"] == "2026-04-10T11:00:30+00:00"
+
+
+def test_snapshot_dashboard_recovery_includes_paper_runtime_auto_restart_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(Path.cwd())
+    monkeypatch.setattr(
+        service,
+        "_load_or_refresh_auth_gate_result",
+        lambda run_if_missing: {
+            "runtime_ready": True,
+            "refresh_checked_at": "2026-04-10T11:00:00+00:00",
+            "detail": "Token is runtime-ready.",
+            "next_action": "No action needed",
+            "source": "test_fixture",
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_paper_runtime_recovery_payload",
+        lambda **kwargs: (
+            {
+                "status": "AUTO_RESTART_BACKOFF",
+                "auto_restart_eligible": True,
+                "manual_action_required": False,
+                "restart_backoff_until": "2026-04-10T11:02:00+00:00",
+                "next_action": "Wait for the next readiness refresh",
+                "operator_message": "Paper runtime stopped; auto-restart backoff is active.",
+            },
+            None,
+            None,
+        ),
+    )
+
+    snapshot = service.snapshot()
+    recovery = snapshot["dashboard_recovery"]
+    paper_target = next(target for target in recovery["targets"] if target["target"] == "paper_runtime")
+
+    assert recovery["state"] == "RECOVERING"
+    assert paper_target["state"] == "RECOVERING"
+    assert paper_target["active"] is True
+    assert paper_target["next_recovery_attempt_at"] == "2026-04-10T11:02:00+00:00"
+
+
+def test_paper_latest_operator_control_prefers_operator_status_and_ignores_legacy_file(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    runtime_dir = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "operator_control.json").write_text(
+        json.dumps(
+            {
+                "action": "resume_entries",
+                "status": "pending",
+                "requested_at": "2026-04-10T22:51:20+00:00",
+                "lane_id": "lane_a",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "atp_companion_v1_operator_control.json").write_text(
+        json.dumps(
+            {
+                "action": "resume_entries",
+                "status": "applied",
+                "requested_at": "2026-04-10T22:51:20+00:00",
+                "applied_at": "2026-04-10T22:52:07+00:00",
+                "lane_id": "lane_a",
+                "control_path": str(runtime_dir / "atp_companion_v1_operator_control.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service._paper_latest_operator_control(  # noqa: SLF001
+        runtime_artifacts_dir=tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session",
+        operator_status={
+            "latest_operator_control": {
+                "status": "applied",
+                "requested_at": "2026-04-10T22:51:20+00:00",
+                "applied_at": "2026-04-10T22:52:12+00:00",
+                "lane_id": "lane_a",
+                "control_path": str(runtime_dir / "operator_control.json"),
+            }
+        },
+    )
+
+    assert result["status"] == "applied"
+    assert result["applied_at"] == "2026-04-10T22:52:12+00:00"
 
 
 def test_paper_lane_fallback_status_treats_clean_lane_artifacts_as_restartable_when_top_level_status_is_missing(
@@ -5241,6 +6085,7 @@ def test_restart_paper_with_temp_paper_ignores_missing_pid_and_surfaces_temp_pap
     monkeypatch.setattr(service, "_paper_carry_forward_state", lambda paper, review: {"active": False})
     monkeypatch.setattr(service, "_paper_pre_session_review_state", lambda carry: {"ready_for_run": True})
     monkeypatch.setattr(service, "_load_or_refresh_auth_gate_result", lambda run_if_missing: {"runtime_ready": True})
+    monkeypatch.setattr(service, "_prechecked_action_result", lambda action: None if action == "start-paper" else None)
 
     def _fake_run(command, **kwargs):
         if command == ["bash", "scripts/stop_probationary_paper_soak.sh"]:
@@ -5314,6 +6159,7 @@ def test_restart_paper_with_temp_paper_restarts_cleanly_when_runtime_is_already_
     monkeypatch.setattr(service, "_paper_carry_forward_state", lambda paper, review: {"active": False})
     monkeypatch.setattr(service, "_paper_pre_session_review_state", lambda carry: {"ready_for_run": True})
     monkeypatch.setattr(service, "_load_or_refresh_auth_gate_result", lambda run_if_missing: {"runtime_ready": True})
+    monkeypatch.setattr(service, "_prechecked_action_result", lambda action: None if action == "start-paper" else None)
 
     def _fake_run(command, **kwargs):
         if command == ["bash", "scripts/stop_probationary_paper_soak.sh"]:
@@ -5803,6 +6649,7 @@ def test_dashboard_strategy_performance_tags_temporary_paper_metrics_bucket(tmp_
     )
 
     row = payload["rows"][0]
+    assert payload["payload_version"] == DASHBOARD_PAYLOAD_SCHEMA_VERSION
     assert row["lane_id"] == "atpe_long_medium_high_canary"
     assert row["paper_strategy_class"] == "temporary_paper_strategy"
     assert row["metrics_bucket"] == "experimental_temporary_paper"
@@ -7040,6 +7887,8 @@ def test_dashboard_non_approved_payload_merges_experimental_canary_snapshot(tmp_
     assert canary_row["runtime_instance_present"] is False
     assert canary_row["runtime_state_loaded"] is False
     assert canary_row["snapshot_only"] is True
+    assert canary_row["runtime_presence"] == "HISTORICAL_SNAPSHOT_ONLY"
+    assert canary_row["runtime_presence_label"] == "Historical / Snapshot"
     assert canary_row["allow_block_override_summary"]["label"] == "allowed=1 blocked=1 override=paper_only_experimental_canary"
     assert canary_row["atp_bias_state"] == "LONG_BIAS"
     assert canary_row["atp_pullback_state"] == "NORMAL_PULLBACK"
@@ -7057,6 +7906,7 @@ def test_dashboard_non_approved_payload_merges_experimental_canary_snapshot(tmp_
     assert temporary_payload["enabled_count"] == 1
     assert temporary_payload["metrics_bucket"] == "experimental_temporary_paper"
     assert temporary_payload["rows"][0]["lane_id"] == "atpe_long_medium_high_canary"
+    assert temporary_payload["runtime_presence_counts"]["HISTORICAL_SNAPSHOT_ONLY"] == 1
 
     integrity_payload = service._paper_temporary_paper_runtime_integrity_payload(
         {
@@ -7069,9 +7919,99 @@ def test_dashboard_non_approved_payload_merges_experimental_canary_snapshot(tmp_
     assert integrity_payload["enabled_in_app_count"] == 1
     assert integrity_payload["loaded_in_runtime_count"] == 0
     assert integrity_payload["snapshot_only_count"] == 1
+    assert integrity_payload["temp_paper_blocked"] is True
+    assert integrity_payload["block_reason_code"] == "enabled_lane_missing_from_runtime"
+    assert "not loaded in the running paper runtime" in str(integrity_payload["block_reason"]).lower()
     assert integrity_payload["mismatch_status"] == "MISMATCH"
     assert integrity_payload["missing_lane_ids"] == ["atpe_long_medium_high_canary"]
     assert integrity_payload["start_flags"] == ["--include-atpe-canary"]
+    assert integrity_payload["rows"][0]["runtime_presence"] == "HISTORICAL_SNAPSHOT_ONLY"
+
+
+def test_temp_paper_runtime_integrity_keeps_loaded_unmapped_lane_as_warning_not_blocker(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+
+    integrity_payload = service._paper_temporary_paper_runtime_integrity_payload(  # noqa: SLF001
+        {
+            "temporary_paper_strategies": {
+                "rows": [
+                    {
+                        "lane_id": "atp_companion_v1_gc_asia_us_production_track",
+                        "display_name": "ATP GC production track",
+                        "state": "ENABLED",
+                        "experimental_status": "experimental_temp_paper",
+                        "runtime_instance_present": True,
+                        "runtime_state_loaded": True,
+                        "runtime_kind": "paper",
+                    }
+                ]
+            },
+            "runtime_registry": {
+                "rows": [
+                    {
+                        "lane_id": "atp_companion_v1_gc_asia_us_production_track",
+                        "runtime_instance_present": True,
+                        "runtime_state_loaded": True,
+                        "runtime_kind": "paper",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert integrity_payload["temp_paper_blocked"] is False
+    assert integrity_payload["mismatch_status"] == "CLEAR"
+    assert integrity_payload["block_reason_code"] == "unresolved_temp_paper_overlay_mapping"
+    assert integrity_payload["restart_overlay_mapping_ready"] is False
+
+
+def test_atp_production_track_lane_is_not_classified_as_temporary_paper(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    lane_dir = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "lanes" / "atp_companion_v1_gc_asia_us_production_track"
+    lane_dir.mkdir(parents=True)
+
+    payload = service._paper_non_approved_lanes_payload(
+        {
+            "artifacts_dir": str(tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session"),
+            "raw_operator_status": {
+                "lanes": [
+                    {
+                        "lane_id": "atp_companion_v1_gc_asia_us_production_track",
+                        "display_name": "ATP Companion Production-Track Candidate v1 — GC / Asia + US / US_LATE Safeguard / Halt-Only 3000",
+                        "symbol": "GC",
+                        "runtime_kind": "atp_companion_benchmark_paper",
+                        "experimental_status": "production_track_candidate",
+                        "quality_bucket_policy": "MEDIUM_HIGH_ONLY",
+                        "observer_side": "LONG",
+                        "observer_variant_id": "trend_participation.pullback_continuation.long.conservative",
+                        "entries_enabled": True,
+                        "operator_halt": False,
+                        "position_side": "FLAT",
+                        "risk_state": "OK",
+                        "database_url": f"sqlite:///{tmp_path / 'gc_prod.sqlite3'}",
+                        "paper_only": True,
+                        "non_approved": False,
+                        "artifacts_dir": str(lane_dir),
+                    }
+                ]
+            },
+            "status": {"strategy_status": "RUNNING"},
+            "runtime_registry": {"rows": []},
+            "events": {"branch_sources": [], "rule_blocks": [], "operator_controls": [], "reconciliation": []},
+            "latest_fills": [],
+            "latest_intents": [],
+            "daily_summary": None,
+            "position": {"side": "FLAT"},
+            "operator_state": {},
+            "performance": {"branch_performance": []},
+            "experimental_canaries": {"rows": [], "generated_at": "2026-04-11T06:00:00+00:00", "kill_switch": {"active": False}},
+        }
+    )
+
+    row = payload["rows"][0]
+    assert row["temporary_paper_strategy"] is False
+    assert row["paper_strategy_class"] == "paper_only_non_approved"
+    assert row["metrics_bucket"] == "paper_only_non_approved"
 
 
 def test_dashboard_approved_models_surface_includes_atp_as_shared_paper_lane(tmp_path: Path) -> None:
@@ -8071,6 +9011,8 @@ def test_dashboard_signal_intent_fill_audit_uses_lane_id_identity_for_temp_paper
         session_date="2026-03-24",
         root_db_path=None,
     )
+    assert payload["payload_version"] == DASHBOARD_PAYLOAD_SCHEMA_VERSION
+    assert payload["session_date"] == "2026-03-24"
     row = payload["rows"][0]
     assert row["lane_id"] == "atpe_short_high_only_canary__MES"
     assert row["standalone_strategy_id"] == "atpe_short_high_only_canary__MES"
@@ -8110,7 +9052,9 @@ def test_start_paper_command_auto_includes_enabled_temp_paper_overlays(tmp_path:
     command, metadata = service._paper_start_command_with_enabled_temp_paper(snapshot)
 
     assert command is not None
-    assert command[:3] == ["bash", "scripts/run_probationary_paper_soak.sh", "--include-atpe-canary"]
+    assert command[:2] == ["bash", "scripts/run_probationary_paper_soak.sh"]
+    assert "--config" in command
+    assert "--include-atpe-canary" in command
     assert "--include-gc-mgc-acceptance" in command
     assert command[-1] == "--background"
     assert metadata["enabled_lane_ids"] == [
@@ -8119,6 +9063,23 @@ def test_start_paper_command_auto_includes_enabled_temp_paper_overlays(tmp_path:
     ]
     assert metadata["requested_flags"] == ["--include-atpe-canary", "--include-gc-mgc-acceptance"]
     assert metadata["unresolved_lane_ids"] == []
+
+
+def test_default_paper_runtime_config_paths_include_atp_companion_overlays(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+
+    config_paths = [str(path) for path in service._paper_runtime_config_paths()]
+
+    assert str(tmp_path / "config" / "probationary_pattern_engine_paper.yaml") in config_paths
+    assert str(tmp_path / "config" / "probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml") in config_paths
+    assert str(tmp_path / "config" / "probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us.yaml") in config_paths
+    assert str(tmp_path / "config" / "probationary_pattern_engine_paper_atp_companion_v1_pl_asia_us.yaml") in config_paths
+    assert (
+        str(tmp_path / "config" / "probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us_production_track.yaml")
+        in config_paths
+    )
+    assert str(tmp_path / "config" / "probationary_pattern_engine_paper_atp_companion_shared_runtime.yaml") in config_paths
+    assert config_paths[-1] == str(tmp_path / "config" / "probationary_pattern_engine_paper_atp_companion_shared_runtime.yaml")
 
 
 def test_dashboard_snapshot_includes_approved_quant_baselines_snapshot(tmp_path: Path) -> None:

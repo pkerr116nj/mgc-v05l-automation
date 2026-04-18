@@ -67,6 +67,7 @@ POSITION_OPTIONAL_FIELDS = (
 )
 ACCOUNT_HEALTH_REQUIRED_FIELDS = ("status", "broker_reachable", "auth_ready", "account_selected")
 ACCOUNT_HEALTH_OPTIONAL_FIELDS = (
+    "selected_account_id",
     "selected_account_hash",
     "broker_reachable_label",
     "auth_label",
@@ -122,7 +123,7 @@ BROKER_TRUTH_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         "required_fields": list(ACCOUNT_HEALTH_REQUIRED_FIELDS),
         "optional_fields": list(ACCOUNT_HEALTH_OPTIONAL_FIELDS),
         "normalization_rules": [
-            "Schwab does not expose a dedicated account-health payload here, so health is derived from auth, connectivity, selected-account, and freshness truth.",
+            "The current broker implementation does not expose a dedicated account-health payload here, so health is derived from auth, connectivity, selected-account, and freshness truth.",
             "broker_reachable/auth_ready/account_selected are required booleans for usable runtime health.",
             "freshness fields are advisory and may degrade the classification without invalidating the base schema.",
         ],
@@ -309,6 +310,7 @@ def validate_account_health_snapshot(*, snapshot: dict[str, Any]) -> dict[str, A
         "broker_reachable": _as_dict(health.get("broker_reachable")).get("ok"),
         "auth_ready": _as_dict(health.get("auth_healthy")).get("ok"),
         "account_selected": _as_dict(health.get("account_selected")).get("ok"),
+        "selected_account_id": connection.get("selected_account_id") or connection.get("selected_account_hash"),
         "selected_account_hash": connection.get("selected_account_hash"),
         "broker_reachable_label": _as_dict(health.get("broker_reachable")).get("label"),
         "auth_label": _as_dict(health.get("auth_healthy")).get("label") or auth.get("label"),
@@ -383,6 +385,7 @@ def build_broker_truth_shadow_validation_payload(
             "mode": "READ_ONLY_LIVE_SHADOW",
             "state_mutation": "none",
         },
+        "selected_account_id": selected_account_hash,
         "selected_account_hash": selected_account_hash,
         "schemas": deepcopy(BROKER_TRUTH_SCHEMA_DEFINITIONS),
         "validations": {

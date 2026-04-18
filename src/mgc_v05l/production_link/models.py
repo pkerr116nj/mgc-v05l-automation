@@ -1,8 +1,8 @@
-"""Broker-facing models for the isolated Schwab production link."""
+"""Broker-facing models for the production-link layer."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -14,6 +14,7 @@ class ProductionFeatureFlags:
     production_connectivity_enabled: bool = False
     manual_order_ticket_enabled: bool = False
     manual_live_pilot_enabled: bool = False
+    futures_pilot_enabled: bool = False
     live_order_submit_enabled: bool = False
     stock_market_live_submit_enabled: bool = False
     stock_limit_live_submit_enabled: bool = False
@@ -48,6 +49,13 @@ class ProductionFeatureFlags:
     live_verified_order_keys: tuple[str, ...] = ()
     manual_symbol_whitelist: tuple[str, ...] = ()
     manual_max_quantity: Decimal = Decimal("1")
+    futures_symbol_whitelist: tuple[str, ...] = ()
+    futures_supported_asset_classes: tuple[str, ...] = ("FUTURE",)
+    futures_supported_order_types: tuple[str, ...] = ("MARKET",)
+    futures_supported_time_in_force_values: tuple[str, ...] = ("DAY",)
+    futures_supported_session_values: tuple[str, ...] = ("NORMAL",)
+    futures_max_quantity: Decimal = Decimal("1")
+    futures_market_data_symbol_map: dict[str, str] = field(default_factory=dict)
     broker_freshness_max_age_seconds: int = 120
 
 
@@ -55,6 +63,8 @@ class ProductionFeatureFlags:
 class SchwabProductionLinkConfig:
     repo_root: Path
     enabled: bool
+    broker_provider_id: str
+    market_data_provider_id: str
     features: ProductionFeatureFlags
     trader_api_base_url: str
     market_data_config_path: Path
@@ -86,6 +96,10 @@ class BrokerAccountIdentity:
     updated_at: datetime
     raw_payload: dict[str, Any]
 
+    @property
+    def account_id(self) -> str:
+        return self.account_hash
+
 
 @dataclass(frozen=True)
 class BrokerBalanceSnapshot:
@@ -102,6 +116,10 @@ class BrokerBalanceSnapshot:
     margin_balance: Decimal | None
     fetched_at: datetime
     raw_payload: dict[str, Any]
+
+    @property
+    def account_id(self) -> str:
+        return self.account_hash
 
 
 @dataclass(frozen=True)
@@ -124,6 +142,10 @@ class BrokerPositionSnapshot:
     fetched_at: datetime
     raw_payload: dict[str, Any]
 
+    @property
+    def account_id(self) -> str:
+        return self.account_hash
+
 
 @dataclass(frozen=True)
 class BrokerQuoteSnapshot:
@@ -142,6 +164,10 @@ class BrokerQuoteSnapshot:
     fetched_at: datetime
     source: str
     raw_payload: dict[str, Any]
+
+    @property
+    def account_id(self) -> str:
+        return self.account_hash
 
 
 @dataclass(frozen=True)
@@ -167,6 +193,10 @@ class BrokerOrderRecord:
     source: str
     raw_payload: dict[str, Any]
 
+    @property
+    def account_id(self) -> str:
+        return self.account_hash
+
 
 @dataclass(frozen=True)
 class BrokerOrderEvent:
@@ -181,6 +211,10 @@ class BrokerOrderEvent:
     response_payload: dict[str, Any] | None
     source: str
 
+    @property
+    def account_id(self) -> str:
+        return self.account_hash
+
 
 @dataclass(frozen=True)
 class BrokerReconciliationRecord:
@@ -191,6 +225,10 @@ class BrokerReconciliationRecord:
     mismatch_count: int
     created_at: datetime
     payload: dict[str, Any]
+
+    @property
+    def account_id(self) -> str | None:
+        return self.account_hash
 
 
 @dataclass(frozen=True)
@@ -218,10 +256,17 @@ class ManualOrderRequest:
     oco_group_id: str | None = None
     oco_legs: tuple["ManualOcoLegRequest", ...] = ()
     operator_authenticated: bool = False
+    operator_reduce_only_authorized: bool = False
+    operator_auth_policy: str | None = None
+    operator_auth_risk_bucket: str | None = None
     local_operator_identity: str | None = None
     auth_session_id: str | None = None
     auth_method: str | None = None
     authenticated_at: str | None = None
+
+    @property
+    def account_id(self) -> str:
+        return self.account_hash
 
 
 @dataclass(frozen=True)
@@ -234,10 +279,17 @@ class ManualFlattenRequest:
     time_in_force: str = "DAY"
     session: str = "NORMAL"
     operator_authenticated: bool = False
+    operator_reduce_only_authorized: bool = False
+    operator_auth_policy: str | None = None
+    operator_auth_risk_bucket: str | None = None
     local_operator_identity: str | None = None
     auth_session_id: str | None = None
     auth_method: str | None = None
     authenticated_at: str | None = None
+
+    @property
+    def account_id(self) -> str:
+        return self.account_hash
 
 
 @dataclass(frozen=True)
@@ -252,3 +304,6 @@ class ManualOcoLegRequest:
     trail_value: Decimal | None
     trail_trigger_basis: str | None
     trail_limit_offset: Decimal | None
+
+
+ProductionLinkConfig = SchwabProductionLinkConfig

@@ -1,3 +1,13 @@
+const NY_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
 export function formatValue(value: unknown): string {
   if (value === null || value === undefined || value === "") {
     return "Unavailable";
@@ -22,7 +32,7 @@ export function formatTimestamp(value: unknown): string {
   if (Number.isNaN(parsed)) {
     return value;
   }
-  return new Date(parsed).toLocaleString();
+  return `${NY_TIMESTAMP_FORMATTER.format(new Date(parsed))} ET`;
 }
 
 export function formatRelativeAge(value: unknown): string {

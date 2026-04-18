@@ -10,6 +10,7 @@ from mgc_v05l.research.trend_participation import (
     ATP_TIMING_5M_CONTEXT_NOT_READY,
     ATP_TIMING_CHASE_RISK,
     ATP_TIMING_CONFIRMED,
+    ATP_TIMING_EARLY_PARTICIPATION,
     ATP_TIMING_INVALIDATED,
     ATP_TIMING_INVALIDATED_BEFORE_ENTRY,
     ATP_TIMING_LONDON_DISABLED,
@@ -17,8 +18,10 @@ from mgc_v05l.research.trend_participation import (
     ATP_TIMING_VWAP_CHASE_RISK,
     ATP_TIMING_WAITING,
     ATP_NO_PULLBACK,
+    AtpTimingState,
     ATP_POSITION_NOT_FLAT,
     ATP_V1_LONG_CONTINUATION_FAMILY,
+    ATP_V1_SHORT_CONTINUATION_FAMILY,
     CONTINUATION_TRIGGER_CONFIRMED,
     CONTINUATION_TRIGGER_NOT_CONFIRMED,
     ENTRY_BLOCKED,
@@ -48,10 +51,17 @@ from mgc_v05l.research.trend_participation import (
     summarize_atp_state_diagnostics,
 )
 from mgc_v05l.research.trend_participation.canary import CanaryLaneSpec, _decision_policy_row, _signal_row
-from mgc_v05l.research.trend_participation.phase2_continuation import overlay_position_blocks
+from mgc_v05l.research.trend_participation.phase2_continuation import _setup_signature, overlay_position_blocks
 from mgc_v05l.research.trend_participation.phase4 import build_rolling_windows
 from mgc_v05l.research.trend_participation.phase5 import _fragility_diagnosis
 from mgc_v05l.research.trend_participation.phase3_timing import ATP_TIMING_ACTIVATION_ROLLING_5M
+from mgc_v05l.research.trend_participation.phase3_timing import (
+    ATP_REPLAY_EXIT_POLICY_FIXED_TARGET,
+    ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_LONG_HOLD,
+    ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_NO_TRACTION,
+    ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT,
+    simulate_timed_entries,
+)
 from mgc_v05l.research.trend_participation.storage import rolling_window_bars_from_1m
 
 
@@ -137,6 +147,77 @@ def _eligible_phase2_setup_and_1m_followthrough() -> tuple[list[ResearchBar], li
         _bar(instrument="MES", timeframe="1m", minute_offset=54, minutes=1, open_=103.84, high=104.02, low=103.74, close=103.98),
     ]
     return bars_5m, bars_1m
+
+
+def _eligible_phase2_short_setup_and_1m_followthrough() -> tuple[list[ResearchBar], list[ResearchBar]]:
+    bars_5m = [
+        _bar(
+            instrument="MES",
+            timeframe="5m",
+            minute_offset=idx * 5,
+            minutes=5,
+            open_=104.0 - idx * 0.4,
+            high=104.1 - idx * 0.4,
+            low=103.65 - idx * 0.4,
+            close=103.75 - idx * 0.4,
+        )
+        for idx in range(8)
+    ] + [
+        _bar(instrument="MES", timeframe="5m", minute_offset=40, minutes=5, open_=101.0, high=101.6, low=100.95, close=101.45),
+        _bar(instrument="MES", timeframe="5m", minute_offset=45, minutes=5, open_=101.45, high=101.5, low=100.52, close=100.64),
+    ]
+    bars_1m = [
+        _bar(instrument="MES", timeframe="1m", minute_offset=51, minutes=1, open_=100.88, high=100.95, low=100.74, close=100.82),
+        _bar(instrument="MES", timeframe="1m", minute_offset=52, minutes=1, open_=100.8, high=100.84, low=100.18, close=100.3),
+        _bar(instrument="MES", timeframe="1m", minute_offset=53, minutes=1, open_=100.28, high=100.36, low=100.08, close=100.14),
+        _bar(instrument="MES", timeframe="1m", minute_offset=54, minutes=1, open_=100.16, high=100.22, low=99.98, close=100.02),
+    ]
+    return bars_5m, bars_1m
+
+
+def _atp_timing_state_for_replay(
+    *,
+    side: str = "LONG",
+    decision_minute: int = 0,
+    entry_minute: int = 1,
+    setup_signature: str = "checkpoint-test",
+    setup_state_signature: str = "checkpoint-state-a",
+) -> AtpTimingState:
+    entry_ts = datetime(2026, 1, 5, 14, 0, tzinfo=UTC) + timedelta(minutes=entry_minute)
+    decision_ts = datetime(2026, 1, 5, 14, 0, tzinfo=UTC) + timedelta(minutes=decision_minute)
+    normalized_side = side.upper()
+    return AtpTimingState(
+        instrument="MES",
+        decision_ts=decision_ts,
+        session_date=decision_ts.date(),
+        session_segment="US",
+        family_name="atp_v1_long_pullback_continuation" if normalized_side == "LONG" else "atp_v1_short_pullback_continuation",
+        context_entry_state="ENTRY_ELIGIBLE",
+        timing_state="ATP_TIMING_CONFIRMED",
+        vwap_price_quality_state=VWAP_FAVORABLE,
+        blocker_codes=(),
+        primary_blocker=None,
+        setup_armed=True,
+        timing_confirmed=True,
+        executable_entry=True,
+        invalidated_before_entry=False,
+        setup_armed_but_not_executable=False,
+        entry_executed=True,
+        timing_bar_ts=entry_ts,
+        entry_ts=entry_ts,
+        entry_price=100.0,
+        feature_snapshot={
+            "average_range": 1.0,
+            "decision_bar_low": 99.5,
+            "decision_bar_high": 100.5,
+            "setup_signature": setup_signature,
+            "setup_state_signature": setup_state_signature,
+            "setup_quality_bucket": "HIGH",
+            "regime_bucket": "TREND",
+            "volatility_bucket": "NORMAL",
+        },
+        side=normalized_side,
+    )
 
 
 def test_build_feature_states_detects_uptrend_alignment() -> None:
@@ -286,6 +367,21 @@ def test_phase2_entry_states_mark_continuation_bar_as_entry_eligible() -> None:
     assert latest.pullback_state in {"NORMAL_PULLBACK", "STRETCHED_PULLBACK"}
 
 
+def test_phase2_entry_states_mark_short_continuation_bar_as_entry_eligible() -> None:
+    bars_5m, _ = _eligible_phase2_short_setup_and_1m_followthrough()
+
+    features = build_feature_states(bars_5m=bars_5m, bars_1m=[])
+    entry_states = classify_entry_states(feature_rows=features, side="SHORT")
+    latest = entry_states[-1]
+
+    assert latest.family_name == ATP_V1_SHORT_CONTINUATION_FAMILY
+    assert latest.side == "SHORT"
+    assert latest.entry_state == ENTRY_ELIGIBLE
+    assert latest.continuation_trigger_state == CONTINUATION_TRIGGER_CONFIRMED
+    assert latest.blocker_codes == ()
+    assert latest.raw_candidate is True
+
+
 def test_phase2_entry_states_emit_exact_trigger_blocker_when_reassertion_fails() -> None:
     bars_5m = [
         _bar(instrument="MES", timeframe="5m", minute_offset=idx * 5, minutes=5, open_=100.0 + idx * 0.4, high=100.35 + idx * 0.4, low=99.9 + idx * 0.4, close=100.25 + idx * 0.4)
@@ -397,6 +493,32 @@ def test_phase3_timing_is_unavailable_when_5m_context_is_not_ready() -> None:
     assert latest.primary_blocker == ATP_TIMING_5M_CONTEXT_NOT_READY
 
 
+def test_phase3_timing_allows_early_participation_before_completed_5m_context_when_enabled() -> None:
+    bars_5m, bars_1m = _eligible_phase2_setup_and_1m_followthrough()
+    features = build_feature_states(bars_5m=bars_5m, bars_1m=[])
+    entry_states = classify_entry_states(feature_rows=features)
+    softened_state = replace(
+        entry_states[-1],
+        entry_state=ENTRY_BLOCKED,
+        entry_eligible=False,
+        primary_blocker=ATP_CONTINUATION_TRIGGER_NOT_CONFIRMED,
+        blocker_codes=(ATP_CONTINUATION_TRIGGER_NOT_CONFIRMED,),
+    )
+
+    timing_states = classify_timing_states(
+        entry_states=[softened_state],
+        bars_1m=bars_1m,
+        allow_pre_5m_context_participation=True,
+    )
+    latest = timing_states[-1]
+
+    assert latest.timing_state == ATP_TIMING_EARLY_PARTICIPATION
+    assert latest.executable_entry is True
+    assert latest.primary_blocker is None
+    assert latest.feature_snapshot["timing_activation"] == "pre_5m_context_participation"
+    assert latest.feature_snapshot["original_primary_blocker"] == ATP_CONTINUATION_TRIGGER_NOT_CONFIRMED
+
+
 def test_phase3_timing_confirms_with_favorable_vwap_quality() -> None:
     bars_5m, bars_1m = _eligible_phase2_setup_and_1m_followthrough()
 
@@ -412,6 +534,21 @@ def test_phase3_timing_confirms_with_favorable_vwap_quality() -> None:
     assert latest.executable_entry is True
     assert summary["timing_state"] == ATP_TIMING_CONFIRMED
     assert summary["entry_executed"] is False
+
+
+def test_phase3_timing_confirms_short_with_favorable_vwap_quality() -> None:
+    bars_5m, bars_1m = _eligible_phase2_short_setup_and_1m_followthrough()
+
+    features = build_feature_states(bars_5m=bars_5m, bars_1m=[])
+    entry_states = classify_entry_states(feature_rows=features, side="SHORT")
+    timing_states = classify_timing_states(entry_states=entry_states, bars_1m=bars_1m)
+    latest = timing_states[-1]
+
+    assert entry_states[-1].entry_state == ENTRY_ELIGIBLE
+    assert latest.side == "SHORT"
+    assert latest.timing_state == ATP_TIMING_CONFIRMED
+    assert latest.vwap_price_quality_state == VWAP_FAVORABLE
+    assert latest.executable_entry is True
 
 
 def test_phase3_timing_marks_chase_risk_when_vwap_quality_is_poor() -> None:
@@ -513,6 +650,327 @@ def test_phase3_timing_rolling_activation_can_execute_on_current_minute_window()
     assert any(state.executable_entry for state in timing_states)
     assert timing_states[-1].entry_ts is not None
     assert timing_states[-1].entry_ts >= bars_1m[0].end_ts
+
+
+def test_simulate_timed_entries_fixed_policy_exits_on_target() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = [
+        _bar(instrument="MES", timeframe="1m", minute_offset=0, minutes=1, open_=100.0, high=100.4, low=99.8, close=100.2),
+        _bar(instrument="MES", timeframe="1m", minute_offset=1, minutes=1, open_=100.2, high=101.9, low=100.1, close=101.7),
+        _bar(instrument="MES", timeframe="1m", minute_offset=2, minutes=1, open_=101.6, high=101.7, low=100.9, close=101.0),
+    ]
+    feature_rows = [
+        replace(
+            build_feature_states(
+                bars_5m=[
+                    _bar(instrument="MES", timeframe="5m", minute_offset=0, minutes=5, open_=99.5, high=101.0, low=99.4, close=100.8),
+                    _bar(instrument="MES", timeframe="5m", minute_offset=5, minutes=5, open_=100.8, high=101.8, low=100.6, close=101.5),
+                ],
+                bars_1m=bars_1m,
+            )[-1],
+            decision_ts=bars_1m[1].end_ts,
+            trend_state="UP",
+            momentum_persistence="PERSISTENT_UP",
+            mtf_agreement_state="ALIGNED_UP",
+            bar_anatomy="BULL_IMPULSE",
+            reference_state="ABOVE_SESSION_OPEN",
+            expansion_state="NORMAL",
+            direction_bias="LONG_BIAS",
+        )
+    ]
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        feature_rows=feature_rows,
+        point_value=5.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=24,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_FIXED_TARGET,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "target"
+    assert trades[0].exit_ts == bars_1m[1].end_ts
+
+
+def test_simulate_timed_entries_checkpoint_policy_exits_on_momentum_fade_after_target() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = [
+        _bar(instrument="MES", timeframe="1m", minute_offset=0, minutes=1, open_=100.0, high=100.4, low=99.8, close=100.2),
+        _bar(instrument="MES", timeframe="1m", minute_offset=1, minutes=1, open_=100.2, high=101.9, low=100.1, close=101.7),
+        _bar(instrument="MES", timeframe="1m", minute_offset=2, minutes=1, open_=101.6, high=101.7, low=100.95, close=101.05),
+    ]
+    base_feature = build_feature_states(
+        bars_5m=[
+            _bar(instrument="MES", timeframe="5m", minute_offset=0, minutes=5, open_=99.5, high=101.0, low=99.4, close=100.8),
+            _bar(instrument="MES", timeframe="5m", minute_offset=5, minutes=5, open_=100.8, high=101.8, low=100.6, close=101.5),
+        ],
+        bars_1m=bars_1m,
+    )[-1]
+    feature_rows = [
+        replace(
+            base_feature,
+            decision_ts=bars_1m[1].end_ts,
+            trend_state="UP",
+            momentum_persistence="PERSISTENT_UP",
+            mtf_agreement_state="ALIGNED_UP",
+            bar_anatomy="BULL_IMPULSE",
+            reference_state="ABOVE_SESSION_OPEN",
+            expansion_state="NORMAL",
+            direction_bias="LONG_BIAS",
+        ),
+        replace(
+            base_feature,
+            decision_ts=bars_1m[2].end_ts,
+            trend_state="DOWN",
+            momentum_persistence="MIXED",
+            mtf_agreement_state="MIXED",
+            bar_anatomy="UPPER_REJECTION",
+            reference_state="MID_RANGE",
+            expansion_state="CONTRACTING",
+            direction_bias="SHORT_BIAS",
+        ),
+    ]
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        feature_rows=feature_rows,
+        point_value=5.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=24,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "target_momentum_fade"
+    assert trades[0].exit_ts == bars_1m[2].end_ts
+
+
+def test_simulate_timed_entries_checkpoint_long_hold_extends_fail_safe_window() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = [
+        _bar(instrument="MES", timeframe="1m", minute_offset=0, minutes=1, open_=100.0, high=100.3, low=99.9, close=100.1),
+        _bar(instrument="MES", timeframe="1m", minute_offset=1, minutes=1, open_=100.1, high=100.25, low=100.0, close=100.12),
+        _bar(instrument="MES", timeframe="1m", minute_offset=2, minutes=1, open_=100.12, high=100.24, low=100.01, close=100.11),
+        _bar(instrument="MES", timeframe="1m", minute_offset=3, minutes=1, open_=100.11, high=100.23, low=100.0, close=100.1),
+        _bar(instrument="MES", timeframe="1m", minute_offset=4, minutes=1, open_=100.1, high=100.22, low=99.99, close=100.08),
+    ]
+    feature_rows = [
+        replace(
+            build_feature_states(
+                bars_5m=[
+                    _bar(instrument="MES", timeframe="5m", minute_offset=0, minutes=5, open_=99.8, high=100.4, low=99.7, close=100.2),
+                ],
+                bars_1m=bars_1m,
+            )[-1],
+            decision_ts=bars_1m[-1].end_ts,
+            trend_state="UP",
+            momentum_persistence="MIXED",
+            mtf_agreement_state="MIXED",
+            bar_anatomy="BALANCED",
+            reference_state="MID_RANGE",
+            expansion_state="NORMAL",
+            direction_bias="LONG_BIAS",
+        )
+    ]
+
+    fixed_trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        feature_rows=feature_rows,
+        point_value=5.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=2,
+            stop_atr_multiple=0.85,
+            target_r_multiple=3.0,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT,
+    )
+    longer_hold_trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        feature_rows=feature_rows,
+        point_value=5.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=2,
+            stop_atr_multiple=0.85,
+            target_r_multiple=3.0,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_LONG_HOLD,
+    )
+
+    assert fixed_trades[0].exit_reason == "time_stop"
+    assert fixed_trades[0].exit_ts == bars_1m[2].end_ts
+    assert longer_hold_trades[0].exit_reason == "time_stop"
+    assert longer_hold_trades[0].exit_ts == bars_1m[-1].end_ts
+
+
+def test_simulate_timed_entries_checkpoint_no_traction_abort_cuts_dead_trade_early() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = [
+        _bar(instrument="MES", timeframe="1m", minute_offset=0, minutes=1, open_=100.0, high=100.15, low=99.9, close=100.02),
+        _bar(instrument="MES", timeframe="1m", minute_offset=1, minutes=1, open_=100.02, high=100.16, low=99.96, close=100.01),
+        _bar(instrument="MES", timeframe="1m", minute_offset=2, minutes=1, open_=100.01, high=100.18, low=99.94, close=100.0),
+    ]
+    feature_rows = [
+        replace(
+            build_feature_states(
+                bars_5m=[
+                    _bar(instrument="MES", timeframe="5m", minute_offset=0, minutes=5, open_=99.8, high=100.4, low=99.7, close=100.2),
+                ],
+                bars_1m=bars_1m,
+            )[-1],
+            decision_ts=bars_1m[1].end_ts,
+            trend_state="UP",
+            momentum_persistence="MIXED",
+            mtf_agreement_state="MIXED",
+            bar_anatomy="BALANCED",
+            reference_state="MID_RANGE",
+            expansion_state="NORMAL",
+            direction_bias="LONG_BIAS",
+        )
+    ]
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        feature_rows=feature_rows,
+        point_value=5.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=24,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_NO_TRACTION,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "no_traction_abort"
+    assert trades[0].exit_ts == bars_1m[1].end_ts
+
+
+def test_simulate_timed_entries_allows_structural_reset_reentry_when_enabled() -> None:
+    first_state = _atp_timing_state_for_replay(
+        decision_minute=0,
+        entry_minute=2,
+        setup_signature="gc-reset",
+        setup_state_signature="state-a",
+    )
+    second_state = _atp_timing_state_for_replay(
+        decision_minute=13,
+        entry_minute=15,
+        setup_signature="gc-reset",
+        setup_state_signature="state-b",
+    )
+    bars_1m = [
+        _bar(instrument="MES", timeframe="1m", minute_offset=1, minutes=1, open_=100.0, high=100.2, low=99.8, close=100.1),
+        _bar(instrument="MES", timeframe="1m", minute_offset=2, minutes=1, open_=100.1, high=101.1, low=100.0, close=100.9),
+        _bar(instrument="MES", timeframe="1m", minute_offset=14, minutes=1, open_=100.0, high=100.2, low=99.8, close=100.1),
+        _bar(instrument="MES", timeframe="1m", minute_offset=15, minutes=1, open_=100.1, high=101.2, low=100.0, close=101.0),
+    ]
+
+    trades = simulate_timed_entries(
+        timing_states=[first_state, second_state],
+        bars_1m=bars_1m,
+        point_value=5.0,
+        variant=PatternVariant(
+            variant_id="trend_participation.atp_v1_long_pullback_continuation.long.base",
+            family="atp_v1_long_pullback_continuation",
+            side="LONG",
+            strictness="base",
+            description="ATP replay reentry test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=24,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.0,
+            local_cooldown_bars_1m=1,
+            reset_window_bars_5m=2,
+            allow_reentry=True,
+            reentry_policy="structural_only",
+        ),
+        slippage_points=0.0,
+        fee_per_trade=0.0,
+        variant_overrides={
+            "allow_reentry": True,
+            "local_cooldown_bars_1m": 1,
+            "reset_window_bars_5m": 2,
+            "target_r_multiple": 1.0,
+        },
+    )
+
+    assert len(trades) == 2
+    assert trades[0].is_reentry is False
+    assert trades[1].is_reentry is True
+    assert trades[1].reentry_type == "STRUCTURAL_RESET"
+    assert trades[0].exit_ts <= trades[1].entry_ts
+
+
+def test_phase2_setup_signature_is_unique_per_structural_setup_occurrence() -> None:
+    setup_a = SimpleNamespace(
+        decision_ts=datetime(2026, 1, 5, 14, 0, tzinfo=UTC),
+        atp_pullback_state="NORMAL_PULLBACK",
+    )
+    setup_b = SimpleNamespace(
+        decision_ts=datetime(2026, 1, 5, 14, 5, tzinfo=UTC),
+        atp_pullback_state="NORMAL_PULLBACK",
+    )
+    feature_a = SimpleNamespace(
+        decision_ts=datetime(2026, 1, 5, 14, 1, tzinfo=UTC),
+        session_segment="US",
+        atp_bias_state="LONG_BIAS",
+        bar_anatomy="BULL_IMPULSE",
+    )
+    feature_b = SimpleNamespace(
+        decision_ts=datetime(2026, 1, 5, 14, 6, tzinfo=UTC),
+        session_segment="US",
+        atp_bias_state="LONG_BIAS",
+        bar_anatomy="BULL_IMPULSE",
+    )
+
+    signature_a = _setup_signature(side="LONG", feature=feature_a, setup_feature=setup_a)
+    signature_b = _setup_signature(side="LONG", feature=feature_b, setup_feature=setup_b)
+
+    assert signature_a != signature_b
+    assert "2026-01-05T14:00:00+00:00" in signature_a
+    assert "2026-01-05T14:05:00+00:00" in signature_b
 
 
 def test_phase3_vwap_price_quality_classifier_is_explicit() -> None:

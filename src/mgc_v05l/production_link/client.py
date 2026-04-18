@@ -1,4 +1,9 @@
-"""Thin Schwab trader API client for production-link account and order truth."""
+"""Broker HTTP client for production-link account and order truth.
+
+The current implementation is Schwab-specific, but neutral aliases are exposed
+at the bottom of the module so higher layers can migrate away from explicit
+Schwab naming incrementally.
+"""
 
 from __future__ import annotations
 
@@ -92,6 +97,12 @@ class SchwabBrokerHttpClient:
             "headers": response.headers,
         }
 
+    def preview_order(self, account_hash: str, order_payload: dict[str, Any]) -> dict[str, Any]:
+        payload = self._request_json("POST", f"/accounts/{account_hash}/previewOrder", json_body=order_payload)
+        if isinstance(payload, dict):
+            return payload
+        raise SchwabBrokerHttpError("Expected object payload from Schwab preview-order endpoint.")
+
     def cancel_order(self, account_hash: str, broker_order_id: str) -> dict[str, Any]:
         response = self._request("DELETE", f"/accounts/{account_hash}/orders/{broker_order_id}", allow_empty=True)
         return {
@@ -167,7 +178,7 @@ class SchwabBrokerHttpClient:
             except json.JSONDecodeError:
                 payload = None
             if isinstance(payload, dict):
-                detail = str(payload.get("message") or payload.get("error") or detail)
+                detail = _http_error_detail(payload) or detail
             raise SchwabBrokerHttpError(
                 f"Schwab trader HTTP error {exc.code} for {method} {path}: {detail or exc.reason}"
             ) from exc
@@ -195,3 +206,35 @@ def _parse_body(text: str, *, allow_empty: bool) -> dict[str, Any] | list[Any] |
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise SchwabBrokerHttpError(f"Expected JSON response from Schwab trader API, received: {text[:200]!r}") from exc
+
+
+def _http_error_detail(payload: dict[str, Any]) -> str:
+    direct = str(payload.get("message") or payload.get("error") or "").strip()
+    detail_candidates: list[str] = []
+    for key in ("errors", "details", "validationErrors", "fieldErrors"):
+        raw = payload.get(key)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            if isinstance(item, dict):
+                piece = str(
+                    item.get("message")
+                    or item.get("detail")
+                    or item.get("error")
+                    or item.get("reason")
+                    or item.get("field")
+                    or ""
+                ).strip()
+            else:
+                piece = str(item or "").strip()
+            if piece and piece not in detail_candidates:
+                detail_candidates.append(piece)
+    if detail_candidates:
+        prefix = direct if direct and direct not in detail_candidates else ""
+        return ": ".join(part for part in (prefix, "; ".join(detail_candidates)) if part)
+    return direct
+
+
+BrokerHttpClient = SchwabBrokerHttpClient
+BrokerHttpError = SchwabBrokerHttpError
+BrokerHttpResponse = SchwabBrokerHttpResponse

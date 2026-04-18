@@ -1,0 +1,22 @@
+# ATP companion production-track paper package on GC.
+# This exact config is the frozen paper-pilot package for the admitted GC lane.
+# This package is an admitted paper package, not a benchmark replacement.
+# It preserves the raw GC candidate as a separate research lane and carries:
+# - narrow US_LATE safeguard
+# - outer halt-only desk governance at -3000
+mode: "paper"
+environment_mode: "live_execution_mode"
+structural_signal_timeframe: "5m"
+execution_timeframe: "1m"
+artifact_timeframe: "5m"
+context_timeframes: ["5m"]
+execution_timeframe_role: "execution_detail_only"
+database_url: "sqlite:///./mgc_v05l.probationary.paper.sqlite3"
+probationary_artifacts_dir: "./outputs/probationary_pattern_engine/paper_session"
+probationary_paper_runtime_exclusive_config: true
+
+probationary_paper_desk_halt_new_entries_loss: -3000
+probationary_paper_desk_flatten_and_halt_loss: -999999
+probationary_paper_lane_warning_open_loss_json: "{}"
+
+probationary_paper_lanes_json: '[{"lane_id":"atp_companion_v1_gc_asia_us_production_track","display_name":"ATP Companion Production-Track Candidate v1 — GC / Asia + US / US_LATE Safeguard / Halt-Only 3000 [3m]","symbol":"GC","standalone_strategy_id":"atp_companion_v1__production_track_gc_asia_us","identity_components":["paper","gc","asia_us","production_track"],"long_sources":["trend_participation.pullback_continuation.long.conservative"],"short_sources":["trend_participation.atp_v1_short_pullback_continuation.short.base"],"session_restriction":"ASIA/US","allowed_sessions":["ASIA","US"],"point_value":"100","trade_size":1,"participation_policy":"PYRAMID_WITH_LIMIT","max_concurrent_entries":3,"max_position_quantity":3,"max_adds_after_entry":2,"add_direction_policy":"SAME_DIRECTION_ONLY","catastrophic_open_loss":"-750","lane_mode":"ATP_COMPANION_PRODUCTION_TRACK_CANDIDATE","strategy_family":"active_trend_participation_engine","strategy_identity_root":"ATP_COMPANION_V1","runtime_kind":"atp_companion_benchmark_paper","live_poll_lookback_minutes":1440,"observed_instruments":["GC"],"quality_bucket_policy":"MEDIUM_HIGH_ONLY","experimental_status":"production_track_candidate","paper_only":true,"non_approved":false,"observer_variant_id":"trend_participation.pullback_continuation.long.conservative","observer_side":"LONG","allow_pre_5m_context_participation":true,"atp_context_timeframe":"3m","shared_strategy_identity":"ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK","package_id":"gc_asia_us_production_track_v1","package_label":"GC Asia+US + US_LATE safeguard + halt-only 3000","runtime_overlay_id":"atp_us_late_2bar_no_traction_plus_adverse","runtime_overlay_params":{"min_favorable_excursion_r":0.25,"adverse_excursion_abort_r":0.65,"logic_mode":"all","apply_subwindows":["US_LATE"]},"artifacts_dir":"./outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_gc_asia_us_production_track","database_url":"sqlite:///./mgc_v05l.probationary.paper__atp_companion_v1_gc_asia_us_production_track.sqlite3"}]'

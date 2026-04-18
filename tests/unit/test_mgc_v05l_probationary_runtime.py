@@ -18,6 +18,7 @@ import mgc_v05l.app.probationary_runtime as probationary_runtime_module
 from mgc_v05l.app.strategy_study import build_strategy_study_v3
 from mgc_v05l.app.probationary_runtime import (
     ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
+    ATP_COMPANION_PRODUCTION_TRACK_OVERLAY_ID,
     ATPE_EXIT_POLICY_HARD_TARGET,
     ATPE_EXIT_POLICY_TARGET_CHECKPOINT,
     GC_MGC_ACCEPTANCE_RUNTIME_KIND,
@@ -42,6 +43,7 @@ from mgc_v05l.app.probationary_runtime import (
     _restore_paper_runtime_state,
     _apply_probationary_operator_control,
     _active_probationary_paper_lane_specs,
+    _atp_us_late_overlay_abort_reasons,
     _build_probationary_paper_soak_validation_runtime,
     _build_probationary_paper_soak_validation_settings,
     build_probationary_paper_readiness,
@@ -114,6 +116,66 @@ def _build_probationary_settings(tmp_path: Path):
             override_path,
         ]
     )
+
+
+def _research_bar_1m(index: int, *, instrument: str = "GC", close: str = "100") -> ResearchBar:
+    end_ts = datetime(2026, 4, 17, 13, 0, tzinfo=timezone.utc) + timedelta(minutes=index + 1)
+    start_ts = end_ts - timedelta(minutes=1)
+    price = Decimal(close)
+    return ResearchBar(
+        instrument=instrument,
+        timeframe="1m",
+        start_ts=start_ts,
+        end_ts=end_ts,
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        volume=100,
+        session_label="US",
+        session_segment="US",
+        source="test",
+        provenance="unit_test",
+    )
+
+
+def test_resample_research_bars_supports_3m_context() -> None:
+    bars_1m = [_research_bar_1m(index, close=str(100 + index)) for index in range(6)]
+
+    resampled = probationary_runtime_module._resample_research_bars(  # noqa: SLF001
+        bars_1m,
+        target_timeframe="3m",
+    )
+
+    assert len(resampled) == 3
+    assert all(bar.timeframe == "3m" for bar in resampled)
+    assert [bar.end_ts for bar in resampled] == [
+        datetime(2026, 4, 17, 13, 0, tzinfo=timezone.utc),
+        datetime(2026, 4, 17, 13, 3, tzinfo=timezone.utc),
+        datetime(2026, 4, 17, 13, 6, tzinfo=timezone.utc),
+    ]
+
+
+def test_latest_atpe_feature_state_uses_configured_context_timeframe(monkeypatch: pytest.MonkeyPatch) -> None:
+    bars_1m = [_research_bar_1m(index, close=str(100 + index)) for index in range(6)]
+    captured: dict[str, object] = {}
+
+    def _fake_build_feature_states(*, bars_5m, bars_1m):
+        captured["timeframes"] = [bar.timeframe for bar in bars_5m]
+        captured["count"] = len(bars_5m)
+        return [SimpleNamespace(instrument="GC")]
+
+    monkeypatch.setattr(probationary_runtime_module, "build_feature_states", _fake_build_feature_states)
+
+    feature = probationary_runtime_module._latest_atpe_feature_state_from_bars(  # noqa: SLF001
+        bars_1m=bars_1m,
+        instrument="GC",
+        context_timeframe="3m",
+    )
+
+    assert feature is not None
+    assert captured["count"] == 2
+    assert captured["timeframes"] == ["3m", "3m"]
 
 
 def _build_probationary_paper_settings(tmp_path: Path):
@@ -344,6 +406,7 @@ def _run_atp_companion_benchmark_paper_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     exit_bearing: bool = False,
+    allow_pre_5m_context_participation: bool = False,
 ) -> SimpleNamespace:
     def _clean_reconciliation_payload() -> dict[str, object]:
         return {
@@ -383,6 +446,7 @@ def _run_atp_companion_benchmark_paper_fixture(
         "non_approved": True,
         "observer_variant_id": "trend_participation.pullback_continuation.long.conservative",
         "observer_side": "LONG",
+        "allow_pre_5m_context_participation": allow_pre_5m_context_participation,
         "artifacts_dir": str(tmp_path / "paper_artifacts" / "lanes" / "atp_companion_v1_asia_us"),
         "database_url": f"sqlite:///{tmp_path / 'probationary.paper__atp_companion_v1_asia_us.sqlite3'}",
     }
@@ -553,7 +617,7 @@ def _run_atp_companion_benchmark_paper_fixture(
             )
         ]
 
-    def _fake_classify_timing_states(*, entry_states, bars_1m):
+    def _fake_classify_timing_states(*, entry_states, bars_1m, allow_pre_5m_context_participation=False):
         state = entry_states[-1]
         latest_bar = bars_1m[-1]
         executable = len(bars_1m) == 1
@@ -564,8 +628,14 @@ def _run_atp_companion_benchmark_paper_fixture(
                 session_date=state.session_date,
                 session_segment="ASIA",
                 family_name=state.family_name,
-                context_entry_state=state.entry_state,
-                timing_state="ATP_TIMING_CONFIRMED" if executable else "ATP_TIMING_WAITING",
+                context_entry_state="ENTRY_BLOCKED" if executable and allow_pre_5m_context_participation else state.entry_state,
+                timing_state=(
+                    "ATP_TIMING_EARLY_PARTICIPATION"
+                    if executable and allow_pre_5m_context_participation
+                    else "ATP_TIMING_CONFIRMED"
+                    if executable
+                    else "ATP_TIMING_WAITING"
+                ),
                 vwap_price_quality_state="VWAP_FAVORABLE",
                 blocker_codes=() if executable else ("ATP_TIMING_CONFIRMATION_NOT_REACHED",),
                 primary_blocker=None if executable else "ATP_TIMING_CONFIRMATION_NOT_REACHED",
@@ -986,6 +1056,11 @@ def test_build_probationary_paper_runner_includes_atpe_observer_lanes_when_overl
             return []
 
     monkeypatch.setattr(probationary_runtime_module, "_build_live_polling_service", lambda *args, **kwargs: _DummyLivePollingService())
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_run_probationary_runtime_market_data_transport_probe",
+        lambda *args, **kwargs: None,
+    )
 
     runner = build_probationary_paper_runner(
         [
@@ -1057,6 +1132,11 @@ def test_build_probationary_paper_runner_includes_atp_companion_benchmark_lane(
             return []
 
     monkeypatch.setattr(probationary_runtime_module, "_build_live_polling_service", lambda *args, **kwargs: _DummyLivePollingService())
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_run_probationary_runtime_market_data_transport_probe",
+        lambda *args, **kwargs: None,
+    )
 
     runner = build_probationary_paper_runner(
         [
@@ -1196,6 +1276,154 @@ def test_atp_companion_operator_control_queues_shared_lane_target(tmp_path: Path
     assert payload["lane_id"] == "atp_companion_v1_asia_us"
     assert payload["shared_strategy_identity"] == "ATP_COMPANION_V1_ASIA_US"
 
+
+def test_atp_companion_production_track_config_queues_shared_lane_target(tmp_path: Path) -> None:
+    control_path = tmp_path / "paper_artifacts" / "runtime" / "operator_control.json"
+    override_path = tmp_path / "paper_atp_companion_gc_production_track_control_override.yaml"
+    override_path.write_text(
+        "\n".join(
+            [
+                f'database_url: "sqlite:///{tmp_path / "probationary.paper.sqlite3"}"',
+                f'probationary_artifacts_dir: "{tmp_path / "paper_artifacts"}"',
+                "probationary_paper_runtime_exclusive_config: true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_paths = [
+        Path("config/base.yaml"),
+        Path("config/live.yaml"),
+        Path("config/probationary_pattern_engine.yaml"),
+        Path("config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us_production_track.yaml"),
+        override_path,
+    ]
+
+    settings = load_settings_from_files(config_paths)
+    result = submit_probationary_operator_control(
+        config_paths,
+        action="halt_entries",
+        shared_strategy_identity="ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK",
+    )
+
+    assert settings.resolved_probationary_operator_control_path == control_path
+    assert result.control_path == str(control_path)
+    payload = json.loads(control_path.read_text(encoding="utf-8"))
+    assert payload["action"] == "halt_entries"
+    assert payload["lane_id"] == "atp_companion_v1_gc_asia_us_production_track"
+    assert payload["shared_strategy_identity"] == "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"
+
+
+def test_lane_targeted_operator_control_uses_resolved_runtime_path_even_when_not_exclusive(tmp_path: Path) -> None:
+    control_path = tmp_path / "paper_artifacts" / "runtime" / "atp_gc_control.json"
+    override_path = tmp_path / "paper_atp_companion_gc_production_track_nonexclusive_override.yaml"
+    override_path.write_text(
+        "\n".join(
+            [
+                f'database_url: "sqlite:///{tmp_path / "probationary.paper.sqlite3"}"',
+                f'probationary_artifacts_dir: "{tmp_path / "paper_artifacts"}"',
+                f'probationary_operator_control_path: "{control_path}"',
+                "probationary_paper_runtime_exclusive_config: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_paths = [
+        Path("config/base.yaml"),
+        Path("config/live.yaml"),
+        Path("config/probationary_pattern_engine.yaml"),
+        Path("config/probationary_pattern_engine_paper.yaml"),
+        Path("config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us_production_track.yaml"),
+        override_path,
+    ]
+
+    settings = load_settings_from_files(config_paths)
+    result = submit_probationary_operator_control(
+        config_paths,
+        action="clear_risk_halts",
+        shared_strategy_identity="ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK",
+    )
+
+    assert settings.probationary_paper_runtime_exclusive_config is False
+    assert settings.resolved_probationary_operator_control_path == control_path
+    assert result.control_path == str(control_path)
+    payload = json.loads(control_path.read_text(encoding="utf-8"))
+    assert payload["action"] == "clear_risk_halts"
+    assert payload["lane_id"] == "atp_companion_v1_gc_asia_us_production_track"
+    assert payload["shared_strategy_identity"] == "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"
+
+
+def test_lane_targeted_operator_control_writes_only_to_shared_control_path(tmp_path: Path) -> None:
+    shared_control_path = tmp_path / "paper_artifacts" / "runtime" / "operator_control.json"
+    legacy_control_path = tmp_path / "paper_artifacts" / "runtime" / "atp_companion_v1_operator_control.json"
+    override_path = tmp_path / "paper_atp_companion_gc_production_track_shared_runtime_override.yaml"
+    override_path.write_text(
+        "\n".join(
+            [
+                f'database_url: "sqlite:///{tmp_path / "probationary.paper.sqlite3"}"',
+                f'probationary_artifacts_dir: "{tmp_path / "paper_artifacts"}"',
+                f'probationary_operator_control_path: "{shared_control_path}"',
+                "probationary_paper_runtime_exclusive_config: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_paths = [
+        Path("config/base.yaml"),
+        Path("config/live.yaml"),
+        Path("config/probationary_pattern_engine.yaml"),
+        Path("config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us_production_track.yaml"),
+        override_path,
+    ]
+
+    result = submit_probationary_operator_control(
+        config_paths,
+        action="resume_entries",
+        shared_strategy_identity="ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK",
+    )
+
+    assert result.control_path == str(shared_control_path)
+    shared_payload = json.loads(shared_control_path.read_text(encoding="utf-8"))
+    assert shared_payload["status"] == "pending"
+    assert shared_payload["lane_id"] == "atp_companion_v1_gc_asia_us_production_track"
+    assert shared_payload["shared_strategy_identity"] == "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"
+    assert legacy_control_path.exists() is False
+
+
+def test_atp_companion_production_track_overlay_triggers_only_when_both_conditions_fail() -> None:
+    bars = [
+        SimpleNamespace(high=Decimal("100.20"), low=Decimal("99.20")),
+        SimpleNamespace(high=Decimal("100.22"), low=Decimal("99.10")),
+    ]
+
+    reasons = _atp_us_late_overlay_abort_reasons(
+        entry_fill_price=100.0,
+        risk_points=1.0,
+        bars=bars,
+        min_favorable_excursion_r=0.25,
+        adverse_excursion_abort_r=0.65,
+        logic_mode="all",
+    )
+
+    assert reasons == ["no_traction", "adverse_excursion"]
+
+    safe_bars = [
+        SimpleNamespace(high=Decimal("100.40"), low=Decimal("99.60")),
+        SimpleNamespace(high=Decimal("100.80"), low=Decimal("99.55")),
+    ]
+    safe_reasons = _atp_us_late_overlay_abort_reasons(
+        entry_fill_price=100.0,
+        risk_points=1.0,
+        bars=safe_bars,
+        min_favorable_excursion_r=0.25,
+        adverse_excursion_abort_r=0.65,
+        logic_mode="all",
+    )
+
+    assert safe_reasons == []
+
 def test_atp_companion_benchmark_runtime_processes_live_1m_bars_and_suppresses_duplicates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1234,6 +1462,23 @@ def test_atp_companion_benchmark_runtime_processes_live_1m_bars_and_suppresses_d
     assert fixture.runtime_state["pnl_truth_basis"] == "PAPER_RUNTIME_LEDGER"
     assert fixture.runtime_state["lifecycle_truth_class"] == "AUTHORITATIVE_INTRABAR_ENTRY_ONLY"
     assert fixture.runtime_state["truth_provenance"]["artifact_context"] == "ATP_COMPANION_PAPER_RUNTIME_STATE"
+
+
+def test_atp_companion_runtime_can_arm_entry_from_early_participation_timing_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _run_atp_companion_benchmark_paper_fixture(
+        tmp_path,
+        monkeypatch,
+        allow_pre_5m_context_participation=True,
+    )
+
+    assert fixture.lane.spec.allow_pre_5m_context_participation is True
+    assert len(fixture.order_intents) == 1
+    assert len(fixture.fills) == 1
+    assert fixture.operator_status["allow_pre_5m_context_participation"] is True
+    assert fixture.runtime_state["allow_pre_5m_context_participation"] is True
 
 
 def test_atp_replay_and_paper_artifacts_expose_shared_lifecycle_contract_with_explicit_lane_provenance(
@@ -2930,6 +3175,42 @@ def test_probationary_operator_flatten_and_halt_submits_paper_exit_intent(tmp_pa
     assert saved_rows[0]["reason_code"] == "operator_flatten_and_halt"
 
 
+def test_probationary_operator_control_rejects_and_recovers_from_malformed_queue_file(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path).model_copy(update={"mode": RuntimeMode.PAPER})
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger)
+    execution_engine = ExecutionEngine(broker=PaperBroker())
+    engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    control_path = settings.resolved_probationary_operator_control_path
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    control_path.write_text('{"action":"resume_entries"}\ntrailing-garbage\n', encoding="utf-8")
+
+    result = _apply_probationary_operator_control(
+        settings=settings,
+        repositories=repositories,
+        strategy_engine=engine,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+
+    assert result is not None
+    assert result["status"] == "rejected"
+    assert "malformed operator control payload" in result["message"].lower()
+    assert "JSONDecodeError" in str(result.get("error"))
+    assert Path(str(result["invalid_control_path"])).exists()
+    repaired_payload = json.loads(control_path.read_text(encoding="utf-8"))
+    assert repaired_payload["status"] == "rejected"
+    assert repaired_payload["action"] == "unknown"
+
+
 def test_probationary_paper_lane_specs_admit_pl_and_gc_asia_only(tmp_path: Path) -> None:
     settings = _build_probationary_paper_settings(tmp_path)
 
@@ -2945,6 +3226,33 @@ def test_probationary_paper_lane_specs_admit_pl_and_gc_asia_only(tmp_path: Path)
     assert caps["pl_us_late_pause_resume_long"] == Decimal("-1000")
     assert caps["gc_asia_early_normal_breakout_retest_hold_long"] == Decimal("-750")
     assert caps["mgc_us_late_pause_resume_long"] == Decimal("-500")
+
+
+def test_active_probationary_paper_lane_specs_follow_runtime_config_in_force_only(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    runtime_dir = settings.probationary_artifacts_path / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "paper_config_in_force.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-10T22:00:00+00:00",
+                "lanes": [
+                    {
+                        "lane_id": "gc_asia_early_normal_breakout_retest_hold_long",
+                        "display_name": "GC only",
+                        "symbol": "GC",
+                        "session_restriction": "ASIA_EARLY",
+                        "catastrophic_open_loss": "-600",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    specs = _active_probationary_paper_lane_specs(settings)
+
+    assert [spec.lane_id for spec in specs] == ["gc_asia_early_normal_breakout_retest_hold_long"]
 
 
 def test_probationary_paper_lane_specs_append_canary_only_when_enabled(tmp_path: Path) -> None:
@@ -3594,6 +3902,7 @@ def test_live_strategy_pilot_runner_cannot_enable_accidentally_and_blocks_submit
     assert broker.submit_calls == 0
     assert summary["live_strategy_pilot_enabled"] is False
     assert summary["live_strategy_submit_enabled"] is False
+    assert summary["allowed_scope"]["point_value"] == "10"
     assert summary["entries_disabled_blocker"] == "live_strategy_pilot_disabled"
     assert summary["current_strategy_readiness"] is False
     assert repositories.order_intents.list_all() == []
@@ -4027,7 +4336,12 @@ def test_live_strategy_pilot_runner_applies_confirmed_fill_from_broker_truth(tmp
 
 
 def test_live_strategy_pilot_single_cycle_auto_stops_after_completed_entry_exit_cycle(tmp_path: Path) -> None:
-    settings = _build_live_strategy_pilot_settings(tmp_path).model_copy(update={"live_poll_interval_seconds": 1})
+    settings = _build_live_strategy_pilot_settings(tmp_path).model_copy(
+        update={
+            "live_poll_interval_seconds": 1,
+            "live_strategy_pilot_single_cycle_mode": True,
+        }
+    )
     repositories = RepositorySet(build_engine(settings.database_url))
     structured_logger = StructuredLogger(settings.probationary_artifacts_path)
     alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_live_strategy_pilot_test")
@@ -5018,6 +5332,89 @@ def test_lane_two_loser_rule_halts_lane(tmp_path: Path) -> None:
     assert lane.strategy_engine.state.operator_halt is True
 
 
+def test_probationary_paper_observation_mode_disables_loss_halts(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path).model_copy(
+        update={
+            "probationary_paper_disable_loss_halts": True,
+            "probationary_paper_desk_halt_new_entries_loss": Decimal("-10"),
+            "probationary_paper_desk_flatten_and_halt_loss": Decimal("-20"),
+        }
+    )
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+    lane.spec.catastrophic_open_loss = Decimal("-750")  # type: ignore[attr-defined]
+    lane.strategy_engine._state = replace(  # noqa: SLF001
+        lane.strategy_engine.state,
+        strategy_status=StrategyStatus.IN_LONG_K,
+        position_side=PositionSide.LONG,
+        broker_position_qty=1,
+        internal_position_qty=1,
+        entry_price=Decimal("3000"),
+    )
+    risk_state = ProbationaryPaperRiskRuntimeState(
+        session_date="2026-03-19",
+        desk_halt_new_entries_triggered=True,
+        desk_flatten_and_halt_triggered=True,
+        desk_last_trigger_reason="desk_flatten_and_halt_loss",
+        lane_states={
+            "gc_lane": {
+                "catastrophic_triggered": True,
+                "warning_triggered": True,
+                "degradation_triggered": True,
+                "risk_state": "HALTED_CATASTROPHIC",
+                "halt_reason": "lane_catastrophic_open_loss_cap",
+                "unblock_action": "Manual inspection required",
+            }
+        },
+    )
+    metrics = {
+        "gc_lane": ProbationaryPaperLaneMetrics(
+            session_date="2026-03-19",
+            realized_pnl=Decimal("-25"),
+            unrealized_pnl=Decimal("-800"),
+            total_pnl=Decimal("-825"),
+            closed_trades=2,
+            losing_closed_trades=2,
+            intent_count=2,
+            fill_count=2,
+            open_order_count=0,
+            position_side="LONG",
+            internal_position_qty=1,
+            broker_position_qty=1,
+            open_entry_leg_count=1,
+            open_add_count=0,
+            additional_entry_allowed=False,
+            entry_price=Decimal("3000"),
+            last_mark=Decimal("2992"),
+            last_processed_bar_end_ts=None,
+        )
+    }
+
+    updated_state, risk_events = _apply_probationary_paper_risk_controls(
+        settings=settings,
+        lanes=[lane],
+        lane_metrics=metrics,
+        risk_state=risk_state,
+        structured_logger=StructuredLogger(tmp_path / "root"),
+        alert_dispatcher=AlertDispatcher(StructuredLogger(tmp_path / "root")),
+    )
+
+    assert updated_state.desk_halt_new_entries_triggered is False
+    assert updated_state.desk_flatten_and_halt_triggered is False
+    assert updated_state.desk_last_trigger_reason is None
+    assert updated_state.lane_states["gc_lane"]["risk_state"] == "OK"
+    assert updated_state.lane_states["gc_lane"]["halt_reason"] is None
+    assert updated_state.lane_states["gc_lane"]["unblock_action"] == "Paper observation mode: loss halts disabled"
+    assert risk_events == []
+    assert lane.execution_engine.pending_executions() == []
+
+
 def test_probationary_paper_risk_state_auto_clears_session_scoped_lane_halts_on_session_rollover() -> None:
     risk_state = ProbationaryPaperRiskRuntimeState(
         session_date="2026-03-19",
@@ -5888,6 +6285,176 @@ def test_desk_halt_contaminates_all_lanes_by_design(tmp_path: Path) -> None:
     status_lanes = {row["lane_id"]: row for row in status_payload["lanes"]}
     assert status_lanes["pl_lane"]["operator_halt"] is True
     assert status_lanes["mgc_lane"]["operator_halt"] is True
+
+
+def test_paper_risk_runtime_state_separates_active_and_historical_lane_states(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    active_lane = _seed_test_lane(
+        tmp_path,
+        lane_id="active_lane",
+        symbol="MGC",
+        source="usLatePauseResumeLongTurn",
+        session_restriction="US_LATE",
+        point_value=Decimal("10"),
+    )
+    risk_state = ProbationaryPaperRiskRuntimeState(
+        session_date="2026-03-19",
+        lane_states={
+            "active_lane": {"risk_state": "OK"},
+            "historical_lane": {"risk_state": "HALTED_CATASTROPHIC"},
+        },
+    )
+    metrics = {
+        "active_lane": ProbationaryPaperLaneMetrics(
+            session_date="2026-03-19",
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_pnl=Decimal("0"),
+            closed_trades=0,
+            losing_closed_trades=0,
+            intent_count=0,
+            fill_count=0,
+            open_order_count=0,
+            position_side="FLAT",
+            internal_position_qty=0,
+            broker_position_qty=0,
+            open_entry_leg_count=0,
+            open_add_count=0,
+            additional_entry_allowed=False,
+            entry_price=None,
+            last_mark=None,
+            last_processed_bar_end_ts=None,
+        ),
+    }
+
+    _write_probationary_paper_risk_artifacts(
+        settings=settings,
+        lanes=[active_lane],
+        lane_metrics=metrics,
+        risk_state=risk_state,
+        structured_logger=root_logger,
+        risk_events=[],
+    )
+
+    payload = json.loads((settings.probationary_artifacts_path / "runtime" / "paper_risk_runtime_state.json").read_text(encoding="utf-8"))
+    assert payload["active_lane_ids"] == ["active_lane"]
+    assert list(payload["lane_states"].keys()) == ["active_lane"]
+    assert list(payload["historical_lane_states"].keys()) == ["historical_lane"]
+
+
+def test_supervisor_operator_status_keeps_lane_specific_halts_from_poisoning_global_runtime(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    running_lane = _seed_test_lane(
+        tmp_path,
+        lane_id="mgc_lane",
+        symbol="MGC",
+        source="usLatePauseResumeLongTurn",
+        session_restriction="US_LATE",
+        point_value=Decimal("10"),
+    )
+    halted_lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+    halted_lane.strategy_engine.set_operator_halt(datetime.now(timezone.utc), True)
+
+    risk_state = ProbationaryPaperRiskRuntimeState(
+        session_date="2026-03-19",
+        lane_states={
+            "gc_lane": {
+                "risk_state": "HALTED_CATASTROPHIC",
+                "halt_reason": "lane_catastrophic_open_loss_cap",
+                "unblock_action": "Manual inspection required",
+            }
+        },
+    )
+
+    status_path = _write_probationary_supervisor_operator_status(
+        settings=settings,
+        lanes=[running_lane, halted_lane],
+        structured_logger=root_logger,
+        risk_state=risk_state,
+        latest_operator_control=None,
+    )
+
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["generated_at"]
+    assert payload["source_runtime_pid"] > 0
+    assert payload["active_lane_ids"] == ["mgc_lane", "gc_lane"]
+    assert payload["entries_enabled"] is True
+    assert payload["operator_halt"] is False
+    assert payload["usable_lane_count"] == 1
+    assert payload["halted_lane_count"] == 1
+
+
+def test_probationary_paper_risk_controls_clear_stale_lane_risk_when_lane_is_rearmed(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+    lane.strategy_engine.set_operator_halt(datetime.now(timezone.utc), False)
+
+    risk_state = ProbationaryPaperRiskRuntimeState(
+        session_date="2026-03-19",
+        lane_states={
+            "gc_lane": {
+                "catastrophic_triggered": True,
+                "risk_state": "HALTED_CATASTROPHIC",
+                "halt_reason": None,
+                "unblock_action": "Manual inspection required",
+                "last_cleared_action": "session_reset_auto_clear",
+            }
+        },
+    )
+    metrics = {
+        "gc_lane": ProbationaryPaperLaneMetrics(
+            session_date="2026-03-19",
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_pnl=Decimal("0"),
+            closed_trades=0,
+            losing_closed_trades=0,
+            intent_count=0,
+            fill_count=0,
+            open_order_count=0,
+            open_entry_leg_count=0,
+            open_add_count=0,
+            additional_entry_allowed=False,
+            position_side="FLAT",
+            internal_position_qty=0,
+            broker_position_qty=0,
+            entry_price=None,
+            last_mark=None,
+            last_processed_bar_end_ts=datetime(2026, 3, 19, 14, 0, tzinfo=timezone.utc).isoformat(),
+        )
+    }
+
+    updated_state, _ = _apply_probationary_paper_risk_controls(
+        settings=settings,
+        lanes=[lane],
+        lane_metrics=metrics,
+        risk_state=risk_state,
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+
+    assert updated_state.lane_states["gc_lane"]["catastrophic_triggered"] is False
+    assert updated_state.lane_states["gc_lane"]["risk_state"] == "OK"
+    assert updated_state.lane_states["gc_lane"]["halt_reason"] is None
+    assert updated_state.lane_states["gc_lane"]["unblock_action"] == "No action needed; already eligible"
+    assert updated_state.lane_states["gc_lane"]["last_cleared_action"] == "stale_risk_state_reconciled"
 
 
 def test_supervisor_operator_status_exposes_lane_reason_and_unblock_action(tmp_path: Path) -> None:

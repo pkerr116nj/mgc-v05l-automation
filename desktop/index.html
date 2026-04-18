@@ -4,9 +4,188 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MGC Operator</title>
+    <style>
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        background: #0b1320;
+      }
+      #bootstrap-shell {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 28px;
+        box-sizing: border-box;
+        background:
+          radial-gradient(circle at top, rgba(56, 88, 138, 0.34), transparent 42%),
+          linear-gradient(180deg, #101a2b 0%, #060b14 100%);
+        color: #f5f7fb;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #bootstrap-shell[data-hidden="true"] {
+        display: none;
+      }
+      .bootstrap-shell-panel {
+        width: min(860px, 100%);
+        border-radius: 22px;
+        border: 1px solid rgba(255,255,255,0.14);
+        background: rgba(6, 11, 20, 0.9);
+        box-shadow: 0 26px 90px rgba(0,0,0,0.42);
+        padding: 28px;
+      }
+      .bootstrap-shell-kicker {
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #f3a94b;
+        margin-bottom: 12px;
+      }
+      .bootstrap-shell-title {
+        margin: 0 0 12px;
+        font-size: clamp(28px, 4vw, 40px);
+        line-height: 1.08;
+      }
+      .bootstrap-shell-detail {
+        margin: 0 0 18px;
+        font-size: 16px;
+        line-height: 1.58;
+        color: rgba(245,247,251,0.84);
+      }
+      .bootstrap-shell-badges {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 18px;
+      }
+      .bootstrap-shell-badge {
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: rgba(255,255,255,0.08);
+        border: 1px solid rgba(255,255,255,0.12);
+      }
+      #bootstrap-shell[data-tone="ready"] .bootstrap-shell-badge-state {
+        background: rgba(70, 168, 120, 0.16);
+        border-color: rgba(70, 168, 120, 0.36);
+      }
+      #bootstrap-shell[data-tone="loading"] .bootstrap-shell-badge-state,
+      #bootstrap-shell[data-tone="booting"] .bootstrap-shell-badge-state {
+        background: rgba(243, 169, 75, 0.16);
+        border-color: rgba(243, 169, 75, 0.36);
+      }
+      #bootstrap-shell[data-tone="fatal"] .bootstrap-shell-badge-state {
+        background: rgba(255, 119, 119, 0.16);
+        border-color: rgba(255, 119, 119, 0.36);
+      }
+      .bootstrap-shell-evidence {
+        font-size: 14px;
+        line-height: 1.55;
+        color: rgba(245,247,251,0.68);
+        white-space: pre-wrap;
+      }
+    </style>
   </head>
   <body>
+    <div id="bootstrap-shell" data-tone="booting" data-hidden="false">
+      <div class="bootstrap-shell-panel">
+        <div class="bootstrap-shell-kicker">MGC Operator</div>
+        <h1 class="bootstrap-shell-title" id="bootstrap-shell-title">Booting packaged operator UI…</h1>
+        <p class="bootstrap-shell-detail" id="bootstrap-shell-detail">
+          Loading renderer assets, preload bridge, and desktop state. If this screen does not advance, inspect
+          `outputs/operator_dashboard/runtime/desktop_electron_startup.json`
+          and
+          `outputs/operator_dashboard/runtime/desktop_renderer_bootstrap.json`.
+        </p>
+        <div class="bootstrap-shell-badges">
+          <span class="bootstrap-shell-badge bootstrap-shell-badge-state" id="bootstrap-shell-state">BOOTING</span>
+          <span class="bootstrap-shell-badge">PAPER ONLY</span>
+        </div>
+        <div class="bootstrap-shell-evidence" id="bootstrap-shell-evidence">
+          Waiting for renderer bootstrap.
+        </div>
+      </div>
+    </div>
     <div id="root"></div>
-    <script type="module" src="/src/renderer/main.tsx"></script>
+    <script>
+      (() => {
+        const shell = document.getElementById("bootstrap-shell");
+        const titleNode = document.getElementById("bootstrap-shell-title");
+        const detailNode = document.getElementById("bootstrap-shell-detail");
+        const stateNode = document.getElementById("bootstrap-shell-state");
+        const evidenceNode = document.getElementById("bootstrap-shell-evidence");
+        const events = [];
+        const apply = (update) => {
+          if (!shell) return;
+          if (update.tone) shell.dataset.tone = String(update.tone);
+          if (update.title && titleNode) titleNode.textContent = String(update.title);
+          if (update.detail && detailNode) detailNode.textContent = String(update.detail);
+          if (update.state && stateNode) stateNode.textContent = String(update.state);
+        };
+        window.__MGC_BOOTSTRAP__ = {
+          setShellState(update) {
+            apply(update || {});
+          },
+          hideShell() {
+            if (shell) shell.dataset.hidden = "true";
+          },
+          showShell() {
+            if (shell) shell.dataset.hidden = "false";
+          },
+          recordInline(stage, payload) {
+            events.push({
+              recorded_at: new Date().toISOString(),
+              stage: String(stage || "unknown"),
+              payload: payload || {},
+            });
+            if (evidenceNode) {
+              const latest = events.slice(-3).map((row) => `${row.stage}: ${JSON.stringify(row.payload)}`);
+              evidenceNode.textContent = latest.join("\n");
+            }
+          },
+        };
+        window.addEventListener("error", (event) => {
+          const target = event.target;
+          const resourceUrl =
+            target && typeof target === "object" && "src" in target && target.src
+              ? String(target.src)
+              : target && typeof target === "object" && "href" in target && target.href
+                ? String(target.href)
+                : "";
+          window.__MGC_BOOTSTRAP__.showShell();
+          window.__MGC_BOOTSTRAP__.setShellState({
+            tone: "fatal",
+            state: resourceUrl ? "ASSET_LOAD_FAILED" : "RENDERER_BOOTSTRAP_FAILED",
+            title: resourceUrl ? "Renderer asset failed to load." : "Renderer bootstrap failed before the operator UI painted.",
+            detail: resourceUrl ? resourceUrl : String(event.message || "Unknown bootstrap failure."),
+          });
+          window.__MGC_BOOTSTRAP__.recordInline("inline:error", {
+            message: String(event.message || ""),
+            filename: event.filename || null,
+            resource_url: resourceUrl || null,
+          });
+        });
+        window.addEventListener("unhandledrejection", (event) => {
+          window.__MGC_BOOTSTRAP__.showShell();
+          window.__MGC_BOOTSTRAP__.setShellState({
+            tone: "fatal",
+            state: "UNHANDLED_REJECTION",
+            title: "Renderer bootstrap hit an unhandled promise rejection.",
+            detail: String(event.reason || "Unknown rejection."),
+          });
+          window.__MGC_BOOTSTRAP__.recordInline("inline:unhandledrejection", {
+            reason: String(event.reason || ""),
+          });
+        });
+      })();
+    </script>
+    <script
+      type="module"
+      src="/src/renderer/main.tsx"
+      onerror="window.__MGC_BOOTSTRAP__ && window.__MGC_BOOTSTRAP__.setShellState({tone:'fatal',state:'RENDERER_ENTRY_LOAD_FAILED',title:'Renderer entry failed to load.',detail:'The packaged renderer bundle did not load successfully.'})"
+    ></script>
   </body>
-  </html>
+</html>

@@ -6,12 +6,12 @@ import json
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .backtest import backtest_decisions_with_audit, summarize_performance
 from .conflict import resolve_conflict
 from .models import AtpEntryState, FeatureState, HigherPrioritySignal, PatternVariant, SignalDecision
-from .state_layers import LONG_BIAS, NEUTRAL, NO_PULLBACK, NORMAL_PULLBACK, STRETCHED_PULLBACK, VIOLENT_PULLBACK_DISQUALIFY
+from .state_layers import LONG_BIAS, NEUTRAL, NO_PULLBACK, NORMAL_PULLBACK, SHORT_BIAS, STRETCHED_PULLBACK, VIOLENT_PULLBACK_DISQUALIFY
 
 ENTRY_ELIGIBLE = "ENTRY_ELIGIBLE"
 ENTRY_BLOCKED = "ENTRY_BLOCKED"
@@ -22,6 +22,8 @@ CONTINUATION_TRIGGER_UNAVAILABLE = "CONTINUATION_TRIGGER_UNAVAILABLE"
 
 ATP_V1_LONG_CONTINUATION_FAMILY = "atp_v1_long_pullback_continuation"
 ATP_V1_LONG_CONTINUATION_VARIANT_ID = "trend_participation.atp_v1_long_pullback_continuation.long.base"
+ATP_V1_SHORT_CONTINUATION_FAMILY = "atp_v1_short_pullback_continuation"
+ATP_V1_SHORT_CONTINUATION_VARIANT_ID = "trend_participation.atp_v1_short_pullback_continuation.short.base"
 
 ATP_WARMUP_INCOMPLETE = "ATP_WARMUP_INCOMPLETE"
 ATP_SESSION_BLOCKED = "ATP_SESSION_BLOCKED"
@@ -37,10 +39,39 @@ ATP_CONTINUATION_TRIGGER_NOT_CONFIRMED = "ATP_CONTINUATION_TRIGGER_NOT_CONFIRMED
 PHASE2_ALLOWED_SESSIONS = frozenset({"ASIA", "LONDON", "US"})
 PHASE2_WARMUP_BARS = 9
 REASSERTION_ANATOMY = {"BULL_IMPULSE", "LOWER_REJECTION", "BALANCED"}
+SHORT_REASSERTION_ANATOMY = {"BEAR_IMPULSE", "UPPER_REJECTION", "BALANCED"}
 
 
-def atp_phase2_variant() -> PatternVariant:
-    return PatternVariant(
+def atp_phase2_variant(side: str = "LONG", variant_overrides: Mapping[str, Any] | None = None) -> PatternVariant:
+    normalized_side = str(side or "LONG").strip().upper()
+    normalized_overrides = dict(variant_overrides or {})
+    if normalized_side == "SHORT":
+        base_variant = PatternVariant(
+            variant_id=ATP_V1_SHORT_CONTINUATION_VARIANT_ID,
+            family=ATP_V1_SHORT_CONTINUATION_FAMILY,
+            side="SHORT",
+            strictness="base",
+            description=(
+                "ATP v1 short continuation after an acceptable pullback when the next completed 5m bar reasserts downside trend."
+            ),
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=24,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+            local_cooldown_bars_1m=0,
+            reset_window_bars_5m=0,
+            allow_reentry=False,
+            reentry_policy="structural_only",
+            trigger_reclaim_band_multiple=0.08,
+            notes=(
+                "phase2",
+                "replay_paper_only",
+                "short_continuation_family",
+                "continuation_trigger_requires_prior_pullback_and_completed_bar_reassertion",
+            ),
+        )
+        return replace(base_variant, **normalized_overrides) if normalized_overrides else base_variant
+    base_variant = PatternVariant(
         variant_id=ATP_V1_LONG_CONTINUATION_VARIANT_ID,
         family=ATP_V1_LONG_CONTINUATION_FAMILY,
         side="LONG",
@@ -64,6 +95,7 @@ def atp_phase2_variant() -> PatternVariant:
             "continuation_trigger_requires_prior_pullback_and_completed_bar_reassertion",
         ),
     )
+    return replace(base_variant, **normalized_overrides) if normalized_overrides else base_variant
 
 
 def build_phase2_replay_package(
@@ -73,20 +105,26 @@ def build_phase2_replay_package(
     higher_priority_signals: Iterable[HigherPrioritySignal] = (),
     point_value: float,
     allowed_sessions: frozenset[str] = PHASE2_ALLOWED_SESSIONS,
+    variant_overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    base_states = classify_entry_states(feature_rows=feature_rows, allowed_sessions=allowed_sessions)
+    base_states = classify_entry_states(
+        feature_rows=feature_rows,
+        allowed_sessions=allowed_sessions,
+        variant_overrides=variant_overrides,
+    )
     states = list(base_states)
     previous_decision_ids: tuple[str, ...] | None = None
     trades: list[Any] = []
     decisions: list[SignalDecision] = []
     audit: list[Any] = []
-    variant = atp_phase2_variant()
+    variant = atp_phase2_variant(variant_overrides=variant_overrides)
     variants_by_id = {variant.variant_id: variant}
 
     for _ in range(4):
         decisions = build_signal_decisions_from_entry_states(
             entry_states=states,
             higher_priority_signals=higher_priority_signals,
+            variant_overrides=variant_overrides,
         )
         decision_ids = tuple(decision.decision_id for decision in decisions)
         trades, audit = backtest_decisions_with_audit(
@@ -124,7 +162,11 @@ def classify_entry_states(
     runtime_ready: bool = True,
     position_flat: bool = True,
     one_position_rule_clear: bool = True,
+    side: str = "LONG",
+    variant_overrides: Mapping[str, Any] | None = None,
 ) -> list[AtpEntryState]:
+    normalized_side = str(side or "LONG").strip().upper()
+    variant = atp_phase2_variant(normalized_side, variant_overrides=variant_overrides)
     states: list[AtpEntryState] = []
     for index, feature in enumerate(feature_rows):
         setup_feature = feature_rows[index - 1] if index > 0 else None
@@ -132,12 +174,13 @@ def classify_entry_states(
         session_allowed = feature.session_segment in allowed_sessions
         bias_state = feature.atp_bias_state
         setup_pullback_state = setup_feature.atp_pullback_state if setup_feature is not None else NO_PULLBACK
-        trigger_confirmed, trigger_snapshot = _long_continuation_trigger(
+        trigger_confirmed, trigger_snapshot = _continuation_trigger(
+            side=normalized_side,
             feature=feature,
             setup_feature=setup_feature,
         )
         raw_candidate = bool(
-            bias_state == LONG_BIAS
+            bias_state == (LONG_BIAS if normalized_side == "LONG" else SHORT_BIAS)
             and setup_pullback_state in {NORMAL_PULLBACK, STRETCHED_PULLBACK}
             and setup_feature is not None
         )
@@ -149,6 +192,7 @@ def classify_entry_states(
             else CONTINUATION_TRIGGER_UNAVAILABLE
         )
         blockers = _entry_blockers(
+            side=normalized_side,
             bias_state=bias_state,
             setup_pullback_state=setup_pullback_state,
             warmup_complete=warmup_complete,
@@ -160,6 +204,7 @@ def classify_entry_states(
             trigger_confirmed=trigger_confirmed,
         )
         setup_quality_score = _setup_quality_score(
+            side=normalized_side,
             feature=feature,
             setup_feature=setup_feature,
             trigger_confirmed=trigger_confirmed,
@@ -170,7 +215,7 @@ def classify_entry_states(
                 decision_ts=feature.decision_ts,
                 session_date=feature.session_date,
                 session_segment=feature.session_segment,
-                family_name=ATP_V1_LONG_CONTINUATION_FAMILY,
+                family_name=variant.family,
                 bias_state=bias_state,
                 pullback_state=setup_pullback_state,
                 continuation_trigger_state=continuation_trigger_state,
@@ -185,8 +230,8 @@ def classify_entry_states(
                 runtime_ready=runtime_ready,
                 position_flat=position_flat,
                 one_position_rule_clear=one_position_rule_clear,
-                setup_signature=_setup_signature(feature=feature, setup_feature=setup_feature),
-                setup_state_signature=_setup_state_signature(feature=feature, setup_feature=setup_feature),
+                setup_signature=_setup_signature(side=normalized_side, feature=feature, setup_feature=setup_feature),
+                setup_state_signature=_setup_state_signature(side=normalized_side, feature=feature, setup_feature=setup_feature),
                 setup_quality_score=setup_quality_score,
                 setup_quality_bucket=_setup_quality_bucket(setup_quality_score),
                 feature_snapshot={
@@ -209,9 +254,10 @@ def classify_entry_states(
                     "setup_pullback_depth_score": setup_feature.atp_pullback_depth_score if setup_feature is not None else None,
                     "setup_pullback_violence_score": setup_feature.atp_pullback_violence_score if setup_feature is not None else None,
                     "bias_reasons": list(feature.atp_bias_reasons),
-                    "bias_blockers": list(feature.atp_long_bias_blockers),
+                    "bias_blockers": list(feature.atp_long_bias_blockers if normalized_side == "LONG" else feature.atp_short_bias_blockers),
                     "trigger_checks": trigger_snapshot,
                 },
+                side=normalized_side,
             )
         )
     return states
@@ -266,13 +312,14 @@ def build_signal_decisions_from_entry_states(
     *,
     entry_states: Sequence[AtpEntryState],
     higher_priority_signals: Iterable[HigherPrioritySignal] = (),
+    variant_overrides: Mapping[str, Any] | None = None,
 ) -> list[SignalDecision]:
-    variant = atp_phase2_variant()
     higher_priority = tuple(higher_priority_signals)
     decisions: list[SignalDecision] = []
     for state in entry_states:
         if not state.entry_eligible:
             continue
+        variant = atp_phase2_variant(state.side, variant_overrides=variant_overrides)
         conflict_outcome, block_reason = resolve_conflict(
             instrument=state.instrument,
             side=variant.side,
@@ -283,7 +330,7 @@ def build_signal_decisions_from_entry_states(
         live_eligible = conflict_outcome.value == "no_conflict"
         decisions.append(
             SignalDecision(
-                decision_id=_decision_id(state),
+                decision_id=_decision_id(state, variant_overrides=variant_overrides),
                 instrument=state.instrument,
                 variant_id=variant.variant_id,
                 family=variant.family,
@@ -324,6 +371,7 @@ def latest_atp_entry_state_summary(entry_state: AtpEntryState | None) -> dict[st
     if entry_state is None:
         return {
             "family_name": ATP_V1_LONG_CONTINUATION_FAMILY,
+            "side": "LONG",
             "entry_state": ENTRY_BLOCKED,
             "continuation_trigger_state": CONTINUATION_TRIGGER_UNAVAILABLE,
             "blocker_codes": [],
@@ -331,6 +379,7 @@ def latest_atp_entry_state_summary(entry_state: AtpEntryState | None) -> dict[st
         }
     return {
         "family_name": entry_state.family_name,
+        "side": entry_state.side,
         "bias_state": entry_state.bias_state,
         "pullback_state": entry_state.pullback_state,
         "continuation_trigger_state": entry_state.continuation_trigger_state,
@@ -356,6 +405,7 @@ def summarize_phase2_entry_diagnostics(
     entry_states: Sequence[AtpEntryState],
     decisions: Sequence[SignalDecision],
     trades: Sequence[Any],
+    variant_overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     total = len(entry_states)
     bias_rows = [feature for feature in feature_rows if feature.atp_bias_state != NEUTRAL]
@@ -387,9 +437,14 @@ def summarize_phase2_entry_diagnostics(
     pullback_counter = Counter(feature.atp_pullback_state for feature in bias_rows)
     decision_count = len(decisions)
     trade_metrics = summarize_performance(trades)
+    reference_state = state_rows[0] if state_rows else None
+    reference_variant = atp_phase2_variant(
+        reference_state.side if reference_state is not None else "LONG",
+        variant_overrides=variant_overrides,
+    )
     return {
-        "family_name": ATP_V1_LONG_CONTINUATION_FAMILY,
-        "variant_id": ATP_V1_LONG_CONTINUATION_VARIANT_ID,
+        "family_name": reference_variant.family,
+        "variant_id": reference_variant.variant_id,
         "bar_count": total,
         "raw_continuation_candidates": len(raw_candidates),
         "entry_eligible_bars": len(eligible_rows),
@@ -488,6 +543,7 @@ def write_phase2_artifacts(
 
 def _entry_blockers(
     *,
+    side: str,
     bias_state: str,
     setup_pullback_state: str,
     warmup_complete: bool,
@@ -509,9 +565,11 @@ def _entry_blockers(
         blockers.append(ATP_POSITION_NOT_FLAT)
     if not one_position_rule_clear:
         blockers.append(ATP_ONE_POSITION_BASELINE_BLOCK)
+    normalized_side = str(side or "LONG").strip().upper()
+    supported_bias = LONG_BIAS if normalized_side == "LONG" else SHORT_BIAS
     if bias_state == NEUTRAL:
         blockers.append(ATP_NEUTRAL_BIAS)
-    elif bias_state != LONG_BIAS:
+    elif bias_state != supported_bias:
         blockers.append(ATP_SHORT_BIAS_UNSUPPORTED)
     if setup_pullback_state == NO_PULLBACK:
         blockers.append(ATP_NO_PULLBACK)
@@ -520,6 +578,12 @@ def _entry_blockers(
     if raw_candidate and not trigger_confirmed:
         blockers.append(ATP_CONTINUATION_TRIGGER_NOT_CONFIRMED)
     return blockers
+
+
+def _continuation_trigger(*, side: str, feature: FeatureState, setup_feature: FeatureState | None) -> tuple[bool, dict[str, Any]]:
+    if str(side or "LONG").strip().upper() == "SHORT":
+        return _short_continuation_trigger(feature=feature, setup_feature=setup_feature)
+    return _long_continuation_trigger(feature=feature, setup_feature=setup_feature)
 
 
 def _long_continuation_trigger(*, feature: FeatureState, setup_feature: FeatureState | None) -> tuple[bool, dict[str, Any]]:
@@ -542,8 +606,29 @@ def _long_continuation_trigger(*, feature: FeatureState, setup_feature: FeatureS
     return confirmed, snapshot
 
 
+def _short_continuation_trigger(*, feature: FeatureState, setup_feature: FeatureState | None) -> tuple[bool, dict[str, Any]]:
+    if setup_feature is None:
+        return False, {"setup_bar_available": False}
+    close_below_fast_ema = feature.close <= feature.atp_fast_ema
+    close_below_previous_close = feature.close < setup_feature.close
+    breaks_prior_low = feature.low <= setup_feature.low
+    bearish_reassertion_body = feature.close <= ((feature.open + feature.high + feature.low) / 3.0)
+    anatomy_ok = feature.bar_anatomy in SHORT_REASSERTION_ANATOMY
+    snapshot = {
+        "setup_bar_available": True,
+        "close_below_fast_ema": close_below_fast_ema,
+        "close_below_previous_close": close_below_previous_close,
+        "breaks_prior_low": breaks_prior_low,
+        "bearish_reassertion_body": bearish_reassertion_body,
+        "anatomy_ok": anatomy_ok,
+    }
+    confirmed = all(snapshot.values())
+    return confirmed, snapshot
+
+
 def _setup_quality_score(
     *,
+    side: str,
     feature: FeatureState,
     setup_feature: FeatureState | None,
     trigger_confirmed: bool,
@@ -557,9 +642,12 @@ def _setup_quality_score(
         score += max(0.0, 1.0 - min(setup_feature.atp_pullback_violence_score, 2.0) * 0.25)
     if trigger_confirmed:
         score += 1.1
-    if feature.bar_anatomy == "BULL_IMPULSE":
+    normalized_side = str(side or "LONG").strip().upper()
+    impulse_anatomy = "BULL_IMPULSE" if normalized_side == "LONG" else "BEAR_IMPULSE"
+    rejection_anatomy = "LOWER_REJECTION" if normalized_side == "LONG" else "UPPER_REJECTION"
+    if feature.bar_anatomy == impulse_anatomy:
         score += 0.6
-    elif feature.bar_anatomy == "LOWER_REJECTION":
+    elif feature.bar_anatomy == rejection_anatomy:
         score += 0.4
     else:
         score += 0.2
@@ -574,22 +662,27 @@ def _setup_quality_bucket(score: float) -> str:
     return "LOW"
 
 
-def _setup_signature(*, feature: FeatureState, setup_feature: FeatureState | None) -> str:
+def _setup_signature(*, side: str, feature: FeatureState, setup_feature: FeatureState | None) -> str:
+    normalized_side = str(side or "LONG").strip().upper()
+    setup_origin_ts = setup_feature.decision_ts if setup_feature is not None else feature.decision_ts
     return "|".join(
         [
-            ATP_V1_LONG_CONTINUATION_FAMILY,
-            "LONG",
+            ATP_V1_LONG_CONTINUATION_FAMILY if normalized_side == "LONG" else ATP_V1_SHORT_CONTINUATION_FAMILY,
+            normalized_side,
             feature.session_segment,
             feature.atp_bias_state,
             setup_feature.atp_pullback_state if setup_feature is not None else NO_PULLBACK,
             feature.bar_anatomy,
+            setup_origin_ts.isoformat(),
+            feature.decision_ts.isoformat(),
         ]
     )
 
 
-def _setup_state_signature(*, feature: FeatureState, setup_feature: FeatureState | None) -> str:
+def _setup_state_signature(*, side: str, feature: FeatureState, setup_feature: FeatureState | None) -> str:
     return "|".join(
         [
+            str(side or "LONG").strip().upper(),
             feature.atp_bias_state,
             setup_feature.atp_pullback_state if setup_feature is not None else NO_PULLBACK,
             feature.atp_pullback_state,
@@ -599,8 +692,8 @@ def _setup_state_signature(*, feature: FeatureState, setup_feature: FeatureState
     )
 
 
-def _decision_id(state: AtpEntryState) -> str:
-    return f"{state.instrument}|{ATP_V1_LONG_CONTINUATION_VARIANT_ID}|{state.decision_ts.isoformat()}"
+def _decision_id(state: AtpEntryState, variant_overrides: Mapping[str, Any] | None = None) -> str:
+    return f"{state.instrument}|{atp_phase2_variant(state.side, variant_overrides=variant_overrides).variant_id}|{state.decision_ts.isoformat()}"
 
 
 def _percent(numerator: int, denominator: int) -> float:

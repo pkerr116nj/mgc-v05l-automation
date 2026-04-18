@@ -1,4 +1,4 @@
-"""Configuration loading for the isolated Schwab production link."""
+"""Configuration loading for the broker production-link layer."""
 
 from __future__ import annotations
 
@@ -35,6 +35,12 @@ def load_schwab_production_link_config(repo_root: Path) -> SchwabProductionLinkC
             "MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED",
             payload,
             "manual_live_pilot_enabled",
+            default=False,
+        ),
+        futures_pilot_enabled=_env_or_config_bool(
+            "MGC_PRODUCTION_FUTURES_PILOT_ENABLED",
+            payload,
+            "futures_pilot_enabled",
             default=False,
         ),
         live_order_submit_enabled=_env_or_config_bool(
@@ -196,6 +202,48 @@ def load_schwab_production_link_config(repo_root: Path) -> SchwabProductionLinkC
             "manual_max_quantity",
             default=Decimal("1"),
         ),
+        futures_symbol_whitelist=_env_or_config_csv(
+            "MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST",
+            payload,
+            "futures_symbol_whitelist",
+            default=(),
+        ),
+        futures_supported_asset_classes=_env_or_config_csv(
+            "MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES",
+            payload,
+            "futures_supported_asset_classes",
+            default=("FUTURE",),
+        ),
+        futures_supported_order_types=_env_or_config_csv(
+            "MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES",
+            payload,
+            "futures_supported_order_types",
+            default=("MARKET",),
+        ),
+        futures_supported_time_in_force_values=_env_or_config_csv(
+            "MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES",
+            payload,
+            "futures_supported_time_in_force_values",
+            default=("DAY",),
+        ),
+        futures_supported_session_values=_env_or_config_csv(
+            "MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES",
+            payload,
+            "futures_supported_session_values",
+            default=("NORMAL",),
+        ),
+        futures_max_quantity=_env_or_config_decimal(
+            "MGC_PRODUCTION_FUTURES_MAX_QUANTITY",
+            payload,
+            "futures_max_quantity",
+            default=Decimal("1"),
+        ),
+        futures_market_data_symbol_map=_env_or_config_symbol_map(
+            "MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP",
+            payload,
+            "futures_market_data_symbol_map",
+            default={},
+        ),
         broker_freshness_max_age_seconds=_env_or_config_int(
             "MGC_PRODUCTION_BROKER_FRESHNESS_MAX_AGE_SECONDS",
             payload,
@@ -229,6 +277,18 @@ def load_schwab_production_link_config(repo_root: Path) -> SchwabProductionLinkC
     return SchwabProductionLinkConfig(
         repo_root=repo_root,
         enabled=enabled,
+        broker_provider_id=_env_or_config_str(
+            "MGC_PRODUCTION_BROKER_PROVIDER",
+            payload,
+            "broker_provider",
+            default="schwab",
+        ),
+        market_data_provider_id=_env_or_config_str(
+            "MGC_PRODUCTION_MARKET_DATA_PROVIDER",
+            payload,
+            "market_data_provider",
+            default="schwab",
+        ),
         features=features,
         trader_api_base_url=_env_or_config_str(
             "SCHWAB_TRADER_API_BASE_URL",
@@ -305,6 +365,10 @@ def load_schwab_production_link_config(repo_root: Path) -> SchwabProductionLinkC
         ),
         config_path=config_path,
     )
+
+
+def load_production_link_config(repo_root: Path) -> SchwabProductionLinkConfig:
+    return load_schwab_production_link_config(repo_root)
 
 
 def _load_optional_json(path: Path | None) -> dict[str, Any]:
@@ -405,3 +469,50 @@ def _env_or_config_decimal(env_name: str, payload: dict[str, Any], key: str, *, 
         return Decimal(str(raw))
     except (InvalidOperation, ValueError, TypeError):
         return default
+
+
+def _env_or_config_symbol_map(
+    env_name: str,
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: dict[str, str],
+) -> dict[str, str]:
+    env_value = os.environ.get(env_name)
+    raw = env_value if env_value not in (None, "") else payload.get(key)
+    if raw in (None, ""):
+        return dict(default)
+    if isinstance(raw, dict):
+        return {
+            str(map_key).strip().upper(): str(map_value).strip()
+            for map_key, map_value in raw.items()
+            if str(map_key).strip() and str(map_value).strip()
+        } or dict(default)
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return {
+                str(map_key).strip().upper(): str(map_value).strip()
+                for map_key, map_value in parsed.items()
+                if str(map_key).strip() and str(map_value).strip()
+            } or dict(default)
+        mapping: dict[str, str] = {}
+        for item in raw.split(","):
+            chunk = item.strip()
+            if not chunk:
+                continue
+            if "=" in chunk:
+                map_key, map_value = chunk.split("=", 1)
+            elif ":" in chunk:
+                map_key, map_value = chunk.split(":", 1)
+            else:
+                continue
+            normalized_key = str(map_key).strip().upper()
+            normalized_value = str(map_value).strip()
+            if normalized_key and normalized_value:
+                mapping[normalized_key] = normalized_value
+        return mapping or dict(default)
+    return dict(default)

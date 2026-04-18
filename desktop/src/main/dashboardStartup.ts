@@ -252,5 +252,5 @@ export function shouldAutoReconnectDashboardFailure(
   if (assessment.kind === "stale_listener_conflict" || assessment.kind === "stale_dashboard_instance") {
     return attemptCount < 1;
   }
-  return assessment.kind === "none" || assessment.kind === "early_process_exit";
+  return assessment.kind === "none" || assessment.kind === "early_process_exit" || assessment.kind === "dashboard_api_not_ready";
 }

@@ -2,14 +2,14 @@
 
 ## Governance Note
 
-This document records the exact narrow live-pilot scope that has been proven so far.
+This document records historical proven pilot scope and distinguishes it from the current active live-test target.
 
 It is not:
 - a statement of research defaults
 - a statement of legacy benchmark semantics
 - a declaration that the platform is production-enabled beyond this pilot slice
 
-## What Is Proven Live
+## Historical Proven Live Scope
 
 - Real manual-live `BUY_TO_OPEN` on Schwab completed submit, ack, and fill.
 - Real manual-live `SELL_TO_CLOSE` on Schwab completed submit, ack, and fill.
@@ -18,7 +18,9 @@ It is not:
 - Refresh/restart stayed passive with no autonomous follow-on submit.
 - No autonomous live strategy submission is enabled.
 
-## Exact Narrow Scope
+The stock pilot proof below is historical record only. It is not the current active manual live-test lane.
+
+## Historical Narrow Scope
 
 - Asset class: `STOCK`
 - Order type: `LIMIT`
@@ -31,7 +33,7 @@ It is not:
 - Close route: `FLATTEN + SELL`
 - `clientOrderId` omitted only for the exact proven narrow stock pilot shape
 
-## Exact Allowed Route
+## Historical Allowed Route
 
 - `BUY_TO_OPEN`:
   - `intent_type = MANUAL_LIVE_PILOT`
@@ -48,7 +50,7 @@ It is not:
   - `order_type = LIMIT`
   - `quantity = 1`
 
-## Exact Required Gates
+## Historical Required Gates
 
 - Local operator auth ready
 - Live Schwab account selected
@@ -58,15 +60,36 @@ It is not:
 - No unresolved same-symbol broker/manual order ambiguity
 - Route must remain inside the narrow scope above
 
-## Exact Operator UI Path
+## Historical Operator UI Path
 
 - `Positions > Manual Order Ticket`
 - Use `Set BUY_TO_OPEN Ticket` for the proven open route
 - Use `Set SELL_TO_CLOSE Ticket` for the proven close route
 - Send through `Review / Confirm / Send`
 - Inspect compact state in:
-  - `Live Manual Pilot Runbook`
-  - `Last Completed Live Cycle`
+- `Historical Stock Pilot Record`
+- `Last Completed Live Cycle`
+
+## Current Active Live-Test Lane
+
+- Current active lane: narrow manual futures lane
+- Asset class: `FUTURE`
+- Symbol scope: whitelist-controlled valid futures symbols only
+- Order type: `LIMIT`
+- Quantity: `1` contract only
+- Time in force: `DAY`
+- Session: `NORMAL`
+- Open route: `MANUAL_LIVE_FUTURES_PILOT + BUY`
+- Close route: `FLATTEN + SELL`
+- `clientOrderId` omission remains scoped only to the approved manual futures lane
+- `ANYTIME` remains disabled/deferred
+
+Operator-facing current runbook:
+- [`MANUAL_FUTURES_PILOT_RUNBOOK.md`](/Users/patrick/Documents/MGC-v05l-automation/docs/MANUAL_FUTURES_PILOT_RUNBOOK.md)
+
+Current status boundary:
+- Proven inside sandbox: narrow futures lane policy, whitelist-controlled symbol authorization, and operator-facing preview/live-gate observability
+- Not yet proven from sandbox: end-to-end live Schwab open/fill/flatten/return-to-flat cycle
 
 ## Exact Known Non-Goals
 

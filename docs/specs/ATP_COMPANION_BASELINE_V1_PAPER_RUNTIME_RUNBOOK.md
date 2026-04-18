@@ -16,6 +16,7 @@ This runtime is not:
 - live order routing
 - a semantic change to the frozen ATP benchmark
 - permission to widen production scope
+- a statement that benchmark-local ATP assumptions are repo-wide law
 
 ## Launch
 
@@ -149,3 +150,9 @@ Still out of scope:
 - exit redesign
 - multi-symbol orchestration
 - portfolio management
+
+## Taxonomy Reminder
+
+- this runbook is for the frozen benchmark lane only
+- ATP-derived paper candidates and production-track candidate packages are tracked separately
+- success in a candidate lane does not replace the benchmark without explicit promotion

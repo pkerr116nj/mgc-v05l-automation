@@ -9,6 +9,7 @@ import shutil
 import signal
 import socket
 import sys
+import tempfile
 import time as time_module
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
@@ -67,7 +68,7 @@ from ..monitoring.logger import StructuredLogger
 from ..persistence import build_engine
 from ..persistence.repositories import RepositorySet, decode_order_intent
 from ..persistence.tables import bars_table, fills_table, order_intents_table, signals_table
-from ..production_link import SchwabProductionLinkService
+from ..production_link import ProductionLinkService
 from ..research.trend_participation.canary import _CANARY_LANES
 from ..research.trend_participation.canary import atpe_runtime_lane_id, atpe_runtime_lane_name
 from ..research.trend_participation.engine import DEFAULT_POINT_VALUES as ATPE_POINT_VALUES
@@ -76,6 +77,7 @@ from ..research.trend_participation.models import HigherPrioritySignal, PatternV
 from ..research.trend_participation.patterns import default_pattern_variants, generate_signal_decisions
 from ..research.trend_participation.phase2_continuation import (
     ATP_V1_LONG_CONTINUATION_VARIANT_ID,
+    ATP_V1_SHORT_CONTINUATION_VARIANT_ID,
     ENTRY_ELIGIBLE,
     PHASE2_ALLOWED_SESSIONS,
     PHASE2_WARMUP_BARS,
@@ -85,6 +87,7 @@ from ..research.trend_participation.phase2_continuation import (
 )
 from ..research.trend_participation.phase3_timing import (
     ATP_TIMING_CONFIRMED,
+    ATP_TIMING_EARLY_PARTICIPATION,
     classify_timing_states,
     latest_atp_timing_state_summary,
 )
@@ -101,7 +104,7 @@ from .execution_truth import (
 from ..strategy.strategy_engine import StrategyEngine
 from ..market_data.schwab_auth import SchwabOAuthClient, SchwabTokenStore
 from ..market_data.timeframes import timeframe_minutes
-from ..market_data.schwab_http import UrllibJsonTransport
+from ..market_data.schwab_http import SchwabHttpError, UrllibJsonTransport
 from .approved_quant_lanes.engine import ApprovedQuantStrategyEngine
 from .approved_quant_lanes.specs import ApprovedQuantLaneSpec, approved_quant_lane_specs
 from .gc_mgc_london_open_acceptance_continuation_runtime import (
@@ -110,7 +113,7 @@ from .gc_mgc_london_open_acceptance_continuation_runtime import (
     GcMgcLondonOpenAcceptanceContinuationStrategyEngine,
     gc_mgc_london_open_acceptance_window_matches,
 )
-from .shared_strategy_identities import get_shared_strategy_identity
+from .shared_strategy_identities import ATP_COMPANION_V1_ASIA_US, ATP_COMPANION_V1_GC_ASIA_US, get_shared_strategy_identity
 from .session_phase_labels import label_session_phase
 from .strategy_runtime_registry import (
     StandaloneStrategyRuntimeInstance,
@@ -266,6 +269,7 @@ LIVE_TIMING_STAGE_TERMINAL_NON_FILL = "TERMINAL_NON_FILL_CONFIRMED"
 LIVE_STRATEGY_PILOT_OPERATOR_PATH = "mgc-v05l probationary-live-strategy-pilot"
 LIVE_STRATEGY_PILOT_REARM_ACTION = "rearm_live_strategy_pilot"
 LIVE_STRATEGY_PILOT_CYCLE_TERMINAL_RESULTS = {"completed", "reconciled", "faulted", "aborted"}
+LIVE_STRATEGY_PILOT_SHARED_IDENTITY = ATP_COMPANION_V1_GC_ASIA_US
 LIVE_STRATEGY_TERMINAL_NON_FILL_STATUSES = {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}
 LIVE_STRATEGY_ACKNOWLEDGED_STATUSES = {
     OrderStatus.ACKNOWLEDGED.value,
@@ -331,8 +335,17 @@ PAPER_EXECUTION_CANARY_FORCE_ENTRY_REASON = "paperExecutionCanaryForceFireOnceEn
 PAPER_EXECUTION_CANARY_FORCE_EXIT_REASON = "paperExecutionCanaryForceFireOnceExitNextBar"
 ATPE_CANARY_RUNTIME_KIND = "atpe_canary_observer"
 ATP_COMPANION_BENCHMARK_RUNTIME_KIND = "atp_companion_benchmark_paper"
+ATP_COMPANION_LIVE_ENTRY_PILOT_RUNTIME_KIND = "atp_companion_live_entry_pilot"
 ATPE_CANARY_LANE_MODE = "ATPE_CANARY_OBSERVER"
 ATP_COMPANION_BENCHMARK_LANE_MODE = "ATP_COMPANION_BENCHMARK"
+ATP_COMPANION_LIVE_ENTRY_PILOT_LANE_MODE = "ATP_COMPANION_LIVE_ENTRY_PILOT"
+ATP_COMPANION_PRODUCTION_TRACK_OVERLAY_ID = "atp_us_late_2bar_no_traction_plus_adverse"
+ATP_COMPANION_PRODUCTION_TRACK_DEFAULTS = {
+    "min_favorable_excursion_r": 0.25,
+    "adverse_excursion_abort_r": 0.65,
+    "logic_mode": "all",
+    "apply_subwindows": ["US_LATE"],
+}
 ATPE_CANARY_SOURCE_FAMILY = "active_trend_participation_engine"
 ATPE_EXIT_POLICY_HARD_TARGET = "hard_target"
 ATPE_EXIT_POLICY_TARGET_CHECKPOINT = "target_checkpoint_trail_v1"
@@ -355,9 +368,39 @@ APPROVED_QUANT_POINT_VALUES: dict[str, Decimal] = {
 }
 
 
+def _atp_us_late_overlay_abort_reasons(
+    *,
+    entry_fill_price: float,
+    risk_points: float,
+    bars: Sequence[Any],
+    min_favorable_excursion_r: float,
+    adverse_excursion_abort_r: float,
+    logic_mode: str,
+) -> list[str]:
+    if len(bars) < 2:
+        return []
+    first_two = list(bars[:2])
+    running_mfe = max(float(candidate.high) - entry_fill_price for candidate in first_two)
+    running_mae = max(entry_fill_price - float(candidate.low) for candidate in first_two)
+    no_traction = running_mfe < (max(risk_points, 1e-9) * float(min_favorable_excursion_r))
+    bad_adverse = running_mae >= (max(risk_points, 1e-9) * float(adverse_excursion_abort_r))
+    reasons: list[str] = []
+    if no_traction:
+        reasons.append("no_traction")
+    if bad_adverse:
+        reasons.append("adverse_excursion")
+    normalized_logic = str(logic_mode or "all").strip().lower()
+    if normalized_logic == "any":
+        return reasons
+    if no_traction and bad_adverse:
+        return reasons
+    return []
+
+
 def _atp_runtime_identity_payload(spec: "ProbationaryPaperLaneSpec") -> dict[str, Any]:
     experimental_status = str(spec.experimental_status or "").strip().lower()
     is_benchmark = experimental_status == "tracked_paper_benchmark"
+    is_production_track = experimental_status == "production_track_candidate"
     participation_policy = spec.participation_policy.value
     is_staged_candidate = (not is_benchmark) and spec.participation_policy is not ParticipationPolicy.SINGLE_ENTRY_ONLY
 
@@ -369,6 +412,19 @@ def _atp_runtime_identity_payload(spec: "ProbationaryPaperLaneSpec") -> dict[str
         benchmark_designation = "CURRENT_ATP_COMPANION_BENCHMARK"
         notes = [
             "ATP Companion Baseline v1 benchmark runtime",
+            "Paper Only",
+            "Asia + US executable",
+            "London diagnostic-only",
+            f"Participation Policy: {participation_policy}",
+        ]
+    elif is_production_track:
+        strategy_status = "RUNNING_ATP_COMPANION_PRODUCTION_TRACK_PAPER"
+        scope_label = "ATP Companion Production-Track Candidate / Paper Only / London Diagnostic-Only / Staged"
+        runtime_mode = "atp_companion_production_track_paper_runtime"
+        tracked_strategy_id = str(spec.standalone_strategy_id or spec.lane_id)
+        benchmark_designation = None
+        notes = [
+            "ATP Companion production-track candidate runtime",
             "Paper Only",
             "Asia + US executable",
             "London diagnostic-only",
@@ -409,6 +465,106 @@ def _atp_runtime_identity_payload(spec: "ProbationaryPaperLaneSpec") -> dict[str
         "notes": notes,
         "participation_policy": participation_policy,
     }
+
+
+def _probationary_lane_spec_runtime_row(
+    spec: "ProbationaryPaperLaneSpec",
+    settings: StrategySettings,
+    *,
+    config_source: str,
+) -> dict[str, Any]:
+    return {
+        "lane_id": spec.lane_id,
+        "display_name": spec.display_name,
+        "symbol": spec.symbol,
+        "standalone_strategy_id": spec.standalone_strategy_id,
+        "strategy_family": spec.strategy_family,
+        "strategy_identity_root": spec.strategy_identity_root,
+        "identity_components": list(spec.identity_components),
+        "runtime_kind": spec.runtime_kind,
+        "long_sources": list(spec.long_sources),
+        "short_sources": list(spec.short_sources),
+        "session_restriction": spec.session_restriction,
+        "allowed_sessions": list(spec.allowed_sessions),
+        "trade_size": spec.trade_size,
+        "participation_policy": spec.participation_policy.value,
+        "max_concurrent_entries": spec.max_concurrent_entries,
+        "max_position_quantity": spec.max_position_quantity,
+        "max_adds_after_entry": spec.max_adds_after_entry,
+        "add_direction_policy": spec.add_direction_policy.value,
+        "database_url": spec.database_url or _derive_probationary_lane_database_url(settings.database_url, spec.lane_id),
+        "artifacts_dir": spec.artifacts_dir or str(settings.probationary_artifacts_path / "lanes" / spec.lane_id),
+        "observed_instruments": list(spec.observed_instruments),
+        "quality_bucket_policy": spec.quality_bucket_policy,
+        "experimental_status": spec.experimental_status,
+        "paper_only": spec.paper_only,
+        "non_approved": spec.non_approved,
+        "observer_variant_id": spec.observer_variant_id,
+        "observer_side": spec.observer_side,
+        "package_id": spec.package_id,
+        "package_label": spec.package_label,
+        "runtime_overlay_id": spec.runtime_overlay_id,
+        "runtime_overlay_params": dict(spec.runtime_overlay_params or {}),
+        "shared_strategy_identity": spec.shared_strategy_identity,
+        "config_source": config_source,
+    }
+
+
+def _resolve_live_strategy_pilot_lane_spec(settings: StrategySettings) -> "ProbationaryPaperLaneSpec":
+    specs = list(_load_probationary_paper_lane_specs(settings))
+    if len(specs) != 1:
+        raise ValueError("Live strategy pilot requires exactly one configured runtime lane.")
+    spec = specs[0]
+    if str(spec.shared_strategy_identity or "").strip() != LIVE_STRATEGY_PILOT_SHARED_IDENTITY.identity_id:
+        raise ValueError(
+            f"Live strategy pilot requires shared_strategy_identity {LIVE_STRATEGY_PILOT_SHARED_IDENTITY.identity_id}."
+        )
+    if spec.lane_id != LIVE_STRATEGY_PILOT_SHARED_IDENTITY.lane_id:
+        raise ValueError(f"Live strategy pilot requires lane_id {LIVE_STRATEGY_PILOT_SHARED_IDENTITY.lane_id}.")
+    if spec.symbol != LIVE_STRATEGY_PILOT_SHARED_IDENTITY.symbol:
+        raise ValueError(f"Live strategy pilot remains locked to symbol {LIVE_STRATEGY_PILOT_SHARED_IDENTITY.symbol}.")
+    if spec.trade_size != 1:
+        raise ValueError("Live strategy pilot requires trade_size=1.")
+    if spec.max_position_quantity not in (None, 1):
+        raise ValueError("Live strategy pilot requires max_position_quantity <= 1.")
+    if spec.max_adds_after_entry != 0:
+        raise ValueError("Live strategy pilot does not allow adds.")
+    if spec.participation_policy is not ParticipationPolicy.SINGLE_ENTRY_ONLY:
+        raise ValueError("Live strategy pilot remains locked to SINGLE_ENTRY_ONLY participation.")
+    if spec.runtime_kind != ATP_COMPANION_LIVE_ENTRY_PILOT_RUNTIME_KIND:
+        raise ValueError("Live strategy pilot requires runtime_kind atp_companion_live_entry_pilot.")
+    if tuple(spec.long_sources) != ("trend_participation.pullback_continuation.long.conservative",):
+        raise ValueError("Live strategy pilot requires the ATP companion conservative long source only.")
+    if tuple(spec.short_sources):
+        raise ValueError("Live strategy pilot does not route autonomous short entries.")
+    allowed_sessions = {str(value).upper() for value in spec.allowed_sessions}
+    if allowed_sessions != set(LIVE_STRATEGY_PILOT_SHARED_IDENTITY.allowed_sessions):
+        raise ValueError("Live strategy pilot requires allowed_sessions exactly ASIA and US.")
+    if spec.point_value != Decimal("100"):
+        raise ValueError("Live strategy pilot requires GC point_value=100.")
+    observed_instruments = {str(value).upper() for value in spec.observed_instruments}
+    if observed_instruments != {LIVE_STRATEGY_PILOT_SHARED_IDENTITY.symbol}:
+        raise ValueError("Live strategy pilot requires observed_instruments exactly GC.")
+    return spec
+
+
+def _live_strategy_pilot_runtime_identity(
+    settings: StrategySettings,
+    spec: "ProbationaryPaperLaneSpec",
+) -> dict[str, Any] | None:
+    runtime_definitions = build_standalone_strategy_definitions(
+        settings,
+        runtime_lanes=[_probationary_lane_spec_runtime_row(spec, settings, config_source="live_strategy_pilot")],
+    )
+    runtime_definition = runtime_definitions[0] if runtime_definitions else None
+    return runtime_definition.runtime_identity if runtime_definition is not None else None
+
+
+def _live_strategy_pilot_operator_exit_allowed(intent: OrderIntent | None) -> bool:
+    if intent is None or not intent.is_exit:
+        return False
+    reason_code = str(intent.reason_code or "").strip().lower()
+    return reason_code.startswith("operator_")
 
 
 @dataclass(frozen=True)
@@ -454,6 +610,12 @@ class ProbationaryPaperLaneSpec:
     observer_side: str | None = None
     identity_components: tuple[str, ...] = ()
     shared_strategy_identity: str | None = None
+    package_id: str | None = None
+    package_label: str | None = None
+    runtime_overlay_id: str | None = None
+    runtime_overlay_params: dict[str, Any] = field(default_factory=dict)
+    allow_pre_5m_context_participation: bool = False
+    atp_context_timeframe: str = "5m"
 
 
 @dataclass(frozen=True)
@@ -2020,6 +2182,10 @@ def _shadow_broker_truth_summary(
     mismatch_reasons: list[str] = []
     if state.position_side is PositionSide.FLAT and broker_position_qty != 0:
         mismatch_reasons.append("broker_position_mismatch")
+    if len(open_rows) > 1:
+        mismatch_reasons.append("same_symbol_open_order_ambiguity")
+    elif open_rows and state.open_broker_order_id is None:
+        mismatch_reasons.append("same_symbol_open_order_ambiguity")
     if state.open_broker_order_id and not any(
         str(row.get("broker_order_id") or "").strip() == str(state.open_broker_order_id or "").strip()
         for row in open_rows
@@ -2188,7 +2354,7 @@ def _latest_runtime_bar(strategy_engine: StrategyEngine) -> Bar | None:
 def _load_live_strategy_broker_truth_snapshot(
     *,
     execution_engine: ExecutionEngine,
-    broker_truth_service: SchwabProductionLinkService | Any | None = None,
+    broker_truth_service: ProductionLinkService | Any | None = None,
     force_refresh: bool = True,
 ) -> dict[str, Any]:
     broker = execution_engine.broker
@@ -2241,6 +2407,7 @@ def _live_strategy_pilot_gate_status(
     pilot_cycle_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = strategy_engine.state
+    runtime_identity = dict(getattr(strategy_engine, "_runtime_identity", {}) or {})
     latest_bar = bar or _latest_runtime_bar(strategy_engine)
     cycle_state = dict(pilot_cycle_state or _load_live_strategy_pilot_cycle_state(settings))
     broker_truth_summary = _shadow_broker_truth_summary(
@@ -2263,7 +2430,11 @@ def _live_strategy_pilot_gate_status(
         blockers.append("live_strategy_pilot_submit_disabled")
     if settings.mode is not RuntimeMode.LIVE:
         blockers.append("runtime_mode_not_live")
-    if settings.symbol != "MGC":
+    if str(runtime_identity.get("lane_id") or "").strip() != LIVE_STRATEGY_PILOT_SHARED_IDENTITY.lane_id:
+        blockers.append("shared_strategy_identity_out_of_scope")
+    if str(runtime_identity.get("strategy_family") or "").strip() != LIVE_STRATEGY_PILOT_SHARED_IDENTITY.strategy_family:
+        blockers.append("strategy_family_out_of_scope")
+    if settings.symbol != LIVE_STRATEGY_PILOT_SHARED_IDENTITY.symbol:
         blockers.append("symbol_out_of_scope")
     if settings.timeframe != "5m":
         blockers.append("timeframe_out_of_scope")
@@ -2273,6 +2444,8 @@ def _live_strategy_pilot_gate_status(
         blockers.append("pilot_quantity_cap_not_one")
     if intent is not None and int(intent.quantity) != 1:
         blockers.append("intent_quantity_out_of_scope")
+    if intent is not None and intent.is_exit and not _live_strategy_pilot_operator_exit_allowed(intent):
+        blockers.append("strategy_exit_automation_out_of_scope")
     if latest_bar is None:
         blockers.append("no_finalized_bar_processed")
     elif not latest_bar.is_final:
@@ -2301,6 +2474,9 @@ def _live_strategy_pilot_gate_status(
     return {
         "pilot_mode_enabled": settings.live_strategy_pilot_enabled,
         "submit_enabled_flag": settings.live_strategy_pilot_submit_enabled,
+        "shared_strategy_identity": LIVE_STRATEGY_PILOT_SHARED_IDENTITY.identity_id,
+        "lane_id": runtime_identity.get("lane_id"),
+        "standalone_strategy_id": runtime_identity.get("standalone_strategy_id"),
         "warmup_complete": warmup_complete,
         "warmup_bars_loaded": warmup_bars_loaded,
         "warmup_bars_required": warmup_bars_required,
@@ -2325,7 +2501,7 @@ def _live_strategy_submit_gate_blocker(
     settings: StrategySettings,
     strategy_engine: StrategyEngine,
     execution_engine: ExecutionEngine,
-    broker_truth_service: SchwabProductionLinkService | Any | None,
+    broker_truth_service: ProductionLinkService | Any | None,
     bar: Bar,
     intent: OrderIntent,
 ) -> str | None:
@@ -3022,6 +3198,24 @@ def _build_live_strategy_pilot_summary(
     observed_at: datetime | None = None,
 ) -> dict[str, Any]:
     observed = observed_at or datetime.now(timezone.utc)
+    live_pilot_spec: ProbationaryPaperLaneSpec | None = None
+    try:
+        live_pilot_spec = _resolve_live_strategy_pilot_lane_spec(settings)
+    except ValueError:
+        # Some tests and non-pilot runtime contexts still exercise the live-pilot
+        # summary path with generic settings. Fall back to the instrument map there.
+        live_pilot_spec = None
+    point_value = (
+        live_pilot_spec.point_value
+        if live_pilot_spec is not None
+        else APPROVED_QUANT_POINT_VALUES.get(str(settings.symbol).upper(), Decimal("1"))
+    )
+    observed_instruments = (
+        list(live_pilot_spec.observed_instruments)
+        if live_pilot_spec is not None and live_pilot_spec.observed_instruments
+        else [str(settings.symbol).upper()]
+    )
+    runtime_identity = dict(getattr(strategy_engine, "_runtime_identity", {}) or {})
     pilot_cycle = _build_live_strategy_pilot_cycle_summary(
         settings=settings,
         repositories=repositories,
@@ -3059,16 +3253,33 @@ def _build_live_strategy_pilot_summary(
     return {
         "generated_at": observed.isoformat(),
         "operator_path": LIVE_STRATEGY_PILOT_OPERATOR_PATH,
+        "runtime_label": "ATP GC Live Entry Pilot",
+        "execution_scope": "ATP_LIVE_ENTRY_PILOT",
+        "automation_scope": "ENTRY_ONLY_BROKER_AUTOMATION",
+        "shared_strategy_identity": LIVE_STRATEGY_PILOT_SHARED_IDENTITY.identity_id,
+        "lane_id": runtime_identity.get("lane_id"),
+        "standalone_strategy_id": runtime_identity.get("standalone_strategy_id"),
+        "strategy_family": runtime_identity.get("strategy_family"),
         "allowed_scope": {
             "symbol": settings.symbol,
             "timeframe": settings.timeframe,
             "mode": "LIVE_STRATEGY_PILOT",
+            "shared_strategy_identity": LIVE_STRATEGY_PILOT_SHARED_IDENTITY.identity_id,
+            "lane_id": runtime_identity.get("lane_id"),
+            "standalone_strategy_id": runtime_identity.get("standalone_strategy_id"),
             "one_position_at_a_time": True,
             "completed_bar_only": True,
             "deterministic_sequential_processing": True,
             "order_types": ["LIMIT"],
             "max_quantity": int(settings.live_strategy_pilot_max_quantity),
+            "trade_size": int(settings.trade_size),
+            "point_value": str(point_value),
+            "observed_instruments": observed_instruments,
             "regular_hours_only": bool(settings.live_strategy_pilot_regular_hours_only),
+            "entry_automation_enabled": True,
+            "strategy_exit_automation_enabled": False,
+            "operator_flatten_enabled": True,
+            "broker_truth_authoritative": True,
         },
         "live_strategy_pilot_enabled": settings.live_strategy_pilot_enabled,
         "live_strategy_submit_enabled": settings.live_strategy_pilot_submit_enabled,
@@ -3106,7 +3317,7 @@ def _build_live_strategy_pilot_summary(
         "signal_observability": dict(signal_observability or {}),
         "fault_code": strategy_engine.state.fault_code,
         "summary_line": (
-            f"pilot={'ENABLED' if settings.live_strategy_pilot_enabled and settings.live_strategy_pilot_submit_enabled else 'DISABLED'} | "
+            f"atp_live_pilot={'ENABLED' if settings.live_strategy_pilot_enabled and settings.live_strategy_pilot_submit_enabled else 'DISABLED'} | "
             f"armed={'YES' if pilot_cycle.get('pilot_armed') else 'NO'} | "
             f"phase={runtime_phase} | "
             f"submit={'ELIGIBLE' if gate_status.get('submit_eligible') and pilot_cycle.get('submit_enabled', True) else 'BLOCKED'} | "
@@ -3859,12 +4070,15 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
         bars_1m = sorted(self._bars_1m.get(self._instrument, []), key=lambda item: item.end_ts)
         if not bars_1m:
             return features_by_instrument, fresh_signal_rows
-        bars_5m = _resample_research_bars_5m(bars_1m)
-        if bars_5m:
+        context_bars = _resample_research_bars(
+            bars_1m,
+            target_timeframe=self.spec.atp_context_timeframe,
+        )
+        if context_bars:
             first_1m_ts = bars_1m[0].end_ts
             last_1m_ts = bars_1m[-1].end_ts
-            bars_5m = [bar for bar in bars_5m if first_1m_ts <= bar.end_ts <= last_1m_ts]
-        features = build_feature_states(bars_5m=bars_5m, bars_1m=bars_1m)
+            context_bars = [bar for bar in context_bars if first_1m_ts <= bar.end_ts <= last_1m_ts]
+        features = build_feature_states(bars_5m=context_bars, bars_1m=bars_1m)
         features_by_instrument[self._instrument] = [_runtime_feature_row(feature, self.spec) for feature in features]
         decisions = generate_signal_decisions(
             feature_rows=features,
@@ -4111,6 +4325,7 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
         latest_feature = _latest_atpe_feature_state_from_bars(
             bars_1m=self._bars_1m.get(self._instrument, []),
             instrument=self._instrument,
+            context_timeframe=self.spec.atp_context_timeframe,
         )
         if bool(plan.get("target_checkpoint_reached")):
             ratcheted_stop = _atpe_target_checkpoint_stop_price(
@@ -4280,11 +4495,13 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
         latest_feature = _latest_atpe_feature_state_from_bars(
             bars_1m=self._bars_1m.get(self._instrument, []),
             instrument=self._instrument,
+            context_timeframe=self.spec.atp_context_timeframe,
         )
         latest_atp_state = latest_atp_state_summary(latest_feature)
         latest_atp_entry_state = _latest_atpe_phase2_entry_state_from_bars(
             bars_1m=self._bars_1m.get(self._instrument, []),
             instrument=self._instrument,
+            context_timeframe=self.spec.atp_context_timeframe,
             runtime_ready=(
                 bool(self.strategy_engine.state.entries_enabled)
                 and not bool(self.strategy_engine.state.operator_halt)
@@ -4296,6 +4513,7 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
         latest_atp_timing_state = _latest_atpe_phase3_timing_state_from_bars(
             bars_1m=self._bars_1m.get(self._instrument, []),
             instrument=self._instrument,
+            context_timeframe=self.spec.atp_context_timeframe,
             runtime_ready=(
                 bool(self.strategy_engine.state.entries_enabled)
                 and not bool(self.strategy_engine.state.operator_halt)
@@ -4409,11 +4627,13 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
                             _latest_atpe_feature_state_from_bars(
                                 bars_1m=self._bars_1m.get(self._instrument, []),
                                 instrument=self._instrument,
+                                context_timeframe=self.spec.atp_context_timeframe,
                             )
                         ),
                         "latest_atp_entry_state": _latest_atpe_phase2_entry_state_from_bars(
                             bars_1m=self._bars_1m.get(self._instrument, []),
                             instrument=self._instrument,
+                            context_timeframe=self.spec.atp_context_timeframe,
                             runtime_ready=(
                                 bool(self.strategy_engine.state.entries_enabled)
                                 and not bool(self.strategy_engine.state.operator_halt)
@@ -4425,6 +4645,7 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
                         "latest_atp_timing_state": _latest_atpe_phase3_timing_state_from_bars(
                             bars_1m=self._bars_1m.get(self._instrument, []),
                             instrument=self._instrument,
+                            context_timeframe=self.spec.atp_context_timeframe,
                             runtime_ready=(
                                 bool(self.strategy_engine.state.entries_enabled)
                                 and not bool(self.strategy_engine.state.operator_halt)
@@ -4601,6 +4822,11 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
             "experimental_status": self.spec.experimental_status,
             "paper_only": self.spec.paper_only,
             "non_approved": self.spec.non_approved,
+            "package_id": self.spec.package_id,
+            "package_label": self.spec.package_label,
+            "runtime_overlay_id": self.spec.runtime_overlay_id,
+            "runtime_overlay_params": dict(self.spec.runtime_overlay_params or {}),
+            "allow_pre_5m_context_participation": self.spec.allow_pre_5m_context_participation,
             "quality_bucket_policy": self.spec.quality_bucket_policy,
             "observer_side": self.spec.observer_side,
             "observer_variant_id": self.spec.observer_variant_id,
@@ -4625,6 +4851,10 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
             "benchmark_designation": runtime_identity["benchmark_designation"],
             "tracked_strategy_id": runtime_identity["tracked_strategy_id"],
             "quality_bucket_policy": self.spec.quality_bucket_policy,
+            "package_id": self.spec.package_id,
+            "package_label": self.spec.package_label,
+            "runtime_overlay_id": self.spec.runtime_overlay_id,
+            "runtime_overlay_params": dict(self.spec.runtime_overlay_params or {}),
             "scope_label": runtime_identity["scope_label"],
             "strategy_status": runtime_identity["strategy_status"],
             "live_runtime_mode": runtime_identity["live_runtime_mode"],
@@ -4747,6 +4977,7 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "lane_id": self.spec.lane_id,
             "instrument": self._instrument,
+            "allow_pre_5m_context_participation": self.spec.allow_pre_5m_context_participation,
             "pending_entry_plan": self._pending_entry_plan,
             "active_trade_plan": self._active_trade_plan,
             "duplicate_bar_suppression_count": self._duplicate_bar_suppression_count,
@@ -4775,12 +5006,15 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
             self._latest_entry_states = []
             self._latest_timing_states = []
             return features_by_instrument, fresh_signal_rows
-        bars_5m = _resample_research_bars_5m(bars_1m)
-        if bars_5m:
+        context_bars = _resample_research_bars(
+            bars_1m,
+            target_timeframe=self.spec.atp_context_timeframe,
+        )
+        if context_bars:
             first_1m_ts = bars_1m[0].end_ts
             last_1m_ts = bars_1m[-1].end_ts
-            bars_5m = [bar for bar in bars_5m if first_1m_ts <= bar.end_ts <= last_1m_ts]
-        features = build_feature_states(bars_5m=bars_5m, bars_1m=bars_1m)
+            context_bars = [bar for bar in context_bars if first_1m_ts <= bar.end_ts <= last_1m_ts]
+        features = build_feature_states(bars_5m=context_bars, bars_1m=bars_1m)
         self._latest_feature_rows = [row for row in features if row.instrument == self._instrument]
         features_by_instrument[self._instrument] = [_runtime_feature_row(feature, self.spec) for feature in self._latest_feature_rows]
         runtime_ready = (
@@ -4789,34 +5023,105 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
             and _effective_reconciliation_clean(self._last_reconciliation_payload)
         )
         position_flat = str(self.strategy_engine.state.position_side.value).upper() == "FLAT"
-        self._latest_entry_states = classify_entry_states(
-            feature_rows=self._latest_feature_rows,
-            allowed_sessions=frozenset({"ASIA", "US"}),
-            runtime_ready=runtime_ready,
-            position_flat=position_flat,
-            one_position_rule_clear=position_flat,
-        )
-        self._latest_timing_states = classify_timing_states(
-            entry_states=self._latest_entry_states,
-            bars_1m=bars_1m,
-        )
-        latest_timing_state = self._latest_timing_states[-1] if self._latest_timing_states else None
-        if latest_timing_state is None:
+        sides_to_evaluate: list[str] = []
+        if tuple(self.spec.long_sources):
+            sides_to_evaluate.append("LONG")
+        if tuple(self.spec.short_sources):
+            sides_to_evaluate.append("SHORT")
+        if not sides_to_evaluate:
+            sides_to_evaluate.append(str(self.spec.observer_side or "LONG").strip().upper())
+
+        latest_entry_states: list[Any] = []
+        latest_timing_states: list[Any] = []
+        for side in sides_to_evaluate:
+            side_entry_states = _classify_atp_entry_states_compat(
+                feature_rows=self._latest_feature_rows,
+                allowed_sessions=frozenset({"ASIA", "US"}),
+                runtime_ready=runtime_ready,
+                position_flat=position_flat,
+                one_position_rule_clear=position_flat,
+                side=side,
+            )
+            side_timing_states = classify_timing_states(
+                entry_states=side_entry_states,
+                bars_1m=bars_1m,
+                allow_pre_5m_context_participation=self.spec.allow_pre_5m_context_participation,
+            )
+            if side_entry_states:
+                latest_entry_states.append(side_entry_states[-1])
+            if side_timing_states:
+                latest_timing_states.append(side_timing_states[-1])
+
+        self._latest_entry_states = sorted(latest_entry_states, key=lambda row: row.decision_ts)
+        self._latest_timing_states = sorted(latest_timing_states, key=lambda row: row.decision_ts)
+        latest_entry_state_by_side = {state.side: state for state in self._latest_entry_states}
+        timing_state_keys = {
+            (
+                str(state.side).upper(),
+                state.decision_ts.isoformat(),
+            )
+            for state in self._latest_timing_states
+        }
+        for latest_entry_state in self._latest_entry_states:
+            entry_key = (str(latest_entry_state.side).upper(), latest_entry_state.decision_ts.isoformat())
+            if entry_key in timing_state_keys:
+                continue
+            signal_key = "|".join(
+                [
+                    self._instrument,
+                    latest_entry_state.family_name,
+                    latest_entry_state.side,
+                    latest_entry_state.decision_ts.isoformat(),
+                    "ENTRY_STATE_BLOCKED_BEFORE_TIMING",
+                    latest_entry_state.primary_blocker or "",
+                    latest_entry_state.entry_state,
+                ]
+            )
+            if signal_key in self._emitted_signal_keys:
+                continue
+            signal_row = _runtime_atp_companion_pre_timing_signal_row(
+                spec=self.spec,
+                entry_state=latest_entry_state,
+                observed_instruments=self._observed_instruments,
+            )
+            self._emitted_signal_keys.add(signal_key)
+            self.structured_logger.log_branch_source(signal_row)
+            self.structured_logger.log_rule_block(signal_row)
+            self._event_rows.append(
+                {
+                    "timestamp": observed_at.isoformat(),
+                    "lane_id": self.spec.lane_id,
+                    "event_type": "ATP_COMPANION_SIGNAL",
+                    "decision_ts": latest_entry_state.decision_ts.isoformat(),
+                    "timing_state": None,
+                    "primary_blocker": latest_entry_state.primary_blocker,
+                    "entry_executable": False,
+                    "side": latest_entry_state.side,
+                    "decision_stage": "entry_state_blocked_before_timing",
+                }
+            )
+            fresh_signal_rows.append(signal_row)
+
+        if not self._latest_timing_states:
             return features_by_instrument, fresh_signal_rows
-        signal_key = "|".join(
-            [
-                self._instrument,
-                latest_timing_state.family_name,
-                latest_timing_state.decision_ts.isoformat(),
-                latest_timing_state.timing_state,
-                latest_timing_state.primary_blocker or "",
-                latest_timing_state.timing_bar_ts.isoformat() if latest_timing_state.timing_bar_ts is not None else "",
-            ]
-        )
-        if signal_key not in self._emitted_signal_keys:
+
+        for latest_timing_state in self._latest_timing_states:
+            signal_key = "|".join(
+                [
+                    self._instrument,
+                    latest_timing_state.family_name,
+                    latest_timing_state.side,
+                    latest_timing_state.decision_ts.isoformat(),
+                    latest_timing_state.timing_state,
+                    latest_timing_state.primary_blocker or "",
+                    latest_timing_state.timing_bar_ts.isoformat() if latest_timing_state.timing_bar_ts is not None else "",
+                ]
+            )
+            if signal_key in self._emitted_signal_keys:
+                continue
             signal_row = _runtime_atp_companion_signal_row(
                 spec=self.spec,
-                entry_state=self._latest_entry_states[-1] if self._latest_entry_states else None,
+                entry_state=latest_entry_state_by_side.get(latest_timing_state.side),
                 timing_state=latest_timing_state,
                 observed_instruments=self._observed_instruments,
             )
@@ -4833,43 +5138,72 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
                     "timing_state": latest_timing_state.timing_state,
                     "primary_blocker": latest_timing_state.primary_blocker,
                     "entry_executable": latest_timing_state.executable_entry,
+                    "side": latest_timing_state.side,
                 }
             )
             fresh_signal_rows.append(signal_row)
 
+        executable_candidates = [
+            state
+            for state in self._latest_timing_states
+            if (
+                (
+                    state.context_entry_state == ENTRY_ELIGIBLE
+                    or (
+                        self.spec.allow_pre_5m_context_participation
+                        and state.timing_state == ATP_TIMING_EARLY_PARTICIPATION
+                    )
+                )
+                and state.timing_state in {ATP_TIMING_CONFIRMED, ATP_TIMING_EARLY_PARTICIPATION}
+                and state.executable_entry
+                and state.entry_ts is not None
+                and state.entry_price is not None
+            )
+        ]
+
+        selected_timing_state = (
+            sorted(
+                executable_candidates,
+                key=lambda state: (
+                    state.decision_ts,
+                    latest_entry_state_by_side.get(state.side).setup_quality_score if latest_entry_state_by_side.get(state.side) is not None else 0.0,
+                ),
+            )[-1]
+            if executable_candidates
+            else None
+        )
+
         if (
-            latest_timing_state.context_entry_state == ENTRY_ELIGIBLE
-            and latest_timing_state.timing_state == ATP_TIMING_CONFIRMED
-            and latest_timing_state.executable_entry
-            and latest_timing_state.entry_ts is not None
-            and latest_timing_state.entry_price is not None
+            selected_timing_state is not None
             and self._pending_entry_plan is None
             and self.strategy_engine.state.position_side == PositionSide.FLAT
             and self.strategy_engine.state.open_broker_order_id is None
         ):
-            decision_id = f"{latest_timing_state.instrument}|{latest_timing_state.family_name}|{latest_timing_state.decision_ts.isoformat()}"
+            selected_variant = atp_phase2_variant(selected_timing_state.side)
+            decision_id = f"{selected_timing_state.instrument}|{selected_timing_state.family_name}|{selected_timing_state.decision_ts.isoformat()}"
             self._pending_entry_plan = {
                 "decision_id": decision_id,
-                "decision_ts": latest_timing_state.decision_ts.isoformat(),
-                "entry_ts": latest_timing_state.entry_ts.isoformat(),
-                "entry_price": float(latest_timing_state.entry_price),
-                "decision_bar_low": float(latest_timing_state.feature_snapshot.get("decision_bar_low") or latest_timing_state.entry_price),
-                "decision_bar_high": float(latest_timing_state.feature_snapshot.get("decision_bar_high") or latest_timing_state.entry_price),
-                "average_range": max(float(latest_timing_state.feature_snapshot.get("average_range") or 0.25), 0.25),
-                "setup_signature": str(latest_timing_state.feature_snapshot.get("setup_signature") or latest_timing_state.family_name),
+                "decision_ts": selected_timing_state.decision_ts.isoformat(),
+                "entry_ts": selected_timing_state.entry_ts.isoformat(),
+                "entry_price": float(selected_timing_state.entry_price),
+                "decision_bar_low": float(selected_timing_state.feature_snapshot.get("decision_bar_low") or selected_timing_state.entry_price),
+                "decision_bar_high": float(selected_timing_state.feature_snapshot.get("decision_bar_high") or selected_timing_state.entry_price),
+                "average_range": max(float(selected_timing_state.feature_snapshot.get("average_range") or 0.25), 0.25),
+                "setup_signature": str(selected_timing_state.feature_snapshot.get("setup_signature") or selected_timing_state.family_name),
                 "setup_state_signature": str(
-                    latest_timing_state.feature_snapshot.get("setup_state_signature")
-                    or latest_timing_state.feature_snapshot.get("setup_signature")
-                    or latest_timing_state.family_name
+                    selected_timing_state.feature_snapshot.get("setup_state_signature")
+                    or selected_timing_state.feature_snapshot.get("setup_signature")
+                    or selected_timing_state.family_name
                 ),
-                "setup_quality_bucket": str(latest_timing_state.feature_snapshot.get("setup_quality_bucket") or "MEDIUM"),
-                "session_segment": latest_timing_state.session_segment,
-                "timing_bar_ts": latest_timing_state.timing_bar_ts.isoformat() if latest_timing_state.timing_bar_ts is not None else None,
-                "max_hold_bars_1m": atp_phase2_variant().max_hold_bars_1m,
-                "stop_atr_multiple": atp_phase2_variant().stop_atr_multiple,
-                "target_r_multiple": atp_phase2_variant().target_r_multiple,
-                "reason_code": ATP_V1_LONG_CONTINUATION_VARIANT_ID,
-                "signal_source": latest_timing_state.family_name,
+                "setup_quality_bucket": str(selected_timing_state.feature_snapshot.get("setup_quality_bucket") or "MEDIUM"),
+                "session_segment": selected_timing_state.session_segment,
+                "timing_bar_ts": selected_timing_state.timing_bar_ts.isoformat() if selected_timing_state.timing_bar_ts is not None else None,
+                "max_hold_bars_1m": selected_variant.max_hold_bars_1m,
+                "stop_atr_multiple": selected_variant.stop_atr_multiple,
+                "target_r_multiple": selected_variant.target_r_multiple,
+                "reason_code": selected_variant.variant_id,
+                "signal_source": selected_timing_state.family_name,
+                "side": selected_timing_state.side,
             }
             self._event_rows.append(
                 {
@@ -4877,13 +5211,14 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
                     "lane_id": self.spec.lane_id,
                     "event_type": "ATP_COMPANION_SETUP_ARMED",
                     "decision_id": decision_id,
-                    "decision_ts": latest_timing_state.decision_ts.isoformat(),
-                    "entry_ts": latest_timing_state.entry_ts.isoformat(),
-                    "entry_price": latest_timing_state.entry_price,
+                    "decision_ts": selected_timing_state.decision_ts.isoformat(),
+                    "entry_ts": selected_timing_state.entry_ts.isoformat(),
+                    "entry_price": selected_timing_state.entry_price,
                     "setup_signature": self._pending_entry_plan["setup_signature"],
                     "setup_state_signature": self._pending_entry_plan["setup_state_signature"],
-                    "signal_source": latest_timing_state.family_name,
-                    "vwap_price_quality_state": latest_timing_state.vwap_price_quality_state,
+                    "signal_source": selected_timing_state.family_name,
+                    "vwap_price_quality_state": selected_timing_state.vwap_price_quality_state,
+                    "side": selected_timing_state.side,
                 }
             )
         return features_by_instrument, fresh_signal_rows
@@ -4904,16 +5239,26 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
                 short_entry_source=pending.short_entry_source,
             )
             if pending.intent.is_entry:
+                plan = dict(self._pending_entry_plan or {})
                 if self._pending_entry_plan is not None and self._pending_entry_plan.get("order_intent_id") == pending.intent.order_intent_id:
                     plan = dict(self._pending_entry_plan)
                     risk = max(float(plan["average_range"]) * float(plan["stop_atr_multiple"]), 0.25)
+                    side = str(plan.get("side") or "LONG").upper()
                     self._active_trade_plan = {
                         **plan,
                         "entry_fill_timestamp": fill.fill_timestamp.isoformat(),
                         "entry_fill_price": float(fill.fill_price),
                         "risk_points": risk,
-                        "stop_price": float(plan["decision_bar_low"]) - risk,
-                        "target_price": float(fill.fill_price) + risk * float(plan["target_r_multiple"]),
+                        "stop_price": (
+                            float(plan["decision_bar_low"]) - risk
+                            if side == "LONG"
+                            else float(plan["decision_bar_high"]) + risk
+                        ),
+                        "target_price": (
+                            float(fill.fill_price) + risk * float(plan["target_r_multiple"])
+                            if side == "LONG"
+                            else float(fill.fill_price) - risk * float(plan["target_r_multiple"])
+                        ),
                         "max_exit_timestamp": (
                             fill.fill_timestamp + timedelta(minutes=int(plan["max_hold_bars_1m"]))
                         ).isoformat(),
@@ -4932,6 +5277,7 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
                         "setup_state_signature": plan.get("setup_state_signature"),
                         "signal_source": plan.get("signal_source"),
                         "symbol": pending.intent.symbol,
+                        "side": plan.get("side"),
                     }
                 )
             else:
@@ -4978,14 +5324,15 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
             )
             self._pending_entry_plan = None
             return
+        side = str(self._pending_entry_plan.get("side") or "LONG").upper()
         intent = self.strategy_engine.submit_runtime_entry_intent(
             bar,
-            side="LONG",
+            side=side,
             signal_source=str(self._pending_entry_plan["signal_source"]),
             reason_code=str(self._pending_entry_plan["reason_code"]),
             symbol=self._instrument,
-            long_entry_family=LongEntryFamily.K,
-            short_entry_family=ShortEntryFamily.NONE,
+            long_entry_family=LongEntryFamily.K if side == "LONG" else LongEntryFamily.NONE,
+            short_entry_family=ShortEntryFamily.BEAR_SNAP if side == "SHORT" else ShortEntryFamily.NONE,
         )
         if intent is None:
             self._event_rows.append(
@@ -5017,9 +5364,56 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
                 "setup_state_signature": self._pending_entry_plan.get("setup_state_signature"),
                 "signal_source": self._pending_entry_plan.get("signal_source"),
                 "symbol": self._instrument,
-                "side": "LONG",
+                "side": side,
             }
         )
+
+    def _production_track_overlay_profile(self) -> dict[str, Any] | None:
+        if str(self.spec.runtime_overlay_id or "").strip() != ATP_COMPANION_PRODUCTION_TRACK_OVERLAY_ID:
+            return None
+        profile = dict(ATP_COMPANION_PRODUCTION_TRACK_DEFAULTS)
+        profile.update(dict(self.spec.runtime_overlay_params or {}))
+        return profile
+
+    def _us_late_overlay_exit_reason(self, bar: Bar) -> str | None:
+        plan = self._active_trade_plan
+        if plan is None or bool(plan.get("runtime_overlay_evaluated")):
+            return None
+        profile = self._production_track_overlay_profile()
+        if profile is None:
+            return None
+        if str(self.strategy_engine.state.position_side.value).upper() != "LONG":
+            plan["runtime_overlay_evaluated"] = True
+            return None
+        entry_fill_ts_raw = plan.get("entry_fill_timestamp")
+        if not entry_fill_ts_raw:
+            return None
+        entry_fill_ts = datetime.fromisoformat(str(entry_fill_ts_raw))
+        if label_session_phase(entry_fill_ts) not in set(profile.get("apply_subwindows") or ()):
+            plan["runtime_overlay_evaluated"] = True
+            return None
+        post_entry_bars = [
+            candidate
+            for candidate in self._bars_1m.get(self._instrument, [])
+            if candidate.end_ts > entry_fill_ts and candidate.end_ts <= bar.end_ts
+        ]
+        if len(post_entry_bars) < 2:
+            return None
+        plan["runtime_overlay_evaluated"] = True
+        reasons = _atp_us_late_overlay_abort_reasons(
+            entry_fill_price=float(plan.get("entry_fill_price") or 0.0),
+            risk_points=float(plan.get("risk_points") or 0.0),
+            bars=post_entry_bars,
+            min_favorable_excursion_r=float(profile.get("min_favorable_excursion_r") or 0.0),
+            adverse_excursion_abort_r=float(profile.get("adverse_excursion_abort_r") or 0.0),
+            logic_mode=str(profile.get("logic_mode") or "all"),
+        )
+        if not reasons:
+            return None
+        plan["runtime_overlay_triggered"] = True
+        plan["runtime_overlay_reason_codes"] = reasons
+        plan["runtime_overlay_triggered_at"] = bar.end_ts.isoformat()
+        return "atp_companion_us_late_no_traction_adverse_abort"
 
     def _evaluate_exit_triggers(self, bar: Bar) -> None:
         plan = self._active_trade_plan
@@ -5031,10 +5425,18 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
         stop_price = float(plan["stop_price"])
         target_price = float(plan["target_price"]) if plan.get("target_price") is not None else None
         max_exit_timestamp = datetime.fromisoformat(str(plan["max_exit_timestamp"]))
+        side = str(plan.get("side") or self.strategy_engine.state.position_side.value or "LONG").upper()
         exit_reason = None
-        stop_hit = float(bar.low) <= stop_price
-        target_hit = target_price is not None and float(bar.high) >= target_price
-        if stop_hit and target_hit:
+        overlay_exit_reason = self._us_late_overlay_exit_reason(bar)
+        if side == "LONG":
+            stop_hit = float(bar.low) <= stop_price
+            target_hit = target_price is not None and float(bar.high) >= target_price
+        else:
+            stop_hit = float(bar.high) >= stop_price
+            target_hit = target_price is not None and float(bar.low) <= target_price
+        if overlay_exit_reason is not None:
+            exit_reason = overlay_exit_reason
+        elif stop_hit and target_hit:
             exit_reason = "atp_companion_stop_first_conflict"
         elif stop_hit:
             exit_reason = "atp_companion_stop"
@@ -5061,6 +5463,7 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
                 "signal_source": plan.get("signal_source"),
                 "symbol": self._instrument,
                 "exit_reason": exit_reason,
+                "side": side,
             }
         )
 
@@ -5198,6 +5601,11 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
             "experimental_status": self.spec.experimental_status,
             "paper_only": self.spec.paper_only,
             "non_approved": self.spec.non_approved,
+            "package_id": self.spec.package_id,
+            "package_label": self.spec.package_label,
+            "runtime_overlay_id": self.spec.runtime_overlay_id,
+            "runtime_overlay_params": dict(self.spec.runtime_overlay_params or {}),
+            "allow_pre_5m_context_participation": self.spec.allow_pre_5m_context_participation,
             "enabled": True,
             "entries_enabled": self.strategy_engine.state.entries_enabled,
             "operator_halt": self.strategy_engine.state.operator_halt,
@@ -5226,6 +5634,13 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
                 if self.strategy_engine.state.entry_price is not None
                 else None
             ),
+            "runtime_overlay_state": {
+                "overlay_id": self.spec.runtime_overlay_id,
+                "evaluated": bool((self._active_trade_plan or {}).get("runtime_overlay_evaluated")),
+                "triggered": bool((self._active_trade_plan or {}).get("runtime_overlay_triggered")),
+                "triggered_at": (self._active_trade_plan or {}).get("runtime_overlay_triggered_at"),
+                "reason_codes": list((self._active_trade_plan or {}).get("runtime_overlay_reason_codes") or []),
+            },
             "strategy_status": runtime_identity["strategy_status"],
             "scope_label": runtime_identity["scope_label"],
             "participation_policy": runtime_identity["participation_policy"],
@@ -5266,7 +5681,7 @@ class ProbationaryShadowRunner:
         live_polling_service: LivePollingService,
         structured_logger: StructuredLogger,
         alert_dispatcher: AlertDispatcher,
-        broker_truth_service: SchwabProductionLinkService | None = None,
+        broker_truth_service: ProductionLinkService | None = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
@@ -5410,6 +5825,35 @@ class ProbationaryShadowRunner:
             reconciliation_clean=snapshot.reconciliation_clean,
             invariants_ok=snapshot.invariants_ok,
             health_status=derive_health_status(snapshot),
+        )
+
+def _classify_atp_entry_states_compat(
+    *,
+    feature_rows: Sequence[Any],
+    allowed_sessions: frozenset[str],
+    runtime_ready: bool,
+    position_flat: bool,
+    one_position_rule_clear: bool,
+    side: str,
+) -> list[Any]:
+    try:
+        return classify_entry_states(
+            feature_rows=feature_rows,
+            allowed_sessions=allowed_sessions,
+            runtime_ready=runtime_ready,
+            position_flat=position_flat,
+            one_position_rule_clear=one_position_rule_clear,
+            side=side,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument 'side'" not in str(exc):
+            raise
+        return classify_entry_states(
+            feature_rows=feature_rows,
+            allowed_sessions=allowed_sessions,
+            runtime_ready=runtime_ready,
+            position_flat=position_flat,
+            one_position_rule_clear=one_position_rule_clear,
         )
 
 
@@ -5838,17 +6282,57 @@ class ProbationaryPaperSupervisor:
                     )
 
                 reconciliation_clean = True
+                market_data_failures: list[dict[str, Any]] = []
                 higher_priority_signals = _probationary_supervisor_higher_priority_signals(self._lanes)
                 for lane in self._lanes:
-                    if getattr(lane.spec, "runtime_kind", "") in {
-                        ATPE_CANARY_RUNTIME_KIND,
-                        ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
-                    }:
-                        lane_new_bars, reconciliation, _ = lane.poll_and_process(
-                            higher_priority_signals=higher_priority_signals
+                    try:
+                        if getattr(lane.spec, "runtime_kind", "") in {
+                            ATPE_CANARY_RUNTIME_KIND,
+                            ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
+                        }:
+                            lane_new_bars, reconciliation, _ = lane.poll_and_process(
+                                higher_priority_signals=higher_priority_signals
+                            )
+                        else:
+                            lane_new_bars, reconciliation, _ = lane.poll_and_process()
+                    except SchwabHttpError as exc:
+                        failure_payload = {
+                            "generated_at": datetime.now(timezone.utc).isoformat(),
+                            "lane_id": lane.spec.lane_id,
+                            "display_name": lane.spec.display_name,
+                            "symbol": lane.spec.symbol,
+                            "exception_text": str(exc),
+                            "failure_kind": "live_market_data_transport_failure",
+                            "runtime_pid": os.getpid(),
+                        }
+                        market_data_failures.append(failure_payload)
+                        _write_probationary_runtime_transport_failure(
+                            lane.settings,
+                            {
+                                **failure_payload,
+                                "blocker_label": "market_data_transport_failure",
+                                "runtime_ready": False,
+                                "status": "degraded",
+                                "next_fix": (
+                                    "Paper runtime stayed alive, but a lane-level Schwab transport request failed. "
+                                    "Retry automatically and inspect DNS/proxy stability if this repeats."
+                                ),
+                            },
                         )
-                    else:
-                        lane_new_bars, reconciliation, _ = lane.poll_and_process()
+                        self._alert_dispatcher.emit(
+                            severity="WARNING",
+                            code="paper_lane_market_data_transport_failure",
+                            message=(
+                                f"Lane {lane.spec.lane_id} hit a Schwab transport failure; "
+                                "keeping the paper host alive and retrying next cycle."
+                            ),
+                            payload=failure_payload,
+                            category="market_data_transport",
+                            title="Paper Lane Market Data Failure",
+                            dedup_key=f"{lane.spec.lane_id}:paper_lane_market_data_transport_failure",
+                            active=True,
+                        )
+                        continue
                     new_bars += lane_new_bars
                     if not reconciliation["clean"]:
                         reconciliation_clean = False
@@ -5882,6 +6366,8 @@ class ProbationaryPaperSupervisor:
                     risk_state=risk_state,
                     latest_operator_control=control_result,
                     lane_metrics=lane_metrics,
+                    market_data_ok=not market_data_failures,
+                    market_data_failures=market_data_failures,
                 )
 
                 if not reconciliation_clean:
@@ -5979,7 +6465,7 @@ class ProbationaryLiveStrategyPilotRunner:
         live_polling_service: LivePollingService,
         structured_logger: StructuredLogger,
         alert_dispatcher: AlertDispatcher,
-        broker_truth_service: SchwabProductionLinkService | Any | None = None,
+        broker_truth_service: ProductionLinkService | Any | None = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
@@ -6153,7 +6639,10 @@ class ProbationaryLiveStrategyPilotRunner:
             if (
                 poll_once
                 or (max_cycles is not None and cycles >= max_cycles)
-                or str(cycle_state.get("final_result") or "") in LIVE_STRATEGY_PILOT_CYCLE_TERMINAL_RESULTS
+                or (
+                    self._settings.live_strategy_pilot_single_cycle_mode
+                    and str(cycle_state.get("final_result") or "") in LIVE_STRATEGY_PILOT_CYCLE_TERMINAL_RESULTS
+                )
             ):
                 return ProbationaryLiveStrategyPilotSummary(
                     processed_bars=self._repositories.processed_bars.count(),
@@ -6316,7 +6805,7 @@ def build_probationary_shadow_runner(
         live_polling_service=live_polling_service,
         structured_logger=structured_logger,
         alert_dispatcher=alert_dispatcher,
-        broker_truth_service=SchwabProductionLinkService(Path(__file__).resolve().parents[3]),
+        broker_truth_service=ProductionLinkService(Path(__file__).resolve().parents[3]),
     )
 
 
@@ -6325,21 +6814,21 @@ def build_probationary_live_strategy_pilot_runner(
     schwab_config_path: str | Path | None,
 ) -> ProbationaryLiveStrategyPilotRunner:
     settings = load_settings_from_files(config_paths)
-    runtime_definitions = build_standalone_strategy_definitions(settings)
-    runtime_identity = runtime_definitions[0].runtime_identity if runtime_definitions else None
-    repositories = RepositorySet(build_engine(settings.database_url), runtime_identity=runtime_identity)
-    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    spec = _resolve_live_strategy_pilot_lane_spec(settings)
+    runtime_identity = _live_strategy_pilot_runtime_identity(settings, spec)
+    lane_settings = _build_probationary_paper_lane_settings(settings, spec)
+    repositories = RepositorySet(build_engine(lane_settings.database_url), runtime_identity=runtime_identity)
+    structured_logger = StructuredLogger(lane_settings.probationary_artifacts_path)
     alert_dispatcher = AlertDispatcher(
         structured_logger,
         repositories.alerts,
         source_subsystem="probationary_live_strategy_pilot",
     )
-    live_polling_service = _build_live_polling_service(settings, repositories, schwab_config_path)
-    broker_truth_service = SchwabProductionLinkService(Path(__file__).resolve().parents[3])
+    live_polling_service = _build_live_polling_service(lane_settings, repositories, schwab_config_path)
+    broker_truth_service = ProductionLinkService(Path(__file__).resolve().parents[3])
     live_broker = LiveStrategyPilotBroker(
-        settings=settings,
+        settings=lane_settings,
         repo_root=Path(__file__).resolve().parents[3],
-        production_link_service=broker_truth_service,
     )
     execution_engine = ExecutionEngine(broker=live_broker)
     strategy_engine: StrategyEngine | None = None
@@ -6348,7 +6837,7 @@ def build_probationary_live_strategy_pilot_runner(
         del state
         assert strategy_engine is not None
         return _live_strategy_submit_gate_blocker(
-            settings=settings,
+            settings=lane_settings,
             strategy_engine=strategy_engine,
             execution_engine=execution_engine,
             broker_truth_service=broker_truth_service,
@@ -6356,8 +6845,9 @@ def build_probationary_live_strategy_pilot_runner(
             intent=intent,
         )
 
-    strategy_engine = StrategyEngine(
-        settings=settings,
+    strategy_engine = _build_probationary_strategy_engine(
+        spec=spec,
+        settings=lane_settings,
         repositories=repositories,
         execution_engine=execution_engine,
         structured_logger=structured_logger,
@@ -6366,7 +6856,7 @@ def build_probationary_live_strategy_pilot_runner(
         submit_gate_evaluator=_submit_gate,
     )
     return ProbationaryLiveStrategyPilotRunner(
-        settings=settings,
+        settings=lane_settings,
         repositories=repositories,
         strategy_engine=strategy_engine,
         execution_engine=execution_engine,
@@ -6458,16 +6948,10 @@ def _active_probationary_paper_lane_specs(settings: StrategySettings) -> tuple[P
             if row.get("lane_id")
         }
         merged_rows: list[dict[str, Any]] = []
-        seen_lane_ids: set[str] = set()
         for row in runtime_lanes:
             lane_id = str(row.get("lane_id") or "")
             configured = configured_by_lane_id.get(lane_id, {})
             merged_rows.append({**dict(row), **configured})
-            if lane_id:
-                seen_lane_ids.add(lane_id)
-        for lane_id, configured in configured_by_lane_id.items():
-            if lane_id not in seen_lane_ids:
-                merged_rows.append(dict(configured))
         return _coerce_probationary_paper_lane_specs(merged_rows)
     return _load_probationary_paper_lane_specs(settings)
 
@@ -6593,6 +7077,16 @@ def _coerce_probationary_paper_lane_specs(
                 shared_strategy_identity=(
                     str(raw_spec["shared_strategy_identity"]) if raw_spec.get("shared_strategy_identity") else None
                 ),
+                package_id=str(raw_spec["package_id"]) if raw_spec.get("package_id") else None,
+                package_label=str(raw_spec["package_label"]) if raw_spec.get("package_label") else None,
+                runtime_overlay_id=(
+                    str(raw_spec["runtime_overlay_id"]) if raw_spec.get("runtime_overlay_id") else None
+                ),
+                runtime_overlay_params=dict(raw_spec.get("runtime_overlay_params") or {}),
+                allow_pre_5m_context_participation=bool(
+                    raw_spec.get("allow_pre_5m_context_participation", False)
+                ),
+                atp_context_timeframe=str(raw_spec.get("atp_context_timeframe", "5m")),
             )
         )
     return tuple(specs)
@@ -6918,6 +7412,7 @@ def _build_probationary_strategy_engine(
     structured_logger: ProbationaryLaneStructuredLogger,
     alert_dispatcher: AlertDispatcher,
     runtime_identity: dict[str, Any] | None,
+    submit_gate_evaluator: Any | None = None,
 ) -> StrategyEngine:
     if spec.runtime_kind == "approved_quant_strategy_engine":
         quant_spec = next(
@@ -6950,6 +7445,7 @@ def _build_probationary_strategy_engine(
         structured_logger=structured_logger,
         alert_dispatcher=alert_dispatcher,
         runtime_identity=runtime_identity,
+        submit_gate_evaluator=submit_gate_evaluator,
     )
 
 
@@ -7043,8 +7539,12 @@ def _write_probationary_paper_config_in_force(
 ) -> Path:
     runtime_dir = settings.probationary_artifacts_path / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at,
+        "source_runtime_pid": os.getpid(),
+        "active_lane_ids": [lane.spec.lane_id for lane in lanes],
+        "loss_halts_disabled": bool(getattr(settings, "probationary_paper_disable_loss_halts", False)),
         "desk_halt_new_entries_loss": str(settings.probationary_paper_desk_halt_new_entries_loss),
         "desk_flatten_and_halt_loss": str(settings.probationary_paper_desk_flatten_and_halt_loss),
         "lane_realized_loser_limit_per_session": settings.probationary_paper_lane_realized_loser_limit_per_session,
@@ -7117,6 +7617,9 @@ def _load_probationary_paper_risk_state(settings: StrategySettings) -> Probation
         return ProbationaryPaperRiskRuntimeState(
             session_date=datetime.now(settings.timezone_info).date().isoformat(),
         )
+    lane_states = dict(payload.get("lane_states") or {})
+    historical_lane_states = dict(payload.get("historical_lane_states") or {})
+    lane_states.update({str(key): value for key, value in historical_lane_states.items()})
     return ProbationaryPaperRiskRuntimeState(
         session_date=str(payload.get("session_date") or datetime.now(settings.timezone_info).date().isoformat()),
         desk_halt_new_entries_triggered=bool(payload.get("desk_halt_new_entries_triggered", False)),
@@ -7125,7 +7628,7 @@ def _load_probationary_paper_risk_state(settings: StrategySettings) -> Probation
         desk_last_triggered_at=payload.get("desk_last_triggered_at"),
         desk_last_cleared_at=payload.get("desk_last_cleared_at"),
         desk_last_cleared_action=payload.get("desk_last_cleared_action"),
-        lane_states=dict(payload.get("lane_states") or {}),
+        lane_states=lane_states,
     )
 
 
@@ -7336,7 +7839,7 @@ def _runtime_cadence_payload_from_research_bars(
     execution_bar_id = None
     if latest_polled_end_ts is not None:
         execution_bar_id = f"{instrument}|1m|{latest_polled_end_ts.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
-    bars_5m = _resample_research_bars_5m(bars_1m)
+    bars_5m = _resample_research_bars(bars_1m, target_timeframe="5m")
     latest_completed_context = bars_5m[-1].end_ts.isoformat() if bars_5m else None
     return {
         "execution_timeframe": "1m",
@@ -7459,6 +7962,40 @@ def _probationary_lane_can_add_participation(lane: ProbationaryPaperLaneRuntime)
     return state.internal_position_qty + lane.settings.trade_size <= max_position_quantity
 
 
+def _clear_stale_probationary_lane_risk_halt(
+    *,
+    lane: ProbationaryPaperLaneRuntime,
+    lane_state: dict[str, Any],
+    now: datetime,
+) -> bool:
+    if not (
+        lane_state.get("catastrophic_triggered")
+        or lane_state.get("warning_triggered")
+        or lane_state.get("degradation_triggered")
+    ):
+        return False
+
+    state = lane.strategy_engine.state
+    if state.operator_halt or not state.entries_enabled or state.fault_code is not None:
+        return False
+    if state.position_side != PositionSide.FLAT:
+        return False
+    if state.internal_position_qty != 0 or state.broker_position_qty != 0:
+        return False
+    if state.open_broker_order_id is not None or lane.execution_engine.pending_executions():
+        return False
+
+    lane_state["catastrophic_triggered"] = False
+    lane_state["warning_triggered"] = False
+    lane_state["degradation_triggered"] = False
+    lane_state["risk_state"] = "OK"
+    lane_state["halt_reason"] = None
+    lane_state["unblock_action"] = "No action needed; already eligible"
+    lane_state["last_cleared_at"] = now.isoformat()
+    lane_state["last_cleared_action"] = "stale_risk_state_reconciled"
+    return True
+
+
 def _apply_probationary_paper_risk_controls(
     *,
     settings: StrategySettings,
@@ -7471,6 +8008,7 @@ def _apply_probationary_paper_risk_controls(
     now = datetime.now(timezone.utc)
     risk_events: list[dict[str, Any]] = []
     warning_map = settings.probationary_paper_lane_warning_open_loss
+    loss_halts_disabled = bool(getattr(settings, "probationary_paper_disable_loss_halts", False))
 
     for lane in lanes:
         metrics = lane_metrics[lane.spec.lane_id]
@@ -7493,6 +8031,11 @@ def _apply_probationary_paper_risk_controls(
             lane_state,
             session_date=metrics.session_date,
         )
+        _clear_stale_probationary_lane_risk_halt(
+            lane=lane,
+            lane_state=lane_state,
+            now=now,
+        )
         if is_canary_lane:
             lane_state["degradation_triggered"] = False
             if lane_state.get("halt_reason") == "lane_realized_loser_limit_per_session":
@@ -7506,6 +8049,26 @@ def _apply_probationary_paper_risk_controls(
                     and state.open_broker_order_id is None
                 ):
                     lane.strategy_engine.set_operator_halt(now, False)
+        if loss_halts_disabled:
+            if lane_state.get("catastrophic_triggered") or lane_state.get("warning_triggered") or lane_state.get("degradation_triggered"):
+                lane_state["last_cleared_at"] = now.isoformat()
+                lane_state["last_cleared_action"] = "loss_halts_disabled"
+            lane_state["catastrophic_triggered"] = False
+            lane_state["warning_triggered"] = False
+            lane_state["degradation_triggered"] = False
+            lane_state["risk_state"] = "OK"
+            lane_state["halt_reason"] = None
+            lane_state["unblock_action"] = "Paper observation mode: loss halts disabled"
+            if lane.strategy_engine.state.operator_halt and lane.strategy_engine.state.fault_code is None:
+                state = lane.strategy_engine.state
+                if (
+                    state.position_side == PositionSide.FLAT
+                    and state.internal_position_qty == 0
+                    and state.broker_position_qty == 0
+                    and state.open_broker_order_id is None
+                ):
+                    lane.strategy_engine.set_operator_halt(now, False)
+            continue
         if (
             lane.spec.catastrophic_open_loss is not None
             and metrics.unrealized_pnl <= lane.spec.catastrophic_open_loss
@@ -7621,7 +8184,12 @@ def _apply_probationary_paper_risk_controls(
     desk_realized = sum((metrics.realized_pnl for metrics in lane_metrics.values()), Decimal("0"))
     desk_unrealized = sum((metrics.unrealized_pnl for metrics in lane_metrics.values()), Decimal("0"))
     desk_total = desk_realized + desk_unrealized
-    if (
+    if loss_halts_disabled:
+        risk_state.desk_halt_new_entries_triggered = False
+        risk_state.desk_flatten_and_halt_triggered = False
+        risk_state.desk_last_trigger_reason = None
+        risk_state.desk_last_triggered_at = None
+    elif (
         desk_total <= settings.probationary_paper_desk_flatten_and_halt_loss
         and not risk_state.desk_flatten_and_halt_triggered
     ):
@@ -7735,6 +8303,7 @@ def _probationary_desk_risk_summary(
     desk_state = "OK"
     reason = risk_state.desk_last_trigger_reason
     unblock_action = "No action needed; already eligible"
+    loss_halts_disabled = bool(getattr(settings, "probationary_paper_disable_loss_halts", False))
     if faulted:
         desk_state = "FAULTED"
         reason = "active_fault"
@@ -7743,6 +8312,10 @@ def _probationary_desk_risk_summary(
         desk_state = "DIRTY_RECONCILIATION"
         reason = "dirty_reconciliation"
         unblock_action = "Manual inspection required"
+    elif loss_halts_disabled:
+        desk_state = "LOSS_HALTS_DISABLED"
+        reason = "paper_observation_mode"
+        unblock_action = "Observation mode active; loss-driven desk halts are disabled"
     elif risk_state.desk_flatten_and_halt_triggered:
         desk_state = "FLATTEN_AND_HALT"
         reason = risk_state.desk_last_trigger_reason or "desk_flatten_and_halt_loss"
@@ -7774,6 +8347,12 @@ def _write_probationary_paper_risk_artifacts(
 ) -> None:
     runtime_dir = settings.probationary_artifacts_path / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    active_lane_ids = {lane.spec.lane_id for lane in lanes}
+    active_lane_states = {lane_id: dict(state) for lane_id, state in risk_state.lane_states.items() if lane_id in active_lane_ids}
+    historical_lane_states = {
+        lane_id: dict(state) for lane_id, state in risk_state.lane_states.items() if lane_id not in active_lane_ids
+    }
     desk_summary = _probationary_desk_risk_summary(
         settings=settings,
         lanes=lanes,
@@ -7783,20 +8362,26 @@ def _write_probationary_paper_risk_artifacts(
     structured_logger._write_json(  # noqa: SLF001
         runtime_dir / "paper_risk_runtime_state.json",
         {
+            "generated_at": generated_at,
+            "source_runtime_pid": os.getpid(),
             "session_date": risk_state.session_date,
+            "loss_halts_disabled": bool(getattr(settings, "probationary_paper_disable_loss_halts", False)),
             "desk_halt_new_entries_triggered": risk_state.desk_halt_new_entries_triggered,
             "desk_flatten_and_halt_triggered": risk_state.desk_flatten_and_halt_triggered,
             "desk_last_trigger_reason": risk_state.desk_last_trigger_reason,
             "desk_last_triggered_at": risk_state.desk_last_triggered_at,
             "desk_last_cleared_at": risk_state.desk_last_cleared_at,
             "desk_last_cleared_action": risk_state.desk_last_cleared_action,
-            "lane_states": risk_state.lane_states,
+            "active_lane_ids": sorted(active_lane_ids),
+            "lane_states": active_lane_states,
+            "historical_lane_states": historical_lane_states,
         },
     )
     desk_payload = {
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": generated_at,
         "session_date": risk_state.session_date,
         "desk_risk_state": desk_summary["desk_risk_state"],
+        "loss_halts_disabled": bool(getattr(settings, "probationary_paper_disable_loss_halts", False)),
         "session_realized_pnl": str(desk_summary["desk_realized"]),
         "session_unrealized_pnl": str(desk_summary["desk_unrealized"]),
         "session_total_pnl": str(desk_summary["desk_total"]),
@@ -7812,8 +8397,9 @@ def _write_probationary_paper_risk_artifacts(
         "last_cleared_action": risk_state.desk_last_cleared_action,
     }
     lane_payload = {
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": generated_at,
         "session_date": risk_state.session_date,
+        "active_lane_ids": sorted(active_lane_ids),
         "lanes": [
             {
                 "lane_id": lane.spec.lane_id,
@@ -7888,8 +8474,11 @@ def _write_probationary_supervisor_operator_status(
     risk_state: ProbationaryPaperRiskRuntimeState,
     latest_operator_control: dict[str, Any] | None,
     lane_metrics: dict[str, ProbationaryPaperLaneMetrics] | None = None,
+    market_data_ok: bool = True,
+    market_data_failures: Sequence[dict[str, Any]] | None = None,
 ) -> Path:
     now_local = datetime.now(settings.timezone_info)
+    generated_at = datetime.now(timezone.utc).isoformat()
     current_detected_session = label_session_phase(now_local)
     latest_end_ts = _latest_probationary_lane_processed_ts(lanes)
     non_authority_runtime_kinds = {
@@ -7947,17 +8536,37 @@ def _write_probationary_supervisor_operator_status(
         key=lambda row: str(row.get("restore_completed_at") or row.get("restore_started_at") or ""),
         default=None,
     )
+    executable_lane_count = len(executable_lanes)
+    enabled_lane_count = sum(1 for lane in executable_lanes if lane.strategy_engine.state.entries_enabled)
+    halted_lane_count = sum(1 for lane in executable_lanes if lane.strategy_engine.state.operator_halt)
+    faulted_lane_count = sum(1 for lane in executable_lanes if lane.strategy_engine.state.fault_code is not None)
+    same_underlying_hold_lane_count = sum(1 for lane in executable_lanes if lane.strategy_engine.state.same_underlying_entry_hold)
+    usable_lane_count = sum(
+        1
+        for lane in executable_lanes
+        if lane.strategy_engine.state.entries_enabled
+        and not lane.strategy_engine.state.operator_halt
+        and lane.strategy_engine.state.fault_code is None
+    )
+    global_entries_enabled = usable_lane_count > 0
+    global_operator_halt = executable_lane_count > 0 and halted_lane_count == executable_lane_count
     payload = {
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at,
+        "source_runtime_pid": os.getpid(),
+        "active_lane_ids": [lane.spec.lane_id for lane in lanes],
+        "updated_at": generated_at,
         "health": {
-            "market_data_ok": True,
+            "market_data_ok": market_data_ok,
             "broker_ok": broker_ok,
             "persistence_ok": True,
             "reconciliation_clean": reconciliation_clean,
             "invariants_ok": all(lane.strategy_engine.state.fault_code is None for lane in lanes),
             "health_status": (
                 "HEALTHY"
-                if broker_ok and reconciliation_clean and all(lane.strategy_engine.state.fault_code is None for lane in lanes)
+                if market_data_ok
+                and broker_ok
+                and reconciliation_clean
+                and all(lane.strategy_engine.state.fault_code is None for lane in lanes)
                 else "DEGRADED"
             ),
         },
@@ -7967,9 +8576,14 @@ def _write_probationary_supervisor_operator_status(
         "position_side": "FLAT" if all_flat else "MULTI",
         "strategy_status": "RUNNING_MULTI_LANE",
         "fault_code": next((lane.strategy_engine.state.fault_code for lane in executable_lanes if lane.strategy_engine.state.fault_code), None),
-        "entries_enabled": all(lane.strategy_engine.state.entries_enabled for lane in executable_lanes),
-        "operator_halt": any(lane.strategy_engine.state.operator_halt for lane in executable_lanes),
-        "same_underlying_entry_hold": any(lane.strategy_engine.state.same_underlying_entry_hold for lane in executable_lanes),
+        "entries_enabled": global_entries_enabled,
+        "operator_halt": global_operator_halt,
+        "same_underlying_entry_hold": same_underlying_hold_lane_count > 0,
+        "executable_lane_count": executable_lane_count,
+        "enabled_lane_count": enabled_lane_count,
+        "halted_lane_count": halted_lane_count,
+        "faulted_lane_count": faulted_lane_count,
+        "usable_lane_count": usable_lane_count,
         "same_underlying_hold_instruments": sorted(
             {
                 lane.spec.symbol
@@ -7983,6 +8597,7 @@ def _write_probationary_supervisor_operator_status(
         "desk_risk_state": desk_risk["desk_risk_state"],
         "desk_risk_reason": desk_risk["trigger_reason"],
         "desk_unblock_action": desk_risk["unblock_action"],
+        "loss_halts_disabled": bool(getattr(settings, "probationary_paper_disable_loss_halts", False)),
         "desk_session_realized_pnl": str(desk_risk["desk_realized"]),
         "desk_session_unrealized_pnl": str(desk_risk["desk_unrealized"]),
         "desk_session_total_pnl": str(desk_risk["desk_total"]),
@@ -7994,6 +8609,7 @@ def _write_probationary_supervisor_operator_status(
         "paper_lane_risk_status_path": str(settings.probationary_artifacts_path / "runtime" / "paper_lane_risk_status.json"),
         "paper_config_in_force_path": str(settings.probationary_artifacts_path / "runtime" / "paper_config_in_force.json"),
         "latest_operator_control": latest_operator_control,
+        "market_data_failures": [dict(row) for row in (market_data_failures or [])],
         "startup_restore_validation_summary": {
             "last_restore_completed_at": latest_restore.get("restore_completed_at") if latest_restore else None,
             "last_restore_result": latest_restore.get("restore_result") if latest_restore else "UNAVAILABLE",
@@ -8353,10 +8969,9 @@ def _apply_probationary_supervisor_operator_control(
     alert_dispatcher: AlertDispatcher,
     risk_state: ProbationaryPaperRiskRuntimeState,
 ) -> dict[str, Any] | None:
-    control_path = settings.resolved_probationary_operator_control_path
-    if not control_path.exists():
+    payload, control_path, candidate_paths = _select_probationary_operator_control_payload(settings)
+    if payload is None:
         return None
-    payload = _read_json(control_path)
     now = datetime.now(timezone.utc)
     if payload.get("action") == "flatten_and_halt" and payload.get("status") in {"flatten_pending", "applied"}:
         if all(_lane_is_flat_and_safe(lane) for lane in lanes):
@@ -8365,7 +8980,7 @@ def _apply_probationary_supervisor_operator_control(
             result["flatten_state"] = "complete"
             result["completed_at"] = now.isoformat()
             result["message"] = "Flatten And Halt completed; all probationary paper lanes are flat."
-            control_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            _write_probationary_operator_control_payloads(candidate_paths, result)
             structured_logger.log_operator_control(result)
             return result
         return payload
@@ -8379,7 +8994,7 @@ def _apply_probationary_supervisor_operator_control(
     target_lane, target_error = _resolve_probationary_supervisor_target_lane(payload, lanes)
     if target_error is not None:
         result.update(target_error)
-        control_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        _write_probationary_operator_control_payloads(candidate_paths, result)
         structured_logger.log_operator_control(result)
         alert_dispatcher.emit(
             "warning",
@@ -8391,7 +9006,7 @@ def _apply_probationary_supervisor_operator_control(
     if target_lane is not None and action == "stop_after_cycle":
         result["status"] = "rejected"
         result["message"] = "Stop After Current Cycle rejected because it is a runtime-wide control and cannot target a single lane."
-        control_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        _write_probationary_operator_control_payloads(candidate_paths, result)
         structured_logger.log_operator_control(result)
         alert_dispatcher.emit(
             "warning",
@@ -8730,7 +9345,7 @@ def _apply_probationary_supervisor_operator_control(
         result["status"] = "rejected"
         result["message"] = f"Unsupported control action: {action}"
 
-    control_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    _write_probationary_operator_control_payloads(candidate_paths, result)
     structured_logger.log_operator_control(result)
     alert_dispatcher.emit(
         "info" if result["status"] == "applied" else "warning",
@@ -12219,11 +12834,8 @@ def submit_probationary_operator_control(
         lane_id=requested_lane_id,
         shared_strategy_identity=requested_shared_identity,
     )
-    control_path = (
-        _shared_probationary_operator_control_path(settings)
-        if target_payload
-        else settings.resolved_probationary_operator_control_path
-    )
+    control_path = settings.resolved_probationary_operator_control_path
+    control_paths = _probationary_operator_control_candidate_paths(settings)
     control_path.parent.mkdir(parents=True, exist_ok=True)
     control_payload = {
         "action": action,
@@ -12239,7 +12851,7 @@ def submit_probationary_operator_control(
     if target_payload:
         control_payload.update(target_payload)
         control_payload["control_scope"] = "lane"
-    control_path.write_text(json.dumps(control_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    _write_probationary_operator_control_payloads(control_paths, control_payload)
     logger.log_operator_control({**control_payload, "control_path": str(control_path)})
     return ProbationaryOperatorControlResult(
         action=action,
@@ -12251,6 +12863,66 @@ def submit_probationary_operator_control(
 
 def _shared_probationary_operator_control_path(settings: StrategySettings) -> Path:
     return settings.probationary_artifacts_path / "runtime" / "operator_control.json"
+
+
+def _probationary_operator_control_candidate_paths(settings: StrategySettings) -> tuple[Path, ...]:
+    primary = settings.resolved_probationary_operator_control_path
+    return (primary,)
+
+
+def _write_probationary_operator_control_payload(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(json.dumps(payload, sort_keys=True, indent=2) + "\n")
+        temp_path = Path(handle.name)
+    temp_path.replace(path)
+
+
+def _write_probationary_operator_control_payloads(paths: Sequence[Path], payload: dict[str, Any]) -> None:
+    seen: set[Path] = set()
+    for path in paths:
+        candidate = Path(path)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        _write_probationary_operator_control_payload(candidate, payload)
+
+
+def _select_probationary_operator_control_payload(
+    settings: StrategySettings,
+) -> tuple[dict[str, Any] | None, Path, tuple[Path, ...]]:
+    candidate_paths = _probationary_operator_control_candidate_paths(settings)
+    primary_path = settings.resolved_probationary_operator_control_path
+    candidates: list[tuple[Path, dict[str, Any], str, int]] = []
+    for index, path in enumerate(candidate_paths):
+        if not path.exists():
+            continue
+        payload = _read_json(path)
+        if not isinstance(payload, dict) or not payload:
+            continue
+        timestamp = (
+            str(payload.get("applied_at") or "").strip()
+            or str(payload.get("completed_at") or "").strip()
+            or str(payload.get("requested_at") or "").strip()
+        )
+        candidates.append((path, dict(payload), timestamp, index))
+    if not candidates:
+        return None, primary_path, candidate_paths
+
+    def _sort_key(item: tuple[Path, dict[str, Any], str, int]) -> tuple[int, str, int]:
+        _, payload, timestamp, index = item
+        is_pending = 1 if str(payload.get("status") or "").strip().lower() == "pending" else 0
+        return (is_pending, timestamp, -index)
+
+    chosen_path, chosen_payload, _, _ = max(candidates, key=_sort_key)
+    return chosen_payload, chosen_path, candidate_paths
 
 
 def _resolve_probationary_operator_control_target(
@@ -12558,11 +13230,20 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    invalid_lines: list[int] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         stripped = line.strip()
         if not stripped:
             continue
-        records.append(json.loads(stripped))
+        try:
+            records.append(json.loads(stripped))
+        except json.JSONDecodeError:
+            invalid_lines.append(line_number)
+    if invalid_lines:
+        print(
+            f"Skipping malformed JSONL rows in {path}: {invalid_lines}",
+            file=sys.stderr,
+        )
     return records
 
 
@@ -12661,10 +13342,15 @@ def _prune_research_bars(bars: Sequence[ResearchBar], *, keep_minutes: int) -> l
     return [bar for bar in bars if bar.end_ts >= cutoff]
 
 
-def _resample_research_bars_5m(bars_1m: Sequence[ResearchBar]) -> list[ResearchBar]:
+def _resample_research_bars(
+    bars_1m: Sequence[ResearchBar],
+    *,
+    target_timeframe: str = "5m",
+) -> list[ResearchBar]:
+    target_minutes = max(timeframe_minutes(target_timeframe), 1)
     buckets: dict[datetime, list[ResearchBar]] = {}
     for bar in sorted(bars_1m, key=lambda item: item.end_ts):
-        bucket_end = _latest_completed_probationary_bar_end(bar.end_ts, "5m")
+        bucket_end = _latest_completed_probationary_bar_end(bar.end_ts, target_timeframe)
         buckets.setdefault(bucket_end, []).append(bar)
     rows: list[ResearchBar] = []
     for bucket_end, bucket in sorted(buckets.items(), key=lambda item: item[0]):
@@ -12674,8 +13360,8 @@ def _resample_research_bars_5m(bars_1m: Sequence[ResearchBar]) -> list[ResearchB
         rows.append(
             ResearchBar(
                 instrument=first.instrument,
-                timeframe="5m",
-                start_ts=bucket_end - timedelta(minutes=5),
+                timeframe=target_timeframe,
+                start_ts=bucket_end - timedelta(minutes=target_minutes),
                 end_ts=bucket_end,
                 open=first.open,
                 high=max(item.high for item in bucket),
@@ -12714,16 +13400,17 @@ def _latest_atpe_feature_state_from_bars(
     *,
     bars_1m: Sequence[ResearchBar],
     instrument: str,
+    context_timeframe: str = "5m",
 ) -> Any | None:
     sorted_bars = sorted(bars_1m, key=lambda item: item.end_ts)
     if not sorted_bars:
         return None
-    bars_5m = _resample_research_bars_5m(sorted_bars)
-    if bars_5m:
+    context_bars = _resample_research_bars(sorted_bars, target_timeframe=context_timeframe)
+    if context_bars:
         first_1m_ts = sorted_bars[0].end_ts
         last_1m_ts = sorted_bars[-1].end_ts
-        bars_5m = [bar for bar in bars_5m if first_1m_ts <= bar.end_ts <= last_1m_ts]
-    feature_rows = build_feature_states(bars_5m=bars_5m, bars_1m=sorted_bars)
+        context_bars = [bar for bar in context_bars if first_1m_ts <= bar.end_ts <= last_1m_ts]
+    feature_rows = build_feature_states(bars_5m=context_bars, bars_1m=sorted_bars)
     matching = [row for row in feature_rows if row.instrument == instrument]
     return matching[-1] if matching else None
 
@@ -12735,16 +13422,17 @@ def _latest_atpe_phase2_entry_state_from_bars(
     runtime_ready: bool,
     position_flat: bool,
     one_position_rule_clear: bool,
+    context_timeframe: str = "5m",
 ) -> dict[str, Any]:
     sorted_bars = sorted(bars_1m, key=lambda item: item.end_ts)
     if not sorted_bars:
         return latest_atp_entry_state_summary(None)
-    bars_5m = _resample_research_bars_5m(sorted_bars)
-    if bars_5m:
+    context_bars = _resample_research_bars(sorted_bars, target_timeframe=context_timeframe)
+    if context_bars:
         first_1m_ts = sorted_bars[0].end_ts
         last_1m_ts = sorted_bars[-1].end_ts
-        bars_5m = [bar for bar in bars_5m if first_1m_ts <= bar.end_ts <= last_1m_ts]
-    feature_rows = build_feature_states(bars_5m=bars_5m, bars_1m=sorted_bars)
+        context_bars = [bar for bar in context_bars if first_1m_ts <= bar.end_ts <= last_1m_ts]
+    feature_rows = build_feature_states(bars_5m=context_bars, bars_1m=sorted_bars)
     matching = [row for row in feature_rows if row.instrument == instrument]
     if not matching:
         return latest_atp_entry_state_summary(None)
@@ -12764,16 +13452,17 @@ def _latest_atpe_phase3_timing_state_from_bars(
     runtime_ready: bool,
     position_flat: bool,
     one_position_rule_clear: bool,
+    context_timeframe: str = "5m",
 ) -> dict[str, Any]:
     sorted_bars = sorted(bars_1m, key=lambda item: item.end_ts)
     if not sorted_bars:
         return latest_atp_timing_state_summary(None)
-    bars_5m = _resample_research_bars_5m(sorted_bars)
-    if bars_5m:
+    context_bars = _resample_research_bars(sorted_bars, target_timeframe=context_timeframe)
+    if context_bars:
         first_1m_ts = sorted_bars[0].end_ts
         last_1m_ts = sorted_bars[-1].end_ts
-        bars_5m = [bar for bar in bars_5m if first_1m_ts <= bar.end_ts <= last_1m_ts]
-    feature_rows = build_feature_states(bars_5m=bars_5m, bars_1m=sorted_bars)
+        context_bars = [bar for bar in context_bars if first_1m_ts <= bar.end_ts <= last_1m_ts]
+    feature_rows = build_feature_states(bars_5m=context_bars, bars_1m=sorted_bars)
     matching = [row for row in feature_rows if row.instrument == instrument]
     if not matching:
         return latest_atp_timing_state_summary(None)
@@ -12927,7 +13616,7 @@ def simulate_atpe_exit_policy_on_bars(
     )
     if not sorted_bars:
         return []
-    bars_5m = _resample_research_bars_5m(sorted_bars)
+    bars_5m = _resample_research_bars(sorted_bars, target_timeframe="5m")
     if bars_5m:
         first_1m_ts = sorted_bars[0].end_ts
         last_1m_ts = sorted_bars[-1].end_ts
@@ -13327,6 +14016,7 @@ def _runtime_atp_companion_signal_row(
 ) -> dict[str, Any]:
     signal_passed_flag = bool(timing_state.executable_entry)
     blocker = timing_state.primary_blocker or (entry_state.primary_blocker if entry_state is not None else None)
+    variant_id = ATP_V1_LONG_CONTINUATION_VARIANT_ID if str(timing_state.side).upper() == "LONG" else ATP_V1_SHORT_CONTINUATION_VARIANT_ID
     return {
         "lane_id": spec.lane_id,
         "lane_name": spec.display_name,
@@ -13335,9 +14025,9 @@ def _runtime_atp_companion_signal_row(
         "non_approved": spec.non_approved,
         "symbol": timing_state.instrument,
         "instrument_scope": ",".join(observed_instruments),
-        "variant_id": spec.observer_variant_id,
+        "variant_id": variant_id,
         "family": timing_state.family_name,
-        "side": spec.observer_side,
+        "side": timing_state.side,
         "signal_timestamp": timing_state.decision_ts.isoformat(),
         "bar_end_ts": timing_state.timing_bar_ts.isoformat() if timing_state.timing_bar_ts is not None else timing_state.decision_ts.isoformat(),
         "session_date": timing_state.session_date.isoformat(),
@@ -13362,6 +14052,81 @@ def _runtime_atp_companion_signal_row(
         "setup_state_signature": timing_state.feature_snapshot.get("setup_state_signature")
         or timing_state.feature_snapshot.get("setup_signature"),
         "feature_snapshot": timing_state.feature_snapshot,
+        "raw_setup_candidate": bool(entry_state.raw_candidate) if entry_state is not None else False,
+        "trigger_confirmed": bool(entry_state.trigger_confirmed) if entry_state is not None else False,
+        "entry_state": entry_state.entry_state if entry_state is not None else None,
+        "continuation_trigger_state": entry_state.continuation_trigger_state if entry_state is not None else None,
+        "timing_state": timing_state.timing_state,
+        "atp_decision_stage": "timing_state_evaluated",
+    }
+
+
+def _runtime_atp_companion_pre_timing_signal_row(
+    *,
+    spec: ProbationaryPaperLaneSpec,
+    entry_state: Any,
+    observed_instruments: Sequence[str],
+) -> dict[str, Any]:
+    blocker = entry_state.primary_blocker or "ATP_ENTRY_STATE_BLOCKED"
+    variant_id = (
+        ATP_V1_LONG_CONTINUATION_VARIANT_ID
+        if str(entry_state.side).upper() == "LONG"
+        else ATP_V1_SHORT_CONTINUATION_VARIANT_ID
+    )
+    feature_snapshot = dict(entry_state.feature_snapshot or {})
+    feature_snapshot.setdefault("setup_signature", entry_state.setup_signature)
+    feature_snapshot.setdefault("setup_state_signature", entry_state.setup_state_signature)
+    feature_snapshot.setdefault("setup_quality_bucket", entry_state.setup_quality_bucket)
+    feature_snapshot["raw_setup_candidate"] = bool(entry_state.raw_candidate)
+    feature_snapshot["trigger_confirmed"] = bool(entry_state.trigger_confirmed)
+    feature_snapshot["entry_state"] = entry_state.entry_state
+    feature_snapshot["continuation_trigger_state"] = entry_state.continuation_trigger_state
+    feature_snapshot["primary_blocker"] = blocker
+    feature_snapshot["blocker_codes"] = list(entry_state.blocker_codes)
+    feature_snapshot["atp_decision_stage"] = "entry_state_blocked_before_timing"
+    return {
+        "lane_id": spec.lane_id,
+        "lane_name": spec.display_name,
+        "experimental_status": spec.experimental_status,
+        "paper_only": spec.paper_only,
+        "non_approved": spec.non_approved,
+        "symbol": entry_state.instrument,
+        "instrument_scope": ",".join(observed_instruments),
+        "variant_id": variant_id,
+        "family": entry_state.family_name,
+        "side": entry_state.side,
+        "signal_timestamp": entry_state.decision_ts.isoformat(),
+        "bar_end_ts": entry_state.decision_ts.isoformat(),
+        "session_date": entry_state.session_date.isoformat(),
+        "session_segment": entry_state.session_segment,
+        "decision_id": (
+            f"{entry_state.instrument}|{entry_state.family_name}|{entry_state.side}|"
+            f"{entry_state.decision_ts.isoformat()}|entry_state"
+        ),
+        "decision": "blocked",
+        "signal_passed_flag": False,
+        "paper_canary_eligible": False,
+        "live_eligible": False,
+        "shadow_only": False,
+        "quality_bucket_policy": spec.quality_bucket_policy,
+        "quality_bucket": entry_state.setup_quality_bucket,
+        "setup_quality_score": entry_state.setup_quality_score,
+        "conflict_outcome": "no_timing_state_materialized",
+        "allow_block_reason": "blocked_entry_state_before_timing",
+        "override_reason": blocker,
+        "rejection_reason_code": blocker,
+        "block_reason": blocker,
+        "priority_tier": "paper_tracking_pre_live_soak",
+        "lower_priority_policy": "yield_to_higher_priority_live_strategies",
+        "setup_signature": entry_state.setup_signature,
+        "setup_state_signature": entry_state.setup_state_signature,
+        "feature_snapshot": feature_snapshot,
+        "raw_setup_candidate": bool(entry_state.raw_candidate),
+        "trigger_confirmed": bool(entry_state.trigger_confirmed),
+        "entry_state": entry_state.entry_state,
+        "continuation_trigger_state": entry_state.continuation_trigger_state,
+        "timing_state": None,
+        "atp_decision_stage": "entry_state_blocked_before_timing",
     }
 
 
@@ -13754,7 +14519,7 @@ def _restore_live_runtime_state(
     repositories: RepositorySet,
     strategy_engine: StrategyEngine,
     execution_engine: ExecutionEngine,
-    broker_truth_service: SchwabProductionLinkService | Any | None = None,
+    broker_truth_service: ProductionLinkService | Any | None = None,
 ) -> dict[str, Any]:
     open_order_rows = _load_open_order_intent_rows(repositories)
     pending_executions = [_pending_execution_from_row(row) for row in open_order_rows]
@@ -13767,6 +14532,82 @@ def _restore_live_runtime_state(
     )
 
 
+def _cancel_open_live_strategy_orders(
+    *,
+    repositories: RepositorySet,
+    strategy_engine: StrategyEngine,
+    execution_engine: ExecutionEngine,
+    occurred_at: datetime,
+) -> dict[str, Any]:
+    broker = execution_engine.broker
+    if not isinstance(broker, LiveStrategyPilotBroker):
+        return {
+            "attempted": False,
+            "cancelled_order_ids": [],
+            "errors": [],
+            "reconciliation": None,
+        }
+
+    broker_order_ids: list[str] = []
+    try:
+        open_orders = broker.get_open_orders()
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "cancelled_order_ids": [],
+            "errors": [str(exc)],
+            "reconciliation": None,
+        }
+
+    for row in open_orders:
+        broker_order_id = str(row.get("broker_order_id") or "").strip()
+        if broker_order_id:
+            broker_order_ids.append(broker_order_id)
+    for pending in execution_engine.pending_executions():
+        broker_order_id = str(pending.broker_order_id or "").strip()
+        if broker_order_id:
+            broker_order_ids.append(broker_order_id)
+    state_open_order_id = str(strategy_engine.state.open_broker_order_id or "").strip()
+    if state_open_order_id:
+        broker_order_ids.append(state_open_order_id)
+
+    cancelled_order_ids: list[str] = []
+    errors: list[str] = []
+    for broker_order_id in list(dict.fromkeys(broker_order_ids)):
+        try:
+            broker.cancel_order(broker_order_id)
+            cancelled_order_ids.append(broker_order_id)
+        except Exception as exc:
+            errors.append(f"{broker_order_id}: {exc}")
+
+    if not errors:
+        for pending in list(execution_engine.pending_executions()):
+            if str(pending.broker_order_id or "").strip() in cancelled_order_ids:
+                execution_engine.clear_intent(pending.intent.order_intent_id)
+
+    load_snapshot = getattr(broker, "load_snapshot", None)
+    if callable(load_snapshot):
+        try:
+            load_snapshot(force_refresh=True)
+        except Exception as exc:
+            errors.append(f"snapshot_refresh: {exc}")
+
+    reconciliation = _reconcile_paper_runtime(
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        trigger="operator_cancel_open_live_orders",
+        apply_repairs=True,
+        occurred_at=occurred_at,
+    )
+    return {
+        "attempted": bool(broker_order_ids),
+        "cancelled_order_ids": cancelled_order_ids,
+        "errors": errors,
+        "reconciliation": reconciliation,
+    }
+
+
 def _apply_probationary_operator_control(
     *,
     settings: StrategySettings,
@@ -13776,15 +14617,43 @@ def _apply_probationary_operator_control(
     structured_logger: StructuredLogger,
     alert_dispatcher: AlertDispatcher,
 ) -> dict[str, Any] | None:
-    control_path = settings.resolved_probationary_operator_control_path
-    if not control_path.exists():
+    payload, control_path, candidate_paths = _select_probationary_operator_control_payload(settings)
+    if payload is None:
         return None
-    payload = _read_json(control_path)
     now = datetime.now(timezone.utc)
+    try:
+        payload = dict(payload)
+    except Exception as exc:
+        invalid_path = control_path.with_name(
+            f"{control_path.stem}.invalid.{int(now.timestamp() * 1000)}{control_path.suffix}"
+        )
+        try:
+            control_path.replace(invalid_path)
+        except OSError:
+            invalid_path = control_path
+        payload = {
+            "action": "unknown",
+            "status": "rejected",
+            "requested_at": now.isoformat(),
+            "applied_at": now.isoformat(),
+            "control_path": str(control_path),
+            "invalid_control_path": str(invalid_path),
+            "message": "Ignored malformed operator control payload; please re-queue the requested action.",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        _write_probationary_operator_control_payloads(candidate_paths, payload)
+        structured_logger.log_operator_control(payload)
+        alert_dispatcher.emit(
+            "warning",
+            "operator_control_malformed",
+            payload["message"],
+            payload,
+        )
+        return payload
     if payload.get("action") == "flatten_and_halt" and payload.get("status") in {"flatten_pending", "applied"}:
         finalized = _maybe_finalize_flatten_and_halt_control(
             payload=payload,
-            control_path=control_path,
+            control_paths=candidate_paths,
             strategy_engine=strategy_engine,
             execution_engine=execution_engine,
             structured_logger=structured_logger,
@@ -13802,9 +14671,34 @@ def _apply_probationary_operator_control(
 
     if action == "halt_entries":
         strategy_engine.set_operator_halt(now, True)
-        result["status"] = "applied"
-        result["message"] = "Entries halted for paper runtime."
-        result["halt_reason"] = "operator_halt_entries"
+        is_live_pilot = isinstance(execution_engine.broker, LiveStrategyPilotBroker)
+        live_cancel = _cancel_open_live_strategy_orders(
+            repositories=repositories,
+            strategy_engine=strategy_engine,
+            execution_engine=execution_engine,
+            occurred_at=now,
+        )
+        if list(live_cancel.get("errors") or []):
+            result["status"] = "rejected"
+            result["message"] = (
+                "Entries halted locally, but live broker order cancellation did not complete cleanly."
+                if is_live_pilot
+                else "Entries halted locally, but broker-order cleanup did not complete cleanly."
+            )
+            result["halt_reason"] = "operator_halt_entries"
+            result["live_broker_cancel"] = live_cancel
+        else:
+            result["status"] = "applied"
+            result["message"] = (
+                "Entries halted for live pilot runtime and any working broker orders were cancelled."
+                if is_live_pilot and live_cancel.get("attempted")
+                else "Entries halted for live pilot runtime."
+                if is_live_pilot
+                else "Entries halted for paper runtime."
+            )
+            result["halt_reason"] = "operator_halt_entries"
+            if live_cancel.get("attempted"):
+                result["live_broker_cancel"] = live_cancel
     elif action == "force_reconcile":
         reconciliation = strategy_engine.force_reconcile(
             occurred_at=now,
@@ -13889,23 +14783,33 @@ def _apply_probationary_operator_control(
         result["halt_reason"] = "operator_flatten_and_halt"
         state = strategy_engine.state
         if state.open_broker_order_id is not None or execution_engine.pending_executions():
-            result["status"] = "rejected"
-            result["flatten_state"] = "rejected_open_order_uncertainty"
-            result["message"] = "Flatten And Halt rejected because an open paper order is already pending."
-            result["reconciliation"] = _reconcile_paper_runtime(
+            live_cancel = _cancel_open_live_strategy_orders(
                 repositories=repositories,
                 strategy_engine=strategy_engine,
                 execution_engine=execution_engine,
+                occurred_at=now,
             )
-        elif (
+            result["live_broker_cancel"] = live_cancel
+            if list(live_cancel.get("errors") or []):
+                result["status"] = "rejected"
+                result["flatten_state"] = "rejected_open_order_uncertainty"
+                result["message"] = "Flatten And Halt rejected because live broker order cancellation did not complete cleanly."
+                result["reconciliation"] = live_cancel.get("reconciliation") or _reconcile_paper_runtime(
+                    repositories=repositories,
+                    strategy_engine=strategy_engine,
+                    execution_engine=execution_engine,
+                )
+            else:
+                state = strategy_engine.state
+        if (
             state.position_side == PositionSide.FLAT
             and state.internal_position_qty == 0
             and state.broker_position_qty == 0
-        ):
+        ) and result.get("status") != "rejected":
             result["status"] = "applied"
             result["flatten_state"] = "complete"
-            result["message"] = "Runtime halted and already flat."
-        else:
+            result["message"] = "Runtime halted and flat."
+        elif result.get("status") != "rejected":
             try:
                 intent = strategy_engine.submit_operator_flatten_intent(now)
             except ValueError as exc:
@@ -13932,7 +14836,7 @@ def _apply_probationary_operator_control(
         result["status"] = "rejected"
         result["message"] = f"Unsupported control action: {action}"
 
-    control_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    _write_probationary_operator_control_payloads(candidate_paths, result)
     structured_logger.log_operator_control(result)
     alert_dispatcher.emit(
         "info" if result["status"] == "applied" else "warning",
@@ -13946,7 +14850,7 @@ def _apply_probationary_operator_control(
 def _maybe_finalize_flatten_and_halt_control(
     *,
     payload: dict[str, Any],
-    control_path: Path,
+    control_paths: Sequence[Path],
     strategy_engine: StrategyEngine,
     execution_engine: ExecutionEngine,
     structured_logger: StructuredLogger,
@@ -13967,7 +14871,7 @@ def _maybe_finalize_flatten_and_halt_control(
         result["flatten_state"] = "complete"
         result["completed_at"] = now.isoformat()
         result["message"] = "Flatten And Halt completed; runtime is halted and flat."
-        control_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        _write_probationary_operator_control_payloads(control_paths, result)
         structured_logger.log_operator_control(result)
         alert_dispatcher.emit(
             "info",

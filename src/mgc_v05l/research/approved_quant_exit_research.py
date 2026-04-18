@@ -44,6 +44,11 @@ class ExitVariantSpec:
     structural_invalidation_r: float | None = None
     excursion_arm_r: float | None = None
     giveback_r: float | None = None
+    checkpoint_arm_r: float | None = None
+    checkpoint_lock_r: float | None = None
+    checkpoint_trail_r: float | None = None
+    no_traction_abort_bars: int | None = None
+    no_traction_min_favorable_r: float | None = None
     session_boundary_exit: bool = False
     complexity_points: int = 1
 
@@ -358,6 +363,7 @@ def _build_exit_variants(spec: ApprovedQuantLaneSpec) -> list[ExitVariantSpec]:
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.excursion_trail.a080.g050", "excursion_trail", "Arm a give-back trail after 0.80R MFE.", spec.hold_bars, spec.stop_r, None, excursion_arm_r=0.80, giveback_r=0.50, complexity_points=3),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.excursion_trail.a100.g050", "excursion_trail", "Arm a give-back trail after 1.00R MFE.", spec.hold_bars, spec.stop_r, None, excursion_arm_r=1.00, giveback_r=0.50, complexity_points=3),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.excursion_trail.a080.g075", "excursion_trail", "Looser give-back trail after 0.80R MFE.", spec.hold_bars, spec.stop_r, None, excursion_arm_r=0.80, giveback_r=0.75, complexity_points=3),
+                ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.checkpoint_no_traction.a080", "checkpoint_no_traction", "Arm a checkpoint after 0.80R MFE and abort after 2 bars if no traction appears.", spec.hold_bars, spec.stop_r, None, checkpoint_arm_r=0.80, checkpoint_lock_r=0.35, checkpoint_trail_r=0.25, no_traction_abort_bars=2, no_traction_min_favorable_r=0.25, complexity_points=3),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.session_boundary.h12", "session_boundary", "Exit on first excluded-session bar or after 12 bars.", 12, spec.stop_r, None, session_boundary_exit=True, complexity_points=2),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.session_boundary.h18", "session_boundary", "Exit on first excluded-session bar or after baseline horizon.", 18, spec.stop_r, None, session_boundary_exit=True, complexity_points=2),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.hybrid.target_plus_session_boundary", "simple_hybrid", "Keep approved target/stop but clamp at session boundary.", spec.hold_bars, spec.stop_r, spec.target_r, session_boundary_exit=True, complexity_points=3),
@@ -375,6 +381,7 @@ def _build_exit_variants(spec: ApprovedQuantLaneSpec) -> list[ExitVariantSpec]:
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.excursion_trail.a060.g040", "excursion_trail", "Arm a give-back trail after 0.60R MFE.", spec.hold_bars, spec.stop_r, None, excursion_arm_r=0.60, giveback_r=0.40, complexity_points=3),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.excursion_trail.a080.g040", "excursion_trail", "Arm a give-back trail after 0.80R MFE.", spec.hold_bars, spec.stop_r, None, excursion_arm_r=0.80, giveback_r=0.40, complexity_points=3),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.excursion_trail.a060.g060", "excursion_trail", "Looser give-back trail after 0.60R MFE.", spec.hold_bars, spec.stop_r, None, excursion_arm_r=0.60, giveback_r=0.60, complexity_points=3),
+                ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.checkpoint_no_traction.a080", "checkpoint_no_traction", "Arm a checkpoint after 0.80R MFE and abort after 2 bars if no traction appears.", spec.hold_bars, spec.stop_r, None, checkpoint_arm_r=0.80, checkpoint_lock_r=0.35, checkpoint_trail_r=0.25, no_traction_abort_bars=2, no_traction_min_favorable_r=0.25, complexity_points=3),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.session_boundary.h8", "session_boundary", "Exit on first excluded-session bar or after 8 bars.", 8, spec.stop_r, None, session_boundary_exit=True, complexity_points=2),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.session_boundary.h12", "session_boundary", "Exit on first excluded-session bar or after baseline horizon.", 12, spec.stop_r, None, session_boundary_exit=True, complexity_points=2),
                 ExitVariantSpec(spec.lane_id, f"{spec.lane_id}.hybrid.target_plus_session_boundary", "simple_hybrid", "Keep approved target/stop but clamp at session boundary.", spec.hold_bars, spec.stop_r, spec.target_r, session_boundary_exit=True, complexity_points=3),
@@ -470,6 +477,8 @@ def _simulate_trade(
     exit_index = last_index
     exit_price = execution.closes[last_index]
     exit_reason = "time_exit"
+    checkpoint_reached = False
+    dynamic_stop_price = stop_price
     for index in range(entry.entry_index, last_index + 1):
         high = execution.highs[index]
         low = execution.lows[index]
@@ -484,26 +493,54 @@ def _simulate_trade(
         )
         peak_mfe = max(peak_mfe, current_mfe)
         trough_mae = min(trough_mae, current_mae)
+        if (
+            not checkpoint_reached
+            and variant.checkpoint_arm_r is not None
+            and peak_mfe >= float(variant.checkpoint_arm_r)
+        ):
+            checkpoint_reached = True
+        if checkpoint_reached and variant.checkpoint_lock_r is not None and variant.checkpoint_trail_r is not None:
+            dynamic_stop_price = _checkpoint_stop_price(
+                direction=spec.direction,
+                current_stop=dynamic_stop_price,
+                entry_price=entry.entry_price,
+                risk=entry.risk,
+                bar_low=low,
+                bar_high=high,
+                checkpoint_lock_r=float(variant.checkpoint_lock_r),
+                checkpoint_trail_r=float(variant.checkpoint_trail_r),
+            )
         if spec.direction == "LONG":
-            stop_hit = low <= stop_price
+            stop_hit = low <= dynamic_stop_price
             target_hit = target_price is not None and high >= target_price
         else:
-            stop_hit = high >= stop_price
+            stop_hit = high >= dynamic_stop_price
             target_hit = target_price is not None and low <= target_price
         if stop_hit and target_hit:
             exit_index = index
-            exit_price = stop_price
-            exit_reason = "stop_first_conflict"
+            exit_price = dynamic_stop_price
+            exit_reason = "checkpoint_stop_first_conflict" if checkpoint_reached else "stop_first_conflict"
             break
         if stop_hit:
             exit_index = index
-            exit_price = stop_price
-            exit_reason = "stop"
+            exit_price = dynamic_stop_price
+            exit_reason = "checkpoint_stop" if checkpoint_reached else "stop"
             break
         if target_hit and target_price is not None:
             exit_index = index
             exit_price = target_price
             exit_reason = "target"
+            break
+        if (
+            not checkpoint_reached
+            and variant.no_traction_abort_bars is not None
+            and variant.no_traction_min_favorable_r is not None
+            and (index - entry.entry_index + 1) >= int(variant.no_traction_abort_bars)
+            and peak_mfe < float(variant.no_traction_min_favorable_r)
+        ):
+            exit_index = index
+            exit_price = close
+            exit_reason = "no_traction_abort"
             break
         if variant.session_boundary_exit and current_session not in spec.allowed_sessions:
             exit_index = index
@@ -556,6 +593,26 @@ def _simulate_trade(
         mae_r=round(trough_mae, 6),
         giveback_from_peak_r=round(giveback_from_peak, 6),
     )
+
+
+def _checkpoint_stop_price(
+    *,
+    direction: str,
+    current_stop: float,
+    entry_price: float,
+    risk: float,
+    bar_low: float,
+    bar_high: float,
+    checkpoint_lock_r: float,
+    checkpoint_trail_r: float,
+) -> float:
+    if direction == "LONG":
+        locked_profit_stop = entry_price + risk * checkpoint_lock_r
+        structure_stop = bar_low - risk * checkpoint_trail_r
+        return max(current_stop, locked_profit_stop, structure_stop)
+    locked_profit_stop = entry_price - risk * checkpoint_lock_r
+    structure_stop = bar_high + risk * checkpoint_trail_r
+    return min(current_stop, locked_profit_stop, structure_stop)
 
 
 def _current_excursion(

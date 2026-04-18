@@ -54,6 +54,7 @@ export interface DesktopStartupStatus {
   chosenHost: string | null;
   chosenPort: number | null;
   chosenUrl: string | null;
+  mode: "SERVICE_ATTACHED" | "DESKTOP_MANAGED_DIAGNOSTIC" | "SNAPSHOT_ONLY" | "UNAVAILABLE";
   ownership: "attached_existing" | "started_managed" | "snapshot_only" | "unavailable";
   latestEvent: string | null;
   recentEvents: string[];
@@ -141,6 +142,7 @@ export interface OperatorDesktopApi {
   startDashboard(): Promise<DesktopCommandResult>;
   stopDashboard(): Promise<DesktopCommandResult>;
   restartDashboard(): Promise<DesktopCommandResult>;
+  reportBootstrapEvent(stage: string, payload?: JsonRecord): void;
   runDashboardAction(action: string, payload?: JsonRecord): Promise<DesktopCommandResult>;
   runProductionLinkAction(action: string, payload: JsonRecord): Promise<DesktopCommandResult>;
   authenticateLocalOperator(reason?: string): Promise<DesktopCommandResult>;

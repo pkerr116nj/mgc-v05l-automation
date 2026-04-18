@@ -196,6 +196,7 @@ class AtpEntryState:
     setup_quality_score: float
     setup_quality_bucket: str
     feature_snapshot: dict[str, Any]
+    side: str = "LONG"
 
 
 @dataclass(frozen=True)
@@ -220,6 +221,7 @@ class AtpTimingState:
     entry_ts: datetime | None
     entry_price: float | None
     feature_snapshot: dict[str, Any]
+    side: str = "LONG"
 
 
 @dataclass(frozen=True)

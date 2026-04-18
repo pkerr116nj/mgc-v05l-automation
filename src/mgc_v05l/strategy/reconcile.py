@@ -6,6 +6,8 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy.exc import OperationalError
+
 from ..domain.enums import PositionSide, StrategyStatus
 from ..domain.models import StrategyState
 from ..execution.execution_engine import ExecutionEngine
@@ -238,14 +240,21 @@ class StrategyReconciler:
         )
 
     def _persist_reconciliation_event(self, payload: dict[str, Any], *, occurred_at: datetime) -> None:
+        enriched_payload = dict(payload)
         if self._repositories is not None:
-            self._repositories.reconciliation_events.save(payload, created_at=occurred_at)
+            try:
+                self._repositories.reconciliation_events.save(enriched_payload, created_at=occurred_at)
+            except OperationalError as exc:
+                if not _is_transient_sqlite_lock_error(exc):
+                    raise
+                enriched_payload["repository_persistence_degraded"] = True
+                enriched_payload["repository_persistence_error"] = str(exc)
         if self._structured_logger is not None:
-            self._structured_logger.log_reconciliation_event(payload)
+            self._structured_logger.log_reconciliation_event(enriched_payload)
         if self._alert_dispatcher is None:
             return
-        mismatch_codes = [str(item) for item in payload.get("mismatches") or []]
-        classification = str(payload.get("classification") or "")
+        mismatch_codes = [str(item) for item in enriched_payload.get("mismatches") or []]
+        classification = str(enriched_payload.get("classification") or "")
         category = (
             "missing_fill_ack"
             if classification == RECONCILIATION_CLASS_FILL_ACK_UNCERTAINTY
@@ -275,8 +284,8 @@ class StrategyReconciler:
                 severity="RECOVERY",
                 category=category,
                 title="Reconciliation Recovered",
-                message=payload.get("recommended_action") or "Reconciliation mismatch resolved with a safe repair.",
-                payload={**payload, **self._runtime_identity},
+                message=enriched_payload.get("recommended_action") or "Reconciliation mismatch resolved with a safe repair.",
+                payload={**enriched_payload, **self._runtime_identity},
                 dedup_key=dedup_key,
                 recommended_action="No manual action required unless the mismatch reappears.",
                 occurred_at=occurred_at,
@@ -284,17 +293,17 @@ class StrategyReconciler:
             self._alert_dispatcher.emit(
                 severity="RECOVERY",
                 code="safe_repair_performed",
-                message=payload.get("recommended_action") or "Safe reconciliation repair performed.",
-                payload={**payload, **self._runtime_identity},
+                message=enriched_payload.get("recommended_action") or "Safe reconciliation repair performed.",
+                payload={**enriched_payload, **self._runtime_identity},
                 category="safe_repair_performed",
                 title="Safe Repair Performed",
-                dedup_key=f"{dedup_key}|safe_repair|{'-'.join(str(item) for item in payload.get('repair_actions') or [])}",
+                dedup_key=f"{dedup_key}|safe_repair|{'-'.join(str(item) for item in enriched_payload.get('repair_actions') or [])}",
                 active=False,
                 coalesce=False,
                 occurred_at=occurred_at,
             )
             return
-        if payload.get("clean", False):
+        if enriched_payload.get("clean", False):
             self._alert_dispatcher.sync_condition(
                 code="strategy_reconciliation_mismatch",
                 active=False,
@@ -302,7 +311,7 @@ class StrategyReconciler:
                 category=category,
                 title="Reconciliation Recovered",
                 message="Reconciliation is clean again.",
-                payload={**payload, **self._runtime_identity},
+                payload={**enriched_payload, **self._runtime_identity},
                 dedup_key=dedup_key,
                 occurred_at=occurred_at,
             )
@@ -310,13 +319,13 @@ class StrategyReconciler:
         self._alert_dispatcher.sync_condition(
             code="strategy_reconciliation_mismatch",
             active=True,
-            severity="BLOCKING" if payload.get("requires_fault") is True else "ACTION",
+            severity="BLOCKING" if enriched_payload.get("requires_fault") is True else "ACTION",
             category=category,
             title=title,
-            message=payload.get("recommended_action") or "Reconciliation mismatch detected.",
-            payload={**payload, **self._runtime_identity, "mismatch_codes": mismatch_codes},
+            message=enriched_payload.get("recommended_action") or "Reconciliation mismatch detected.",
+            payload={**enriched_payload, **self._runtime_identity, "mismatch_codes": mismatch_codes},
             dedup_key=dedup_key,
-            recommended_action=payload.get("recommended_action") or "Inspect broker/internal mismatch details before resuming entries.",
+            recommended_action=enriched_payload.get("recommended_action") or "Inspect broker/internal mismatch details before resuming entries.",
             occurred_at=occurred_at,
         )
 
@@ -324,12 +333,16 @@ class StrategyReconciler:
         fault_payload = dict(payload)
         fault_payload["fault_code"] = fault_code
         if self._repositories is not None:
-            self._repositories.fault_events.save(
-                fault_code=fault_code,
-                payload=fault_payload,
-                created_at=occurred_at,
-                bar_id=None,
-            )
+            try:
+                self._repositories.fault_events.save(
+                    fault_code=fault_code,
+                    payload=fault_payload,
+                    created_at=occurred_at,
+                    bar_id=None,
+                )
+            except OperationalError as exc:
+                if not _is_transient_sqlite_lock_error(exc):
+                    raise
 
     def _load_persisted_open_order_ids(self) -> tuple[str, ...]:
         if self._repositories is None:
@@ -374,3 +387,7 @@ class StrategyReconciler:
             return None
         text = str(value).strip()
         return text or None
+
+
+def _is_transient_sqlite_lock_error(error: OperationalError) -> bool:
+    return "database is locked" in str(error).lower()

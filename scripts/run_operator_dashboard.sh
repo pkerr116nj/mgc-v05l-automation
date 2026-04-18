@@ -11,6 +11,7 @@ DEFAULT_PORT="${OPERATOR_DASHBOARD_PORT:-8790}"
 DEFAULT_RUNTIME_DIR="${REPO_ROOT}/outputs/operator_dashboard/runtime"
 DEFAULT_LOG_FILE="${OPERATOR_DASHBOARD_LOG_FILE:-${DEFAULT_RUNTIME_DIR}/operator_dashboard.log}"
 DEFAULT_INFO_FILE="${OPERATOR_DASHBOARD_INFO_FILE:-${DEFAULT_RUNTIME_DIR}/operator_dashboard.json}"
+DEFAULT_READINESS_FILE="${OPERATOR_DASHBOARD_READINESS_FILE:-${DEFAULT_RUNTIME_DIR}/operator_dashboard_readiness.json}"
 DEFAULT_PID_FILE="${OPERATOR_DASHBOARD_PID_FILE:-${DEFAULT_RUNTIME_DIR}/operator_dashboard.pid}"
 INTERNAL_INFO_FILE="${TMPDIR:-/tmp}/mgc_v05l_operator_dashboard_launch.json"
 
@@ -18,6 +19,7 @@ HOST="${DEFAULT_HOST}"
 PORT="${DEFAULT_PORT}"
 LOG_FILE="${DEFAULT_LOG_FILE}"
 INFO_FILE="${DEFAULT_INFO_FILE}"
+READINESS_FILE="${DEFAULT_READINESS_FILE}"
 PID_FILE="${DEFAULT_PID_FILE}"
 PRINT_INFO_FILE=1
 OPEN_BROWSER=0
@@ -25,6 +27,29 @@ VERIFY_DASHBOARD_API=0
 ALLOW_PORT_FALLBACK=0
 PASSTHROUGH_ARGS=()
 DASHBOARD_PID=""
+HEARTBEAT_PID=""
+MANAGER_INSTANCE_ID="$("${PYTHON_BIN}" - <<'PY'
+import uuid
+print(uuid.uuid4().hex)
+PY
+)"
+resolve_node_bin() {
+  local candidate=""
+  candidate="$(command -v node || true)"
+  if [[ -n "${candidate}" ]]; then
+    echo "${candidate}"
+    return 0
+  fi
+  for fallback in "/opt/homebrew/bin/node" "/usr/local/bin/node"; do
+    if [[ -x "${fallback}" ]]; then
+      echo "${fallback}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+NODE_BIN="$(resolve_node_bin || true)"
 
 while (($# > 0)); do
   case "$1" in
@@ -109,6 +134,7 @@ done
 ensure_dir "${DEFAULT_RUNTIME_DIR}"
 ensure_dir "$(dirname "${LOG_FILE}")"
 ensure_dir "$(dirname "${INFO_FILE}")"
+ensure_dir "$(dirname "${READINESS_FILE}")"
 ensure_dir "$(dirname "${PID_FILE}")"
 
 emit_bootstrap_warning() {
@@ -130,6 +156,9 @@ if [[ "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS:-ready}" == "missing" ]]; then
 fi
 
 cleanup() {
+  if [[ -n "${HEARTBEAT_PID}" ]] && ps -p "${HEARTBEAT_PID}" >/dev/null 2>&1; then
+    kill -TERM "${HEARTBEAT_PID}" 2>/dev/null || true
+  fi
   if [[ -n "${DASHBOARD_PID}" ]] && ps -p "${DASHBOARD_PID}" >/dev/null 2>&1; then
     kill -TERM "${DASHBOARD_PID}" 2>/dev/null || true
   fi
@@ -184,6 +213,114 @@ read_info_field() {
   local info_file="$1"
   local field="$2"
   "${PYTHON_BIN}" -c 'import json, sys; print(json.load(open(sys.argv[1], "r", encoding="utf-8"))[sys.argv[2]])' "${info_file}" "${field}"
+}
+
+read_json_path() {
+  local json_file="$1"
+  local path_expr="$2"
+  "${PYTHON_BIN}" - <<'PY' "${json_file}" "${path_expr}"
+import json
+import sys
+from pathlib import Path
+
+payload_path = Path(sys.argv[1])
+path_expr = sys.argv[2]
+payload = json.loads(payload_path.read_text(encoding="utf-8"))
+value = payload
+for part in path_expr.split("."):
+    if isinstance(value, dict):
+        value = value.get(part)
+    else:
+        value = None
+        break
+if value is None:
+    raise SystemExit(1)
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif isinstance(value, (dict, list)):
+    print(json.dumps(value))
+else:
+    print(value)
+PY
+}
+
+publish_dashboard_readiness_contract() {
+  local manager_mode="$1"
+  local wait_timeout_ms="$2"
+  if [[ -z "${NODE_BIN}" ]]; then
+    echo "Dashboard readiness contract helper could not find node on PATH, /opt/homebrew/bin/node, or /usr/local/bin/node." >&2
+    return 1
+  fi
+  "${NODE_BIN}" "${REPO_ROOT}/desktop/scripts/publish_dashboard_readiness_contract.js" \
+    --mode startup_wait \
+    --output "${READINESS_FILE}" \
+    --info-file "${INFO_FILE}" \
+    --configured-url "http://${HOST}:${PORT}/" \
+    --wait-timeout-ms "${wait_timeout_ms}" \
+    --sample-interval-ms 500 \
+    --sample-history-limit 8 \
+    --min-stable-samples 3 \
+    --stability-window-ms 1500 \
+    --lease-ttl-ms 5000 \
+    --manager-pid "$$" \
+    --server-pid "${DASHBOARD_PID:-0}" \
+    --manager-mode "${manager_mode}" \
+    --manager-instance-id "${MANAGER_INSTANCE_ID}"
+}
+
+start_dashboard_readiness_heartbeat() {
+  local manager_mode="$1"
+  local owner_pid="${2:-${DASHBOARD_PID:-0}}"
+  local server_pid="${3:-${DASHBOARD_PID:-0}}"
+  nohup env \
+    REPO_ROOT="${REPO_ROOT}" \
+    READINESS_FILE="${READINESS_FILE}" \
+    INFO_FILE="${INFO_FILE}" \
+    HOST="${HOST}" \
+    PORT="${PORT}" \
+    OWNER_PID="${owner_pid}" \
+    SERVER_PID="${server_pid}" \
+    MANAGER_MODE="${manager_mode}" \
+    MANAGER_INSTANCE_ID="${MANAGER_INSTANCE_ID}" \
+    NODE_BIN="${NODE_BIN}" \
+    /bin/zsh -lc '
+      while true; do
+        if [[ "${OWNER_PID}" != "0" ]] && ! ps -p "${OWNER_PID}" >/dev/null 2>&1; then
+          exit 0
+        fi
+        if [[ "${SERVER_PID}" != "0" ]] && ! ps -p "${SERVER_PID}" >/dev/null 2>&1; then
+          exit 0
+        fi
+        "${NODE_BIN}" "${REPO_ROOT}/desktop/scripts/publish_dashboard_readiness_contract.js" \
+          --mode continuous \
+          --output "${READINESS_FILE}" \
+          --info-file "${INFO_FILE}" \
+          --configured-url "http://${HOST}:${PORT}/" \
+          --wait-timeout-ms 0 \
+          --sample-interval-ms 1000 \
+          --sample-history-limit 8 \
+          --min-stable-samples 3 \
+          --stability-window-ms 1500 \
+          --lease-ttl-ms 5000 \
+          --manager-pid "${OWNER_PID}" \
+          --server-pid "${SERVER_PID}" \
+          --manager-mode "${MANAGER_MODE}" \
+          --manager-instance-id "${MANAGER_INSTANCE_ID}"
+        if [[ "${OWNER_PID}" != "0" ]] && ! ps -p "${OWNER_PID}" >/dev/null 2>&1; then
+          exit 0
+        fi
+        if [[ "${SERVER_PID}" != "0" ]] && ! ps -p "${SERVER_PID}" >/dev/null 2>&1; then
+          exit 0
+        fi
+        sleep 1
+      done
+    ' >/dev/null 2>&1 &
+  HEARTBEAT_PID=$!
+}
+
+await_launch_ready_contract() {
+  local timeout_ms="$1"
+  publish_dashboard_readiness_contract "startup_wait" "${timeout_ms}"
 }
 
 listener_pid_for_port() {
@@ -291,6 +428,7 @@ report_success() {
   echo "Health ready: ${health_ready}"
   echo "Health endpoint: ${dashboard_url%/}/health"
   echo "Dashboard API: ${dashboard_url%/}/api/dashboard"
+  echo "Readiness contract: ${READINESS_FILE}"
   echo "Log file: ${LOG_FILE}"
   echo "PID file: ${PID_FILE}"
   if [[ ${PRINT_INFO_FILE} -eq 1 ]]; then
@@ -362,6 +500,17 @@ if [[ -f "${INFO_FILE}" ]]; then
         exit 1
       fi
     else
+      if ! publish_dashboard_readiness_contract "reuse_existing" 4000; then
+        READINESS_DETAIL="$(read_json_path "${READINESS_FILE}" reason_detail 2>/dev/null || true)"
+        emit_startup_failure \
+          "dashboard_api_not_ready" \
+          "Existing dashboard health was reachable, but the manager could not verify a stable launch-ready readiness contract. ${READINESS_DETAIL:-Dashboard readiness remained ambiguous.}" \
+          "Wait for the dashboard readiness contract to stabilize, then retry Start/Restart Dashboard/API."
+        exit 1
+      fi
+      if [[ -n "${PID_EXISTING}" ]]; then
+        start_dashboard_readiness_heartbeat "reuse_existing" "${PID_EXISTING}" "${PID_EXISTING}"
+      fi
       report_success "${DASHBOARD_URL_EXISTING}" "${BOUND_HOST_EXISTING:-${HOST}}" "${BOUND_PORT_EXISTING:-${PORT}}" "${PID_EXISTING:-unknown}" "${EXISTING_BUILD:-${LOCAL_BUILD_STAMP}}" "${EXISTING_STARTED:-unknown}" 1 "${EXISTING_HEALTH_STATUS:-unknown}" "${EXISTING_HEALTH_READY:-false}"
       if [[ ${OPEN_BROWSER} -eq 1 ]]; then
         if ! open_browser "${DASHBOARD_URL_EXISTING}"; then
@@ -386,7 +535,7 @@ if [[ -f "${INFO_FILE}" ]]; then
   fi
 fi
 
-rm -f "${INFO_FILE}"
+rm -f "${INFO_FILE}" "${READINESS_FILE}"
 
 LISTENER_PID="$(listener_pid_for_port "${PORT}" || true)"
 if [[ -n "${LISTENER_PID}" ]]; then
@@ -455,76 +604,54 @@ fi
 DASHBOARD_PID=$!
 echo "${DASHBOARD_PID}" > "${PID_FILE}"
 
-for _ in $(seq 1 150); do
-  if ! ps -p "${DASHBOARD_PID}" >/dev/null 2>&1; then
+if await_launch_ready_contract 30000; then
+  start_dashboard_readiness_heartbeat "steady_state" "${DASHBOARD_PID}" "${DASHBOARD_PID}"
+  DASHBOARD_URL="$(read_info_field "${INFO_FILE}" url 2>/dev/null || true)"
+  BOUND_HOST="$(read_info_field "${INFO_FILE}" host 2>/dev/null || true)"
+  BOUND_PORT="$(read_info_field "${INFO_FILE}" port 2>/dev/null || true)"
+  RUNNING_BUILD="$(read_health_field "${DASHBOARD_URL%/}/health" build_stamp 2>/dev/null || true)"
+  RUNNING_STARTED="$(read_health_field "${DASHBOARD_URL%/}/health" started_at 2>/dev/null || true)"
+  RUNNING_HEALTH_STATUS="$(read_health_field "${DASHBOARD_URL%/}/health" status 2>/dev/null || true)"
+  RUNNING_HEALTH_READY="$(read_health_field "${DASHBOARD_URL%/}/health" ready 2>/dev/null || true)"
+  if [[ -n "${RUNNING_BUILD}" ]] && [[ "${RUNNING_BUILD}" != "${LOCAL_BUILD_STAMP}" ]]; then
+    emit_startup_marker "BUILD_MISMATCH" "1"
     emit_startup_failure \
-      "early_process_exit" \
-      "Dashboard failed to start: server process exited early." \
-      "Review the backend log tail, fix the startup error, then retry Start/Restart Dashboard/API."
+      "build_mismatch" \
+      "Dashboard health check returned a build mismatch: running ${RUNNING_BUILD}, local ${LOCAL_BUILD_STAMP}." \
+      "Stop the stale local dashboard instance, then retry Start/Restart Dashboard/API."
+    kill -TERM "${DASHBOARD_PID}" 2>/dev/null || true
     rm -f "${PID_FILE}"
-    echo "Log tail:" >&2
-    tail -n 40 "${LOG_FILE}" >&2 || true
     exit 1
   fi
-
-  if [[ -f "${INFO_FILE}" ]]; then
-    DASHBOARD_URL="$(read_info_field "${INFO_FILE}" url)"
-    BOUND_HOST="$(read_info_field "${INFO_FILE}" host)"
-    BOUND_PORT="$(read_info_field "${INFO_FILE}" port)"
-    if health_check "${DASHBOARD_URL%/}/health"; then
-      emit_startup_marker "HEALTH_REACHABLE" "1"
-      RUNNING_BUILD="$(read_health_field "${DASHBOARD_URL%/}/health" build_stamp 2>/dev/null || true)"
-      RUNNING_STARTED="$(read_health_field "${DASHBOARD_URL%/}/health" started_at 2>/dev/null || true)"
-      RUNNING_HEALTH_STATUS="$(read_health_field "${DASHBOARD_URL%/}/health" status 2>/dev/null || true)"
-      RUNNING_HEALTH_READY="$(read_health_field "${DASHBOARD_URL%/}/health" ready 2>/dev/null || true)"
-      if [[ -n "${RUNNING_BUILD}" ]] && [[ "${RUNNING_BUILD}" != "${LOCAL_BUILD_STAMP}" ]]; then
-        emit_startup_marker "BUILD_MISMATCH" "1"
-        emit_startup_failure \
-          "build_mismatch" \
-          "Dashboard health check returned a build mismatch: running ${RUNNING_BUILD}, local ${LOCAL_BUILD_STAMP}." \
-          "Stop the stale local dashboard instance, then retry Start/Restart Dashboard/API."
-        kill -TERM "${DASHBOARD_PID}" 2>/dev/null || true
-        rm -f "${PID_FILE}"
-        exit 1
-      fi
-      if [[ ${VERIFY_DASHBOARD_API} -eq 1 ]] && ! dashboard_api_check "${DASHBOARD_URL%/}/api/dashboard"; then
-        emit_startup_marker "DASHBOARD_API_TIMED_OUT" "1"
-        sleep 0.2
-        continue
-      fi
-      report_success "${DASHBOARD_URL}" "${BOUND_HOST}" "${BOUND_PORT}" "${DASHBOARD_PID}" "${RUNNING_BUILD:-${LOCAL_BUILD_STAMP}}" "${RUNNING_STARTED:-unknown}" 0 "${RUNNING_HEALTH_STATUS:-unknown}" "${RUNNING_HEALTH_READY:-false}"
-      if [[ ${OPEN_BROWSER} -eq 1 ]]; then
-        if ! open_browser "${DASHBOARD_URL}"; then
-          echo "Dashboard is healthy, but browser auto-open failed. Open this URL manually: ${DASHBOARD_URL}" >&2
-        fi
-      fi
-      wait "${DASHBOARD_PID}"
-      exit $?
+  report_success "${DASHBOARD_URL}" "${BOUND_HOST}" "${BOUND_PORT}" "${DASHBOARD_PID}" "${RUNNING_BUILD:-${LOCAL_BUILD_STAMP}}" "${RUNNING_STARTED:-unknown}" 0 "${RUNNING_HEALTH_STATUS:-unknown}" "${RUNNING_HEALTH_READY:-false}"
+  if [[ ${OPEN_BROWSER} -eq 1 ]]; then
+    if ! open_browser "${DASHBOARD_URL}"; then
+      echo "Dashboard is healthy, but browser auto-open failed. Open this URL manually: ${DASHBOARD_URL}" >&2
     fi
   fi
-  sleep 0.2
-done
+  wait "${DASHBOARD_PID}"
+  exit $?
+fi
 
-if [[ -f "${INFO_FILE}" ]]; then
-  DASHBOARD_URL="$(read_info_field "${INFO_FILE}" url 2>/dev/null || true)"
-  if [[ -n "${DASHBOARD_URL}" ]] && health_check "${DASHBOARD_URL%/}/health"; then
-    emit_startup_marker "HEALTH_REACHABLE" "1"
-    emit_startup_marker "DASHBOARD_API_TIMED_OUT" "1"
-    emit_startup_failure \
-      "dashboard_api_not_ready" \
-      "Dashboard health is up, but /api/dashboard never became ready before timeout." \
-      "Review the backend log and fix the blocking backend condition before retrying Dashboard/API start."
-  else
-    emit_startup_failure \
-      "permission_or_bind_failure" \
-      "Dashboard failed to become healthy before timeout." \
-      "Review the backend log for bind, permission, or environment errors, then retry Dashboard/API start."
-  fi
+READINESS_REASON="$(read_json_path "${READINESS_FILE}" reason_code 2>/dev/null || true)"
+READINESS_DETAIL="$(read_json_path "${READINESS_FILE}" reason_detail 2>/dev/null || true)"
+if ! ps -p "${DASHBOARD_PID}" >/dev/null 2>&1; then
+  emit_startup_failure \
+    "early_process_exit" \
+    "Dashboard failed to start: server process exited early. ${READINESS_DETAIL:-}" \
+    "Review the backend log tail, fix the startup error, then retry Start/Restart Dashboard/API."
+elif [[ "${READINESS_REASON}" == "stability_window_not_met" ]] || [[ "${READINESS_REASON}" == "payload_not_ready" ]] || [[ "${READINESS_REASON}" == "service_warming" ]]; then
+  emit_startup_marker "DASHBOARD_API_TIMED_OUT" "1"
+  echo "Dashboard manager did not yet observe a stable launch-ready readiness contract. Continuing managed warmup with lease renewal." >&2
+  echo "Current readiness reason: ${READINESS_DETAIL:-Dashboard readiness remained unstable.}" >&2
+  start_dashboard_readiness_heartbeat "warming"
+  wait "${DASHBOARD_PID}"
+  exit $?
 else
   emit_startup_failure \
     "permission_or_bind_failure" \
-    "Dashboard failed to become healthy before timeout." \
-    "Review the backend log for bind, permission, or environment errors, then retry Dashboard/API start."
+    "Dashboard failed to publish a trustworthy readiness contract before timeout. ${READINESS_DETAIL:-Dashboard ownership or listener state remained ambiguous.}" \
+    "Review the backend log and readiness contract for ownership or bind failures, then retry Dashboard/API start."
 fi
 if ps -p "${DASHBOARD_PID}" >/dev/null 2>&1; then
   kill -TERM "${DASHBOARD_PID}" 2>/dev/null || true

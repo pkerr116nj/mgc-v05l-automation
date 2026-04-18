@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from sqlalchemy.exc import OperationalError
+
 from .logger import StructuredLogger, get_logger
 
 DEFAULT_THROTTLE_SECONDS = 300
@@ -260,7 +262,12 @@ class AlertDispatcher:
         if self._structured_logger is not None:
             self._structured_logger.log_alert(record)
         if self._alert_repository is not None:
-            self._alert_repository.save(record, occurred_at=datetime.fromisoformat(record["occurred_at"]))
+            try:
+                self._alert_repository.save(record, occurred_at=datetime.fromisoformat(record["occurred_at"]))
+            except OperationalError as exc:
+                if not _is_transient_sqlite_lock_error(exc):
+                    raise
+                self._logger.warning("alert_persistence_degraded: %s", exc)
 
 
 def _build_alert_id(dedup_key: str, occurred_at: datetime, severity: str, category: str, active: bool) -> str:
@@ -305,6 +312,10 @@ def _normalize_severity(severity: str) -> str:
     if normalized in {"SUCCESS", "RECOVERED"}:
         return SEVERITY_RECOVERY
     return SEVERITY_INFO
+
+
+def _is_transient_sqlite_lock_error(error: OperationalError) -> bool:
+    return "database is locked" in str(error).lower()
 
 
 def _infer_category(code: str, severity: str) -> str:

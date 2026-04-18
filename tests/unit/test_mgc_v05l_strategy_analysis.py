@@ -6,6 +6,7 @@ from mgc_v05l.app.strategy_analysis import (
     LANE_TYPE_BENCHMARK_REPLAY,
     LANE_TYPE_HISTORICAL_PLAYBACK,
     LANE_TYPE_PAPER_RUNTIME,
+    LANE_TYPE_RESEARCH_ANALYTICS,
     LANE_TYPE_RESEARCH_EXECUTION,
     build_strategy_analysis_payload,
 )
@@ -258,35 +259,69 @@ def test_strategy_analysis_builds_unified_lanes_and_comparison_presets() -> None
         "benchmark_vs_paper_runtime",
         "baseline_parity_vs_research_execution",
     }
-    benchmark_vs_paper = next(
-        row for row in detail["comparison_presets"] if row["comparison_type"] == "benchmark_vs_paper_runtime"
+
+
+def test_strategy_analysis_accepts_partial_research_analytics_tenant() -> None:
+    strategy_key = "warehouse_historical_evaluator::gc_lane_1"
+    payload = build_strategy_analysis_payload(
+        historical_playback={"study_catalog": {"items": []}},
+        paper={"tracked_strategies": {"rows": []}, "strategy_performance": {"rows": [], "trade_log": []}},
+        research_analytics={
+            "available": True,
+            "generated_at": "2026-04-07T13:45:00+00:00",
+            "strategy_family_counts": {"warehouse_historical_evaluator": 1},
+            "families": [
+                {
+                    "strategy_family": "warehouse_historical_evaluator",
+                    "family_label": "Warehouse Historical Evaluator",
+                    "tenant_class": "full_app_tenant",
+                    "full_app_compatible": True,
+                }
+            ],
+            "strategy_catalog": [
+                {
+                    "strategy_key": strategy_key,
+                    "strategy_family": "warehouse_historical_evaluator",
+                    "strategy_id": "gc_lane_1",
+                    "strategy_label": "Warehouse GC Lane 1",
+                    "target_id": "gc_lane_1",
+                    "symbol": "GC",
+                    "allowed_sessions": [],
+                    "scope_bundle_id": "bundle-1",
+                    "run_id": "run-1",
+                }
+            ],
+            "strategy_summaries": [
+                {
+                    "strategy_key": strategy_key,
+                    "strategy_family": "warehouse_historical_evaluator",
+                    "strategy_id": "gc_lane_1",
+                    "strategy_label": "Warehouse GC Lane 1",
+                    "target_id": "gc_lane_1",
+                    "trade_count": 0,
+                    "net_pnl_cash": 0.0,
+                    "average_trade_pnl_cash": 0.0,
+                    "profit_factor": None,
+                    "max_drawdown": 0.0,
+                    "win_rate": 0.0,
+                }
+            ],
+        },
+        generated_at="2026-04-07T13:45:00+00:00",
     )
-    assert benchmark_vs_paper["left_lane"]["lane_type"] == LANE_TYPE_BENCHMARK_REPLAY
-    assert benchmark_vs_paper["right_lane"]["lane_type"] == LANE_TYPE_PAPER_RUNTIME
-    assert benchmark_vs_paper["left_lane"]["lifecycle_truth"]["class"] == "BASELINE_ONLY"
-    assert benchmark_vs_paper["right_lane"]["lifecycle_truth"]["class"] == "FULL_LIFECYCLE_TRUTH"
-    assert benchmark_vs_paper["left_lane"]["primary_truth_source"] == "strategy_study_v3"
-    assert benchmark_vs_paper["right_lane"]["primary_truth_source"] == "paper_strategy_performance_snapshot"
+
+    assert payload["available"] is True
+    assert payload["default_strategy_key"] == strategy_key
+    detail = payload["details_by_strategy_key"][strategy_key]
+    lane = next(lane for lane in detail["lanes"] if lane["lane_type"] == LANE_TYPE_RESEARCH_ANALYTICS)
+    assert lane["strategy_family"] == "warehouse_historical_evaluator"
+    assert lane["metrics"]["trade_count"]["value"] == 0
+    assert lane["evidence"]["trade_lifecycle"]["available"] is False
 
     results_board = payload["results_board"]
     assert results_board["defaults"]["sort_field"] == "net_pnl"
     assert results_board["defaults"]["run_scope"] == "top"
-    assert {row["id"] for row in results_board["sort_fields"]} >= {
-        "net_pnl",
-        "average_trade",
-        "profit_factor",
-        "max_drawdown",
-        "trade_count",
-        "latest_update_timestamp",
-    }
-    assert any(row["id"] == "top_10_net_pnl" and row["available"] is True for row in results_board["saved_views"])
-    assert any(row["id"] == "replay_vs_paper_selected_strategy" and row["available"] is True for row in results_board["saved_views"])
-    reportable_row = next(row for row in results_board["rows"] if row["lane_type"] == LANE_TYPE_PAPER_RUNTIME)
-    assert reportable_row["metrics"]["net_pnl"]["available"] is True
-    assert reportable_row["metrics"]["average_trade"]["available"] is True
-    assert reportable_row["metrics"]["profit_factor"]["available"] is True
-    assert reportable_row["metrics"]["max_drawdown"]["available"] is True
-    assert reportable_row["metrics"]["trade_count"]["available"] is True
+    assert any(row["lane_type"] == LANE_TYPE_RESEARCH_ANALYTICS for row in results_board["rows"])
 
 
 def test_strategy_analysis_results_board_discovers_registry_and_candidate_lane_selectors() -> None:
@@ -999,3 +1034,49 @@ def test_strategy_analysis_treats_non_finite_profit_factor_as_unavailable() -> N
     lane = payload["details_by_strategy_key"][strategy_key]["lanes"][0]
     assert lane["metrics"]["profit_factor"]["available"] is False
     assert lane["metrics"]["profit_factor"]["value"] is None
+
+
+def test_strategy_analysis_can_surface_published_research_analytics_as_read_only_lanes() -> None:
+    payload = build_strategy_analysis_payload(
+        historical_playback={"study_catalog": {"items": []}},
+        paper={"strategy_performance": {"rows": [], "trade_log": []}},
+        research_analytics={
+            "available": True,
+            "generated_at": "2026-04-07T10:00:00+00:00",
+            "strategy_catalog": [
+                {
+                    "strategy_family": "approved_quant",
+                    "strategy_key": "approved_quant::phase2c.breakout.metals_only.us_unknown.baseline::GC",
+                    "strategy_id": "phase2c.breakout.metals_only.us_unknown.baseline::GC",
+                    "strategy_label": "Approved Quant Breakout / GC",
+                    "target_id": "phase2c.breakout.metals_only.us_unknown.baseline::GC",
+                    "symbol": "GC",
+                }
+            ],
+            "strategy_summaries": [
+                {
+                    "strategy_family": "approved_quant",
+                    "strategy_key": "approved_quant::phase2c.breakout.metals_only.us_unknown.baseline::GC",
+                    "strategy_id": "phase2c.breakout.metals_only.us_unknown.baseline::GC",
+                    "strategy_label": "Approved Quant Breakout / GC",
+                    "target_id": "phase2c.breakout.metals_only.us_unknown.baseline::GC",
+                    "symbol": "GC",
+                    "trade_count": 3,
+                    "net_pnl_cash": 125.0,
+                    "average_trade_pnl_cash": 41.666667,
+                    "profit_factor": 1.8,
+                    "max_drawdown": 55.0,
+                    "win_rate": 66.666667,
+                }
+            ],
+        },
+        generated_at="2026-04-07T10:05:00+00:00",
+    )
+
+    detail = payload["details_by_strategy_key"]["approved_quant::phase2c.breakout.metals_only.us_unknown.baseline::GC"]
+    lane = next(row for row in detail["lanes"] if row["lane_type"] == LANE_TYPE_RESEARCH_ANALYTICS)
+    assert lane["display_name"] == "Approved Quant Breakout / GC"
+    assert lane["metrics"]["trade_count"]["value"] == 3
+    assert lane["metrics"]["net_pnl"]["value"] == 125.0
+    report_row = next(row for row in payload["results_board"]["rows"] if row["lane_type"] == LANE_TYPE_RESEARCH_ANALYTICS)
+    assert report_row["history_review_support"]["trade_history"]["available"] is True

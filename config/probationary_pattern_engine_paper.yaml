@@ -24,6 +24,7 @@ probationary_paper_execution_canary_force_fire_once_token: ""
 # requires explicit manual review / re-enable. Catastrophic cap still takes
 # precedence when the worse threshold is breached.
 probationary_paper_lane_warning_open_loss_json: '{"pl_us_late_pause_resume_long":"-750","gc_asia_early_normal_breakout_retest_hold_long":"-500"}'
+probationary_paper_disable_loss_halts: true
 probationary_paper_desk_halt_new_entries_loss: -1500
 probationary_paper_desk_flatten_and_halt_loss: -2500
 probationary_paper_lane_realized_loser_limit_per_session: 2

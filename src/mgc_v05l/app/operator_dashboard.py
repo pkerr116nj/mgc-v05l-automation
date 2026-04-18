@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import concurrent.futures
 import contextvars
 import errno
 import hashlib
@@ -17,6 +18,7 @@ import statistics
 import subprocess
 import tempfile
 import threading
+import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -26,11 +28,20 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
+from zoneinfo import ZoneInfo
 
+from ..local_operator_auth import (
+    INCREASE_RISK,
+    REDUCE_RISK,
+    append_local_operator_auth_event,
+    local_operator_auth_surface,
+    production_action_risk_bucket,
+)
 from ..config_models import load_data_storage_policy, load_settings_from_files
 from .historical_playback import ensure_strategy_study_artifacts
 from .strategy_study import (
+    build_strategy_study_dashboard_summary,
     build_strategy_study_catalog_entry,
     build_strategy_study_preview,
     normalize_strategy_study_payload,
@@ -42,10 +53,19 @@ from .dashboard_registry import build_dashboard_lane_registry
 from .experimental_canaries_dashboard_payloads import load_experimental_canaries_snapshot
 from .operator_surface import build_operator_surface
 from .probationary_runtime import REALIZED_LOSER_SESSION_OVERRIDE_ACTION, submit_probationary_operator_control
+from .research_runtime_bridge import (
+    BRIDGE_MODE_PROSPECTIVE,
+    DEFAULT_PROSPECTIVE_POLL_INTERVAL_SECONDS,
+    DEFAULT_SELECTED_LANES,
+    DEFAULT_WAREHOUSE_ROOT,
+    review_runtime_bridge_anomaly,
+    run_bridge,
+)
 from .strategy_analysis import build_strategy_analysis_payload
 from .strategy_identity import build_standalone_strategy_identity
 from .strategy_runtime_registry import build_standalone_strategy_definitions
 from .tracked_paper_strategies import build_tracked_paper_strategies_payload
+from ..research.platform import build_discovered_research_analytics_payload, read_research_analytics_dataset
 from ..market_data import (
     SchwabAuthError,
     SchwabOAuthClient,
@@ -55,12 +75,30 @@ from ..market_data import (
     load_schwab_market_data_config,
 )
 from ..market_data.schwab_models import HttpRequest
-from ..production_link import ProductionLinkActionError, SchwabProductionLinkService
+from ..production_link import ProductionLinkActionError, ProductionLinkService
+from ..production_link.client import SchwabBrokerHttpError
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ASSET_DIR = Path(__file__).resolve().parent / "dashboard_assets"
+DEFAULT_RESEARCH_ANALYTICS_PLATFORM_ROOT = REPO_ROOT / "outputs" / "research_platform" / "analytics"
+NEW_YORK_TZ = ZoneInfo("America/New_York")
 DEFAULT_REFRESH_INTERVAL_SECONDS = 15
 DEFAULT_POLL_INTERVAL_SECONDS = 30
+DEFAULT_DASHBOARD_PROBE_WARM_INTERVAL_SECONDS = 1.0
+DEFAULT_DASHBOARD_PROBE_STEADY_INTERVAL_SECONDS = 5.0
+DEFAULT_DASHBOARD_PROBE_STABILITY_WINDOW_SECONDS = 2.0
+DEFAULT_DASHBOARD_PROBE_MIN_STABLE_SAMPLES = 1
+# The steady-state probe loop can legitimately publish a healthy dashboard snapshot
+# on a cadence slower than 15s, especially while heavier payload sections are being
+# rebuilt. Keep the cached payload window aligned with the launcher readiness
+# contract so we do not oscillate between healthy and stale in normal operation.
+DEFAULT_DASHBOARD_API_CACHE_MAX_AGE_SECONDS = 60.0
+DEFAULT_DASHBOARD_API_CACHE_SOURCE_LAG_GRACE_SECONDS = 30.0
+DEFAULT_RUNTIME_DERIVED_PAYLOAD_FRESHNESS_SECONDS = 30.0
+DEFAULT_RUNTIME_DERIVED_PAYLOAD_MAX_STALE_SECONDS = 300.0
+DEFAULT_RUNTIME_DERIVED_PAYLOAD_RUNTIME_UPDATE_GRACE_SECONDS = 60.0
+DEFAULT_AUTH_GATE_READY_REFRESH_SECONDS = 300
+DEFAULT_AUTH_GATE_RECOVERY_RETRY_SECONDS = 30
 PAPER_RUNTIME_AUTO_RECOVERY_BACKOFF_SECONDS = 30
 PAPER_RUNTIME_AUTO_RECOVERY_SUCCESS_WINDOW_SECONDS = 300
 PAPER_RUNTIME_AUTO_RECOVERY_ACTION = "auto-start-paper"
@@ -69,6 +107,9 @@ DEFAULT_RUNTIME_SUPERVISOR_MAX_AUTO_RESTARTS_PER_WINDOW = 3
 DEFAULT_RUNTIME_SUPERVISOR_RESTART_BACKOFF_SECONDS = 60
 DEFAULT_RUNTIME_SUPERVISOR_RESTART_SUPPRESSION_SECONDS = 900
 DEFAULT_RUNTIME_SUPERVISOR_FAILURE_COOLDOWN_SECONDS = 180
+DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS = DEFAULT_PROSPECTIVE_POLL_INTERVAL_SECONDS
+RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_AUTOSTART_ENV = "MGC_SERVICE_HOST_AUTOSTART_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR"
+RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_ENV = "MGC_SERVICE_HOST_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS"
 MARKET_INDEX_CACHE_SECONDS = 10
 TREASURY_CURVE_CACHE_SECONDS = 30
 MARKET_INDEX_CONFIG_PATH = REPO_ROOT / "config" / "schwab.local.json"
@@ -104,6 +145,8 @@ ATPE_CANARY_RUNTIME_KIND = "atpe_canary_observer"
 ATP_COMPANION_BENCHMARK_RUNTIME_KIND = "atp_companion_benchmark_paper"
 GC_MGC_ACCEPTANCE_RUNTIME_KIND = "gc_mgc_london_open_acceptance_temp_paper"
 STRATEGY_HISTORY_SESSION_BUCKETS = ("ASIA_EARLY", "ASIA_LATE", "LONDON_OPEN", "LONDON_LATE", "US_MIDDAY", "US_LATE", "UNKNOWN")
+DASHBOARD_PAYLOAD_SCHEMA_VERSION = 2
+DEFAULT_DASHBOARD_HTTP_MAX_WORKERS = max(4, min(16, (os.cpu_count() or 4) * 2))
 _TRANSPORT_LOGGER = logging.getLogger(__name__)
 _SNAPSHOT_WARNINGS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
     "operator_dashboard_snapshot_warnings",
@@ -131,6 +174,32 @@ _TEMP_PAPER_OVERLAY_SPECS = (
         "label": "GC/MGC London-open temporary paper branch",
     },
 )
+
+
+def _desktop_runtime_root() -> Path:
+    explicit = str(os.environ.get("MGC_DESKTOP_STATE_CACHE_ROOT") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    home = Path.home()
+    if os.name == "posix" and "darwin" in os.sys.platform.lower():
+        return home / "Library" / "Application Support" / "mgc-operator-desktop" / "runtime"
+    return home / ".cache" / "mgc-operator-desktop" / "runtime"
+
+
+def _desktop_dashboard_cache_path() -> Path:
+    explicit = str(os.environ.get("MGC_DESKTOP_WORKSPACE_CACHE_ROOT") or "").strip()
+    if explicit:
+        cache_root = Path(explicit).expanduser()
+    else:
+        cache_root = _desktop_runtime_root() / "desktop_cache"
+    return cache_root / "dashboard_api_snapshot.cache.json"
+
+
+def _env_flag_enabled(name: str, *, default: bool = False) -> bool:
+    raw_value = str(os.environ.get(name) or "").strip().lower()
+    if not raw_value:
+        return default
+    return raw_value in {"1", "true", "yes", "on"}
 
 
 def _historical_strategy_study_status(
@@ -221,6 +290,7 @@ class DashboardServerInfo:
     pid: int
     started_at: str
     build_stamp: str
+    instance_id: str
     info_file: str | None
 
 
@@ -234,6 +304,7 @@ class OperatorDashboardService:
         self._build_stamp = dashboard_build_stamp()
         self._server_info = server_info
         self._auth_cache_path = self._dashboard_artifacts_dir / "auth_gate_latest.json"
+        self._local_operator_auth_state_path = self._dashboard_artifacts_dir / "local_operator_auth_state.json"
         self._action_log_path = self._dashboard_artifacts_dir / "action_log.jsonl"
         self._risk_ack_path = self._dashboard_artifacts_dir / "paper_risk_ack.json"
         self._review_state_path = self._dashboard_artifacts_dir / "paper_review_state.json"
@@ -285,6 +356,19 @@ class OperatorDashboardService:
             self._dashboard_artifacts_dir / "paper_tracked_strategy_details_snapshot.json"
         )
         self._strategy_analysis_path = self._dashboard_artifacts_dir / "strategy_analysis_snapshot.json"
+        self._research_runtime_bridge_root = (
+            self._repo_root / "outputs" / "research_runtime_bridge" / "default_warehouse_paper"
+        )
+        self._research_runtime_bridge_snapshot_path = (
+            self._dashboard_artifacts_dir / "research_runtime_bridge_snapshot.json"
+        )
+        self._research_runtime_bridge_supervisor_state_path = (
+            self._research_runtime_bridge_root / "supervisor_state.json"
+        )
+        self._research_runtime_bridge_supervisor_events_path = (
+            self._research_runtime_bridge_root / "supervisor_events.jsonl"
+        )
+        self._research_analytics_platform_root = DEFAULT_RESEARCH_ANALYTICS_PLATFORM_ROOT
         self._paper_temporary_paper_runtime_integrity_path = (
             self._dashboard_artifacts_dir / "paper_temporary_paper_runtime_integrity_snapshot.json"
         )
@@ -319,6 +403,11 @@ class OperatorDashboardService:
         self._experimental_canaries_operator_summary_path = self._experimental_canaries_dir / "operator_summary.md"
         self._operator_surface_path = self._dashboard_artifacts_dir / "operator_surface_snapshot.json"
         self._research_daily_capture_status_path = self._dashboard_artifacts_dir / "research_daily_capture_status.json"
+        self._startup_control_plane_path = self._dashboard_artifacts_dir / "startup_control_plane_snapshot.json"
+        self._supervised_paper_operability_path = self._dashboard_artifacts_dir / "supervised_paper_operability_snapshot.json"
+        self._dashboard_snapshot_path = self._dashboard_artifacts_dir / "dashboard_api_snapshot.json"
+        self._desktop_dashboard_cache_path = _desktop_dashboard_cache_path()
+        self._desktop_dashboard_cache_path.parent.mkdir(parents=True, exist_ok=True)
         self._bootstrap_prerequisites_path = (
             self._dashboard_artifacts_dir / "runtime" / "dashboard_bootstrap_prerequisites.json"
         )
@@ -334,9 +423,30 @@ class OperatorDashboardService:
         self._treasury_curve_cache_at: datetime | None = None
         self._dashboard_probe_lock = threading.Lock()
         self._snapshot_lock = threading.RLock()
+        self._research_runtime_bridge_supervisor_lock = threading.RLock()
+        self._research_runtime_bridge_supervisor_stop_event = threading.Event()
+        self._research_runtime_bridge_supervisor_thread: threading.Thread | None = None
+        self._dashboard_probe_stop_event = threading.Event()
+        self._dashboard_probe_thread: threading.Thread | None = None
+        self._strategy_analysis_refresh_lock = threading.Lock()
+        self._strategy_analysis_refresh_thread: threading.Thread | None = None
+        self._strategy_analysis_refresh_requested_at: str | None = None
+        self._paper_strategy_performance_refresh_lock = threading.Lock()
+        self._paper_strategy_performance_refresh_thread: threading.Thread | None = None
+        self._paper_signal_intent_fill_audit_refresh_lock = threading.Lock()
+        self._paper_signal_intent_fill_audit_refresh_thread: threading.Thread | None = None
         self._dashboard_probe: dict[str, Any] = {
-            "state": "not_ready",
+            "state": "starting",
             "ready": False,
+            "stable_ready": False,
+            "stable_ready_since": None,
+            "consecutive_ready_samples": 0,
+            "phase": "booting",
+            "phase_detail": "Dashboard manager is still booting.",
+            "dashboard_attached": False,
+            "paper_runtime_ready": False,
+            "last_successful_payload_at": None,
+            "last_successful_instance_id": None,
             "operator_surface_loadable": False,
             "api_dashboard_responding": False,
             "generated_at": None,
@@ -348,7 +458,205 @@ class OperatorDashboardService:
         self._research_daily_capture_latest_path = (
             self._data_policy.resolve_path(self._data_policy.storage_layout.research_root) / "daily_capture" / "latest.json"
         )
-        self._production_link_service = SchwabProductionLinkService(repo_root)
+        self._production_link_service = ProductionLinkService(repo_root)
+        self._autostart_research_runtime_bridge_supervisor = _env_flag_enabled(
+            RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_AUTOSTART_ENV,
+            default=False,
+        )
+        self._ensure_research_runtime_bridge_supervisor_state()
+
+    def _load_cached_dashboard_payload_if_current(
+        self,
+        path: Path,
+        *,
+        runtime_updated_at: str | None = None,
+        session_date: str | None = None,
+        source_path: Path | None = None,
+    ) -> dict[str, Any] | None:
+        payload = _read_json(path)
+        if not isinstance(payload, dict) or not payload:
+            return None
+        if int(payload.get("payload_version") or 0) != DASHBOARD_PAYLOAD_SCHEMA_VERSION:
+            return None
+        generated_at = _parse_iso_datetime(str(payload.get("generated_at") or ""))
+        if generated_at is None:
+            return None
+        if runtime_updated_at:
+            runtime_updated_at_dt = _parse_iso_datetime(str(runtime_updated_at))
+            if runtime_updated_at_dt is not None and generated_at.astimezone(timezone.utc) < runtime_updated_at_dt.astimezone(timezone.utc):
+                return None
+        if session_date:
+            cached_session_date = str(payload.get("session_date") or "").strip()
+            if cached_session_date and cached_session_date != str(session_date):
+                return None
+        if source_path is not None and source_path.exists():
+            source_updated_at = datetime.fromtimestamp(source_path.stat().st_mtime, tz=timezone.utc)
+            if generated_at.astimezone(timezone.utc) < source_updated_at:
+                return None
+        return payload
+
+    def _load_cached_runtime_derived_payload(
+        self,
+        path: Path,
+        *,
+        runtime_updated_at: str | None = None,
+        session_date: str | None = None,
+        source_path: Path | None = None,
+        freshness_seconds: float = DEFAULT_RUNTIME_DERIVED_PAYLOAD_FRESHNESS_SECONDS,
+        max_stale_seconds: float = DEFAULT_RUNTIME_DERIVED_PAYLOAD_MAX_STALE_SECONDS,
+        runtime_updated_at_grace_seconds: float = DEFAULT_RUNTIME_DERIVED_PAYLOAD_RUNTIME_UPDATE_GRACE_SECONDS,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        payload = _read_json(path)
+        if not isinstance(payload, dict) or not payload:
+            return None, False
+        if int(payload.get("payload_version") or 0) != DASHBOARD_PAYLOAD_SCHEMA_VERSION:
+            return None, False
+        generated_at = _parse_iso_datetime(str(payload.get("generated_at") or ""))
+        if generated_at is None:
+            return None, False
+        if session_date:
+            cached_session_date = str(payload.get("session_date") or "").strip()
+            if cached_session_date and cached_session_date != str(session_date):
+                return None, False
+
+        generated_at_utc = generated_at.astimezone(timezone.utc)
+        age_seconds = max((datetime.now(timezone.utc) - generated_at_utc).total_seconds(), 0.0)
+        stale = age_seconds > freshness_seconds
+
+        if runtime_updated_at:
+            runtime_updated_at_dt = _parse_iso_datetime(str(runtime_updated_at))
+            if (
+                runtime_updated_at_dt is not None
+                and generated_at_utc + timedelta(seconds=runtime_updated_at_grace_seconds)
+                < runtime_updated_at_dt.astimezone(timezone.utc)
+            ):
+                stale = True
+        if source_path is not None and source_path.exists():
+            source_updated_at = datetime.fromtimestamp(source_path.stat().st_mtime, tz=timezone.utc)
+            if (
+                generated_at_utc + timedelta(seconds=runtime_updated_at_grace_seconds)
+                < source_updated_at
+            ):
+                stale = True
+        if stale and age_seconds > max_stale_seconds:
+            return None, False
+        return payload, not stale
+
+    def _request_paper_strategy_performance_refresh(
+        self,
+        *,
+        paper: dict[str, Any],
+        session_date: str,
+        root_db_path: Path | None,
+        approved_quant_baselines: dict[str, Any],
+    ) -> None:
+        with self._paper_strategy_performance_refresh_lock:
+            thread = self._paper_strategy_performance_refresh_thread
+            if thread is not None and thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._refresh_paper_strategy_performance_snapshot,
+                kwargs={
+                    "paper": dict(paper or {}),
+                    "session_date": session_date,
+                    "root_db_path": root_db_path,
+                    "approved_quant_baselines": dict(approved_quant_baselines or {}),
+                },
+                name="operator-dashboard-paper-strategy-performance-refresh",
+                daemon=True,
+            )
+            self._paper_strategy_performance_refresh_thread = thread
+            thread.start()
+
+    def _refresh_paper_strategy_performance_snapshot(
+        self,
+        *,
+        paper: dict[str, Any],
+        session_date: str,
+        root_db_path: Path | None,
+        approved_quant_baselines: dict[str, Any],
+    ) -> None:
+        try:
+            payload = self._paper_strategy_performance_payload(
+                paper=paper,
+                session_date=session_date,
+                root_db_path=root_db_path,
+                approved_quant_baselines=approved_quant_baselines,
+            )
+            _write_json_file(self._paper_strategy_performance_path, payload)
+        except Exception as exc:  # noqa: BLE001
+            _TRANSPORT_LOGGER.warning(
+                "Paper strategy performance refresh failed outside the critical dashboard path: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            _record_snapshot_warning(
+                section="paper_strategy_performance",
+                message=(
+                    "Paper strategy performance refresh failed outside the critical dashboard path: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                severity="warning",
+            )
+        finally:
+            with self._paper_strategy_performance_refresh_lock:
+                self._paper_strategy_performance_refresh_thread = None
+
+    def _request_paper_signal_intent_fill_audit_refresh(
+        self,
+        *,
+        paper: dict[str, Any],
+        session_date: str,
+        root_db_path: Path | None,
+    ) -> None:
+        with self._paper_signal_intent_fill_audit_refresh_lock:
+            thread = self._paper_signal_intent_fill_audit_refresh_thread
+            if thread is not None and thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._refresh_paper_signal_intent_fill_audit_snapshot,
+                kwargs={
+                    "paper": dict(paper or {}),
+                    "session_date": session_date,
+                    "root_db_path": root_db_path,
+                },
+                name="operator-dashboard-paper-signal-audit-refresh",
+                daemon=True,
+            )
+            self._paper_signal_intent_fill_audit_refresh_thread = thread
+            thread.start()
+
+    def _refresh_paper_signal_intent_fill_audit_snapshot(
+        self,
+        *,
+        paper: dict[str, Any],
+        session_date: str,
+        root_db_path: Path | None,
+    ) -> None:
+        try:
+            payload = self._paper_signal_intent_fill_audit_payload(
+                paper=paper,
+                session_date=session_date,
+                root_db_path=root_db_path,
+            )
+            _write_json_file(self._paper_signal_intent_fill_audit_path, payload)
+        except Exception as exc:  # noqa: BLE001
+            _TRANSPORT_LOGGER.warning(
+                "Paper signal/intention/fill audit refresh failed outside the critical dashboard path: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            _record_snapshot_warning(
+                section="paper_signal_intent_fill_audit",
+                message=(
+                    "Paper signal/intention/fill audit refresh failed outside the critical dashboard path: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                severity="warning",
+            )
+        finally:
+            with self._paper_signal_intent_fill_audit_refresh_lock:
+                self._paper_signal_intent_fill_audit_refresh_thread = None
 
     def _hydrate_paper_dashboard_context(self, paper: dict[str, Any]) -> dict[str, Any]:
         review_payload = self._review_payload(paper, "paper")
@@ -399,6 +707,81 @@ class OperatorDashboardService:
             "paper_session_close_review": paper_session_close_review,
         }
 
+    def _load_cached_strategy_analysis_payload(self) -> dict[str, Any] | None:
+        payload = _read_json(self._strategy_analysis_path)
+        return payload if isinstance(payload, dict) and payload else None
+
+    def _strategy_analysis_refresh_in_progress(self) -> bool:
+        with self._strategy_analysis_refresh_lock:
+            thread = self._strategy_analysis_refresh_thread
+            return thread is not None and thread.is_alive()
+
+    def _request_strategy_analysis_refresh(
+        self,
+        *,
+        historical_playback: dict[str, Any],
+        paper: dict[str, Any],
+        runtime_registry: dict[str, Any] | None,
+        lane_registry: dict[str, Any] | None,
+    ) -> None:
+        with self._strategy_analysis_refresh_lock:
+            thread = self._strategy_analysis_refresh_thread
+            if thread is not None and thread.is_alive():
+                return
+            self._strategy_analysis_refresh_requested_at = datetime.now(timezone.utc).isoformat()
+            thread = threading.Thread(
+                target=self._refresh_strategy_analysis_snapshot,
+                kwargs={
+                    "historical_playback": dict(historical_playback or {}),
+                    "paper": dict(paper or {}),
+                    "runtime_registry": dict(runtime_registry or {}),
+                    "lane_registry": dict(lane_registry or {}),
+                },
+                name="operator-dashboard-strategy-analysis-refresh",
+                daemon=True,
+            )
+            self._strategy_analysis_refresh_thread = thread
+            thread.start()
+
+    def _refresh_strategy_analysis_snapshot(
+        self,
+        *,
+        historical_playback: dict[str, Any],
+        paper: dict[str, Any],
+        runtime_registry: dict[str, Any],
+        lane_registry: dict[str, Any],
+    ) -> None:
+        try:
+            generated_at = datetime.now(timezone.utc).isoformat()
+            strategy_analysis = build_strategy_analysis_payload(
+                historical_playback=historical_playback,
+                paper=paper,
+                runtime_registry=runtime_registry,
+                lane_registry=lane_registry,
+                research_analytics=build_discovered_research_analytics_payload(
+                    analytics_platform_root=self._research_analytics_platform_root
+                ),
+                generated_at=generated_at,
+            )
+            _write_json_file(self._strategy_analysis_path, strategy_analysis)
+        except Exception as exc:  # noqa: BLE001
+            _TRANSPORT_LOGGER.warning(
+                "Strategy analysis refresh failed outside the critical dashboard path: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            _record_snapshot_warning(
+                section="strategy_analysis",
+                message=(
+                    "Strategy analysis refresh failed outside the critical dashboard path: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                severity="warning",
+            )
+        finally:
+            with self._strategy_analysis_refresh_lock:
+                self._strategy_analysis_refresh_thread = None
+
     def snapshot(self) -> dict[str, Any]:
         with self._snapshot_lock:
             warning_token = _SNAPSHOT_WARNINGS.set([])
@@ -406,8 +789,16 @@ class OperatorDashboardService:
                 generated_at = datetime.now(timezone.utc).isoformat()
                 shadow = self._runtime_snapshot("shadow")
                 paper = self._runtime_snapshot("paper")
-                historical_playback = self._historical_playback_payload()
+                historical_playback_manifest_path = self._latest_historical_playback_manifest_path()
+                historical_playback = self._load_cached_dashboard_payload_if_current(
+                    self._historical_playback_snapshot_path,
+                    source_path=historical_playback_manifest_path,
+                ) or self._historical_playback_payload()
                 auth_status = self._load_or_refresh_auth_gate_result(run_if_missing=True)
+                auth_status = self._normalize_auth_status_for_attached_runtime(
+                    auth_status,
+                    paper=paper,
+                )
 
                 review = {
                     "shadow": self._review_payload(shadow, "shadow"),
@@ -455,6 +846,11 @@ class OperatorDashboardService:
                 active_runtime = self._active_runtime(paper, shadow)
                 active_status = active_runtime["status"]
                 paper["runtime_recovery"] = runtime_recovery_payload
+                dashboard_recovery = self._dashboard_recovery_payload(
+                    auth_status=auth_status,
+                    runtime_recovery=runtime_recovery_payload,
+                    generated_at=generated_at,
+                )
                 run_started_at = _parse_iso_datetime((paper_context["paper_run_start"].get("current") or {}).get("timestamp"))
                 runtime_uptime_seconds = (
                     max(int((datetime.now(timezone.utc) - run_started_at.astimezone(timezone.utc)).total_seconds()), 0)
@@ -610,15 +1006,55 @@ class OperatorDashboardService:
                     bootstrap_prerequisites=self._dashboard_bootstrap_prerequisites_payload(),
                 )
                 research_capture = self._research_daily_capture_payload(generated_at=generated_at)
-                paper["signal_intent_fill_audit"] = self._paper_signal_intent_fill_audit_payload(
-                    paper={
-                        **paper,
-                        "operator_surface": operator_surface,
-                        "approved_quant_baselines": approved_quant_baselines,
-                    },
-                    session_date=str(paper.get("status", {}).get("session_date") or ""),
-                    root_db_path=_path_or_none(paper.get("db_path")),
+                research_runtime_bridge = self._research_runtime_bridge_payload(generated_at=generated_at)
+                startup_control_plane = self._startup_control_plane_payload(
+                    generated_at=generated_at,
+                    auth_status=auth_status,
+                    market_context=market_context,
+                    paper=paper,
                 )
+                supervised_paper_operability = self._supervised_paper_operability_payload(
+                    generated_at=generated_at,
+                    startup_control_plane=startup_control_plane,
+                    paper=paper,
+                )
+                paper_signal_audit = (
+                    dict(paper.get("signal_intent_fill_audit") or {})
+                    if isinstance(paper.get("signal_intent_fill_audit"), dict)
+                    else {}
+                )
+                paper_signal_audit_fresh = bool(
+                    paper_signal_audit
+                    and int(paper_signal_audit.get("payload_version") or 0) == DASHBOARD_PAYLOAD_SCHEMA_VERSION
+                )
+                if not paper_signal_audit_fresh:
+                    paper_signal_audit, paper_signal_audit_fresh = self._load_cached_runtime_derived_payload(
+                        self._paper_signal_intent_fill_audit_path,
+                        runtime_updated_at=str(paper.get("status", {}).get("last_update_ts") or ""),
+                        session_date=str(paper.get("status", {}).get("session_date") or ""),
+                        source_path=_path_or_none(paper.get("artifacts_dir")) / "operator_status.json" if paper.get("artifacts_dir") else None,
+                    )
+                if paper_signal_audit is None:
+                    paper_signal_audit = self._paper_signal_intent_fill_audit_payload(
+                        paper={
+                            **paper,
+                            "operator_surface": operator_surface,
+                            "approved_quant_baselines": approved_quant_baselines,
+                        },
+                        session_date=str(paper.get("status", {}).get("session_date") or ""),
+                        root_db_path=_path_or_none(paper.get("db_path")),
+                    )
+                elif not paper_signal_audit_fresh:
+                    self._request_paper_signal_intent_fill_audit_refresh(
+                        paper={
+                            **paper,
+                            "operator_surface": operator_surface,
+                            "approved_quant_baselines": approved_quant_baselines,
+                        },
+                        session_date=str(paper.get("status", {}).get("session_date") or ""),
+                        root_db_path=_path_or_none(paper.get("db_path")),
+                    )
+                paper["signal_intent_fill_audit"] = paper_signal_audit
                 paper["exit_parity_summary"] = self._paper_exit_parity_summary_payload(paper)
                 shadow["live_shadow_summary"] = self._shadow_live_shadow_summary_payload(shadow)
                 shadow["live_strategy_pilot_summary"] = self._shadow_live_strategy_pilot_summary_payload(shadow)
@@ -672,6 +1108,7 @@ class OperatorDashboardService:
                 _write_json_file(self._operator_surface_path, operator_surface)
                 _write_json_file(self._research_daily_capture_status_path, research_capture)
                 _write_json_file(self._bootstrap_prerequisites_path, self._dashboard_bootstrap_prerequisites_payload())
+                _write_json_file(self._supervised_paper_operability_path, supervised_paper_operability)
                 _write_json_file(self._paper_session_close_review_latest_json_path, paper_session_close_review)
                 _atomic_write_text(
                     self._paper_session_close_review_latest_md_path,
@@ -705,12 +1142,24 @@ class OperatorDashboardService:
                     {"rows": paper["latest_blotter_rows"], "blotter_path": paper["blotter_path"]},
                 )
                 _write_json_file(self._paper_position_state_path, paper["position"])
+                _write_json_file(self._research_runtime_bridge_snapshot_path, research_runtime_bridge)
+                _write_json_file(self._startup_control_plane_path, startup_control_plane)
                 _write_json_file(self._market_index_strip_path, market_context)
                 _write_json_file(self._market_index_diagnostics_path, market_context.get("diagnostics", {}))
                 _write_json_file(self._treasury_curve_path, treasury_curve)
                 _write_json_file(self._treasury_curve_diagnostics_path, treasury_curve.get("diagnostics", {}))
                 _write_json_file(self._historical_playback_snapshot_path, historical_playback)
                 production_link = self._production_link_service.snapshot()
+                production_link = {
+                    **dict(production_link),
+                    "artifacts": {
+                        **dict((production_link or {}).get("artifacts") or {}),
+                        "snapshot": "/api/operator-artifact/production-link-snapshot",
+                        "pilot_status": "/api/operator-artifact/production-link-pilot-status",
+                        "futures_pilot_policy": "/api/operator-artifact/production-link-futures-pilot-policy",
+                        "futures_pilot_status": "/api/operator-artifact/production-link-futures-pilot-status",
+                    },
+                }
                 same_underlying_conflicts = _build_same_underlying_conflicts(
                     paper=paper,
                     production_link=production_link,
@@ -767,31 +1216,66 @@ class OperatorDashboardService:
                         same_underlying_conflict_lookup,
                         same_underlying_entry_block_lookup,
                     )
-                strategy_analysis = build_strategy_analysis_payload(
+                strategy_analysis = self._load_cached_strategy_analysis_payload()
+                if strategy_analysis is None:
+                    strategy_analysis = {
+                        "generated_at": generated_at,
+                        "available": False,
+                        "default_strategy_key": None,
+                        "strategy_count": 0,
+                        "lane_count": 0,
+                        "catalog": {
+                            "rows": [],
+                            "default_strategy_key": None,
+                        },
+                        "details_by_strategy_key": {},
+                        "results_board": {
+                            "rows": [],
+                            "default_strategy_key": None,
+                        },
+                        "metric_support": {},
+                        "lifecycle_truth_classes": {},
+                        "truth_sources": {},
+                        "research_analytics": {
+                            "available": False,
+                            "reason": "strategy analysis refresh is pending",
+                        },
+                        "notes": [
+                            "Strategy analysis is warming in the background and does not block live dashboard readiness.",
+                        ],
+                        "warming": True,
+                    }
+                else:
+                    strategy_analysis = {
+                        **strategy_analysis,
+                        "warming": self._strategy_analysis_refresh_in_progress(),
+                    }
+                self._request_strategy_analysis_refresh(
                     historical_playback=historical_playback,
                     paper=paper,
                     runtime_registry=paper.get("runtime_registry"),
                     lane_registry=lane_registry,
-                    generated_at=generated_at,
                 )
-                _write_json_file(self._strategy_analysis_path, strategy_analysis)
                 _write_json_file(self._production_link_snapshot_path, production_link)
 
-                action_log = _tail_jsonl(self._action_log_path, 20)
+                action_log = _dashboard_action_log_rows(_tail_jsonl(self._action_log_path, 20))
                 snapshot_warnings = list(_SNAPSHOT_WARNINGS.get() or [])
                 degraded_sections = _summarize_snapshot_warnings(snapshot_warnings)
-                return {
+                dashboard_payload: dict[str, Any] = {
+                    "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
                     "generated_at": generated_at,
                     "dashboard_meta": {
                         "build_stamp": self._build_stamp,
                         "version_label": f"dashboard-{self._build_stamp[:10]}",
                         "server_pid": self._server_info.pid if self._server_info else os.getpid(),
+                        "server_instance_id": self._server_info.instance_id if self._server_info else None,
                         "server_started_at": self._server_info.started_at if self._server_info else None,
                         "server_url": self._server_info.url if self._server_info else None,
                         "server_host": self._server_info.host if self._server_info else None,
                         "server_port": self._server_info.port if self._server_info else None,
                         "degraded": bool(degraded_sections),
                         "warning_count": len(snapshot_warnings),
+                        "recovery": dashboard_recovery,
                     },
                     "refresh": {
                         "default_interval_seconds": DEFAULT_REFRESH_INTERVAL_SECONDS,
@@ -825,6 +1309,7 @@ class OperatorDashboardService:
                         "stale": active_status["stale"],
                         "artifact_age_seconds": active_status["artifact_age_seconds"],
                     },
+                    "dashboard_recovery": dashboard_recovery,
                     "degraded_sections": degraded_sections,
                     "dashboard_warnings": snapshot_warnings,
                     "bootstrap_prerequisites": self._dashboard_bootstrap_prerequisites_payload(),
@@ -849,12 +1334,202 @@ class OperatorDashboardService:
                     "paper_continuity": paper_continuity,
                     "historical_playback": historical_playback,
                     "strategy_analysis": strategy_analysis,
+                    "research_runtime_bridge": research_runtime_bridge,
+                    "startup_control_plane": startup_control_plane,
+                    "supervised_paper_operability": supervised_paper_operability,
                     "research_capture": research_capture,
                     "production_link": production_link,
                     "same_underlying_conflicts": same_underlying_conflicts,
                 }
+                _write_json_file(self._dashboard_snapshot_path, dashboard_payload)
+                self._write_desktop_dashboard_cache_mirror(dashboard_payload)
+                return dashboard_payload
             finally:
                 _SNAPSHOT_WARNINGS.reset(warning_token)
+
+    def _write_desktop_dashboard_cache_mirror(self, payload: dict[str, Any]) -> None:
+        try:
+            _write_json_file(self._desktop_dashboard_cache_path, payload)
+        except Exception as exc:  # pragma: no cover - defensive mirror path only
+            _TRANSPORT_LOGGER.debug("operator_dashboard: failed to mirror desktop dashboard cache: %s", exc)
+
+    def _degraded_cached_dashboard_snapshot(
+        self,
+        payload: dict[str, Any],
+        *,
+        stale_instance: bool,
+        stale_sources: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        degraded = dict(payload)
+        with self._dashboard_probe_lock:
+            probe = dict(self._dashboard_probe)
+        generated_at = datetime.now(timezone.utc).isoformat()
+        current_instance_id = self._server_info.instance_id if self._server_info else None
+        cached_instance_id = str(((payload.get("dashboard_meta") or {}).get("server_instance_id")) or "").strip() or None
+        detail = str(
+            probe.get("error")
+            or probe.get("phase_detail")
+            or "Dashboard health is reachable, but the current server instance has not yet published a live /api/dashboard payload."
+        ).strip()
+        if stale_sources:
+            detail = (
+                "Dashboard cached payload is older than the live runtime artifacts and a fresh payload could not be generated yet. "
+                f"Stale inputs: {', '.join(stale_sources)}."
+            )
+        reason_code = "DASHBOARD_API_NOT_READY"
+        existing_recovery = dict(degraded.get("dashboard_recovery") or {})
+        next_recovery_attempt_at = existing_recovery.get("next_recovery_attempt_at")
+        existing_startup_control_plane = dict(degraded.get("startup_control_plane") or {})
+        existing_supervised_paper_operability = dict(degraded.get("supervised_paper_operability") or {})
+        cache_age_only = bool(stale_sources) and all(str(source).startswith("cache_age>") for source in stale_sources)
+        soft_cache_stale = (
+            cache_age_only
+            and not stale_instance
+            and bool(existing_startup_control_plane.get("launch_allowed"))
+            and bool(existing_supervised_paper_operability.get("app_usable_for_supervised_paper"))
+        )
+
+        dashboard_meta = dict(degraded.get("dashboard_meta") or {})
+        dashboard_meta.update(
+            {
+                "source": "live_api_stale_cache" if soft_cache_stale else "artifact_snapshot_fallback",
+                "snapshot_fallback_active": False if soft_cache_stale else True,
+                "snapshot_fallback_reason_code": reason_code,
+                "snapshot_fallback_detail": detail,
+                "snapshot_fallback_served_at": generated_at,
+                "snapshot_server_instance_id": cached_instance_id,
+                "current_server_instance_id": current_instance_id,
+                "snapshot_instance_stale": stale_instance,
+                "recovery": {
+                    **existing_recovery,
+                    "state": "RECOVERING" if existing_recovery.get("active") else existing_recovery.get("state") or "DEGRADED",
+                    "reason_code": existing_recovery.get("reason_code") or reason_code,
+                    "reason": existing_recovery.get("reason") or detail,
+                    "next_recovery_attempt_at": next_recovery_attempt_at,
+                },
+            }
+        )
+        degraded["dashboard_meta"] = dashboard_meta
+        degraded["dashboard_recovery"] = {
+            **existing_recovery,
+            "state": "RECOVERING" if existing_recovery.get("active") else existing_recovery.get("state") or "DEGRADED",
+            "reason_code": existing_recovery.get("reason_code") or reason_code,
+            "reason": existing_recovery.get("reason") or detail,
+            "next_recovery_attempt_at": next_recovery_attempt_at,
+            "active": bool(existing_recovery.get("active")) or bool(next_recovery_attempt_at),
+        }
+
+        if soft_cache_stale:
+            return degraded
+
+        startup_control_plane = existing_startup_control_plane
+        startup_counts = dict(startup_control_plane.get("counts") or {})
+        startup_counts["degraded"] = max(int(startup_counts.get("degraded") or 0), 1)
+        startup_counts["needs_attention_now"] = max(int(startup_counts.get("needs_attention_now") or 0), 1)
+        startup_control_plane.update(
+            {
+                "overall_state": "DEGRADED",
+                "launch_allowed": False,
+                "launch_candidate": False,
+                "dependencies_aligned": False,
+                "primary_reason": detail,
+                "summary_line": detail,
+                "counts": startup_counts,
+                "primary_dependency": {
+                    "key": "dashboard_backend",
+                    "title": "Dashboard / Backend",
+                    "state": "DEGRADED",
+                    "reason": detail,
+                    "next_action_label": "Wait for recovery" if next_recovery_attempt_at else "Refresh",
+                    "next_action_detail": (
+                        f"Automatic recovery is active. Next retry is scheduled for {next_recovery_attempt_at}."
+                        if next_recovery_attempt_at
+                        else "Refresh the dashboard after the backend degradation is resolved or the live payload finishes warming."
+                    ),
+                    "next_action_kind": "refresh",
+                    "authoritative_artifact": "/health",
+                    "authoritative_artifact_label": "Dashboard health payload",
+                },
+            }
+        )
+        degraded["startup_control_plane"] = startup_control_plane
+
+        supervised_paper_operability = existing_supervised_paper_operability
+        supervised_paper_operability.update(
+            {
+                "state": "ATTENTION_REQUIRED",
+                "app_usable_for_supervised_paper": False,
+                "unusable_reason_code": reason_code,
+                "unusable_reason": detail,
+                "summary_line": detail,
+                "primary_next_action": "Wait for recovery" if next_recovery_attempt_at else "Refresh",
+                "next_recovery_attempt_at": next_recovery_attempt_at,
+            }
+        )
+        degraded["supervised_paper_operability"] = supervised_paper_operability
+        return degraded
+
+    def _dashboard_snapshot_source_paths(self) -> list[Path]:
+        paths = [
+            self._repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "operator_status.json",
+            self._repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_config_in_force.json",
+            self._repo_root / "outputs" / "probationary_pattern_engine" / "operator_status.json",
+            self._auth_cache_path,
+        ]
+        return [path for path in paths if path.exists()]
+
+    def _stale_dashboard_snapshot_sources(self, payload: dict[str, Any]) -> list[str]:
+        generated_at = _parse_iso_datetime(str(payload.get("generated_at") or ""))
+        source_paths = self._dashboard_snapshot_source_paths()
+        if not source_paths:
+            return []
+        if generated_at is None:
+            return [str(path) for path in source_paths]
+        stale_sources: list[str] = []
+        for path in source_paths:
+            source_updated_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            if (
+                generated_at.astimezone(timezone.utc)
+                + timedelta(seconds=DEFAULT_DASHBOARD_API_CACHE_SOURCE_LAG_GRACE_SECONDS)
+                < source_updated_at
+            ):
+                stale_sources.append(str(path))
+        return stale_sources
+
+    def cached_dashboard_snapshot(self, *, allow_stale_instance: bool = False) -> dict[str, Any] | None:
+        payload = _load_json_file(self._dashboard_snapshot_path)
+        if not payload:
+            return None
+        if int(payload.get("payload_version") or 0) != DASHBOARD_PAYLOAD_SCHEMA_VERSION:
+            return None
+        generated_at = _parse_iso_datetime(str(payload.get("generated_at") or ""))
+        if generated_at is None:
+            return None
+        cache_age_seconds = max(
+            (datetime.now(timezone.utc) - generated_at.astimezone(timezone.utc)).total_seconds(),
+            0.0,
+        )
+        dashboard_meta = dict(payload.get("dashboard_meta") or {})
+        current_instance_id = self._server_info.instance_id if self._server_info else None
+        snapshot_instance_id = str(dashboard_meta.get("server_instance_id") or "").strip() or None
+        if current_instance_id and snapshot_instance_id != current_instance_id:
+            if not allow_stale_instance:
+                return None
+            return self._degraded_cached_dashboard_snapshot(payload, stale_instance=True)
+        if cache_age_seconds > DEFAULT_DASHBOARD_API_CACHE_MAX_AGE_SECONDS:
+            if not allow_stale_instance:
+                return None
+            return self._degraded_cached_dashboard_snapshot(
+                payload,
+                stale_instance=False,
+                stale_sources=[f"cache_age>{DEFAULT_DASHBOARD_API_CACHE_MAX_AGE_SECONDS:.0f}s"],
+            )
+        stale_sources = self._stale_dashboard_snapshot_sources(payload)
+        if stale_sources:
+            if not allow_stale_instance:
+                return None
+            return self._degraded_cached_dashboard_snapshot(payload, stale_instance=False, stale_sources=stale_sources)
+        return payload
 
     def _research_daily_capture_payload(self, *, generated_at: str) -> dict[str, Any]:
         latest_manifest = _load_json_file(self._research_daily_capture_latest_path)
@@ -909,6 +1584,90 @@ class OperatorDashboardService:
             "expected_schedule": {
                 "cadence": "daily",
                 "stale_after_hours": 36,
+            },
+        }
+
+    def _research_runtime_bridge_payload(self, *, generated_at: str) -> dict[str, Any]:
+        snapshot_path = self._research_runtime_bridge_root / "bridge_snapshot.json"
+        operator_status_path = self._research_runtime_bridge_root / "operator_status.json"
+        runtime_state_path = self._research_runtime_bridge_root / "runtime_state.json"
+        intents_path = self._research_runtime_bridge_root / "order_intents.jsonl"
+        fills_path = self._research_runtime_bridge_root / "fills.jsonl"
+        trades_path = self._research_runtime_bridge_root / "trades.jsonl"
+        alerts_path = self._research_runtime_bridge_root / "alerts.jsonl"
+        reconciliation_path = self._research_runtime_bridge_root / "reconciliation_events.jsonl"
+        runtime_events_path = self._research_runtime_bridge_root / "runtime_events.jsonl"
+        if not snapshot_path.exists():
+            supervisor = self._load_research_runtime_bridge_supervisor_state()
+            return {
+                "available": False,
+                "generated_at": generated_at,
+                "bridge_mode": "PAPER_DRY_RUN_ONLY",
+                "paper_only": True,
+                "live_execution_enabled": False,
+                "summary": {
+                    "status": "NOT_BUILT",
+                    "summary_line": "Research runtime bridge artifacts have not been generated yet.",
+                },
+                "operator_status": {
+                    "status": "NOT_BUILT",
+                    "label": "Research Runtime Bridge",
+                    "operator_action_required": False,
+                },
+                "artifacts": {
+                    "root_dir": str(self._research_runtime_bridge_root),
+                    "snapshot_path": str(snapshot_path),
+                    "supervisor_state_path": str(self._research_runtime_bridge_supervisor_state_path),
+                    "supervisor_events_path": str(self._research_runtime_bridge_supervisor_events_path),
+                },
+                "supervisor": supervisor,
+                "anomaly_queue": {
+                    "count": 0,
+                    "needs_attention_now_count": 0,
+                    "unresolved_count": 0,
+                    "review_pending_count": 0,
+                    "acknowledged_count": 0,
+                    "reviewed_count": 0,
+                    "resolved_count": 0,
+                    "escalated_count": 0,
+                    "recent_rows": [],
+                },
+            }
+        payload = _load_json_file(snapshot_path)
+        supervisor = self._load_research_runtime_bridge_supervisor_state()
+        return {
+            **payload,
+            "generated_at": payload.get("generated_at") or generated_at,
+            "supervisor": supervisor,
+            "anomaly_queue": dict(payload.get("anomaly_queue") or {}),
+            "artifacts": {
+                **dict(payload.get("artifacts") or {}),
+                "snapshot": "/api/operator-artifact/research-runtime-bridge",
+                "operator_status": "/api/operator-artifact/research-runtime-bridge-operator-status",
+                "runtime_state": "/api/operator-artifact/research-runtime-bridge-runtime-state",
+                "intents": "/api/operator-artifact/research-runtime-bridge-intents",
+                "fills": "/api/operator-artifact/research-runtime-bridge-fills",
+                "trades": "/api/operator-artifact/research-runtime-bridge-trades",
+                "alerts": "/api/operator-artifact/research-runtime-bridge-alerts",
+                "reconciliation": "/api/operator-artifact/research-runtime-bridge-reconciliation",
+                "runtime_events": "/api/operator-artifact/research-runtime-bridge-runtime-events",
+                "cadence_state": "/api/operator-artifact/research-runtime-bridge-cadence-state",
+                "operator_reviews": "/api/operator-artifact/research-runtime-bridge-operator-reviews",
+                "supervisor_state": "/api/operator-artifact/research-runtime-bridge-supervisor-state",
+                "supervisor_events": "/api/operator-artifact/research-runtime-bridge-supervisor-events",
+                "snapshot_path": str(snapshot_path),
+                "operator_status_path": str(operator_status_path),
+                "runtime_state_path": str(runtime_state_path),
+                "intents_path": str(intents_path),
+                "fills_path": str(fills_path),
+                "trades_path": str(trades_path),
+                "alerts_path": str(alerts_path),
+                "reconciliation_path": str(reconciliation_path),
+                "runtime_events_path": str(runtime_events_path),
+                "cadence_state_path": str(self._research_runtime_bridge_root / "cadence_state.json"),
+                "operator_reviews_path": str(self._research_runtime_bridge_root / "operator_review_events.jsonl"),
+                "supervisor_state_path": str(self._research_runtime_bridge_supervisor_state_path),
+                "supervisor_events_path": str(self._research_runtime_bridge_supervisor_events_path),
             },
         }
 
@@ -991,6 +1750,709 @@ class OperatorDashboardService:
             "artifact_path": str(self._bootstrap_prerequisites_path),
         }
 
+    def _startup_control_plane_payload(
+        self,
+        *,
+        generated_at: str,
+        auth_status: dict[str, Any],
+        market_context: dict[str, Any],
+        paper: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime_recovery = dict(paper.get("runtime_recovery") or {})
+        paper_readiness = dict(paper.get("readiness") or {})
+        paper_status = dict(paper.get("status") or {})
+        entry_eligibility = dict(paper.get("entry_eligibility") or {})
+        heartbeat_summary = dict(paper_readiness.get("heartbeat_reconciliation_summary") or {})
+        timeout_summary = dict(paper_readiness.get("order_timeout_watchdog_summary") or {})
+        restore_summary = dict(paper_readiness.get("restore_validation_summary") or {})
+        server_info = self._server_info
+        with self._dashboard_probe_lock:
+            dashboard_probe = dict(self._dashboard_probe)
+
+        def _action_kind(label: str | None) -> str | None:
+            normalized = str(label or "").strip().upper()
+            mapping = {
+                "START DASHBOARD/API": "start-dashboard",
+                "AUTH GATE CHECK": "auth-gate-check",
+                "START RUNTIME": "start-paper",
+                "START PAPER SOAK": "start-paper",
+                "RESTART RUNTIME + TEMP PAPER": "restart-paper-with-temp-paper",
+                "COMPLETE PRE-SESSION REVIEW": "complete-pre-session-review",
+                "FORCE RECONCILE": "paper-force-reconcile",
+                "REFRESH": "refresh",
+            }
+            return mapping.get(normalized)
+
+        def _dependency_row(
+            *,
+            key: str,
+            label: str,
+            state: str,
+            reason_code: str,
+            reason: str,
+            detail: str,
+            next_action_label: str,
+            evidence_target: str | None,
+            evidence_label: str,
+            action_required_now: bool,
+            launch_blocking: bool,
+            clears_automatically: bool,
+            next_action_detail: str | None = None,
+            next_recovery_attempt_at: str | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "key": key,
+                "label": label,
+                "state": state,
+                "reason_code": reason_code,
+                "reason": reason,
+                "detail": detail,
+                "summary_line": f"{label}: {reason}",
+                "operator_action_required": action_required_now,
+                "action_required_now": action_required_now,
+                "launch_blocking": launch_blocking,
+                "next_action_label": next_action_label,
+                "next_action_kind": _action_kind(next_action_label),
+                "next_action_detail": (
+                    next_action_detail
+                    if next_action_detail is not None
+                    else (
+                        "This state should clear automatically after the dependency finishes warming."
+                        if clears_automatically and next_action_label.lower().startswith("wait")
+                        else f"Next operator action: {next_action_label}."
+                    )
+                ),
+                "clears_automatically": clears_automatically,
+                "manual_intervention_required": action_required_now and not clears_automatically,
+                "next_recovery_attempt_at": next_recovery_attempt_at,
+                "authoritative_artifact": evidence_target,
+                "authoritative_artifact_label": evidence_label,
+                "queue_status": (
+                    "READY"
+                    if state == "READY"
+                    else "NEEDS_ATTENTION_NOW"
+                    if action_required_now
+                    else "MONITOR_ONLY"
+                ),
+            }
+
+        dashboard_artifact = str(server_info.info_file) if server_info and server_info.info_file else str(self._operator_surface_path)
+        probe_state = str(dashboard_probe.get("state") or "starting").upper()
+        probe_phase_detail = str(
+            dashboard_probe.get("phase_detail")
+            or dashboard_probe.get("error")
+            or "Dashboard manager is still converging startup state."
+        ).strip()
+        if server_info is None:
+            dashboard_row = _dependency_row(
+                key="dashboard_backend",
+                label="Dashboard / Backend",
+                state="BLOCKED",
+                reason_code="dashboard_not_bound",
+                reason="Dashboard manager has not yet published listener ownership for the current server instance.",
+                detail=probe_phase_detail,
+                next_action_label="Start Dashboard/API",
+                evidence_target=dashboard_artifact,
+                evidence_label="Dashboard bind / ownership artifact",
+                action_required_now=True,
+                launch_blocking=True,
+                clears_automatically=False,
+            )
+        elif not bool(dashboard_probe.get("api_dashboard_responding")):
+            dashboard_row = _dependency_row(
+                key="dashboard_backend",
+                label="Dashboard / Backend",
+                state="WARMING",
+                reason_code="dashboard_attach_incomplete",
+                reason="Dashboard/API startup is still converging and attach truth is not stable yet.",
+                detail=probe_phase_detail,
+                next_action_label="Refresh",
+                evidence_target=dashboard_artifact,
+                evidence_label="Dashboard bind / ownership artifact",
+                action_required_now=False,
+                launch_blocking=True,
+                clears_automatically=True,
+            )
+        elif not bool(dashboard_probe.get("operator_surface_loadable")):
+            dashboard_row = _dependency_row(
+                key="dashboard_backend",
+                label="Dashboard / Backend",
+                state="WARMING",
+                reason_code="dashboard_payload_incomplete",
+                reason="Dashboard/API is responding, but the current operator payload is still incomplete for this server instance.",
+                detail=probe_phase_detail,
+                next_action_label="Refresh",
+                evidence_target=dashboard_artifact,
+                evidence_label="Dashboard bind / ownership artifact",
+                action_required_now=False,
+                launch_blocking=True,
+                clears_automatically=True,
+            )
+        else:
+            dashboard_row = _dependency_row(
+                key="dashboard_backend",
+                label="Dashboard / Backend",
+                state="READY",
+                reason_code="dashboard_ready",
+                reason="Dashboard/API is serving the current operator snapshot for this server instance.",
+                detail=(
+                    f"Current dashboard owner PID is {server_info.pid} at {server_info.url}."
+                    if server_info is not None
+                    else "Current dashboard snapshot was generated successfully."
+                ),
+                next_action_label="Refresh",
+                evidence_target=dashboard_artifact,
+                evidence_label="Dashboard bind / ownership artifact",
+                action_required_now=False,
+                launch_blocking=False,
+                clears_automatically=True,
+            )
+
+        auth_recovery = self._auth_recovery_state(auth_status)
+        auth_ready = bool(auth_recovery.get("runtime_ready"))
+        auth_reason = str(auth_recovery.get("reason") or ("Schwab connectivity/auth is ready." if auth_ready else "Schwab connectivity/auth is not ready.")).strip()
+        paper_running = bool(paper.get("running"))
+
+        market_feed_state = str(market_context.get("feed_state") or "UNAVAILABLE").upper()
+        market_note = str(market_context.get("note") or "Market-data feed state is unavailable.").strip()
+        if market_feed_state == "LIVE":
+            market_row = _dependency_row(
+                key="market_data_connectivity",
+                label="Market-Data Connectivity",
+                state="READY",
+                reason_code="market_data_live",
+                reason="Market-data connectivity is live on the current dashboard path.",
+                detail=market_note,
+                next_action_label="Refresh",
+                evidence_target=str(market_context.get("diagnostic_artifact") or "/api/operator-artifact/market-index-strip-diagnostics"),
+                evidence_label="Market-data diagnostics",
+                action_required_now=False,
+                launch_blocking=False,
+                clears_automatically=True,
+            )
+        elif market_feed_state in {"PARTIAL", "STALE"}:
+            market_row = _dependency_row(
+                key="market_data_connectivity",
+                label="Market-Data Connectivity",
+                state="DEGRADED",
+                reason_code=f"market_data_{market_feed_state.lower()}",
+                reason=market_note,
+                detail=market_note,
+                next_action_label="Refresh",
+                evidence_target=str(market_context.get("diagnostic_artifact") or "/api/operator-artifact/market-index-strip-diagnostics"),
+                evidence_label="Market-data diagnostics",
+                action_required_now=False,
+                launch_blocking=False,
+                clears_automatically=True,
+            )
+        elif auth_ready and paper_running:
+            market_row = _dependency_row(
+                key="market_data_connectivity",
+                label="Market-Data Connectivity",
+                state="READY",
+                reason_code="market_data_runtime_attached",
+                reason="Execution market data is live through the attached paper runtime.",
+                detail=(
+                    f"{market_note} Dashboard market-index fetch is currently unavailable, but the attached paper runtime "
+                    "and Schwab auth path are healthy."
+                ),
+                next_action_label="Refresh",
+                evidence_target=str(market_context.get("diagnostic_artifact") or "/api/operator-artifact/market-index-strip-diagnostics"),
+                evidence_label="Market-data diagnostics",
+                action_required_now=False,
+                launch_blocking=False,
+                clears_automatically=True,
+            )
+        elif auth_ready:
+            market_row = _dependency_row(
+                key="market_data_connectivity",
+                label="Market-Data Connectivity",
+                state="DEGRADED",
+                reason_code="market_data_sidecar_unavailable",
+                reason="Schwab auth is ready, but the dashboard market-index fetch is unavailable.",
+                detail=market_note,
+                next_action_label="Refresh",
+                evidence_target=str(market_context.get("diagnostic_artifact") or "/api/operator-artifact/market-index-strip-diagnostics"),
+                evidence_label="Market-data diagnostics",
+                action_required_now=False,
+                launch_blocking=False,
+                clears_automatically=True,
+            )
+        else:
+            market_row = _dependency_row(
+                key="market_data_connectivity",
+                label="Market-Data Connectivity",
+                state="BLOCKED",
+                reason_code="market_data_unavailable",
+                reason=market_note,
+                detail=market_note,
+                next_action_label="Auth Gate Check",
+                evidence_target=str(market_context.get("diagnostic_artifact") or "/api/operator-artifact/market-index-strip-diagnostics"),
+                evidence_label="Market-data diagnostics",
+                action_required_now=True,
+                launch_blocking=True,
+                clears_automatically=False,
+            )
+        auth_row = _dependency_row(
+            key="schwab_connectivity",
+            label="Schwab Connectivity / Auth",
+            state="READY" if auth_ready else ("WARMING" if auth_recovery.get("auto_recovery_active") else "BLOCKED"),
+            reason_code="schwab_auth_ready" if auth_ready else "schwab_auth_not_ready",
+            reason=auth_reason,
+            detail=(
+                f"Auth source: {auth_status.get('source') or 'unknown'}."
+                if auth_ready
+                else (
+                    f"{auth_reason} Source: {auth_status.get('source') or 'unknown'}."
+                    + (
+                        f" Automatic retry is scheduled for {auth_recovery.get('next_recovery_attempt_at')}."
+                        if auth_recovery.get("next_recovery_attempt_at")
+                        else ""
+                    )
+                )
+            ),
+            next_action_label=str(auth_recovery.get("recommended_action") or auth_status.get("next_action") or "Auth Gate Check"),
+            evidence_target="/api/operator-artifact/auth-gate-latest",
+            evidence_label="Latest auth-gate result",
+            action_required_now=bool(auth_recovery.get("manual_action_required")),
+            launch_blocking=not auth_ready,
+            clears_automatically=bool(auth_recovery.get("auto_recovery_active")),
+            next_action_detail=(
+                f"Automatic recovery is active. Next retry is scheduled for {auth_recovery.get('next_recovery_attempt_at')}."
+                if auth_recovery.get("next_recovery_attempt_at")
+                else None
+            ),
+            next_recovery_attempt_at=str(auth_recovery.get("next_recovery_attempt_at") or "") or None,
+        )
+
+        paper_entries_enabled = bool((paper.get("status") or {}).get("entries_enabled"))
+        paper_operator_halt = bool((paper.get("status") or {}).get("operator_halt"))
+        runtime_recovery_status = str(runtime_recovery.get("status") or "STOPPED").upper()
+        runtime_recovery_message = str(
+            runtime_recovery.get("operator_message")
+            or runtime_recovery.get("detail")
+            or runtime_recovery.get("reason")
+            or ""
+        ).strip()
+        paper_next_action = str(
+            runtime_recovery.get("next_action")
+            or entry_eligibility.get("clear_action")
+            or "Start Runtime"
+        ).strip()
+        if paper_running and paper_entries_enabled and not paper_operator_halt:
+            paper_row = _dependency_row(
+                key="paper_runtime",
+                label="Paper Runtime",
+                state="READY",
+                reason_code="paper_runtime_running",
+                reason="Paper runtime is active and the current shared paper session is up.",
+                detail=runtime_recovery_message or "Paper runtime is active.",
+                next_action_label="Refresh",
+                evidence_target="/api/operator-artifact/paper-runtime-recovery",
+                evidence_label="Paper runtime recovery state",
+                action_required_now=False,
+                launch_blocking=False,
+                clears_automatically=False,
+            )
+        elif paper_running:
+            paper_row = _dependency_row(
+                key="paper_runtime",
+                label="Paper Runtime",
+                state="BLOCKED",
+                reason_code="paper_runtime_halted",
+                reason=str(entry_eligibility.get("state_note") or "Paper runtime is attached, but entries remain halted."),
+                detail=str(
+                    paper.get("readiness", {}).get("runtime_status_detail")
+                    or entry_eligibility.get("fireability_summary")
+                    or entry_eligibility.get("state_note")
+                    or "Paper runtime is attached, but it is not yet usable for supervised paper operation."
+                ),
+                next_action_label=paper_next_action or "Resume Entries",
+                evidence_target="/api/operator-artifact/paper-readiness",
+                evidence_label="Paper readiness state",
+                action_required_now=True,
+                launch_blocking=True,
+                clears_automatically=False,
+            )
+        elif runtime_recovery_status in {"AUTO_RESTART_IN_PROGRESS", "AUTO_RESTART_BACKOFF"} or bool(runtime_recovery.get("auto_restart_eligible")):
+            paper_row = _dependency_row(
+                key="paper_runtime",
+                label="Paper Runtime",
+                state="WARMING",
+                reason_code=f"paper_runtime_{runtime_recovery_status.lower() if runtime_recovery_status else 'warming'}",
+                reason=runtime_recovery_message or "Paper runtime is warming through managed recovery.",
+                detail=runtime_recovery_message or "Paper runtime recovery is still in progress.",
+                next_action_label=str(runtime_recovery.get("next_action") or "Refresh"),
+                evidence_target="/api/operator-artifact/paper-runtime-recovery",
+                evidence_label="Paper runtime recovery state",
+                action_required_now=False,
+                launch_blocking=True,
+                clears_automatically=True,
+                next_action_detail=(
+                    f"Automatic recovery is active. Next retry is scheduled for {runtime_recovery.get('restart_backoff_until')}."
+                    if runtime_recovery.get("restart_backoff_until")
+                    else "Automatic recovery is active and the supervisor is continuing restart attempts."
+                ),
+                next_recovery_attempt_at=str(runtime_recovery.get("restart_backoff_until") or "") or None,
+            )
+        else:
+            paper_row = _dependency_row(
+                key="paper_runtime",
+                label="Paper Runtime",
+                state="BLOCKED",
+                reason_code=f"paper_runtime_{runtime_recovery_status.lower() if runtime_recovery_status else 'blocked'}",
+                reason=runtime_recovery_message or str(entry_eligibility.get("state_note") or "Paper runtime is not yet active."),
+                detail=(
+                    runtime_recovery_message
+                    or str(entry_eligibility.get("fireability_summary") or entry_eligibility.get("state_note") or "Paper runtime is stopped.")
+                ),
+                next_action_label=paper_next_action or "Start Runtime",
+                evidence_target="/api/operator-artifact/paper-runtime-recovery",
+                evidence_label="Paper runtime recovery state",
+                action_required_now=True,
+                launch_blocking=True,
+                clears_automatically=False,
+            )
+
+        heartbeat_issue_count = int(heartbeat_summary.get("active_issue_count") or 0)
+        timeout_issue_count = int(timeout_summary.get("active_issue_count") or 0)
+        restore_issue_count = int(restore_summary.get("unresolved_issue_count") or 0)
+        reconcile_dirty = str(paper_status.get("reconciliation_semantics") or "UNKNOWN").upper() == "DIRTY"
+        reconcile_required = reconcile_dirty or heartbeat_issue_count > 0 or timeout_issue_count > 0 or restore_issue_count > 0
+        if reconcile_required:
+            reconciliation_row = _dependency_row(
+                key="reconciliation",
+                label="Reconciliation Needed",
+                state="RECONCILIATION_REQUIRED",
+                reason_code="reconciliation_required",
+                reason=(
+                    str(heartbeat_summary.get("reason") or "").strip()
+                    or str(timeout_summary.get("reason") or "").strip()
+                    or "Reconciliation and restore state are not yet clean."
+                ),
+                detail=(
+                    f"Heartbeat issues: {heartbeat_issue_count}; timeout watchdog issues: {timeout_issue_count}; "
+                    f"restore unresolved: {restore_issue_count}; semantic state: {paper_status.get('reconciliation_semantics') or 'UNKNOWN'}."
+                ),
+                next_action_label=str(
+                    heartbeat_summary.get("recommended_action")
+                    or timeout_summary.get("recommended_action")
+                    or restore_summary.get("recommended_action")
+                    or "Force Reconcile"
+                ).strip(),
+                evidence_target="/api/operator-artifact/paper-readiness",
+                evidence_label="Paper readiness / reconciliation view",
+                action_required_now=True,
+                launch_blocking=True,
+                clears_automatically=False,
+            )
+        else:
+            reconciliation_row = _dependency_row(
+                key="reconciliation",
+                label="Reconciliation Needed",
+                state="READY",
+                reason_code="reconciliation_clean",
+                reason="Reconciliation, restore validation, and timeout watchdog state are clean.",
+                detail="No active paper-runtime reconciliation issue requires intervention.",
+                next_action_label="Refresh",
+                evidence_target="/api/operator-artifact/paper-readiness",
+                evidence_label="Paper readiness / reconciliation view",
+                action_required_now=False,
+                launch_blocking=False,
+                clears_automatically=True,
+            )
+
+        dependency_rows = [
+            dashboard_row,
+            market_row,
+            auth_row,
+            paper_row,
+            reconciliation_row,
+        ]
+        state_priority = {
+            "BLOCKED": 0,
+            "RECONCILIATION_REQUIRED": 1,
+            "WARMING": 2,
+            "DEGRADED": 3,
+            "READY": 4,
+        }
+        key_priority = {
+            "dashboard_backend": 0,
+            "schwab_connectivity": 1,
+            "market_data_connectivity": 2,
+            "paper_runtime": 3,
+            "reconciliation": 4,
+        }
+        non_ready_rows = [row for row in dependency_rows if str(row.get("state") or "READY") != "READY"]
+        primary_row = (
+            sorted(
+                non_ready_rows,
+                key=lambda row: (
+                    state_priority.get(str(row.get("state") or "READY"), 99),
+                    key_priority.get(str(row.get("key") or ""), 99),
+                ),
+            )[0]
+            if non_ready_rows
+            else dependency_rows[0]
+        )
+        counts_by_state = dict(Counter(str(row.get("state") or "UNKNOWN") for row in dependency_rows))
+        dependencies_aligned = not any(bool(row.get("launch_blocking")) for row in dependency_rows)
+        convergence = self._startup_convergence_payload(
+            generated_at=generated_at,
+            startup_control_plane={
+                "overall_state": None,
+                "launch_allowed": dependencies_aligned,
+                "launch_candidate": dependencies_aligned,
+                "dependencies_aligned": dependencies_aligned,
+                "dependencies": dependency_rows,
+                "primary_reason": primary_row.get("reason"),
+            },
+            paper=paper,
+            probe_snapshot=dashboard_probe,
+        )
+        stable_ready = bool(convergence.get("stable_ready"))
+        launch_allowed = dependencies_aligned
+        if dependencies_aligned:
+            overall_state = "READY"
+            if not stable_ready:
+                primary_row = {
+                    "key": "dashboard_backend",
+                    "label": "Dashboard / Backend",
+                    "reason": (
+                        "Dashboard/API and the tracked paper runtime are attached; "
+                        "manager stability monitoring is still accumulating in the background."
+                    ),
+                    "reason_code": "stability_window_monitoring",
+                    "next_action_label": "No action needed",
+                    "next_action_kind": "refresh",
+                    "authoritative_artifact": dashboard_artifact,
+                    "authoritative_artifact_label": "Dashboard bind / ownership artifact",
+                    "state": "READY",
+                }
+        elif counts_by_state.get("BLOCKED", 0):
+            overall_state = "BLOCKED"
+        elif counts_by_state.get("RECONCILIATION_REQUIRED", 0):
+            overall_state = "RECONCILIATION_REQUIRED"
+        elif counts_by_state.get("WARMING", 0):
+            overall_state = "WARMING"
+        elif counts_by_state.get("DEGRADED", 0):
+            overall_state = "DEGRADED"
+        else:
+            overall_state = "READY"
+
+        summary_line = (
+            (
+                "Startup dependencies are aligned for paper-only launch. "
+                "Packaged startup is allowed while manager stability monitoring continues in the background."
+                if dependencies_aligned and not stable_ready
+                else "Startup dependencies are aligned for paper-only launch. Packaged startup is allowed."
+            )
+            if launch_allowed
+            else (
+                f"Startup is {overall_state.lower().replace('_', ' ')} because {primary_row.get('label')} is "
+                f"{str(primary_row.get('state') or 'UNKNOWN').lower().replace('_', ' ')}. "
+                f"Next action: {primary_row.get('next_action_label') or 'Manual inspection required'}."
+            )
+        )
+        convergence.update(
+            {
+                "startup_overall_state": overall_state,
+                "startup_launch_allowed": launch_allowed,
+                "dependencies_aligned": dependencies_aligned,
+                "primary_dependency_key": primary_row.get("key"),
+            }
+        )
+        return {
+            "generated_at": generated_at,
+            "paper_only": True,
+            "overall_state": overall_state,
+            "launch_allowed": launch_allowed,
+            "launch_candidate": dependencies_aligned,
+            "dependencies_aligned": dependencies_aligned,
+            "summary_line": summary_line,
+            "primary_dependency_key": primary_row.get("key"),
+            "primary_issue_title": primary_row.get("label"),
+            "primary_reason": primary_row.get("reason"),
+            "primary_reason_code": primary_row.get("reason_code"),
+            "primary_next_action_label": primary_row.get("next_action_label"),
+            "primary_next_action_kind": primary_row.get("next_action_kind"),
+            "primary_evidence_target": primary_row.get("authoritative_artifact"),
+            "primary_evidence_label": primary_row.get("authoritative_artifact_label"),
+            "counts": {
+                "ready": counts_by_state.get("READY", 0),
+                "warming": counts_by_state.get("WARMING", 0),
+                "blocked": counts_by_state.get("BLOCKED", 0),
+                "degraded": counts_by_state.get("DEGRADED", 0),
+                "reconciliation_required": counts_by_state.get("RECONCILIATION_REQUIRED", 0),
+                "needs_attention_now": sum(1 for row in dependency_rows if bool(row.get("action_required_now"))),
+            },
+            "authoritative_artifact": "/api/operator-artifact/startup-control-plane",
+            "dependencies": dependency_rows,
+            "primary_dependency": primary_row,
+            "convergence": convergence,
+            "artifacts": {
+                "startup_control_plane": "/api/operator-artifact/startup-control-plane",
+                "supervised_paper_operability": "/api/operator-artifact/supervised-paper-operability",
+                "paper_runtime_recovery": "/api/operator-artifact/paper-runtime-recovery",
+                "paper_readiness": "/api/operator-artifact/paper-readiness",
+                "market_data_diagnostics": str(market_context.get("diagnostic_artifact") or "/api/operator-artifact/market-index-strip-diagnostics"),
+                "auth_gate_latest": "/api/operator-artifact/auth-gate-latest",
+                "dashboard_bind": dashboard_artifact,
+            },
+        }
+
+    def _supervised_paper_operability_payload(
+        self,
+        *,
+        generated_at: str,
+        startup_control_plane: dict[str, Any],
+        paper: dict[str, Any],
+    ) -> dict[str, Any]:
+        convergence = dict(startup_control_plane.get("convergence") or {})
+        readiness = dict(paper.get("readiness") or {})
+        operator_state = dict(paper.get("operator_state") or {})
+        runtime_recovery = dict(paper.get("runtime_recovery") or {})
+        entry_eligibility = dict(paper.get("entry_eligibility") or {})
+        lane_status_summary = dict(readiness.get("lane_status_summary") or {})
+        runtime_phase = str(readiness.get("runtime_phase") or "STOPPED").upper()
+        runtime_running = bool(paper.get("running")) and bool(readiness.get("runtime_running"))
+        dashboard_attached = bool(convergence.get("dashboard_attached"))
+        startup_ready = str(startup_control_plane.get("overall_state") or "UNKNOWN").upper() == "READY"
+        launch_allowed = bool(startup_control_plane.get("launch_allowed"))
+        startup_action_label = str(startup_control_plane.get("primary_next_action_label") or "").strip()
+        startup_action_kind = str(startup_control_plane.get("primary_next_action_kind") or "").strip().lower()
+        operator_halt = bool(operator_state.get("operator_halt"))
+        entries_enabled = bool(readiness.get("entries_enabled"))
+        temp_paper_ok = str(((paper.get("temporary_paper_runtime_integrity") or {}).get("mismatch_status") or "MATCHED")).upper() in {
+            "",
+            "MATCHED",
+            "CLEAR",
+        }
+        usable_lane_count = int(readiness.get("usable_lane_count") or 0)
+        halted_lane_count = int(readiness.get("halted_lane_count") or 0)
+        eligible_to_trade_count = int(lane_status_summary.get("eligible_to_trade_count") or 0)
+        primary_action = str(
+            entry_eligibility.get("clear_action")
+            or startup_control_plane.get("primary_next_action_label")
+            or runtime_recovery.get("next_action")
+            or "Refresh"
+        ).strip()
+
+        usable = True
+        state = "USABLE"
+        reason_code = "supervised_paper_ready"
+        reason = "Dashboard/API is attached and the supervised paper runtime is operational."
+
+        passive_stability_only = (
+            dashboard_attached
+            and runtime_running
+            and temp_paper_ok
+            and not operator_halt
+            and entries_enabled
+            and str(
+                startup_control_plane.get("primary_reason_code")
+                or convergence.get("reason_code")
+                or ""
+            ).strip()
+            == "stability_window_incomplete"
+        )
+
+        if passive_stability_only:
+            usable = True
+            state = "USABLE"
+            reason_code = "supervised_paper_ready"
+            reason = "Dashboard/API and the supervised paper runtime are attached; startup stability monitoring is still accumulating."
+            primary_action = startup_action_label or "No action needed"
+        elif not dashboard_attached or not startup_ready or not launch_allowed:
+            usable = False
+            state = "ATTACH_INCOMPLETE"
+            reason_code = str(
+                startup_control_plane.get("primary_reason_code")
+                or convergence.get("reason_code")
+                or "dashboard_attach_incomplete"
+            ).strip() or "dashboard_attach_incomplete"
+            reason = str(
+                startup_control_plane.get("primary_reason")
+                or convergence.get("reason")
+                or "Dashboard/API is not fully attached for supervised paper use yet."
+            ).strip() or "Dashboard/API is not fully attached for supervised paper use yet."
+            primary_action = startup_action_label or "Refresh"
+        elif not runtime_running:
+            usable = False
+            state = "PAPER_RUNTIME_STOPPED"
+            reason_code = "paper_runtime_not_running"
+            reason = str(
+                runtime_recovery.get("operator_message")
+                or runtime_recovery.get("detail")
+                or "Paper runtime is not currently running."
+            ).strip() or "Paper runtime is not currently running."
+        elif not temp_paper_ok:
+            usable = False
+            state = "PAPER_RUNTIME_BLOCKED"
+            reason_code = "temp_paper_runtime_mismatch"
+            reason = str(
+                (paper.get("temporary_paper_runtime_integrity") or {}).get("summary_line")
+                or "Temp-paper runtime integrity is not yet matched."
+            ).strip() or "Temp-paper runtime integrity is not yet matched."
+        elif runtime_phase in {"STOPPED", "STOPPING", "BLOCKED", "RECONCILING"}:
+            usable = False
+            state = "PAPER_RUNTIME_NOT_READY"
+            reason_code = f"paper_runtime_{runtime_phase.lower()}"
+            reason = str(
+                readiness.get("runtime_status_detail")
+                or readiness.get("summary_line")
+                or entry_eligibility.get("state_note")
+                or "Paper runtime has not reached a usable supervised state."
+            ).strip() or "Paper runtime has not reached a usable supervised state."
+        elif operator_halt or not entries_enabled:
+            usable = False
+            state = "PAPER_RUNTIME_HALTED"
+            reason_code = "paper_entries_halted"
+            reason = str(
+                readiness.get("runtime_status_detail")
+                or entry_eligibility.get("state_note")
+                or "Paper runtime is attached, but entries remain halted."
+            ).strip() or "Paper runtime is attached, but entries remain halted."
+
+        operator_action_required = not usable
+        if not usable and state == "ATTACH_INCOMPLETE":
+            passive_startup_action = startup_action_kind in {"", "refresh"}
+            passive_startup_label = primary_action.strip().lower() in {
+                "",
+                "refresh",
+                "no action needed; already eligible",
+            }
+            operator_action_required = not (passive_startup_action and passive_startup_label)
+
+        return {
+            "generated_at": generated_at,
+            "paper_only": True,
+            "app_usable_for_supervised_paper": usable,
+            "state": state,
+            "unusable_reason_code": None if usable else reason_code,
+            "unusable_reason": None if usable else reason,
+            "summary_line": (
+                "Application is usable for supervised paper operation."
+                if usable
+                else f"Application is not usable for supervised paper operation: {reason}"
+            ),
+            "dashboard_attached": dashboard_attached,
+            "startup_ready": startup_ready,
+            "launch_allowed": launch_allowed,
+            "runtime_running": runtime_running,
+            "paper_runtime_phase": runtime_phase,
+            "paper_runtime_ready": runtime_running and runtime_phase == "RUNNING" and not operator_halt and entries_enabled,
+            "entries_enabled": entries_enabled,
+            "operator_halt": operator_halt,
+            "usable_lane_count": usable_lane_count,
+            "eligible_to_trade_count": eligible_to_trade_count,
+            "halted_lane_count": halted_lane_count,
+            "operator_action_required": operator_action_required,
+            "primary_next_action": primary_action,
+            "evidence_target": "/api/operator-artifact/startup-control-plane",
+            "evidence_label": "Startup control plane artifact",
+        }
+
     def dashboard_snapshot(self) -> dict[str, Any]:
         try:
             snapshot = self.snapshot()
@@ -1012,19 +2474,161 @@ class OperatorDashboardService:
         except Exception:
             return
 
+    def start_dashboard_probe_loop(self) -> None:
+        with self._dashboard_probe_lock:
+            if self._dashboard_probe_thread is not None and self._dashboard_probe_thread.is_alive():
+                return
+            self._dashboard_probe_stop_event.clear()
+            self._dashboard_probe_thread = threading.Thread(
+                target=self._dashboard_probe_loop,
+                name="operator-dashboard-probe",
+                daemon=True,
+            )
+            self._dashboard_probe_thread.start()
+
+    def _autostart_research_runtime_bridge_supervisor_if_enabled(self) -> None:
+        if not self._autostart_research_runtime_bridge_supervisor:
+            return
+        state = self._load_research_runtime_bridge_supervisor_state()
+        if state.get("desired_state") == "RUNNING" and state.get("current_thread_alive"):
+            return
+        interval_seconds = max(
+            1,
+            int(
+                os.environ.get(
+                    RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_ENV,
+                    state.get("cycle_interval_seconds") or DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS,
+                )
+            ),
+        )
+        self._start_research_runtime_bridge_supervisor(
+            {
+                "operator_label": "service-first host",
+                "poll_interval_seconds": interval_seconds,
+            }
+        )
+
+    def _dashboard_probe_loop(self) -> None:
+        while not self._dashboard_probe_stop_event.is_set():
+            try:
+                self.dashboard_snapshot()
+            except Exception:
+                pass
+            with self._dashboard_probe_lock:
+                stable_ready = bool(self._dashboard_probe.get("stable_ready"))
+            wait_seconds = (
+                DEFAULT_DASHBOARD_PROBE_STEADY_INTERVAL_SECONDS
+                if stable_ready
+                else DEFAULT_DASHBOARD_PROBE_WARM_INTERVAL_SECONDS
+            )
+            if self._dashboard_probe_stop_event.wait(wait_seconds):
+                return
+
+    def _startup_convergence_payload(
+        self,
+        *,
+        generated_at: str,
+        startup_control_plane: dict[str, Any],
+        paper: dict[str, Any],
+        probe_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        probe = dict(probe_snapshot or {})
+        server_info = self._server_info
+        paper_status = dict(paper.get("status") or {})
+        runtime_recovery = dict(paper.get("runtime_recovery") or {})
+        runtime_recovery_status = str(runtime_recovery.get("status") or "UNKNOWN").upper()
+        temporary_runtime_integrity = dict(paper.get("temporary_paper_runtime_integrity") or {})
+        mismatch_status = str(temporary_runtime_integrity.get("mismatch_status") or "").upper()
+        paper_running = bool(paper.get("running"))
+        control_plane_state = str(startup_control_plane.get("overall_state") or "UNKNOWN").upper()
+        control_plane_launch_candidate = bool(
+            startup_control_plane.get("launch_candidate", startup_control_plane.get("dependencies_aligned", startup_control_plane.get("launch_allowed")))
+        )
+        paper_runtime_state = next(
+            (
+                str(row.get("state") or "UNKNOWN").upper()
+                for row in list(startup_control_plane.get("dependencies") or [])
+                if str(row.get("key") or "") == "paper_runtime"
+            ),
+            "UNKNOWN",
+        )
+        runtime_attachment_verified = bool(paper_status) or bool(runtime_recovery_status and runtime_recovery_status != "UNKNOWN")
+        dashboard_attached = server_info is not None
+        paper_runtime_ready = (
+            dashboard_attached
+            and paper_running
+            and paper_runtime_state == "READY"
+        )
+
+        if not dashboard_attached:
+            phase = "booting"
+            reason_code = "dashboard_booting"
+            reason = "Dashboard manager has not yet published listener ownership for the current server instance."
+        elif not bool(probe.get("api_dashboard_responding")):
+            phase = "listener_bound"
+            reason_code = "dashboard_api_not_ready"
+            reason = "Dashboard listener is bound, but /api/dashboard has not yet produced a current payload."
+        elif not runtime_attachment_verified:
+            phase = "dashboard_payload_ready"
+            reason_code = "runtime_attachment_unverified"
+            reason = "Dashboard payload is serving, but tracked paper-runtime attachment is not verified yet."
+        elif not paper_runtime_ready:
+            phase = "runtime_attachment_verified"
+            reason_code = "paper_runtime_not_ready"
+            reason = (
+                str(runtime_recovery.get("operator_message") or "").strip()
+                or str(startup_control_plane.get("primary_reason") or "").strip()
+                or "Tracked paper runtime is attached, but still blocked, halted, or reconciling."
+            )
+        elif control_plane_launch_candidate and bool(probe.get("stable_ready")):
+            phase = "stable_attached"
+            reason_code = "stable_attached"
+            reason = "Dashboard/API and tracked paper runtime remained attached long enough to be treated as stably ready."
+        else:
+            phase = "paper_runtime_verified"
+            reason_code = "stability_window_incomplete"
+            reason = "Tracked paper runtime is verified, but the manager stability window has not completed yet."
+
+        return {
+            "generated_at": generated_at,
+            "phase": phase,
+            "reason_code": reason_code,
+            "reason": reason,
+            "dashboard_attached": dashboard_attached,
+            "runtime_attachment_verified": runtime_attachment_verified,
+            "paper_runtime_ready": paper_runtime_ready,
+            "launch_candidate": control_plane_launch_candidate,
+            "stable_ready": bool(probe.get("stable_ready")) and control_plane_launch_candidate and paper_runtime_ready,
+            "stable_ready_since": probe.get("stable_ready_since"),
+            "ready_streak_count": int(probe.get("consecutive_ready_samples") or 0),
+            "last_probe_at": probe.get("checked_at"),
+            "last_successful_payload_at": probe.get("last_successful_payload_at"),
+            "manager_instance_id": server_info.instance_id if server_info else None,
+            "server_pid": server_info.pid if server_info else None,
+            "paper_runtime_state": paper_runtime_state,
+            "mismatch_status": mismatch_status or "MATCHED",
+        }
+
     def health_payload(self) -> dict[str, Any]:
         generated_at = datetime.now(timezone.utc).isoformat()
         server_info = self._server_info
         with self._dashboard_probe_lock:
             probe = dict(self._dashboard_probe)
-        status = "ok" if probe.get("ready") else "starting" if probe.get("state") == "starting" else "degraded"
+        status = (
+            "ok"
+            if probe.get("stable_ready")
+            else "starting"
+            if str(probe.get("state") or "").lower() in {"starting", "warming"}
+            else "degraded"
+        )
         payload: dict[str, Any] = {
             "status": status,
-            "ready": bool(probe.get("ready")),
+            "ready": bool(probe.get("stable_ready")),
             "generated_at": generated_at,
             "build_stamp": self._build_stamp,
             "version_label": f"dashboard-{self._build_stamp[:10]}",
             "pid": server_info.pid if server_info else os.getpid(),
+            "instance_id": server_info.instance_id if server_info else None,
             "started_at": server_info.started_at if server_info else None,
             "url": server_info.url if server_info else None,
             "host": server_info.host if server_info else None,
@@ -1045,10 +2649,21 @@ class OperatorDashboardService:
                     "detail": probe.get("api_dashboard_detail")
                     or "No successful dashboard probe has been recorded yet.",
                 },
+                "startup_convergence_stable": {
+                    "ok": bool(probe.get("stable_ready")),
+                    "detail": probe.get("phase_detail")
+                    or "Dashboard startup convergence is still warming.",
+                },
             },
         }
         payload["latest_dashboard_generated_at"] = probe.get("generated_at")
         payload["last_probe_at"] = probe.get("checked_at")
+        payload["stable_ready_since"] = probe.get("stable_ready_since")
+        payload["consecutive_ready_samples"] = probe.get("consecutive_ready_samples")
+        payload["phase"] = probe.get("phase")
+        payload["phase_detail"] = probe.get("phase_detail")
+        payload["dashboard_attached"] = bool(probe.get("dashboard_attached"))
+        payload["paper_runtime_ready"] = bool(probe.get("paper_runtime_ready"))
         if probe.get("error"):
             payload["error"] = probe["error"]
         return payload
@@ -1063,6 +2678,13 @@ class OperatorDashboardService:
                     {
                         "state": "degraded",
                         "ready": False,
+                        "stable_ready": False,
+                        "stable_ready_since": None,
+                        "consecutive_ready_samples": 0,
+                        "phase": "dashboard_payload_error",
+                        "phase_detail": detail,
+                        "dashboard_attached": False,
+                        "paper_runtime_ready": False,
                         "operator_surface_loadable": False,
                         "operator_surface_detail": detail,
                         "api_dashboard_responding": False,
@@ -1075,10 +2697,72 @@ class OperatorDashboardService:
 
             operator_surface = snapshot.get("operator_surface") if snapshot is not None else None
             operator_surface_loadable = isinstance(operator_surface, dict) and bool(operator_surface)
+            startup_control_plane = dict(snapshot.get("startup_control_plane") or {}) if snapshot is not None else {}
+            convergence = self._startup_convergence_payload(
+                generated_at=checked_at,
+                startup_control_plane=startup_control_plane,
+                paper=dict(snapshot.get("paper") or {}) if snapshot is not None else {},
+                probe_snapshot=self._dashboard_probe,
+            )
+            control_plane_launch_candidate = bool(
+                startup_control_plane.get("launch_candidate", startup_control_plane.get("dependencies_aligned", startup_control_plane.get("launch_allowed")))
+            )
+            payload_instance_id = str(
+                ((snapshot.get("dashboard_meta") or {}) if snapshot is not None else {}).get("server_instance_id") or ""
+            ).strip()
+            previous_instance_id = str(self._dashboard_probe.get("last_successful_instance_id") or "").strip()
+            previous_stable_since = self._dashboard_probe.get("stable_ready_since")
+            ready_candidate = (
+                operator_surface_loadable
+                and snapshot is not None
+                and control_plane_launch_candidate
+                and convergence.get("dashboard_attached") is True
+                and convergence.get("paper_runtime_ready") is True
+            )
+            if ready_candidate:
+                if previous_instance_id and payload_instance_id and previous_instance_id != payload_instance_id:
+                    ready_count = 1
+                    stable_ready_since = checked_at
+                else:
+                    ready_count = int(self._dashboard_probe.get("consecutive_ready_samples") or 0) + 1
+                    stable_ready_since = previous_stable_since or checked_at
+                stable_ready_dt = _parse_iso_datetime(stable_ready_since)
+                stable_window_seconds = (
+                    max((datetime.now(timezone.utc) - stable_ready_dt.astimezone(timezone.utc)).total_seconds(), 0.0)
+                    if stable_ready_dt is not None
+                    else 0.0
+                )
+                stable_ready = (
+                    ready_count >= DEFAULT_DASHBOARD_PROBE_MIN_STABLE_SAMPLES
+                    and stable_window_seconds >= DEFAULT_DASHBOARD_PROBE_STABILITY_WINDOW_SECONDS
+                )
+                state = "ready" if stable_ready else "warming"
+                phase = "stable_attached" if stable_ready else "paper_runtime_verified"
+                phase_detail = (
+                    "Dashboard/API and tracked paper runtime remained attached across the manager stability window."
+                    if stable_ready
+                    else "Dashboard/API and tracked paper runtime are healthy, but the manager stability window is still accumulating."
+                )
+            else:
+                ready_count = 0
+                stable_ready_since = None
+                stable_ready = False
+                phase = str(convergence.get("phase") or "dashboard_payload_ready")
+                phase_detail = str(convergence.get("reason") or "Dashboard startup convergence is still incomplete.")
+                state = "blocked" if str(startup_control_plane.get("overall_state") or "").upper() in {"BLOCKED", "RECONCILIATION_REQUIRED"} else "warming"
             self._dashboard_probe.update(
                 {
-                    "state": "ready" if operator_surface_loadable else "degraded",
-                    "ready": operator_surface_loadable,
+                    "state": state,
+                    "ready": stable_ready,
+                    "stable_ready": stable_ready,
+                    "stable_ready_since": stable_ready_since,
+                    "consecutive_ready_samples": ready_count,
+                    "phase": phase,
+                    "phase_detail": phase_detail,
+                    "dashboard_attached": bool(convergence.get("dashboard_attached")),
+                    "paper_runtime_ready": bool(convergence.get("paper_runtime_ready")),
+                    "last_successful_payload_at": snapshot.get("generated_at") if snapshot is not None else None,
+                    "last_successful_instance_id": payload_instance_id or None,
                     "operator_surface_loadable": operator_surface_loadable,
                     "operator_surface_detail": (
                         "operator_surface payload loaded from the current dashboard snapshot."
@@ -1103,17 +2787,24 @@ class OperatorDashboardService:
             "stop-shadow": ["bash", "scripts/stop_probationary_shadow.sh"],
             "start-paper": None,
             "stop-paper": ["bash", "scripts/stop_probationary_paper_soak.sh"],
+            "start-live-strategy-pilot": ["bash", "scripts/run_probationary_live_strategy_pilot.sh", "--background"],
+            "stop-live-strategy-pilot": ["bash", "scripts/stop_probationary_live_strategy_pilot.sh"],
             "generate-daily-summary": ["bash", "scripts/run_probationary_daily_summary.sh"],
             "generate-paper-summary": ["bash", "scripts/run_probationary_paper_summary.sh"],
             "auth-gate-check": ["bash", "scripts/run_schwab_auth_gate.sh"],
             "refresh-market-strip": None,
-            "paper-halt-entries": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "halt_entries"],
-            "paper-resume-entries": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "resume_entries"],
-            "paper-clear-fault": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "clear_fault"],
-            "paper-clear-risk-halts": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "clear_risk_halts"],
-            "paper-force-reconcile": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "force_reconcile"],
-            "paper-flatten-and-halt": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "flatten_and_halt"],
-            "paper-stop-after-cycle": ["bash", "scripts/run_probationary_operator_control.sh", "--action", "stop_after_cycle"],
+            "paper-halt-entries": None,
+            "paper-resume-entries": None,
+            "paper-clear-fault": None,
+            "paper-clear-risk-halts": None,
+            "paper-force-reconcile": None,
+            "paper-flatten-and-halt": None,
+            "paper-stop-after-cycle": None,
+            "live-pilot-halt-entries": None,
+            "live-pilot-resume-entries": None,
+            "live-pilot-flatten-and-halt": None,
+            "live-pilot-stop-after-cycle": None,
+            "live-pilot-rearm": None,
             "refresh-status": None,
         }
         if action not in command_map:
@@ -1164,6 +2855,36 @@ class OperatorDashboardService:
                 return result
             if action == "acknowledge-inherited-risk":
                 result = self._acknowledge_inherited_risk()
+                self._log_action(result)
+                result["snapshot"] = self.snapshot()
+                return result
+            if action == "research-runtime-bridge-acknowledge-anomaly":
+                result = self._review_research_runtime_bridge_anomaly(payload, review_state="ACKNOWLEDGED")
+                self._log_action(result)
+                result["snapshot"] = self.snapshot()
+                return result
+            if action == "research-runtime-bridge-mark-reviewed":
+                result = self._review_research_runtime_bridge_anomaly(payload, review_state="REVIEWED")
+                self._log_action(result)
+                result["snapshot"] = self.snapshot()
+                return result
+            if action == "research-runtime-bridge-resolve-anomaly":
+                result = self._review_research_runtime_bridge_anomaly(payload, review_state="RESOLVED")
+                self._log_action(result)
+                result["snapshot"] = self.snapshot()
+                return result
+            if action == "research-runtime-bridge-start-supervisor":
+                result = self._start_research_runtime_bridge_supervisor(payload)
+                self._log_action(result)
+                result["snapshot"] = self.snapshot()
+                return result
+            if action == "research-runtime-bridge-stop-supervisor":
+                result = self._stop_research_runtime_bridge_supervisor(payload)
+                self._log_action(result)
+                result["snapshot"] = self.snapshot()
+                return result
+            if action == "research-runtime-bridge-run-cycle-now":
+                result = self._run_research_runtime_bridge_supervisor_cycle_now(payload)
                 self._log_action(result)
                 result["snapshot"] = self.snapshot()
                 return result
@@ -1343,7 +3064,11 @@ class OperatorDashboardService:
             precheck["snapshot"] = self.snapshot()
             return precheck
 
-        command = command_map[action]
+        command = (
+            self._paper_operator_control_command(action)
+            or self._live_strategy_pilot_operator_control_command(action)
+            or command_map[action]
+        )
         if action == "start-paper":
             command, metadata = self._paper_start_command_with_enabled_temp_paper(pre_snapshot or self.snapshot())
             if command is None:
@@ -1410,7 +3135,57 @@ class OperatorDashboardService:
         return result
 
     def run_production_action(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
-        result = self._production_link_service.run_action(action, payload)
+        if action == "prime-local-auth":
+            result_payload = self._prime_local_operator_auth_session()
+            self._log_action(result_payload)
+            result_payload["snapshot"] = self.snapshot()
+            return result_payload
+        effective_payload = dict(payload)
+        auth_metadata: dict[str, Any] | None = None
+        live_auth_required_actions = {"submit-order", "cancel-order", "replace-order", "flatten-position"}
+        auth_context_actions = live_auth_required_actions | {"preview-order"}
+        if action in auth_context_actions:
+            auth_metadata = self._current_local_operator_auth_metadata()
+            authorization = self._authorize_production_action(
+                action=action,
+                payload=effective_payload,
+                auth_metadata=auth_metadata,
+            )
+            auth_metadata = authorization["auth"]
+            if action in live_auth_required_actions and not authorization["allowed"]:
+                output = f"Production live action blocked because {authorization['blocked_reason'] or 'local operator auth is not active.'}"
+                result_payload = self._result_record(
+                    action=f"production-{action}",
+                    ok=False,
+                    command=None,
+                    output=output,
+                )
+                result_payload["message"] = output
+                result_payload["production_link"] = self._production_link_service.snapshot()
+                result_payload["auth"] = auth_metadata
+                self._log_action(result_payload)
+                result_payload["snapshot"] = self.snapshot()
+                return result_payload
+            effective_payload.update(authorization["payload_updates"])
+            if authorization["payload_updates"]:
+                effective_payload.setdefault("operator_label", auth_metadata.get("local_operator_identity") or "manual operator")
+        try:
+            result = self._production_link_service.run_action(action, effective_payload)
+        except SchwabBrokerHttpError as exc:
+            detail = str(exc).strip() or "Schwab broker request failed."
+            result_payload = self._result_record(
+                action=f"production-{action}",
+                ok=False,
+                command=None,
+                output=detail,
+            )
+            result_payload["message"] = f"Production-link action {action} failed."
+            result_payload["production_link"] = self._production_link_service.snapshot()
+            if auth_metadata:
+                result_payload["auth"] = auth_metadata
+            self._log_action(result_payload)
+            result_payload["snapshot"] = self.snapshot()
+            return result_payload
         result_payload = self._result_record(
             action=f"production-{action}",
             ok=bool(result.get("ok")),
@@ -1419,9 +3194,236 @@ class OperatorDashboardService:
         )
         result_payload["message"] = str(result.get("message") or result_payload["message"])
         result_payload["production_link"] = result.get("production_link") or self._production_link_service.snapshot()
+        if auth_metadata:
+            result_payload["auth"] = auth_metadata
         self._log_action(result_payload)
         result_payload["snapshot"] = self.snapshot()
         return result_payload
+
+    def _current_local_operator_auth_metadata(self) -> dict[str, Any]:
+        payload = local_operator_auth_surface(self._repo_root)
+        auth_available = bool(payload.get("available"))
+        auth_session_active = bool(payload.get("auth_session_active"))
+        local_operator_identity = str(payload.get("local_operator_identity") or "").strip() or None
+        auth_method = str(payload.get("auth_method") or "").strip() or None
+        authenticated_at = str(payload.get("authenticated_at") or "").strip() or None
+        auth_session_id = str(payload.get("auth_session_id") or "").strip() or None
+        detail = str(payload.get("detail") or "").strip()
+        return {
+            "auth_available": auth_available,
+            "auth_session_active": auth_session_active,
+            "local_operator_identity": local_operator_identity,
+            "auth_method": auth_method,
+            "authenticated_at": authenticated_at,
+            "auth_session_id": auth_session_id,
+            "operator_authenticated": bool(auth_session_active and local_operator_identity and auth_method and authenticated_at),
+            "detail": detail,
+            "auth_session_expires_at": payload.get("auth_session_expires_at"),
+            "auth_session_ttl_seconds": payload.get("auth_session_ttl_seconds"),
+            "ttl_seconds": payload.get("ttl_seconds"),
+            "time_remaining_seconds": payload.get("time_remaining_seconds"),
+            "time_remaining_label": payload.get("time_remaining_label"),
+            "next_action_label": payload.get("next_action_label"),
+            "next_action_detail": payload.get("next_action_detail"),
+            "prime_action": payload.get("prime_action"),
+            "source_of_truth": payload.get("source_of_truth"),
+            "entry_allowed": payload.get("entry_allowed"),
+            "entry_blocked_reason": payload.get("entry_blocked_reason"),
+            "flatten_allowed": payload.get("flatten_allowed"),
+            "flatten_blocked_reason": payload.get("flatten_blocked_reason"),
+            "cancel_allowed": payload.get("cancel_allowed"),
+            "cancel_blocked_reason": payload.get("cancel_blocked_reason"),
+            "replace_allowed": payload.get("replace_allowed"),
+            "replace_blocked_reason": payload.get("replace_blocked_reason"),
+            "action_risk_policy": payload.get("action_risk_policy"),
+            "state_path": str((payload.get("artifacts") or {}).get("state_path") or self._local_operator_auth_state_path),
+            "updated_at": _read_json(self._local_operator_auth_state_path).get("updated_at"),
+        }
+
+    def _authorize_production_action(
+        self,
+        *,
+        action: str,
+        payload: dict[str, Any],
+        auth_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        risk_bucket = production_action_risk_bucket(action, payload)
+        operator_authenticated = bool(auth_metadata.get("operator_authenticated"))
+        reduce_only_allowed = risk_bucket == REDUCE_RISK and action in {
+            "submit-order",
+            "flatten-position",
+            "cancel-order",
+            "replace-order",
+            "preview-order",
+        }
+        if operator_authenticated:
+            authorization_policy = "FULL_ACTIVE_SESSION"
+            allowed = True
+            blocked_reason = None
+        elif reduce_only_allowed and action != "preview-order":
+            authorization_policy = "REDUCE_ONLY_POLICY"
+            allowed = True
+            blocked_reason = None
+        elif action == "preview-order":
+            authorization_policy = "FULL_ACTIVE_SESSION" if operator_authenticated else "PREVIEW_ONLY"
+            allowed = True
+            blocked_reason = None
+        else:
+            authorization_policy = "DENIED_NO_ACTIVE_SESSION"
+            allowed = False
+            blocked_reason = str(auth_metadata.get("entry_blocked_reason") or auth_metadata.get("detail") or "local operator auth is not active.")
+
+        enriched_auth = {
+            **auth_metadata,
+            "action": action,
+            "action_risk_bucket": risk_bucket,
+            "authorization_policy": authorization_policy,
+            "authorized_for_action": allowed,
+            "blocked_reason": blocked_reason,
+        }
+        payload_updates: dict[str, Any] = {
+            "operator_auth_policy": authorization_policy,
+            "operator_auth_risk_bucket": risk_bucket,
+        }
+        if operator_authenticated:
+            payload_updates.update(
+                {
+                    "local_operator_identity": auth_metadata.get("local_operator_identity"),
+                    "auth_method": auth_metadata.get("auth_method"),
+                    "authenticated_at": auth_metadata.get("authenticated_at"),
+                    "auth_session_id": auth_metadata.get("auth_session_id"),
+                    "operator_authenticated": True,
+                    "operator_reduce_only_authorized": False,
+                }
+            )
+        elif reduce_only_allowed and action != "preview-order":
+            payload_updates.update(
+                {
+                    "local_operator_identity": auth_metadata.get("local_operator_identity"),
+                    "auth_method": auth_metadata.get("auth_method"),
+                    "authenticated_at": auth_metadata.get("authenticated_at"),
+                    "auth_session_id": auth_metadata.get("auth_session_id"),
+                    "operator_authenticated": False,
+                    "operator_reduce_only_authorized": True,
+                }
+            )
+        elif action == "preview-order":
+            payload_updates.update(
+                {
+                    "operator_authenticated": operator_authenticated,
+                    "operator_reduce_only_authorized": bool(reduce_only_allowed and not operator_authenticated),
+                }
+            )
+            if operator_authenticated:
+                payload_updates.update(
+                    {
+                        "local_operator_identity": auth_metadata.get("local_operator_identity"),
+                        "auth_method": auth_metadata.get("auth_method"),
+                        "authenticated_at": auth_metadata.get("authenticated_at"),
+                        "auth_session_id": auth_metadata.get("auth_session_id"),
+                    }
+                )
+
+        note = (
+            "Existing local operator auth session reused for production action."
+            if authorization_policy == "FULL_ACTIVE_SESSION"
+            else "Reduce-only production action authorized despite inactive normal session."
+            if authorization_policy == "REDUCE_ONLY_POLICY"
+            else "Preview built without an active local operator auth session."
+            if authorization_policy == "PREVIEW_ONLY"
+            else "Production action denied because no active local operator auth session is present."
+        )
+        append_local_operator_auth_event(
+            self._repo_root,
+            {
+                "event_type": (
+                    "sensitive_action_authorized"
+                    if authorization_policy == "FULL_ACTIVE_SESSION"
+                    else "sensitive_action_authorized_reduce_only"
+                    if authorization_policy == "REDUCE_ONLY_POLICY"
+                    else "sensitive_action_preview_built_without_auth"
+                    if authorization_policy == "PREVIEW_ONLY"
+                    else "sensitive_action_denied_no_auth"
+                ),
+                "action_kind": "production",
+                "action": action,
+                "instrument": str(payload.get("instrument") or payload.get("symbol") or "").strip().upper() or None,
+                "local_operator_identity": auth_metadata.get("local_operator_identity"),
+                "auth_method": auth_metadata.get("auth_method") or ("NONE" if not operator_authenticated else None),
+                "authenticated_at": auth_metadata.get("authenticated_at"),
+                "auth_session_id": auth_metadata.get("auth_session_id"),
+                "operator_triggered": True,
+                "automatic": False,
+                "note": note,
+                "authorization_policy": authorization_policy,
+                "risk_bucket": risk_bucket,
+                "reduce_only_authorized": authorization_policy == "REDUCE_ONLY_POLICY",
+            },
+        )
+        return {
+            "allowed": allowed,
+            "blocked_reason": blocked_reason,
+            "payload_updates": payload_updates,
+            "auth": enriched_auth,
+        }
+
+    def _prime_local_operator_auth_session(self) -> dict[str, Any]:
+        auth_metadata = self._current_local_operator_auth_metadata()
+        if auth_metadata.get("operator_authenticated"):
+            result_payload = self._result_record(
+                action="production-prime-local-auth",
+                ok=True,
+                command=None,
+                output=(
+                    "Local operator auth session is already active. "
+                    f"Time remaining: {auth_metadata.get('time_remaining_label') or 'unknown'}."
+                ),
+            )
+            result_payload["message"] = "Local operator auth session already active."
+            result_payload["production_link"] = self._production_link_service.snapshot()
+            result_payload["auth"] = auth_metadata
+            return result_payload
+        command = ["bash", "scripts/run_local_operator_auth.sh"]
+        completed = subprocess.run(
+            command,
+            cwd=self._repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        auth_metadata = self._wait_for_local_operator_auth_metadata(timeout_seconds=10.0)
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        output = stdout or stderr or "Local operator auth command completed without output."
+        ok = completed.returncode == 0 and bool(auth_metadata.get("operator_authenticated"))
+        result_payload = self._result_record(
+            action="production-prime-local-auth",
+            ok=ok,
+            command=command,
+            output=output,
+            returncode=completed.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        if ok:
+            result_payload["message"] = "Local operator auth session primed for the live-pilot workflow."
+        else:
+            result_payload["message"] = (
+                f"Local operator auth prime failed because {auth_metadata.get('detail') or 'Touch ID session is not active.'}"
+            )
+        result_payload["production_link"] = self._production_link_service.snapshot()
+        result_payload["auth"] = auth_metadata
+        return result_payload
+
+    def _wait_for_local_operator_auth_metadata(self, *, timeout_seconds: float) -> dict[str, Any]:
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+        latest = self._current_local_operator_auth_metadata()
+        while datetime.now(timezone.utc) < deadline:
+            latest = self._current_local_operator_auth_metadata()
+            if latest.get("operator_authenticated"):
+                return latest
+            threading.Event().wait(0.25)
+        return latest
 
     def _load_same_underlying_conflict_review_store(self) -> dict[str, Any]:
         payload = _read_json(self._same_underlying_conflict_review_state_path)
@@ -1978,6 +3980,497 @@ class OperatorDashboardService:
                 return text
         return None
 
+    def _review_research_runtime_bridge_anomaly(self, payload: dict[str, Any], *, review_state: str) -> dict[str, Any]:
+        anomaly_key = str(payload.get("dedup_key") or payload.get("review_key") or payload.get("anomaly_key") or "").strip()
+        if not anomaly_key:
+            return self._result_record(
+                action="research-runtime-bridge-review-anomaly",
+                ok=False,
+                command=None,
+                output="Runtime bridge anomaly review rejected because no anomaly key was supplied.",
+            )
+        operator_label = self._operator_label_from_payload(payload)
+        note = self._note_from_payload(payload, "review_note", "acknowledgement_note", "note", "reason")
+        try:
+            result = review_runtime_bridge_anomaly(
+                output_dir=self._research_runtime_bridge_root,
+                anomaly_key=anomaly_key,
+                operator_label=operator_label,
+                note=note,
+                review_state=review_state,
+            )
+        except Exception as exc:
+            return self._result_record(
+                action="research-runtime-bridge-review-anomaly",
+                ok=False,
+                command=None,
+                output=f"Runtime bridge anomaly review failed: {exc}",
+            )
+        return self._result_record(
+            action="research-runtime-bridge-review-anomaly",
+            ok=True,
+            command=None,
+            output=(
+                f"Runtime bridge anomaly {anomaly_key} marked {review_state.lower()} by {operator_label}."
+            ),
+            stdout=json.dumps(result, sort_keys=True),
+        )
+
+    def _default_research_runtime_bridge_supervisor_state(self) -> dict[str, Any]:
+        return {
+            "contract_version": "research_runtime_bridge_supervisor_v1",
+            "label": "Research Runtime Bridge Supervisor",
+            "paper_only": True,
+            "live_execution_enabled": False,
+            "desired_state": "STOPPED",
+            "status": "STOPPED",
+            "status_reason": "SUPERVISOR_STOPPED",
+            "status_detail": "The paper-only supervisor is stopped until the operator starts it.",
+            "current_thread_alive": False,
+            "operator_action_required": False,
+            "cycle_interval_seconds": DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS,
+            "heartbeat_at": None,
+            "heartbeat_age_seconds": None,
+            "last_cycle_started_at": None,
+            "last_cycle_completed_at": None,
+            "last_successful_cycle_at": None,
+            "last_successful_cycle_index": 0,
+            "next_cycle_not_before": None,
+            "blocked_reason": None,
+            "blocked_cycle_count": 0,
+            "attention_cycle_count": 0,
+            "last_error": None,
+            "start_count": 0,
+            "run_now_count": 0,
+            "interrupted_cycle_recovery_count": 0,
+            "needs_attention_now_count": 0,
+            "unresolved_anomaly_count": 0,
+            "acknowledged_anomaly_count": 0,
+            "acknowledged_pending_count": 0,
+            "resolved_anomaly_count": 0,
+            "review_pending_count": 0,
+            "reviewed_pending_count": 0,
+            "escalated_anomaly_count": 0,
+            "attention_summary_line": "0 needs attention now, 0 acknowledged pending, 0 reviewed pending, 0 escalated.",
+            "last_start_requested_at": None,
+            "last_stop_requested_at": None,
+            "last_run_now_requested_at": None,
+            "last_result_summary_line": None,
+            "liveness_state": "STOPPED",
+        }
+
+    def _ensure_research_runtime_bridge_supervisor_state(self) -> None:
+        if self._research_runtime_bridge_supervisor_state_path.exists():
+            return
+        self._research_runtime_bridge_root.mkdir(parents=True, exist_ok=True)
+        _write_json_file(
+            self._research_runtime_bridge_supervisor_state_path,
+            self._default_research_runtime_bridge_supervisor_state(),
+        )
+
+    def _load_research_runtime_bridge_supervisor_state(self) -> dict[str, Any]:
+        self._ensure_research_runtime_bridge_supervisor_state()
+        payload = {
+            **self._default_research_runtime_bridge_supervisor_state(),
+            **_load_json_file(self._research_runtime_bridge_supervisor_state_path),
+        }
+        thread_alive = bool(self._research_runtime_bridge_supervisor_thread and self._research_runtime_bridge_supervisor_thread.is_alive())
+        payload["current_thread_alive"] = thread_alive
+        heartbeat_at = _parse_iso_datetime(str(payload.get("heartbeat_at") or ""))
+        payload["heartbeat_age_seconds"] = (
+            max(0, int((datetime.now(timezone.utc) - heartbeat_at).total_seconds()))
+            if heartbeat_at is not None
+            else None
+        )
+        cycle_interval_seconds = max(
+            1,
+            int(payload.get("cycle_interval_seconds") or DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS),
+        )
+        if str(payload.get("status") or "").upper() == "STOPPED":
+            payload["liveness_state"] = "STOPPED"
+        elif payload["heartbeat_age_seconds"] is None:
+            payload["liveness_state"] = "NO_HEARTBEAT"
+        elif int(payload["heartbeat_age_seconds"]) > max(cycle_interval_seconds * 2, 15):
+            payload["liveness_state"] = "STALE_HEARTBEAT"
+        else:
+            payload["liveness_state"] = "HEALTHY"
+        if payload["desired_state"] == "RUNNING" and not thread_alive and payload["status"] in {"RUNNING", "STARTING"}:
+            payload["status"] = "STOPPED"
+            payload["status_reason"] = "SUPERVISOR_NOT_RUNNING_IN_CURRENT_PROCESS"
+            payload["status_detail"] = "The supervisor was expected to be running, but no active local supervisor thread is attached in this process."
+            payload["blocked_reason"] = payload.get("blocked_reason") or "SUPERVISOR_NOT_RUNNING_IN_CURRENT_PROCESS"
+            payload["operator_action_required"] = True
+        return payload
+
+    def _write_research_runtime_bridge_supervisor_state(self, state: dict[str, Any]) -> None:
+        payload = {
+            **self._default_research_runtime_bridge_supervisor_state(),
+            **dict(state),
+        }
+        payload["current_thread_alive"] = bool(
+            self._research_runtime_bridge_supervisor_thread and self._research_runtime_bridge_supervisor_thread.is_alive()
+        )
+        self._research_runtime_bridge_root.mkdir(parents=True, exist_ok=True)
+        _write_json_file(self._research_runtime_bridge_supervisor_state_path, payload)
+
+    def _append_research_runtime_bridge_supervisor_event(
+        self,
+        *,
+        event_type: str,
+        status: str,
+        message: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        self._research_runtime_bridge_root.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "event_type": event_type,
+            "status": status,
+            "message": message,
+            "paper_only": True,
+            "live_execution_enabled": False,
+        }
+        if extra:
+            payload.update(extra)
+        with self._research_runtime_bridge_supervisor_events_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True))
+            handle.write("\n")
+
+    def _research_runtime_bridge_config(self) -> dict[str, Any]:
+        snapshot = _load_json_file(self._research_runtime_bridge_root / "bridge_snapshot.json")
+        runtime_state = _load_json_file(self._research_runtime_bridge_root / "runtime_state.json")
+        selected_lane_ids: list[str] = []
+        for tenant in list(snapshot.get("selected_tenants") or []):
+            for lane_id in list(dict(tenant).get("lane_ids") or []):
+                normalized = str(lane_id or "").strip()
+                if normalized and normalized not in selected_lane_ids:
+                    selected_lane_ids.append(normalized)
+        warehouse_root = Path(
+            str((snapshot.get("source_truth") or {}).get("warehouse_root") or DEFAULT_WAREHOUSE_ROOT)
+        ).resolve()
+        return {
+            "warehouse_root": warehouse_root,
+            "selected_lane_ids": tuple(selected_lane_ids or DEFAULT_SELECTED_LANES),
+            "entries_enabled": bool(runtime_state.get("entries_enabled", True)),
+            "exits_enabled": bool(runtime_state.get("exits_enabled", True)),
+            "operator_halt": bool(runtime_state.get("operator_halt", False)),
+        }
+
+    def _update_research_runtime_bridge_supervisor_from_snapshot(
+        self,
+        *,
+        state: dict[str, Any],
+        snapshot: dict[str, Any],
+        cycle_interval_seconds: int,
+        last_cycle_started_at: str,
+    ) -> dict[str, Any]:
+        summary = dict(snapshot.get("summary") or {})
+        cadence = dict(snapshot.get("cadence") or {})
+        anomaly_queue = dict(snapshot.get("anomaly_queue") or {})
+        blocked_reason = str(cadence.get("blocked_reason") or "").strip() or None
+        needs_attention_now_count = int(anomaly_queue.get("needs_attention_now_count") or summary.get("needs_attention_now_count") or 0)
+        unresolved_count = int(anomaly_queue.get("unresolved_count") or summary.get("unresolved_anomaly_count") or 0)
+        review_pending_count = int(anomaly_queue.get("review_pending_count") or summary.get("unreviewed_anomaly_count") or 0)
+        acknowledged_count = int(anomaly_queue.get("acknowledged_count") or summary.get("acknowledged_anomaly_count") or 0)
+        acknowledged_pending_count = int(anomaly_queue.get("acknowledged_pending_count") or 0)
+        reviewed_pending_count = int(anomaly_queue.get("reviewed_pending_count") or 0)
+        resolved_count = int(anomaly_queue.get("resolved_count") or summary.get("resolved_anomaly_count") or 0)
+        escalated_count = int(anomaly_queue.get("escalated_count") or 0)
+        status = "WAITING"
+        status_reason = "WAITING_FOR_NEXT_CYCLE"
+        status_detail = "The paper-only supervisor is waiting for the next cadence cycle."
+        if blocked_reason:
+            status = "BLOCKED"
+            status_reason = blocked_reason
+            status_detail = runtime_bridge_blocked_reason_detail(blocked_reason)
+        elif needs_attention_now_count > 0 or int(summary.get("reconciliation_issue_count") or 0) > 0:
+            status = "ATTENTION_REQUIRED"
+            status_reason = "ACTIVE_RUNTIME_ANOMALIES"
+            status_detail = (
+                f"{escalated_count} escalated anomaly{'ies' if escalated_count != 1 else ''} still need explicit resolution."
+                if escalated_count > 0
+                else f"{needs_attention_now_count} active anomaly{'ies' if needs_attention_now_count != 1 else ''} still need acknowledgement or review."
+            )
+        elif str(cadence.get("cycle_state") or "").upper() == "SETTLED":
+            status = "SETTLED"
+            status_reason = "CADENCE_SETTLED"
+            status_detail = "No pending intents, open positions, or unresolved runtime anomalies remain in the selected paper bridge scope."
+        elif int(summary.get("pending_intent_count") or 0) > 0 or int(summary.get("open_position_count") or 0) > 0:
+            status = "RUNNING"
+            status_reason = "LIFECYCLE_IN_PROGRESS"
+            status_detail = "The bridge is actively advancing pending intents or open paper positions."
+        elif unresolved_count > 0:
+            status = "WAITING"
+            status_reason = "MONITORING_REVIEWED_ANOMALIES"
+            status_detail = (
+                f"{acknowledged_pending_count} acknowledged and {reviewed_pending_count} reviewed anomaly"
+                f"{'ies are' if (acknowledged_pending_count + reviewed_pending_count) != 1 else ' is'} still being monitored."
+            )
+        return {
+            **state,
+            "status": status,
+            "status_reason": status_reason,
+            "status_detail": status_detail,
+            "desired_state": state.get("desired_state") or "RUNNING",
+            "operator_action_required": needs_attention_now_count > 0 or bool(blocked_reason),
+            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "last_cycle_started_at": last_cycle_started_at,
+            "last_cycle_completed_at": datetime.now(timezone.utc).isoformat(),
+            "last_successful_cycle_at": datetime.now(timezone.utc).isoformat(),
+            "last_successful_cycle_index": int(summary.get("bridge_cycle_index") or cadence.get("bridge_cycle_index") or 0),
+            "next_cycle_not_before": (datetime.now(timezone.utc) + timedelta(seconds=max(1, cycle_interval_seconds))).isoformat(),
+            "blocked_reason": blocked_reason,
+            "blocked_cycle_count": (int(state.get("blocked_cycle_count") or 0) + 1) if blocked_reason else 0,
+            "attention_cycle_count": (
+                int(state.get("attention_cycle_count") or 0) + 1
+                if status == "ATTENTION_REQUIRED"
+                else 0
+            ),
+            "last_error": None,
+            "interrupted_cycle_recovery_count": int(cadence.get("recovered_interrupted_cycle_count") or 0),
+            "needs_attention_now_count": needs_attention_now_count,
+            "unresolved_anomaly_count": unresolved_count,
+            "acknowledged_anomaly_count": acknowledged_count,
+            "acknowledged_pending_count": acknowledged_pending_count,
+            "resolved_anomaly_count": resolved_count,
+            "review_pending_count": review_pending_count,
+            "reviewed_pending_count": reviewed_pending_count,
+            "escalated_anomaly_count": escalated_count,
+            "cadence_cycle_state": cadence.get("cycle_state"),
+            "cadence_last_transition": cadence.get("last_transition"),
+            "cadence_last_transition_message": cadence.get("last_transition_message"),
+            "last_result_summary_line": summary.get("summary_line"),
+            "attention_summary_line": (
+                f"{needs_attention_now_count} needs attention now, {acknowledged_pending_count} acknowledged pending, "
+                f"{reviewed_pending_count} reviewed pending, {escalated_count} escalated."
+            ),
+        }
+
+    def _run_research_runtime_bridge_cycle(self) -> dict[str, Any]:
+        config = self._research_runtime_bridge_config()
+        started_at = datetime.now(timezone.utc).isoformat()
+        state = self._load_research_runtime_bridge_supervisor_state()
+        interval_seconds = max(1, int(state.get("cycle_interval_seconds") or DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS))
+        state.update(
+            {
+                "status": "RUNNING",
+                "status_reason": "SUPERVISOR_CYCLE_RUNNING",
+                "status_detail": "The paper-only supervisor is executing one bridge cycle.",
+                "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                "last_cycle_started_at": started_at,
+                "next_cycle_not_before": None,
+            }
+        )
+        self._write_research_runtime_bridge_supervisor_state(state)
+        result = run_bridge(
+            warehouse_root=config["warehouse_root"],
+            output_dir=self._research_runtime_bridge_root,
+            selected_lane_ids=config["selected_lane_ids"],
+            mode=BRIDGE_MODE_PROSPECTIVE,
+            reset_state=not (self._research_runtime_bridge_root / "bridge_snapshot.json").exists(),
+            entries_enabled=bool(config["entries_enabled"]),
+            exits_enabled=bool(config["exits_enabled"]),
+            operator_halt=bool(config["operator_halt"]),
+            cycle_count=1,
+            poll_interval_seconds=0,
+            stop_when_settled=False,
+        )
+        snapshot = _load_json_file(self._research_runtime_bridge_root / "bridge_snapshot.json")
+        updated_state = self._update_research_runtime_bridge_supervisor_from_snapshot(
+            state=state,
+            snapshot=snapshot,
+            cycle_interval_seconds=interval_seconds,
+            last_cycle_started_at=started_at,
+        )
+        self._write_research_runtime_bridge_supervisor_state(updated_state)
+        self._append_research_runtime_bridge_supervisor_event(
+            event_type="SUPERVISOR_CYCLE_COMPLETED",
+            status=str(updated_state.get("status") or "RUNNING"),
+            message=str(updated_state.get("last_result_summary_line") or "Research runtime bridge cycle completed."),
+            extra={
+                "bridge_cycle_index": updated_state.get("last_successful_cycle_index"),
+                "blocked_reason": updated_state.get("blocked_reason"),
+                "needs_attention_now_count": updated_state.get("needs_attention_now_count"),
+            },
+        )
+        return result
+
+    def _research_runtime_bridge_supervisor_loop(self) -> None:
+        while not self._research_runtime_bridge_supervisor_stop_event.is_set():
+            try:
+                with self._research_runtime_bridge_supervisor_lock:
+                    self._run_research_runtime_bridge_cycle()
+                    state = self._load_research_runtime_bridge_supervisor_state()
+                    interval_seconds = max(
+                        1,
+                        int(state.get("cycle_interval_seconds") or DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS),
+                    )
+            except Exception as exc:
+                state = self._load_research_runtime_bridge_supervisor_state()
+                state.update(
+                    {
+                        "status": "ATTENTION_REQUIRED",
+                        "status_reason": "SUPERVISOR_CYCLE_FAILED",
+                        "status_detail": f"The paper-only supervisor cycle failed with {type(exc).__name__}: {exc}",
+                        "operator_action_required": True,
+                        "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                        "last_cycle_completed_at": datetime.now(timezone.utc).isoformat(),
+                        "next_cycle_not_before": (datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS)).isoformat(),
+                        "last_error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                self._write_research_runtime_bridge_supervisor_state(state)
+                self._append_research_runtime_bridge_supervisor_event(
+                    event_type="SUPERVISOR_CYCLE_FAILED",
+                    status="ATTENTION_REQUIRED",
+                    message=f"Research runtime bridge supervisor cycle failed: {exc}",
+                    extra={"error_type": type(exc).__name__},
+                )
+                interval_seconds = DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS
+            if self._research_runtime_bridge_supervisor_stop_event.wait(interval_seconds):
+                break
+        final_state = self._load_research_runtime_bridge_supervisor_state()
+        final_state.update(
+            {
+                "desired_state": "STOPPED",
+                "status": "STOPPED",
+                "status_reason": "SUPERVISOR_STOPPED",
+                "status_detail": "The paper-only supervisor is stopped and will not advance another cadence cycle until restarted.",
+                "current_thread_alive": False,
+                "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                "next_cycle_not_before": None,
+            }
+        )
+        self._write_research_runtime_bridge_supervisor_state(final_state)
+
+    def _start_research_runtime_bridge_supervisor(self, payload: dict[str, Any]) -> dict[str, Any]:
+        operator_label = self._operator_label_from_payload(payload)
+        interval_seconds = max(
+            1,
+            int(payload.get("poll_interval_seconds") or DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS),
+        )
+        with self._research_runtime_bridge_supervisor_lock:
+            state = self._load_research_runtime_bridge_supervisor_state()
+            if state.get("desired_state") == "RUNNING" and state.get("current_thread_alive"):
+                return self._result_record(
+                    action="research-runtime-bridge-start-supervisor",
+                    ok=True,
+                    command=None,
+                    output="Research runtime bridge supervisor is already running in paper-only mode.",
+                )
+            state.update(
+                {
+                    "desired_state": "RUNNING",
+                    "status": "STARTING",
+                    "status_reason": "SUPERVISOR_START_REQUESTED",
+                    "status_detail": "The paper-only supervisor is starting and will begin local cadence cycles shortly.",
+                    "cycle_interval_seconds": interval_seconds,
+                    "last_start_requested_at": datetime.now(timezone.utc).isoformat(),
+                    "start_count": int(state.get("start_count") or 0) + 1,
+                    "last_error": None,
+                }
+            )
+            self._write_research_runtime_bridge_supervisor_state(state)
+            if not (self._research_runtime_bridge_supervisor_thread and self._research_runtime_bridge_supervisor_thread.is_alive()):
+                self._research_runtime_bridge_supervisor_stop_event = threading.Event()
+                self._research_runtime_bridge_supervisor_thread = threading.Thread(
+                    target=self._research_runtime_bridge_supervisor_loop,
+                    name="research-runtime-bridge-supervisor",
+                    daemon=True,
+                )
+                self._research_runtime_bridge_supervisor_thread.start()
+            self._append_research_runtime_bridge_supervisor_event(
+                event_type="SUPERVISOR_STARTED",
+                status="STARTING",
+                message=f"Research runtime bridge supervisor started by {operator_label}.",
+                extra={"operator_label": operator_label, "cycle_interval_seconds": interval_seconds},
+            )
+        return self._result_record(
+            action="research-runtime-bridge-start-supervisor",
+            ok=True,
+            command=None,
+            output=f"Research runtime bridge supervisor started in paper-only mode with {interval_seconds}s cadence.",
+        )
+
+    def _stop_research_runtime_bridge_supervisor(self, payload: dict[str, Any]) -> dict[str, Any]:
+        operator_label = self._operator_label_from_payload(payload)
+        existing_state = self._load_research_runtime_bridge_supervisor_state()
+        if existing_state.get("desired_state") == "STOPPED" and existing_state.get("current_thread_alive") is not True:
+            return self._result_record(
+                action="research-runtime-bridge-stop-supervisor",
+                ok=True,
+                command=None,
+                output="Research runtime bridge supervisor is already stopped.",
+            )
+        self._research_runtime_bridge_supervisor_stop_event.set()
+        thread = self._research_runtime_bridge_supervisor_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=10)
+        with self._research_runtime_bridge_supervisor_lock:
+            state = self._load_research_runtime_bridge_supervisor_state()
+            state.update(
+                {
+                    "desired_state": "STOPPED",
+                    "status": "STOPPED",
+                    "status_reason": "SUPERVISOR_STOP_REQUESTED",
+                    "status_detail": "The paper-only supervisor was stopped intentionally by the operator.",
+                    "last_stop_requested_at": datetime.now(timezone.utc).isoformat(),
+                    "next_cycle_not_before": None,
+                }
+            )
+            self._write_research_runtime_bridge_supervisor_state(state)
+            self._append_research_runtime_bridge_supervisor_event(
+                event_type="SUPERVISOR_STOPPED",
+                status="STOPPED",
+                message=f"Research runtime bridge supervisor stopped by {operator_label}.",
+                extra={"operator_label": operator_label},
+            )
+        return self._result_record(
+            action="research-runtime-bridge-stop-supervisor",
+            ok=True,
+            command=None,
+            output="Research runtime bridge supervisor stopped.",
+        )
+
+    def _run_research_runtime_bridge_supervisor_cycle_now(self, payload: dict[str, Any]) -> dict[str, Any]:
+        operator_label = self._operator_label_from_payload(payload)
+        try:
+            with self._research_runtime_bridge_supervisor_lock:
+                state = self._load_research_runtime_bridge_supervisor_state()
+                if str(state.get("status") or "").upper() == "RUNNING" and state.get("current_thread_alive"):
+                    return self._result_record(
+                        action="research-runtime-bridge-run-cycle-now",
+                        ok=True,
+                        command=None,
+                        output="Research runtime bridge supervisor is already running a local cadence loop; manual cycle request was skipped.",
+                    )
+                state["last_run_now_requested_at"] = datetime.now(timezone.utc).isoformat()
+                state["run_now_count"] = int(state.get("run_now_count") or 0) + 1
+                state["status_reason"] = "MANUAL_CYCLE_REQUESTED"
+                state["status_detail"] = "A manual paper-only bridge cycle was requested outside the recurring supervisor cadence."
+                self._write_research_runtime_bridge_supervisor_state(state)
+                result = self._run_research_runtime_bridge_cycle()
+        except Exception as exc:
+            return self._result_record(
+                action="research-runtime-bridge-run-cycle-now",
+                ok=False,
+                command=None,
+                output=f"Research runtime bridge cycle failed: {exc}",
+            )
+        self._append_research_runtime_bridge_supervisor_event(
+            event_type="SUPERVISOR_RUN_NOW",
+            status="RUNNING",
+            message=f"Manual paper-only runtime bridge cycle requested by {operator_label}.",
+            extra={"operator_label": operator_label},
+        )
+        return self._result_record(
+            action="research-runtime-bridge-run-cycle-now",
+            ok=True,
+            command=None,
+            output="Research runtime bridge completed one manual paper-only cycle.",
+            stdout=json.dumps(result, sort_keys=True),
+        )
+
     def _update_same_underlying_conflict_review_record(
         self,
         *,
@@ -2446,6 +4939,7 @@ class OperatorDashboardService:
             "paper-session-branch-contribution": (self._paper_session_branch_contribution_path, "application/json; charset=utf-8"),
             "paper-session-event-timeline": (self._paper_session_event_timeline_path, "application/json; charset=utf-8"),
             "paper-readiness": (self._paper_readiness_path, "application/json; charset=utf-8"),
+            "supervised-paper-operability": (self._supervised_paper_operability_path, "application/json; charset=utf-8"),
             "paper-approved-models": (self._paper_approved_models_path, "application/json; charset=utf-8"),
             "paper-non-approved-lanes": (self._paper_non_approved_lanes_path, "application/json; charset=utf-8"),
             "paper-temporary-paper-strategies": (
@@ -2475,6 +4969,73 @@ class OperatorDashboardService:
             "paper-latest-intents": (self._paper_latest_intents_path, "application/json; charset=utf-8"),
             "paper-latest-blotter": (self._paper_latest_blotter_path, "application/json; charset=utf-8"),
             "paper-position-state": (self._paper_position_state_path, "application/json; charset=utf-8"),
+            "research-runtime-bridge": (
+                self._research_runtime_bridge_snapshot_path,
+                "application/json; charset=utf-8",
+            ),
+            "research-runtime-bridge-operator-status": (
+                self._research_runtime_bridge_root / "operator_status.json",
+                "application/json; charset=utf-8",
+            ),
+            "research-runtime-bridge-runtime-state": (
+                self._research_runtime_bridge_root / "runtime_state.json",
+                "application/json; charset=utf-8",
+            ),
+            "research-runtime-bridge-intents": (
+                self._research_runtime_bridge_root / "order_intents.jsonl",
+                "application/x-ndjson; charset=utf-8",
+            ),
+            "research-runtime-bridge-fills": (
+                self._research_runtime_bridge_root / "fills.jsonl",
+                "application/x-ndjson; charset=utf-8",
+            ),
+            "research-runtime-bridge-trades": (
+                self._research_runtime_bridge_root / "trades.jsonl",
+                "application/x-ndjson; charset=utf-8",
+            ),
+            "research-runtime-bridge-alerts": (
+                self._research_runtime_bridge_root / "alerts.jsonl",
+                "application/x-ndjson; charset=utf-8",
+            ),
+            "research-runtime-bridge-reconciliation": (
+                self._research_runtime_bridge_root / "reconciliation_events.jsonl",
+                "application/x-ndjson; charset=utf-8",
+            ),
+            "research-runtime-bridge-runtime-events": (
+                self._research_runtime_bridge_root / "runtime_events.jsonl",
+                "application/x-ndjson; charset=utf-8",
+            ),
+            "research-runtime-bridge-cadence-state": (
+                self._research_runtime_bridge_root / "cadence_state.json",
+                "application/json; charset=utf-8",
+            ),
+            "research-runtime-bridge-operator-reviews": (
+                self._research_runtime_bridge_root / "operator_review_events.jsonl",
+                "application/x-ndjson; charset=utf-8",
+            ),
+            "research-runtime-bridge-supervisor-state": (
+                self._research_runtime_bridge_supervisor_state_path,
+                "application/json; charset=utf-8",
+            ),
+            "research-runtime-bridge-supervisor-events": (
+                self._research_runtime_bridge_supervisor_events_path,
+                "application/x-ndjson; charset=utf-8",
+            ),
+            "startup-control-plane": (self._startup_control_plane_path, "application/json; charset=utf-8"),
+            "auth-gate-latest": (self._auth_cache_path, "application/json; charset=utf-8"),
+            "production-link-snapshot": (self._production_link_snapshot_path, "application/json; charset=utf-8"),
+            "production-link-pilot-status": (
+                self._production_link_service.config.snapshot_path.with_name("pilot_status_v1.json"),
+                "application/json; charset=utf-8",
+            ),
+            "production-link-futures-pilot-policy": (
+                self._production_link_service.config.snapshot_path.with_name("futures_pilot_policy_snapshot.json"),
+                "application/json; charset=utf-8",
+            ),
+            "production-link-futures-pilot-status": (
+                self._production_link_service.config.snapshot_path.with_name("futures_pilot_status.json"),
+                "application/json; charset=utf-8",
+            ),
             "approved-quant-baselines": (self._approved_quant_baselines_path, "application/json; charset=utf-8"),
             "approved-quant-baselines-current-status": (self._approved_quant_current_status_path, "application/json; charset=utf-8"),
             "approved-quant-baselines-current-status-md": (self._approved_quant_current_status_md_path, "text/markdown; charset=utf-8"),
@@ -2499,6 +5060,87 @@ class OperatorDashboardService:
             "treasury-symbol-audit": (self._treasury_symbol_audit_path, "application/json; charset=utf-8"),
         }
         return mapping.get(artifact_name, (None, "text/plain; charset=utf-8"))
+
+    def research_analytics_dataset_rows(
+        self,
+        dataset_name: str,
+        *,
+        strategy_families: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        allowed = {
+            "strategy_catalog",
+            "daily_pnl",
+            "strategy_summaries",
+            "equity_curve",
+            "drawdown_curve",
+            "trade_blotter",
+            "exit_reason_breakdown",
+            "session_breakdown",
+        }
+        if dataset_name not in allowed:
+            return []
+        return read_research_analytics_dataset(
+            analytics_platform_root=self._research_analytics_platform_root,
+            dataset_name=dataset_name,
+            strategy_families=strategy_families,
+        )
+
+    def historical_playback_study_artifact_file(
+        self,
+        study_key: str,
+        *,
+        markdown: bool = False,
+        manifest_path: Path | None = None,
+    ) -> tuple[Path | None, str]:
+        content_type = "text/markdown; charset=utf-8" if markdown else "application/json; charset=utf-8"
+        if not study_key.strip():
+            return None, content_type
+        resolved_manifest_path = manifest_path or self._latest_historical_playback_manifest_path()
+        if resolved_manifest_path is None or not resolved_manifest_path.exists():
+            return None, content_type
+        manifest = _read_json(resolved_manifest_path)
+        for entry in list(manifest.get("symbols") or []):
+            catalog_entry = dict(entry.get("catalog_entry") or {})
+            preview = dict(entry.get("study_preview") or {})
+            preview_meta = dict(preview.get("meta") or {})
+            entry_study_key = str(
+                catalog_entry.get("study_key")
+                or preview_meta.get("study_id")
+                or preview.get("standalone_strategy_id")
+                or ""
+            ).strip()
+            if entry_study_key != study_key:
+                continue
+            summary_path = _path_or_none(entry.get("summary_path"))
+            json_path = _path_or_none(entry.get("strategy_study_json_path"))
+            markdown_path = _path_or_none(entry.get("strategy_study_markdown_path"))
+            if (
+                summary_path is not None
+                and summary_path.exists()
+                and (
+                    json_path is None
+                    or markdown_path is None
+                    or not json_path.exists()
+                    or not markdown_path.exists()
+                )
+            ):
+                rebuilt_json_path, rebuilt_markdown_path = ensure_strategy_study_artifacts(
+                    summary_path=summary_path,
+                    summary_payload=_read_json(summary_path),
+                )
+                if rebuilt_json_path is not None:
+                    json_path = rebuilt_json_path
+                if rebuilt_markdown_path is not None:
+                    markdown_path = rebuilt_markdown_path
+            resolved_path = markdown_path if markdown else json_path
+            if resolved_path is not None and resolved_path.exists():
+                return resolved_path, content_type
+            return None, content_type
+        return None, content_type
+
+    def _historical_playback_study_api_path(self, study_key: str, *, markdown: bool = False) -> str:
+        suffix = "/markdown" if markdown else ""
+        return f"/api/historical-playback-study/{quote(study_key, safe='')}{suffix}"
 
     def _historical_playback_artifact_path(self, artifact_key: str) -> tuple[Path | None, str]:
         payload = self._historical_playback_payload()
@@ -2530,6 +5172,7 @@ class OperatorDashboardService:
                 run_loaded=False,
             )
             return {
+                "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
                 "available": False,
                 "note": "No historical-playback manifest found under outputs/historical_playback yet.",
                 "latest_run": None,
@@ -2638,7 +5281,8 @@ class OperatorDashboardService:
         if selected_catalog_entry is not None:
             selected_study_preview_payload = dict(selected_catalog_entry.get("study_preview") or {}) or None
             selected_study_path = _path_or_none(
-                dict(selected_catalog_entry.get("artifact_paths") or {}).get("strategy_study_json")
+                dict(selected_catalog_entry.get("local_artifact_paths") or {}).get("strategy_study_json")
+                or dict(selected_catalog_entry.get("artifact_paths") or {}).get("strategy_study_json")
             )
             if selected_study_preview_payload is None and selected_study_path is not None and selected_study_path.exists():
                 selected_study_payload = normalize_strategy_study_payload(_read_json(selected_study_path))
@@ -2651,6 +5295,7 @@ class OperatorDashboardService:
             artifact_paths[f"selected_{artifact_key}"] = artifact_value
 
         return {
+            "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
             "available": True,
             "note": "Historical playback results are shown separately from strategy-ledger, runtime, and live broker operator state.",
             "artifacts": {"snapshot": snapshot_artifact},
@@ -2710,9 +5355,14 @@ class OperatorDashboardService:
     def _latest_historical_playback_manifest_path(self) -> Path | None:
         if not self._historical_playback_dir.exists():
             return None
+        def _manifest_sort_key(path: Path) -> tuple[str, float]:
+            match = re.match(r"historical_playback_(.+)\.manifest\.json$", path.name)
+            run_stamp = match.group(1) if match else ""
+            return (run_stamp, path.stat().st_mtime)
+
         manifest_paths = sorted(
             self._historical_playback_dir.glob("historical_playback_*.manifest.json"),
-            key=lambda path: path.stat().st_mtime,
+            key=_manifest_sort_key,
         )
         return manifest_paths[-1] if manifest_paths else None
 
@@ -2732,15 +5382,34 @@ class OperatorDashboardService:
                 item = dict(manifest_catalog_entry)
                 item.setdefault("run_stamp", run_stamp)
                 item.setdefault("run_timestamp", run_timestamp)
-                item["artifact_paths"] = {
-                    **dict(item.get("artifact_paths") or {}),
+                item["summary"] = build_strategy_study_dashboard_summary(item.get("summary"))
+                if item.get("study_preview"):
+                    compact_preview = build_strategy_study_preview(dict(item.get("study_preview") or {}))
+                    if compact_preview is not None:
+                        item["study_preview"] = compact_preview
+                study_key = str(item.get("study_key") or "").strip()
+                local_artifact_paths = {
+                    **dict(item.get("local_artifact_paths") or {}),
                     "manifest": str(resolved_manifest_path),
                     "summary": entry.get("summary_path"),
                     "strategy_study_json": entry.get("strategy_study_json_path"),
                     "strategy_study_markdown": entry.get("strategy_study_markdown_path"),
                 }
+                api_artifact_paths = {
+                    **dict(item.get("artifact_paths") or {}),
+                    "manifest": "/api/operator-artifact/historical-playback-manifest",
+                    "summary": entry.get("summary_path"),
+                    "strategy_study_json": self._historical_playback_study_api_path(study_key) if study_key else entry.get("strategy_study_json_path"),
+                    "strategy_study_markdown": self._historical_playback_study_api_path(study_key, markdown=True) if study_key else entry.get("strategy_study_markdown_path"),
+                }
+                item["local_artifact_paths"] = local_artifact_paths
+                item["artifact_paths"] = {
+                    **api_artifact_paths,
+                }
                 if entry.get("study_preview") and not item.get("study_preview"):
-                    item["study_preview"] = entry.get("study_preview")
+                    compact_preview = build_strategy_study_preview(dict(entry.get("study_preview") or {}))
+                    if compact_preview is not None:
+                        item["study_preview"] = compact_preview
                 items.append(item)
                 continue
             summary_path = _path_or_none(entry.get("summary_path"))
@@ -2782,6 +5451,20 @@ class OperatorDashboardService:
                 strategy_study_markdown_path=str(strategy_study_markdown_path) if strategy_study_markdown_path is not None else None,
             )
             if catalog_entry is not None:
+                study_key = str(catalog_entry.get("study_key") or "").strip()
+                catalog_entry["local_artifact_paths"] = {
+                    "manifest": str(resolved_manifest_path),
+                    "summary": str(summary_path) if summary_path is not None else None,
+                    "strategy_study_json": str(strategy_study_json_path),
+                    "strategy_study_markdown": str(strategy_study_markdown_path) if strategy_study_markdown_path is not None else None,
+                }
+                catalog_entry["artifact_paths"] = {
+                    **dict(catalog_entry.get("artifact_paths") or {}),
+                    "manifest": "/api/operator-artifact/historical-playback-manifest",
+                    "summary": str(summary_path) if summary_path is not None else None,
+                    "strategy_study_json": self._historical_playback_study_api_path(study_key) if study_key else str(strategy_study_json_path),
+                    "strategy_study_markdown": self._historical_playback_study_api_path(study_key, markdown=True) if study_key else (str(strategy_study_markdown_path) if strategy_study_markdown_path is not None else None),
+                }
                 items.append(catalog_entry)
         return items
 
@@ -2939,6 +5622,7 @@ class OperatorDashboardService:
             )
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "loss_halts_disabled": bool(getattr(settings, "probationary_paper_disable_loss_halts", False)),
             "desk_halt_new_entries_loss": str(settings.probationary_paper_desk_halt_new_entries_loss),
             "desk_flatten_and_halt_loss": str(settings.probationary_paper_desk_flatten_and_halt_loss),
             "lane_realized_loser_limit_per_session": settings.probationary_paper_lane_realized_loser_limit_per_session,
@@ -2970,6 +5654,43 @@ class OperatorDashboardService:
             self._repo_root / "config" / "probationary_pattern_engine.yaml",
             self._repo_root / "config" / "probationary_pattern_engine_paper.yaml",
         ]
+
+    def _paper_latest_operator_control(
+        self,
+        *,
+        runtime_artifacts_dir: Path,
+        operator_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime_dir = runtime_artifacts_dir / "runtime"
+        candidates: list[dict[str, Any]] = []
+        for path in (runtime_dir / "operator_control.json",):
+            payload = _read_json(path)
+            if isinstance(payload, dict) and payload:
+                candidates.append({**payload, "_source_path": str(path)})
+        status_payload = dict(operator_status.get("latest_operator_control") or {})
+        if status_payload:
+            candidates.append(status_payload)
+            control_path = Path(str(status_payload.get("control_path") or "").strip()) if str(status_payload.get("control_path") or "").strip() else None
+            if control_path is not None:
+                payload = _read_json(control_path)
+                if isinstance(payload, dict) and payload:
+                    candidates.append({**payload, "_source_path": str(control_path)})
+        if not candidates:
+            return {}
+
+        def _sort_key(payload: dict[str, Any]) -> tuple[str, int, str]:
+            timestamp = (
+                str(payload.get("applied_at") or "").strip()
+                or str(payload.get("completed_at") or "").strip()
+                or str(payload.get("requested_at") or "").strip()
+            )
+            status = str(payload.get("status") or "").strip().lower()
+            applied_rank = 1 if status and status != "pending" else 0
+            return (timestamp, applied_rank, str(payload.get("_source_path") or payload.get("control_path") or ""))
+
+        selected = max(candidates, key=_sort_key)
+        selected.pop("_source_path", None)
+        return selected
 
     def _standalone_runtime_registry_payload(
         self,
@@ -3084,8 +5805,8 @@ class OperatorDashboardService:
         synthesized_lanes: list[dict[str, Any]] = []
         latest_updated_at: str | None = str(merged.get("updated_at") or "").strip() or None
         latest_processed_bar_end_ts: str | None = str(merged.get("last_processed_bar_end_ts") or "").strip() or None
-        entries_enabled = bool(merged.get("entries_enabled", True))
-        operator_halt = bool(merged.get("operator_halt", False))
+        merged_entries_enabled = bool(merged.get("entries_enabled", True))
+        merged_operator_halt = bool(merged.get("operator_halt", False))
         all_reconciliation_clean = True
         all_broker_ok = True
         any_lane_status = False
@@ -3093,6 +5814,10 @@ class OperatorDashboardService:
         processed_bars_total = int(merged.get("processed_bars", 0) or 0)
         new_bars_last_cycle = int(merged.get("new_bars_last_cycle", 0) or 0)
         position_sides: set[str] = set()
+        enabled_lane_count = 0
+        halted_lane_count = 0
+        usable_lane_count = 0
+        risk_halted_lane_count = 0
 
         for row in config_lanes:
             lane_id = str(row.get("lane_id") or "")
@@ -3121,8 +5846,10 @@ class OperatorDashboardService:
                 )
                 processed_bars_total += int(lane_status.get("processed_bars", 0) or 0)
                 new_bars_last_cycle += int(lane_status.get("new_bars_last_cycle", 0) or 0)
-                operator_halt = operator_halt or lane_operator_halt
-                entries_enabled = entries_enabled and lane_entries_enabled
+                enabled_lane_count += 1 if lane_entries_enabled else 0
+                halted_lane_count += 1 if lane_operator_halt else 0
+                risk_halted_lane_count += 1 if str(risk_row.get("risk_state") or "OK").startswith("HALTED") else 0
+                usable_lane_count += 1 if lane_entries_enabled and not lane_operator_halt and not lane_fault_code else 0
                 if lane_position_side and lane_position_side != "FLAT":
                     position_sides.add(lane_position_side)
                 any_fault_code = any_fault_code or bool(lane_fault_code)
@@ -3200,10 +5927,14 @@ class OperatorDashboardService:
         if any_lane_status:
             merged["updated_at"] = latest_updated_at
             merged["last_processed_bar_end_ts"] = latest_processed_bar_end_ts
-            merged["entries_enabled"] = entries_enabled and not operator_halt
-            merged["operator_halt"] = operator_halt
+            merged["entries_enabled"] = merged_entries_enabled or usable_lane_count > 0
+            merged["operator_halt"] = merged_operator_halt or (halted_lane_count > 0 and usable_lane_count == 0)
             merged["processed_bars"] = processed_bars_total
             merged["new_bars_last_cycle"] = new_bars_last_cycle
+            merged["enabled_lane_count"] = enabled_lane_count
+            merged["halted_lane_count"] = halted_lane_count
+            merged["usable_lane_count"] = usable_lane_count
+            merged["risk_halted_lane_count"] = risk_halted_lane_count
             if position_sides:
                 merged["position_side"] = next(iter(position_sides)) if len(position_sides) == 1 else "MIXED"
             else:
@@ -3283,7 +6014,7 @@ class OperatorDashboardService:
         session_date = (
             (daily_summary or {}).get("session_date")
             or _session_date_from_status(operator_status)
-            or date.today().isoformat()
+            or datetime.now(NEW_YORK_TZ).date().isoformat()
         )
         session_intents = _session_table_rows_across_paths(lane_db_paths, "order_intents", "created_at", "created_at", session_date)
         session_fills = _session_table_rows_across_paths(lane_db_paths, "fills", "fill_timestamp", "fill_timestamp", session_date)
@@ -3310,7 +6041,10 @@ class OperatorDashboardService:
             else "CLEAR"
         )
         position = self._paper_position_payload(operator_status, latest_bar_close, daily_summary, full_blotter_rows)
-        latest_operator_control = _read_json(runtime["artifacts_dir"] / "runtime" / "operator_control.json")
+        latest_operator_control = self._paper_latest_operator_control(
+            runtime_artifacts_dir=runtime["artifacts_dir"],
+            operator_status=operator_status,
+        )
         operator_state = self._build_operator_state_payload(position, operator_status, latest_operator_control)
         performance = self._paper_performance_payload(
             session_date=session_date,
@@ -3331,39 +6065,93 @@ class OperatorDashboardService:
             config_in_force=config_in_force,
             include_approved_quant=runtime_name == "paper",
         )
-        strategy_performance = self._paper_strategy_performance_payload(
-            paper={
-                "raw_operator_status": operator_status,
-                "config_in_force": config_in_force,
-                "lane_risk": lane_risk,
-                "position": position,
-                "performance": performance,
-                "runtime_registry": runtime_registry,
-                "status": {
-                    "strategy_status": operator_status.get("strategy_status"),
-                },
-            },
-            session_date=session_date,
-            root_db_path=db_path,
-            approved_quant_baselines=approved_quant_baselines,
-        )
-        signal_intent_fill_audit = self._paper_signal_intent_fill_audit_payload(
-            paper={
-                "raw_operator_status": operator_status,
-                "config_in_force": config_in_force,
-                "lane_risk": lane_risk,
-                "position": position,
-                "performance": performance,
-                "status": {
-                    "strategy_status": operator_status.get("strategy_status"),
-                    "session_date": session_date,
-                },
-                "runtime_registry": runtime_registry,
-                "strategy_performance": strategy_performance,
-            },
-            session_date=session_date,
-            root_db_path=db_path,
-        )
+        cached_runtime_updated_at = str(operator_status.get("updated_at") or "")
+        operator_status_path = runtime["artifacts_dir"] / "operator_status.json"
+        strategy_performance: dict[str, Any] = {}
+        signal_intent_fill_audit: dict[str, Any] = {}
+        if runtime_name == "paper":
+            strategy_performance, strategy_performance_fresh = self._load_cached_runtime_derived_payload(
+                self._paper_strategy_performance_path,
+                runtime_updated_at=cached_runtime_updated_at,
+                session_date=session_date,
+                source_path=operator_status_path,
+            )
+            if strategy_performance is None:
+                strategy_performance = self._paper_strategy_performance_payload(
+                    paper={
+                        "raw_operator_status": operator_status,
+                        "config_in_force": config_in_force,
+                        "lane_risk": lane_risk,
+                        "position": position,
+                        "performance": performance,
+                        "runtime_registry": runtime_registry,
+                        "status": {
+                            "strategy_status": operator_status.get("strategy_status"),
+                        },
+                    },
+                    session_date=session_date,
+                    root_db_path=db_path,
+                    approved_quant_baselines=approved_quant_baselines,
+                )
+            elif not strategy_performance_fresh:
+                self._request_paper_strategy_performance_refresh(
+                    paper={
+                        "raw_operator_status": operator_status,
+                        "config_in_force": config_in_force,
+                        "lane_risk": lane_risk,
+                        "position": position,
+                        "performance": performance,
+                        "runtime_registry": runtime_registry,
+                        "status": {
+                            "strategy_status": operator_status.get("strategy_status"),
+                        },
+                    },
+                    session_date=session_date,
+                    root_db_path=db_path,
+                    approved_quant_baselines=approved_quant_baselines,
+                )
+            signal_intent_fill_audit, signal_intent_fill_audit_fresh = self._load_cached_runtime_derived_payload(
+                self._paper_signal_intent_fill_audit_path,
+                runtime_updated_at=cached_runtime_updated_at,
+                session_date=session_date,
+                source_path=operator_status_path,
+            )
+            if signal_intent_fill_audit is None:
+                signal_intent_fill_audit = self._paper_signal_intent_fill_audit_payload(
+                    paper={
+                        "raw_operator_status": operator_status,
+                        "config_in_force": config_in_force,
+                        "lane_risk": lane_risk,
+                        "position": position,
+                        "performance": performance,
+                        "status": {
+                            "strategy_status": operator_status.get("strategy_status"),
+                            "session_date": session_date,
+                        },
+                        "runtime_registry": runtime_registry,
+                        "strategy_performance": strategy_performance,
+                    },
+                    session_date=session_date,
+                    root_db_path=db_path,
+                )
+            elif not signal_intent_fill_audit_fresh:
+                self._request_paper_signal_intent_fill_audit_refresh(
+                    paper={
+                        "raw_operator_status": operator_status,
+                        "config_in_force": config_in_force,
+                        "lane_risk": lane_risk,
+                        "position": position,
+                        "performance": performance,
+                        "status": {
+                            "strategy_status": operator_status.get("strategy_status"),
+                            "session_date": session_date,
+                        },
+                        "runtime_registry": runtime_registry,
+                        "strategy_performance": strategy_performance,
+                    },
+                    session_date=session_date,
+                    root_db_path=db_path,
+                )
         strategy_runtime_generated_at = datetime.now(timezone.utc).isoformat()
         strategy_runtime_summary = _build_strategy_runtime_summary(
             runtime_registry=runtime_registry,
@@ -3508,6 +6296,7 @@ class OperatorDashboardService:
         }
 
     def _paper_readiness_payload(self, paper: dict[str, Any]) -> dict[str, Any]:
+        generated_at = datetime.now(timezone.utc).isoformat()
         approved_models = paper.get("approved_models") or {}
         active_models = [row for row in approved_models.get("rows", []) if row.get("enabled")]
         position = paper.get("position", {})
@@ -3649,6 +6438,13 @@ class OperatorDashboardService:
                 }
                 next_action = next_action_map.get(str(eligibility_reason or ""), "No manual action needed unless this state is unexpected.")
                 manual_action_required = str(eligibility_reason or "") in {"entries_disabled", "operator_halt", "stopped_runtime"}
+            runtime_presence_payload = _runtime_presence_payload(
+                runtime_instance_present=loaded_in_runtime,
+                runtime_state_loaded=loaded_in_runtime,
+                can_process_bars=loaded_in_runtime,
+                snapshot_only=False,
+                loaded_in_runtime=loaded_in_runtime,
+            )
             lane_eligibility_rows.append(
                 {
                     "lane_id": lane_id,
@@ -3667,6 +6463,7 @@ class OperatorDashboardService:
                     "tradability_reason": tradability_reason,
                     "next_action": next_action,
                     "manual_action_required": manual_action_required,
+                    **runtime_presence_payload,
                     "current_strategy_status": current_strategy_status,
                     "eligibility_reason": eligibility_reason,
                     "eligibility_detail": row.get("eligibility_detail"),
@@ -3718,6 +6515,7 @@ class OperatorDashboardService:
                     "tradability_reason": tradability_reason,
                     "next_action": next_action,
                     "manual_action_required": manual_action_required,
+                    **runtime_presence_payload,
                     "risk_state": risk_state,
                     "halt_reason": row.get("halt_reason"),
                     "heartbeat_reconciliation": dict(row.get("heartbeat_reconciliation") or {}),
@@ -3752,15 +6550,36 @@ class OperatorDashboardService:
             "logged_at",
             "bar_end_ts",
         )
+        lane_status_summary = {
+            "loaded_in_runtime_count": sum(1 for row in lane_status_rows if row.get("loaded_in_runtime")),
+            "eligible_to_trade_count": sum(1 for row in lane_status_rows if row.get("eligible_to_trade")),
+            "halted_by_risk_count": sum(1 for row in lane_status_rows if row.get("halted_by_risk")),
+            "reconciling_count": sum(1 for row in lane_status_rows if row.get("reconciling")),
+            "faulted_count": sum(1 for row in lane_status_rows if row.get("faulted")),
+            "informational_only_count": sum(1 for row in lane_status_rows if row.get("informational_degradation_only")),
+            "runtime_presence_counts": dict(
+                Counter(str(row.get("runtime_presence") or "CONFIGURED_NOT_LOADED") for row in lane_status_rows)
+            ),
+        }
+        usable_lane_count = int(paper.get("status", {}).get("usable_lane_count", 0) or lane_status_summary["eligible_to_trade_count"] or 0)
+        halted_lane_count = int(paper.get("status", {}).get("halted_lane_count", 0) or 0)
         if paper.get("running"):
             if operator_state.get("stop_after_cycle_requested"):
                 runtime_phase = "STOPPING"
-            elif operator_state.get("operator_halt"):
+            elif operator_state.get("operator_halt") and usable_lane_count == 0:
                 runtime_phase = "HALTED"
             else:
                 runtime_phase = "RUNNING"
         else:
             runtime_phase = "STOPPED"
+        if runtime_phase == "RUNNING" and halted_lane_count > 0 and usable_lane_count > 0:
+            runtime_status_detail = (
+                f"Paper runtime is active. {usable_lane_count} lane(s) are eligible now while {halted_lane_count} lane(s) remain halted or lane-blocked."
+            )
+        elif runtime_phase == "HALTED":
+            runtime_status_detail = "Paper runtime is active, but every currently loaded lane remains halted or blocked."
+        else:
+            runtime_status_detail = None
         exposure_state = (
             "FLAT"
             if position.get("side") == "FLAT"
@@ -3817,10 +6636,14 @@ class OperatorDashboardService:
             default=paper.get("restore_validation") or {},
         )
         return {
+            "generated_at": generated_at,
             "runtime_running": runtime_running,
             "runtime_phase": runtime_phase,
             "entries_enabled": bool(paper.get("status", {}).get("entries_enabled")),
             "operator_halt": bool(paper.get("status", {}).get("operator_halt")),
+            "usable_lane_count": usable_lane_count,
+            "halted_lane_count": halted_lane_count,
+            "runtime_status_detail": runtime_status_detail,
             "current_detected_session": current_detected_session,
             "approved_models_active": len(active_models),
             "approved_models_total": len(approved_models.get("rows", [])),
@@ -3841,14 +6664,7 @@ class OperatorDashboardService:
             "lane_risk_rows": lane_rows,
             "lane_eligibility_rows": lane_eligibility_rows,
             "lane_status_rows": lane_status_rows,
-            "lane_status_summary": {
-                "loaded_in_runtime_count": sum(1 for row in lane_status_rows if row.get("loaded_in_runtime")),
-                "eligible_to_trade_count": sum(1 for row in lane_status_rows if row.get("eligible_to_trade")),
-                "halted_by_risk_count": sum(1 for row in lane_status_rows if row.get("halted_by_risk")),
-                "reconciling_count": sum(1 for row in lane_status_rows if row.get("reconciling")),
-                "faulted_count": sum(1 for row in lane_status_rows if row.get("faulted")),
-                "informational_only_count": sum(1 for row in lane_status_rows if row.get("informational_degradation_only")),
-            },
+            "lane_status_summary": lane_status_summary,
             "heartbeat_reconciliation_summary": {
                 "last_attempted_at": latest_heartbeat.get("last_heartbeat_reconcile_at"),
                 "last_status": latest_heartbeat.get("heartbeat_reconciliation_status") or "UNAVAILABLE",
@@ -4042,21 +6858,40 @@ class OperatorDashboardService:
         }
 
     def _shadow_live_strategy_pilot_summary_payload(self, shadow: dict[str, Any]) -> dict[str, Any]:
-        artifacts_dir_value = shadow.get("artifacts_dir")
-        if not artifacts_dir_value:
-            return {"available": False, "summary_line": "No live strategy pilot summary artifact is available yet."}
-        artifacts_dir = Path(str(artifacts_dir_value))
+        runtime_paths = self._runtime_paths("live_pilot")
+        artifacts_dir = runtime_paths["artifacts_dir"]
+        running = _pid_running(runtime_paths["pid_file"])
         payload = _read_json(artifacts_dir / "live_strategy_pilot_summary_latest.json")
         if not payload:
             raw_operator_status = dict(shadow.get("raw_operator_status") or {})
             payload = dict(raw_operator_status.get("live_strategy_pilot_summary") or {})
         if not payload:
-            return {"available": False, "summary_line": "No live strategy pilot summary artifact is available yet."}
+            return {
+                "available": False,
+                "runtime_running": running,
+                "pid_file": str(runtime_paths["pid_file"]),
+                "log_file": str(runtime_paths["log_file"]),
+                "summary_line": (
+                    "ATP GC live strategy pilot has not emitted a summary artifact yet."
+                    if running
+                    else "ATP GC live strategy pilot is not running."
+                ),
+            }
         signal_observability = dict(payload.get("signal_observability") or {})
         if not signal_observability:
             signal_observability = _read_json(artifacts_dir / "live_strategy_signal_observability_latest.json")
         return {
             "available": True,
+            "runtime_running": running,
+            "pid_file": str(runtime_paths["pid_file"]),
+            "log_file": str(runtime_paths["log_file"]),
+            "runtime_label": payload.get("runtime_label") or "ATP GC Live Entry Pilot",
+            "execution_scope": payload.get("execution_scope") or "ATP_LIVE_ENTRY_PILOT",
+            "automation_scope": payload.get("automation_scope") or "ENTRY_ONLY_BROKER_AUTOMATION",
+            "shared_strategy_identity": payload.get("shared_strategy_identity") or "ATP_COMPANION_V1_GC_ASIA_US",
+            "lane_id": payload.get("lane_id") or "atp_companion_v1_gc_asia_us",
+            "standalone_strategy_id": payload.get("standalone_strategy_id"),
+            "strategy_family": payload.get("strategy_family"),
             "generated_at": payload.get("generated_at"),
             "operator_path": payload.get("operator_path") or "mgc-v05l probationary-live-strategy-pilot",
             "allowed_scope": dict(payload.get("allowed_scope") or {}),
@@ -4478,6 +7313,11 @@ class OperatorDashboardService:
                 lane_row.get("last_execution_bar_evaluated_at")
                 or lane_row.get("last_processed_bar_end_ts")
             )
+            latest_atp_timing_state = dict(lane_row.get("latest_atp_timing_state") or {})
+            detail["latest_atp_timing_state"] = latest_atp_timing_state
+            detail["atp_timing_state"] = latest_atp_timing_state.get("timing_state")
+            detail["atp_timing_blocker"] = latest_atp_timing_state.get("primary_blocker")
+            detail["atp_vwap_price_quality_state"] = latest_atp_timing_state.get("vwap_price_quality_state")
             detail["last_completed_context_bars_at"] = dict(
                 lane_row.get("last_completed_context_bars_at")
                 or {}
@@ -4492,6 +7332,15 @@ class OperatorDashboardService:
             detail["temporary_paper_strategy"] = temporary_paper_strategy
             detail["paper_strategy_class"] = (
                 "temporary_paper_strategy" if temporary_paper_strategy else "approved_or_admitted_paper_strategy"
+            )
+            detail.update(
+                _runtime_presence_payload(
+                    runtime_instance_present=bool(detail.get("runtime_attached")),
+                    runtime_state_loaded=bool(detail.get("runtime_attached")),
+                    can_process_bars=bool(detail.get("runtime_attached")),
+                    snapshot_only=False,
+                    loaded_in_runtime=bool(detail.get("runtime_attached")),
+                )
             )
             detail.update(_paper_lane_classification_payload(detail))
             detail["staged_capable"] = str(detail.get("participation_policy") or "").upper() != "SINGLE_ENTRY_ONLY"
@@ -4548,6 +7397,13 @@ class OperatorDashboardService:
                     "execution_timeframe": detail.get("execution_timeframe"),
                     "context_timeframes": detail.get("context_timeframes"),
                     "last_execution_bar_evaluated_at": detail.get("last_execution_bar_evaluated_at"),
+                    "latest_eligible_timestamp": detail.get("latest_eligible_timestamp"),
+                    "latest_blocked_timestamp": detail.get("latest_blocked_timestamp"),
+                    "latest_blocked_reason": detail.get("latest_blocked_reason"),
+                    "top_blockers": detail.get("top_blockers"),
+                    "atp_timing_state": detail.get("atp_timing_state"),
+                    "atp_timing_blocker": detail.get("atp_timing_blocker"),
+                    "atp_vwap_price_quality_state": detail.get("atp_vwap_price_quality_state"),
                     "last_completed_context_bars_at": detail.get("last_completed_context_bars_at"),
                     "staged_capable": detail.get("staged_capable"),
                     "net_side": detail.get("net_side"),
@@ -4559,6 +7415,10 @@ class OperatorDashboardService:
                     "paper_strategy_class": (
                         "temporary_paper_strategy" if temporary_paper_strategy else "approved_or_admitted_paper_strategy"
                     ),
+                    "runtime_presence": detail.get("runtime_presence"),
+                    "runtime_presence_label": detail.get("runtime_presence_label"),
+                    "runtime_presence_tone": detail.get("runtime_presence_tone"),
+                    "runtime_presence_summary": detail.get("runtime_presence_summary"),
                 }
             )
 
@@ -4581,6 +7441,9 @@ class OperatorDashboardService:
             "enabled_count": enabled_count,
             "total_count": len(rows),
             "temporary_paper_count": temporary_count,
+            "runtime_presence_counts": dict(
+                Counter(str(row.get("runtime_presence") or "CONFIGURED_NOT_LOADED") for row in rows)
+            ),
             "rows": rows,
             "default_branch": default_branch,
             "details_by_branch": details_by_branch,
@@ -4672,7 +7535,6 @@ class OperatorDashboardService:
                 experimental_status in {"experimental_canary", "experimental_temp_paper"}
                 or runtime_kind in {
                     ATPE_CANARY_RUNTIME_KIND,
-                    ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
                     GC_MGC_ACCEPTANCE_RUNTIME_KIND,
                 }
             )
@@ -4993,7 +7855,19 @@ class OperatorDashboardService:
                 deduped_rows[lane_id] = merged
                 continue
             deduped_rows[lane_id] = {**existing, **row}
-        rows = list(deduped_rows.values())
+        rows = [
+            {
+                **row,
+                **_runtime_presence_payload(
+                    runtime_instance_present=bool(row.get("runtime_instance_present", False)),
+                    runtime_state_loaded=bool(row.get("runtime_state_loaded", False)),
+                    can_process_bars=bool(row.get("can_process_bars", False)),
+                    snapshot_only=bool(row.get("snapshot_only", False)),
+                    loaded_in_runtime=bool(row.get("runtime_instance_present", False)),
+                ),
+            }
+            for row in deduped_rows.values()
+        ]
         rows.sort(
             key=lambda row: (
                 0 if _is_temporary_paper_strategy_row(row) else (1 if row.get("is_canary") else 2),
@@ -5025,6 +7899,9 @@ class OperatorDashboardService:
             "experimental_count": experimental_count,
             "enabled_count": enabled_count,
             "disabled_count": disabled_count,
+            "runtime_presence_counts": dict(
+                Counter(str(row.get("runtime_presence") or "CONFIGURED_NOT_LOADED") for row in rows)
+            ),
             "fired_count": fired_count,
             "completed_count": completed_count,
             "recent_signal_count": recent_signal_count,
@@ -5201,6 +8078,9 @@ class OperatorDashboardService:
             "total_count": len(rows),
             "enabled_count": enabled_count,
             "disabled_count": disabled_count,
+            "runtime_presence_counts": dict(
+                Counter(str(row.get("runtime_presence") or "CONFIGURED_NOT_LOADED") for row in rows)
+            ),
             "recent_signal_count": sum(int(row.get("recent_signal_count") or row.get("signal_count") or 0) for row in rows),
             "recent_event_count": sum(int(row.get("recent_event_count") or row.get("event_count") or 0) for row in rows),
             "kill_switch_active": bool(payload.get("kill_switch_active")),
@@ -5261,7 +8141,13 @@ class OperatorDashboardService:
         }
         if unresolved_lane_ids:
             return None, metadata
-        return ["bash", "scripts/run_probationary_paper_soak.sh", *sorted(set(requested_flags)), "--background"], metadata
+        return [
+            "bash",
+            "scripts/run_probationary_paper_soak.sh",
+            *self._paper_runtime_config_args(),
+            *sorted(set(requested_flags)),
+            "--background",
+        ], metadata
 
     def _paper_temporary_paper_runtime_integrity_payload(self, paper: dict[str, Any]) -> dict[str, Any]:
         payload = paper.get("temporary_paper_strategies") or {}
@@ -5300,6 +8186,13 @@ class OperatorDashboardService:
                 if runtime_instance_present and runtime_state_loaded
                 else ("RUNTIME INSTANCE ONLY" if runtime_instance_present else "SNAPSHOT ONLY / NOT LOADED IN RUNTIME")
             )
+            runtime_presence_payload = _runtime_presence_payload(
+                runtime_instance_present=runtime_instance_present,
+                runtime_state_loaded=runtime_state_loaded,
+                can_process_bars=runtime_state_loaded,
+                snapshot_only=snapshot_only,
+                loaded_in_runtime=runtime_instance_present,
+            )
             detail_rows.append(
                 {
                     "lane_id": lane_id,
@@ -5309,23 +8202,47 @@ class OperatorDashboardService:
                     "runtime_state_loaded": runtime_state_loaded,
                     "snapshot_only": snapshot_only,
                     "truth_label": truth_label,
+                    **runtime_presence_payload,
                     "start_flag": spec.get("flag") if spec is not None else None,
                     "runtime_kind": row.get("runtime_kind") or runtime_row.get("runtime_kind"),
                     "last_update_timestamp": row.get("last_update_timestamp") or row.get("latest_activity_timestamp"),
                 }
             )
 
-        mismatch_status = (
-            "MISMATCH"
-            if missing_lane_ids or unresolved_start_lane_ids
-            else ("INSTANCE ONLY" if enabled_rows and runtime_state_loaded_count < loaded_in_runtime_count else "CLEAR")
-        )
+        block_reason_code = None
+        block_reason = None
+        clearing_action = "Refresh"
+        clearing_evidence = "/api/operator-artifact/paper-temporary-paper-runtime-integrity"
+        mismatch_status = "CLEAR"
+
+        if missing_lane_ids:
+            mismatch_status = "MISMATCH"
+            block_reason_code = "enabled_lane_missing_from_runtime"
+            block_reason = "Enabled temporary paper lanes are not loaded in the running paper runtime."
+            clearing_action = "Restart Runtime + Temp Paper"
+        elif unresolved_start_lane_ids:
+            mismatch_status = "CLEAR"
+            block_reason_code = "unresolved_temp_paper_overlay_mapping"
+            block_reason = (
+                "Enabled temporary paper lanes are already loaded in the running runtime, but the restart overlay mapping is still incomplete."
+            )
+            clearing_action = "Inspect Temp-Paper Mapping"
+        elif enabled_rows and runtime_state_loaded_count < loaded_in_runtime_count:
+            mismatch_status = "INSTANCE_ONLY"
+            block_reason_code = "runtime_state_not_fully_loaded"
+            block_reason = "Temporary paper runtime instances exist, but their runtime state is not fully loaded yet."
+            clearing_action = "Restart Runtime + Temp Paper"
+
         summary_line = (
             f"Enabled in app: {len(enabled_rows)} | loaded in runtime: {loaded_in_runtime_count} | "
             f"snapshot only: {snapshot_only_count} | missing lane ids: {', '.join(missing_lane_ids) if missing_lane_ids else 'none'}"
         )
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "temp_paper_blocked": mismatch_status not in {"", "MATCHED", "CLEAR"},
+            "block_reason_code": block_reason_code,
+            "block_reason": block_reason,
+            "restart_overlay_mapping_ready": not bool(unresolved_start_lane_ids),
             "enabled_in_app_count": len(enabled_rows),
             "loaded_in_runtime_count": loaded_in_runtime_count,
             "runtime_state_loaded_count": runtime_state_loaded_count,
@@ -5335,6 +8252,8 @@ class OperatorDashboardService:
             "unresolved_start_lane_ids": unresolved_start_lane_ids,
             "start_flags": sorted(start_flags),
             "restart_action": "restart-paper-with-temp-paper",
+            "clearing_action": clearing_action,
+            "clearing_evidence": clearing_evidence,
             "summary_line": summary_line,
             "rows": detail_rows,
             "artifacts": {
@@ -5444,7 +8363,9 @@ class OperatorDashboardService:
                     "intent_open": bool(int(detail.get("intent_count", 0) or 0) > 0 and int(detail.get("fill_count", 0) or 0) == 0),
                     "filled": bool(int(detail.get("fill_count", 0) or 0) > 0),
                     "open_position": bool(detail.get("open_position")),
-                    "latest_blocking_reason": detail.get("latest_blocked_reason") or detail.get("lane_halt_reason"),
+                    "latest_blocking_reason": detail.get("latest_blocked_reason") or detail.get("atp_timing_blocker") or detail.get("lane_halt_reason"),
+                    "atp_timing_state": detail.get("atp_timing_state"),
+                    "top_blockers": detail.get("top_blockers"),
                     "latest_fill_price": detail.get("latest_fill_price"),
                     "risk_state": detail.get("risk_state", "OK"),
                     "reconciliation_state": detail.get("reconciliation_state"),
@@ -5620,6 +8541,14 @@ class OperatorDashboardService:
         latest_blotter = _latest_row(model_blotter, "exit_ts", "entry_ts") or {}
         latest_blotter_timestamp = _row_timestamp(latest_blotter, "exit_ts", "entry_ts")
         latest_signal_timestamp = _row_timestamp(latest_signal, "logged_at", "bar_end_ts")
+        latest_eligible_timestamp = max(
+            [
+                _row_timestamp(row, "logged_at", "bar_end_ts")
+                for row in model_signals
+                if str(row.get("decision") or "").lower() not in {"blocked", ""}
+            ],
+            default=None,
+        )
         latest_block_timestamp = _row_timestamp(latest_block, "logged_at", "bar_end_ts")
         latest_block_reason = latest_block.get("block_reason")
         if not latest_block_timestamp and str(latest_signal.get("decision") or "").lower() == "blocked":
@@ -5632,6 +8561,17 @@ class OperatorDashboardService:
             row
             for row in model_intents
             if str(row.get("order_status") or "").upper() not in {"FILLED", "CANCELLED", "REJECTED", "EXPIRED"}
+        ]
+        blocker_counts = Counter(
+            str(row.get("block_reason") or row.get("allow_block_reason") or "UNKNOWN")
+            for row in model_blocks
+        )
+        top_blockers = [
+            {
+                "code": code,
+                "count": count,
+            }
+            for code, count in blocker_counts.most_common(3)
         ]
         unresolved_intent_count = len(unresolved_intents)
         unrealized_pnl = position.get("unrealized_pnl") if open_position else None
@@ -5716,6 +8656,7 @@ class OperatorDashboardService:
             "intent_count": len(model_intents),
             "fill_count": len(model_fills),
             "latest_signal_timestamp": latest_signal_timestamp,
+            "latest_eligible_timestamp": latest_eligible_timestamp,
             "latest_signal_decision": latest_signal.get("decision"),
             "latest_signal_label": _format_signal_label(
                 {
@@ -5756,6 +8697,7 @@ class OperatorDashboardService:
             "realized_pnl": _decimal_to_string(realized_pnl),
             "unrealized_pnl": unrealized_pnl if open_position else None,
             "blocked_count": blocked_count,
+            "top_blockers": top_blockers,
             "unresolved_intent_count": unresolved_intent_count,
             "latest_activity_type": latest_activity_type,
             "latest_activity_timestamp": latest_activity_timestamp,
@@ -8028,9 +10970,14 @@ class OperatorDashboardService:
                     "realized_pnl": _decimal_to_string(cumulative_realized),
                     "unrealized_pnl": _decimal_to_string(current_unrealized),
                     "day_pnl": _decimal_to_string(day_pnl),
+                    "session_realized_pnl": _decimal_to_string(session_realized),
+                    "session_unrealized_pnl": _decimal_to_string(current_unrealized),
+                    "session_total_pnl": _decimal_to_string(day_pnl),
                     "cumulative_pnl": _decimal_to_string(cumulative_pnl),
                     "max_drawdown": _decimal_to_string(max_drawdown),
                     "trade_count": trade_count,
+                    "fill_count": lane_row.get("fill_count"),
+                    "intent_count": lane_row.get("intent_count"),
                     "latest_fill_timestamp": latest_fill_timestamp,
                     "latest_activity_timestamp": latest_activity,
                     "risk_state": lane_row.get("risk_state") or "OK",
@@ -8219,6 +11166,7 @@ class OperatorDashboardService:
         )
         attribution = _build_strategy_attribution_payload(trade_log_rows)
         return {
+            "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
             "generated_at": generated_at,
             "session_date": session_date,
             "rows": rows,
@@ -8341,13 +11289,18 @@ class OperatorDashboardService:
                 source_family=source_family,
             )
             db_path = _resolve_sqlite_database_path(lane_row.get("database_url")) or root_db_path
-            all_bars = _all_table_rows(db_path, "bars", "end_ts")
+            lane_artifacts_dir = self._repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "lanes" / lane_id
+            all_bars = _all_jsonl_rows(lane_artifacts_dir / "bars.jsonl") or _all_table_rows(db_path, "bars", "end_ts")
             bars_by_id = {str(row.get("bar_id")): row for row in all_bars if row.get("bar_id")}
-            all_processed_bars = _all_table_rows_safe(db_path, "processed_bars", "end_ts")
-            all_signal_rows = _all_table_rows_safe(db_path, "signals", "created_at")
-            all_feature_rows = _all_table_rows_safe(db_path, "features", "created_at")
-            all_intents = _all_table_rows(db_path, "order_intents", "created_at")
-            all_fills = _all_table_rows(db_path, "fills", "fill_timestamp")
+            all_processed_bars = _all_jsonl_rows(lane_artifacts_dir / "processed_bars.jsonl") or _all_table_rows_safe(db_path, "processed_bars", "end_ts")
+            all_signal_rows = _all_jsonl_rows(lane_artifacts_dir / "signals.jsonl") or _all_table_rows_safe(db_path, "signals", "created_at")
+            all_feature_rows = _all_jsonl_rows(lane_artifacts_dir / "features.jsonl") or _all_table_rows_safe(db_path, "features", "created_at")
+            all_intents = (
+                _all_jsonl_rows(lane_artifacts_dir / "order_intents.jsonl")
+                or _all_jsonl_rows(lane_artifacts_dir / "intents.jsonl")
+                or _all_table_rows(db_path, "order_intents", "created_at")
+            )
+            all_fills = _all_jsonl_rows(lane_artifacts_dir / "fills.jsonl") or _all_table_rows(db_path, "fills", "fill_timestamp")
 
             window_processed_bars = _rows_for_session_date(all_processed_bars, session_date, "end_ts")
             window_signal_rows = _rows_for_session_date(all_signal_rows, session_date, "created_at")
@@ -8548,7 +11501,9 @@ class OperatorDashboardService:
             )
         )
         return {
+            "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
             "generated_at": generated_at,
+            "session_date": session_date,
             "inspection_scope": inspection_label,
             "inspection_start_ts": min((value for value in inspection_start_candidates if value), default=None),
             "inspection_end_ts": max((value for value in inspection_end_candidates if value), default=None),
@@ -9046,7 +12001,7 @@ class OperatorDashboardService:
     ) -> dict[str, Any]:
         summary = review_payload.get("summary") or {}
         assertions = summary.get("session_end_assertions", {})
-        session_date = summary.get("session_date") or paper["status"]["session_date"] or date.today().isoformat()
+        session_date = summary.get("session_date") or paper["status"]["session_date"] or datetime.now(NEW_YORK_TZ).date().isoformat()
         position_flat = paper["position"]["side"] == "FLAT"
         reconciliation_clean = bool(
             summary.get(
@@ -9377,7 +12332,7 @@ class OperatorDashboardService:
         }
 
     def _paper_carry_forward_state(self, paper: dict[str, Any], review_payload: dict[str, Any]) -> dict[str, Any]:
-        current_session_date = paper["status"]["session_date"] or date.today().isoformat()
+        current_session_date = paper["status"]["session_date"] or datetime.now(NEW_YORK_TZ).date().isoformat()
         summary = self._prior_paper_summary(paper["artifacts_dir"], current_session_date)
         summary_links = self._summary_links_for_session("paper", summary.get("session_date") if summary else None)
         if not summary:
@@ -10407,7 +13362,7 @@ class OperatorDashboardService:
     ) -> dict[str, Any]:
         prior_summary = self._prior_paper_summary(
             paper["artifacts_dir"],
-            paper["status"]["session_date"] or date.today().isoformat(),
+            paper["status"]["session_date"] or datetime.now(NEW_YORK_TZ).date().isoformat(),
         )
         signoff = _read_json(self._session_signoff_path)
         entries: list[dict[str, Any]] = []
@@ -10559,9 +13514,10 @@ class OperatorDashboardService:
         carry_forward: dict[str, Any],
         pre_session_review: dict[str, Any],
     ) -> dict[str, Any]:
+        generated_at = datetime.now(timezone.utc).isoformat()
         session_shape = paper.get("session_shape") or {}
         branch_contribution = paper.get("branch_session_contribution") or {}
-        session_date = session_shape.get("session_date") or paper["status"]["session_date"] or date.today().isoformat()
+        session_date = session_shape.get("session_date") or paper["status"]["session_date"] or datetime.now(NEW_YORK_TZ).date().isoformat()
         events: list[dict[str, Any]] = []
 
         def add_event(
@@ -10820,6 +13776,7 @@ class OperatorDashboardService:
             deduped.append(event)
 
         return {
+            "generated_at": generated_at,
             "session_date": session_date,
             "scope": f"Latest paper session {session_date} chronological event timeline.",
             "events": deduped,
@@ -10898,6 +13855,8 @@ class OperatorDashboardService:
         if self._auth_cache_path.exists():
             payload = _read_json(self._auth_cache_path)
             payload.setdefault("source", "cached_auth_gate")
+            if self._auth_gate_result_should_refresh(payload):
+                return self._run_auth_gate_result()
             return payload
         bootstrap_status = self._bootstrap_auth_status()
         if bootstrap_status is not None:
@@ -10906,6 +13865,232 @@ class OperatorDashboardService:
         if not run_if_missing:
             return {"runtime_ready": False, "source": "missing"}
         return self._run_auth_gate_result()
+
+    def _auth_gate_result_checked_at(self, payload: dict[str, Any]) -> datetime | None:
+        candidates = [
+            payload.get("refresh_checked_at"),
+            payload.get("market_data_probe_checked_at"),
+            payload.get("generated_at"),
+            ((payload.get("debug") or {}).get("refresh_checked_at") if isinstance(payload.get("debug"), dict) else None),
+        ]
+        for value in candidates:
+            parsed = _parse_iso_datetime(str(value) if value else None)
+            if parsed is not None:
+                return parsed.astimezone(timezone.utc)
+        return None
+
+    def _auth_gate_result_should_refresh(self, payload: dict[str, Any], *, now: datetime | None = None) -> bool:
+        now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        checked_at = self._auth_gate_result_checked_at(payload)
+        if checked_at is None:
+            return True
+        interval_seconds = (
+            DEFAULT_AUTH_GATE_READY_REFRESH_SECONDS
+            if bool(payload.get("runtime_ready"))
+            else DEFAULT_AUTH_GATE_RECOVERY_RETRY_SECONDS
+        )
+        return (now_utc - checked_at) >= timedelta(seconds=interval_seconds)
+
+    def _auth_recovery_state(self, auth_status: dict[str, Any]) -> dict[str, Any]:
+        checked_at = self._auth_gate_result_checked_at(auth_status)
+        runtime_ready = bool(auth_status.get("runtime_ready"))
+        retry_interval_seconds = (
+            DEFAULT_AUTH_GATE_READY_REFRESH_SECONDS
+            if runtime_ready
+            else DEFAULT_AUTH_GATE_RECOVERY_RETRY_SECONDS
+        )
+        next_recovery_attempt_at = (
+            (checked_at + timedelta(seconds=retry_interval_seconds)).astimezone(timezone.utc).isoformat()
+            if checked_at is not None and not runtime_ready
+            else None
+        )
+        reason = str(
+            auth_status.get("detail")
+            or auth_status.get("message")
+            or auth_status.get("refresh_error")
+            or auth_status.get("error")
+            or ("Schwab auth/runtime checks are green." if runtime_ready else "Schwab auth/runtime checks are not ready.")
+        ).strip()
+        manual_action = str(auth_status.get("next_action") or "Auth Gate Check").strip() or "Auth Gate Check"
+        auto_recovery_active = bool((not runtime_ready) and next_recovery_attempt_at)
+        manual_action_required = bool((not runtime_ready) and not auto_recovery_active)
+        return {
+            "runtime_ready": runtime_ready,
+            "reason": reason,
+            "checked_at": checked_at.isoformat() if checked_at is not None else None,
+            "retry_interval_seconds": retry_interval_seconds,
+            "next_recovery_attempt_at": next_recovery_attempt_at,
+            "auto_recovery_active": auto_recovery_active,
+            "manual_action_required": manual_action_required,
+            "recommended_action": "Wait for recovery" if auto_recovery_active else manual_action,
+            "manual_fallback_action": manual_action,
+            "source": str(auth_status.get("source") or "unknown"),
+        }
+
+    def _normalize_auth_status_for_attached_runtime(
+        self,
+        auth_status: dict[str, Any],
+        *,
+        paper: dict[str, Any],
+    ) -> dict[str, Any]:
+        if bool(auth_status.get("runtime_ready")):
+            return auth_status
+        if not bool(paper.get("running")):
+            return auth_status
+        paper_status = dict(paper.get("status") or {})
+        health = dict((paper.get("raw_operator_status") or {}).get("health") or paper_status.get("health") or {})
+        if not (bool(health.get("broker_ok")) and bool(health.get("market_data_ok"))):
+            return auth_status
+        normalized = dict(auth_status)
+        normalized.update(
+            {
+                "runtime_ready": True,
+                "source": "attached_paper_runtime",
+                "detail": "Attached paper runtime is active and its broker/auth and market-data health checks are green.",
+                "message": "Attached paper runtime is active and its broker/auth and market-data health checks are green.",
+                "next_action": "No action needed",
+                "generated_at": normalized.get("generated_at") or datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return normalized
+
+    def _runtime_recovery_state(self, runtime_recovery: dict[str, Any]) -> dict[str, Any]:
+        status = str(runtime_recovery.get("status") or "UNKNOWN").upper()
+        reason_code = str(runtime_recovery.get("reason_code") or runtime_recovery.get("supervisor_reason_code") or "").upper()
+        next_recovery_attempt_at = str(
+            runtime_recovery.get("restart_backoff_until")
+            or runtime_recovery.get("restart_suppressed_until")
+            or ""
+        ).strip() or None
+        active = status in {"AUTO_RESTART_IN_PROGRESS", "AUTO_RESTART_BACKOFF"} or bool(runtime_recovery.get("auto_restart_eligible"))
+        manual_action_required = bool(runtime_recovery.get("manual_action_required"))
+        reason = str(
+            runtime_recovery.get("operator_message")
+            or runtime_recovery.get("detail")
+            or runtime_recovery.get("reason")
+            or "Paper runtime recovery state is unavailable."
+        ).strip()
+        return {
+            "status": status,
+            "reason_code": reason_code,
+            "active": active,
+            "manual_action_required": manual_action_required,
+            "next_recovery_attempt_at": next_recovery_attempt_at,
+            "reason": reason,
+            "recommended_action": (
+                "Wait for recovery"
+                if active and not manual_action_required
+                else str(runtime_recovery.get("next_action") or "Start Runtime").strip() or "Start Runtime"
+            ),
+            "manual_fallback_action": str(runtime_recovery.get("next_action") or "Start Runtime").strip() or "Start Runtime",
+        }
+
+    def _dashboard_recovery_payload(
+        self,
+        *,
+        auth_status: dict[str, Any],
+        runtime_recovery: dict[str, Any] | None,
+        generated_at: str,
+    ) -> dict[str, Any]:
+        auth_recovery = self._auth_recovery_state(auth_status)
+        runtime_recovery_state = self._runtime_recovery_state(runtime_recovery or {})
+        targets: list[dict[str, Any]] = [
+            {
+                "target": "auth_gate",
+                "state": "READY" if auth_recovery["runtime_ready"] else ("RECOVERING" if auth_recovery["auto_recovery_active"] else "MANUAL_ACTION_REQUIRED"),
+                "active": bool(auth_recovery["auto_recovery_active"]),
+                "manual_action_required": bool(auth_recovery["manual_action_required"]),
+                "reason": auth_recovery["reason"],
+                "next_recovery_attempt_at": auth_recovery["next_recovery_attempt_at"],
+                "recommended_action": auth_recovery["recommended_action"],
+                "manual_fallback_action": auth_recovery["manual_fallback_action"],
+                "source": auth_recovery["source"],
+            }
+        ]
+        if runtime_recovery:
+            runtime_manual_action_required = bool(runtime_recovery_state["manual_action_required"])
+            runtime_active = bool(runtime_recovery_state["active"])
+            runtime_next_recovery_attempt_at = runtime_recovery_state["next_recovery_attempt_at"]
+            runtime_recommended_action = runtime_recovery_state["recommended_action"]
+            runtime_reason = runtime_recovery_state["reason"]
+            if (
+                runtime_recovery_state["reason_code"] == "AUTH_NOT_READY"
+                and bool(auth_recovery["auto_recovery_active"])
+            ):
+                runtime_manual_action_required = False
+                runtime_active = True
+                runtime_next_recovery_attempt_at = auth_recovery["next_recovery_attempt_at"]
+                runtime_recommended_action = "Wait for recovery"
+                runtime_reason = f"{runtime_reason} Automatic auth recovery is already in progress."
+            targets.append(
+                {
+                    "target": "paper_runtime",
+                    "state": (
+                        "MANUAL_ACTION_REQUIRED"
+                        if runtime_manual_action_required
+                        else "RECOVERING"
+                        if runtime_active
+                        else "READY"
+                    ),
+                    "active": runtime_active,
+                    "manual_action_required": runtime_manual_action_required,
+                    "reason": runtime_reason,
+                    "next_recovery_attempt_at": runtime_next_recovery_attempt_at,
+                    "recommended_action": runtime_recommended_action,
+                    "manual_fallback_action": runtime_recovery_state["manual_fallback_action"],
+                    "source": "paper_runtime_supervisor",
+                    "status": runtime_recovery_state["status"],
+                }
+            )
+        active_targets = [target for target in targets if bool(target.get("active"))]
+        manual_targets = [target for target in targets if bool(target.get("manual_action_required"))]
+        next_recovery_attempt_at = min(
+            [str(target.get("next_recovery_attempt_at")) for target in active_targets if str(target.get("next_recovery_attempt_at")).strip()],
+            default=None,
+        )
+        if manual_targets:
+            state = "MANUAL_ACTION_REQUIRED"
+            reason = str(manual_targets[0].get("reason") or "Manual recovery is required.").strip()
+            recommended_action = str(manual_targets[0].get("recommended_action") or "Manual action required").strip()
+            active = False
+            manual_action_required = True
+            primary_target = str(manual_targets[0].get("target") or "auth_gate")
+        elif active_targets:
+            state = "RECOVERING"
+            reason = str(active_targets[0].get("reason") or "Automatic recovery is active.").strip()
+            recommended_action = "Wait for recovery"
+            active = True
+            manual_action_required = False
+            primary_target = str(active_targets[0].get("target") or "auth_gate")
+        else:
+            state = "READY"
+            reason = str(auth_recovery["reason"] or "Schwab auth/runtime checks are green.").strip()
+            recommended_action = "No action needed"
+            active = False
+            manual_action_required = False
+            primary_target = "none"
+        return {
+            "state": state,
+            "active": active,
+            "reason_code": "RECOVERY_READY" if state == "READY" else "RECOVERY_MANUAL_ACTION_REQUIRED" if state == "MANUAL_ACTION_REQUIRED" else "RECOVERY_IN_PROGRESS",
+            "reason": reason,
+            "checked_at": auth_recovery["checked_at"],
+            "retry_interval_seconds": auth_recovery["retry_interval_seconds"],
+            "next_recovery_attempt_at": next_recovery_attempt_at,
+            "auto_recovery_enabled": True,
+            "recommended_action": recommended_action,
+            "source": str(auth_recovery["source"] or "unknown"),
+            "runtime_ready": bool(auth_recovery["runtime_ready"]),
+            "manual_action_required": manual_action_required,
+            "manual_fallback_action": (
+                str(manual_targets[0].get("manual_fallback_action") or "Manual action required").strip()
+                if manual_targets
+                else None
+            ),
+            "primary_target": primary_target,
+            "targets": targets,
+            "generated_at": generated_at,
+        }
 
     def _run_auth_gate_result(self) -> dict[str, Any]:
         completed = subprocess.run(
@@ -10942,6 +14127,94 @@ class OperatorDashboardService:
             return None
         return _read_json(status_path)
 
+    def _paper_runtime_config_paths(self) -> list[Path]:
+        raw_override = str(os.environ.get("MGC_PROBATIONARY_PAPER_CONFIG_PATHS") or "").strip()
+        if raw_override:
+            raw_parts = [part.strip() for part in re.split(rf"[,\n{re.escape(os.pathsep)}]+", raw_override) if part.strip()]
+            resolved_paths: list[Path] = []
+            for raw_part in raw_parts:
+                path = Path(raw_part)
+                if not path.is_absolute():
+                    path = (self._repo_root / path).resolve()
+                resolved_paths.append(path)
+            if resolved_paths:
+                return resolved_paths
+        return [
+            self._repo_root / "config/base.yaml",
+            self._repo_root / "config/live.yaml",
+            self._repo_root / "config/probationary_pattern_engine.yaml",
+            self._repo_root / "config/probationary_pattern_engine_paper.yaml",
+            self._repo_root / "config/probationary_pattern_engine_paper_atp_companion_v1_asia_us.yaml",
+            self._repo_root / "config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us.yaml",
+            self._repo_root / "config/probationary_pattern_engine_paper_atp_companion_v1_pl_asia_us.yaml",
+            self._repo_root / "config/probationary_pattern_engine_paper_atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only.yaml",
+            self._repo_root / "config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_promotion_1_075r_favorable_only.yaml",
+            self._repo_root / "config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us_production_track.yaml",
+            self._repo_root / "config/probationary_pattern_engine_paper_atp_companion_shared_runtime.yaml",
+        ]
+
+    def _paper_runtime_config_args(self) -> list[str]:
+        args: list[str] = []
+        for path in self._paper_runtime_config_paths():
+            args.extend(["--config", str(path)])
+        return args
+
+    def _paper_operator_control_command(self, action: str) -> list[str] | None:
+        action_name_by_dashboard_action = {
+            "paper-halt-entries": "halt_entries",
+            "paper-resume-entries": "resume_entries",
+            "paper-clear-fault": "clear_fault",
+            "paper-clear-risk-halts": "clear_risk_halts",
+            "paper-force-reconcile": "force_reconcile",
+            "paper-flatten-and-halt": "flatten_and_halt",
+            "paper-stop-after-cycle": "stop_after_cycle",
+        }
+        control_action = action_name_by_dashboard_action.get(action)
+        if control_action is None:
+            return None
+        return [
+            "bash",
+            "scripts/run_probationary_operator_control.sh",
+            *self._paper_runtime_config_args(),
+            "--action",
+            control_action,
+        ]
+
+    def _live_strategy_pilot_config_paths(self) -> list[Path]:
+        return [
+            self._repo_root / "config/base.yaml",
+            self._repo_root / "config/live.yaml",
+            self._repo_root / "config/probationary_pattern_engine.yaml",
+            self._repo_root / "config/probationary_pattern_engine_live_atp_companion_v1_gc_asia_us_pilot.yaml",
+        ]
+
+    def _live_strategy_pilot_config_args(self) -> list[str]:
+        args: list[str] = []
+        for path in self._live_strategy_pilot_config_paths():
+            args.extend(["--config", str(path)])
+        return args
+
+    def _live_strategy_pilot_operator_control_command(self, action: str) -> list[str] | None:
+        action_name_by_dashboard_action = {
+            "live-pilot-halt-entries": "halt_entries",
+            "live-pilot-resume-entries": "resume_entries",
+            "live-pilot-flatten-and-halt": "flatten_and_halt",
+            "live-pilot-stop-after-cycle": "stop_after_cycle",
+            "live-pilot-rearm": "rearm_live_strategy_pilot",
+        }
+        control_action = action_name_by_dashboard_action.get(action)
+        if control_action is None:
+            return None
+        return [
+            "bash",
+            "scripts/run_probationary_operator_control.sh",
+            *self._live_strategy_pilot_config_args(),
+            "--action",
+            control_action,
+            "--shared-strategy-identity",
+            "ATP_COMPANION_V1_GC_ASIA_US",
+        ]
+
     def _runtime_paths(self, runtime_name: str) -> dict[str, Path]:
         if runtime_name == "paper":
             return {
@@ -10959,15 +14232,17 @@ class OperatorDashboardService:
                 / "runtime"
                 / "probationary_paper.log",
                 "db_path": _resolve_sqlite_database_path(
-                    load_settings_from_files(
-                        [
-                            self._repo_root / "config/base.yaml",
-                            self._repo_root / "config/live.yaml",
-                            self._repo_root / "config/probationary_pattern_engine.yaml",
-                            self._repo_root / "config/probationary_pattern_engine_paper.yaml",
-                        ]
-                    ).database_url
+                    load_settings_from_files(self._paper_runtime_config_paths()).database_url
                 ),
+            }
+        if runtime_name == "live_pilot":
+            settings = load_settings_from_files(self._live_strategy_pilot_config_paths())
+            return {
+                "artifacts_dir": settings.probationary_artifacts_path,
+                "pid_file": settings.probationary_artifacts_path / "runtime" / "probationary_live_strategy_pilot.pid",
+                "log_file": settings.probationary_artifacts_path / "runtime" / "probationary_live_strategy_pilot.log",
+                "operator_control_path": settings.resolved_probationary_operator_control_path,
+                "db_path": _resolve_sqlite_database_path(settings.database_url),
             }
         return {
             "artifacts_dir": self._repo_root / "outputs" / "probationary_pattern_engine",
@@ -11016,11 +14291,17 @@ class OperatorDashboardService:
     def _prechecked_action_result(self, action: str) -> dict[str, Any] | None:
         paper = self._runtime_snapshot("paper")
         shadow = self._runtime_snapshot("shadow")
+        live_pilot_running = _pid_running(self._runtime_paths("live_pilot")["pid_file"])
+        live_pilot_status = _read_json(self._runtime_paths("live_pilot")["artifacts_dir"] / "operator_status.json")
+        live_pilot_operator_control = _read_json(
+            self._runtime_paths("live_pilot").get("operator_control_path")
+            or (self._runtime_paths("live_pilot")["artifacts_dir"] / "runtime" / "atp_companion_v1_gc_live_pilot_operator_control.json")
+        )
         carry_forward = self._paper_carry_forward_state(paper, self._review_payload(paper, "paper"))
         pre_session_review = self._paper_pre_session_review_state(carry_forward)
         auth_status = (
             self._launch_gate_auth_status()
-            if action == "start-paper"
+            if action in {"start-paper", "start-live-strategy-pilot"}
             else self._load_or_refresh_auth_gate_result(run_if_missing=False)
         )
         paper_faulted = paper["status"]["fault_state"] == "FAULTED"
@@ -11035,6 +14316,8 @@ class OperatorDashboardService:
             return self._result_record(action=action, ok=True, command=None, output="Shadow is already running.")
         if action == "start-paper" and paper["running"]:
             return self._result_record(action=action, ok=True, command=None, output="Paper soak is already running.")
+        if action == "start-live-strategy-pilot" and live_pilot_running:
+            return self._result_record(action=action, ok=True, command=None, output="ATP GC live strategy pilot is already running.")
         if action == "start-paper" and not pre_session_review["ready_for_run"]:
             return self._result_record(
                 action=action,
@@ -11042,12 +14325,16 @@ class OperatorDashboardService:
                 command=None,
                 output="Inherited prior-session risk is active and pre-session review is still pending. Complete the review before starting paper soak.",
             )
-        if action == "start-paper" and not bool(auth_status.get("runtime_ready")):
+        if action in {"start-paper", "start-live-strategy-pilot"} and not bool(auth_status.get("runtime_ready")):
             auth_output = str(
                 auth_status.get("detail")
                 or auth_status.get("message")
                 or auth_status.get("error")
-                or "Paper runtime start is blocked because broker/auth readiness is not green yet."
+                or (
+                    "ATP GC live strategy pilot start is blocked because broker/auth readiness is not green yet."
+                    if action == "start-live-strategy-pilot"
+                    else "Paper runtime start is blocked because broker/auth readiness is not green yet."
+                )
             ).strip()
             result = self._result_record(
                 action=action,
@@ -11063,6 +14350,8 @@ class OperatorDashboardService:
             return self._result_record(action=action, ok=True, command=None, output="Shadow is not running.")
         if action == "stop-paper" and not paper["running"]:
             return self._result_record(action=action, ok=True, command=None, output="Paper soak is not running.")
+        if action == "stop-live-strategy-pilot" and not live_pilot_running:
+            return self._result_record(action=action, ok=True, command=None, output="ATP GC live strategy pilot is not running.")
         if action == "paper-halt-entries" and not paper["running"]:
             return self._result_record(action=action, ok=False, command=None, output="Paper runtime is not running.")
         if action == "paper-resume-entries" and not paper["running"]:
@@ -11112,6 +14401,24 @@ class OperatorDashboardService:
             return self._result_record(action=action, ok=False, command=None, output="Paper runtime is not running.")
         if action == "paper-stop-after-cycle" and paper["operator_state"]["stop_after_cycle_requested"]:
             return self._result_record(action=action, ok=True, command=None, output="Stop After Current Cycle is already requested.")
+        if action == "live-pilot-halt-entries" and not live_pilot_running:
+            return self._result_record(action=action, ok=False, command=None, output="ATP GC live strategy pilot is not running.")
+        if action == "live-pilot-resume-entries" and not live_pilot_running:
+            return self._result_record(action=action, ok=False, command=None, output="ATP GC live strategy pilot is not running.")
+        if action == "live-pilot-flatten-and-halt" and not live_pilot_running:
+            return self._result_record(action=action, ok=False, command=None, output="ATP GC live strategy pilot is not running.")
+        if action == "live-pilot-stop-after-cycle" and not live_pilot_running:
+            return self._result_record(action=action, ok=False, command=None, output="ATP GC live strategy pilot is not running.")
+        if action == "live-pilot-rearm" and not live_pilot_running:
+            return self._result_record(action=action, ok=False, command=None, output="ATP GC live strategy pilot is not running.")
+        if action == "live-pilot-halt-entries" and bool(live_pilot_status.get("operator_halt")):
+            return self._result_record(action=action, ok=True, command=None, output="ATP GC live strategy pilot entries are already halted.")
+        if action == "live-pilot-resume-entries" and not bool(live_pilot_status.get("operator_halt")):
+            return self._result_record(action=action, ok=True, command=None, output="ATP GC live strategy pilot entries are already enabled.")
+        if action == "live-pilot-flatten-and-halt" and str(live_pilot_operator_control.get("status") or "") == "flatten_pending":
+            return self._result_record(action=action, ok=True, command=None, output="ATP GC live strategy pilot flatten is already pending.")
+        if action == "live-pilot-stop-after-cycle" and bool(live_pilot_operator_control.get("stop_after_cycle_requested")):
+            return self._result_record(action=action, ok=True, command=None, output="ATP GC live strategy pilot stop after cycle is already requested.")
         return None
 
     def _result_record_for_action(self, result: dict[str, Any], action: str) -> dict[str, Any]:
@@ -11280,7 +14587,7 @@ class OperatorDashboardService:
 
     def _log_action(self, payload: dict[str, Any]) -> None:
         with self._action_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True))
+            handle.write(json.dumps(_json_ready(payload), sort_keys=True))
             handle.write("\n")
 
     def _market_index_debug_payload(self, market_context: dict[str, Any]) -> dict[str, Any]:
@@ -11338,6 +14645,7 @@ def run_operator_dashboard_server(
 ) -> DashboardServerInfo:
     started_at = datetime.now(timezone.utc).isoformat()
     build_stamp = dashboard_build_stamp()
+    instance_id = uuid.uuid4().hex
     service = OperatorDashboardService(
         REPO_ROOT,
         server_info=DashboardServerInfo(
@@ -11347,6 +14655,7 @@ def run_operator_dashboard_server(
             pid=os.getpid(),
             started_at=started_at,
             build_stamp=build_stamp,
+            instance_id=instance_id,
             info_file=info_file,
         ),
     )
@@ -11360,6 +14669,7 @@ def run_operator_dashboard_server(
         pid=os.getpid(),
         started_at=started_at,
         build_stamp=build_stamp,
+        instance_id=instance_id,
         info_file=info_file,
     )
     service._server_info = info
@@ -11375,6 +14685,8 @@ def run_operator_dashboard_server(
                     "pid": info.pid,
                     "started_at": info.started_at,
                     "build_stamp": info.build_stamp,
+                    "instance_id": info.instance_id,
+                    "server_instance_id": info.instance_id,
                     "version_label": f"dashboard-{info.build_stamp[:10]}",
                     "health_url": f"{url}health",
                     "dashboard_api_url": f"{url}api/dashboard",
@@ -11386,7 +14698,8 @@ def run_operator_dashboard_server(
             + "\n",
             encoding="utf-8",
         )
-    threading.Thread(target=service.prime_dashboard_health, daemon=True).start()
+    service._autostart_research_runtime_bridge_supervisor_if_enabled()
+    service.start_dashboard_probe_loop()
     print("Operator dashboard listening.")
     print(f"URL: {url}")
     print(f"PID: {info.pid}")
@@ -11410,9 +14723,17 @@ def _build_handler(service: OperatorDashboardService):
                 self._serve_asset("operator_dashboard.js", "application/javascript; charset=utf-8")
                 return
             if parsed.path == "/api/dashboard":
+                cached_payload = service.cached_dashboard_snapshot()
+                if cached_payload is not None:
+                    self._write_json(HTTPStatus.OK, cached_payload)
+                    return
                 try:
                     payload = service.dashboard_snapshot()
                 except Exception as exc:
+                    degraded_cached_payload = service.cached_dashboard_snapshot(allow_stale_instance=True)
+                    if degraded_cached_payload is not None:
+                        self._write_json(HTTPStatus.OK, degraded_cached_payload)
+                        return
                     self._write_json(
                         HTTPStatus.SERVICE_UNAVAILABLE,
                         {
@@ -11425,8 +14746,51 @@ def _build_handler(service: OperatorDashboardService):
                     return
                 self._write_json(HTTPStatus.OK, payload)
                 return
+            if parsed.path.startswith("/api/research-analytics/"):
+                dataset_name = parsed.path.rsplit("/", 1)[-1].strip()
+                family_filters = [value.strip() for value in parse_qs(parsed.query).get("family", []) if value.strip()]
+                rows = service.research_analytics_dataset_rows(
+                    dataset_name,
+                    strategy_families=family_filters or None,
+                )
+                if not rows and dataset_name not in {
+                    "strategy_catalog",
+                    "daily_pnl",
+                    "strategy_summaries",
+                    "equity_curve",
+                    "drawdown_curve",
+                    "trade_blotter",
+                    "exit_reason_breakdown",
+                    "session_breakdown",
+                }:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "dataset_not_found", "dataset": dataset_name})
+                    return
+                self._write_json(
+                    HTTPStatus.OK,
+                    {
+                        "dataset": dataset_name,
+                        "families": family_filters,
+                        "row_count": len(rows),
+                        "rows": rows,
+                    },
+                )
+                return
             if parsed.path == "/health":
                 self._write_json(HTTPStatus.OK, service.health_payload())
+                return
+            if parsed.path.startswith("/api/historical-playback-study/"):
+                parts = parsed.path.strip("/").split("/")
+                if len(parts) not in {3, 4}:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                    return
+                study_key = unquote(parts[2])
+                markdown = len(parts) == 4 and parts[3] == "markdown"
+                artifact_path, content_type = service.historical_playback_study_artifact_file(study_key, markdown=markdown)
+                if artifact_path is None or not artifact_path.exists():
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "artifact_not_found", "study_key": study_key, "markdown": markdown})
+                    return
+                payload = artifact_path.read_bytes()
+                self._write_body(HTTPStatus.OK, payload, content_type)
                 return
             if parsed.path.startswith("/api/operator-artifact/"):
                 artifact_name = parsed.path.rsplit("/", 1)[-1]
@@ -11466,8 +14830,15 @@ def _build_handler(service: OperatorDashboardService):
                 except ProductionLinkActionError as exc:
                     self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
+                except SchwabBrokerHttpError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
                 except json.JSONDecodeError as exc:
                     self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"Invalid JSON payload: {exc}"})
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    _TRANSPORT_LOGGER.exception("Unhandled production-link POST failure for %s", action)
+                    self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc) or "Unhandled production-link error."})
                     return
                 self._write_json(HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST, result)
                 return
@@ -11516,10 +14887,12 @@ def _build_handler(service: OperatorDashboardService):
 
         def _write_body(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
             try:
+                self.close_connection = True
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Connection", "close")
                 self.end_headers()
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError) as exc:
@@ -11549,6 +14922,38 @@ def _build_handler(service: OperatorDashboardService):
             )
 
     return DashboardHandler
+
+
+class DashboardHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+    request_queue_size = 128
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler,
+        *,
+        max_workers: int = DEFAULT_DASHBOARD_HTTP_MAX_WORKERS,
+    ) -> None:
+        super().__init__(server_address, handler)
+        self._request_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="operator-dashboard-http",
+        )
+
+    def process_request(self, request, client_address) -> None:  # type: ignore[override]
+        try:
+            self._request_executor.submit(self.process_request_thread, request, client_address)
+        except RuntimeError:
+            self.shutdown_request(request)
+            raise
+
+    def server_close(self) -> None:
+        try:
+            self._request_executor.shutdown(wait=False, cancel_futures=True)
+        finally:
+            super().server_close()
 
 
 def _inject_initial_operator_canary_markup(payload: str, service: "OperatorDashboardService") -> str:
@@ -11672,10 +15077,50 @@ def _initial_operator_canary_cards_markup(rows: list[dict[str, Any]], *, kill_sw
     return "".join(cards)
 
 
+def _dashboard_action_log_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _compact_output(value: Any) -> Any:
+        if isinstance(value, dict):
+            compacted = {
+                "message": value.get("message"),
+                "status": value.get("status"),
+                "summary": value.get("summary"),
+                "status_line": value.get("status_line"),
+                "detail": value.get("detail"),
+                "note": value.get("note"),
+                "reason": value.get("reason"),
+            }
+            return {key: item for key, item in compacted.items() if item not in (None, "", [], {})}
+        if isinstance(value, list):
+            return value[:5]
+        return value
+
+    compact_rows: list[dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row)
+        compact_rows.append(
+            {
+                "timestamp": payload.get("timestamp"),
+                "action": payload.get("action"),
+                "action_label": payload.get("action_label") or payload.get("action"),
+                "kind": payload.get("kind"),
+                "ok": payload.get("ok"),
+                "message": payload.get("message"),
+                "output": _compact_output(
+                    payload.get("stdout_snippet")
+                    or payload.get("stderr_snippet")
+                    or payload.get("output")
+                    or payload.get("message")
+                ),
+                "returncode": payload.get("returncode"),
+            }
+        )
+    return compact_rows
+
+
 def _bind_dashboard_server(host: str, preferred_port: int, handler, *, allow_port_fallback: bool):
     if not allow_port_fallback:
         try:
-            return ThreadingHTTPServer((host, preferred_port), handler), preferred_port
+            return DashboardHTTPServer((host, preferred_port), handler), preferred_port
         except OSError as exc:
             if isinstance(exc, PermissionError) or exc.errno == errno.EACCES:
                 raise OSError(
@@ -11697,7 +15142,7 @@ def _bind_dashboard_server(host: str, preferred_port: int, handler, *, allow_por
 def _bind_first_available(host: str, preferred_port: int, handler):
     for candidate in range(preferred_port, preferred_port + 200):
         try:
-            return ThreadingHTTPServer((host, candidate), handler), candidate
+            return DashboardHTTPServer((host, candidate), handler), candidate
         except OSError:
             continue
     raise OSError(f"Could not bind dashboard server on {host} starting at port {preferred_port}.")
@@ -11927,7 +15372,7 @@ def _tail_jsonl(path: Path, limit: int) -> list[dict[str, Any]]:
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True))
+        handle.write(json.dumps(_json_ready(payload), sort_keys=True))
         handle.write("\n")
 
 
@@ -12125,6 +15570,43 @@ def _runtime_lookup_by_lane_id(runtime_registry: dict[str, Any]) -> dict[str, di
     return lookup
 
 
+def _runtime_presence_payload(
+    *,
+    runtime_instance_present: bool,
+    runtime_state_loaded: bool = False,
+    can_process_bars: bool = False,
+    snapshot_only: bool = False,
+    loaded_in_runtime: bool | None = None,
+    audit_only: bool = False,
+) -> dict[str, Any]:
+    if snapshot_only or audit_only:
+        runtime_presence = "HISTORICAL_SNAPSHOT_ONLY"
+        runtime_presence_label = "Historical / Snapshot"
+        runtime_presence_tone = "warn"
+        runtime_presence_summary = "Visible from persisted or tracked truth only; not attached to the current runtime."
+    elif runtime_instance_present and (runtime_state_loaded or can_process_bars or bool(loaded_in_runtime)):
+        runtime_presence = "ACTIVE_RUNTIME"
+        runtime_presence_label = "Active Runtime"
+        runtime_presence_tone = "good"
+        runtime_presence_summary = "Attached to the current runtime and contributing live operator truth."
+    elif runtime_instance_present:
+        runtime_presence = "ATTACH_PENDING"
+        runtime_presence_label = "Attach Pending"
+        runtime_presence_tone = "warn"
+        runtime_presence_summary = "Runtime identity is present, but full state load/convergence is still pending."
+    else:
+        runtime_presence = "CONFIGURED_NOT_LOADED"
+        runtime_presence_label = "Configured Only"
+        runtime_presence_tone = "muted"
+        runtime_presence_summary = "Configured in the platform, but not loaded into the current runtime."
+    return {
+        "runtime_presence": runtime_presence,
+        "runtime_presence_label": runtime_presence_label,
+        "runtime_presence_tone": runtime_presence_tone,
+        "runtime_presence_summary": runtime_presence_summary,
+    }
+
+
 def _standalone_runtime_state_loaded(db_path: Path | None, standalone_strategy_id: str) -> bool:
     if db_path is None or not db_path.exists():
         return False
@@ -12166,14 +15648,31 @@ def _annotate_runtime_identity_state(
             "runtime_state_loaded": False,
             "config_source": row.get("config_source"),
             "legacy_derived_identity": row.get("legacy_derived_identity", False),
+            **_runtime_presence_payload(
+                runtime_instance_present=False,
+                runtime_state_loaded=False,
+                can_process_bars=False,
+                snapshot_only=False,
+                loaded_in_runtime=False,
+            ),
         }
+    runtime_instance_present = bool(runtime_row.get("runtime_instance_present", True))
+    runtime_state_loaded = bool(runtime_row.get("runtime_state_loaded", False))
+    can_process_bars = bool(runtime_row.get("can_process_bars", runtime_state_loaded))
     return {
         **row,
-        "runtime_instance_present": bool(runtime_row.get("runtime_instance_present", True)),
-        "runtime_state_loaded": bool(runtime_row.get("runtime_state_loaded", False)),
+        "runtime_instance_present": runtime_instance_present,
+        "runtime_state_loaded": runtime_state_loaded,
         "config_source": runtime_row.get("config_source") or row.get("config_source"),
         "legacy_derived_identity": bool(runtime_row.get("legacy_derived_identity", False)),
         "runtime_kind": runtime_row.get("runtime_kind"),
+        **_runtime_presence_payload(
+            runtime_instance_present=runtime_instance_present,
+            runtime_state_loaded=runtime_state_loaded,
+            can_process_bars=can_process_bars,
+            snapshot_only=False,
+            loaded_in_runtime=runtime_instance_present,
+        ),
     }
 
 
@@ -12992,13 +16491,29 @@ def _filled_entry_history_rows(
 
 def _decode_signal_audit_row(row: dict[str, Any], *, bars_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
     payload = _json_dict_from_text(row.get("payload_json"))
+    feature_snapshot = row.get("feature_snapshot") if isinstance(row.get("feature_snapshot"), dict) else {}
+    side = str(row.get("side") or payload.get("side") or "").upper()
+    if not payload and (feature_snapshot or row.get("family") or row.get("variant_id")):
+        payload = {
+            "long_entry": bool(row.get("signal_passed_flag")) if side == "LONG" else False,
+            "short_entry": bool(row.get("signal_passed_flag")) if side == "SHORT" else False,
+            "long_entry_raw": bool(row.get("raw_setup_candidate")) if side == "LONG" else False,
+            "short_entry_raw": bool(row.get("raw_setup_candidate")) if side == "SHORT" else False,
+            "atp_decision_stage": row.get("atp_decision_stage"),
+            "atp_entry_state": row.get("entry_state"),
+            "atp_timing_state": row.get("timing_state"),
+            "atp_primary_blocker": row.get("rejection_reason_code") or row.get("block_reason"),
+            "trigger_confirmed": row.get("trigger_confirmed"),
+            "feature_snapshot": feature_snapshot,
+        }
     long_source = payload.get("long_entry_source")
     short_source = payload.get("short_entry_source")
-    signal_family = long_source or short_source or _signal_candidate_label(payload)
+    signal_family = long_source or short_source or str(row.get("family") or "") or _signal_candidate_label(payload)
     bar_id = str(row.get("bar_id") or "") or None
     bar_row = bars_by_id.get(bar_id or "")
     timestamp = (
         (bar_row or {}).get("end_ts")
+        or row.get("signal_timestamp")
         or row.get("created_at")
     )
     raw_setup_candidate = any(
@@ -13013,18 +16528,18 @@ def _decode_signal_audit_row(row: dict[str, Any], *, bars_by_id: dict[str, dict[
             "asia_reclaim_bar_raw",
             "derivative_bear_turn_candidate",
         )
-    )
+    ) or bool(row.get("raw_setup_candidate")) or bool(feature_snapshot.get("raw_setup_candidate"))
     return {
         "bar_id": bar_id,
         "timestamp": timestamp,
         "signal_family": signal_family,
-        "long_entry_raw": bool(payload.get("long_entry_raw")),
-        "short_entry_raw": bool(payload.get("short_entry_raw")),
-        "long_entry": bool(payload.get("long_entry")),
-        "short_entry": bool(payload.get("short_entry")),
+        "long_entry_raw": bool(payload.get("long_entry_raw")) or (bool(row.get("raw_setup_candidate")) and side == "LONG"),
+        "short_entry_raw": bool(payload.get("short_entry_raw")) or (bool(row.get("raw_setup_candidate")) and side == "SHORT"),
+        "long_entry": bool(payload.get("long_entry")) or (bool(row.get("signal_passed_flag")) and side == "LONG"),
+        "short_entry": bool(payload.get("short_entry")) or (bool(row.get("signal_passed_flag")) and side == "SHORT"),
         "recent_long_setup": bool(payload.get("recent_long_setup")),
         "recent_short_setup": bool(payload.get("recent_short_setup")),
-        "actionable_entry": bool(payload.get("long_entry") or payload.get("short_entry")),
+        "actionable_entry": bool(payload.get("long_entry") or payload.get("short_entry") or row.get("signal_passed_flag")),
         "raw_setup_candidate": raw_setup_candidate,
         "payload": payload,
     }
@@ -13060,7 +16575,7 @@ def _rows_for_session_date(rows: Sequence[dict[str, Any]], session_date: str | N
     for row in rows:
         for field in timestamp_fields:
             value = row.get(field)
-            if value and str(value)[:10] == session_date:
+            if value and _timestamp_matches_session(str(value), session_date):
                 matched.append(dict(row))
                 break
     return matched
@@ -13316,7 +16831,7 @@ def _quant_strategy_performance_payload(
             day_values = [
                 value
                 for row, value in zip(trades, explicit_trade_pnls)
-                if value is not None and str(row.get("exit_timestamp") or row.get("entry_timestamp") or "")[:10] == session_date
+                if value is not None and _timestamp_matches_session(str(row.get("exit_timestamp") or row.get("entry_timestamp") or ""), session_date)
             ]
             day_pnl = sum(day_values, Decimal("0")) if trades and len(realized_values) == len(trades) else None
             cumulative_pnl = realized_pnl
@@ -14378,6 +17893,7 @@ def _paper_lane_classification_payload(row: dict[str, Any]) -> dict[str, Any]:
     strategy_status = str(row.get("strategy_status") or "").strip().upper()
     scope_label = str(row.get("scope_label") or "").strip()
     participation_policy = str(row.get("participation_policy") or "SINGLE_ENTRY_ONLY").strip().upper()
+    experimental_status = str(row.get("experimental_status") or "").strip().lower()
 
     if temporary_paper_strategy:
         return {
@@ -14394,6 +17910,14 @@ def _paper_lane_classification_payload(row: dict[str, Any]) -> dict[str, Any]:
             "lane_class_badge": "BENCHMARK",
             "designation_label": benchmark_designation.replace("_", " "),
             "candidate_designation": None,
+        }
+    if experimental_status == "production_track_candidate":
+        return {
+            "lane_class": "production_track_candidate",
+            "lane_class_label": "Production-Track Candidate",
+            "lane_class_badge": "PROD TRACK",
+            "designation_label": "ATP production-track candidate package",
+            "candidate_designation": "ATP_COMPANION_PRODUCTION_TRACK_CANDIDATE",
         }
     if (
         "CANDIDATE" in strategy_status
@@ -15332,6 +18856,36 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
         return None
 
 
+def _ny_session_date_key(timestamp: str | None) -> str | None:
+    parsed = _parse_iso_datetime(timestamp)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(NEW_YORK_TZ).date().isoformat()
+
+
+def runtime_bridge_blocked_reason_detail(reason: str | None) -> str:
+    normalized = str(reason or "").strip().upper()
+    if normalized == "OPERATOR_HALT":
+        return "Expected when paper entries were halted intentionally. Resume entries when the halt is understood."
+    if normalized == "ENTRIES_DISABLED":
+        return "Expected if the runtime is in paper-only monitoring mode. Enable entries only after the runtime is judged safe."
+    if normalized == "EXITS_DISABLED":
+        return "Abnormal for the selected warehouse bridge subset. Review lifecycle state before clearing it."
+    if normalized == "ACTIVE_ALERTS_PRESENT":
+        return "Actionable bridge anomalies are still active. Acknowledge, review, or resolve them before expecting another cycle."
+    if normalized == "RECONCILIATION_ISSUES_PRESENT":
+        return "Reconciliation is not clean. Treat this as blocking until the anomaly is reviewed or resolved."
+    if normalized == "SUPERVISOR_NOT_RUNNING_IN_CURRENT_PROCESS":
+        return "The operator expected a running supervisor, but no local cadence thread is attached in this process."
+    return (
+        "No explicit remediation mapping is published for this blocked state yet."
+        if normalized
+        else "The cadence runner is free to advance when the next cycle window opens."
+    )
+
+
 def _load_json_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -15489,12 +19043,7 @@ def _session_time_bucket(timestamp: str | None, session_start: str | None, sessi
 def _timestamp_matches_session(timestamp: str | None, session_date: str | None) -> bool:
     if not timestamp or not session_date:
         return False
-    parsed = _parse_iso_datetime(timestamp)
-    if parsed is None:
-        return False
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).date().isoformat() == session_date
+    return _ny_session_date_key(timestamp) == session_date
 
 
 def _operator_control_title(action: Any) -> str:
@@ -16409,7 +19958,13 @@ def _pid_running(pid_file: Path) -> bool:
         return False
     try:
         os.kill(pid, 0)
-    except OSError:
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if exc.errno == errno.EPERM:
+            return True
         return False
     return True
 
@@ -16417,13 +19972,8 @@ def _pid_running(pid_file: Path) -> bool:
 def _session_date_from_status(operator_status: dict[str, Any]) -> str | None:
     timestamp = operator_status.get("last_processed_bar_end_ts") or operator_status.get("updated_at")
     if not timestamp:
-        return date.today().isoformat()
-    parsed = _parse_iso_datetime(timestamp)
-    if parsed is None:
-        return date.today().isoformat()
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).date().isoformat()
+        return datetime.now(NEW_YORK_TZ).date().isoformat()
+    return _ny_session_date_key(str(timestamp)) or datetime.now(NEW_YORK_TZ).date().isoformat()
 
 
 def _freshness_semantics(last_update_ts: str | None, *, poll_interval_seconds: int, running: bool) -> dict[str, Any]:
@@ -16487,6 +20037,8 @@ def _humanize_action(action: str) -> str:
         "auto-start-paper": "Auto-Start Paper Soak",
         "restart-paper-with-temp-paper": "Restart Paper Soak With Temp Paper",
         "stop-paper": "Stop Paper Soak",
+        "start-live-strategy-pilot": "Start ATP GC Live Entry Pilot",
+        "stop-live-strategy-pilot": "Stop ATP GC Live Entry Pilot",
         "generate-daily-summary": "Generate Shadow Summary",
         "generate-paper-summary": "Generate Paper Summary",
         "auth-gate-check": "Auth Gate Check",
@@ -16497,6 +20049,11 @@ def _humanize_action(action: str) -> str:
         "paper-force-lane-resume-session-override": "Force Lane Resume (Session Override)",
         "paper-flatten-and-halt": "Paper Flatten And Halt",
         "paper-stop-after-cycle": "Paper Stop After Current Cycle",
+        "live-pilot-halt-entries": "ATP GC Live Pilot Halt Entries",
+        "live-pilot-resume-entries": "ATP GC Live Pilot Resume Entries",
+        "live-pilot-flatten-and-halt": "ATP GC Live Pilot Flatten And Halt",
+        "live-pilot-stop-after-cycle": "ATP GC Live Pilot Stop After Current Cycle",
+        "live-pilot-rearm": "ATP GC Live Pilot Re-Arm",
         "acknowledge-paper-risk": "Acknowledge Paper Risk",
         "acknowledge-inherited-risk": "Acknowledge Inherited Risk",
         "resolve-inherited-risk": "Resolve Inherited Risk",

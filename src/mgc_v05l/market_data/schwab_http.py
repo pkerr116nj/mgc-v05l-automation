@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import gzip
 import json
+import socket
+import time
 from typing import Any, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -43,8 +45,16 @@ class SchwabHttpError(RuntimeError):
 class UrllibJsonTransport(JsonHttpTransport):
     """Small stdlib transport so tests can stay network-free by injecting fakes."""
 
-    def __init__(self, timeout_seconds: int = 30) -> None:
+    def __init__(
+        self,
+        timeout_seconds: int = 30,
+        *,
+        retry_attempts: int = 3,
+        retry_backoff_seconds: float = 0.75,
+    ) -> None:
         self._timeout_seconds = timeout_seconds
+        self._retry_attempts = max(1, int(retry_attempts))
+        self._retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
 
     def request_json(self, request: HttpRequest) -> dict[str, Any]:
         body: Optional[bytes] = None
@@ -54,34 +64,41 @@ class UrllibJsonTransport(JsonHttpTransport):
         if request.form:
             body = urlencode({key: _encode_http_value(value) for key, value in request.form.items()}).encode("utf-8")
 
-        try:
-            with urlopen(
-                Request(url=url, method=request.method, headers=request.headers, data=body),
-                timeout=self._timeout_seconds,
-            ) as response:
-                payload = response.read().decode("utf-8")
-        except HTTPError as exc:
-            raw = exc.read()
-            headers = dict(exc.headers.items())
-            body_bytes = raw
-            encoding = headers.get("Content-Encoding", "")
-            if "gzip" in encoding.lower():
-                try:
-                    body_bytes = gzip.decompress(raw)
-                except Exception:
-                    body_bytes = raw
+        request_obj = Request(url=url, method=request.method, headers=request.headers, data=body)
+        last_transport_exc: URLError | None = None
+        for attempt in range(1, self._retry_attempts + 1):
             try:
-                detail = body_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                detail = repr(body_bytes[:500])
-            raise SchwabHttpError(
-                f"Schwab HTTP error {exc.code}. Headers={headers}. Body={detail}",
-                url=url,
-                status_code=exc.code,
-                headers=headers,
-                response_body=detail,
-            ) from exc
-        except URLError as exc:
+                with urlopen(request_obj, timeout=self._timeout_seconds) as response:
+                    payload = response.read().decode("utf-8")
+                break
+            except HTTPError as exc:
+                raw = exc.read()
+                headers = dict(exc.headers.items())
+                body_bytes = raw
+                encoding = headers.get("Content-Encoding", "")
+                if "gzip" in encoding.lower():
+                    try:
+                        body_bytes = gzip.decompress(raw)
+                    except Exception:
+                        body_bytes = raw
+                try:
+                    detail = body_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    detail = repr(body_bytes[:500])
+                raise SchwabHttpError(
+                    f"Schwab HTTP error {exc.code}. Headers={headers}. Body={detail}",
+                    url=url,
+                    status_code=exc.code,
+                    headers=headers,
+                    response_body=detail,
+                ) from exc
+            except URLError as exc:
+                last_transport_exc = exc
+                if attempt >= self._retry_attempts or not _is_retryable_url_error(exc):
+                    raise SchwabHttpError(f"Schwab transport error for {url}: {exc}", url=url) from exc
+                time.sleep(self._retry_backoff_seconds * attempt)
+        else:
+            exc = last_transport_exc or URLError("unknown transport failure")
             raise SchwabHttpError(f"Schwab transport error for {url}: {exc}", url=url) from exc
 
         try:
@@ -189,3 +206,16 @@ def _encode_http_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _is_retryable_url_error(exc: URLError) -> bool:
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, socket.gaierror):
+        return True
+    if isinstance(reason, TimeoutError):
+        return True
+    if isinstance(reason, OSError):
+        # Network stack readiness can wobble briefly at launch; allow quick retries.
+        retryable_errno = {socket.EAI_AGAIN if hasattr(socket, "EAI_AGAIN") else -3, 8, 60, 61, 65}
+        return getattr(reason, "errno", None) in retryable_errno
+    return False

@@ -1,0 +1,11 @@
+mode: "paper"
+environment_mode: "live_execution_mode"
+structural_signal_timeframe: "5m"
+execution_timeframe: "1m"
+artifact_timeframe: "5m"
+context_timeframes: ["5m"]
+execution_timeframe_role: "execution_detail_only"
+database_url: "sqlite:///./mgc_v05l.probationary.paper.sqlite3"
+probationary_artifacts_dir: "./outputs/probationary_pattern_engine/paper_session"
+probationary_paper_runtime_exclusive_config: true
+probationary_paper_lanes_json: '[{"lane_id":"atp_companion_v1_asia_us_5m","display_name":"ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only [5m]","symbol":"MGC","standalone_strategy_id":"atp_companion_v1__benchmark_mgc_asia_us_5m","identity_components":["benchmark","mgc","asia_us","context_5m"],"long_sources":["trend_participation.pullback_continuation.long.conservative"],"short_sources":[],"session_restriction":"ASIA/US","allowed_sessions":["ASIA","US"],"point_value":"10","trade_size":1,"participation_policy":"SINGLE_ENTRY_ONLY","max_concurrent_entries":1,"max_adds_after_entry":0,"add_direction_policy":"SAME_DIRECTION_ONLY","catastrophic_open_loss":"-500","lane_mode":"ATP_COMPANION_BENCHMARK","strategy_family":"active_trend_participation_engine","strategy_identity_root":"ATP_COMPANION_V1","runtime_kind":"atp_companion_benchmark_paper","live_poll_lookback_minutes":1440,"observed_instruments":["MGC"],"quality_bucket_policy":"MEDIUM_HIGH_ONLY","experimental_status":"tracked_paper_benchmark","paper_only":true,"non_approved":true,"observer_variant_id":"trend_participation.pullback_continuation.long.conservative","observer_side":"LONG","allow_pre_5m_context_participation":true,"atp_context_timeframe":"5m","artifacts_dir":"./outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_asia_us_5m","database_url":"sqlite:///./mgc_v05l.probationary.paper__atp_companion_v1_asia_us_5m.sqlite3"}]'

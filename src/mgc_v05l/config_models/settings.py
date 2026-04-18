@@ -20,6 +20,21 @@ class RuntimeMode(str, Enum):
     LIVE = "live"
 
 
+class BrokerProvider(str, Enum):
+    SCHWAB = "schwab"
+    IBKR = "ibkr"
+
+
+class MarketDataProvider(str, Enum):
+    DATABENTO = "databento"
+    SCHWAB = "schwab"
+
+
+class ExecutionPricingPolicy(str, Enum):
+    MARKET_DATA = "market_data"
+    BROKER_QUOTE_FALLBACK = "broker_quote_fallback"
+
+
 class EnvironmentMode(str, Enum):
     # Retain stable serialized lane identifiers for config and artifact compatibility.
     BASELINE_PARITY = "baseline_parity_mode"
@@ -47,6 +62,10 @@ class StrategySettings(BaseModel):
     execution_timeframe_role: ExecutionTimeframeRole = ExecutionTimeframeRole.MATCHES_SIGNAL_EVALUATION
     timezone: str
     mode: RuntimeMode
+    broker_provider: BrokerProvider = BrokerProvider.SCHWAB
+    market_data_provider: MarketDataProvider = MarketDataProvider.DATABENTO
+    execution_pricing_policy: ExecutionPricingPolicy = ExecutionPricingPolicy.MARKET_DATA
+    broker_quote_fallback_enabled: bool = False
     database_url: str
     replay_fill_policy: ReplayFillPolicy
     vwap_policy: VwapPolicy
@@ -293,6 +312,7 @@ class StrategySettings(BaseModel):
     probationary_gc_mgc_acceptance_live_poll_lookback_minutes: int = 1440
     probationary_paper_runtime_exclusive_config: bool = False
     probationary_operator_control_path: str = ""
+    probationary_paper_disable_loss_halts: bool = False
     probationary_paper_lane_warning_open_loss_json: str = "{}"
     probationary_paper_desk_halt_new_entries_loss: Decimal = Decimal("-1500")
     probationary_paper_desk_flatten_and_halt_loss: Decimal = Decimal("-2500")
@@ -426,8 +446,6 @@ class StrategySettings(BaseModel):
     @field_validator("live_strategy_pilot_single_cycle_mode")
     @classmethod
     def validate_live_strategy_pilot_single_cycle_mode(cls, value: bool) -> bool:
-        if value is not True:
-            raise ValueError("live_strategy_pilot_single_cycle_mode must remain enabled for the first live strategy pilot.")
         return value
 
     @field_validator("order_timeout_retry_limit")

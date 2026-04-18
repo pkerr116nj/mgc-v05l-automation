@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
@@ -11,6 +12,7 @@ from typing import Any, Optional, Sequence
 from sqlalchemy import desc, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 from ..domain.enums import LongEntryFamily, OrderIntentType, OrderStatus, PositionSide, ShortEntryFamily, StrategyStatus
 from ..domain.models import Bar, FeaturePacket, SignalPacket, StrategyEntryLeg, StrategyState
@@ -42,6 +44,27 @@ from .tables import (
     strategy_state_snapshots_table,
     trade_outcomes_table,
 )
+
+_SQLITE_LOCK_RETRY_ATTEMPTS = 5
+_SQLITE_LOCK_RETRY_DELAY_SECONDS = 0.25
+
+
+def _run_sqlite_write_with_retry(engine: Engine, operation) -> Any:  # type: ignore[no-untyped-def]
+    last_error: OperationalError | None = None
+    for attempt in range(_SQLITE_LOCK_RETRY_ATTEMPTS):
+        try:
+            with engine.begin() as connection:
+                return operation(connection)
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            last_error = exc
+            if attempt == _SQLITE_LOCK_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(_SQLITE_LOCK_RETRY_DELAY_SECONDS * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    return None
 
 
 def _to_iso(value: datetime) -> str:
@@ -180,7 +203,7 @@ class BarRepository:
         data_source: str = "internal",
         created_at: Optional[datetime] = None,
     ) -> None:
-        with self._engine.begin() as connection:
+        def _write(connection) -> None:  # type: ignore[no-untyped-def]
             connection.execute(
                 bars_table.insert().prefix_with("OR REPLACE"),
                 {
@@ -208,6 +231,7 @@ class BarRepository:
                     "created_at": _to_iso(created_at or datetime.now(bar.end_ts.tzinfo)),
                 },
             )
+        _run_sqlite_write_with_retry(self._engine, _write)
 
     def count(self) -> int:
         with self._engine.begin() as connection:
@@ -725,7 +749,7 @@ class ReconciliationEventRepository:
 
     def save(self, payload: dict[str, Any], *, created_at: datetime) -> None:
         record = {**self._runtime_identity, **payload}
-        with self._engine.begin() as connection:
+        def _write(connection) -> None:  # type: ignore[no-untyped-def]
             connection.execute(
                 reconciliation_events_table.insert(),
                 {
@@ -733,6 +757,7 @@ class ReconciliationEventRepository:
                     "payload_json": _json_dumps(record),
                 },
             )
+        _run_sqlite_write_with_retry(self._engine, _write)
 
     def list_all(self) -> list[dict[str, Any]]:
         with self._engine.begin() as connection:

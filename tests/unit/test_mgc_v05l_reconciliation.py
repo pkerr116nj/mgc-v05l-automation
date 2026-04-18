@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from mgc_v05l.config_models import load_settings_from_files
 from mgc_v05l.app.probationary_runtime import _run_order_timeout_watchdog, _run_reconciliation_heartbeat
@@ -104,6 +105,32 @@ def test_startup_reconciliation_clean_when_internal_and_broker_are_aligned(tmp_p
     with repositories.engine.begin() as connection:
         rows = connection.execute(select(reconciliation_events_table)).mappings().all()
     assert len(rows) == 1
+
+
+def test_reconciliation_tolerates_transient_repository_lock_during_event_persist(tmp_path: Path) -> None:
+    _, repositories, strategy_engine, execution_engine = _build_runtime(tmp_path)
+    now = datetime.now(timezone.utc)
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        position_side=PositionSide.FLAT,
+        internal_position_qty=0,
+        broker_position_qty=0,
+        open_broker_order_id=None,
+    )
+
+    def _raise_locked(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise OperationalError("insert", {}, Exception("database is locked"))
+
+    repositories.reconciliation_events.save = _raise_locked  # type: ignore[method-assign]
+
+    payload = strategy_engine.apply_reconciliation(
+        occurred_at=now,
+        trigger="startup",
+        execution_engine=execution_engine,
+    )
+
+    assert payload["classification"] == "clean"
+    assert strategy_engine.state.strategy_status is StrategyStatus.READY
 
 
 def test_startup_reconciliation_safely_clears_stale_internal_pending_order_marker(tmp_path: Path) -> None:

@@ -1,10 +1,11 @@
 # MGC Operator Desktop
 
-This workspace is the first-pass Electron + React desktop shell for the trading operations console.
+This workspace is the Electron + React operator console for the trading runtime.
 
 ## Current shape
 
-- Electron main process owns app lifecycle and the local Python dashboard process.
+- The service-first host owns the backend/operator service and supervised paper runtime.
+- Electron is the optional operator console that attaches to that already-running host.
 - React renderer provides the operator shell, navigation, and page surfaces.
 - The renderer prefers the live local dashboard API at `/health` and `/api/dashboard`.
 - If the local API is unavailable, the Electron bridge falls back to the latest persisted operator snapshots in `outputs/operator_dashboard/`.
@@ -14,11 +15,11 @@ This workspace is the first-pass Electron + React desktop shell for the trading 
 - `npm run dev`
   Starts the Vite renderer, compiles Electron main/preload TypeScript, then launches Electron.
 - `npm run dev:launch`
-  Builds the local `MGC Operator.app` bundle and launches the bundled app executable from its packaged app context.
+  Builds the local `MGC Operator.app` bundle and launches it through the service-first operator-console startup path.
 - `npm run build`
   Builds Electron main/preload output into `dist/main` and the renderer into `dist/renderer`.
 - `npm run start:bundle`
-  Launches the packaged local `MGC Operator.app` through macOS `open --args`, preserving automation capture flags while avoiding the raw `node_modules/electron/dist/Electron.app` bootstrap path.
+  Launches the packaged local `MGC Operator.app` through the service-first operator-console startup path.
 - `npm run dist`
   Runs a production build and packages the desktop app via `electron-builder`.
 - `npm run package:local`
@@ -28,22 +29,21 @@ This workspace is the first-pass Electron + React desktop shell for the trading 
 - `npm run package:mac`
   Builds a local macOS `.app` bundle (unsigned/unnotarized) into `release/`.
 - `npm run package:open`
-  Opens the first packaged `MGC Operator.app` found under `release/`.
+  Starts or verifies the service-first host and then launches the packaged operator console.
 
-## Local runtime integration
+## Service-first runtime integration
 
-The main process calls the existing repo scripts instead of replacing Python behavior:
+Normal supervised-paper startup uses the existing repo scripts instead of letting Electron own the backend:
 
-- `scripts/run_operator_dashboard.sh --no-open-browser --verify-dashboard-api`
-- `scripts/stop_operator_dashboard.sh`
+- `scripts/run_supervised_paper_host.sh`
+- `scripts/show_headless_supervised_paper_status.sh`
+- `scripts/run_supervised_paper_operator_console.sh`
 
-Startup policy:
+Desktop startup policy:
 
-- Preferred dashboard host/port defaults to `127.0.0.1:8790`.
-- Override with `MGC_OPERATOR_DASHBOARD_HOST` and `MGC_OPERATOR_DASHBOARD_PORT`.
-- Controlled port fallback is disabled by default.
-- Enable explicit fallback only by setting `MGC_OPERATOR_DASHBOARD_ALLOW_PORT_FALLBACK=1`.
-- The desktop UI shows preferred URL, chosen URL/port, ownership (`attached` vs `started`), and the latest bind/start error.
+- The service-first host is authoritative for supervised paper.
+- Desktop launch first ensures the host is usable, then attaches the packaged console.
+- Legacy desktop-managed backend launch remains diagnostic-only and is disabled by default.
 
 Renderer runtime controls use the existing dashboard action surface:
 

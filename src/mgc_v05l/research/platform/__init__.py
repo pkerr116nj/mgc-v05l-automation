@@ -1,0 +1,85 @@
+"""Shared research-platform helpers for durable intermediate datasets."""
+
+from .configs import RESEARCH_PLATFORM_CONFIG_VERSION, config_hash, config_payload
+from .analytics import (
+    analytics_strategy_key,
+    build_discovered_research_analytics_payload,
+    build_multi_research_analytics_payload,
+    build_research_analytics_payload,
+    build_research_analytics_views,
+    discover_research_analytics_roots,
+    query_daily_pnl,
+    read_research_analytics_dataset,
+    refresh_research_analytics_family_index,
+    shared_research_analytics_contract,
+)
+from .datasets import (
+    json_ready,
+    read_jsonl_dataset,
+    register_duckdb_catalog,
+    stable_hash,
+    write_dataset_bundle,
+    write_json_manifest,
+)
+from .registry import (
+    REGISTRY_ARTIFACT_VERSION,
+    build_registry_run_row,
+    current_code_version,
+    latest_target_entries,
+    read_experiment_registry,
+    register_experiment_run,
+)
+from .source_context import (
+    SOURCE_INVENTORY_ARTIFACT_VERSION,
+    SourceInventoryConfig,
+    SourceSelection,
+    discover_best_sources,
+    ensure_source_inventory,
+    ensure_symbol_context_bundle,
+    last_source_discovery_metadata,
+    load_symbol_context,
+)
+from .scope_bundles import (
+    GENERIC_SCOPE_BUNDLE_ARTIFACT_VERSION,
+    GenericTradeScopeBundle,
+    ensure_trade_scope_bundle,
+)
+
+__all__ = [
+    "build_research_analytics_payload",
+    "build_discovered_research_analytics_payload",
+    "build_multi_research_analytics_payload",
+    "build_research_analytics_views",
+    "analytics_strategy_key",
+    "discover_research_analytics_roots",
+    "RESEARCH_PLATFORM_CONFIG_VERSION",
+    "config_hash",
+    "config_payload",
+    "query_daily_pnl",
+    "read_research_analytics_dataset",
+    "refresh_research_analytics_family_index",
+    "shared_research_analytics_contract",
+    "build_registry_run_row",
+    "current_code_version",
+    "json_ready",
+    "latest_target_entries",
+    "read_jsonl_dataset",
+    "read_experiment_registry",
+    "register_experiment_run",
+    "register_duckdb_catalog",
+    "REGISTRY_ARTIFACT_VERSION",
+    "stable_hash",
+    "SOURCE_INVENTORY_ARTIFACT_VERSION",
+    "GENERIC_SCOPE_BUNDLE_ARTIFACT_VERSION",
+    "GenericTradeScopeBundle",
+    "SourceInventoryConfig",
+    "SourceSelection",
+    "discover_best_sources",
+    "ensure_source_inventory",
+    "ensure_symbol_context_bundle",
+    "ensure_trade_scope_bundle",
+    "last_source_discovery_metadata",
+    "load_symbol_context",
+    "write_dataset_bundle",
+    "write_json_manifest",
+]

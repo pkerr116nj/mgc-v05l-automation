@@ -47,6 +47,120 @@ from .execution_truth import (
 from .session_phase_labels import label_session_phase
 
 
+def _dashboard_summary_decimal(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def build_strategy_study_dashboard_meta(meta_payload: dict[str, Any] | None) -> dict[str, Any]:
+    meta = dict(meta_payload or {})
+    coverage_range = dict(meta.get("coverage_range") or {})
+    timeframe_truth = dict(meta.get("timeframe_truth") or {})
+    truth_provenance = dict(meta.get("truth_provenance") or {})
+    compacted_meta = {
+        "study_id": meta.get("study_id"),
+        "symbol": meta.get("symbol"),
+        "strategy_id": meta.get("strategy_id"),
+        "candidate_id": meta.get("candidate_id"),
+        "strategy_family": meta.get("strategy_family"),
+        "study_mode": meta.get("study_mode"),
+        "entry_model": meta.get("entry_model"),
+        "active_entry_model": meta.get("active_entry_model"),
+        "supported_entry_models": list(meta.get("supported_entry_models") or []),
+        "entry_model_supported": meta.get("entry_model_supported"),
+        "execution_truth_emitter": meta.get("execution_truth_emitter"),
+        "intrabar_execution_authoritative": meta.get("intrabar_execution_authoritative"),
+        "authoritative_intrabar_available": meta.get("authoritative_intrabar_available"),
+        "authoritative_entry_truth_available": meta.get("authoritative_entry_truth_available"),
+        "authoritative_exit_truth_available": meta.get("authoritative_exit_truth_available"),
+        "authoritative_trade_lifecycle_available": meta.get("authoritative_trade_lifecycle_available"),
+        "pnl_truth_basis": meta.get("pnl_truth_basis"),
+        "lifecycle_truth_class": meta.get("lifecycle_truth_class"),
+        "unsupported_reason": meta.get("unsupported_reason"),
+        "context_resolution": meta.get("context_resolution"),
+        "execution_resolution": meta.get("execution_resolution"),
+        "coverage_start": meta.get("coverage_start") or coverage_range.get("start_timestamp"),
+        "coverage_end": meta.get("coverage_end") or coverage_range.get("end_timestamp"),
+        "coverage_range": {
+            "start_timestamp": coverage_range.get("start_timestamp"),
+            "end_timestamp": coverage_range.get("end_timestamp"),
+        },
+        "timeframe_truth": {
+            "structural_signal_timeframe": timeframe_truth.get("structural_signal_timeframe"),
+            "execution_timeframe": timeframe_truth.get("execution_timeframe"),
+            "artifact_timeframe": timeframe_truth.get("artifact_timeframe"),
+            "execution_timeframe_role": timeframe_truth.get("execution_timeframe_role"),
+        },
+        "truth_provenance": {
+            "run_mode": truth_provenance.get("run_mode"),
+            "run_lane": truth_provenance.get("run_lane"),
+            "source_artifact": truth_provenance.get("source_artifact"),
+        },
+        "available_overlay_flags": dict(meta.get("available_overlay_flags") or {}),
+    }
+    return compacted_meta
+
+
+def build_strategy_study_dashboard_summary(summary_payload: dict[str, Any] | None) -> dict[str, Any]:
+    summary = dict(summary_payload or {})
+    closed_trade_rows = list(summary.get("closed_trade_breakdown") or [])
+    if not closed_trade_rows:
+        if "closed_trade_count" not in summary:
+            summary["closed_trade_count"] = 0
+        if "calendar_breakdown" not in summary:
+            summary["calendar_breakdown"] = []
+        return summary
+
+    calendar_by_date: dict[str, dict[str, Any]] = {}
+    for row in closed_trade_rows:
+        timestamp = str(
+            row.get("exit_timestamp")
+            or row.get("exit_ts")
+            or row.get("entry_timestamp")
+            or row.get("entry_ts")
+            or ""
+        ).strip()
+        if not timestamp:
+            continue
+        date_key = timestamp.split("T", 1)[0].strip()
+        if not date_key:
+            continue
+        bucket = calendar_by_date.setdefault(
+            date_key,
+            {
+                "date": date_key,
+                "realized_pnl": Decimal("0"),
+                "trade_count": 0,
+            },
+        )
+        pnl_value = _dashboard_summary_decimal(
+            row.get("realized_pnl")
+            or row.get("pnl_cash")
+            or row.get("net_pnl")
+            or row.get("pnl_points")
+        )
+        if pnl_value is not None:
+            bucket["realized_pnl"] += pnl_value
+        bucket["trade_count"] = int(bucket.get("trade_count") or 0) + 1
+
+    compacted_summary = dict(summary)
+    compacted_summary["closed_trade_count"] = len(closed_trade_rows)
+    compacted_summary["calendar_breakdown"] = [
+        {
+            "date": date_key,
+            "realized_pnl": str(bucket["realized_pnl"]),
+            "trade_count": int(bucket["trade_count"]),
+        }
+        for date_key, bucket in sorted(calendar_by_date.items())
+    ]
+    compacted_summary.pop("closed_trade_breakdown", None)
+    return compacted_summary
+
+
 def build_strategy_study(
     *,
     repositories: RepositorySet,
@@ -912,8 +1026,8 @@ def build_strategy_study_preview(payload: dict[str, Any]) -> dict[str, Any] | No
         "timeframe": normalized.get("timeframe"),
         "standalone_strategy_id": normalized.get("standalone_strategy_id"),
         "strategy_family": normalized.get("strategy_family"),
-        "meta": dict(normalized.get("meta") or {}),
-        "summary": dict(normalized.get("summary") or {}),
+        "meta": build_strategy_study_dashboard_meta(normalized.get("meta")),
+        "summary": build_strategy_study_dashboard_summary(normalized.get("summary")),
     }
 
 
@@ -932,7 +1046,8 @@ def build_strategy_study_catalog_entry(
     if not isinstance(normalized, dict):
         return None
     meta = dict(normalized.get("meta") or {})
-    summary = dict(normalized.get("summary") or {})
+    compact_meta = build_strategy_study_dashboard_meta(meta)
+    summary = build_strategy_study_dashboard_summary(normalized.get("summary"))
     timeframe_truth = dict(meta.get("timeframe_truth") or {})
     coverage = dict(meta.get("coverage_range") or {})
     symbol = str(meta.get("symbol") or normalized.get("symbol") or "-")
@@ -947,7 +1062,6 @@ def build_strategy_study_catalog_entry(
         else "Legacy Benchmark"
     )
     study_key = str(meta.get("study_id") or f"{run_stamp}:{symbol}:{strategy_id or strategy_family or 'study'}")
-    closed_trade_breakdown = list(summary.get("closed_trade_breakdown") or [])
     return {
         "study_key": study_key,
         "label": label
@@ -972,7 +1086,7 @@ def build_strategy_study_catalog_entry(
         "context_resolution": meta.get("context_resolution"),
         "execution_resolution": meta.get("execution_resolution"),
         "timeframe_truth": timeframe_truth,
-        "meta": meta,
+        "meta": compact_meta,
         "coverage_start": meta.get("coverage_start") or coverage.get("start_timestamp"),
         "coverage_end": meta.get("coverage_end") or coverage.get("end_timestamp"),
         "study_mode": study_mode,
@@ -992,7 +1106,7 @@ def build_strategy_study_catalog_entry(
         "truth_provenance": dict(meta.get("truth_provenance") or {}),
         "entry_model_capabilities": list(meta.get("entry_model_capabilities") or []),
         "available_overlay_flags": dict(meta.get("available_overlay_flags") or {}),
-        "closed_trade_count": len(closed_trade_breakdown),
+        "closed_trade_count": int(summary.get("closed_trade_count") or 0),
         "artifact_paths": {
             "manifest": manifest_path,
             "summary": summary_path,

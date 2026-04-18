@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from mgc_v05l.local_operator_auth import local_operator_auth_surface
 import mgc_v05l.production_link.service as production_link_service
 from mgc_v05l.production_link.models import BrokerAccountIdentity, BrokerOrderEvent, BrokerOrderRecord, BrokerPositionSnapshot
 from mgc_v05l.production_link.service import ProductionLinkActionError, SchwabProductionLinkService
@@ -17,6 +18,7 @@ from mgc_v05l.production_link.service import ProductionLinkActionError, SchwabPr
 class FakeSchwabBrokerClient:
     def __init__(self) -> None:
         self.submitted_orders: list[dict] = []
+        self.previewed_orders: list[dict] = []
         self.replaced_orders: list[tuple[str, dict]] = []
         self.cancelled_orders: list[str] = []
         self.direct_status_checks: list[str] = []
@@ -25,6 +27,8 @@ class FakeSchwabBrokerClient:
         self.dynamic_positions: list[dict] = []
         self.hide_submitted_from_open_orders: bool = False
         self.direct_status_payloads: dict[str, dict | None] = {}
+        self.preview_response: dict | None = {"result": "ok"}
+        self.preview_error: Exception | None = None
 
     def list_account_numbers(self) -> list[dict]:
         return [{"accountNumber": "123456789", "hashValue": "hash-123"}]
@@ -155,6 +159,12 @@ class FakeSchwabBrokerClient:
         location = f"/accounts/hash-123/orders/{self.submit_broker_order_id}" if self.submit_broker_order_id else None
         return {"status_code": 201, "location": location, "broker_order_id": self.submit_broker_order_id}
 
+    def preview_order(self, account_hash: str, order_payload: dict) -> dict:
+        self.previewed_orders.append(order_payload)
+        if self.preview_error is not None:
+            raise self.preview_error
+        return dict(self.preview_response or {})
+
     def get_order_status(self, account_hash: str, broker_order_id: str) -> dict:
         self.direct_status_checks.append(broker_order_id)
         if broker_order_id in self.direct_status_payloads:
@@ -223,6 +233,37 @@ def _live_quote_payload(*, delayed: bool = False) -> dict[str, dict]:
     }
 
 
+def _live_futures_quote_payload(
+    root_symbol: str,
+    contract_symbol: str,
+    *,
+    key_symbol: str | None = None,
+) -> dict[str, dict]:
+    root = root_symbol.strip().upper()
+    contract = contract_symbol.strip().upper()
+    payload_key = (key_symbol or root).strip().upper()
+    return {
+        payload_key: {
+            "symbol": contract,
+            "quote": {
+                "bidPrice": "2500.00",
+                "askPrice": "2500.50",
+                "lastPrice": "2500.25",
+                "mark": "2500.25",
+                "closePrice": "2490.00",
+                "futurePercentChange": "0.41",
+                "quoteTime": 1775682000078,
+            },
+            "reference": {
+                "product": root,
+                "symbol": contract,
+                "description": "Test futures contract",
+                "assetType": "FUTURE",
+            },
+        }
+    }
+
+
 def _manual_auth_payload() -> dict[str, object]:
     return {
         "operator_authenticated": True,
@@ -231,6 +272,57 @@ def _manual_auth_payload() -> dict[str, object]:
         "auth_method": "TOUCH_ID",
         "authenticated_at": "2026-03-22T20:00:00+00:00",
     }
+
+
+def _write_local_operator_auth_state(repo_root: Path, *, active: bool) -> None:
+    path = repo_root / "outputs" / "operator_dashboard" / "local_operator_auth_state.json"
+    events_path = repo_root / "outputs" / "operator_dashboard" / "local_operator_auth_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    ttl_seconds = 28800
+    authenticated_at = now - timedelta(minutes=5 if active else 600)
+    expires_at = authenticated_at + timedelta(seconds=ttl_seconds)
+    payload = {
+        "auth_available": True,
+        "touch_id_available": True,
+        "auth_method": "TOUCH_ID",
+        "last_authenticated_at": authenticated_at.isoformat(),
+        "last_auth_result": "SUCCESS" if active else "EXPIRED",
+        "last_auth_detail": (
+            "Local operator auth session is active for live broker actions."
+            if active
+            else "Local operator auth session expired and must be renewed before live broker actions."
+        ),
+        "auth_session_expires_at": expires_at.isoformat(),
+        "auth_session_ttl_seconds": ttl_seconds,
+        "auth_session_active": active,
+        "local_operator_identity": "test_operator",
+        "auth_session_id": "auth-session-1" if active else None,
+        "updated_at": now.isoformat(),
+        "artifacts": {
+            "state_path": str(path),
+            "events_path": str(events_path),
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if active:
+        events_path.write_text(
+            json.dumps(
+                {
+                    "event_type": "local_operator_auth_succeeded",
+                    "occurred_at": authenticated_at.isoformat(),
+                    "authenticated_at": authenticated_at.isoformat(),
+                    "auth_method": "TOUCH_ID",
+                    "local_operator_identity": "test_operator",
+                    "auth_session_id": "auth-session-1",
+                    "auth_result": "SUCCEEDED",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    else:
+        events_path.write_text("", encoding="utf-8")
 
 
 def test_production_link_snapshot_disabled_by_default(tmp_path: Path, monkeypatch) -> None:
@@ -258,27 +350,918 @@ def test_manual_live_pilot_surface_reports_scope_and_status(tmp_path: Path, monk
     monkeypatch.setenv("MGC_PRODUCTION_STOCK_LIMIT_LIVE_SUBMIT_ENABLED", "1")
     monkeypatch.setenv("MGC_PRODUCTION_SUPPORTED_MANUAL_ORDER_TYPES", "LIMIT")
     monkeypatch.setenv("MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST", "ABBV")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC"}')
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_VERIFIED_ORDER_KEYS", "FUTURE:MARKET")
+    _write_local_operator_auth_state(tmp_path, active=True)
 
     service = SchwabProductionLinkService(
         tmp_path,
         client_factory=lambda config, oauth_client: FakeSchwabBrokerClient(),
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/ES", "/ESM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
     )
 
     snapshot = service.snapshot(force_refresh=True)
 
     assert snapshot["capabilities"]["manual_live_pilot"] is True
     assert snapshot["manual_order_safety"]["pilot_mode"]["enabled"] is True
-    assert snapshot["manual_order_safety"]["pilot_mode"]["scope"]["submit_order_type"] == "LIMIT"
+    assert snapshot["manual_order_safety"]["pilot_mode"]["current_active_lane"] == "FUTURES"
+    assert snapshot["manual_order_safety"]["pilot_mode"]["scope"]["submit_order_type"] == "MARKET"
     assert snapshot["manual_order_safety"]["pilot_readiness"]["submit_eligible"] is True
-    assert snapshot["manual_order_safety"]["pilot_mode"]["scope"]["symbol_whitelist"] == ["ABBV"]
+    assert snapshot["manual_order_safety"]["pilot_mode"]["scope"]["asset_class"] == "FUTURE"
+    assert snapshot["manual_order_safety"]["pilot_mode"]["scope"]["symbol_whitelist"] == ["MGC"]
     assert snapshot["manual_order_safety"]["pilot_readiness"]["locked_policy"]["allowed_open_route"]["operator_label"] == "BUY_TO_OPEN"
     assert snapshot["manual_order_safety"]["pilot_readiness"]["locked_policy"]["allowed_close_route"]["operator_label"] == "SELL_TO_CLOSE"
-    assert snapshot["capabilities"]["manual_live_pilot_scope"]["omit_client_order_id_for_proven_route"] is True
+    assert snapshot["capabilities"]["manual_live_pilot_scope"]["asset_class"] == "FUTURE"
+    assert snapshot["capabilities"]["historical_stock_pilot_scope"]["asset_class"] == "STOCK"
+    assert snapshot["operator_status"]["local_operator_auth"]["ready"] is True
+    assert snapshot["operator_status"]["local_operator_auth"]["entry_allowed"] is True
+    assert snapshot["operator_status"]["local_operator_auth"]["flatten_allowed"] is True
+    assert snapshot["operator_status"]["local_operator_auth"]["cancel_allowed"] is True
+    assert snapshot["operator_status"]["local_operator_auth"]["next_action_label"] == "Ready"
+    assert snapshot["operator_status"]["local_operator_auth"]["time_remaining_seconds"] > 0
     pilot_status_export = json.loads((tmp_path / "outputs" / "operator_dashboard" / "pilot_status_v1.json").read_text(encoding="utf-8"))
     assert pilot_status_export["pilot_readiness"]["submit_eligible"] is True
-    assert pilot_status_export["allowed_scope"]["submit_order_type"] == "LIMIT"
+    assert pilot_status_export["current_active_lane"] == "FUTURES"
+    assert pilot_status_export["allowed_scope"]["asset_class"] == "FUTURE"
+    assert pilot_status_export["allowed_scope"]["submit_order_type"] == "MARKET"
     assert pilot_status_export["allowed_scope"]["allowed_open_route"]["operator_label"] == "BUY_TO_OPEN"
+    assert pilot_status_export["historical_stock_pilot"]["policy"]["asset_class"] == "STOCK"
+    assert pilot_status_export["selected_account"]["live_verified"] is True
+    assert pilot_status_export["first_live_verification"]["live_submit_allowed_now"] is True
+    assert pilot_status_export["first_live_verification"]["exact_close_shape"]["existing_broker_position_required"] == "LONG 1"
+    assert pilot_status_export["local_operator_auth"]["next_action_label"] == "Ready"
+    assert pilot_status_export["local_operator_auth"]["time_remaining_seconds"] > 0
+    assert pilot_status_export["operator_workflow"][0]["label"] == "Authenticate Now"
+    assert pilot_status_export["broader_live_routing"]["enabled"] is False
 
+
+def test_futures_pilot_preview_surface_reports_separate_lane_without_mutating_historical_stock_record(tmp_path: Path, monkeypatch) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_STOCK_LIMIT_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_SUPPORTED_MANUAL_ORDER_TYPES", "LIMIT")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST", "ABBV")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC,ES")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC","ES":"/ES"}')
+    _write_local_operator_auth_state(tmp_path, active=True)
+
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: FakeSchwabBrokerClient(),
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/ES", "/ESM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
+    )
+
+    snapshot = service.snapshot(force_refresh=True)
+
+    assert snapshot["manual_order_safety"]["pilot_mode"]["scope"]["asset_class"] == "FUTURE"
+    assert snapshot["manual_order_safety"]["pilot_mode"]["scope"]["symbol_whitelist"] == ["MGC", "ES"]
+    assert snapshot["manual_order_safety"]["pilot_readiness"]["historical_stock_policy"]["asset_class"] == "STOCK"
+
+    futures_policy = snapshot["futures_pilot_policy"]
+    futures_status = snapshot["futures_pilot_status"]
+
+    assert futures_policy["separate_from_stock_pilot"] is True
+    assert futures_policy["asset_class"] == "FUTURE"
+    assert futures_policy["symbol_scope"] == "WHITELIST_CONTROLLED"
+    assert futures_policy["representative_symbol"] == "MGC"
+    assert futures_policy["enabled"] is True
+    assert futures_policy["time_in_force"] == "DAY"
+    assert futures_policy["session"] == "NORMAL"
+    assert futures_policy["operator_requested_market_hours"] == "DAY + NORMAL ONLY"
+    assert futures_policy["recommended_first_market_hours"] == "DAY + NORMAL"
+    assert futures_policy["market_data_requirements"]["representative_resolved_external_symbol"] == "/MGC"
+    assert futures_policy["client_order_id_policy"]["manual_futures_pilot_route"] == "OMITTED"
+    assert futures_policy["futures_config"]["futures_symbol_whitelist"] == ["MGC", "ES"]
+
+    assert futures_status["status"] == "PREVIEW READY"
+    assert futures_status["preview_enabled"] is True
+    assert futures_status["preview_blockers"] == []
+    assert futures_status["live_submit_enabled"] is False
+    assert futures_status["live_submit_blocked_pending_first_verification"] is True
+    assert futures_status["recommended_first_lane"]["recommended_market_hours_policy"] == "Keep DAY + NORMAL only for the current live futures route."
+    assert "Futures pilot live submit remains preview-only until FUTURE:MARKET is explicitly live-verified." in futures_status["live_submit_blockers"]
+    assert futures_status["gap_analysis"]["existing_futures_broker_path"]["already_exists"][1] == (
+        "Existing futures broker helper already uses asset_type=FUTURE, quantity=1, session=NORMAL, time_in_force=DAY."
+    )
+    assert futures_status["proof_surfaces"]["futures_pilot_policy_snapshot"] == "/api/operator-artifact/production-link-futures-pilot-policy"
+    assert futures_status["proof_surfaces"]["futures_pilot_status"] == "/api/operator-artifact/production-link-futures-pilot-status"
+    assert futures_status["next_live_verification_step"]["preview_allowed_now"] is True
+    assert futures_status["next_live_verification_step"]["live_submit_allowed_now"] is False
+    assert futures_status["local_operator_auth"]["next_action_label"] == "Ready"
+    assert futures_status["local_operator_auth"]["time_remaining_seconds"] > 0
+    assert futures_status["operator_workflow"][0]["label"] == "Authenticate Now"
+
+    futures_policy_export = json.loads(
+        (tmp_path / "outputs" / "operator_dashboard" / "futures_pilot_policy_snapshot.json").read_text(encoding="utf-8")
+    )
+    futures_status_export = json.loads(
+        (tmp_path / "outputs" / "operator_dashboard" / "futures_pilot_status.json").read_text(encoding="utf-8")
+    )
+    pilot_status_export = json.loads((tmp_path / "outputs" / "operator_dashboard" / "pilot_status_v1.json").read_text(encoding="utf-8"))
+
+    assert futures_policy_export["symbol_scope"] == "WHITELIST_CONTROLLED"
+    assert futures_policy_export["representative_symbol"] == "MGC"
+    assert futures_status_export["status"] == "PREVIEW READY"
+    assert pilot_status_export["futures_pilot_status"]["status"] == "PREVIEW READY"
+    assert pilot_status_export["futures_pilot_status"]["policy_snapshot"]["symbol_scope"] == "WHITELIST_CONTROLLED"
+    assert pilot_status_export["futures_pilot_status"]["local_operator_auth"]["next_action_label"] == "Ready"
+    assert pilot_status_export["allowed_scope"]["asset_class"] == "FUTURE"
+    assert pilot_status_export["historical_stock_pilot"]["policy"]["asset_class"] == "STOCK"
+
+
+def test_local_operator_auth_surface_uses_shared_success_event_as_authoritative_source(tmp_path: Path) -> None:
+    _write_local_operator_auth_state(tmp_path, active=False)
+    state_path = tmp_path / "outputs" / "operator_dashboard" / "local_operator_auth_state.json"
+    events_path = tmp_path / "outputs" / "operator_dashboard" / "local_operator_auth_events.jsonl"
+    current_time = datetime.now(timezone.utc)
+    authenticated_at = current_time - timedelta(minutes=2)
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    payload["last_auth_result"] = "EXPIRED"
+    payload["last_auth_detail"] = "Local operator auth session expired and must be renewed before live broker actions."
+    payload["auth_session_active"] = False
+    payload["auth_session_expires_at"] = (current_time - timedelta(minutes=1)).isoformat()
+    state_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    events_path.write_text(
+        json.dumps(
+            {
+                "event_type": "local_operator_auth_succeeded",
+                "occurred_at": authenticated_at.isoformat(),
+                "authenticated_at": authenticated_at.isoformat(),
+                "auth_method": "TOUCH_ID",
+                "local_operator_identity": "test_operator",
+                "auth_session_id": "shared-artifact-session",
+                "auth_result": "SUCCEEDED",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    surface = local_operator_auth_surface(tmp_path)
+
+    assert surface["ready"] is True
+    assert surface["auth_session_active"] is True
+    assert surface["auth_session_id"] == "shared-artifact-session"
+    assert surface["entry_allowed"] is True
+    assert surface["flatten_allowed"] is True
+    assert surface["cancel_allowed"] is True
+    assert surface["next_action_label"] == "Ready"
+    assert surface["time_remaining_seconds"] is not None
+    assert surface["time_remaining_seconds"] > 0
+    assert surface["source_of_truth"] == "shared_local_auth_artifact"
+
+
+def test_reduce_only_flatten_submit_is_allowed_without_active_session(tmp_path: Path, monkeypatch) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_STOCK_LIMIT_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_SUPPORTED_MANUAL_ORDER_TYPES", "LIMIT")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST", "TSLA")
+    monkeypatch.setattr(production_link_service, "_is_us_regular_hours", lambda now: True)
+    _write_local_operator_auth_state(tmp_path, active=False)
+
+    fake_client = FakeSchwabBrokerClient()
+    fake_client.dynamic_positions = [
+        {
+            "longQuantity": "1",
+            "averagePrice": "101.25",
+            "marketValue": "101.25",
+            "currentDayProfitLoss": "0.25",
+            "instrument": {
+                "symbol": "TSLA",
+                "description": "Tesla Inc.",
+                "assetType": "EQUITY",
+                "mark": "101.25",
+            },
+        }
+    ]
+    service = SchwabProductionLinkService(tmp_path, client_factory=lambda config, oauth_client: fake_client)
+
+    preview = service.run_action(
+        "preview-order",
+        {
+            "account_hash": "hash-123",
+            "symbol": "TSLA",
+            "asset_class": "STOCK",
+            "intent_type": "FLATTEN",
+            "side": "SELL",
+            "quantity": "1",
+            "order_type": "LIMIT",
+            "limit_price": "101.50",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+            "operator_authenticated": False,
+            "operator_reduce_only_authorized": True,
+            "operator_auth_policy": "REDUCE_ONLY_POLICY",
+            "operator_auth_risk_bucket": "REDUCE_RISK",
+        },
+    )
+
+    assert preview["payload"]["live_submit_enabled"] is True
+    assert preview["payload"]["live_submit_blockers"] == []
+
+    submit = service.run_action(
+        "submit-order",
+        {
+            "account_hash": "hash-123",
+            "symbol": "TSLA",
+            "asset_class": "STOCK",
+            "intent_type": "FLATTEN",
+            "side": "SELL",
+            "quantity": "1",
+            "order_type": "LIMIT",
+            "limit_price": "101.50",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+            "operator_authenticated": False,
+            "operator_reduce_only_authorized": True,
+            "operator_auth_policy": "REDUCE_ONLY_POLICY",
+            "operator_auth_risk_bucket": "REDUCE_RISK",
+        },
+    )
+
+    assert submit["ok"] is True
+    last_request = service._store.load_runtime_state("last_manual_order")["request"]  # type: ignore[attr-defined]
+    assert last_request["operator_authenticated"] is False
+    assert last_request["operator_reduce_only_authorized"] is True
+    assert last_request["operator_auth_policy"] == "REDUCE_ONLY_POLICY"
+
+
+def test_futures_pilot_whitelisted_symbol_preview_builds_payload_with_mapped_symbol_and_omits_client_order_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_STOCK_LIMIT_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_SUPPORTED_MANUAL_ORDER_TYPES", "LIMIT")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST", "ABBV")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC,ES")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC","ES":"/ES"}')
+    _write_local_operator_auth_state(tmp_path, active=True)
+
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: FakeSchwabBrokerClient(),
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/ES", "/ESM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
+    )
+
+    snapshot = service.snapshot(force_refresh=True)
+    preview = service.run_action(
+        "preview-order",
+        {
+            "account_hash": snapshot["connection"]["selected_account_hash"],
+            "symbol": "ES",
+            "asset_class": "FUTURE",
+            "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+            "operator_authenticated": True,
+            "local_operator_identity": "test_operator",
+            "auth_method": "TOUCH_ID",
+            "authenticated_at": "2026-03-22T20:00:00+00:00",
+            "auth_session_id": "auth-session-1",
+        },
+    )
+
+    payload = preview["payload"]
+    intended = payload["payload_summary"]["intended_schwab_payload"]
+    instrument = intended["orderLegCollection"][0]["instrument"]
+
+    assert preview["ok"] is True
+    assert payload["route_scope"] == "futures_pilot"
+    assert payload["payload_summary"]["resolved_broker_symbol"] == "/ES"
+    assert payload["payload_summary"]["client_order_id_omitted"] is True
+    assert payload["action_phase"] == "OPEN_PREVIEW"
+    assert payload["allowing_rule"] == "MANUAL_FUTURES_PILOT_TIME_SESSION_POLICY"
+    assert payload["symbol_authorization"]["allowed"] is True
+    assert payload["symbol_authorization"]["requested_symbol"] == "ES"
+    assert payload["gate_summary"]["reconciliation_clear"] is True
+    assert instrument["symbol"] == "/ES"
+    assert instrument["assetType"] == "FUTURE"
+    assert intended["orderType"] == "LIMIT"
+    assert intended["price"] == "2500.50"
+    assert "clientOrderId" not in intended
+    assert payload["live_submit_enabled"] is False
+    assert payload["payload_summary"]["futures_symbol_resolution"]["broker_transport_order_type"] == "LIMIT"
+    assert payload["payload_summary"]["futures_symbol_resolution"]["broker_transport_limit_price"] == Decimal("2500.50")
+    assert "Futures pilot live submit remains preview-only until FUTURE:MARKET is explicitly live-verified." in payload["live_submit_blockers"]
+
+
+def test_futures_pilot_unlisted_symbol_is_blocked_even_when_other_symbols_are_whitelisted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_STOCK_LIMIT_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_SUPPORTED_MANUAL_ORDER_TYPES", "LIMIT")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST", "ABBV")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC,ES")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC","ES":"/ES","NQ":"/NQ"}')
+    _write_local_operator_auth_state(tmp_path, active=True)
+
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: FakeSchwabBrokerClient(),
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/MGC", "/MGCM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
+    )
+
+    snapshot = service.snapshot(force_refresh=True)
+    preview = service.run_action(
+        "preview-order",
+        {
+            "account_hash": snapshot["connection"]["selected_account_hash"],
+            "symbol": "NQ",
+            "asset_class": "FUTURE",
+            "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+            "operator_authenticated": True,
+            "local_operator_identity": "test_operator",
+            "auth_method": "TOUCH_ID",
+            "authenticated_at": "2026-03-22T20:00:00+00:00",
+            "auth_session_id": "auth-session-1",
+        },
+    )
+
+    payload = preview["payload"]
+
+    assert preview["ok"] is True
+    assert payload["symbol_authorization"]["allowed"] is False
+    assert payload["symbol_authorization"]["requested_symbol"] == "NQ"
+    assert "not in the configured futures symbol whitelist" in payload["symbol_authorization"]["reason"]
+    assert payload["live_submit_enabled"] is False
+    assert "Symbol NQ is not in the configured futures pilot whitelist." in payload["live_submit_blockers"]
+    assert "Locked futures pilot route only supports whitelisted futures symbols: MGC, ES." in payload["live_submit_blockers"]
+
+
+def test_futures_pilot_status_reports_pilot_ready_when_exact_lane_is_live_enabled(tmp_path: Path, monkeypatch) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_STOCK_LIMIT_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_SUPPORTED_MANUAL_ORDER_TYPES", "LIMIT")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST", "ABBV")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC,ES")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC","ES":"/ES"}')
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_VERIFIED_ORDER_KEYS", "FUTURE:MARKET")
+    _write_local_operator_auth_state(tmp_path, active=True)
+
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: FakeSchwabBrokerClient(),
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/MGC", "/MGCM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
+    )
+
+    snapshot = service.snapshot(force_refresh=True)
+    futures_policy = snapshot["futures_pilot_policy"]
+    futures_status = snapshot["futures_pilot_status"]
+
+    assert futures_policy["status"] == "PILOT READY"
+    assert futures_status["status"] == "PILOT READY"
+    assert futures_status["label"] == "FUTURES PILOT READY"
+    assert futures_status["preview_enabled"] is True
+    assert futures_status["live_submit_enabled"] is True
+    assert futures_status["live_submit_blockers"] == []
+    assert futures_status["live_submit_blocked_pending_first_verification"] is False
+    assert futures_status["next_live_verification_step"]["live_submit_allowed_now"] is True
+    assert futures_policy["capability_status"] == "DURABLE_NARROW_MANUAL_FUTURES_PILOT"
+    assert futures_policy["durability"]["durable_by_design"] is True
+    assert futures_policy["durability"]["hidden_dependency_check"]["depends_on_anytime_widening"] is False
+    assert futures_policy["time_session_policy"]["policy_mode"] == "SCOPED_POLICY_AMENDMENT"
+    assert futures_policy["time_session_policy"]["current_clock_gate_applied"] is False
+    assert futures_status["time_session_policy"]["allowed_outside_current_clock_window"] is True
+    assert futures_status["next_live_verification_step"]["time_session_policy"]["audit_label"] == "MANUAL_FUTURES_PILOT_TIME_SESSION_POLICY"
+    assert futures_status["outside_sandbox_live_validation"]["runbook_path"] == "docs/MANUAL_FUTURES_PILOT_RUNBOOK.md"
+    assert futures_status["live_cycle_checklist"][0]["label"] == "Operator auth ready"
+    assert "Real Schwab broker acceptance for open submit." in futures_status["proof_boundary"]["requires_outside_sandbox_live_validation"]
+
+
+def test_futures_live_submit_uses_configured_root_symbol_and_marketable_limit_transport(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC"}')
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_VERIFIED_ORDER_KEYS", "FUTURE:MARKET")
+    _write_local_operator_auth_state(tmp_path, active=True)
+
+    fake_client = FakeSchwabBrokerClient()
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: fake_client,
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/MGC", "/MGCM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
+    )
+
+    snapshot = service.snapshot(force_refresh=True)
+    preview = service.run_action(
+        "preview-order",
+        {
+            **_manual_auth_payload(),
+            "account_hash": snapshot["connection"]["selected_account_hash"],
+            "symbol": "MGC",
+            "asset_class": "FUTURE",
+            "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+        },
+    )
+    submit = service.run_action(
+        "submit-order",
+        {
+            **_manual_auth_payload(),
+            "account_hash": snapshot["connection"]["selected_account_hash"],
+            "symbol": "MGC",
+            "asset_class": "FUTURE",
+            "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+        },
+    )
+
+    preview_resolution = preview["payload"]["payload_summary"]["futures_symbol_resolution"]
+    submitted_instrument = fake_client.submitted_orders[0]["orderLegCollection"][0]["instrument"]
+
+    assert preview["payload"]["live_submit_enabled"] is True
+    assert preview["payload"]["live_submit_blockers"] == []
+    assert preview["payload"]["payload_summary"]["broker_preview_result"]["ok"] is True
+    assert preview_resolution["allowed"] is True
+    assert preview_resolution["quote_contract_symbol"] == "/MGCM26"
+    assert preview_resolution["broker_submit_symbol"] == "/MGC"
+    assert preview_resolution["broker_transport_order_type"] == "LIMIT"
+    assert preview_resolution["broker_transport_limit_price"] == Decimal("2500.50")
+    assert preview["payload"]["payload_summary"]["resolved_broker_symbol"] == "/MGC"
+    assert submit["ok"] is True
+    assert len(fake_client.previewed_orders) == 2
+    assert fake_client.previewed_orders[0]["complexOrderStrategyType"] == "NONE"
+    assert fake_client.previewed_orders[0]["quantity"] == 1
+    assert fake_client.previewed_orders[0]["orderLegCollection"][0]["legId"] == 1
+    assert fake_client.previewed_orders[0]["orderLegCollection"][0]["orderLegType"] == "FUTURE"
+    assert fake_client.previewed_orders[0]["orderLegCollection"][0]["positionEffect"] == "OPENING"
+    assert submitted_instrument["symbol"] == "/MGC"
+    assert fake_client.submitted_orders[0]["orderType"] == "LIMIT"
+    assert fake_client.submitted_orders[0]["price"] == "2500.50"
+    assert fake_client.submitted_orders[0]["complexOrderStrategyType"] == "NONE"
+    assert fake_client.submitted_orders[0]["quantity"] == 1
+    assert fake_client.submitted_orders[0]["orderLegCollection"][0]["legId"] == 1
+    assert fake_client.submitted_orders[0]["orderLegCollection"][0]["orderLegType"] == "FUTURE"
+    assert fake_client.submitted_orders[0]["orderLegCollection"][0]["positionEffect"] == "OPENING"
+    last_manual_order = service._store.load_runtime_state("last_manual_order")  # type: ignore[attr-defined]
+    assert last_manual_order["result"]["futures_symbol_resolution"]["quote_contract_symbol"] == "/MGCM26"
+    assert last_manual_order["result"]["futures_symbol_resolution"]["broker_submit_symbol"] == "/MGC"
+    assert last_manual_order["result"]["broker_preview_result"]["ok"] is True
+
+
+def test_futures_preview_and_submit_fail_fast_when_broker_preview_rejects_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC"}')
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_VERIFIED_ORDER_KEYS", "FUTURE:MARKET")
+    _write_local_operator_auth_state(tmp_path, active=True)
+
+    fake_client = FakeSchwabBrokerClient()
+    fake_client.preview_error = production_link_service.SchwabBrokerHttpError(
+        "Schwab trader HTTP error 400 for POST /accounts/hash-123/previewOrder: Invalid request data"
+    )
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: fake_client,
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/MGC", "/MGCM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
+    )
+
+    snapshot = service.snapshot(force_refresh=True)
+    preview = service.run_action(
+        "preview-order",
+        {
+            **_manual_auth_payload(),
+            "account_hash": snapshot["connection"]["selected_account_hash"],
+            "symbol": "MGC",
+            "asset_class": "FUTURE",
+            "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+        },
+    )
+
+    assert preview["ok"] is True
+    assert preview["payload"]["live_submit_enabled"] is False
+    assert "preview rejected this futures payload" in preview["payload"]["live_submit_blockers"][0]
+    assert preview["payload"]["payload_summary"]["broker_preview_result"]["ok"] is False
+
+    with pytest.raises(
+        ProductionLinkActionError,
+        match="Schwab broker preview rejected this futures payload before live submit",
+    ):
+        service.run_action(
+            "submit-order",
+            {
+                **_manual_auth_payload(),
+                "account_hash": snapshot["connection"]["selected_account_hash"],
+                "symbol": "MGC",
+                "asset_class": "FUTURE",
+                "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+                "side": "BUY",
+                "quantity": "1",
+                "order_type": "MARKET",
+                "time_in_force": "DAY",
+                "session": "NORMAL",
+                "review_confirmed": True,
+            },
+        )
+
+    assert fake_client.submitted_orders == []
+    last_manual_order = service._store.load_runtime_state("last_manual_order")  # type: ignore[attr-defined]
+    assert "preview rejected this futures payload" in last_manual_order["result"]["error"]
+    assert last_manual_order["result"]["broker_preview_result"]["ok"] is False
+    refreshed_snapshot = service.snapshot(force_refresh=False)
+    futures_status = refreshed_snapshot["futures_pilot_status"]
+    assert futures_status["live_submit_enabled"] is False
+    assert "preview rejected this futures payload" in futures_status["live_submit_blockers"][0]
+
+
+def test_futures_flatten_preview_uses_closing_position_effect_and_richer_leg_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC"}')
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_VERIFIED_ORDER_KEYS", "FUTURE:MARKET")
+    _write_local_operator_auth_state(tmp_path, active=True)
+
+    fake_client = FakeSchwabBrokerClient()
+    fake_client.dynamic_positions = [
+        {
+            "longQuantity": "1",
+            "averagePrice": "2500.25",
+            "marketValue": "2500.25",
+            "instrument": {
+                "symbol": "MGC",
+                "description": "Micro Gold Futures",
+                "assetType": "FUTURE",
+            },
+        }
+    ]
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: fake_client,
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/MGC", "/MGCM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
+    )
+
+    snapshot = service.snapshot(force_refresh=True)
+    preview = service.run_action(
+        "preview-order",
+        {
+            **_manual_auth_payload(),
+            "account_hash": snapshot["connection"]["selected_account_hash"],
+            "symbol": "MGC",
+            "asset_class": "FUTURE",
+            "intent_type": "FLATTEN",
+            "side": "SELL",
+            "quantity": "1",
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+        },
+    )
+
+    intended = preview["payload"]["payload_summary"]["intended_schwab_payload"]
+    leg = intended["orderLegCollection"][0]
+
+    assert preview["ok"] is True
+    assert preview["payload"]["live_submit_enabled"] is True
+    assert intended["complexOrderStrategyType"] == "NONE"
+    assert intended["quantity"] == 1
+    assert leg["legId"] == 1
+    assert leg["orderLegType"] == "FUTURE"
+    assert leg["positionEffect"] == "CLOSING"
+
+
+def test_futures_live_submit_accepts_contract_keyed_quote_payload_when_reference_product_matches_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC"}')
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_VERIFIED_ORDER_KEYS", "FUTURE:MARKET")
+    _write_local_operator_auth_state(tmp_path, active=True)
+
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: FakeSchwabBrokerClient(),
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/MGC", "/MGCM26", key_symbol="/MGCM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
+    )
+
+    snapshot = service.snapshot(force_refresh=True)
+    preview = service.run_action(
+        "preview-order",
+        {
+            **_manual_auth_payload(),
+            "account_hash": snapshot["connection"]["selected_account_hash"],
+            "symbol": "MGC",
+            "asset_class": "FUTURE",
+            "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+        },
+    )
+
+    resolution = preview["payload"]["payload_summary"]["futures_symbol_resolution"]
+
+    assert preview["ok"] is True
+    assert preview["payload"]["live_submit_enabled"] is True
+    assert preview["payload"]["live_submit_blockers"] == []
+    assert resolution["allowed"] is True
+    assert resolution["quote_contract_symbol"] == "/MGCM26"
+    assert resolution["broker_submit_symbol"] == "/MGC"
+    assert resolution["broker_transport_order_type"] == "LIMIT"
+    assert resolution["broker_transport_limit_price"] == Decimal("2500.50")
+    assert resolution["resolved_quote_symbol"] == "/MGCM26"
+
+
+def test_exact_mgc_futures_pilot_preview_is_allowed_outside_regular_hours_with_audited_policy(tmp_path: Path, monkeypatch) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_ORDER_TICKET_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_LIVE_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_ORDER_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_STOCK_LIMIT_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_SUPPORTED_MANUAL_ORDER_TYPES", "LIMIT")
+    monkeypatch.setenv("MGC_PRODUCTION_MANUAL_SYMBOL_WHITELIST", "ABBV")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_PILOT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_LIVE_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SYMBOL_WHITELIST", "MGC")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ASSET_CLASSES", "FUTURE")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_ORDER_TYPES", "MARKET")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_TIF_VALUES", "DAY")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_SUPPORTED_SESSION_VALUES", "NORMAL")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MAX_QUANTITY", "1")
+    monkeypatch.setenv("MGC_PRODUCTION_FUTURES_MARKET_DATA_SYMBOL_MAP", '{"MGC":"/MGC"}')
+    monkeypatch.setenv("MGC_PRODUCTION_LIVE_VERIFIED_ORDER_KEYS", "FUTURE:MARKET")
+    monkeypatch.setattr(production_link_service, "_is_us_regular_hours", lambda now: False)
+    _write_local_operator_auth_state(tmp_path, active=True)
+
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: FakeSchwabBrokerClient(),
+        quote_payload_fetcher=lambda config_path, oauth_client, symbols: (
+            _live_futures_quote_payload("/MGC", "/MGCM26"),
+            {"auth_mode": "test", "source_label": "test futures quote"},
+        ),
+    )
+
+    snapshot = service.snapshot(force_refresh=True)
+    preview = service.run_action(
+        "preview-order",
+        {
+            "account_hash": snapshot["connection"]["selected_account_hash"],
+            "symbol": "MGC",
+            "asset_class": "FUTURE",
+            "intent_type": "MANUAL_LIVE_FUTURES_PILOT",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+            "session": "NORMAL",
+            "review_confirmed": True,
+            "operator_authenticated": True,
+            "local_operator_identity": "test_operator",
+            "auth_method": "TOUCH_ID",
+            "authenticated_at": "2026-03-22T20:00:00+00:00",
+            "auth_session_id": "auth-session-1",
+        },
+    )
+
+    payload = preview["payload"]
+    decision = payload["time_session_policy_decision"]
+
+    assert preview["ok"] is True
+    assert payload["live_submit_enabled"] is True
+    assert payload["live_submit_blockers"] == []
+    assert decision["policy_mode"] == "SCOPED_POLICY_AMENDMENT"
+    assert decision["current_clock_gate_applied"] is False
+    assert decision["current_us_regular_hours"] is False
+    assert decision["allowed"] is True
+    assert decision["symbol_authorization"]["allowed"] is True
+    assert "separate wall-clock" in decision["allowed_reason"]
+    assert payload["allowing_rule"] == "MANUAL_FUTURES_PILOT_TIME_SESSION_POLICY"
+    assert payload["action_phase"] == "OPEN_PREVIEW"
+    assert payload["payload_summary"]["intended_schwab_payload"]["orderType"] == "LIMIT"
+    assert payload["payload_summary"]["intended_schwab_payload"]["price"] == "2500.50"
 
 def test_locked_manual_live_pilot_route_blocks_out_of_scope_live_submit(tmp_path: Path, monkeypatch) -> None:
     token_path = tmp_path / ".local" / "schwab" / "tokens.json"
@@ -332,7 +1315,7 @@ def test_locked_manual_live_pilot_route_blocks_out_of_scope_live_submit(tmp_path
         client_factory=lambda config, oauth_client: FlatClient(),
     )
 
-    with pytest.raises(ProductionLinkActionError, match="Locked manual-live pilot open route only supports BUY_TO_OPEN."):
+    with pytest.raises(ProductionLinkActionError, match="Historical stock pilot open route only supports BUY_TO_OPEN."):
         service.run_action(
             "submit-order",
             {
@@ -351,7 +1334,7 @@ def test_locked_manual_live_pilot_route_blocks_out_of_scope_live_submit(tmp_path
             },
         )
 
-    with pytest.raises(ProductionLinkActionError, match="Locked manual-live pilot route only supports quantity 1."):
+    with pytest.raises(ProductionLinkActionError, match="Historical stock pilot route only supports quantity 1."):
         service.run_action(
             "submit-order",
             {
@@ -1493,7 +2476,7 @@ def test_cancel_flatten_and_reconciliation_surface(tmp_path: Path, monkeypatch) 
     assert cancel_result["ok"] is True
     assert fake_client.cancelled_orders == ["broker-1"]
 
-    with pytest.raises(ProductionLinkActionError, match="Locked manual-live pilot route only supports LIMIT submit."):
+    with pytest.raises(ProductionLinkActionError, match="Historical stock pilot route only supports LIMIT submit."):
         service.run_action(
             "flatten-position",
             {

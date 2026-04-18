@@ -1,4 +1,4 @@
-"""Dedicated SQLite persistence for Schwab production-link state."""
+"""Dedicated SQLite persistence for production-link state."""
 
 from __future__ import annotations
 
@@ -159,6 +159,20 @@ class ProductionLinkStore:
     @property
     def database_path(self) -> Path:
         return self._database_path
+
+    def save_provider_context(
+        self,
+        *,
+        broker_provider_id: str,
+        market_data_provider_id: str | None = None,
+    ) -> None:
+        self.save_runtime_state(
+            "provider_context",
+            {
+                "broker_provider_id": broker_provider_id,
+                "market_data_provider_id": market_data_provider_id,
+            },
+        )
 
     def save_accounts(self, accounts: Iterable[BrokerAccountIdentity], *, selected_account_hash: str | None) -> None:
         rows = list(accounts)
@@ -399,7 +413,7 @@ class ProductionLinkStore:
                 select broker_order_id, client_order_id, symbol, status, raw_json
                 from broker_orders
                 where account_hash = ?
-                  and source = 'schwab_live'
+                  and source like '%_live'
                   and upper(status) not in ('FILLED', 'CANCELED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'NOT_OPEN_ON_BROKER')
                 """,
                 (account_hash,),
@@ -430,7 +444,7 @@ class ProductionLinkStore:
                         event_type="retired_by_live_sync",
                         status=closed_status,
                         occurred_at=occurred_at,
-                        message="Latest live Schwab refresh no longer showed this order as open.",
+                        message="Latest live broker refresh no longer showed this order as open.",
                         request_payload=None,
                         response_payload=_json_loads(str(row["raw_json"])) if row["raw_json"] else None,
                         source="schwab_sync",
@@ -632,11 +646,18 @@ class ProductionLinkStore:
             if not selected_account_hash or str(row["account_hash"]) == selected_account_hash
         ]
         return {
+            "provider_context": runtime_state.get("provider_context")
+            or {
+                "broker_provider_id": "schwab",
+                "market_data_provider_id": "schwab",
+            },
             "accounts": {
+                "selected_account_id": selected_account_hash,
                 "selected_account_hash": selected_account_hash,
                 "selected_account_number": selected_account.get("account_number") if selected_account else None,
                 "rows": [
                     {
+                        "account_id": str(row["account_hash"]),
                         "account_hash": str(row["account_hash"]),
                         "account_number": row["account_number"],
                         "display_name": row["display_name"],
@@ -776,6 +797,8 @@ def _balance_row_json(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if not row:
         return None
     return {
+        "account_id": row.get("account_hash"),
+        "account_hash": row.get("account_hash"),
         "currency": row.get("currency"),
         "liquidation_value": row.get("liquidation_value"),
         "buying_power": row.get("buying_power"),
@@ -828,6 +851,7 @@ def _position_row_json(row: dict[str, Any], quote_row: dict[str, Any] | None = N
         persisted_day_pnl=_to_decimal(row.get("current_day_pnl")),
     )
     return {
+        "account_id": row["account_hash"],
         "account_hash": row["account_hash"],
         "position_key": row["position_key"],
         "symbol": row["symbol"],
@@ -853,6 +877,7 @@ def _position_row_json(row: dict[str, Any], quote_row: dict[str, Any] | None = N
 
 def _quote_row_json(row: dict[str, Any]) -> dict[str, Any]:
     return {
+        "account_id": row["account_hash"],
         "account_hash": row["account_hash"],
         "symbol": row["symbol"],
         "external_symbol": row["external_symbol"],
@@ -875,6 +900,7 @@ def _quote_row_json(row: dict[str, Any]) -> dict[str, Any]:
 def _order_row_json(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "broker_order_id": row["broker_order_id"],
+        "account_id": row["account_hash"],
         "account_hash": row["account_hash"],
         "client_order_id": row["client_order_id"],
         "symbol": row["symbol"],
@@ -900,6 +926,7 @@ def _order_row_json(row: dict[str, Any]) -> dict[str, Any]:
 def _event_row_json(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "event_id": int(row["event_id"]),
+        "account_id": row["account_hash"],
         "account_hash": row["account_hash"],
         "broker_order_id": row["broker_order_id"],
         "client_order_id": row["client_order_id"],
@@ -1018,6 +1045,7 @@ def _broker_state_snapshot(
     open_orders_by_symbol = _orders_by_symbol_summary(open_orders)
     recent_fills_by_symbol = _orders_by_symbol_summary(recent_fills)
     return {
+        "selected_account_id": selected_account_hash,
         "selected_account_hash": selected_account_hash,
         "positions_by_symbol": positions_by_symbol,
         "open_orders_by_symbol": open_orders_by_symbol,

@@ -15,6 +15,16 @@ from .backtest import backtest_decisions, backtest_decisions_with_audit, rank_va
 from .canary import run_phase5_canary_package
 from .conflict import resolve_conflict
 from .engine import run_trend_participation_engine
+from .experiment_configs import (
+    ATP_EXPERIMENT_CONFIG_VERSION,
+    AtpPackageConfig,
+    DrawdownGovernanceConfig,
+    EarlyInvalidationConfig,
+    ExecutionRealismConfig,
+    SessionScopeConfig,
+    config_hash,
+    config_payload,
+)
 from .features import build_feature_states
 from .models import (
     AtpEntryState,
@@ -32,6 +42,13 @@ from .models import (
     VariantExecutionAudit,
     VariantEvaluation,
     WalkForwardFoldResult,
+)
+from .outcome_engine import (
+    generate_atp_trade_records,
+    trade_record_to_position_row,
+    trade_record_to_retest_row,
+    trade_records_to_position_rows,
+    trade_records_to_retest_rows,
 )
 from .patterns import (
     default_pattern_variants,
@@ -51,6 +68,8 @@ from .phase2_continuation import (
     ATP_SHORT_BIAS_UNSUPPORTED,
     ATP_V1_LONG_CONTINUATION_FAMILY,
     ATP_V1_LONG_CONTINUATION_VARIANT_ID,
+    ATP_V1_SHORT_CONTINUATION_FAMILY,
+    ATP_V1_SHORT_CONTINUATION_VARIANT_ID,
     ATP_VIOLENT_PULLBACK_DISQUALIFY,
     ATP_WARMUP_INCOMPLETE,
     CONTINUATION_TRIGGER_CONFIRMED,
@@ -72,6 +91,7 @@ from .phase3_timing import (
     ATP_TIMING_CHASE_RISK,
     ATP_TIMING_CONFIRMATION_NOT_REACHED,
     ATP_TIMING_CONFIRMED,
+    ATP_TIMING_EARLY_PARTICIPATION,
     ATP_TIMING_INVALIDATED,
     ATP_TIMING_INVALIDATED_BEFORE_ENTRY,
     ATP_TIMING_LONDON_DISABLED,
@@ -113,6 +133,14 @@ from .storage import (
     resample_bars_from_1m,
     write_storage_manifest,
 )
+from .substrate import (
+    ATP_CANDIDATE_VERSION,
+    ATP_FEATURE_VERSION,
+    ATP_OUTCOME_ENGINE_VERSION,
+    ATP_SUBSTRATE_ARTIFACT_VERSION,
+    ensure_atp_feature_bundle,
+    ensure_atp_scope_bundle,
+)
 
 __all__ = [
     "ConflictOutcome",
@@ -134,9 +162,15 @@ __all__ = [
     "backtest_decisions",
     "backtest_decisions_with_audit",
     "build_feature_states",
+    "generate_atp_trade_records",
     "build_layout",
     "build_candidate_branch_registry",
     "build_atp_candidate_lane_identity",
+    "AtpPackageConfig",
+    "DrawdownGovernanceConfig",
+    "EarlyInvalidationConfig",
+    "ExecutionRealismConfig",
+    "SessionScopeConfig",
     "default_atp_promotion_add_candidates",
     "default_pattern_variants",
     "feature_matches_side_context",
@@ -175,6 +209,19 @@ __all__ = [
     "run_phase4_review",
     "run_phase5_review",
     "run_trend_participation_engine",
+    "trade_record_to_position_row",
+    "trade_record_to_retest_row",
+    "trade_records_to_position_rows",
+    "trade_records_to_retest_rows",
+    "ensure_atp_feature_bundle",
+    "ensure_atp_scope_bundle",
+    "ATP_SUBSTRATE_ARTIFACT_VERSION",
+    "ATP_FEATURE_VERSION",
+    "ATP_CANDIDATE_VERSION",
+    "ATP_OUTCOME_ENGINE_VERSION",
+    "ATP_EXPERIMENT_CONFIG_VERSION",
+    "config_hash",
+    "config_payload",
     "segment_trade_metrics",
     "summarize_performance",
     "summarize_atp_state_diagnostics",
@@ -191,6 +238,8 @@ __all__ = [
     "CONTINUATION_TRIGGER_UNAVAILABLE",
     "ATP_V1_LONG_CONTINUATION_FAMILY",
     "ATP_V1_LONG_CONTINUATION_VARIANT_ID",
+    "ATP_V1_SHORT_CONTINUATION_FAMILY",
+    "ATP_V1_SHORT_CONTINUATION_VARIANT_ID",
     "ATP_WARMUP_INCOMPLETE",
     "ATP_SESSION_BLOCKED",
     "ATP_RUNTIME_HEALTH_BLOCKED",
@@ -204,6 +253,7 @@ __all__ = [
     "atp_phase2_variant",
     "ATP_TIMING_WAITING",
     "ATP_TIMING_CONFIRMED",
+    "ATP_TIMING_EARLY_PARTICIPATION",
     "ATP_TIMING_CHASE_RISK",
     "ATP_TIMING_INVALIDATED",
     "ATP_TIMING_UNAVAILABLE",

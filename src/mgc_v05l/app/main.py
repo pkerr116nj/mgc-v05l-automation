@@ -37,12 +37,49 @@ from .replay_base_preservation import preserve_replay_base
 from .probationary_runtime import (
     ProbationaryRuntimeTransportFailure,
     REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
+    LIVE_STRATEGY_PILOT_REARM_ACTION,
     build_probationary_paper_runner,
+    build_probationary_live_strategy_pilot_runner,
     run_probationary_market_data_transport_probe,
     submit_probationary_operator_control,
 )
 from .runner import StrategyServiceRunner
 from .historical_playback import run_historical_playback
+from .headless_supervised_paper import (
+    build_headless_supervised_paper_contract,
+    write_headless_supervised_paper_artifacts,
+)
+from .atp_loosened_history_publish import (
+    DEFAULT_END_TIMESTAMP as ATP_LOOSENED_DEFAULT_END_TIMESTAMP,
+    DEFAULT_REPORT_DIR as ATP_LOOSENED_DEFAULT_REPORT_DIR,
+    DEFAULT_SOURCE_DB as ATP_LOOSENED_DEFAULT_SOURCE_DB,
+    DEFAULT_START_TIMESTAMP as ATP_LOOSENED_DEFAULT_START_TIMESTAMP,
+    run_atp_loosened_history_publish,
+)
+from .atp_continuous_backfill_publish import (
+    DEFAULT_BACKFILL_END_TIMESTAMP as ATP_CONTINUOUS_BACKFILL_DEFAULT_END_TIMESTAMP,
+    DEFAULT_BACKFILL_START_TIMESTAMP as ATP_CONTINUOUS_BACKFILL_DEFAULT_BACKFILL_START_TIMESTAMP,
+    DEFAULT_HISTORICAL_PLAYBACK_DIR as ATP_CONTINUOUS_BACKFILL_DEFAULT_HISTORICAL_PLAYBACK_DIR,
+    DEFAULT_REPORT_DIR as ATP_CONTINUOUS_BACKFILL_DEFAULT_REPORT_DIR,
+    DEFAULT_SOURCE_DB as ATP_CONTINUOUS_BACKFILL_DEFAULT_SOURCE_DB,
+    DEFAULT_START_TIMESTAMP as ATP_CONTINUOUS_BACKFILL_DEFAULT_START_TIMESTAMP,
+    run_atp_continuous_backfill_publish,
+)
+from .ibkr_milestone_a_check import main as run_ibkr_milestone_a_check
+from .strategy_risk_shape_lab import DEFAULT_REPORT_DIR as STRATEGY_RISK_SHAPE_DEFAULT_REPORT_DIR
+from .strategy_risk_shape_lab import DEFAULT_HISTORICAL_PLAYBACK_DIR as STRATEGY_RISK_SHAPE_DEFAULT_HISTORICAL_PLAYBACK_DIR
+from .strategy_risk_shape_lab import publish_strategy_risk_shaped_studies
+from .strategy_risk_shape_lab import run_strategy_risk_shape_lab
+from .atp_scope_replay_probe import run_atp_scope_replay_probe
+from .atp_scope_replay_probe import publish_atp_scope_replay_probe_study
+from .published_strategy_exit_probe import DEFAULT_REPORT_DIR as PUBLISHED_EXIT_PROBE_DEFAULT_REPORT_DIR
+from .published_strategy_exit_probe import PublishedExitProbeSpec
+from .published_strategy_exit_probe import publish_published_strategy_exit_probe_study
+from .published_strategy_exit_probe import run_published_strategy_exit_probe
+from .approved_exit_transplant_similarity import DEFAULT_REPORT_DIR as APPROVED_EXIT_TRANSPLANT_SIMILARITY_REPORT_DIR
+from .approved_exit_transplant_similarity import run_approved_exit_transplant_similarity
+from .paper_engine_silent_failure_audit import DEFAULT_OUTPUT_DIR as PAPER_ENGINE_SILENT_FAILURE_AUDIT_REPORT_DIR
+from .paper_engine_silent_failure_audit import run_paper_engine_silent_failure_audit
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -315,6 +352,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Strategy config file path. Used for timezone and replay DB selection.",
     )
+    provider_backfill_parser.add_argument(
+        "--skip-replay-preservation",
+        action="store_true",
+        help="Skip the replay-base preservation copy/merge pass for targeted backfill repair runs.",
+    )
 
     historical_playback_parser = subparsers.add_parser(
         "historical-playback",
@@ -344,6 +386,131 @@ def build_parser() -> argparse.ArgumentParser:
         "--ephemeral-replay-db",
         action="store_true",
         help="Run playback against an in-memory replay DB and emit summary/study artifacts without persisting replay SQLite files.",
+    )
+
+    atp_loosened_history_parser = subparsers.add_parser(
+        "atp-loosened-history-publish",
+        help="Publish loosened ATP historical studies beside the canonical playback catalog.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--report-dir",
+        default=str(ATP_LOOSENED_DEFAULT_REPORT_DIR),
+        help="Output directory for the loosened ATP publish report.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--historical-playback-dir",
+        default="./outputs/historical_playback",
+        help="Historical playback directory that will receive the merged manifest.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--start",
+        default=ATP_LOOSENED_DEFAULT_START_TIMESTAMP.isoformat(),
+        help="Inclusive ISO timestamp for the replay window.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--end",
+        default=ATP_LOOSENED_DEFAULT_END_TIMESTAMP.isoformat(),
+        help="Inclusive ISO timestamp for the replay window.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--study-suffix",
+        default="_loosened_v1",
+        help="Suffix appended to the published parallel ATP standalone strategy IDs.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--label-suffix",
+        default=" [Loosened v1]",
+        help="Suffix appended to published display labels.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--target-config",
+        action="append",
+        default=[],
+        help="Explicit ATP config path to publish. May be supplied multiple times.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--source-db",
+        action="append",
+        default=[str(ATP_LOOSENED_DEFAULT_SOURCE_DB)],
+        help="SQLite source DB path. May be supplied multiple times.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--exit-policy",
+        default="fixed_target_time_stop",
+        help="ATP replay exit policy for the published studies.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Optional max worker override for ATP replay publishing. Defaults to a safer low-concurrency path.",
+    )
+    atp_loosened_history_parser.add_argument(
+        "--unsafe-parallel",
+        action="store_true",
+        help="Allow more aggressive ATP replay parallelism. Safer low-concurrency mode is the default.",
+    )
+
+    atp_continuous_backfill_parser = subparsers.add_parser(
+        "atp-continuous-backfill-publish",
+        help="Publish stitched ATP continuity studies that preserve intact pre-gap history and append repaired gap-window playback.",
+    )
+    atp_continuous_backfill_parser.add_argument(
+        "--report-dir",
+        default=str(ATP_CONTINUOUS_BACKFILL_DEFAULT_REPORT_DIR),
+        help="Output directory for the ATP continuity backfill report.",
+    )
+    atp_continuous_backfill_parser.add_argument(
+        "--historical-playback-dir",
+        default=str(ATP_CONTINUOUS_BACKFILL_DEFAULT_HISTORICAL_PLAYBACK_DIR),
+        help="Historical playback directory that will receive the merged continuity studies.",
+    )
+    atp_continuous_backfill_parser.add_argument(
+        "--start",
+        default=ATP_CONTINUOUS_BACKFILL_DEFAULT_START_TIMESTAMP.isoformat(),
+        help="Inclusive full-history ISO timestamp for rebuilt study bars.",
+    )
+    atp_continuous_backfill_parser.add_argument(
+        "--backfill-start",
+        default=ATP_CONTINUOUS_BACKFILL_DEFAULT_BACKFILL_START_TIMESTAMP.isoformat(),
+        help="Inclusive ISO timestamp where repaired gap-window evaluation begins.",
+    )
+    atp_continuous_backfill_parser.add_argument(
+        "--end",
+        default=ATP_CONTINUOUS_BACKFILL_DEFAULT_END_TIMESTAMP.isoformat(),
+        help="Inclusive ISO timestamp where repaired gap-window evaluation ends.",
+    )
+    atp_continuous_backfill_parser.add_argument(
+        "--source-db",
+        action="append",
+        default=[str(ATP_CONTINUOUS_BACKFILL_DEFAULT_SOURCE_DB)],
+        help="SQLite source DB path. May be supplied multiple times.",
+    )
+
+    strategy_risk_shape_parser = subparsers.add_parser(
+        "strategy-risk-shape-lab",
+        help="Replay published strategy-study closed trades under shared session-risk rules.",
+    )
+    strategy_risk_shape_parser.add_argument(
+        "--study-json",
+        action="append",
+        required=True,
+        help="Published strategy-study JSON path. May be supplied multiple times.",
+    )
+    strategy_risk_shape_parser.add_argument(
+        "--report-dir",
+        default=str(STRATEGY_RISK_SHAPE_DEFAULT_REPORT_DIR),
+        help="Output directory for the reusable risk-shape report.",
+    )
+    strategy_risk_shape_parser.add_argument(
+        "--publish-profile",
+        default=None,
+        help="Optional built-in risk-shape profile ID to publish as parallel historical playback studies.",
+    )
+    strategy_risk_shape_parser.add_argument(
+        "--historical-playback-dir",
+        default=str(STRATEGY_RISK_SHAPE_DEFAULT_HISTORICAL_PLAYBACK_DIR),
+        help="Historical playback directory for published risk-shaped studies.",
     )
 
     canonical_maintenance_parser = subparsers.add_parser(
@@ -427,6 +594,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional max polling cycles before exit.",
     )
 
+    live_pilot_parser = subparsers.add_parser(
+        "probationary-live-strategy-pilot",
+        help="Run the tightly gated ATP live-entry pilot against live Schwab broker truth.",
+    )
+    live_pilot_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Config file path. Later files override earlier ones.",
+    )
+    live_pilot_parser.add_argument(
+        "--schwab-config",
+        default="config/schwab.local.json",
+        help="Optional Schwab market-data config JSON.",
+    )
+    live_pilot_parser.add_argument(
+        "--poll-once",
+        action="store_true",
+        help="Poll once, process completed bars, and exit.",
+    )
+    live_pilot_parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Optional max polling cycles before exit.",
+    )
+
     market_data_probe_parser = subparsers.add_parser(
         "probationary-market-data-probe",
         help="Run the shared authenticated Schwab /pricehistory reachability probe used by paper runtime startup.",
@@ -464,6 +658,7 @@ def build_parser() -> argparse.ArgumentParser:
             "flatten_and_halt",
             "stop_after_cycle",
             "force_reconcile",
+            LIVE_STRATEGY_PILOT_REARM_ACTION,
             REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
         ],
         help="Shared operator control action to queue.",
@@ -499,6 +694,264 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-port-fallback",
         action="store_true",
         help="If the preferred port is unavailable, search upward for the next open port.",
+    )
+
+    headless_status_parser = subparsers.add_parser(
+        "headless-supervised-paper-status",
+        help="Build a service-first supervised-paper operability contract without requiring Electron.",
+    )
+    headless_status_parser.add_argument(
+        "--health-file",
+        default="outputs/operator_dashboard/runtime/headless_supervised_paper_health.json",
+        help="Path to a captured dashboard /health JSON payload.",
+    )
+    headless_status_parser.add_argument(
+        "--startup-control-plane-file",
+        default="outputs/operator_dashboard/startup_control_plane_snapshot.json",
+        help="Path to the startup control-plane snapshot.",
+    )
+    headless_status_parser.add_argument(
+        "--supervised-operability-file",
+        default="outputs/operator_dashboard/supervised_paper_operability_snapshot.json",
+        help="Path to the supervised-paper operability snapshot.",
+    )
+    headless_status_parser.add_argument(
+        "--dashboard-info-file",
+        default="outputs/operator_dashboard/runtime/operator_dashboard.json",
+        help="Path to the dashboard info file.",
+    )
+    headless_status_parser.add_argument(
+        "--output",
+        default=None,
+        help="Optional JSON path to write the headless supervised-paper contract.",
+    )
+    headless_status_parser.add_argument(
+        "--markdown-output",
+        default=None,
+        help="Optional Markdown path to write the headless supervised-paper summary.",
+    )
+
+    ibkr_milestone_parser = subparsers.add_parser(
+        "ibkr-milestone-a-check",
+        help="Evaluate a captured IBKR broker-truth snapshot against Milestone A acceptance checks.",
+    )
+    ibkr_milestone_parser.add_argument(
+        "--snapshot",
+        required=True,
+        help="Path to a captured IBKR broker-truth snapshot JSON file.",
+    )
+    ibkr_milestone_parser.add_argument(
+        "--output",
+        default=None,
+        help="Optional path to write the evaluated acceptance result as JSON.",
+    )
+
+    atp_scope_probe_parser = subparsers.add_parser(
+        "atp-scope-replay-probe",
+        help="Replay a cached ATP scope bundle under isolated variant overrides using reduced 1m bar windows.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--scope-bundle-manifest",
+        required=True,
+        help="Path to an ATP scope-bundle manifest.json file.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--exit-policy",
+        default="target_checkpoint_no_traction_abort",
+        help="Replay exit policy to apply.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--variant-overrides-json",
+        default=None,
+        help="Optional JSON object of PatternVariant override fields.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--pre-confirmation-stop-r-multiple",
+        type=float,
+        default=None,
+        help="Optional tighter stop multiple to apply before confirmation release.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--pre-confirmation-release-candidate-id",
+        default=None,
+        help="Optional ATP candidate id whose confirmation releases the tighter first-attempt stop.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--probe-size-fraction",
+        type=float,
+        default=1.0,
+        help="Optional initial probe size fraction to apply to each replay trade.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--confirmation-add-candidate-id",
+        default=None,
+        help="Optional ATP earned-add candidate id to use for confirmation sizing.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--confirmation-add-size-fraction",
+        type=float,
+        default=0.0,
+        help="Optional add size fraction to earn once the confirmation candidate fires.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--point-value",
+        type=float,
+        default=None,
+        help="Optional point-value override. Defaults to the scope bundle's point_value.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--output",
+        default=None,
+        help="Optional JSON output path.",
+    )
+    atp_scope_probe_parser.add_argument(
+        "--markdown-output",
+        default=None,
+        help="Optional Markdown output path.",
+    )
+    atp_scope_publish_parser = subparsers.add_parser(
+        "atp-scope-replay-probe-publish",
+        help="Publish a scope-replay probe result as a parallel historical playback study.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--source-study-json",
+        required=True,
+        help="Path to the source strategy study JSON to inherit metadata from.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--scope-bundle-manifest",
+        required=True,
+        help="Path to an ATP scope-bundle manifest.json file.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--exit-policy",
+        default="target_checkpoint_no_traction_abort",
+        help="Replay exit policy to apply.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--variant-overrides-json",
+        default=None,
+        help="Optional JSON object of PatternVariant override fields.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--pre-confirmation-stop-r-multiple",
+        type=float,
+        default=None,
+        help="Optional tighter stop multiple to apply before confirmation release.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--pre-confirmation-release-candidate-id",
+        default=None,
+        help="Optional ATP candidate id whose confirmation releases the tighter first-attempt stop.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--probe-size-fraction",
+        type=float,
+        default=1.0,
+        help="Optional initial probe size fraction to apply to each replay trade.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--confirmation-add-candidate-id",
+        default=None,
+        help="Optional ATP earned-add candidate id to use for confirmation sizing.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--confirmation-add-size-fraction",
+        type=float,
+        default=0.0,
+        help="Optional add size fraction to earn once the confirmation candidate fires.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--point-value",
+        type=float,
+        default=None,
+        help="Optional point-value override. Defaults to the scope bundle's point_value.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--study-suffix",
+        default="_probe_confirmation_v1",
+        help="Suffix for the published strategy id.",
+    )
+    atp_scope_publish_parser.add_argument(
+        "--label-suffix",
+        default=" [Probe Confirmation v1]",
+        help="Display-name suffix for the published strategy study.",
+    )
+    published_exit_probe_parser = subparsers.add_parser(
+        "published-strategy-exit-probe",
+        help="Replay alternate exits against already-published strategy studies using embedded bars and frozen entries.",
+    )
+    published_exit_probe_parser.add_argument(
+        "--study-json",
+        action="append",
+        required=True,
+        help="Published strategy-study JSON path. May be supplied multiple times.",
+    )
+    published_exit_probe_parser.add_argument(
+        "--report-dir",
+        default=str(PUBLISHED_EXIT_PROBE_DEFAULT_REPORT_DIR),
+        help="Output directory for the exit-probe report.",
+    )
+    published_exit_probe_parser.add_argument("--checkpoint-arm-r", type=float, default=0.80, help="MFE threshold, in risk units, required to arm the checkpoint trail.")
+    published_exit_probe_parser.add_argument("--checkpoint-lock-r", type=float, default=0.35, help="Locked-in profit stop, in risk units, after the checkpoint arms.")
+    published_exit_probe_parser.add_argument("--checkpoint-trail-r", type=float, default=0.25, help="Structure trail distance, in risk units, after the checkpoint arms.")
+    published_exit_probe_parser.add_argument("--no-traction-abort-bars", type=int, default=2, help="Abort a trade this many bars in if it still has not shown enough favorable excursion.")
+    published_exit_probe_parser.add_argument("--no-traction-min-favorable-r", type=float, default=0.25, help="Minimum favorable excursion, in risk units, required to avoid the no-traction abort.")
+    published_exit_probe_parser.add_argument("--risk-lookback-bars", type=int, default=5, help="Lookback bars used to estimate per-trade risk from the embedded bars.")
+    published_exit_probe_parser.add_argument("--risk-range-floor", type=float, default=0.25, help="Minimum risk range in raw price units when the embedded bar range is tiny.")
+    published_exit_publish_parser = subparsers.add_parser(
+        "published-strategy-exit-probe-publish",
+        help="Publish an exit-only probe result as a parallel historical playback study.",
+    )
+    published_exit_publish_parser.add_argument(
+        "--source-study-json",
+        required=True,
+        help="Published strategy-study JSON path to inherit metadata and bars from.",
+    )
+    published_exit_publish_parser.add_argument(
+        "--report-dir",
+        default=str(PUBLISHED_EXIT_PROBE_DEFAULT_REPORT_DIR),
+        help="Output directory for publish artifacts.",
+    )
+    published_exit_publish_parser.add_argument(
+        "--study-suffix",
+        default="_checkpoint_no_traction_v1",
+        help="Suffix for the published strategy id.",
+    )
+    published_exit_publish_parser.add_argument(
+        "--label-suffix",
+        default=" [Checkpoint + No-Traction v1]",
+        help="Display-name suffix for the published strategy study.",
+    )
+    published_exit_publish_parser.add_argument("--checkpoint-arm-r", type=float, default=0.80, help="MFE threshold, in risk units, required to arm the checkpoint trail.")
+    published_exit_publish_parser.add_argument("--checkpoint-lock-r", type=float, default=0.35, help="Locked-in profit stop, in risk units, after the checkpoint arms.")
+    published_exit_publish_parser.add_argument("--checkpoint-trail-r", type=float, default=0.25, help="Structure trail distance, in risk units, after the checkpoint arms.")
+    published_exit_publish_parser.add_argument("--no-traction-abort-bars", type=int, default=2, help="Abort a trade this many bars in if it still has not shown enough favorable excursion.")
+    published_exit_publish_parser.add_argument("--no-traction-min-favorable-r", type=float, default=0.25, help="Minimum favorable excursion, in risk units, required to avoid the no-traction abort.")
+    published_exit_publish_parser.add_argument("--risk-lookback-bars", type=int, default=5, help="Lookback bars used to estimate per-trade risk from the embedded bars.")
+    published_exit_publish_parser.add_argument("--risk-range-floor", type=float, default=0.25, help="Minimum risk range in raw price units when the embedded bar range is tiny.")
+    approved_exit_similarity_parser = subparsers.add_parser(
+        "approved-exit-transplant-similarity",
+        help="Rank approved non-ATP lanes by structural similarity to a target lane for exit-only transplant review.",
+    )
+    approved_exit_similarity_parser.add_argument(
+        "--target-branch",
+        required=True,
+        help="Exact approved branch label to use as the similarity anchor.",
+    )
+    approved_exit_similarity_parser.add_argument(
+        "--report-dir",
+        default=str(APPROVED_EXIT_TRANSPLANT_SIMILARITY_REPORT_DIR),
+        help="Output directory for the similarity report.",
+    )
+    paper_engine_silent_failure_audit_parser = subparsers.add_parser(
+        "paper-engine-silent-failure-audit",
+        help="Audit live paper lanes from eligibility through persistence and dashboard rendering freshness.",
+    )
+    paper_engine_silent_failure_audit_parser.add_argument(
+        "--report-dir",
+        default=str(PAPER_ENGINE_SILENT_FAILURE_AUDIT_REPORT_DIR),
+        help="Output directory for the paper-engine audit report.",
     )
     return parser
 
@@ -706,7 +1159,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "market-data-backfill":
         try:
             settings = load_settings_from_files(args.config or ["config/base.yaml", "config/replay.yaml"])
-            preserve_replay_base()
+            preservation = None
+            if not bool(args.skip_replay_preservation):
+                preserve_replay_base()
             ingestion = HistoricalMarketDataIngestionService(
                 database_url=settings.database_url,
                 provider_config_path=args.provider_config,
@@ -734,7 +1189,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         allow_canonical_overwrite=args.allow_canonical_overwrite,
                     )
                 )
-            preservation = preserve_replay_base()
+            if not bool(args.skip_replay_preservation):
+                preservation = preserve_replay_base()
         except Exception as exc:
             print(
                 json.dumps(
@@ -757,6 +1213,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "symbol_count": len(audits),
                     "symbols": [audit.internal_symbol for audit in audits],
                     "audits": _json_ready(audits),
+                    "skip_replay_preservation": bool(args.skip_replay_preservation),
                     "replay_base_preservation": _json_ready(preservation),
                 },
                 sort_keys=True,
@@ -779,6 +1236,51 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_stamp=args.run_stamp,
             persist_replay_db=not bool(args.ephemeral_replay_db),
         )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "atp-loosened-history-publish":
+        result = run_atp_loosened_history_publish(
+            report_dir=Path(args.report_dir),
+            historical_playback_dir=Path(args.historical_playback_dir),
+            start_timestamp=datetime.fromisoformat(args.start),
+            end_timestamp=datetime.fromisoformat(args.end),
+            study_suffix=str(args.study_suffix),
+            label_suffix=str(args.label_suffix),
+            target_configs=[Path(path) for path in args.target_config] if args.target_config else None,
+            source_database_paths=[Path(path) for path in args.source_db],
+            exit_policy=str(args.exit_policy),
+            safe_mode=not bool(args.unsafe_parallel),
+            max_workers=args.max_workers,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "atp-continuous-backfill-publish":
+        result = run_atp_continuous_backfill_publish(
+            report_dir=Path(args.report_dir),
+            historical_playback_dir=Path(args.historical_playback_dir),
+            source_database_paths=[Path(path) for path in args.source_db],
+            full_start_timestamp=datetime.fromisoformat(args.start),
+            backfill_start_timestamp=datetime.fromisoformat(args.backfill_start),
+            backfill_end_timestamp=datetime.fromisoformat(args.end),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "strategy-risk-shape-lab":
+        if args.publish_profile:
+            result = publish_strategy_risk_shaped_studies(
+                study_json_paths=[Path(path) for path in args.study_json],
+                profile_id=str(args.publish_profile),
+                report_dir=Path(args.report_dir),
+                historical_playback_dir=Path(args.historical_playback_dir),
+            )
+        else:
+            result = run_strategy_risk_shape_lab(
+                study_json_paths=[Path(path) for path in args.study_json],
+                report_dir=Path(args.report_dir),
+            )
         print(json.dumps(_json_ready(result), sort_keys=True))
         return 0
 
@@ -873,6 +1375,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(_json_ready(summary), sort_keys=True))
         return 0
 
+    if args.command == "probationary-live-strategy-pilot":
+        config_paths = args.config or [
+            "config/base.yaml",
+            "config/live.yaml",
+            "config/probationary_pattern_engine.yaml",
+            "config/probationary_pattern_engine_live_atp_companion_v1_gc_asia_us_pilot.yaml",
+        ]
+        try:
+            runner = build_probationary_live_strategy_pilot_runner(
+                [Path(path) for path in config_paths],
+                schwab_config_path=args.schwab_config,
+            )
+            summary = runner.run(poll_once=args.poll_once, max_cycles=args.max_cycles)
+        except ProbationaryRuntimeTransportFailure as exc:
+            print(json.dumps(_json_ready(exc.payload), sort_keys=True))
+            return 1
+        print(json.dumps(_json_ready(summary), sort_keys=True))
+        return 0
+
     if args.command == "probationary-market-data-probe":
         config_paths = args.config or [
             "config/base.yaml",
@@ -919,6 +1440,150 @@ def main(argv: Sequence[str] | None = None) -> int:
             info_file=args.info_file,
             allow_port_fallback=args.allow_port_fallback,
         )
+        return 0
+
+    if args.command == "headless-supervised-paper-status":
+        def _read_optional_json(path_value: str | None) -> dict[str, Any]:
+            if not path_value:
+                return {}
+            path = Path(path_value)
+            if not path.exists():
+                return {}
+            return json.loads(path.read_text(encoding="utf-8"))
+
+        contract = build_headless_supervised_paper_contract(
+            health_payload=_read_optional_json(args.health_file),
+            startup_control_plane=_read_optional_json(args.startup_control_plane_file),
+            supervised_paper_operability=_read_optional_json(args.supervised_operability_file),
+            dashboard_info=_read_optional_json(args.dashboard_info_file),
+        )
+        write_headless_supervised_paper_artifacts(
+            contract=contract,
+            output_path=args.output,
+            markdown_path=args.markdown_output,
+        )
+        print(json.dumps(_json_ready(contract), sort_keys=True))
+        return 0
+
+    if args.command == "ibkr-milestone-a-check":
+        result = run_ibkr_milestone_a_check(
+            [
+                "--snapshot",
+                args.snapshot,
+                *([] if not args.output else ["--output", args.output]),
+            ]
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "atp-scope-replay-probe":
+        result = run_atp_scope_replay_probe(
+            scope_bundle_manifest=Path(args.scope_bundle_manifest),
+            exit_policy=str(args.exit_policy or "").strip() or "target_checkpoint_no_traction_abort",
+            variant_overrides=(
+                json.loads(args.variant_overrides_json)
+                if args.variant_overrides_json
+                else None
+            ),
+            pre_confirmation_stop_r_multiple=args.pre_confirmation_stop_r_multiple,
+            pre_confirmation_release_candidate_id=(
+                str(args.pre_confirmation_release_candidate_id).strip()
+                if args.pre_confirmation_release_candidate_id
+                else None
+            ),
+            probe_size_fraction=float(args.probe_size_fraction),
+            confirmation_add_candidate_id=(
+                str(args.confirmation_add_candidate_id).strip()
+                if args.confirmation_add_candidate_id
+                else None
+            ),
+            confirmation_add_size_fraction=float(args.confirmation_add_size_fraction),
+            point_value_override=args.point_value,
+            output_path=Path(args.output) if args.output else None,
+            markdown_output_path=Path(args.markdown_output) if args.markdown_output else None,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "atp-scope-replay-probe-publish":
+        result = publish_atp_scope_replay_probe_study(
+            source_study_json_path=Path(args.source_study_json),
+            scope_bundle_manifest=Path(args.scope_bundle_manifest),
+            exit_policy=str(args.exit_policy or "").strip() or "target_checkpoint_no_traction_abort",
+            variant_overrides=(
+                json.loads(args.variant_overrides_json)
+                if args.variant_overrides_json
+                else None
+            ),
+            pre_confirmation_stop_r_multiple=args.pre_confirmation_stop_r_multiple,
+            pre_confirmation_release_candidate_id=(
+                str(args.pre_confirmation_release_candidate_id).strip()
+                if args.pre_confirmation_release_candidate_id
+                else None
+            ),
+            probe_size_fraction=float(args.probe_size_fraction),
+            confirmation_add_candidate_id=(
+                str(args.confirmation_add_candidate_id).strip()
+                if args.confirmation_add_candidate_id
+                else None
+            ),
+            confirmation_add_size_fraction=float(args.confirmation_add_size_fraction),
+            point_value_override=args.point_value,
+            study_suffix=str(args.study_suffix or "").strip() or "_probe_confirmation_v1",
+            label_suffix=str(args.label_suffix or "").strip() or " [Probe Confirmation v1]",
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "published-strategy-exit-probe":
+        result = run_published_strategy_exit_probe(
+            study_json_paths=[Path(path) for path in (args.study_json or [])],
+            report_dir=Path(args.report_dir),
+            spec=PublishedExitProbeSpec(
+                checkpoint_arm_r=float(args.checkpoint_arm_r),
+                checkpoint_lock_r=float(args.checkpoint_lock_r),
+                checkpoint_trail_r=float(args.checkpoint_trail_r),
+                no_traction_abort_bars=int(args.no_traction_abort_bars),
+                no_traction_min_favorable_r=float(args.no_traction_min_favorable_r),
+                risk_lookback_bars=int(args.risk_lookback_bars),
+                risk_range_floor=float(args.risk_range_floor),
+            ),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "published-strategy-exit-probe-publish":
+        result = publish_published_strategy_exit_probe_study(
+            source_study_json_path=Path(args.source_study_json),
+            report_dir=Path(args.report_dir),
+            study_suffix=str(args.study_suffix or "").strip() or "_checkpoint_no_traction_v1",
+            label_suffix=str(args.label_suffix or "").strip() or " [Checkpoint + No-Traction v1]",
+            spec=PublishedExitProbeSpec(
+                checkpoint_arm_r=float(args.checkpoint_arm_r),
+                checkpoint_lock_r=float(args.checkpoint_lock_r),
+                checkpoint_trail_r=float(args.checkpoint_trail_r),
+                no_traction_abort_bars=int(args.no_traction_abort_bars),
+                no_traction_min_favorable_r=float(args.no_traction_min_favorable_r),
+                risk_lookback_bars=int(args.risk_lookback_bars),
+                risk_range_floor=float(args.risk_range_floor),
+            ),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "approved-exit-transplant-similarity":
+        result = run_approved_exit_transplant_similarity(
+            target_branch=str(args.target_branch),
+            report_dir=Path(args.report_dir),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "paper-engine-silent-failure-audit":
+        result = run_paper_engine_silent_failure_audit(
+            output_dir=Path(args.report_dir),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
         return 0
 
     parser.error(f"Unsupported command: {args.command}")

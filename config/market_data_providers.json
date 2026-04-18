@@ -74,18 +74,30 @@
         "exchange": "COMEX",
         "description": "Micro Gold futures volume-based front continuous"
       },
-      "GC": {
-        "request_symbol": "GC.v.0",
-        "dataset": "GLBX.MDP3",
-        "stype_in": "continuous",
-        "stype_out": "instrument_id",
+    "GC": {
+      "request_symbol": "GC.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
         "schema_by_timeframe": {
           "1m": "ohlcv-1m"
         },
-        "asset_class": "future",
-        "exchange": "COMEX",
-        "description": "Gold futures volume-based front continuous"
+      "asset_class": "future",
+      "exchange": "COMEX",
+      "description": "Gold futures volume-based front continuous"
+    },
+    "HG": {
+      "request_symbol": "HG.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
       },
+      "asset_class": "future",
+      "exchange": "COMEX",
+      "description": "Copper futures volume-based front continuous"
+    },
       "MES": {
         "request_symbol": "MES.v.0",
         "dataset": "GLBX.MDP3",
@@ -146,22 +158,58 @@
         "exchange": "NYMEX",
         "description": "WTI crude oil futures volume-based front continuous"
       },
-      "6E": {
-        "request_symbol": "6E.v.0",
-        "dataset": "GLBX.MDP3",
-        "stype_in": "continuous",
-        "stype_out": "instrument_id",
+    "6E": {
+      "request_symbol": "6E.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
         "schema_by_timeframe": {
           "1m": "ohlcv-1m"
         },
-        "asset_class": "future",
-        "exchange": "CME",
-        "description": "Euro FX futures volume-based front continuous"
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "Euro FX futures volume-based front continuous"
+    },
+    "6J": {
+      "request_symbol": "6J.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
       },
-      "ZN": {
-        "request_symbol": "ZN.v.0",
-        "dataset": "GLBX.MDP3",
-        "stype_in": "continuous",
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "Japanese yen futures volume-based front continuous"
+    },
+    "PL": {
+      "request_symbol": "PL.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "NYMEX",
+      "description": "Platinum futures volume-based front continuous"
+    },
+    "QC": {
+      "request_symbol": "QC.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "COMEX",
+      "description": "E-mini copper futures volume-based front continuous"
+    },
+    "ZN": {
+      "request_symbol": "ZN.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
         "stype_out": "instrument_id",
         "schema_by_timeframe": {
           "1m": "ohlcv-1m"

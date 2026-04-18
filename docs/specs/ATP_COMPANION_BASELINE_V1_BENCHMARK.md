@@ -12,10 +12,12 @@ Benchmark status:
 - freeze branch reference for future ATP research
 - current tracked paper strategy benchmark for app-facing paper monitoring
 - current continuously running live-data paper benchmark for soak validation
+- frozen benchmark lane, not repo-wide ATP law
 
 Governance note:
 - this document freezes an ATP benchmark lane
 - it does not define global platform defaults for all research or production lanes
+- benchmark-local assumptions here are comparison anchors, not disqualifying rules for ATP-derived candidate lanes
 
 ## Promotion Note
 
@@ -42,7 +44,7 @@ Why London is disabled:
 - until a better London-specific continuation model exists, London should remain diagnostic-only in the ATP companion baseline
 
 This benchmark is now the reference baseline for future ATP research branches.
-It is a benchmark lane, not a statement that London or ATP timing assumptions are universal truth across the platform.
+It is a frozen benchmark lane, not a statement that London, MGC scope, or ATP timing assumptions are universal truth across the platform.
 
 ## Productized Paper Tracking Note
 
@@ -82,6 +84,7 @@ It does not authorize:
 - live broker routing
 - semantic changes to the benchmark
 - live-readiness promotion without additional soak duration
+- candidate lanes to inherit benchmark status automatically
 
 ## Benchmark Summary
 
@@ -126,5 +129,12 @@ Companion documents:
 
 Future ATP research should branch from this benchmark rather than continuing to modify the candidate branch in place.
 
+Benchmark-local assumptions should remain explicit and local to this lane.
+ATP-derived candidate success does not imply benchmark replacement.
+
 Recommended next research branch:
 - promotion/add logic on top of `ATP Companion Baseline v1 — Asia + US Executable, London Diagnostic-Only`
+
+Related taxonomy:
+- [ATP Strategy Taxonomy](./ATP_STRATEGY_TAXONOMY.md)
+- [ATP Companion GC Asia+US Production-Track Candidate Package](./ATP_COMPANION_GC_ASIA_US_PRODUCTION_TRACK_PACKAGE.md)
