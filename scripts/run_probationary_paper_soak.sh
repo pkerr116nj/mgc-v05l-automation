@@ -33,6 +33,8 @@ GC_MGC_ACCEPTANCE_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_
 DEFAULT_RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
 DEFAULT_PID_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.pid"
 DEFAULT_LOG_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.log"
+DEFAULT_CONFIG_PATHS_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_config_paths.txt"
+CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
 
 ARGS=()
 CONFIG_SET=0
@@ -43,6 +45,7 @@ INCLUDE_ATPE_CANARY=0
 INCLUDE_GC_MGC_ACCEPTANCE=0
 PID_FILE="${DEFAULT_PID_FILE}"
 LOG_FILE="${DEFAULT_LOG_FILE}"
+CONFIG_PATHS_FILE="${DEFAULT_CONFIG_PATHS_FILE}"
 
 while (($# > 0)); do
   case "$1" in
@@ -107,7 +110,35 @@ done
 
 FINAL_ARGS=()
 if [[ ${CONFIG_SET} -eq 0 ]]; then
-  for config_path in "${DEFAULT_CONFIGS[@]}"; do
+  CONFIG_PATHS=()
+  if [[ -n "${CONFIG_OVERRIDE_RAW}" ]]; then
+    IFS=',:' read -r -a CONFIG_OVERRIDE_PARTS <<< "${CONFIG_OVERRIDE_RAW}"
+    for config_path in "${CONFIG_OVERRIDE_PARTS[@]}"; do
+      config_path="${config_path#"${config_path%%[![:space:]]*}"}"
+      config_path="${config_path%"${config_path##*[![:space:]]}"}"
+      if [[ -z "${config_path}" ]]; then
+        continue
+      fi
+      if [[ "${config_path}" != /* ]]; then
+        config_path="${REPO_ROOT}/${config_path}"
+      fi
+      CONFIG_PATHS+=("${config_path}")
+    done
+  fi
+  if [[ ${#CONFIG_PATHS[@]} -eq 0 ]] && [[ -f "${CONFIG_PATHS_FILE}" ]]; then
+    while IFS= read -r config_path; do
+      config_path="${config_path#"${config_path%%[![:space:]]*}"}"
+      config_path="${config_path%"${config_path##*[![:space:]]}"}"
+      if [[ -z "${config_path}" ]]; then
+        continue
+      fi
+      CONFIG_PATHS+=("${config_path}")
+    done < "${CONFIG_PATHS_FILE}"
+  fi
+  if [[ ${#CONFIG_PATHS[@]} -eq 0 ]]; then
+    CONFIG_PATHS=("${DEFAULT_CONFIGS[@]}")
+  fi
+  for config_path in "${CONFIG_PATHS[@]}"; do
     FINAL_ARGS+=(--config "${config_path}")
   done
   if [[ ${INCLUDE_ATPE_CANARY} -eq 1 ]]; then
@@ -124,11 +155,36 @@ if [[ ${#ARGS[@]} -gt 0 ]]; then
   FINAL_ARGS+=("${ARGS[@]}")
 fi
 
+persist_runtime_config_paths() {
+  local path
+  local persisted=()
+  local index=0
+  while [[ ${index} -lt ${#FINAL_ARGS[@]} ]]; do
+    local arg="${FINAL_ARGS[${index}]}"
+    if [[ "${arg}" == "--config" ]]; then
+      index=$((index + 1))
+      if [[ ${index} -lt ${#FINAL_ARGS[@]} ]]; then
+        path="${FINAL_ARGS[${index}]}"
+        [[ -n "${path}" ]] && persisted+=("${path}")
+      fi
+    elif [[ "${arg}" == --config=* ]]; then
+      path="${arg#*=}"
+      [[ -n "${path}" ]] && persisted+=("${path}")
+    fi
+    index=$((index + 1))
+  done
+  ensure_dir "$(dirname "${CONFIG_PATHS_FILE}")"
+  : > "${CONFIG_PATHS_FILE}"
+  for path in "${persisted[@]}"; do
+    printf '%s\n' "${path}" >> "${CONFIG_PATHS_FILE}"
+  done
+}
+
 echo "Launching probationary paper soak with repo bootstrap."
 echo "Schwab config: ${DEFAULT_SCHWAB_CONFIG}"
 echo "Paper configs:"
 if [[ ${CONFIG_SET} -eq 0 ]]; then
-  for config_path in "${DEFAULT_CONFIGS[@]}"; do
+  for config_path in "${CONFIG_PATHS[@]}"; do
     echo "  - ${config_path}"
   done
   if [[ ${INCLUDE_ATPE_CANARY} -eq 1 ]]; then
@@ -142,6 +198,7 @@ else
 fi
 
 runtime_network_resolution_preflight "${DEFAULT_SCHWAB_CONFIG}" "probationary-paper-soak-launch"
+persist_runtime_config_paths
 
 if [[ ${NETWORK_PREFLIGHT_ONLY} -eq 1 ]]; then
   echo "Runtime network preflight completed; skipping probationary paper soak launch."

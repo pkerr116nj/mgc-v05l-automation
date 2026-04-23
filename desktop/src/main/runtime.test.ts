@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { __testing, getDesktopState, prepareDesktopForLaunch, runDashboardAction, runProductionLinkAction, startDashboard, type DesktopState } from "./runtime";
+import { buildOperatorTriageContract } from "./shared/operatorTriage";
 
 function makeDesktopState(overrides: Partial<DesktopState> = {}): DesktopState {
   return {
@@ -481,6 +482,122 @@ test("health-only backend uses snapshot fallback immediately instead of blocking
   assert.match(state.errors[0] ?? "", /showing latest persisted operator snapshots/i);
 
   __testing.resetRuntimeState();
+});
+
+test("health-only backend prefers attached degraded bridge over snapshot fallback messaging", async () => {
+  __testing.resetRuntimeState();
+
+  __testing.setLoadLiveDashboardHook(async () => ({
+    mode: "health-only",
+    url: "http://127.0.0.1:8790/",
+    health: { status: "degraded", ready: false },
+    error: "dashboard payload timeout",
+  }));
+  __testing.setBuildLocalOperatorAuthStateHook(async () => makeDesktopState().localAuth);
+  __testing.setLoadSnapshotBundleHook(async () => ({
+    generated_at: new Date().toISOString(),
+    dashboard_meta: { server_instance_id: "instance-current" },
+    global: { mode: "IDLE", mode_label: "IDLE", auth_ready: true, runtime_status: "STOPPED" },
+    operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
+    paper: { readiness: { runtime_running: false, entries_enabled: true }, running: false },
+    startup_control_plane: {},
+    production_link: {},
+  }));
+  __testing.setLoadAttachedSnapshotBridgeHook(async () => ({
+    readiness: { readiness_state: "NOT_READY", control_plane: { launch_allowed: false, dashboard_attached: true } },
+    health: { status: "degraded", ready: false },
+    backendUrl: "http://127.0.0.1:8790/",
+    detail: "Service is attached and current, but supervised paper remains blocked and requires operator attention.",
+  }));
+
+  const state = await getDesktopState();
+
+  assert.equal(state.connection, "snapshot");
+  assert.equal(state.source.mode, "attached_snapshot_bridge");
+  assert.equal(state.source.label, "SERVICE ATTACHED / DEGRADED");
+  assert.equal(state.backend.state, "degraded");
+  assert.deepEqual(state.errors, []);
+
+  __testing.resetRuntimeState();
+});
+
+test("paper mode does not let live broker and operator auth gates block supervised paper usability", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "attached_snapshot_bridge",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "LIVE",
+      market_data_label: "LIVE",
+      reconciliation_status: "CLEAN",
+      stale: false,
+    },
+    operatorSurface: {
+      generated_at: new Date().toISOString(),
+    },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+    },
+    runtimeValues: {
+      runtime_recovery_state: "RUNNING",
+    },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {
+      operator_status: {
+        local_operator_auth: {
+          available: true,
+          ready: false,
+          auth_session_active: false,
+          entry_allowed: false,
+          flatten_allowed: true,
+          replace_allowed: false,
+          blocker: "Local operator auth session expired.",
+        },
+      },
+      futures_pilot_status: {
+        preview_blockers: ["Futures pilot preview is disabled because MGC_PRODUCTION_FUTURES_PILOT_ENABLED is false."],
+        live_submit_blockers: ["Futures pilot live submit remains preview-only until FUTURE:MARKET is explicitly live-verified."],
+      },
+    },
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: {
+      blocked: false,
+      mismatch_count: 0,
+      detail: "clear",
+    },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {
+      auth_session_active: false,
+      last_auth_detail: "expired",
+    },
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  assert.equal(contract.operator_triage.live_trade_authority, "Enabled");
+  assert.equal(contract.operator_triage.root_cause.code, "no_hard_gate_failure");
+  assert.equal(contract.operator_triage.hard_gates.find((gate) => gate.key === "broker-authority")?.status, "pass");
+  assert.equal(contract.operator_triage.hard_gates.find((gate) => gate.key === "operator-authority")?.status, "pass");
 });
 
 test("snapshot fallback with a stale backend endpoint starts automatic service recovery", async () => {

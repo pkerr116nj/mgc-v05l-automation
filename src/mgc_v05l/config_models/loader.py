@@ -23,6 +23,9 @@ def load_settings_from_files(paths: Iterable[str | Path]) -> StrategySettings:
 
 
 def _merge_flat_yaml(merged: dict[str, Any], overlay: dict[str, Any]) -> None:
+    if overlay.get("probationary_paper_runtime_exclusive_config") is True:
+        for key in _ADDITIVE_JSON_ARRAY_KEYS:
+            merged.pop(key, None)
     for key, value in overlay.items():
         if key in _ADDITIVE_JSON_ARRAY_KEYS and key in merged:
             merged[key] = _merge_json_array_scalars(merged[key], value, key=key)

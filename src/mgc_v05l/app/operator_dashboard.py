@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -51,6 +51,8 @@ from .session_phase_labels import label_session_phase
 from .approved_quant_lanes.dashboard_payloads import load_approved_quant_baselines_snapshot
 from .dashboard_registry import build_dashboard_lane_registry
 from .experimental_canaries_dashboard_payloads import load_experimental_canaries_snapshot
+from .gc_mgc_forced_session_runtime import GC_MGC_FORCED_SESSION_RUNTIME_KIND
+from .index_futures_forced_session_runtime import INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND
 from .operator_surface import build_operator_surface
 from .probationary_runtime import REALIZED_LOSER_SESSION_OVERRIDE_ACTION, submit_probationary_operator_control
 from .research_runtime_bridge import (
@@ -88,6 +90,7 @@ DEFAULT_DASHBOARD_PROBE_WARM_INTERVAL_SECONDS = 1.0
 DEFAULT_DASHBOARD_PROBE_STEADY_INTERVAL_SECONDS = 5.0
 DEFAULT_DASHBOARD_PROBE_STABILITY_WINDOW_SECONDS = 2.0
 DEFAULT_DASHBOARD_PROBE_MIN_STABLE_SAMPLES = 1
+DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT = 2000
 # The steady-state probe loop can legitimately publish a healthy dashboard snapshot
 # on a cadence slower than 15s, especially while heavier payload sections are being
 # rebuilt. Keep the cached payload window aligned with the launcher readiness
@@ -354,6 +357,14 @@ class OperatorDashboardService:
         self._paper_tracked_strategies_path = self._dashboard_artifacts_dir / "paper_tracked_strategies_snapshot.json"
         self._paper_tracked_strategy_details_path = (
             self._dashboard_artifacts_dir / "paper_tracked_strategy_details_snapshot.json"
+        )
+        self._paper_runtime_config_paths_override_path = (
+            self._repo_root
+            / "outputs"
+            / "probationary_pattern_engine"
+            / "paper_session"
+            / "runtime"
+            / "paper_runtime_config_paths.txt"
         )
         self._strategy_analysis_path = self._dashboard_artifacts_dir / "strategy_analysis_snapshot.json"
         self._research_runtime_bridge_root = (
@@ -5633,6 +5644,16 @@ class OperatorDashboardService:
             "source": "config/probationary_pattern_engine_paper.yaml fallback",
         }
 
+    def _configured_paper_lanes(self, config_in_force: dict[str, Any] | None) -> list[dict[str, Any]]:
+        payload = config_in_force or {}
+        lanes = list(payload.get("lanes") or [])
+        if lanes:
+            return [dict(row) for row in lanes if isinstance(row, dict)]
+        paper_lanes = list(payload.get("paper_lanes") or [])
+        if paper_lanes:
+            return [dict(row) for row in paper_lanes if isinstance(row, dict)]
+        return []
+
     def _dashboard_base_settings(self):
         config_paths = [
             self._repo_root / "config" / "base.yaml",
@@ -5703,7 +5724,7 @@ class OperatorDashboardService:
             return {"rows": [], "row_count": 0}
         runtime_definitions = build_standalone_strategy_definitions(
             settings,
-            runtime_lanes=list(config_in_force.get("lanes") or []),
+            runtime_lanes=self._configured_paper_lanes(config_in_force),
             include_approved_quant_runtime_rows=include_approved_quant,
         )
         rows = [
@@ -5720,6 +5741,8 @@ class OperatorDashboardService:
                     ATPE_CANARY_RUNTIME_KIND,
                     ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
                     GC_MGC_ACCEPTANCE_RUNTIME_KIND,
+                    GC_MGC_FORCED_SESSION_RUNTIME_KIND,
+                    INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND,
                 },
                 "runtime_state_loaded": _standalone_runtime_state_loaded(
                     _resolve_sqlite_database_path(definition.database_url),
@@ -5736,7 +5759,7 @@ class OperatorDashboardService:
         }
 
     def _paper_lane_risk_fallback(self, operator_status: dict[str, Any], config_in_force: dict[str, Any]) -> dict[str, Any]:
-        config_lanes = list(config_in_force.get("lanes") or [])
+        config_lanes = self._configured_paper_lanes(config_in_force)
         if not config_lanes:
             return {}
         operator_lane_rows = {
@@ -5776,9 +5799,54 @@ class OperatorDashboardService:
         db_path: Path | None,
     ) -> dict[str, Any]:
         lane_rows = list(operator_status.get("lanes") or [])
-        if lane_rows:
+        config_lanes = self._configured_paper_lanes(config_in_force)
+
+        def _normalized_lane_ids(rows: Sequence[dict[str, Any]]) -> list[str]:
+            return [
+                lane_id
+                for lane_id in (str(row.get("lane_id") or "").strip() for row in rows)
+                if lane_id
+            ]
+
+        config_lane_ids = _normalized_lane_ids(config_lanes)
+        status_lane_ids = _normalized_lane_ids(lane_rows)
+        active_lane_ids = [
+            lane_id
+            for lane_id in (str(value or "").strip() for value in list(operator_status.get("active_lane_ids") or []))
+            if lane_id
+        ]
+        lane_universe_mismatch = bool(
+            config_lane_ids
+            and lane_rows
+            and (
+                set(status_lane_ids) != set(config_lane_ids)
+                or (active_lane_ids and set(active_lane_ids) != set(config_lane_ids))
+            )
+        )
+        status_updated_at = _parse_iso_datetime(
+            str(
+                operator_status.get("updated_at")
+                or operator_status.get("generated_at")
+                or operator_status.get("last_processed_bar_end_ts")
+                or ""
+            ).strip()
+        )
+        config_updated_at = _parse_iso_datetime(
+            str(
+                config_in_force.get("generated_at")
+                or config_in_force.get("updated_at")
+                or ""
+            ).strip()
+        )
+        force_config_lane_refresh = bool(
+            lane_universe_mismatch
+            and (
+                status_updated_at is None
+                or (config_updated_at is not None and config_updated_at >= status_updated_at)
+            )
+        )
+        if lane_rows and not force_config_lane_refresh:
             return operator_status
-        config_lanes = list(config_in_force.get("lanes") or [])
         if not config_lanes:
             return operator_status
         risk_by_lane = {
@@ -5802,17 +5870,39 @@ class OperatorDashboardService:
             return candidate_text if candidate_dt >= current_dt else current_value
 
         merged = dict(operator_status)
+        if force_config_lane_refresh:
+            for stale_key in (
+                "active_lane_ids",
+                "entries_enabled",
+                "fault_code",
+                "halted_lane_count",
+                "last_processed_bar_end_ts",
+                "new_bars_last_cycle",
+                "paper_lane_count",
+                "position_side",
+                "processed_bars",
+                "risk_halted_lane_count",
+                "strategy_status",
+                "updated_at",
+                "usable_lane_count",
+            ):
+                merged.pop(stale_key, None)
+            merged["source"] = "config lane refresh"
         synthesized_lanes: list[dict[str, Any]] = []
-        latest_updated_at: str | None = str(merged.get("updated_at") or "").strip() or None
-        latest_processed_bar_end_ts: str | None = str(merged.get("last_processed_bar_end_ts") or "").strip() or None
-        merged_entries_enabled = bool(merged.get("entries_enabled", True))
-        merged_operator_halt = bool(merged.get("operator_halt", False))
+        latest_updated_at: str | None = (
+            None if force_config_lane_refresh else str(merged.get("updated_at") or "").strip() or None
+        )
+        latest_processed_bar_end_ts: str | None = (
+            None if force_config_lane_refresh else str(merged.get("last_processed_bar_end_ts") or "").strip() or None
+        )
+        merged_entries_enabled = bool(False if force_config_lane_refresh else merged.get("entries_enabled", True))
+        merged_operator_halt = bool(False if force_config_lane_refresh else merged.get("operator_halt", False))
         all_reconciliation_clean = True
         all_broker_ok = True
         any_lane_status = False
-        any_fault_code = bool(merged.get("fault_code"))
-        processed_bars_total = int(merged.get("processed_bars", 0) or 0)
-        new_bars_last_cycle = int(merged.get("new_bars_last_cycle", 0) or 0)
+        any_fault_code = bool(False if force_config_lane_refresh else merged.get("fault_code"))
+        processed_bars_total = int(0 if force_config_lane_refresh else merged.get("processed_bars", 0) or 0)
+        new_bars_last_cycle = int(0 if force_config_lane_refresh else merged.get("new_bars_last_cycle", 0) or 0)
         position_sides: set[str] = set()
         enabled_lane_count = 0
         halted_lane_count = 0
@@ -5877,6 +5967,17 @@ class OperatorDashboardService:
                         lane_status.get("approved_short_entry_sources") or row.get("short_sources") or []
                     ),
                     "position_side": lane_position_side,
+                    "entry_price": (
+                        lane_status.get("entry_price")
+                        or lane_reconciliation.get("broker_average_price")
+                    ),
+                    "last_mark": lane_status.get("last_mark"),
+                    "broker_position_qty": lane_reconciliation.get("broker_position_quantity"),
+                    "internal_position_qty": (
+                        lane_reconciliation.get("internal_position_quantity")
+                        or lane_reconciliation.get("strategy_internal_position_qty")
+                    ),
+                    "open_broker_order_id": lane_reconciliation.get("strategy_open_broker_order_id"),
                     "strategy_status": lane_status.get("strategy_status") or "UNKNOWN",
                     "entries_enabled": lane_entries_enabled,
                     "operator_halt": lane_operator_halt,
@@ -5888,6 +5989,9 @@ class OperatorDashboardService:
                         risk_row.get("catastrophic_open_loss_threshold")
                         or row.get("catastrophic_open_loss")
                     ),
+                    "session_realized_pnl": risk_row.get("session_realized_pnl"),
+                    "session_unrealized_pnl": risk_row.get("session_unrealized_pnl"),
+                    "session_total_pnl": risk_row.get("session_total_pnl"),
                     "artifacts_dir": row.get("artifacts_dir") or str(lane_artifacts_dir),
                     "database_url": row.get("database_url") or _derive_probationary_lane_database_url(db_path, lane_id),
                     "execution_timeframe": (
@@ -5923,6 +6027,7 @@ class OperatorDashboardService:
             )
 
         merged["lanes"] = synthesized_lanes
+        merged["active_lane_ids"] = config_lane_ids
         merged["paper_lane_count"] = len(merged["lanes"])
         if any_lane_status:
             merged["updated_at"] = latest_updated_at
@@ -5939,13 +6044,12 @@ class OperatorDashboardService:
                 merged["position_side"] = next(iter(position_sides)) if len(position_sides) == 1 else "MIXED"
             else:
                 merged["position_side"] = "FLAT"
-            if not merged.get("strategy_status"):
-                if any_fault_code:
-                    merged["strategy_status"] = "FAULTED"
-                elif all_reconciliation_clean:
-                    merged["strategy_status"] = "READY"
-                else:
-                    merged["strategy_status"] = "RECONCILING"
+            if any_fault_code:
+                merged["strategy_status"] = "FAULTED"
+            elif all_reconciliation_clean:
+                merged["strategy_status"] = "READY"
+            else:
+                merged["strategy_status"] = "RECONCILING"
             merged["health"] = {
                 **dict(merged.get("health") or {}),
                 "health_status": "HEALTHY" if all_reconciliation_clean and not any_fault_code else "DEGRADED",
@@ -5994,7 +6098,7 @@ class OperatorDashboardService:
         lane_risk = _read_json(runtime_dir / "paper_lane_risk_status.json") or _read_json(runtime_dir / "paper_lane_risk_snapshot.json")
         config_in_force = _read_json(runtime_dir / "paper_config_in_force.json")
         db_path = runtime["db_path"]
-        if runtime_name == "paper" and (not config_in_force or not list(config_in_force.get("lanes") or [])):
+        if runtime_name == "paper" and not self._configured_paper_lanes(config_in_force):
             config_in_force = self._paper_config_in_force_fallback(runtime["artifacts_dir"], db_path)
         if runtime_name == "paper" and (not lane_risk or not list(lane_risk.get("lanes") or [])):
             lane_risk = self._paper_lane_risk_fallback(operator_status, config_in_force)
@@ -6070,46 +6174,44 @@ class OperatorDashboardService:
         strategy_performance: dict[str, Any] = {}
         signal_intent_fill_audit: dict[str, Any] = {}
         if runtime_name == "paper":
+            paper_strategy_refresh_args = {
+                "paper": {
+                    "raw_operator_status": operator_status,
+                    "config_in_force": config_in_force,
+                    "lane_risk": lane_risk,
+                    "position": position,
+                    "performance": performance,
+                    "runtime_registry": runtime_registry,
+                    "status": {
+                        "strategy_status": operator_status.get("strategy_status"),
+                    },
+                },
+                "session_date": session_date,
+                "root_db_path": db_path,
+                "approved_quant_baselines": approved_quant_baselines,
+            }
             strategy_performance, strategy_performance_fresh = self._load_cached_runtime_derived_payload(
                 self._paper_strategy_performance_path,
                 runtime_updated_at=cached_runtime_updated_at,
                 session_date=session_date,
                 source_path=operator_status_path,
             )
+            paper_runtime_has_loaded_lanes = bool(
+                list((operator_status or {}).get("active_lane_ids") or [])
+                or list((operator_status or {}).get("lanes") or [])
+                or list((config_in_force or {}).get("lanes") or [])
+                or list((runtime_registry or {}).get("rows") or [])
+            )
+            strategy_performance_rows = list((strategy_performance or {}).get("rows") or [])
+            if strategy_performance is not None and paper_runtime_has_loaded_lanes and not strategy_performance_rows:
+                strategy_performance = self._paper_strategy_performance_payload(**paper_strategy_refresh_args)
+                _write_json_file(self._paper_strategy_performance_path, strategy_performance)
+                strategy_performance_fresh = True
             if strategy_performance is None:
-                strategy_performance = self._paper_strategy_performance_payload(
-                    paper={
-                        "raw_operator_status": operator_status,
-                        "config_in_force": config_in_force,
-                        "lane_risk": lane_risk,
-                        "position": position,
-                        "performance": performance,
-                        "runtime_registry": runtime_registry,
-                        "status": {
-                            "strategy_status": operator_status.get("strategy_status"),
-                        },
-                    },
-                    session_date=session_date,
-                    root_db_path=db_path,
-                    approved_quant_baselines=approved_quant_baselines,
-                )
+                strategy_performance = self._paper_strategy_performance_payload(**paper_strategy_refresh_args)
+                _write_json_file(self._paper_strategy_performance_path, strategy_performance)
             elif not strategy_performance_fresh:
-                self._request_paper_strategy_performance_refresh(
-                    paper={
-                        "raw_operator_status": operator_status,
-                        "config_in_force": config_in_force,
-                        "lane_risk": lane_risk,
-                        "position": position,
-                        "performance": performance,
-                        "runtime_registry": runtime_registry,
-                        "status": {
-                            "strategy_status": operator_status.get("strategy_status"),
-                        },
-                    },
-                    session_date=session_date,
-                    root_db_path=db_path,
-                    approved_quant_baselines=approved_quant_baselines,
-                )
+                self._request_paper_strategy_performance_refresh(**paper_strategy_refresh_args)
             signal_intent_fill_audit, signal_intent_fill_audit_fresh = self._load_cached_runtime_derived_payload(
                 self._paper_signal_intent_fill_audit_path,
                 runtime_updated_at=cached_runtime_updated_at,
@@ -6305,7 +6407,7 @@ class OperatorDashboardService:
         desk_risk = paper.get("desk_risk") or {}
         lane_risk = paper.get("lane_risk") or {}
         config_in_force = paper.get("config_in_force") or {}
-        configured_lanes = list(config_in_force.get("lanes") or [])
+        configured_lanes = self._configured_paper_lanes(config_in_force)
         lane_rows = list(lane_risk.get("lanes") or [])
         lane_universe = {
             str(row.get("lane_id")): dict(row)
@@ -8284,11 +8386,29 @@ class OperatorDashboardService:
     def _paper_lane_universe(self, paper: dict[str, Any]) -> list[dict[str, Any]]:
         config_lanes = {
             str(row.get("lane_id")): dict(row)
-            for row in ((paper.get("config_in_force") or {}).get("lanes") or [])
+            for row in self._configured_paper_lanes(paper.get("config_in_force") or {})
             if row.get("lane_id")
         }
-        merged = {lane_id: dict(row) for lane_id, row in config_lanes.items()}
-        for row in ((paper.get("raw_operator_status") or {}).get("lanes") or []):
+        runtime_rows = [dict(row) for row in ((paper.get("raw_operator_status") or {}).get("lanes") or []) if row.get("lane_id")]
+        runtime_lane_ids = {
+            str(value or "").strip()
+            for value in list((paper.get("raw_operator_status") or {}).get("active_lane_ids") or [])
+            if str(value or "").strip()
+        }
+        if not runtime_lane_ids:
+            runtime_lane_ids = {
+                str(row.get("lane_id") or "").strip()
+                for row in runtime_rows
+                if str(row.get("lane_id") or "").strip()
+            }
+        if runtime_lane_ids:
+            merged = {
+                lane_id: dict(config_lanes.get(lane_id) or {})
+                for lane_id in runtime_lane_ids
+            }
+        else:
+            merged = {lane_id: dict(row) for lane_id, row in config_lanes.items()}
+        for row in runtime_rows:
             lane_id = str(row.get("lane_id") or "")
             if not lane_id:
                 continue
@@ -10788,6 +10908,17 @@ class OperatorDashboardService:
         execution_likelihood_rows: list[dict[str, Any]] = []
         missing_mark_rows: list[str] = []
         limited_history_rows: list[str] = []
+        active_runtime_lane_ids = {
+            str(value or "").strip()
+            for value in list((paper.get("raw_operator_status") or {}).get("active_lane_ids") or [])
+            if str(value or "").strip()
+        }
+        if not active_runtime_lane_ids:
+            active_runtime_lane_ids = {
+                str(row.get("lane_id") or "").strip()
+                for row in lane_rows
+                if str(row.get("lane_id") or "").strip()
+            }
 
         for lane_row in lane_rows:
             lane_id = str(lane_row.get("lane_id") or "unknown_lane")
@@ -11117,31 +11248,46 @@ class OperatorDashboardService:
                 }
             )
 
-        quant_performance = _quant_strategy_performance_payload(
-            repo_root=self._repo_root,
-            approved_quant_baselines=approved_quant_baselines,
-            session_date=session_date,
-            current_session=current_session,
-        )
-        existing_strategy_ids = {
-            str(row.get("standalone_strategy_id") or row.get("strategy_key") or "")
-            for row in rows
-            if row.get("standalone_strategy_id") or row.get("strategy_key")
-        }
-        rows.extend(
-            row for row in quant_performance["rows"]
-            if str(row.get("standalone_strategy_id") or row.get("strategy_key") or "") not in existing_strategy_ids
-        )
-        trade_log_rows.extend(
-            row for row in quant_performance["trade_log"]
-            if str(row.get("standalone_strategy_id") or row.get("strategy_key") or "") not in existing_strategy_ids
-        )
-        execution_likelihood_rows.extend(
-            row for row in quant_performance["execution_likelihood"]
-            if str(row.get("standalone_strategy_id") or row.get("strategy_key") or "") not in existing_strategy_ids
-        )
-        missing_mark_rows.extend(quant_performance["warnings"].get("missing_mark_rows", []))
-        limited_history_rows.extend(quant_performance["warnings"].get("limited_history_rows", []))
+        if not active_runtime_lane_ids:
+            quant_performance = _quant_strategy_performance_payload(
+                repo_root=self._repo_root,
+                approved_quant_baselines=approved_quant_baselines,
+                session_date=session_date,
+                current_session=current_session,
+            )
+            existing_strategy_ids = {
+                str(row.get("standalone_strategy_id") or row.get("strategy_key") or "")
+                for row in rows
+                if row.get("standalone_strategy_id") or row.get("strategy_key")
+            }
+            rows.extend(
+                row for row in quant_performance["rows"]
+                if str(row.get("standalone_strategy_id") or row.get("strategy_key") or "") not in existing_strategy_ids
+            )
+            trade_log_rows.extend(
+                row for row in quant_performance["trade_log"]
+                if str(row.get("standalone_strategy_id") or row.get("strategy_key") or "") not in existing_strategy_ids
+            )
+            execution_likelihood_rows.extend(
+                row for row in quant_performance["execution_likelihood"]
+                if str(row.get("standalone_strategy_id") or row.get("strategy_key") or "") not in existing_strategy_ids
+            )
+            missing_mark_rows.extend(quant_performance["warnings"].get("missing_mark_rows", []))
+            limited_history_rows.extend(quant_performance["warnings"].get("limited_history_rows", []))
+
+        archived_trade_log_rows = _archived_paper_trade_log_rows(repo_root=self._repo_root)
+        if archived_trade_log_rows:
+            existing_trade_ids = {
+                str(row.get("id") or row.get("trade_id") or "").strip()
+                for row in trade_log_rows
+                if str(row.get("id") or row.get("trade_id") or "").strip()
+            }
+            trade_log_rows.extend(
+                row
+                for row in archived_trade_log_rows
+                if str(row.get("id") or row.get("trade_id") or "").strip() not in existing_trade_ids
+            )
+
         runtime_lookup = {
             str(row.get("standalone_strategy_id") or ""): row
             for row in ((paper.get("runtime_registry") or {}).get("rows") or [])
@@ -11182,11 +11328,12 @@ class OperatorDashboardService:
                 ],
             },
             "trade_log": trade_log_rows,
-            "trade_log_scope": "Closed trades paired from persisted lane-local intents and fills. Open positions remain in the strategy line items rather than the closed-trade log.",
+            "trade_log_scope": "Closed trades paired from the active lane-local SQLite histories plus archived lane-local trades.jsonl artifacts under paper_session/lanes. Open positions remain in the strategy line items rather than the closed-trade log.",
             "trade_log_notes": [
                 "Each standalone strategy identity is keyed by a canonical standalone_strategy_id resolved from the strategy identity root plus instrument.",
                 "Realized P/L comes only from completed closed trades.",
                 "Unrealized P/L is current open-position P/L from the lane runtime when a trusted mark/reference price exists.",
+                "Archived paper lane trade rows are appended so historical paper sessions across runtime changes remain visible in calendar/history surfaces.",
             ],
             "attribution": attribution,
             "notes": [
@@ -11201,7 +11348,7 @@ class OperatorDashboardService:
             },
             "provenance": {
                 "strategy_rows": "Derived from supervisor lane operator_status plus each lane-local SQLite order_intents/fills history.",
-                "trade_log": "Derived from deterministic pairing of lane-local order intents and fills using the existing replay-first trade ledger helper.",
+                "trade_log": "Derived from deterministic pairing of active lane-local order intents/fills plus archived lane-local trades.jsonl files under outputs/probationary_pattern_engine/paper_session/lanes.",
                 "attribution": "Derived by grouping closed trades by exact setup_family and a conservative operator-facing family label.",
                 "execution_likelihood": "Derived from persisted lane-local entry fills only; no partial-bar or current-bar logic is used.",
             },
@@ -11290,17 +11437,59 @@ class OperatorDashboardService:
             )
             db_path = _resolve_sqlite_database_path(lane_row.get("database_url")) or root_db_path
             lane_artifacts_dir = self._repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "lanes" / lane_id
-            all_bars = _all_jsonl_rows(lane_artifacts_dir / "bars.jsonl") or _all_table_rows(db_path, "bars", "end_ts")
-            bars_by_id = {str(row.get("bar_id")): row for row in all_bars if row.get("bar_id")}
-            all_processed_bars = _all_jsonl_rows(lane_artifacts_dir / "processed_bars.jsonl") or _all_table_rows_safe(db_path, "processed_bars", "end_ts")
-            all_signal_rows = _all_jsonl_rows(lane_artifacts_dir / "signals.jsonl") or _all_table_rows_safe(db_path, "signals", "created_at")
-            all_feature_rows = _all_jsonl_rows(lane_artifacts_dir / "features.jsonl") or _all_table_rows_safe(db_path, "features", "created_at")
-            all_intents = (
-                _all_jsonl_rows(lane_artifacts_dir / "order_intents.jsonl")
-                or _all_jsonl_rows(lane_artifacts_dir / "intents.jsonl")
-                or _all_table_rows(db_path, "order_intents", "created_at")
+            all_bars = _tail_jsonl(lane_artifacts_dir / "bars.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT) or _recent_table_rows(
+                db_path,
+                "bars",
+                "end_ts",
+                DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
             )
-            all_fills = _all_jsonl_rows(lane_artifacts_dir / "fills.jsonl") or _all_table_rows(db_path, "fills", "fill_timestamp")
+            bars_by_id = {str(row.get("bar_id")): row for row in all_bars if row.get("bar_id")}
+            all_processed_bars = _tail_jsonl(
+                lane_artifacts_dir / "processed_bars.jsonl",
+                DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
+            ) or _recent_table_rows_safe(
+                db_path,
+                "processed_bars",
+                "end_ts",
+                DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
+            )
+            all_signal_rows = _tail_jsonl(
+                lane_artifacts_dir / "signals.jsonl",
+                DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
+            ) or _recent_table_rows_safe(
+                db_path,
+                "signals",
+                "created_at",
+                DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
+            )
+            all_feature_rows = _tail_jsonl(
+                lane_artifacts_dir / "features.jsonl",
+                DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
+            ) or _recent_table_rows_safe(
+                db_path,
+                "features",
+                "created_at",
+                DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
+            )
+            all_intents = (
+                _tail_jsonl(lane_artifacts_dir / "order_intents.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT)
+                or _tail_jsonl(lane_artifacts_dir / "intents.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT)
+                or _recent_table_rows(
+                    db_path,
+                    "order_intents",
+                    "created_at",
+                    DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
+                )
+            )
+            all_fills = _tail_jsonl(
+                lane_artifacts_dir / "fills.jsonl",
+                DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
+            ) or _recent_table_rows(
+                db_path,
+                "fills",
+                "fill_timestamp",
+                DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT,
+            )
 
             window_processed_bars = _rows_for_session_date(all_processed_bars, session_date, "end_ts")
             window_signal_rows = _rows_for_session_date(all_signal_rows, session_date, "created_at")
@@ -14139,6 +14328,18 @@ class OperatorDashboardService:
                 resolved_paths.append(path)
             if resolved_paths:
                 return resolved_paths
+        if self._paper_runtime_config_paths_override_path.exists():
+            resolved_paths: list[Path] = []
+            for raw_line in self._paper_runtime_config_paths_override_path.read_text(encoding="utf-8").splitlines():
+                raw_part = raw_line.strip()
+                if not raw_part:
+                    continue
+                path = Path(raw_part)
+                if not path.is_absolute():
+                    path = (self._repo_root / path).resolve()
+                resolved_paths.append(path)
+            if resolved_paths:
+                return resolved_paths
         return [
             self._repo_root / "config/base.yaml",
             self._repo_root / "config/live.yaml",
@@ -15350,23 +15551,60 @@ def _historical_playback_result_status(row: dict[str, Any]) -> str:
 def _tail_jsonl(path: Path, limit: int) -> list[dict[str, Any]]:
     if not path.exists():
         return []
+    limit = max(int(limit), 0)
+    if limit == 0:
+        return []
+    chunk_size = 65536
+    raw_lines: deque[bytes] = deque(maxlen=limit)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            cursor = handle.tell()
+            buffer = b""
+            while cursor > 0 and len(raw_lines) < limit:
+                read_size = min(chunk_size, cursor)
+                cursor -= read_size
+                handle.seek(cursor)
+                chunk = handle.read(read_size)
+                buffer = chunk + buffer
+                parts = buffer.split(b"\n")
+                buffer = parts[0]
+                for raw_line in reversed(parts[1:]):
+                    if raw_line.strip():
+                        raw_lines.appendleft(raw_line)
+                        if len(raw_lines) >= limit:
+                            break
+            if cursor == 0 and buffer.strip() and len(raw_lines) < limit:
+                raw_lines.appendleft(buffer)
     except OSError as exc:
         _record_snapshot_warning(path, reader="jsonl", detail=f"{type(exc).__name__}: {exc}")
         return []
     rows: list[dict[str, Any]] = []
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
+    for index, raw_line in enumerate(raw_lines, start=1):
         try:
-            parsed = json.loads(line)
+            parsed = json.loads(raw_line.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            _record_snapshot_warning(path, reader="jsonl", detail=f"{type(exc).__name__} near tail row {index}: {exc}")
+            continue
         except json.JSONDecodeError as exc:
-            _record_snapshot_warning(path, reader="jsonl", detail=f"{type(exc).__name__} on line {line_number}: {exc}")
+            _record_snapshot_warning(path, reader="jsonl", detail=f"{type(exc).__name__} near tail row {index}: {exc}")
             continue
         if isinstance(parsed, dict):
             rows.append(parsed)
-    return rows[-limit:]
+    return rows
+
+
+def _recent_table_rows(db_path: Path | None, table_name: str, order_column: str, limit: int) -> list[dict[str, Any]]:
+    rows = _latest_table_rows(db_path, table_name, order_column, limit)
+    rows.sort(key=lambda row: str(row.get(order_column) or ""))
+    return rows
+
+
+def _recent_table_rows_safe(db_path: Path | None, table_name: str, order_column: str, limit: int) -> list[dict[str, Any]]:
+    try:
+        return _recent_table_rows(db_path, table_name, order_column, limit)
+    except sqlite3.Error:
+        return []
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
@@ -16775,6 +17013,84 @@ def _temporary_paper_trade_log_rows(
     return rows
 
 
+def _archived_paper_trade_log_rows(
+    *,
+    repo_root: Path,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    lanes_root = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "lanes"
+    if not lanes_root.exists():
+        return rows
+
+    for trades_path in lanes_root.rglob("trades.jsonl"):
+        lane_dir = trades_path.parent
+        lane_id = lane_dir.name
+        for index, trade in enumerate(_all_jsonl_rows(trades_path), start=1):
+            instrument = str(trade.get("symbol") or trade.get("instrument") or "UNKNOWN")
+            source_family = str(trade.get("setup_family") or lane_id or "UNKNOWN")
+            strategy_key = str(trade.get("standalone_strategy_id") or lane_id)
+            strategy_name = str(
+                trade.get("strategy_name")
+                or trade.get("standalone_strategy_id")
+                or lane_id
+                or "Archived Paper Strategy"
+            )
+            side = str(trade.get("direction") or "")
+            trade_pnl = _decimal_or_none(trade.get("realized_pnl") or trade.get("net_pnl"))
+            gross_pnl = _decimal_or_none(trade.get("gross_pnl"))
+            fees = _decimal_or_none(trade.get("fees_paid") or trade.get("fees"))
+            slippage = _decimal_or_none(trade.get("slippage_cost") or trade.get("slippage"))
+            attribution_family_label = _strategy_attribution_family_label(
+                source_family=source_family,
+                side=side,
+            )
+            trade_id = str(trade.get("trade_id") or f"{lane_id}:{index}")
+            row_id = trade_id if trade_id.startswith(f"{strategy_key}:") else f"{strategy_key}:{trade_id}"
+            rows.append(
+                {
+                    "id": row_id,
+                    "strategy_key": strategy_key,
+                    "standalone_strategy_id": strategy_key,
+                    "legacy_strategy_key": None,
+                    "lane_id": lane_id,
+                    "strategy_name": strategy_name,
+                    "instrument": instrument,
+                    "family": source_family,
+                    "source_family": source_family,
+                    "strategy_family": source_family,
+                    "standalone_strategy_root": strategy_name,
+                    "standalone_strategy_label": strategy_name,
+                    "paper_strategy_class": "archived_paper_strategy",
+                    "metrics_bucket": "archived_paper",
+                    "paper_only": True,
+                    "non_approved": False,
+                    "experimental_status": None,
+                    "signal_family_label": attribution_family_label,
+                    "trade_id": trade_id,
+                    "side": side,
+                    "entry_timestamp": trade.get("entry_timestamp"),
+                    "exit_timestamp": trade.get("exit_timestamp"),
+                    "entry_price": _decimal_to_string(_decimal_or_none(trade.get("entry_price"))),
+                    "exit_price": _decimal_to_string(_decimal_or_none(trade.get("exit_price"))),
+                    "quantity": trade.get("quantity") or 1,
+                    "realized_pnl": _decimal_to_string(trade_pnl),
+                    "gross_pnl": _decimal_to_string(gross_pnl if gross_pnl is not None else trade_pnl),
+                    "fees": _decimal_to_string(fees),
+                    "slippage": _decimal_to_string(slippage),
+                    "exit_reason": trade.get("exit_reason"),
+                    "signal_family": source_family,
+                    "entry_session_phase": label_session_phase(_parse_iso_datetime(trade.get("entry_timestamp"))) if trade.get("entry_timestamp") else None,
+                    "exit_session_phase": label_session_phase(_parse_iso_datetime(trade.get("exit_timestamp"))) if trade.get("exit_timestamp") else None,
+                    "status": "CLOSED" if trade.get("exit_timestamp") else "OPEN",
+                    "quality_bucket": trade.get("quality_bucket"),
+                    "quality_bucket_policy": trade.get("quality_bucket_policy"),
+                }
+            )
+
+    rows.sort(key=lambda row: str(row.get("exit_timestamp") or row.get("entry_timestamp") or ""), reverse=True)
+    return rows
+
+
 def _quant_strategy_performance_payload(
     *,
     repo_root: Path,
@@ -17128,27 +17444,31 @@ def _quant_signal_intent_fill_audit_rows(
         approved_scope = baseline_row.get("approved_scope") or {}
         lane_dir = repo_root / "outputs" / "probationary_quant_baselines" / "lanes" / lane_id
         signals = [
-            row for row in _all_jsonl_rows(lane_dir / "signals.jsonl")
+            row for row in _tail_jsonl(lane_dir / "signals.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT)
             if not instrument or str(row.get("symbol") or "") == instrument
         ]
         processed_bars = [
-            row for row in _all_jsonl_rows(lane_dir / "processed_bars.jsonl")
+            row for row in _tail_jsonl(lane_dir / "processed_bars.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT)
             if not instrument or str(row.get("symbol") or "") in {"", instrument}
         ]
         features = [
-            row for row in _all_jsonl_rows(lane_dir / "features.jsonl")
+            row for row in _tail_jsonl(lane_dir / "features.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT)
             if not instrument or str(row.get("symbol") or "") in {"", instrument}
         ]
         trades = [
-            row for row in _all_jsonl_rows(lane_dir / "trades.jsonl")
+            row for row in _tail_jsonl(lane_dir / "trades.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT)
             if not instrument or str(row.get("symbol") or "") == instrument
         ]
         intents = [
-            row for row in (_all_jsonl_rows(lane_dir / "order_intents.jsonl") or _all_jsonl_rows(lane_dir / "intents.jsonl"))
+            row
+            for row in (
+                _tail_jsonl(lane_dir / "order_intents.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT)
+                or _tail_jsonl(lane_dir / "intents.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT)
+            )
             if not instrument or str(row.get("symbol") or "") == instrument
         ]
         fills = [
-            row for row in _all_jsonl_rows(lane_dir / "fills.jsonl")
+            row for row in _tail_jsonl(lane_dir / "fills.jsonl", DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT)
             if not instrument or str(row.get("symbol") or "") == instrument
         ]
         window_processed_bars = _rows_for_session_date(processed_bars, session_date, "end_ts", "timestamp")
@@ -18524,6 +18844,10 @@ def _build_session_shape_points(
                 "label": row.get("setup_family") or row.get("exit_reason") or "Closed trade",
             }
         )
+    if not ordered_rows:
+        fill_points = _build_session_shape_points_from_fills(session_fills)
+        if fill_points:
+            points.extend(fill_points)
     current_unrealized = _decimal_or_none(position.get("unrealized_pnl"))
     if current_unrealized is not None and position.get("side") != "FLAT":
         timestamp = operator_status.get("last_processed_bar_end_ts") or operator_status.get("updated_at")
@@ -18536,6 +18860,111 @@ def _build_session_shape_points(
             }
         )
     return points
+
+
+def _build_session_shape_points_from_fills(session_fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    cumulative = Decimal("0")
+    open_by_lane: dict[str, dict[str, Any]] = {}
+    ordered_fills = sorted(
+        session_fills,
+        key=lambda row: row.get("fill_timestamp") or row.get("created_at") or row.get("timestamp") or "",
+    )
+    for row in ordered_fills:
+        timestamp = row.get("fill_timestamp") or row.get("created_at") or row.get("timestamp")
+        intent_type = str(row.get("intent_type") or row.get("side") or "").strip().upper()
+        fill_price = _decimal_or_none(row.get("fill_price") or row.get("price"))
+        quantity = _decimal_or_none(row.get("quantity")) or Decimal("0")
+        if not timestamp or not intent_type or fill_price is None or quantity == 0:
+            continue
+        lane_id = str(
+            row.get("lane_id")
+            or row.get("standalone_strategy_id")
+            or row.get("strategy_id")
+            or row.get("instrument")
+            or row.get("symbol")
+            or "UNKNOWN_LANE"
+        )
+        instrument = str(row.get("instrument") or row.get("symbol") or "").strip().upper()
+        label = str(row.get("lane_id") or row.get("instrument") or row.get("symbol") or "Paper fill")
+        if intent_type.endswith("_OPEN"):
+            entry_sign = _entry_fill_direction_sign(intent_type)
+            if entry_sign == 0:
+                continue
+            open_by_lane[lane_id] = {
+                "entry_sign": entry_sign,
+                "fill_price": fill_price,
+                "quantity": quantity,
+                "instrument": instrument,
+                "label": label,
+            }
+            points.append(
+                {
+                    "timestamp": timestamp,
+                    "pnl": cumulative,
+                    "kind": "entry_fill",
+                    "label": f"{label} opened",
+                }
+            )
+            continue
+        if not intent_type.endswith("_CLOSE"):
+            continue
+        open_fill = open_by_lane.pop(lane_id, None)
+        if open_fill is None:
+            continue
+        point_value = _paper_session_shape_point_value(instrument or str(open_fill.get("instrument") or ""))
+        matched_quantity = min(quantity, _decimal_or_none(open_fill.get("quantity")) or quantity)
+        entry_price = _decimal_or_none(open_fill.get("fill_price")) or Decimal("0")
+        if _entry_fill_direction_sign(str(open_fill.get("entry_sign"))) > 0:
+            realized = (fill_price - entry_price) * matched_quantity * point_value
+        else:
+            realized = (entry_price - fill_price) * matched_quantity * point_value
+        cumulative += realized
+        points.append(
+            {
+                "timestamp": timestamp,
+                "pnl": cumulative,
+                "kind": "closed_trade",
+                "label": f"{open_fill.get('label') or label} closed",
+            }
+        )
+    return points
+
+
+def _entry_fill_direction_sign(intent_type: str) -> int:
+    normalized = str(intent_type or "").strip().upper()
+    if normalized in {"BUY_TO_OPEN", "BUY"}:
+        return 1
+    if normalized in {"SELL_TO_OPEN", "SELL"}:
+        return -1
+    try:
+        numeric = int(normalized)
+    except ValueError:
+        return 0
+    if numeric > 0:
+        return 1
+    if numeric < 0:
+        return -1
+    return 0
+
+
+def _paper_session_shape_point_value(symbol: str) -> Decimal:
+    normalized = str(symbol or "").strip().upper()
+    point_values = {
+        "GC": Decimal("100"),
+        "MGC": Decimal("10"),
+        "ES": Decimal("50"),
+        "MES": Decimal("5"),
+        "NQ": Decimal("20"),
+        "MNQ": Decimal("2"),
+        "CL": Decimal("1000"),
+        "MCL": Decimal("100"),
+        "PL": Decimal("50"),
+        "MPL": Decimal("5"),
+        "HG": Decimal("25000"),
+        "MHG": Decimal("2500"),
+    }
+    return point_values.get(normalized, Decimal("1"))
 
 
 def _latest_session_branch_contribution_rows(
@@ -19999,7 +20428,7 @@ def _freshness_semantics(last_update_ts: str | None, *, poll_interval_seconds: i
 
 def _market_data_semantics(*, running: bool, market_data_ok: bool, freshness: str) -> str:
     if not running:
-        return "DEAD"
+        return "READY" if market_data_ok else "UNKNOWN"
     if not market_data_ok:
         return "DEAD"
     if freshness == "STALE":

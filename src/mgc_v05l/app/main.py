@@ -14,6 +14,7 @@ from ..config_models import load_settings_from_files
 from ..market_data import (
     CanonicalMarketDataMaintenanceService,
     DatabentoMarketDataProvider,
+    HistoricalBackfillService,
     HistoricalBarsRequest,
     HistoricalMarketDataIngestionService,
     QuoteService,
@@ -72,6 +73,9 @@ from .strategy_risk_shape_lab import publish_strategy_risk_shaped_studies
 from .strategy_risk_shape_lab import run_strategy_risk_shape_lab
 from .atp_scope_replay_probe import run_atp_scope_replay_probe
 from .atp_scope_replay_probe import publish_atp_scope_replay_probe_study
+from .atp_gc_exit_evolution import run_gc_exit_evolution
+from .atp_gc_7m_maintenance_study import run_gc_7m_maintenance_study
+from .atp_gc_post_promotion_stop_study import run_gc_post_promotion_stop_study
 from .published_strategy_exit_probe import DEFAULT_REPORT_DIR as PUBLISHED_EXIT_PROBE_DEFAULT_REPORT_DIR
 from .published_strategy_exit_probe import PublishedExitProbeSpec
 from .published_strategy_exit_probe import publish_published_strategy_exit_probe_study
@@ -80,6 +84,31 @@ from .approved_exit_transplant_similarity import DEFAULT_REPORT_DIR as APPROVED_
 from .approved_exit_transplant_similarity import run_approved_exit_transplant_similarity
 from .paper_engine_silent_failure_audit import DEFAULT_OUTPUT_DIR as PAPER_ENGINE_SILENT_FAILURE_AUDIT_REPORT_DIR
 from .paper_engine_silent_failure_audit import run_paper_engine_silent_failure_audit
+from .es_mes_opening_drive_continuation_research import run_es_mes_opening_drive_continuation_research
+from .gc_mgc_london_late_long_research import run_gc_mgc_london_late_long_research
+from .gc_mgc_london_late_meta_label_research import run_gc_mgc_london_late_meta_label_research
+from .gc_mgc_forced_session_portfolio_research import run_gc_mgc_forced_session_portfolio_research
+from .gc_mgc_forced_session_portfolio_shaping_research import run_gc_mgc_forced_session_portfolio_shaping_research
+from .gc_mgc_forced_session_candidate_system_research import run_gc_mgc_forced_session_candidate_system_research
+from .gc_mgc_forced_session_candidate_admission_plan import run_gc_mgc_forced_session_candidate_admission_plan
+from .gc_mgc_forced_session_candidate_load_proof import run_gc_mgc_forced_session_candidate_load_proof
+from .gc_mgc_ny_early_short_confirmation_policy_research import run_gc_mgc_ny_early_short_confirmation_policy_research
+from .gc_mgc_ny_early_short_exit_overlay_research import run_gc_mgc_ny_early_short_exit_overlay_research
+from .gc_mgc_ny_early_short_forced_session_research import run_gc_mgc_ny_early_short_forced_session_research
+from .gc_mgc_ny_early_short_forced_session_walkforward_research import (
+    run_gc_mgc_ny_early_short_forced_session_walkforward_research,
+)
+from .gc_mgc_ny_early_short_research import run_gc_mgc_ny_early_short_research
+from .gc_mgc_ny_early_short_meta_label_research import run_gc_mgc_ny_early_short_meta_label_research
+from .gc_mgc_ny_early_short_meta_threshold_research import run_gc_mgc_ny_early_short_meta_threshold_research
+from .gc_mgc_ny_early_short_walkforward_research import run_gc_mgc_ny_early_short_walkforward_research
+from .gc_mgc_segment_forced_session_long_research import run_gc_mgc_segment_forced_session_long_research
+from .gc_mgc_segment_forced_session_short_research import run_gc_mgc_segment_forced_session_short_research
+from .gc_mgc_segment_forced_session_walkforward_research import (
+    run_gc_mgc_segment_forced_session_walkforward_research,
+)
+from .gc_mgc_segment_regime_research import run_gc_mgc_segment_regime_research
+from .live_trade_capture import run_live_trade_capture
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -298,6 +327,702 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="Strategy config file path. Used for internal timezone and internal symbol validation.",
+    )
+
+    live_trade_capture_parser = subparsers.add_parser(
+        "market-data-live-trade-capture",
+        help="Consume live trade prints and persist canonical 1m OHLCV with derived whole-minute surfaces.",
+    )
+    live_trade_capture_parser.add_argument(
+        "--symbol",
+        action="append",
+        required=True,
+        help="Internal symbol to capture. May be supplied multiple times.",
+    )
+    live_trade_capture_parser.add_argument(
+        "--provider",
+        default=None,
+        choices=["databento", "schwab_market_data"],
+        help="Optional market-data provider to use for live trade capture when --input-jsonl is not supplied.",
+    )
+    live_trade_capture_parser.add_argument(
+        "--input-jsonl",
+        default=None,
+        help="Optional newline-delimited trade-print replay file for offline tick-engine runs.",
+    )
+    live_trade_capture_parser.add_argument(
+        "--derive-timeframe",
+        action="append",
+        default=[],
+        help="Derived timeframe to persist from canonical 1m. Defaults to 5m and 10m.",
+    )
+    live_trade_capture_parser.add_argument(
+        "--provider-config",
+        default=None,
+        help="Optional provider-routing JSON config override.",
+    )
+    live_trade_capture_parser.add_argument(
+        "--schwab-config",
+        default=None,
+        help="Optional Schwab market-data config path for the Schwab provider.",
+    )
+    live_trade_capture_parser.add_argument(
+        "--max-events",
+        type=int,
+        default=None,
+        help="Optional cap on processed trade events before the capture loop exits.",
+    )
+    live_trade_capture_parser.add_argument(
+        "--raw-data-source",
+        default="live_trade_capture",
+        help="Raw bars data_source label to persist beside the canonical 1m layer.",
+    )
+    live_trade_capture_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for timezone and replay DB selection.",
+    )
+
+    opening_drive_research_parser = subparsers.add_parser(
+        "es-mes-opening-drive-continuation-research",
+        help="Research a reusable ES/MES opening-drive continuation long model from canonical 1m history.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--symbol",
+        action="append",
+        default=None,
+        help="Symbol to evaluate. May be supplied multiple times; defaults to ES and MES.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--variant",
+        choices=["v1", "v2", "v3"],
+        default="v1",
+        help="Research variant to run. v1 is the original confirmation entry; v2 is the broader early-entry version; v3 is the stricter A+ trend-day capture version.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for replay DB selection.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional inclusive session date filter in YYYY-MM-DD form.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional inclusive session date filter in YYYY-MM-DD form.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--inspect-date",
+        default="2026-04-17",
+        help="Specific session date to highlight in the output. Defaults to 2026-04-17.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--slippage-ticks-per-side",
+        type=float,
+        default=1.0,
+        help="Execution slippage assumption in ticks per side. Defaults to 1.0.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--es-round-turn-commission",
+        type=float,
+        default=4.50,
+        help="Round-turn commission assumption in dollars for ES. Defaults to 4.50.",
+    )
+    opening_drive_research_parser.add_argument(
+        "--mes-round-turn-commission",
+        type=float,
+        default=1.50,
+        help="Round-turn commission assumption in dollars for MES. Defaults to 1.50.",
+    )
+
+    london_late_long_research_parser = subparsers.add_parser(
+        "gc-mgc-london-late-long-research",
+        help="Research a GC/MGC London-late continuation long model from canonical 1m history.",
+    )
+    london_late_long_research_parser.add_argument(
+        "--symbol",
+        action="append",
+        default=None,
+        help="Symbol to evaluate. May be supplied multiple times; defaults to GC and MGC.",
+    )
+    london_late_long_research_parser.add_argument(
+        "--variant",
+        action="append",
+        default=None,
+        help="Optional variant id filter. May be supplied multiple times.",
+    )
+    london_late_long_research_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    london_late_long_research_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for replay DB selection.",
+    )
+    london_late_long_research_parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    london_late_long_research_parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    london_late_long_research_parser.add_argument(
+        "--inspect-date",
+        default=None,
+        help="Optional futures trade date to highlight in the output.",
+    )
+
+    london_late_meta_label_parser = subparsers.add_parser(
+        "gc-mgc-london-late-meta-label-research",
+        help="Fit an interpretable meta-label model on GC/MGC London-late long candidate pools.",
+    )
+    london_late_meta_label_parser.add_argument(
+        "--source-json",
+        default=None,
+        help="Optional gc_mgc_london_late_long_research JSON artifact path.",
+    )
+    london_late_meta_label_parser.add_argument(
+        "--source-variant",
+        action="append",
+        default=None,
+        help="Source candidate variant to model. May be supplied multiple times.",
+    )
+    london_late_meta_label_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    london_late_meta_label_parser.add_argument(
+        "--train-fraction",
+        type=float,
+        default=0.7,
+        help="Chronological training split fraction. Defaults to 0.7.",
+    )
+    london_late_meta_label_parser.add_argument(
+        "--signal-symbol",
+        default=None,
+        help="Optional signal-discovery symbol to train on, e.g. GC.",
+    )
+
+    ny_early_short_research_parser = subparsers.add_parser(
+        "gc-mgc-ny-early-short-research",
+        help="Research GC/MGC NY-early short models from canonical 1m history.",
+    )
+    ny_early_short_research_parser.add_argument(
+        "--symbol",
+        action="append",
+        default=None,
+        help="Symbol to evaluate. May be supplied multiple times; defaults to GC and MGC.",
+    )
+    ny_early_short_research_parser.add_argument(
+        "--variant",
+        action="append",
+        default=None,
+        help="Optional variant id filter. May be supplied multiple times.",
+    )
+    ny_early_short_research_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    ny_early_short_research_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for replay DB selection.",
+    )
+    ny_early_short_research_parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    ny_early_short_research_parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    ny_early_short_research_parser.add_argument(
+        "--inspect-date",
+        default=None,
+        help="Optional futures trade date to highlight in the output.",
+    )
+
+    ny_early_short_meta_label_parser = subparsers.add_parser(
+        "gc-mgc-ny-early-short-meta-label-research",
+        help="Fit an interpretable meta-label model on GC/MGC NY-early short candidate pools.",
+    )
+    ny_early_short_meta_label_parser.add_argument(
+        "--source-json",
+        default=None,
+        help="Optional gc_mgc_ny_early_short_research JSON artifact path.",
+    )
+    ny_early_short_meta_label_parser.add_argument(
+        "--source-variant",
+        action="append",
+        default=None,
+        help="Source candidate variant to model. May be supplied multiple times.",
+    )
+    ny_early_short_meta_label_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    ny_early_short_meta_label_parser.add_argument(
+        "--train-fraction",
+        type=float,
+        default=0.7,
+        help="Chronological training split fraction. Defaults to 0.7.",
+    )
+    ny_early_short_meta_label_parser.add_argument(
+        "--signal-symbol",
+        default=None,
+        help="Optional signal-discovery symbol to train on, e.g. GC.",
+    )
+
+    ny_early_short_exit_overlay_parser = subparsers.add_parser(
+        "gc-mgc-ny-early-short-exit-overlay-research",
+        help="Evaluate fast-fail exit overlays on filtered GC/MGC NY-early short trades.",
+    )
+    ny_early_short_exit_overlay_parser.add_argument(
+        "--source-json",
+        default=None,
+        help="Optional gc_mgc_ny_early_short_research JSON artifact path.",
+    )
+    ny_early_short_exit_overlay_parser.add_argument(
+        "--meta-json",
+        default=None,
+        help="Optional gc_mgc_ny_early_short_meta_label_research JSON artifact path.",
+    )
+    ny_early_short_exit_overlay_parser.add_argument(
+        "--source-variant",
+        action="append",
+        default=None,
+        help="Source candidate variant to evaluate. May be supplied multiple times.",
+    )
+    ny_early_short_exit_overlay_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+
+    ny_early_short_confirmation_policy_parser = subparsers.add_parser(
+        "gc-mgc-ny-early-short-confirmation-policy-research",
+        help="Evaluate GC-led confirmation policies for filtered GC/MGC NY-early short trades.",
+    )
+    ny_early_short_confirmation_policy_parser.add_argument(
+        "--meta-json",
+        default=None,
+        help="Optional gc_mgc_ny_early_short_meta_label_research JSON artifact path.",
+    )
+    ny_early_short_confirmation_policy_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+
+    ny_early_short_meta_threshold_parser = subparsers.add_parser(
+        "gc-mgc-ny-early-short-meta-threshold-research",
+        help="Sweep meta-label probability thresholds for GC/MGC NY-early short trades.",
+    )
+    ny_early_short_meta_threshold_parser.add_argument(
+        "--meta-json",
+        default=None,
+        help="Optional gc_mgc_ny_early_short_meta_label_research JSON artifact path.",
+    )
+    ny_early_short_meta_threshold_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+
+    ny_early_short_walkforward_parser = subparsers.add_parser(
+        "gc-mgc-ny-early-short-walkforward-research",
+        help="Run rolling walk-forward comparisons for GC/MGC NY-early short policies.",
+    )
+    ny_early_short_walkforward_parser.add_argument(
+        "--source-json",
+        default=None,
+        help="Optional gc_mgc_ny_early_short_research JSON artifact path.",
+    )
+    ny_early_short_walkforward_parser.add_argument(
+        "--source-variant",
+        default="ny_early_short_v2_failed_pop_3m",
+        help="Source candidate variant id.",
+    )
+    ny_early_short_walkforward_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    ny_early_short_walkforward_parser.add_argument(
+        "--min-train-dates",
+        type=int,
+        default=20,
+        help="Minimum dates in first train window.",
+    )
+    ny_early_short_walkforward_parser.add_argument(
+        "--test-window-dates",
+        type=int,
+        default=5,
+        help="Dates per test fold.",
+    )
+
+    ny_early_short_forced_parser = subparsers.add_parser(
+        "gc-mgc-ny-early-short-forced-session-research",
+        help="Research forced one-trade-per-session NY-early short playbooks.",
+    )
+    ny_early_short_forced_parser.add_argument(
+        "--symbol",
+        action="append",
+        default=None,
+        help="Symbol to evaluate. May be supplied multiple times; defaults to GC and MGC.",
+    )
+    ny_early_short_forced_parser.add_argument(
+        "--variant",
+        action="append",
+        default=None,
+        help="Optional variant id filter. May be supplied multiple times.",
+    )
+    ny_early_short_forced_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    ny_early_short_forced_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for replay DB selection.",
+    )
+    ny_early_short_forced_parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    ny_early_short_forced_parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    ny_early_short_forced_parser.add_argument(
+        "--inspect-date",
+        default=None,
+        help="Optional futures trade date to highlight in the output.",
+    )
+
+    ny_early_short_forced_walkforward_parser = subparsers.add_parser(
+        "gc-mgc-ny-early-short-forced-session-walkforward-research",
+        help="Run walk-forward stability checks on forced-session NY-early short playbooks.",
+    )
+    ny_early_short_forced_walkforward_parser.add_argument(
+        "--source-json",
+        default=None,
+        help="Optional gc_mgc_ny_early_short_forced_session_research JSON artifact path.",
+    )
+    ny_early_short_forced_walkforward_parser.add_argument(
+        "--source-variant",
+        action="append",
+        default=None,
+        help="Forced-session variant id to evaluate. May be supplied multiple times.",
+    )
+    ny_early_short_forced_walkforward_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    ny_early_short_forced_walkforward_parser.add_argument(
+        "--test-window-dates",
+        type=int,
+        default=20,
+        help="Number of trade dates per walk-forward fold.",
+    )
+
+    segment_forced_long_parser = subparsers.add_parser(
+        "gc-mgc-segment-forced-session-long-research",
+        help="Run forced one-trade-per-session long playbooks for a gold segment.",
+    )
+    segment_forced_long_parser.add_argument(
+        "--segment-id",
+        default="ASIA_EARLY",
+        help="Gold session segment to evaluate. Currently supports ASIA_EARLY and LONDON_EARLY.",
+    )
+    segment_forced_long_parser.add_argument(
+        "--symbol",
+        action="append",
+        default=None,
+        help="Symbol to evaluate. May be supplied multiple times; defaults to GC and MGC.",
+    )
+    segment_forced_long_parser.add_argument(
+        "--variant",
+        action="append",
+        default=None,
+        help="Forced-session variant id filter.",
+    )
+    segment_forced_long_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    segment_forced_long_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for replay DB selection.",
+    )
+    segment_forced_long_parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    segment_forced_long_parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    segment_forced_long_parser.add_argument(
+        "--inspect-date",
+        default=None,
+        help="Optional futures trade date to highlight in the output.",
+    )
+
+    segment_forced_walkforward_parser = subparsers.add_parser(
+        "gc-mgc-segment-forced-session-walkforward-research",
+        help="Run walk-forward stability checks on forced-session gold segment playbooks.",
+    )
+    segment_forced_walkforward_parser.add_argument(
+        "--source-json",
+        required=True,
+        help="gc_mgc_segment_forced_session_long_research JSON artifact path.",
+    )
+    segment_forced_walkforward_parser.add_argument(
+        "--source-variant",
+        action="append",
+        default=None,
+        help="Forced-session variant id to evaluate. May be supplied multiple times.",
+    )
+    segment_forced_walkforward_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    segment_forced_walkforward_parser.add_argument(
+        "--test-window-dates",
+        type=int,
+        default=20,
+        help="Number of trade dates per walk-forward fold.",
+    )
+
+    segment_forced_short_parser = subparsers.add_parser(
+        "gc-mgc-segment-forced-session-short-research",
+        help="Run forced one-trade-per-session short playbooks for a gold segment.",
+    )
+    segment_forced_short_parser.add_argument(
+        "--segment-id",
+        default="ASIA_EARLY",
+        help="Gold session segment to evaluate.",
+    )
+    segment_forced_short_parser.add_argument(
+        "--symbol",
+        action="append",
+        default=None,
+        help="Symbol to evaluate. May be supplied multiple times; defaults to GC and MGC.",
+    )
+    segment_forced_short_parser.add_argument(
+        "--variant",
+        action="append",
+        default=None,
+        help="Forced-session variant id filter.",
+    )
+    segment_forced_short_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    segment_forced_short_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for replay DB selection.",
+    )
+    segment_forced_short_parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    segment_forced_short_parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    segment_forced_short_parser.add_argument(
+        "--inspect-date",
+        default=None,
+        help="Optional futures trade date to highlight in the output.",
+    )
+
+    forced_session_portfolio_parser = subparsers.add_parser(
+        "gc-mgc-forced-session-portfolio-research",
+        help="Combine selected forced-session lanes into GC/MGC portfolio analytics.",
+    )
+    forced_session_portfolio_parser.add_argument(
+        "--lane",
+        action="append",
+        default=None,
+        help="Lane spec in lane_id|source_json|source_variant form. May be supplied multiple times.",
+    )
+    forced_session_portfolio_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    forced_session_portfolio_parser.add_argument(
+        "--test-window-dates",
+        type=int,
+        default=20,
+        help="Number of trade dates per portfolio walk-forward fold.",
+    )
+
+    forced_session_portfolio_shaping_parser = subparsers.add_parser(
+        "gc-mgc-forced-session-portfolio-shaping-research",
+        help="Apply governance overlays to the forced-session portfolio.",
+    )
+    forced_session_portfolio_shaping_parser.add_argument(
+        "--source-json",
+        default=None,
+        help="Portfolio research JSON artifact path.",
+    )
+    forced_session_portfolio_shaping_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    forced_session_portfolio_shaping_parser.add_argument(
+        "--test-window-dates",
+        type=int,
+        default=20,
+        help="Number of trade dates per shaping walk-forward fold.",
+    )
+
+    forced_session_candidate_parser = subparsers.add_parser(
+        "gc-mgc-forced-session-candidate-system",
+        help="Formalize the promoted baseline forced-session portfolio as a deployable candidate system.",
+    )
+    forced_session_candidate_parser.add_argument(
+        "--source-json",
+        default=None,
+        help="Baseline portfolio research JSON artifact path.",
+    )
+    forced_session_candidate_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+
+    forced_session_admission_parser = subparsers.add_parser(
+        "gc-mgc-forced-session-candidate-admission-plan",
+        help="Publish paper-admission packages and runtime wiring requirements for the forced-session baseline candidate.",
+    )
+    forced_session_admission_parser.add_argument(
+        "--candidate-system-json",
+        default=None,
+        help="Candidate-system JSON artifact path.",
+    )
+    forced_session_admission_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+
+    forced_session_load_proof_parser = subparsers.add_parser(
+        "gc-mgc-forced-session-candidate-load-proof",
+        help="Load a published forced-session package into probationary lane specs and instantiate the custom engines.",
+    )
+    forced_session_load_proof_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Config file path. Later files override earlier ones.",
+    )
+    forced_session_load_proof_parser.add_argument(
+        "--package-yaml",
+        default=None,
+        help="Published package YAML path.",
+    )
+    forced_session_load_proof_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+
+    gold_segment_regime_parser = subparsers.add_parser(
+        "gc-mgc-segment-regime-research",
+        help="Build a gold-native GC/MGC segment dataset plus empirical regime scores.",
+    )
+    gold_segment_regime_parser.add_argument(
+        "--symbol",
+        action="append",
+        default=None,
+        help="Symbol to evaluate. May be supplied multiple times; defaults to GC and MGC.",
+    )
+    gold_segment_regime_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory override.",
+    )
+    gold_segment_regime_parser.add_argument(
+        "--config",
+        action="append",
+        default=None,
+        help="Strategy config file path. Used for replay DB selection.",
+    )
+    gold_segment_regime_parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    gold_segment_regime_parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Optional inclusive futures trade-date filter in YYYY-MM-DD form.",
+    )
+    gold_segment_regime_parser.add_argument(
+        "--inspect-date",
+        default=None,
+        help="Optional trade date to highlight in the output.",
+    )
+    gold_segment_regime_parser.add_argument(
+        "--tick-size",
+        type=float,
+        default=0.1,
+        help="Trigger/stop tick size assumption. Defaults to 0.1 for GC/MGC.",
+    )
+    gold_segment_regime_parser.add_argument(
+        "--setup-minutes",
+        type=int,
+        default=15,
+        help="Number of opening minutes inside each segment used to define the setup. Defaults to 15.",
+    )
+    gold_segment_regime_parser.add_argument(
+        "--pre-context-minutes",
+        type=int,
+        default=30,
+        help="Minutes immediately preceding the segment used for local context. Defaults to 30.",
     )
 
     provider_backfill_parser = subparsers.add_parser(
@@ -877,6 +1602,71 @@ def build_parser() -> argparse.ArgumentParser:
         default=" [Probe Confirmation v1]",
         help="Display-name suffix for the published strategy study.",
     )
+    atp_gc_exit_parser = subparsers.add_parser(
+        "atp-gc-exit-evolution",
+        help="Evaluate promoted higher-timeframe exit variants against the strongest current GC ATP add-size path.",
+    )
+    atp_gc_exit_parser.add_argument(
+        "--scope-bundle-manifest",
+        default="outputs/research_platform/atp_substrate/scope_bundles/7c367b0af017569b/manifest.json",
+        help="Path to the GC ATP scope-bundle manifest to replay.",
+    )
+    atp_gc_exit_parser.add_argument(
+        "--output-dir",
+        default="outputs/reports/atp_gc_exit_evolution",
+        help="Output directory for the GC exit-evolution report.",
+    )
+    atp_gc_exit_parser.add_argument(
+        "--point-value",
+        type=float,
+        default=100.0,
+        help="Optional point-value override. Defaults to GC $100/point.",
+    )
+    atp_gc_post_promo_stop_parser = subparsers.add_parser(
+        "atp-gc-post-promotion-stop-study",
+        help="Evaluate GC-only post-promotion stop variants while keeping checkpoint100 + 15m maintenance fixed.",
+    )
+    atp_gc_post_promo_stop_parser.add_argument(
+        "--scope-bundle-manifest",
+        default="outputs/research_platform/atp_substrate/scope_bundles/7c367b0af017569b/manifest.json",
+        help="Path to the GC ATP scope-bundle manifest to replay.",
+    )
+    atp_gc_post_promo_stop_parser.add_argument(
+        "--output-dir",
+        default="outputs/reports/atp_gc_post_promotion_stop_study",
+        help="Output directory for the GC post-promotion stop study.",
+    )
+    atp_gc_post_promo_stop_parser.add_argument(
+        "--point-value",
+        type=float,
+        default=100.0,
+        help="Optional point-value override. Defaults to GC $100/point.",
+    )
+    atp_gc_7m_parser = subparsers.add_parser(
+        "atp-gc-7m-maintenance-study",
+        help="Evaluate GC-only 7m maintenance exit variants with explicit control reconciliation against the clean checkpoint100 pass.",
+    )
+    atp_gc_7m_parser.add_argument(
+        "--scope-bundle-manifest",
+        default="outputs/research_platform/atp_substrate/scope_bundles/7c367b0af017569b/manifest.json",
+        help="Path to the GC ATP scope-bundle manifest to replay.",
+    )
+    atp_gc_7m_parser.add_argument(
+        "--output-dir",
+        default="outputs/reports/atp_gc_7m_maintenance_study",
+        help="Output directory for the GC 7m maintenance study.",
+    )
+    atp_gc_7m_parser.add_argument(
+        "--reference-exit-evolution-json",
+        default="outputs/reports/atp_gc_exit_evolution_20260419/atp_gc_exit_evolution.json",
+        help="Prior GC exit-evolution JSON used to verify control reproduction.",
+    )
+    atp_gc_7m_parser.add_argument(
+        "--point-value",
+        type=float,
+        default=100.0,
+        help="Optional point-value override. Defaults to GC $100/point.",
+    )
     published_exit_probe_parser = subparsers.add_parser(
         "published-strategy-exit-probe",
         help="Replay alternate exits against already-published strategy studies using embedded bars and frozen entries.",
@@ -1154,6 +1944,266 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         quotes = service.fetch_quotes(SchwabQuoteRequest(internal_symbols=(args.internal_symbol,)))
         print(json.dumps({"quotes": _json_ready(quotes)}, sort_keys=True))
+        return 0
+
+    if args.command == "market-data-live-trade-capture":
+        try:
+            settings = load_settings_from_files(args.config or ["config/base.yaml", "config/replay.yaml"])
+            provider = None
+            if args.provider is not None:
+                provider = _build_market_data_provider(
+                    provider_name=args.provider,
+                    settings=settings,
+                    repo_root=Path.cwd(),
+                    provider_config_path=args.provider_config,
+                    schwab_config_path=args.schwab_config,
+                )
+            result = run_live_trade_capture(
+                settings=settings,
+                symbols=[str(item).strip().upper() for item in args.symbol],
+                provider=provider,
+                input_jsonl=args.input_jsonl,
+                derive_timeframes=tuple(
+                    str(item).strip()
+                    for item in (args.derive_timeframe or ["5m", "10m"])
+                    if str(item).strip()
+                ),
+                max_events=args.max_events,
+                raw_data_source=str(args.raw_data_source).strip() or "live_trade_capture",
+                provider_label=args.provider,
+            )
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "provider": args.provider,
+                        "input_jsonl": args.input_jsonl,
+                        "symbols": [str(item).strip().upper() for item in args.symbol],
+                        "error": str(exc),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "es-mes-opening-drive-continuation-research":
+        result = run_es_mes_opening_drive_continuation_research(
+            symbols=[str(item).strip().upper() for item in args.symbol] if args.symbol else None,
+            output_dir=args.output_dir,
+            config_paths=args.config,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            inspect_date=args.inspect_date,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-london-late-long-research":
+        result = run_gc_mgc_london_late_long_research(
+            symbols=[str(item).strip().upper() for item in args.symbol] if args.symbol else None,
+            variant_ids=args.variant,
+            output_dir=args.output_dir,
+            config_paths=args.config,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            inspect_date=args.inspect_date,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-london-late-meta-label-research":
+        result = run_gc_mgc_london_late_meta_label_research(
+            source_json=Path(args.source_json) if args.source_json else None,
+            source_variants=tuple(args.source_variant) if args.source_variant else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            train_fraction=float(args.train_fraction),
+            signal_symbol=str(args.signal_symbol).strip().upper() if args.signal_symbol else None,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-ny-early-short-research":
+        result = run_gc_mgc_ny_early_short_research(
+            symbols=[str(item).strip().upper() for item in args.symbol] if args.symbol else None,
+            variant_ids=args.variant,
+            output_dir=args.output_dir,
+            config_paths=args.config,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            inspect_date=args.inspect_date,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-ny-early-short-meta-label-research":
+        result = run_gc_mgc_ny_early_short_meta_label_research(
+            source_json=Path(args.source_json) if args.source_json else None,
+            source_variants=tuple(args.source_variant) if args.source_variant else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            train_fraction=float(args.train_fraction),
+            signal_symbol=str(args.signal_symbol).strip().upper() if args.signal_symbol else None,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-ny-early-short-exit-overlay-research":
+        result = run_gc_mgc_ny_early_short_exit_overlay_research(
+            source_json=Path(args.source_json) if args.source_json else None,
+            meta_json=Path(args.meta_json) if args.meta_json else None,
+            source_variants=tuple(args.source_variant) if args.source_variant else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-ny-early-short-confirmation-policy-research":
+        result = run_gc_mgc_ny_early_short_confirmation_policy_research(
+            meta_json=Path(args.meta_json) if args.meta_json else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-ny-early-short-meta-threshold-research":
+        result = run_gc_mgc_ny_early_short_meta_threshold_research(
+            meta_json=Path(args.meta_json) if args.meta_json else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-ny-early-short-walkforward-research":
+        result = run_gc_mgc_ny_early_short_walkforward_research(
+            source_json=Path(args.source_json) if args.source_json else None,
+            source_variant=str(args.source_variant),
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            min_train_dates=int(args.min_train_dates),
+            test_window_dates=int(args.test_window_dates),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-ny-early-short-forced-session-research":
+        result = run_gc_mgc_ny_early_short_forced_session_research(
+            symbols=[str(item).strip().upper() for item in args.symbol] if args.symbol else None,
+            variant_ids=args.variant,
+            output_dir=args.output_dir,
+            config_paths=args.config,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            inspect_date=args.inspect_date,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-ny-early-short-forced-session-walkforward-research":
+        result = run_gc_mgc_ny_early_short_forced_session_walkforward_research(
+            source_json=Path(args.source_json) if args.source_json else None,
+            source_variants=tuple(args.source_variant) if args.source_variant else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            test_window_dates=int(args.test_window_dates),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-segment-forced-session-long-research":
+        result = run_gc_mgc_segment_forced_session_long_research(
+            segment_id=str(args.segment_id),
+            symbols=[str(item).strip().upper() for item in args.symbol] if args.symbol else None,
+            variant_ids=args.variant,
+            output_dir=args.output_dir,
+            config_paths=args.config,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            inspect_date=args.inspect_date,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-segment-forced-session-short-research":
+        result = run_gc_mgc_segment_forced_session_short_research(
+            segment_id=str(args.segment_id),
+            symbols=[str(item).strip().upper() for item in args.symbol] if args.symbol else None,
+            variant_ids=args.variant,
+            output_dir=args.output_dir,
+            config_paths=args.config,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            inspect_date=args.inspect_date,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-forced-session-portfolio-research":
+        from .gc_mgc_forced_session_portfolio_research import _parse_lane_specs
+
+        result = run_gc_mgc_forced_session_portfolio_research(
+            lane_specs=_parse_lane_specs(args.lane) if args.lane else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            test_window_dates=int(args.test_window_dates),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-forced-session-portfolio-shaping-research":
+        result = run_gc_mgc_forced_session_portfolio_shaping_research(
+            source_json=Path(args.source_json) if args.source_json else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            test_window_dates=int(args.test_window_dates),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-forced-session-candidate-system":
+        result = run_gc_mgc_forced_session_candidate_system_research(
+            source_json=Path(args.source_json) if args.source_json else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-forced-session-candidate-admission-plan":
+        result = run_gc_mgc_forced_session_candidate_admission_plan(
+            candidate_system_json=Path(args.candidate_system_json) if args.candidate_system_json else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-forced-session-candidate-load-proof":
+        result = run_gc_mgc_forced_session_candidate_load_proof(
+            config_paths=[Path(path) for path in args.config] if args.config else None,
+            package_yaml=Path(args.package_yaml) if args.package_yaml else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-segment-forced-session-walkforward-research":
+        result = run_gc_mgc_segment_forced_session_walkforward_research(
+            source_json=Path(args.source_json),
+            source_variants=tuple(args.source_variant) if args.source_variant else None,
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            test_window_dates=int(args.test_window_dates),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "gc-mgc-segment-regime-research":
+        result = run_gc_mgc_segment_regime_research(
+            symbols=[str(item).strip().upper() for item in args.symbol] if args.symbol else None,
+            output_dir=args.output_dir,
+            config_paths=args.config,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            inspect_date=args.inspect_date,
+            tick_size=float(args.tick_size),
+            setup_minutes=int(args.setup_minutes),
+            pre_context_minutes=int(args.pre_context_minutes),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
         return 0
 
     if args.command == "market-data-backfill":
@@ -1531,6 +2581,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             point_value_override=args.point_value,
             study_suffix=str(args.study_suffix or "").strip() or "_probe_confirmation_v1",
             label_suffix=str(args.label_suffix or "").strip() or " [Probe Confirmation v1]",
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "atp-gc-exit-evolution":
+        result = run_gc_exit_evolution(
+            scope_bundle_manifest=Path(args.scope_bundle_manifest),
+            output_dir=Path(args.output_dir),
+            point_value=float(args.point_value),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "atp-gc-post-promotion-stop-study":
+        result = run_gc_post_promotion_stop_study(
+            scope_bundle_manifest=Path(args.scope_bundle_manifest),
+            output_dir=Path(args.output_dir),
+            point_value=float(args.point_value),
+        )
+        print(json.dumps(_json_ready(result), sort_keys=True))
+        return 0
+
+    if args.command == "atp-gc-7m-maintenance-study":
+        result = run_gc_7m_maintenance_study(
+            scope_bundle_manifest=Path(args.scope_bundle_manifest),
+            output_dir=Path(args.output_dir),
+            reference_exit_evolution_json=Path(args.reference_exit_evolution_json),
+            point_value=float(args.point_value),
         )
         print(json.dumps(_json_ready(result), sort_keys=True))
         return 0

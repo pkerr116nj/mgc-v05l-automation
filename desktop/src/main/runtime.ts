@@ -2300,9 +2300,6 @@ async function loadAttachedSnapshotBridge(snapshot: JsonRecord | null): Promise<
       break;
     }
   }
-  if (String(readiness.readiness_state ?? "").toUpperCase() !== "READY") {
-    return null;
-  }
   const generatedAt = parseIsoDate(readiness.generated_at);
   if (!generatedAt || Date.now() - generatedAt.getTime() > ATTACHED_SNAPSHOT_BRIDGE_MAX_AGE_MS) {
     return null;
@@ -2311,7 +2308,14 @@ async function loadAttachedSnapshotBridge(snapshot: JsonRecord | null): Promise<
   const controlPlane = asJsonRecord(readiness.control_plane);
   const listener = asJsonRecord(readiness.listener);
   const health = asJsonRecord(readiness.health);
-  if (!(payload.reachable === true && payload.ready === true && controlPlane.launch_allowed === true && listener.reachable === true)) {
+  const readinessState = String(readiness.readiness_state ?? "").toUpperCase();
+  const payloadReachable = payload.reachable === true;
+  const payloadReady = payload.ready === true;
+  const listenerReachable = listener.reachable === true;
+  const dashboardAttached = controlPlane.dashboard_attached === true;
+  const launchAllowed = controlPlane.launch_allowed === true;
+  const readinessUsable = readinessState === "READY" || (payloadReachable && payloadReady && listenerReachable && dashboardAttached);
+  if (!readinessUsable) {
     return null;
   }
   const snapshotMeta = asJsonRecord(snapshot.dashboard_meta);
@@ -2328,12 +2332,14 @@ async function loadAttachedSnapshotBridge(snapshot: JsonRecord | null): Promise<
   const backendUrl = typeof readiness.configured_url === "string" && readiness.configured_url.trim()
     ? readiness.configured_url.trim()
     : null;
+  const detail = launchAllowed
+    ? "Service is attached through the local readiness bridge and synchronized operator snapshot."
+    : "Service is attached and current, but supervised paper remains blocked and requires operator attention.";
   return {
     readiness,
     health: Object.keys(health).length ? health : null,
     backendUrl,
-    detail:
-      "Service is attached through the local readiness bridge and synchronized operator snapshot.",
+    detail,
   };
 }
 
@@ -2756,6 +2762,33 @@ function buildRuntimeStates({
   }
 
   if (live?.mode === "health-only") {
+    if (attachedSnapshotBridge && snapshotAvailable) {
+      return {
+        connection: "snapshot",
+        source: {
+          mode: "attached_snapshot_bridge",
+          label: "SERVICE ATTACHED / DEGRADED",
+          detail: attachedSnapshotBridge.detail,
+          canRunLiveActions: false,
+          healthReachable: true,
+          apiReachable: false,
+        },
+        backend: {
+          ...backendPayload(
+            "degraded",
+            "DEGRADED",
+            attachedSnapshotBridge.detail,
+            live.error,
+          ),
+          startupFailureKind: "none",
+          actionHint: "Refresh",
+          staleListenerDetected: false,
+          healthReachable: true,
+          dashboardApiTimedOut: true,
+          portConflictDetected: false,
+        },
+      };
+    }
     return {
       connection: snapshotAvailable ? "snapshot" : "unavailable",
       source: {
@@ -3079,7 +3112,7 @@ async function probeDesktopState(
 
   if (effectiveSnapshot) {
     void persistDesktopDashboardCache(effectiveSnapshot);
-    if (live?.mode === "health-only") {
+    if (live?.mode === "health-only" && !attachedSnapshotBridge) {
       errors.push(
         `Live dashboard health is reachable at ${live.url}, but /api/dashboard did not become ready quickly; showing latest persisted operator snapshots immediately while live attach continues in the background.`,
       );

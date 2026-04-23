@@ -22,7 +22,11 @@ from ..research.trend_participation.backtest import summarize_performance
 from ..research.trend_participation.models import AtpEntryState, AtpTimingState, ResearchBar, TradeRecord
 from ..research.trend_participation.outcome_engine import trade_records_to_retest_rows
 from ..research.trend_participation.phase2_continuation import atp_phase2_variant
-from ..research.trend_participation.phase3_timing import ATP_REPLAY_EXIT_POLICY_FIXED_TARGET, simulate_timed_entries
+from ..research.trend_participation.phase3_timing import (
+    ATP_REPLAY_EXIT_POLICY_FIXED_TARGET,
+    _replay_exit_policy_profile,
+    simulate_timed_entries,
+)
 from ..research.trend_participation.substrate import _entry_state_from_row, _timing_state_from_row, _trade_record_from_row
 from . import strategy_universe_retest as retest
 from .atp_loosened_history_publish import _latest_manifest_path, _load_manifest_study_rows, _merge_study_rows
@@ -55,16 +59,15 @@ class PreConfirmationRiskProfile:
     confirmation_release_candidate: PromotionAddCandidate
 
 
-def load_scope_replay_probe_bundle(manifest_path: Path) -> ScopeReplayProbeBundle:
+def load_scope_replay_probe_bundle(
+    manifest_path: Path,
+    *,
+    include_entry_states: bool = False,
+) -> ScopeReplayProbeBundle:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entry_path = Path(manifest["datasets"]["entry_states"]["jsonl_path"])
     timing_path = Path(manifest["datasets"]["timing_states"]["jsonl_path"])
     trade_path = Path(manifest["datasets"]["trade_records"]["jsonl_path"])
-    entry_states = [
-        _entry_state_from_row(json.loads(line))
-        for line in entry_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
     timing_states = [
         _timing_state_from_row(json.loads(line))
         for line in timing_path.read_text(encoding="utf-8").splitlines()
@@ -75,33 +78,89 @@ def load_scope_replay_probe_bundle(manifest_path: Path) -> ScopeReplayProbeBundl
         for line in trade_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    missing_keys = {
+        (state.instrument, state.decision_ts, state.side, state.family_name)
+        for state in timing_states
+        if not (state.feature_snapshot or {}).get("setup_state_signature")
+    }
+    entry_signature_map = _entry_signature_map_for_keys(
+        entry_path=entry_path,
+        target_keys=missing_keys,
+    )
+    entry_states = (
+        [
+            _entry_state_from_row(json.loads(line))
+            for line in entry_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if include_entry_states
+        else []
+    )
     return ScopeReplayProbeBundle(
         manifest=manifest,
         entry_states=entry_states,
         timing_states=_enrich_timing_states_with_entry_signatures(
             timing_states=timing_states,
             entry_states=entry_states,
+            entry_signature_map=entry_signature_map,
         ),
         trade_records=trade_records,
     )
+
+
+def _entry_signature_map_for_keys(
+    *,
+    entry_path: Path,
+    target_keys: set[tuple[str, datetime, str, str]],
+) -> dict[tuple[str, datetime, str, str], tuple[str, str]]:
+    if not target_keys:
+        return {}
+    matches: dict[tuple[str, datetime, str, str], tuple[str, str]] = {}
+    with entry_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if len(matches) == len(target_keys):
+                break
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            key = (
+                str(payload["instrument"]).upper(),
+                datetime.fromisoformat(str(payload["decision_ts"])),
+                str(payload["side"]).upper(),
+                str(payload["family_name"]),
+            )
+            if key not in target_keys:
+                continue
+            matches[key] = (
+                str(payload.get("setup_signature") or payload.get("family_name") or ""),
+                str(payload.get("setup_state_signature") or payload.get("setup_signature") or payload.get("family_name") or ""),
+            )
+    return matches
 
 
 def _enrich_timing_states_with_entry_signatures(
     *,
     timing_states: Sequence[AtpTimingState],
     entry_states: Sequence[AtpEntryState],
+    entry_signature_map: dict[tuple[str, datetime, str, str], tuple[str, str]] | None = None,
 ) -> list[AtpTimingState]:
     entry_by_key = {
         (row.instrument, row.decision_ts, row.side, row.family_name): row
         for row in entry_states
     }
+    signatures_by_key = dict(entry_signature_map or {})
     enriched: list[AtpTimingState] = []
     for state in timing_states:
-        entry = entry_by_key.get((state.instrument, state.decision_ts, state.side, state.family_name))
+        key = (state.instrument, state.decision_ts, state.side, state.family_name)
+        entry = entry_by_key.get(key)
         snapshot = dict(state.feature_snapshot or {})
         if entry is not None:
             snapshot.setdefault("setup_signature", entry.setup_signature)
             snapshot.setdefault("setup_state_signature", entry.setup_state_signature)
+        elif key in signatures_by_key:
+            setup_signature, setup_state_signature = signatures_by_key[key]
+            snapshot.setdefault("setup_signature", setup_signature)
+            snapshot.setdefault("setup_state_signature", setup_state_signature)
         enriched.append(
             AtpTimingState(
                 **{
@@ -167,7 +226,7 @@ def _load_bars_for_intervals(
     try:
         bars: list[ResearchBar] = []
         for start, end in intervals:
-            rows = connection.execute(
+            cursor = connection.execute(
                 """
                 select symbol, timeframe, start_ts, end_ts, open, high, low, close, volume
                 from bars
@@ -175,8 +234,8 @@ def _load_bars_for_intervals(
                 order by end_ts asc
                 """,
                 (symbol, start.isoformat(), end.isoformat()),
-            ).fetchall()
-            for row in rows:
+            )
+            for row in cursor:
                 end_ts = datetime.fromisoformat(str(row["end_ts"]))
                 bars.append(
                     ResearchBar(
@@ -239,13 +298,16 @@ def _evaluate_scope_probe(
     confirmation_add_candidate_id: str | None,
     confirmation_add_size_fraction: float,
     point_value_override: float | None,
+    bundle_override: ScopeReplayProbeBundle | None = None,
+    bars_1m_override: Sequence[ResearchBar] | None = None,
 ) -> tuple[dict[str, Any], list[TradeRecord], ScopeReplayProbeBundle]:
-    bundle = load_scope_replay_probe_bundle(scope_bundle_manifest)
+    bundle = bundle_override or load_scope_replay_probe_bundle(scope_bundle_manifest)
     symbol = str(bundle.manifest["symbol"]).upper()
     source_db = Path(bundle.manifest["source_db"])
     point_value = float(point_value_override if point_value_override is not None else bundle.manifest["point_value"])
     normalized_overrides = dict(variant_overrides or {})
     variant = atp_phase2_variant("LONG", variant_overrides=normalized_overrides or None)
+    policy_profile = _replay_exit_policy_profile(str(exit_policy or ATP_REPLAY_EXIT_POLICY_FIXED_TARGET))
     can_use_bundle_trade_records = (
         not normalized_overrides
         and str(bundle.manifest.get("exit_policy") or "") == exit_policy
@@ -255,10 +317,14 @@ def _evaluate_scope_probe(
         if can_use_bundle_trade_records
         else _merged_replay_intervals(
             timing_states=bundle.timing_states,
-            window_minutes=max(int(variant.max_hold_bars_1m), 1) + 2,
+            window_minutes=(
+                480
+                if policy_profile.get("use_promoted_maintenance_exit")
+                else max(int(variant.max_hold_bars_1m), 1) + 2
+            ),
         )
     )
-    bars = _load_bars_for_intervals(
+    bars = list(bars_1m_override) if bars_1m_override is not None else _load_bars_for_intervals(
         sqlite_path=source_db,
         symbol=symbol,
         intervals=intervals,

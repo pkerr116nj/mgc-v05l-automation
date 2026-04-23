@@ -49,6 +49,17 @@ class QuoteSnapshot:
 
 
 @dataclass(frozen=True)
+class TradePrint:
+    internal_symbol: str
+    price: Decimal
+    size: int
+    occurred_at: datetime
+    provider: str = ""
+    external_symbol: str | None = None
+    raw_payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class HistoricalBarProvenance:
     provider: str
     dataset: str | None

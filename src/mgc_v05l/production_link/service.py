@@ -784,6 +784,7 @@ class SchwabProductionLinkService:
         )
         client = self._client_factory(self._config, self._build_oauth_client()[0])
         broker_preview_result = self._broker_preview_result(
+            snapshot=self.snapshot(force_refresh=False),
             client=client,
             request=request,
             order_payload=order_payload,
@@ -1149,6 +1150,7 @@ class SchwabProductionLinkService:
         if _is_futures_pilot_request(request) and len(live_submit_blockers) == 0:
             client = self._client_factory(self._config, self._build_oauth_client()[0])
             broker_preview_result = self._broker_preview_result(
+                snapshot=snapshot,
                 client=client,
                 request=request,
                 order_payload=order_payload,
@@ -1255,6 +1257,7 @@ class SchwabProductionLinkService:
     def _broker_preview_result(
         self,
         *,
+        snapshot: dict[str, Any],
         client: BrokerHttpClient,
         request: ManualOrderRequest,
         order_payload: dict[str, Any],
@@ -1264,12 +1267,27 @@ class SchwabProductionLinkService:
     ) -> dict[str, Any] | None:
         if not _is_futures_pilot_request(request):
             return None
+        capability_blocker = _futures_preview_capability_blocker_from_snapshot(snapshot)
+        if capability_blocker:
+            return {
+                "ok": False,
+                "error": capability_blocker,
+                "unsupported_by_broker_api": True,
+                "action_phase": _futures_pilot_action_phase(request, preview=True),
+                "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
+                "symbol_authorization": symbol_authorization,
+                "futures_symbol_resolution": futures_symbol_resolution,
+                "time_session_policy_decision": time_session_policy_decision,
+            }
         try:
             response = client.preview_order(request.account_hash, order_payload)
         except BrokerHttpError as exc:
+            normalized_error = _normalize_futures_preview_error(exc)
             return {
                 "ok": False,
-                "error": f"Schwab broker preview rejected this futures payload before live submit: {exc}",
+                "error": normalized_error,
+                "unsupported_by_broker_api": normalized_error != f"Schwab broker preview rejected this futures payload before live submit: {exc}",
+                "broker_error": str(exc),
                 "action_phase": _futures_pilot_action_phase(request, preview=True),
                 "allowing_rule": as_dict(time_session_policy_decision).get("audit_label") if time_session_policy_decision else None,
                 "symbol_authorization": symbol_authorization,
@@ -5002,6 +5020,50 @@ def _futures_pilot_gap_analysis(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _futures_preview_unsupported_message() -> str:
+    return (
+        "Schwab trader previewOrder currently rejects FUTURE assetType payloads; "
+        "manual futures live verification remains blocked until a broker-supported futures route is available."
+    )
+
+
+def _normalize_futures_preview_error(error: Any) -> str:
+    detail = str(error or "").strip()
+    if detail == _futures_preview_unsupported_message():
+        return detail
+    lowered = detail.lower()
+    if (
+        "/previeworder" in lowered
+        and "assettype" in lowered
+        and "equity" in lowered
+        and "option" in lowered
+    ):
+        return _futures_preview_unsupported_message()
+    if detail:
+        return f"Schwab broker preview rejected this futures payload before live submit: {detail}"
+    return "Schwab broker preview rejected this futures payload before live submit."
+
+
+def _futures_preview_capability_blocker_from_snapshot(snapshot: dict[str, Any]) -> str | None:
+    runtime_state = as_dict(snapshot.get("runtime_state"))
+    diagnostics = as_dict(snapshot.get("diagnostics"))
+    candidates = [
+        as_dict(runtime_state.get("last_manual_order_preview")),
+        as_dict(runtime_state.get("last_manual_order")),
+        as_dict(diagnostics.get("last_manual_order_preview")),
+        as_dict(diagnostics.get("last_manual_order_result")),
+    ]
+    for payload in candidates:
+        direct_error = str(payload.get("error") or "").strip()
+        nested_error = str(as_dict(payload.get("result")).get("error") or "").strip()
+        preview_error = str(as_dict(as_dict(payload.get("payload_summary")).get("broker_preview_result")).get("error") or "").strip()
+        nested_preview_error = str(as_dict(as_dict(payload.get("result")).get("broker_preview_result")).get("error") or "").strip()
+        for error_text in (direct_error, nested_error, preview_error, nested_preview_error):
+            if _normalize_futures_preview_error(error_text) == _futures_preview_unsupported_message():
+                return _futures_preview_unsupported_message()
+    return None
+
+
 def _futures_pilot_preview_blockers(snapshot: dict[str, Any]) -> list[str]:
     feature_flags = as_dict(snapshot.get("feature_flags"))
     blockers: list[str] = []
@@ -5033,9 +5095,12 @@ def _futures_pilot_preview_blockers(snapshot: dict[str, Any]) -> list[str]:
                 + ", ".join(missing_symbols)
                 + "."
             )
+    capability_blocker = _futures_preview_capability_blocker_from_snapshot(snapshot)
+    if capability_blocker:
+        blockers.append(capability_blocker)
     latest_preview = as_dict(as_dict(snapshot.get("runtime_state")).get("last_manual_order_preview"))
     broker_preview_result = as_dict(as_dict(latest_preview.get("payload_summary")).get("broker_preview_result"))
-    if broker_preview_result.get("ok") is False:
+    if broker_preview_result.get("ok") is False and not capability_blocker:
         blockers.append(str(broker_preview_result.get("error") or "Latest broker preview rejected the futures payload."))
     return list(dict.fromkeys(blockers))
 
@@ -5135,6 +5200,9 @@ def _futures_pilot_status_export_payload(snapshot: dict[str, Any]) -> dict[str, 
     elif preview_enabled:
         status = "PREVIEW READY"
         label = "FUTURES PREVIEW READY"
+    elif _futures_preview_unsupported_message() in preview_blockers or _futures_preview_unsupported_message() in live_submit_blockers:
+        status = "UNSUPPORTED"
+        label = "FUTURES PREVIEW UNSUPPORTED"
     else:
         status = "NOT READY"
         label = "FUTURES PREVIEW BLOCKED"

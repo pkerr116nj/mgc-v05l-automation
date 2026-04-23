@@ -19,7 +19,7 @@ from .bar_builder import BarBuilder
 from .bar_models import build_bar_id
 from .provider_config import DatabentoProviderConfig, load_market_data_providers_config
 from .provider_interfaces import MarketDataProvider
-from .provider_models import HistoricalBarProvenance, HistoricalBarsRequest, HistoricalBarsResult, QuoteSnapshot
+from .provider_models import HistoricalBarProvenance, HistoricalBarsRequest, HistoricalBarsResult, QuoteSnapshot, TradePrint
 from .timeframes import normalize_timeframe_label, timeframe_minutes
 
 
@@ -261,6 +261,13 @@ class DatabentoMarketDataProvider(MarketDataProvider):
 
     def subscribe_live_quotes(self, internal_symbols: list[str] | tuple[str, ...]):
         raise NotImplementedError("Databento live streaming is reserved for a later pass.")
+
+    def subscribe_live_trades(self, internal_symbols: list[str] | tuple[str, ...]) -> list[TradePrint]:
+        raise NotImplementedError(
+            "Databento live trade streaming is not wired in this repo yet. "
+            "Use market-data-live-trade-capture with --input-jsonl for offline tick capture tests, "
+            "or add the provider-specific live trade adapter first."
+        )
 
 
 def _basic_auth_header(api_key: str) -> str:

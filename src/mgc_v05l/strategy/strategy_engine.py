@@ -937,6 +937,11 @@ class StrategyEngine:
                     self._execution_bar_history,
                     target_timeframe=timeframe,
                     bar_builder=self._bar_builder,
+                    alignment=(
+                        "rolling"
+                        if self._settings.execution_timeframe_role is ExecutionTimeframeRole.EXECUTION_DETAIL_ONLY
+                        else "bucket"
+                    ),
                 )
                 bars = list(resampled.bars)
             previous_latest = self._context_bar_histories.get(timeframe, [])[-1].bar_id if self._context_bar_histories.get(timeframe) else None
@@ -1001,6 +1006,11 @@ class StrategyEngine:
                         self._execution_bar_history,
                         target_timeframe=timeframe,
                         bar_builder=self._bar_builder,
+                        alignment=(
+                            "rolling"
+                            if self._settings.execution_timeframe_role is ExecutionTimeframeRole.EXECUTION_DETAIL_ONLY
+                            else "bucket"
+                        ),
                     )
                     bars = list(resampled.bars)
             self._context_bar_histories[timeframe] = bars
@@ -1806,11 +1816,33 @@ def _bar_matches_probationary_session_restriction(bar: Bar, restriction: str, ti
         allowed = {part.strip() for part in normalized.split("/") if part.strip()}
         coarse = _phase_coarse_session_group(label_session_phase_for_bar(bar, timezone_info))
         return coarse in allowed or label_session_phase_for_bar(bar, timezone_info) in allowed
+    if _gold_probationary_session_matches_time(local_time, normalized):
+        return True
     if normalized == "ASIA_EARLY":
         return time(18, 0) < local_time < time(20, 30)
     if normalized == "US_LATE":
-        return time(14, 0) <= local_time < time(17, 0)
+        return time(13, 30) <= local_time < time(16, 0)
     return True
+
+
+def _gold_probationary_session_matches_time(local_time: time, restriction: str) -> bool:
+    windows = {
+        "SESSION_OPEN": (time(18, 0), time(19, 0)),
+        "ASIA_EARLY": (time(19, 0), time(20, 30)),
+        "ASIA_LATE": (time(20, 30), time(23, 0)),
+        "LONDON_EARLY": (time(3, 0), time(5, 30)),
+        "LONDON_LATE": (time(5, 30), time(8, 20)),
+        "US_EARLY": (time(8, 20), time(11, 0)),
+        "NY_EARLY": (time(8, 20), time(11, 0)),
+        "US_MIDDAY": (time(11, 0), time(13, 30)),
+        "US_LATE": (time(13, 30), time(16, 0)),
+        "NY_LATE": (time(11, 0), time(13, 30)),
+    }
+    window = windows.get(str(restriction or "").upper())
+    if window is None:
+        return False
+    start, end = window
+    return start <= local_time < end
 
 
 def _gc_mgc_asia_retest_hold_london_open_extension_matches(bar: Bar, source: str, timezone_info) -> bool:
@@ -1842,9 +1874,9 @@ def label_session_phase_for_bar(bar: Bar, timezone_info) -> str:
         return "US_CASH_OPEN_IMPULSE"
     if time(10, 0) <= local_time < time(10, 30):
         return "US_OPEN_LATE"
-    if time(10, 30) <= local_time < time(14, 0):
+    if time(11, 0) <= local_time < time(13, 30):
         return "US_MIDDAY"
-    if time(14, 0) <= local_time < time(17, 0):
+    if time(13, 30) <= local_time < time(16, 0):
         return "US_LATE"
     return "UNCLASSIFIED"
 

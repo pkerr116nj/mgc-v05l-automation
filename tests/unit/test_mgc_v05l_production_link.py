@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from mgc_v05l.local_operator_auth import local_operator_auth_surface
+from mgc_v05l.production_link.client import SchwabBrokerHttpError
 import mgc_v05l.production_link.service as production_link_service
 from mgc_v05l.production_link.models import BrokerAccountIdentity, BrokerOrderEvent, BrokerOrderRecord, BrokerPositionSnapshot
 from mgc_v05l.production_link.service import ProductionLinkActionError, SchwabProductionLinkService
@@ -975,8 +976,10 @@ def test_futures_preview_and_submit_fail_fast_when_broker_preview_rejects_payloa
     _write_local_operator_auth_state(tmp_path, active=True)
 
     fake_client = FakeSchwabBrokerClient()
-    fake_client.preview_error = production_link_service.SchwabBrokerHttpError(
-        "Schwab trader HTTP error 400 for POST /accounts/hash-123/previewOrder: Invalid request data"
+    fake_client.preview_error = SchwabBrokerHttpError(
+        "Schwab trader HTTP error 400 for POST /accounts/hash-123/previewOrder: "
+        "Invalid request data: There was an error processing the provided instrument. "
+        "Valid value for `assetType` is [EQUITY, OPTION]"
     )
     service = SchwabProductionLinkService(
         tmp_path,
@@ -1007,12 +1010,16 @@ def test_futures_preview_and_submit_fail_fast_when_broker_preview_rejects_payloa
 
     assert preview["ok"] is True
     assert preview["payload"]["live_submit_enabled"] is False
-    assert "preview rejected this futures payload" in preview["payload"]["live_submit_blockers"][0]
+    assert "previewOrder currently rejects FUTURE assetType payloads" in preview["payload"]["live_submit_blockers"][0]
     assert preview["payload"]["payload_summary"]["broker_preview_result"]["ok"] is False
+    assert preview["payload"]["payload_summary"]["broker_preview_result"]["unsupported_by_broker_api"] is True
+    assert len(fake_client.previewed_orders) == 1
+
+    fake_client.preview_error = None
 
     with pytest.raises(
         ProductionLinkActionError,
-        match="Schwab broker preview rejected this futures payload before live submit",
+        match="previewOrder currently rejects FUTURE assetType payloads",
     ):
         service.run_action(
             "submit-order",
@@ -1031,14 +1038,17 @@ def test_futures_preview_and_submit_fail_fast_when_broker_preview_rejects_payloa
             },
         )
 
+    assert len(fake_client.previewed_orders) == 1
     assert fake_client.submitted_orders == []
     last_manual_order = service._store.load_runtime_state("last_manual_order")  # type: ignore[attr-defined]
-    assert "preview rejected this futures payload" in last_manual_order["result"]["error"]
+    assert "previewOrder currently rejects FUTURE assetType payloads" in last_manual_order["result"]["error"]
     assert last_manual_order["result"]["broker_preview_result"]["ok"] is False
+    assert last_manual_order["result"]["broker_preview_result"]["unsupported_by_broker_api"] is True
     refreshed_snapshot = service.snapshot(force_refresh=False)
     futures_status = refreshed_snapshot["futures_pilot_status"]
+    assert futures_status["label"] == "FUTURES PREVIEW UNSUPPORTED"
     assert futures_status["live_submit_enabled"] is False
-    assert "preview rejected this futures payload" in futures_status["live_submit_blockers"][0]
+    assert "previewOrder currently rejects FUTURE assetType payloads" in futures_status["live_submit_blockers"][0]
 
 
 def test_futures_flatten_preview_uses_closing_position_effect_and_richer_leg_metadata(

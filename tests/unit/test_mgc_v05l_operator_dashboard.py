@@ -24,6 +24,7 @@ from mgc_v05l.app.operator_dashboard import (
     _build_handler,
     _json_ready,
     _market_index_rows,
+    _market_data_semantics,
     _treasury_curve_rows,
 )
 from mgc_v05l.app.tracked_paper_strategies import build_tracked_paper_strategies_payload
@@ -2512,6 +2513,12 @@ def test_api_dashboard_uses_degraded_stale_cache_when_inline_regeneration_fails(
     assert payload["dashboard_meta"]["snapshot_instance_stale"] is True
     assert payload["startup_control_plane"]["overall_state"] == "DEGRADED"
     assert payload["supervised_paper_operability"]["app_usable_for_supervised_paper"] is False
+
+
+def test_market_data_semantics_do_not_report_dead_when_runtime_is_stopped_but_feed_is_available() -> None:
+    assert _market_data_semantics(running=False, market_data_ok=True, freshness="IDLE") == "READY"
+    assert _market_data_semantics(running=False, market_data_ok=False, freshness="IDLE") == "UNKNOWN"
+    assert _market_data_semantics(running=True, market_data_ok=False, freshness="FRESH") == "DEAD"
 
 
 def test_api_dashboard_ignores_stale_same_instance_cache_when_runtime_artifacts_advance(tmp_path: Path) -> None:
@@ -6038,6 +6045,224 @@ def test_paper_lane_fallback_status_treats_clean_lane_artifacts_as_restartable_w
     assert paper["entry_eligibility"]["primary_blocking_reason"] != "RECONCILIATION_DIRTY"
 
 
+def test_runtime_snapshot_prefers_current_paper_config_lanes_over_stale_operator_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path
+    paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
+    runtime_dir = paper_artifacts / "runtime"
+    current_lane_id = "gc_1x_all_lanes__ny_late_short"
+    legacy_lane_id = "atp_companion_v1_asia_us"
+    current_lane_dir = paper_artifacts / "lanes" / current_lane_id
+    current_lane_dir.mkdir(parents=True, exist_ok=True)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_db = repo_root / "paper__legacy.sqlite3"
+    current_db = repo_root / "paper__current.sqlite3"
+    _init_empty_dashboard_db(legacy_db)
+    _init_empty_dashboard_db(current_db)
+
+    with sqlite3.connect(legacy_db) as connection:
+        connection.execute(
+            "insert into fills (order_intent_id, intent_type, order_status, fill_timestamp, fill_price, broker_order_id) values (?, ?, ?, ?, ?, ?)",
+            ("legacy-fill", "BUY_TO_CLOSE", "FILLED", "2026-04-21T11:34:00-04:00", "999.9", "legacy-broker-order"),
+        )
+        connection.commit()
+
+    with sqlite3.connect(current_db) as connection:
+        connection.execute(
+            "insert into fills (order_intent_id, intent_type, order_status, fill_timestamp, fill_price, broker_order_id) values (?, ?, ?, ?, ?, ?)",
+            ("current-fill", "BUY_TO_CLOSE", "FILLED", "2026-04-21T11:18:00-04:00", "4770.3", "current-broker-order"),
+        )
+        connection.commit()
+
+    (paper_artifacts / "operator_status.json").write_text(
+        json.dumps(
+            {
+                "active_lane_ids": [legacy_lane_id],
+                "entries_enabled": True,
+                "lanes": [
+                    {
+                        "lane_id": legacy_lane_id,
+                        "display_name": "Legacy ATP lane",
+                        "symbol": "MGC",
+                        "database_url": f"sqlite:///{legacy_db}",
+                    }
+                ],
+                "position_side": "FLAT",
+                "strategy_status": "RUNNING",
+                "updated_at": "2026-04-21T10:34:00-04:00",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "paper_config_in_force.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-21T11:19:00-04:00",
+                "lanes": [
+                    {
+                        "lane_id": current_lane_id,
+                        "display_name": "GC 1x All Lanes / NY Late Short",
+                        "symbol": "GC",
+                        "session_restriction": "NY_LATE",
+                        "artifacts_dir": str(current_lane_dir),
+                        "database_url": f"sqlite:///{current_db}",
+                    }
+                ]
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "paper_lane_risk_status.json").write_text(json.dumps({"lanes": []}), encoding="utf-8")
+    (current_lane_dir / "operator_status.json").write_text(
+        json.dumps(
+            {
+                "display_name": "GC 1x All Lanes / NY Late Short",
+                "symbol": "GC",
+                "entries_enabled": True,
+                "operator_halt": False,
+                "position_side": "FLAT",
+                "strategy_status": "READY",
+                "processed_bars": 8,
+                "new_bars_last_cycle": 1,
+                "updated_at": "2026-04-21T11:18:30-04:00",
+                "last_processed_bar_end_ts": "2026-04-21T11:18:00-04:00",
+                "reconciliation": {
+                    "clean": True,
+                    "reconcile_required": False,
+                    "broker_snapshot": {"connected": True},
+                },
+                "heartbeat_reconciliation": {
+                    "status": "CLEAN",
+                    "last_completed_at": "2026-04-21T11:18:30-04:00",
+                },
+                "startup_restore_validation": {
+                    "restore_result": "READY",
+                    "clean": True,
+                    "reconcile_required": False,
+                    "unresolved_restore_issue": False,
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    service = OperatorDashboardService(repo_root)
+    monkeypatch.setattr(
+        service,
+        "_runtime_paths",
+        lambda runtime_name: {
+            "artifacts_dir": paper_artifacts if runtime_name == "paper" else repo_root / "outputs" / "probationary_pattern_engine",
+            "pid_file": repo_root / f"{runtime_name}.pid",
+            "log_file": repo_root / f"{runtime_name}.log",
+            "db_path": None,
+        },
+    )
+
+    paper = service._runtime_snapshot("paper")
+
+    assert paper["raw_operator_status"]["active_lane_ids"] == [current_lane_id]
+    assert [row["lane_id"] for row in paper["raw_operator_status"]["lanes"]] == [current_lane_id]
+    assert paper["latest_fills"][0]["broker_order_id"] == "current-broker-order"
+    assert paper["latest_fills"][0]["fill_price"] == "4770.3"
+
+
+def test_runtime_snapshot_prefers_newer_operator_status_lane_universe_when_config_in_force_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path
+    paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
+    runtime_dir = paper_artifacts / "runtime"
+    current_lane_id = "gc_1x_all_lanes__ny_late_short"
+    legacy_lane_id = "atp_companion_v1_asia_us"
+    current_lane_dir = paper_artifacts / "lanes" / current_lane_id
+    current_lane_dir.mkdir(parents=True, exist_ok=True)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    current_db = repo_root / "paper__current.sqlite3"
+    legacy_db = repo_root / "paper__legacy.sqlite3"
+    _init_empty_dashboard_db(current_db)
+    _init_empty_dashboard_db(legacy_db)
+
+    with sqlite3.connect(current_db) as connection:
+        connection.execute(
+            "insert into fills (order_intent_id, intent_type, order_status, fill_timestamp, fill_price, broker_order_id) values (?, ?, ?, ?, ?, ?)",
+            ("current-fill", "BUY_TO_CLOSE", "FILLED", "2026-04-21T11:18:00-04:00", "4770.3", "current-broker-order"),
+        )
+        connection.commit()
+
+    (paper_artifacts / "operator_status.json").write_text(
+        json.dumps(
+            {
+                "active_lane_ids": [current_lane_id],
+                "entries_enabled": True,
+                "lanes": [
+                    {
+                        "lane_id": current_lane_id,
+                        "display_name": "GC 1x All Lanes / NY Late Short",
+                        "symbol": "GC",
+                        "database_url": f"sqlite:///{current_db}",
+                    }
+                ],
+                "position_side": "FLAT",
+                "strategy_status": "RUNNING",
+                "updated_at": "2026-04-21T11:19:00-04:00",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "paper_config_in_force.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-21T11:10:00-04:00",
+                "lanes": [
+                    {
+                        "lane_id": legacy_lane_id,
+                        "display_name": "Legacy ATP lane",
+                        "symbol": "MGC",
+                        "session_restriction": "ASIA/US",
+                        "artifacts_dir": str(paper_artifacts / "lanes" / legacy_lane_id),
+                        "database_url": f"sqlite:///{legacy_db}",
+                    }
+                ]
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "paper_lane_risk_status.json").write_text(json.dumps({"lanes": []}), encoding="utf-8")
+
+    service = OperatorDashboardService(repo_root)
+    monkeypatch.setattr(
+        service,
+        "_runtime_paths",
+        lambda runtime_name: {
+            "artifacts_dir": paper_artifacts if runtime_name == "paper" else repo_root / "outputs" / "probationary_pattern_engine",
+            "pid_file": repo_root / f"{runtime_name}.pid",
+            "log_file": repo_root / f"{runtime_name}.log",
+            "db_path": None,
+        },
+    )
+
+    paper = service._runtime_snapshot("paper")
+
+    assert paper["raw_operator_status"]["active_lane_ids"] == [current_lane_id]
+    assert [row["lane_id"] for row in paper["raw_operator_status"]["lanes"]] == [current_lane_id]
+    assert paper["latest_fills"][0]["broker_order_id"] == "current-broker-order"
+
+
 def test_restart_paper_with_temp_paper_ignores_missing_pid_and_surfaces_temp_paper_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6387,6 +6612,194 @@ def test_dashboard_snapshot_surfaces_strategy_performance_by_lane_and_instrument
     assert runtime_summary["in_position_strategies"] == 1
 
 
+def test_dashboard_snapshot_rebuilds_empty_fresh_paper_strategy_performance_cache_when_runtime_has_lanes(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
+    paper_artifacts.mkdir(parents=True)
+    (repo_root / "outputs" / "probationary_pattern_engine").mkdir(exist_ok=True)
+
+    shadow_db = repo_root / "shadow.sqlite3"
+    root_paper_db = repo_root / "paper.sqlite3"
+    _init_empty_dashboard_db(shadow_db)
+    _init_empty_dashboard_db(root_paper_db)
+
+    lane_db = repo_root / "paper__mes_late.sqlite3"
+    _init_strategy_lane_dashboard_db(
+        lane_db,
+        symbol="MES",
+        entry_reason="indexNyLateLongV5",
+        closed_trade_pnl=None,
+    )
+
+    operator_status = {
+        "updated_at": "2026-03-22T13:50:00-04:00",
+        "last_processed_bar_end_ts": "2026-03-22T13:45:00-04:00",
+        "position_side": "LONG",
+        "strategy_status": "RUNNING_MULTI_LANE",
+        "entries_enabled": True,
+        "operator_halt": False,
+        "current_detected_session": "US_LATE",
+        "active_lane_ids": ["mes_us_late_long"],
+        "lanes": [
+            {
+                "lane_id": "mes_us_late_long",
+                "display_name": "MES / US_LATE_LONG / x1",
+                "symbol": "MES",
+                "approved_long_entry_sources": ["indexNyLateLongV5"],
+                "approved_short_entry_sources": [],
+                "position_side": "LONG",
+                "strategy_status": "IN_LONG_K",
+                "entries_enabled": True,
+                "operator_halt": False,
+                "risk_state": "OK",
+                "session_realized_pnl": "0",
+                "session_unrealized_pnl": "10.0",
+                "session_total_pnl": "10.0",
+                "entry_timestamp": "2026-03-22T13:35:00-04:00",
+                "entry_price": "100.0",
+                "last_mark": "101.0",
+                "point_value": "10",
+                "database_url": f"sqlite:///{lane_db}",
+            }
+        ],
+    }
+    (paper_artifacts / "operator_status.json").write_text(
+        json.dumps(operator_status) + "\n",
+        encoding="utf-8",
+    )
+
+    strategy_performance_path = repo_root / "outputs" / "operator_dashboard" / "paper_strategy_performance_snapshot.json"
+    strategy_performance_path.parent.mkdir(parents=True, exist_ok=True)
+    strategy_performance_path.write_text(
+        json.dumps(
+            {
+                "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "session_date": "2026-03-22",
+                "rows": [],
+                "trade_log": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    service = OperatorDashboardService(repo_root)
+    service._load_or_refresh_auth_gate_result = lambda run_if_missing: {"runtime_ready": True, "source": "test"}  # type: ignore[method-assign]
+    service._runtime_paths = lambda runtime_name: {  # type: ignore[method-assign]
+        "artifacts_dir": paper_artifacts if runtime_name == "paper" else repo_root / "outputs" / "probationary_pattern_engine",
+        "pid_file": repo_root / f"{runtime_name}.pid",
+        "log_file": repo_root / f"{runtime_name}.log",
+        "db_path": root_paper_db if runtime_name == "paper" else shadow_db,
+    }
+
+    snapshot = service.snapshot()
+
+    strategy_rows = snapshot["paper"]["strategy_performance"]["rows"]
+    assert len(strategy_rows) == 1
+    assert strategy_rows[0]["lane_id"] == "mes_us_late_long"
+
+    cached = json.loads(strategy_performance_path.read_text(encoding="utf-8"))
+    assert len(cached["rows"]) == 1
+    assert cached["rows"][0]["lane_id"] == "mes_us_late_long"
+
+
+def test_paper_strategy_performance_preserves_live_lane_pnl_when_status_rows_are_synthesized(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
+    lane_dir = paper_artifacts / "lanes" / "mes_us_late_long"
+    lane_dir.mkdir(parents=True, exist_ok=True)
+    lane_db = repo_root / "paper__mes_late.sqlite3"
+    _init_empty_dashboard_db(lane_db)
+
+    (lane_dir / "operator_status.json").write_text(
+        json.dumps(
+            {
+                "lane_id": "mes_us_late_long",
+                "display_name": "MES / US_LATE_LONG / x1",
+                "symbol": "MES",
+                "position_side": "LONG",
+                "strategy_status": "READY",
+                "entries_enabled": True,
+                "operator_halt": False,
+                "updated_at": "2026-03-22T13:50:00-04:00",
+                "last_processed_bar_end_ts": "2026-03-22T13:45:00-04:00",
+                "reconciliation": {
+                    "broker_position_quantity": 1,
+                    "broker_average_price": "100.0",
+                    "strategy_open_broker_order_id": "paper-order-1",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    service = OperatorDashboardService(repo_root)
+    merged_status = service._paper_operator_status_with_lane_fallback(
+        {
+            "updated_at": "2026-03-22T13:50:00-04:00",
+            "last_processed_bar_end_ts": "2026-03-22T13:45:00-04:00",
+            "position_side": "LONG",
+            "strategy_status": "RUNNING_MULTI_LANE",
+            "entries_enabled": True,
+            "operator_halt": False,
+            "current_detected_session": "US_LATE",
+            "active_lane_ids": ["mes_us_late_long"],
+            "lanes": [],
+        },
+        {
+            "generated_at": "2026-03-22T13:49:00-04:00",
+            "lanes": [
+                {
+                    "lane_id": "mes_us_late_long",
+                    "display_name": "MES / US_LATE_LONG / x1",
+                    "symbol": "MES",
+                    "session_restriction": "US_LATE",
+                    "long_sources": ["indexUsLateLongV5"],
+                    "short_sources": [],
+                    "artifacts_dir": str(lane_dir),
+                    "database_url": f"sqlite:///{lane_db}",
+                }
+            ],
+        },
+        {
+            "lanes": [
+                {
+                    "lane_id": "mes_us_late_long",
+                    "risk_state": "OK",
+                    "halt_reason": None,
+                    "unblock_action": None,
+                    "realized_losing_trades": 0,
+                    "session_realized_pnl": "2.5",
+                    "session_unrealized_pnl": "10.0",
+                    "session_total_pnl": "12.5",
+                }
+            ]
+        },
+        paper_artifacts,
+        lane_db,
+    )
+
+    payload = service._paper_strategy_performance_payload(
+        paper={
+            "raw_operator_status": merged_status,
+            "status": {"strategy_status": "RUNNING"},
+            "runtime_registry": {"rows": []},
+        },
+        session_date="2026-03-22",
+        root_db_path=lane_db,
+        approved_quant_baselines={"rows": []},
+    )
+
+    row = payload["rows"][0]
+    assert row["lane_id"] == "mes_us_late_long"
+    assert row["position_side"] == "LONG"
+    assert row["entry_price"] == "100.0"
+    assert row["unrealized_pnl"] == "10.0"
+    assert row["day_pnl"] == "12.5"
+    assert payload["portfolio_snapshot"]["total_unrealized_pnl"] == "10.0"
+    assert payload["portfolio_snapshot"]["total_day_pnl"] == "12.5"
+
+
 def test_dashboard_snapshot_builds_unified_strategy_analysis_surface(tmp_path: Path) -> None:
     repo_root = tmp_path
     paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
@@ -6588,9 +7001,22 @@ def test_dashboard_snapshot_builds_unified_strategy_analysis_surface(tmp_path: P
     }
 
     snapshot = service.snapshot()
+    service._refresh_strategy_analysis_snapshot(
+        historical_playback=dict(snapshot["historical_playback"]),
+        paper=dict(snapshot["paper"]),
+        runtime_registry={},
+        lane_registry={},
+    )
 
-    strategy_analysis = snapshot["strategy_analysis"]
+    strategy_analysis_path = repo_root / "outputs" / "operator_dashboard" / "strategy_analysis_snapshot.json"
+    assert strategy_analysis_path.exists()
+    strategy_analysis = json.loads(strategy_analysis_path.read_text(encoding="utf-8"))
     assert strategy_analysis["available"] is True
+    unified_monitor = strategy_analysis["unified_monitor"]
+    assert unified_monitor["available"] is True
+    assert unified_monitor["grouping"]["default_group_keys"] == ["strategy_class", "instrument", "family"]
+    assert unified_monitor["selection_contract"]["default_selection_behavior"]["mode"] == "select_all_visible_lanes"
+    assert unified_monitor["leaderboard_views"]["rankings"]["realized_pnl"]
     detail = strategy_analysis["details_by_strategy_key"]["bull_snap__MGC"]
     lane_types = {row["lane_type"] for row in detail["lanes"]}
     assert lane_types == {"benchmark_replay", "paper_runtime"}
@@ -6605,9 +7031,10 @@ def test_dashboard_snapshot_builds_unified_strategy_analysis_surface(tmp_path: P
     assert detail["comparison_presets"][0]["right_lane"]["lane_type"] == "paper_runtime"
     assert detail["comparison_presets"][0]["left_lane"]["lifecycle_truth"]["class"] == "BASELINE_ONLY"
     assert detail["comparison_presets"][0]["right_lane"]["lifecycle_truth"]["class"] == "FULL_LIFECYCLE_TRUTH"
+    comparison_rows = unified_monitor["comparison_rows"]
+    paper_row = next(row for row in comparison_rows if row["evidence_lane_type"] == "paper_runtime")
+    assert unified_monitor["chart_series"]["series_by_lane_id"][paper_row["lane_id"]]["support"]["cumulative_realized_pnl"] is True
 
-    strategy_analysis_path = repo_root / "outputs" / "operator_dashboard" / "strategy_analysis_snapshot.json"
-    assert strategy_analysis_path.exists()
     assert service.operator_artifact_file("strategy-analysis")[0] == strategy_analysis_path
 
 
@@ -8792,6 +9219,41 @@ def test_tracked_paper_strategy_payload_falls_back_to_lane_artifacts_when_dashbo
     assert detail["recent_trades"][0]["exit_reason"] == "atp_companion_target"
 
 
+def test_tracked_paper_strategy_payload_does_not_fallback_to_atp_when_other_live_paper_lanes_are_loaded(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path
+    paper = {
+        "artifacts_dir": str((repo_root / "outputs" / "probationary_pattern_engine" / "paper_session").resolve()),
+        "running": True,
+        "raw_operator_status": {
+            "active_lane_ids": [
+                "gc_1x_all_lanes__asia_early_short",
+                "gc_1x_all_lanes__ny_early_short",
+            ],
+            "lanes": [
+                {"lane_id": "gc_1x_all_lanes__asia_early_short", "display_name": "GC / ASIA_EARLY_SHORT / x1"},
+                {"lane_id": "gc_1x_all_lanes__ny_early_short", "display_name": "GC / NY_EARLY_SHORT / x1"},
+            ],
+        },
+        "status": {"session_date": "2026-04-21", "current_detected_session": "US_LATE"},
+        "temporary_paper_strategies": {"rows": []},
+        "non_approved_lanes": {"rows": []},
+        "strategy_performance": {"trade_log": []},
+    }
+
+    tracked_payload = build_tracked_paper_strategies_payload(
+        repo_root=repo_root,
+        paper=paper,
+        generated_at="2026-04-21T19:45:00-04:00",
+    )
+
+    row = tracked_payload["rows"][0]
+    assert tracked_payload["active_count"] == 0
+    assert row["lane_count"] == 0
+    assert row["runtime_attached"] is False
+
+
 def test_dashboard_non_approved_payload_marks_gc_mgc_temp_paper_runtime_rows_as_temporary_strategy(tmp_path: Path) -> None:
     repo_root = tmp_path
     paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
@@ -9080,6 +9542,36 @@ def test_default_paper_runtime_config_paths_include_atp_companion_overlays(tmp_p
     )
     assert str(tmp_path / "config" / "probationary_pattern_engine_paper_atp_companion_shared_runtime.yaml") in config_paths
     assert config_paths[-1] == str(tmp_path / "config" / "probationary_pattern_engine_paper_atp_companion_shared_runtime.yaml")
+
+
+def test_paper_runtime_config_paths_use_persisted_override_file(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    override_file = (
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "paper_runtime_config_paths.txt"
+    )
+    override_file.parent.mkdir(parents=True, exist_ok=True)
+    override_file.write_text(
+        "\n".join(
+            [
+                str(tmp_path / "config" / "base.yaml"),
+                str(tmp_path / "outputs" / "reports" / "gc_1x_all_lanes.paper_package.yaml"),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config_paths = [str(path) for path in service._paper_runtime_config_paths()]
+
+    assert config_paths == [
+        str((tmp_path / "config" / "base.yaml").resolve()),
+        str((tmp_path / "outputs" / "reports" / "gc_1x_all_lanes.paper_package.yaml").resolve()),
+    ]
 
 
 def test_dashboard_snapshot_includes_approved_quant_baselines_snapshot(tmp_path: Path) -> None:

@@ -119,6 +119,54 @@ def test_headless_supervised_paper_contract_keeps_auth_and_reconciliation_visibl
     assert contract["overall_state"] == "ATTACH_INCOMPLETE"
 
 
+def test_headless_supervised_paper_contract_reports_runtime_unavailable_when_health_is_reachable_but_not_ready() -> None:
+    contract = build_headless_supervised_paper_contract(
+        health_payload={
+            "ready": False,
+            "status": "degraded",
+            "phase": "runtime_attachment_verified",
+            "phase_detail": "Paper runtime stopped; manual intervention required because system/risk stop.",
+        },
+        startup_control_plane={
+            "overall_state": "BLOCKED",
+            "launch_allowed": False,
+            "dependencies": [
+                {"key": "dashboard_backend", "label": "Dashboard / Backend", "state": "READY", "reason": "Dashboard/API is serving the current operator snapshot."},
+                {"key": "schwab_connectivity", "label": "Schwab Connectivity / Auth", "state": "READY", "reason": "Token is runtime-ready."},
+                {"key": "paper_runtime", "label": "Paper Runtime", "state": "BLOCKED", "reason": "Paper runtime stopped; manual intervention required because system/risk stop.", "next_action_label": "Acknowledge / Clear Fault"},
+                {"key": "reconciliation", "label": "Reconciliation Needed", "state": "RECONCILIATION_REQUIRED", "reason": "Internal and broker state are aligned."},
+            ],
+        },
+        supervised_paper_operability={
+            "app_usable_for_supervised_paper": False,
+            "state": "DEGRADED",
+            "unusable_reason": "Paper runtime stopped; manual intervention required because system/risk stop.",
+            "unusable_reason_code": "paper_runtime_stopped_manual_required",
+            "dashboard_attached": True,
+            "startup_ready": False,
+            "launch_allowed": False,
+            "runtime_running": False,
+            "paper_runtime_phase": "STOPPED",
+            "paper_runtime_ready": False,
+            "entries_enabled": True,
+            "operator_halt": False,
+            "operator_action_required": True,
+            "primary_next_action": "Acknowledge / Clear Fault",
+        },
+        dashboard_info={
+            "dashboard_api_url": "http://127.0.0.1:8790/api/dashboard",
+            "health_url": "http://127.0.0.1:8790/health",
+            "pid": 123,
+            "instance_id": "instance-degraded",
+        },
+    )
+
+    assert contract["backend"]["health_ready"] is False
+    assert contract["backend"]["attached"] is True
+    assert contract["overall_state"] == "PAPER_RUNTIME_UNAVAILABLE"
+    assert contract["unusable_reason_code"] == "paper_runtime_stopped_manual_required"
+
+
 def test_headless_supervised_paper_contract_prefers_live_service_truth_over_stale_startup_snapshot() -> None:
     contract = build_headless_supervised_paper_contract(
         health_payload={

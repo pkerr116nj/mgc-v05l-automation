@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from mgc_v05l.config_models import EnvironmentMode, RuntimeMode, StrategySettings, load_settings_from_files
+from mgc_v05l.config_models import (
+    EnvironmentMode,
+    ExecutionTimeframeRole,
+    RuntimeMode,
+    StrategySettings,
+    load_settings_from_files,
+)
 from mgc_v05l.domain.models import Bar
 from mgc_v05l.persistence import build_engine
 from mgc_v05l.persistence.repositories import RepositorySet
@@ -25,6 +31,7 @@ def _settings(tmp_path: Path, **updates: object) -> StrategySettings:
         "execution_timeframe": "1m",
         "artifact_timeframe": "5m",
         "context_timeframes": ("5m",),
+        "execution_timeframe_role": ExecutionTimeframeRole.EXECUTION_DETAIL_ONLY,
     }
     payload.update(updates)
     return StrategySettings(**payload)
@@ -77,7 +84,7 @@ def test_shared_paper_config_declares_1m_execution_with_completed_5m_context() -
     assert settings.resolved_context_timeframes == ("5m",)
 
 
-def test_strategy_engine_evaluates_each_1m_bar_and_only_advances_completed_5m_context(tmp_path: Path) -> None:
+def test_strategy_engine_evaluates_each_1m_bar_and_advances_trailing_5m_context_on_every_new_1m_bar(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     repositories = RepositorySet(build_engine(settings.database_url))
     engine = StrategyEngine(settings=settings, repositories=repositories)
@@ -112,6 +119,9 @@ def test_strategy_engine_evaluates_each_1m_bar_and_only_advances_completed_5m_co
     cadence_after_next_execution = engine.runtime_cadence_snapshot()
     assert cadence_after_next_execution["last_execution_bar_id"] == sixth_bar.bar_id
     assert cadence_after_next_execution["last_execution_bar_evaluated_at"] == sixth_bar.end_ts.isoformat()
-    assert cadence_after_next_execution["last_completed_context_bars_at"] == {"5m": fifth_bar.end_ts.isoformat()}
+    assert cadence_after_next_execution["last_completed_context_bars_at"] == {"5m": sixth_bar.end_ts.isoformat()}
     assert repositories.processed_bars.count() == 6
     assert repositories.processed_bars.latest_end_ts() == sixth_bar.end_ts
+    resampled_context = repositories.bars.list_recent(symbol="MGC", timeframe="5m", limit=10)
+    assert len(resampled_context) == 2
+    assert resampled_context[-1].end_ts == sixth_bar.end_ts

@@ -6,11 +6,11 @@ import json
 from bisect import bisect_left, bisect_right
 from collections import Counter
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from .models import AtpEntryState, AtpTimingState, ConflictOutcome, FeatureState, PatternVariant, TradeRecord
+from .models import AtpEntryState, AtpTimingState, ConflictOutcome, FeatureState, PatternVariant, ResearchBar, TradeRecord
 from .phase2_continuation import (
     ATP_CONTINUATION_TRIGGER_NOT_CONFIRMED,
     ATP_V1_LONG_CONTINUATION_FAMILY,
@@ -49,11 +49,20 @@ ATP_REPLAY_EXIT_POLICY_FIXED_TARGET = "fixed_target_time_stop"
 ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT = "target_checkpoint_trail"
 ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_LONG_HOLD = "target_checkpoint_trail_long_hold"
 ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_NO_TRACTION = "target_checkpoint_no_traction_abort"
+ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_15M_2OF3 = "checkpoint075_no_traction_abort_15m_2of3"
+ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_15M_2OF3 = "checkpoint100_no_traction_abort_15m_2of3"
+ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_10M_DOUBLE_WEAK = "checkpoint075_no_traction_abort_10m_double_weak_close"
+ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_20M_LOOSE = "checkpoint075_no_traction_abort_20m_loose_trend_hold"
+ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_2OF3 = "checkpoint100_no_traction_abort_7m_2of3"
+ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_STRICT_WEAK = "checkpoint100_no_traction_abort_7m_strict_weak_close"
+ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_LOOSE_HOLD = "checkpoint100_no_traction_abort_7m_loose_hold"
 ATP_REPLAY_CHECKPOINT_LOCK_R = 0.35
 ATP_REPLAY_CHECKPOINT_TRAIL_R = 0.25
 ATP_REPLAY_LONG_HOLD_EXTENSION_BARS = 12
 ATP_REPLAY_NO_TRACTION_ABORT_BARS = 2
 ATP_REPLAY_NO_TRACTION_MIN_FAVORABLE_R = 0.25
+ATP_REPLAY_PROMOTION_EXTENSION_R = 0.25
+ATP_REPLAY_MAINTENANCE_FAST_EMA_SPAN = 5
 
 
 def build_phase3_replay_package(
@@ -313,6 +322,7 @@ def simulate_timed_entries(
     bars_by_instrument: dict[str, list[Any]] = {}
     for bar in minute_bars:
         bars_by_instrument.setdefault(bar.instrument, []).append(bar)
+    maintenance_cache: dict[tuple[str, int], dict[str, Any]] = {}
     feature_rows_by_instrument: dict[str, list[FeatureState]] = {}
     feature_ts_by_instrument: dict[str, list[Any]] = {}
     for feature in sorted(feature_rows or (), key=lambda item: (item.instrument, item.decision_ts)):
@@ -359,7 +369,13 @@ def simulate_timed_entries(
         if entry_index < 0 or entry_index >= len(candidate_bars):
             continue
         entry_bar = candidate_bars[entry_index]
-        execution_window = candidate_bars[entry_index : entry_index + policy_profile["max_hold_bars_1m"](variant.max_hold_bars_1m) + 1]
+        execution_window = _execution_window_for_policy(
+            candidate_bars=candidate_bars,
+            entry_index=entry_index,
+            state=state,
+            policy_profile=policy_profile,
+            base_max_hold_bars_1m=variant.max_hold_bars_1m,
+        )
         if not execution_window:
             continue
         raw_entry_price = float(state.entry_price)
@@ -384,6 +400,20 @@ def simulate_timed_entries(
         mfe_points = 0.0
         mae_points = 0.0
         bars_held = 0
+        promotion_ts = None
+        promotion_price = None
+        pnl_points_at_promotion = None
+        post_promotion_peak_open_profit_points = None
+        last_completed_maintenance_bar_end_ts = None
+        maintenance_state = None
+        if policy_profile.get("use_promoted_maintenance_exit"):
+            maintenance_state = maintenance_cache.setdefault(
+                (instrument, int(policy_profile["maintenance_timeframe_minutes"])),
+                _build_completed_maintenance_context(
+                    minute_bars=candidate_bars,
+                    timeframe_minutes=int(policy_profile["maintenance_timeframe_minutes"]),
+                ),
+            )
 
         for relative_index, bar in enumerate(execution_window, start=1):
             bars_held = relative_index
@@ -392,14 +422,6 @@ def simulate_timed_entries(
                 feature_ts_by_instrument.get(state.instrument, ()),
                 bar.end_ts,
             )
-            if checkpoint_reached:
-                dynamic_stop_price = _checkpoint_stop_price(
-                    current_stop=dynamic_stop_price,
-                    entry_fill_price=entry_price,
-                    risk_points=risk,
-                    bar=bar,
-                    side=state.side,
-                )
             if state.side == "LONG":
                 mfe_points = max(mfe_points, float(bar.high) - raw_entry_price)
                 mae_points = max(mae_points, raw_entry_price - float(bar.low))
@@ -410,6 +432,46 @@ def simulate_timed_entries(
                 mae_points = max(mae_points, float(bar.high) - raw_entry_price)
                 stop_hit = float(bar.high) >= dynamic_stop_price
                 target_hit = not checkpoint_reached and target_price is not None and float(bar.low) <= target_price
+            promotion_hit = (
+                not checkpoint_reached
+                and policy_profile.get("promotion_r_multiple") is not None
+                and mfe_points >= risk * float(policy_profile["promotion_r_multiple"])
+            )
+            if promotion_hit:
+                checkpoint_reached = True
+                promotion_ts = bar.end_ts
+                promotion_price = float(bar.close)
+                pnl_points_at_promotion = (
+                    promotion_price - entry_price if state.side == "LONG" else entry_price - promotion_price
+                )
+                post_promotion_peak_open_profit_points = max(
+                    mfe_points,
+                    (float(bar.high) - entry_price) if state.side == "LONG" else (entry_price - float(bar.low)),
+                )
+            if checkpoint_reached:
+                if policy_profile.get("use_promoted_maintenance_exit"):
+                    dynamic_stop_price = _promoted_maintenance_stop_price(
+                        current_stop=dynamic_stop_price,
+                        entry_fill_price=entry_price,
+                        risk_points=risk,
+                        side=state.side,
+                    )
+                else:
+                    dynamic_stop_price = _checkpoint_stop_price(
+                        current_stop=dynamic_stop_price,
+                        entry_fill_price=entry_price,
+                        risk_points=risk,
+                        bar=bar,
+                        side=state.side,
+                    )
+            if checkpoint_reached:
+                current_open_profit_points = (
+                    float(bar.high) - entry_price if state.side == "LONG" else entry_price - float(bar.low)
+                )
+                post_promotion_peak_open_profit_points = max(
+                    float(post_promotion_peak_open_profit_points or 0.0),
+                    current_open_profit_points,
+                )
             if stop_hit and target_hit:
                 exit_bar = bar
                 raw_exit_price = dynamic_stop_price
@@ -422,9 +484,18 @@ def simulate_timed_entries(
                 exit_price = dynamic_stop_price - slippage_points if state.side == "LONG" else dynamic_stop_price + slippage_points
                 exit_reason = "checkpoint_stop" if checkpoint_reached else "stop"
                 break
-            if target_hit and target_price is not None:
+            if target_hit and target_price is not None and not policy_profile.get("disable_target_exit_after_entry", False):
                 if policy_profile["use_target_checkpoint"] and _checkpoint_feature_is_healthy(feature=latest_feature, side=state.side):
                     checkpoint_reached = True
+                    promotion_ts = bar.end_ts
+                    promotion_price = target_price
+                    pnl_points_at_promotion = (
+                        target_price - entry_price if state.side == "LONG" else entry_price - target_price
+                    )
+                    post_promotion_peak_open_profit_points = max(
+                        float(post_promotion_peak_open_profit_points or 0.0),
+                        pnl_points_at_promotion,
+                    )
                     dynamic_stop_price = _checkpoint_stop_price(
                         current_stop=dynamic_stop_price,
                         entry_fill_price=entry_price,
@@ -439,7 +510,12 @@ def simulate_timed_entries(
                     exit_price = target_price - slippage_points if state.side == "LONG" else target_price + slippage_points
                     exit_reason = "target"
                     break
-            if checkpoint_reached and policy_profile["use_target_checkpoint"] and not _checkpoint_feature_is_healthy(feature=latest_feature, side=state.side):
+            if (
+                checkpoint_reached
+                and policy_profile["use_target_checkpoint"]
+                and not policy_profile.get("use_promoted_maintenance_exit")
+                and not _checkpoint_feature_is_healthy(feature=latest_feature, side=state.side)
+            ):
                 exit_bar = bar
                 raw_exit_price = float(bar.close)
                 exit_price = raw_exit_price - slippage_points if state.side == "LONG" else raw_exit_price + slippage_points
@@ -456,6 +532,30 @@ def simulate_timed_entries(
                 exit_price = raw_exit_price - slippage_points if state.side == "LONG" else raw_exit_price + slippage_points
                 exit_reason = "no_traction_abort"
                 break
+            if checkpoint_reached and policy_profile.get("use_promoted_maintenance_exit") and maintenance_state is not None:
+                maintenance_bar = maintenance_state["bars_by_end_ts"].get(bar.end_ts)
+                if (
+                    maintenance_bar is not None
+                    and bar.end_ts != last_completed_maintenance_bar_end_ts
+                    and promotion_ts is not None
+                    and maintenance_bar.end_ts >= promotion_ts
+                ):
+                    if _maintenance_exit_triggered(
+                        maintenance_bar=maintenance_bar,
+                        maintenance_bars=maintenance_state["bars"],
+                        maintenance_ema_by_end_ts=maintenance_state["ema_by_end_ts"],
+                        side=state.side,
+                        policy_profile=policy_profile,
+                        mfe_points=mfe_points,
+                        risk_points=risk,
+                    ):
+                        last_completed_maintenance_bar_end_ts = bar.end_ts
+                        exit_bar = bar
+                        raw_exit_price = float(bar.close)
+                        exit_price = raw_exit_price - slippage_points if state.side == "LONG" else raw_exit_price + slippage_points
+                        exit_reason = str(policy_profile["maintenance_exit_reason"])
+                        break
+                    last_completed_maintenance_bar_end_ts = bar.end_ts
 
         gross_pnl_points = (raw_exit_price - raw_entry_price) if state.side == "LONG" else (raw_entry_price - raw_exit_price)
         pnl_points = (exit_price - entry_price) if state.side == "LONG" else (entry_price - exit_price)
@@ -497,6 +597,16 @@ def simulate_timed_entries(
                 session_segment=state.session_segment,
                 regime_bucket=str(state.feature_snapshot.get("regime_bucket") or "UNKNOWN"),
                 volatility_bucket=str(state.feature_snapshot.get("volatility_bucket") or "UNKNOWN"),
+                participation_promoted=checkpoint_reached and promotion_ts is not None,
+                promotion_trigger_r_multiple=(
+                    float(policy_profile["promotion_r_multiple"])
+                    if checkpoint_reached and policy_profile.get("promotion_r_multiple") is not None
+                    else None
+                ),
+                promotion_ts=promotion_ts,
+                promotion_price=promotion_price,
+                pnl_points_at_promotion=pnl_points_at_promotion,
+                post_promotion_peak_open_profit_points=post_promotion_peak_open_profit_points,
             )
         )
         blocked_until_by_instrument[instrument] = trades[-1].exit_ts + timedelta(
@@ -567,6 +677,19 @@ def _checkpoint_stop_price(
     return min(current_stop, locked_profit_stop, structure_stop)
 
 
+def _promoted_maintenance_stop_price(
+    *,
+    current_stop: float,
+    entry_fill_price: float,
+    risk_points: float,
+    side: str,
+) -> float:
+    normalized_side = str(side or "LONG").strip().upper()
+    if normalized_side == "LONG":
+        return max(current_stop, entry_fill_price + risk_points * ATP_REPLAY_CHECKPOINT_LOCK_R)
+    return min(current_stop, entry_fill_price - risk_points * ATP_REPLAY_CHECKPOINT_LOCK_R)
+
+
 def _classify_timing_reentry_type(
     *,
     state: AtpTimingState,
@@ -590,29 +713,273 @@ def _classify_timing_reentry_type(
     return "LOCAL_CHURN"
 
 
+def _execution_window_for_policy(
+    *,
+    candidate_bars: Sequence[Any],
+    entry_index: int,
+    state: AtpTimingState,
+    policy_profile: Mapping[str, Any],
+    base_max_hold_bars_1m: int,
+) -> list[Any]:
+    if policy_profile.get("use_promoted_maintenance_exit"):
+        entry_bar = candidate_bars[entry_index]
+        entry_session = str(getattr(entry_bar, "session_segment", None) or state.session_segment or "")
+        bounded: list[Any] = []
+        for bar in candidate_bars[entry_index:]:
+            if bounded and str(getattr(bar, "session_segment", None) or "") != entry_session:
+                break
+            bounded.append(bar)
+        return bounded
+    limit = policy_profile["max_hold_bars_1m"](base_max_hold_bars_1m) + 1
+    return list(candidate_bars[entry_index : entry_index + limit])
+
+
+def _build_completed_maintenance_context(
+    *,
+    minute_bars: Sequence[Any],
+    timeframe_minutes: int,
+) -> dict[str, Any]:
+    grouped: dict[datetime, list[Any]] = {}
+    for bar in minute_bars:
+        grouped.setdefault(_maintenance_bucket_end(bar.end_ts, timeframe_minutes), []).append(bar)
+    completed_bars: list[ResearchBar] = []
+    for bucket_end in sorted(grouped):
+        bucket = sorted(grouped[bucket_end], key=lambda item: item.end_ts)
+        if len(bucket) != timeframe_minutes:
+            continue
+        if any(
+            bucket[index].end_ts - bucket[index - 1].end_ts != timedelta(minutes=1)
+            for index in range(1, len(bucket))
+        ):
+            continue
+        first_bar = bucket[0]
+        last_bar = bucket[-1]
+        completed_bars.append(
+            ResearchBar(
+                instrument=str(first_bar.instrument),
+                timeframe=f"{timeframe_minutes}m",
+                start_ts=first_bar.start_ts,
+                end_ts=bucket_end,
+                open=float(first_bar.open),
+                high=max(float(item.high) for item in bucket),
+                low=min(float(item.low) for item in bucket),
+                close=float(last_bar.close),
+                volume=sum(int(item.volume) for item in bucket),
+                session_label=str(getattr(last_bar, "session_label", "")),
+                session_segment=str(getattr(last_bar, "session_segment", "")),
+                source=str(getattr(last_bar, "source", "sqlite")),
+            )
+        )
+    ema_values = rolling_ema([float(bar.close) for bar in completed_bars], span=ATP_REPLAY_MAINTENANCE_FAST_EMA_SPAN)
+    return {
+        "bars": completed_bars,
+        "bars_by_end_ts": {bar.end_ts: bar for bar in completed_bars},
+        "ema_by_end_ts": {bar.end_ts: ema_values[index] for index, bar in enumerate(completed_bars)},
+    }
+
+
+def _maintenance_bucket_end(timestamp: datetime, target_minutes: int) -> datetime:
+    utc_ts = timestamp.astimezone(UTC)
+    epoch_minutes = int(utc_ts.timestamp() // 60)
+    bucket = ((epoch_minutes + target_minutes - 1) // target_minutes) * target_minutes
+    return datetime.fromtimestamp(bucket * 60, tz=UTC)
+
+
+def _maintenance_exit_triggered(
+    *,
+    maintenance_bar: ResearchBar,
+    maintenance_bars: Sequence[ResearchBar],
+    maintenance_ema_by_end_ts: Mapping[datetime, float],
+    side: str,
+    policy_profile: Mapping[str, Any],
+    mfe_points: float,
+    risk_points: float,
+) -> bool:
+    if str(side or "LONG").upper() != "LONG":
+        return False
+    previous_bar = next(
+        (candidate for candidate in reversed(maintenance_bars) if candidate.end_ts < maintenance_bar.end_ts),
+        None,
+    )
+    if previous_bar is None:
+        return False
+    maintenance_rule = str(policy_profile.get("maintenance_rule") or "")
+    ema_value = float(maintenance_ema_by_end_ts.get(maintenance_bar.end_ts, maintenance_bar.close))
+    extension_context_active = mfe_points >= risk_points * (
+        float(policy_profile.get("promotion_r_multiple") or 0.0) + ATP_REPLAY_PROMOTION_EXTENSION_R
+    )
+    lower_half = float(maintenance_bar.close) <= float(maintenance_bar.low) + (maintenance_bar.range_points * 0.5)
+    lower_third = float(maintenance_bar.close) <= float(maintenance_bar.low) + (maintenance_bar.range_points / 3.0)
+    close_below_ema = float(maintenance_bar.close) < ema_value
+    close_below_prior = float(maintenance_bar.close) < float(previous_bar.close)
+    if maintenance_rule == "15m_2of3":
+        conditions = (
+            close_below_ema,
+            close_below_prior,
+            extension_context_active and lower_half,
+        )
+        return sum(1 for condition in conditions if condition) >= 2
+    if maintenance_rule == "7m_2of3":
+        conditions = (
+            close_below_ema,
+            close_below_prior,
+            extension_context_active and lower_half,
+        )
+        return sum(1 for condition in conditions if condition) >= 2
+    if maintenance_rule == "10m_double_weak_close":
+        current_weak = close_below_ema and close_below_prior
+        decisive_weak = current_weak and lower_third
+        previous_ema = float(maintenance_ema_by_end_ts.get(previous_bar.end_ts, previous_bar.close))
+        prior_of_previous = next(
+            (candidate for candidate in reversed(maintenance_bars) if candidate.end_ts < previous_bar.end_ts),
+            None,
+        )
+        previous_weak = (
+            prior_of_previous is not None
+            and float(previous_bar.close) < previous_ema
+            and float(previous_bar.close) < float(prior_of_previous.close)
+        )
+        return decisive_weak or (current_weak and previous_weak)
+    if maintenance_rule == "7m_strict_weak_close":
+        current_weak = close_below_ema and close_below_prior
+        decisive_weak = current_weak and lower_third
+        previous_ema = float(maintenance_ema_by_end_ts.get(previous_bar.end_ts, previous_bar.close))
+        prior_of_previous = next(
+            (candidate for candidate in reversed(maintenance_bars) if candidate.end_ts < previous_bar.end_ts),
+            None,
+        )
+        previous_weak = (
+            prior_of_previous is not None
+            and float(previous_bar.close) < previous_ema
+            and float(previous_bar.close) < float(prior_of_previous.close)
+        )
+        return decisive_weak or (current_weak and previous_weak)
+    if maintenance_rule == "7m_loose_hold":
+        return close_below_ema and close_below_prior and extension_context_active and lower_half
+    if maintenance_rule == "20m_loose_trend_hold":
+        return close_below_ema and close_below_prior and lower_third
+    return False
+
+
 def _replay_exit_policy_profile(policy_name: str) -> dict[str, Any]:
     normalized = str(policy_name or ATP_REPLAY_EXIT_POLICY_FIXED_TARGET).strip().lower()
+    if normalized == ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_15M_2OF3:
+        return {
+            "use_target_checkpoint": False,
+            "use_no_traction_abort": True,
+            "use_promoted_maintenance_exit": True,
+            "disable_target_exit_after_entry": True,
+            "promotion_r_multiple": 0.75,
+            "maintenance_timeframe_minutes": 15,
+            "maintenance_rule": "15m_2of3",
+            "maintenance_exit_reason": "htf_15m_2of3_deterioration",
+            "max_hold_bars_1m": lambda base: max(int(base), 1),
+        }
+    if normalized == ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_15M_2OF3:
+        return {
+            "use_target_checkpoint": False,
+            "use_no_traction_abort": True,
+            "use_promoted_maintenance_exit": True,
+            "disable_target_exit_after_entry": True,
+            "promotion_r_multiple": 1.0,
+            "maintenance_timeframe_minutes": 15,
+            "maintenance_rule": "15m_2of3",
+            "maintenance_exit_reason": "htf_15m_2of3_deterioration",
+            "max_hold_bars_1m": lambda base: max(int(base), 1),
+        }
+    if normalized == ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_10M_DOUBLE_WEAK:
+        return {
+            "use_target_checkpoint": False,
+            "use_no_traction_abort": True,
+            "use_promoted_maintenance_exit": True,
+            "disable_target_exit_after_entry": True,
+            "promotion_r_multiple": 0.75,
+            "maintenance_timeframe_minutes": 10,
+            "maintenance_rule": "10m_double_weak_close",
+            "maintenance_exit_reason": "htf_10m_double_weak_close",
+            "max_hold_bars_1m": lambda base: max(int(base), 1),
+        }
+    if normalized == ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_2OF3:
+        return {
+            "use_target_checkpoint": False,
+            "use_no_traction_abort": True,
+            "use_promoted_maintenance_exit": True,
+            "disable_target_exit_after_entry": True,
+            "promotion_r_multiple": 1.0,
+            "maintenance_timeframe_minutes": 7,
+            "maintenance_rule": "7m_2of3",
+            "maintenance_exit_reason": "htf_7m_2of3_deterioration",
+            "max_hold_bars_1m": lambda base: max(int(base), 1),
+        }
+    if normalized == ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_STRICT_WEAK:
+        return {
+            "use_target_checkpoint": False,
+            "use_no_traction_abort": True,
+            "use_promoted_maintenance_exit": True,
+            "disable_target_exit_after_entry": True,
+            "promotion_r_multiple": 1.0,
+            "maintenance_timeframe_minutes": 7,
+            "maintenance_rule": "7m_strict_weak_close",
+            "maintenance_exit_reason": "htf_7m_strict_weak_close",
+            "max_hold_bars_1m": lambda base: max(int(base), 1),
+        }
+    if normalized == ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_LOOSE_HOLD:
+        return {
+            "use_target_checkpoint": False,
+            "use_no_traction_abort": True,
+            "use_promoted_maintenance_exit": True,
+            "disable_target_exit_after_entry": True,
+            "promotion_r_multiple": 1.0,
+            "maintenance_timeframe_minutes": 7,
+            "maintenance_rule": "7m_loose_hold",
+            "maintenance_exit_reason": "htf_7m_loose_hold",
+            "max_hold_bars_1m": lambda base: max(int(base), 1),
+        }
+    if normalized == ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_20M_LOOSE:
+        return {
+            "use_target_checkpoint": False,
+            "use_no_traction_abort": True,
+            "use_promoted_maintenance_exit": True,
+            "disable_target_exit_after_entry": True,
+            "promotion_r_multiple": 0.75,
+            "maintenance_timeframe_minutes": 20,
+            "maintenance_rule": "20m_loose_trend_hold",
+            "maintenance_exit_reason": "htf_20m_loose_trend_hold",
+            "max_hold_bars_1m": lambda base: max(int(base), 1),
+        }
     if normalized == ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_LONG_HOLD:
         return {
             "use_target_checkpoint": True,
             "use_no_traction_abort": False,
+            "use_promoted_maintenance_exit": False,
+            "disable_target_exit_after_entry": False,
+            "promotion_r_multiple": None,
             "max_hold_bars_1m": lambda base: max(int(base), 1) + ATP_REPLAY_LONG_HOLD_EXTENSION_BARS,
         }
     if normalized == ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_NO_TRACTION:
         return {
             "use_target_checkpoint": True,
             "use_no_traction_abort": True,
+            "use_promoted_maintenance_exit": False,
+            "disable_target_exit_after_entry": False,
+            "promotion_r_multiple": None,
             "max_hold_bars_1m": lambda base: max(int(base), 1),
         }
     if normalized == ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT:
         return {
             "use_target_checkpoint": True,
             "use_no_traction_abort": False,
+            "use_promoted_maintenance_exit": False,
+            "disable_target_exit_after_entry": False,
+            "promotion_r_multiple": None,
             "max_hold_bars_1m": lambda base: max(int(base), 1),
         }
     return {
         "use_target_checkpoint": False,
         "use_no_traction_abort": False,
+        "use_promoted_maintenance_exit": False,
+        "disable_target_exit_after_entry": False,
+        "promotion_r_multiple": None,
         "max_hold_bars_1m": lambda base: max(int(base), 1),
     }
 

@@ -79,6 +79,18 @@ def build_tracked_paper_strategies_payload(
     generated_at: str | None,
 ) -> dict[str, Any]:
     definitions = build_tracked_paper_strategy_definitions(repo_root)
+    raw_operator_status = dict(paper.get("raw_operator_status") or {})
+    live_lane_ids = {
+        str(lane_id).strip()
+        for lane_id in list(raw_operator_status.get("active_lane_ids") or [])
+        if str(lane_id).strip()
+    }
+    if not live_lane_ids:
+        live_lane_ids = {
+            str(row.get("lane_id") or "").strip()
+            for row in list(raw_operator_status.get("lanes") or [])
+            if str(row.get("lane_id") or "").strip()
+        }
     temporary_rows = [
         dict(row)
         for row in list(
@@ -92,7 +104,7 @@ def build_tracked_paper_strategies_payload(
     details_by_id: dict[str, dict[str, Any]] = {}
     for definition in definitions:
         matched_rows = [row for row in temporary_rows if _matches_definition(row, definition)]
-        if not matched_rows:
+        if not matched_rows and not live_lane_ids:
             matched_rows = _fallback_rows_for_definition(
                 repo_root=repo_root,
                 definition=definition,

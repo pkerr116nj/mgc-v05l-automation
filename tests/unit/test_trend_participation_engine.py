@@ -56,6 +56,13 @@ from mgc_v05l.research.trend_participation.phase4 import build_rolling_windows
 from mgc_v05l.research.trend_participation.phase5 import _fragility_diagnosis
 from mgc_v05l.research.trend_participation.phase3_timing import ATP_TIMING_ACTIVATION_ROLLING_5M
 from mgc_v05l.research.trend_participation.phase3_timing import (
+    ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_10M_DOUBLE_WEAK,
+    ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_15M_2OF3,
+    ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_20M_LOOSE,
+    ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_15M_2OF3,
+    ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_2OF3,
+    ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_LOOSE_HOLD,
+    ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_STRICT_WEAK,
     ATP_REPLAY_EXIT_POLICY_FIXED_TARGET,
     ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_LONG_HOLD,
     ATP_REPLAY_EXIT_POLICY_TARGET_CHECKPOINT_NO_TRACTION,
@@ -885,6 +892,397 @@ def test_simulate_timed_entries_checkpoint_no_traction_abort_cuts_dead_trade_ear
     assert len(trades) == 1
     assert trades[0].exit_reason == "no_traction_abort"
     assert trades[0].exit_ts == bars_1m[1].end_ts
+
+
+def test_simulate_timed_entries_checkpoint075_15m_exit_uses_completed_maintenance_bar() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = []
+    for minute in range(30):
+        if minute < 15:
+            open_ = 100.0 + minute * 0.04
+            high = open_ + 0.28
+            low = open_ - 0.05
+            close = open_ + 0.18
+        else:
+            open_ = 100.7 - (minute - 15) * 0.015
+            high = open_ + 0.02
+            low = open_ - 0.12
+            close = low + 0.04
+        bars_1m.append(
+            _bar(
+                instrument="MES",
+                timeframe="1m",
+                minute_offset=minute,
+                minutes=1,
+                open_=open_,
+                high=high,
+                low=low,
+                close=close,
+            )
+        )
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        point_value=5.0,
+        slippage_points=0.0,
+        fee_per_trade=0.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=5,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_15M_2OF3,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].participation_promoted is True
+    assert trades[0].promotion_trigger_r_multiple == 0.75
+    assert trades[0].exit_reason == "htf_15m_2of3_deterioration"
+    assert trades[0].exit_ts == bars_1m[29].end_ts
+    assert trades[0].bars_held_1m > 5
+
+
+def test_simulate_timed_entries_checkpoint100_15m_waits_for_larger_promotion_threshold() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = []
+    for minute in range(30):
+        if minute < 10:
+            open_ = 100.0 + minute * 0.02
+            high = open_ + 0.24
+            low = open_ - 0.04
+            close = open_ + 0.08
+        elif minute < 15:
+            open_ = 100.3 + (minute - 10) * 0.12
+            high = open_ + 0.3
+            low = open_ - 0.03
+            close = open_ + 0.16
+        else:
+            open_ = 100.82 - (minute - 15) * 0.02
+            high = open_ + 0.02
+            low = open_ - 0.12
+            close = low + 0.05
+        bars_1m.append(
+            _bar(
+                instrument="MES",
+                timeframe="1m",
+                minute_offset=minute,
+                minutes=1,
+                open_=open_,
+                high=high,
+                low=low,
+                close=close,
+            )
+        )
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        point_value=5.0,
+        slippage_points=0.0,
+        fee_per_trade=0.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=5,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_15M_2OF3,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].participation_promoted is True
+    assert trades[0].promotion_trigger_r_multiple == 1.0
+    assert trades[0].promotion_ts is not None
+    assert trades[0].exit_reason == "htf_15m_2of3_deterioration"
+    assert trades[0].exit_ts == bars_1m[29].end_ts
+
+
+def test_simulate_timed_entries_checkpoint075_10m_double_weak_close_exits_after_second_weak_bar() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = []
+    for minute in range(30):
+        if minute < 10:
+            open_ = 100.0 + minute * 0.04
+            high = open_ + 0.3
+            low = open_ - 0.04
+            close = open_ + 0.14
+        elif minute < 20:
+            open_ = 100.7 - (minute - 10) * 0.015
+            high = open_ + 0.02
+            low = open_ - 0.1
+            close = low + 0.08
+        else:
+            open_ = 100.55 - (minute - 20) * 0.015
+            high = open_ + 0.02
+            low = open_ - 0.1
+            close = low + 0.04
+        bars_1m.append(
+            _bar(
+                instrument="MES",
+                timeframe="1m",
+                minute_offset=minute,
+                minutes=1,
+                open_=open_,
+                high=high,
+                low=low,
+                close=close,
+            )
+        )
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        point_value=5.0,
+        slippage_points=0.0,
+        fee_per_trade=0.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=5,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_10M_DOUBLE_WEAK,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].participation_promoted is True
+    assert trades[0].exit_reason == "htf_10m_double_weak_close"
+    assert trades[0].exit_ts == bars_1m[29].end_ts
+
+
+def test_simulate_timed_entries_checkpoint075_20m_loose_waits_for_completed_20m_bar() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = []
+    for minute in range(40):
+        if minute < 20:
+            open_ = 100.0 + minute * 0.03
+            high = open_ + 0.28
+            low = open_ - 0.05
+            close = open_ + 0.15
+        else:
+            open_ = 100.9 - (minute - 20) * 0.02
+            high = open_ + 0.02
+            low = open_ - 0.11
+            close = low + 0.03
+        bars_1m.append(
+            _bar(
+                instrument="MES",
+                timeframe="1m",
+                minute_offset=minute,
+                minutes=1,
+                open_=open_,
+                high=high,
+                low=low,
+                close=close,
+            )
+        )
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        point_value=5.0,
+        slippage_points=0.0,
+        fee_per_trade=0.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=5,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_CHECKPOINT075_20M_LOOSE,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].participation_promoted is True
+    assert trades[0].exit_reason == "htf_20m_loose_trend_hold"
+    assert trades[0].exit_ts == bars_1m[39].end_ts
+
+
+def test_simulate_timed_entries_checkpoint100_7m_2of3_uses_completed_7m_bar() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = []
+    for minute in range(15):
+        if minute < 7:
+            open_ = 100.0 + minute * 0.06
+            high = open_ + 0.32
+            low = open_ - 0.03
+            close = open_ + 0.18
+        else:
+            open_ = 100.86 - (minute - 7) * 0.05
+            high = open_ + 0.01
+            low = open_ - 0.16
+            close = low + 0.04
+        bars_1m.append(
+            _bar(
+                instrument="MES",
+                timeframe="1m",
+                minute_offset=minute,
+                minutes=1,
+                open_=open_,
+                high=high,
+                low=low,
+                close=close,
+            )
+        )
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        point_value=5.0,
+        slippage_points=0.0,
+        fee_per_trade=0.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=5,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_2OF3,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].participation_promoted is True
+    assert trades[0].promotion_trigger_r_multiple == 1.0
+    assert trades[0].exit_reason == "htf_7m_2of3_deterioration"
+    assert trades[0].exit_ts == bars_1m[14].end_ts
+
+
+def test_simulate_timed_entries_checkpoint100_7m_strict_weak_close_waits_for_second_weak_bar() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = []
+    for minute in range(21):
+        if minute < 7:
+            open_ = 100.0 + minute * 0.06
+            high = open_ + 0.30
+            low = open_ - 0.03
+            close = open_ + 0.17
+        elif minute < 14:
+            open_ = 100.84 - (minute - 7) * 0.02
+            high = open_ + 0.02
+            low = open_ - 0.10
+            close = low + 0.06
+        else:
+            open_ = 100.70 - (minute - 14) * 0.025
+            high = open_ + 0.01
+            low = open_ - 0.12
+            close = low + 0.03
+        bars_1m.append(
+            _bar(
+                instrument="MES",
+                timeframe="1m",
+                minute_offset=minute,
+                minutes=1,
+                open_=open_,
+                high=high,
+                low=low,
+                close=close,
+            )
+        )
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        point_value=5.0,
+        slippage_points=0.0,
+        fee_per_trade=0.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=5,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_STRICT_WEAK,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].participation_promoted is True
+    assert trades[0].exit_reason == "htf_7m_strict_weak_close"
+    assert trades[0].exit_ts == bars_1m[14].end_ts
+
+
+def test_simulate_timed_entries_checkpoint100_7m_loose_hold_can_stay_in_trade_when_2of3_would_exit() -> None:
+    timing_state = _atp_timing_state_for_replay(side="LONG")
+    bars_1m = []
+    for minute in range(15):
+        if minute < 7:
+            open_ = 100.0 + minute * 0.07
+            high = open_ + 0.34
+            low = open_ - 0.03
+            close = open_ + 0.18
+        else:
+            open_ = 100.90 - (minute - 7) * 0.03
+            high = open_ + 0.01
+            low = open_ - 0.14
+            close = low + 0.02
+        bars_1m.append(
+            _bar(
+                instrument="MES",
+                timeframe="1m",
+                minute_offset=minute,
+                minutes=1,
+                open_=open_,
+                high=high,
+                low=low,
+                close=close,
+            )
+        )
+
+    trades = simulate_timed_entries(
+        timing_states=[timing_state],
+        bars_1m=bars_1m,
+        point_value=5.0,
+        slippage_points=0.0,
+        fee_per_trade=0.0,
+        variant=PatternVariant(
+            variant_id="test.variant.long",
+            family="test_family",
+            side="LONG",
+            strictness="base",
+            description="test",
+            entry_window_bars_1m=6,
+            max_hold_bars_1m=5,
+            stop_atr_multiple=0.85,
+            target_r_multiple=1.6,
+        ),
+        exit_policy=ATP_REPLAY_EXIT_POLICY_CHECKPOINT100_7M_LOOSE_HOLD,
+    )
+
+    assert len(trades) == 1
+    assert trades[0].participation_promoted is True
+    assert trades[0].exit_reason == "time_stop"
+    assert trades[0].exit_ts == bars_1m[14].end_ts
 
 
 def test_simulate_timed_entries_allows_structural_reset_reentry_when_enabled() -> None:

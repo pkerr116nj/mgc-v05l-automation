@@ -102,7 +102,7 @@ from .execution_truth import (
     normalize_trade_lifecycle_records,
 )
 from ..strategy.strategy_engine import StrategyEngine
-from ..market_data.schwab_auth import SchwabOAuthClient, SchwabTokenStore
+from ..market_data.schwab_auth import SchwabAuthError, SchwabOAuthClient, SchwabTokenStore
 from ..market_data.timeframes import timeframe_minutes
 from ..market_data.schwab_http import SchwabHttpError, UrllibJsonTransport
 from .approved_quant_lanes.engine import ApprovedQuantStrategyEngine
@@ -112,6 +112,18 @@ from .gc_mgc_london_open_acceptance_continuation_runtime import (
     GC_MGC_LONDON_OPEN_ACCEPTANCE_SOURCE,
     GcMgcLondonOpenAcceptanceContinuationStrategyEngine,
     gc_mgc_london_open_acceptance_window_matches,
+)
+from .gc_mgc_forced_session_runtime import (
+    GC_MGC_FORCED_SESSION_RUNTIME_KIND,
+    GcMgcForcedSessionStrategyEngine,
+)
+from .asia_london_participation_runtime import (
+    ASIA_LONDON_PARTICIPATION_RUNTIME_KIND,
+    AsiaLondonParticipationStrategyEngine,
+)
+from .index_futures_forced_session_runtime import (
+    INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND,
+    IndexFuturesForcedSessionStrategyEngine,
 )
 from .shared_strategy_identities import ATP_COMPANION_V1_ASIA_US, ATP_COMPANION_V1_GC_ASIA_US, get_shared_strategy_identity
 from .session_phase_labels import label_session_phase
@@ -6295,13 +6307,14 @@ class ProbationaryPaperSupervisor:
                             )
                         else:
                             lane_new_bars, reconciliation, _ = lane.poll_and_process()
-                    except SchwabHttpError as exc:
+                    except (SchwabHttpError, SchwabAuthError, TimeoutError, OSError, json.JSONDecodeError) as exc:
                         failure_payload = {
                             "generated_at": datetime.now(timezone.utc).isoformat(),
                             "lane_id": lane.spec.lane_id,
                             "display_name": lane.spec.display_name,
                             "symbol": lane.spec.symbol,
                             "exception_text": str(exc),
+                            "exception_type": type(exc).__name__,
                             "failure_kind": "live_market_data_transport_failure",
                             "runtime_pid": os.getpid(),
                         }
@@ -6323,7 +6336,7 @@ class ProbationaryPaperSupervisor:
                             severity="WARNING",
                             code="paper_lane_market_data_transport_failure",
                             message=(
-                                f"Lane {lane.spec.lane_id} hit a Schwab transport failure; "
+                                f"Lane {lane.spec.lane_id} hit a live market-data failure; "
                                 "keeping the paper host alive and retrying next cycle."
                             ),
                             payload=failure_payload,
@@ -7338,6 +7351,34 @@ def _build_probationary_paper_lanes(
                 )
             )
             continue
+        if spec.runtime_kind == GC_MGC_FORCED_SESSION_RUNTIME_KIND:
+            lanes.append(
+                ProbationaryPaperLaneRuntime(
+                    spec=spec,
+                    settings=lane_settings,
+                    repositories=repositories,
+                    strategy_engine=strategy_engine,
+                    execution_engine=execution_engine,
+                    live_polling_service=_build_live_polling_service(lane_settings, repositories, schwab_config_path),
+                    structured_logger=lane_logger,
+                    alert_dispatcher=alert_dispatcher,
+                )
+            )
+            continue
+        if spec.runtime_kind == ASIA_LONDON_PARTICIPATION_RUNTIME_KIND:
+            lanes.append(
+                ProbationaryPaperLaneRuntime(
+                    spec=spec,
+                    settings=lane_settings,
+                    repositories=repositories,
+                    strategy_engine=strategy_engine,
+                    execution_engine=execution_engine,
+                    live_polling_service=_build_live_polling_service(lane_settings, repositories, schwab_config_path),
+                    structured_logger=lane_logger,
+                    alert_dispatcher=alert_dispatcher,
+                )
+            )
+            continue
         lanes.append(
             ProbationaryPaperLaneRuntime(
                 spec=spec,
@@ -7431,6 +7472,36 @@ def _build_probationary_strategy_engine(
         )
     if spec.runtime_kind == GC_MGC_ACCEPTANCE_RUNTIME_KIND:
         return GcMgcLondonOpenAcceptanceContinuationStrategyEngine(
+            settings=settings,
+            repositories=repositories,
+            execution_engine=execution_engine,
+            structured_logger=structured_logger,
+            alert_dispatcher=alert_dispatcher,
+            runtime_identity=runtime_identity,
+        )
+    if spec.runtime_kind == GC_MGC_FORCED_SESSION_RUNTIME_KIND:
+        return GcMgcForcedSessionStrategyEngine(
+            lane_spec=spec,
+            settings=settings,
+            repositories=repositories,
+            execution_engine=execution_engine,
+            structured_logger=structured_logger,
+            alert_dispatcher=alert_dispatcher,
+            runtime_identity=runtime_identity,
+        )
+    if spec.runtime_kind == ASIA_LONDON_PARTICIPATION_RUNTIME_KIND:
+        return AsiaLondonParticipationStrategyEngine(
+            lane_spec=spec,
+            settings=settings,
+            repositories=repositories,
+            execution_engine=execution_engine,
+            structured_logger=structured_logger,
+            alert_dispatcher=alert_dispatcher,
+            runtime_identity=runtime_identity,
+        )
+    if spec.runtime_kind == INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND:
+        return IndexFuturesForcedSessionStrategyEngine(
+            lane_spec=spec,
             settings=settings,
             repositories=repositories,
             execution_engine=execution_engine,
@@ -7715,11 +7786,57 @@ def _session_restriction_matches_phase(current_phase: str, restriction: str | No
         return coarse in allowed or current_phase in allowed
     if normalized == "ASIA_EARLY":
         return current_phase == "ASIA_EARLY"
+    if normalized in {"US_EARLY", "NY_EARLY"}:
+        return current_phase == "US_EARLY"
     if normalized == "US_LATE":
         return current_phase == "US_LATE"
     if normalized == "US_EARLY_OBSERVATION":
         return current_phase in {"US_PREOPEN_OPENING", "US_CASH_OPEN_IMPULSE", "US_OPEN_LATE"}
     return current_phase == normalized
+
+
+def _session_restriction_matches_now(now: datetime, restriction: str | None) -> bool:
+    normalized = str(restriction or "").upper()
+    if not normalized:
+        return True
+    current_phase = label_session_phase(now)
+    if "/" in normalized:
+        allowed = {part.strip() for part in normalized.split("/") if part.strip()}
+        coarse = _phase_coarse_session_group(current_phase)
+        return coarse in allowed or current_phase in allowed
+    local_time = now.timetz().replace(tzinfo=None)
+    if _gold_session_restriction_matches_time(local_time, normalized):
+        return True
+    if normalized == "US_EARLY_OBSERVATION":
+        return current_phase in {"US_PREOPEN_OPENING", "US_CASH_OPEN_IMPULSE", "US_OPEN_LATE"}
+    if normalized == "ASIA_EARLY":
+        return current_phase == "ASIA_EARLY"
+    if normalized in {"US_EARLY", "NY_EARLY"}:
+        return current_phase == "US_EARLY"
+    if normalized == "US_LATE":
+        return current_phase == "US_LATE"
+    return current_phase == normalized
+
+
+def _gold_session_restriction_matches_time(local_time: dt_time, restriction: str) -> bool:
+    normalized = str(restriction or "").upper()
+    windows = {
+        "SESSION_OPEN": (dt_time(18, 0), dt_time(19, 0)),
+        "ASIA_EARLY": (dt_time(19, 0), dt_time(20, 30)),
+        "ASIA_LATE": (dt_time(20, 30), dt_time(23, 0)),
+        "LONDON_EARLY": (dt_time(3, 0), dt_time(5, 30)),
+        "LONDON_LATE": (dt_time(5, 30), dt_time(8, 20)),
+        "US_EARLY": (dt_time(8, 20), dt_time(11, 0)),
+        "NY_EARLY": (dt_time(8, 20), dt_time(11, 0)),
+        "US_MIDDAY": (dt_time(11, 0), dt_time(13, 30)),
+        "US_LATE": (dt_time(13, 30), dt_time(16, 0)),
+        "NY_LATE": (dt_time(11, 0), dt_time(13, 30)),
+    }
+    window = windows.get(normalized)
+    if window is None:
+        return False
+    start, end = window
+    return start <= local_time < end
 
 
 def _gc_mgc_asia_retest_hold_london_open_extension_matches(*, symbol: str, long_sources: Sequence[str], end_ts: datetime) -> bool:
@@ -7760,7 +7877,7 @@ def _probationary_lane_eligibility_snapshot(
     warmup_bars_loaded = len(lane.strategy_engine._bar_history)  # noqa: SLF001 - operator status needs runtime truth
     warmup_complete = warmup_bars_loaded >= warmup_required
     lane_risk_state = str(risk_state.lane_states.get(lane.spec.lane_id, {}).get("risk_state", "OK") or "OK")
-    session_allowed = _session_restriction_matches_phase(current_session, lane.spec.session_restriction)
+    session_allowed = _session_restriction_matches_now(now, lane.spec.session_restriction)
     if not session_allowed and _gc_mgc_asia_retest_hold_london_open_extension_matches(
         symbol=lane.spec.symbol,
         long_sources=getattr(lane.spec, "long_sources", ()),

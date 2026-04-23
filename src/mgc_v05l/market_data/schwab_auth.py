@@ -6,6 +6,8 @@ import base64
 import hashlib
 import json
 import os
+import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +44,21 @@ class SchwabTokenStore:
     def load_payload(self) -> dict:
         if not self._path.exists():
             raise FileNotFoundError(self._path)
-        return json.loads(self._path.read_text(encoding="utf-8"))
+        last_error: json.JSONDecodeError | None = None
+        for _attempt in range(3):
+            raw = self._path.read_text(encoding="utf-8")
+            if raw.strip():
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    last_error = exc
+            else:
+                last_error = json.JSONDecodeError("Empty token payload", raw, 0)
+            time.sleep(0.05)
+        assert last_error is not None
+        raise SchwabAuthError(
+            f"Token store payload at {self._path} is unreadable or temporarily incomplete: {last_error}"
+        ) from last_error
 
     def load_metadata(self) -> Optional[dict]:
         if not self._path.exists():
@@ -56,13 +72,14 @@ class SchwabTokenStore:
         payload = token_set.to_json_dict()
         if auth_metadata:
             payload["_meta"] = auth_metadata
-        self._path.write_text(
+        _atomic_write_text(
+            self._path,
             json.dumps(payload, indent=2, sort_keys=True),
-            encoding="utf-8",
         )
         artifact_path = self._path.parent / "bootstrap_artifacts" / "latest_persisted_token_payload.json"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        artifact_path.write_text(
+        _atomic_write_text(
+            artifact_path,
             json.dumps(
                 {
                     "generated_at": _now_iso(),
@@ -73,7 +90,6 @@ class SchwabTokenStore:
                 indent=2,
                 sort_keys=True,
             ),
-            encoding="utf-8",
         )
 
     def summary(self) -> dict[str, object]:
@@ -464,6 +480,23 @@ def _safe_json_dict(path: Path) -> dict[str, object] | None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_write_text(path: Path, payload: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temp_path = Path(handle.name)
+    temp_path.replace(path)
 
 
 def load_schwab_auth_config_from_env(token_file: str | Path | None = None) -> SchwabAuthConfig:

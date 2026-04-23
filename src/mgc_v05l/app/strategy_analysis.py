@@ -13,6 +13,7 @@ from typing import Any, Iterable, Sequence
 
 from .session_phase_labels import label_session_phase
 from .strategy_identity import build_standalone_strategy_identity
+from .unified_strategy_monitor import build_unified_strategy_monitor
 
 LANE_TYPE_BENCHMARK_REPLAY = "benchmark_replay"
 LANE_TYPE_PAPER_RUNTIME = "paper_runtime"
@@ -166,6 +167,17 @@ def build_strategy_analysis_payload(
         )
     )
     default_strategy_key = catalog_rows[0]["strategy_key"] if catalog_rows else None
+    unified_monitor = build_unified_strategy_monitor(
+        catalog_rows=catalog_rows,
+        details_by_strategy_key=details_by_strategy_key,
+        evidence_lanes=evidence_lanes,
+        historical_playback=historical_playback,
+        paper=paper,
+        runtime_registry=runtime_registry,
+        lane_registry=lane_registry,
+        research_analytics=research_analytics,
+        generated_at=generated_at,
+    )
 
     return {
         "generated_at": generated_at,
@@ -186,6 +198,7 @@ def build_strategy_analysis_payload(
             runtime_registry=runtime_registry,
             lane_registry=lane_registry,
         ),
+        "unified_monitor": unified_monitor,
         "metric_support": {
             "universal_metrics": [
                 "net_pnl",

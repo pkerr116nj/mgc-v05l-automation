@@ -6,7 +6,7 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 
 from ..domain.models import Bar
 from ..market_data.bar_builder import BarBuilder
@@ -25,6 +25,7 @@ def build_resampled_bars(
     *,
     target_timeframe: str,
     bar_builder: BarBuilder,
+    alignment: Literal["bucket", "rolling"] = "bucket",
 ) -> ResampledBars:
     if not source_bars:
         return ResampledBars(bars=[], skipped_bucket_count=0)
@@ -37,43 +38,31 @@ def build_resampled_bars(
         raise ValueError("target_timeframe must be a larger whole-minute multiple of the source timeframe.")
 
     ratio = target_minutes // source_minutes
-    buckets: dict[int, list[Bar]] = {}
-    for bar in source_bars:
+    normalized_source_bars = [bar for bar in source_bars]
+    for bar in normalized_source_bars:
         if normalize_timeframe_label(bar.timeframe) != canonical_source_timeframe:
             raise ValueError("All source bars must share the same timeframe.")
-        bucket_key = _bucket_key(bar.end_ts, target_minutes)
-        buckets.setdefault(bucket_key, []).append(bar)
 
     resampled: list[Bar] = []
     skipped_bucket_count = 0
-    for key in sorted(buckets):
-        bucket_bars = sorted(buckets[key], key=lambda bar: bar.end_ts)
-        if not _is_complete_bucket(bucket_bars, ratio=ratio, source_minutes=source_minutes):
-            skipped_bucket_count += 1
-            continue
-        first = bucket_bars[0]
-        last = bucket_bars[-1]
-        resampled.append(
-            bar_builder.normalize(
-                Bar(
-                    bar_id=build_bar_id(first.symbol, canonical_target_timeframe, last.end_ts),
-                    symbol=first.symbol,
-                    timeframe=canonical_target_timeframe,
-                    start_ts=first.start_ts,
-                    end_ts=last.end_ts,
-                    open=first.open,
-                    high=max(bar.high for bar in bucket_bars),
-                    low=min(bar.low for bar in bucket_bars),
-                    close=last.close,
-                    volume=sum(bar.volume for bar in bucket_bars),
-                    is_final=all(bar.is_final for bar in bucket_bars),
-                    session_asia=first.session_asia,
-                    session_london=first.session_london,
-                    session_us=first.session_us,
-                    session_allowed=first.session_allowed,
-                )
-            )
-        )
+    if alignment == "rolling":
+        for index in range(ratio - 1, len(normalized_source_bars)):
+            window_bars = normalized_source_bars[index - ratio + 1 : index + 1]
+            if not _is_complete_bucket(window_bars, ratio=ratio, source_minutes=source_minutes):
+                skipped_bucket_count += 1
+                continue
+            resampled.append(_aggregate_bars(window_bars, canonical_target_timeframe, bar_builder))
+    else:
+        buckets: dict[int, list[Bar]] = {}
+        for bar in normalized_source_bars:
+            bucket_key = _bucket_key(bar.end_ts, target_minutes)
+            buckets.setdefault(bucket_key, []).append(bar)
+        for key in sorted(buckets):
+            bucket_bars = sorted(buckets[key], key=lambda bar: bar.end_ts)
+            if not _is_complete_bucket(bucket_bars, ratio=ratio, source_minutes=source_minutes):
+                skipped_bucket_count += 1
+                continue
+            resampled.append(_aggregate_bars(bucket_bars, canonical_target_timeframe, bar_builder))
 
     return ResampledBars(bars=resampled, skipped_bucket_count=skipped_bucket_count)
 
@@ -140,3 +129,27 @@ def _is_complete_bucket(bucket_bars: Sequence[Bar], *, ratio: int, source_minute
             return False
         prior_end_ts = bar.end_ts
     return True
+
+
+def _aggregate_bars(bucket_bars: Sequence[Bar], canonical_target_timeframe: str, bar_builder: BarBuilder) -> Bar:
+    first = bucket_bars[0]
+    last = bucket_bars[-1]
+    return bar_builder.normalize(
+        Bar(
+            bar_id=build_bar_id(first.symbol, canonical_target_timeframe, last.end_ts),
+            symbol=first.symbol,
+            timeframe=canonical_target_timeframe,
+            start_ts=first.start_ts,
+            end_ts=last.end_ts,
+            open=first.open,
+            high=max(bar.high for bar in bucket_bars),
+            low=min(bar.low for bar in bucket_bars),
+            close=last.close,
+            volume=sum(bar.volume for bar in bucket_bars),
+            is_final=all(bar.is_final for bar in bucket_bars),
+            session_asia=last.session_asia,
+            session_london=last.session_london,
+            session_us=last.session_us,
+            session_allowed=last.session_allowed,
+        )
+    )

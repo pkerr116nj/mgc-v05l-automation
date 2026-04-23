@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 
 import pytest
 
 from mgc_v05l.market_data.schwab_auth import SchwabAuthError, SchwabOAuthClient, SchwabTokenStore
-from mgc_v05l.market_data import schwab_local_auth
+import mgc_v05l.market_data.schwab_local_auth as schwab_local_auth
 from mgc_v05l.market_data.schwab_local_auth import run_loopback_authorization
 from mgc_v05l.market_data.schwab_models import HttpRequest, JsonHttpTransport, SchwabAuthConfig
 
@@ -198,3 +199,32 @@ def test_ensure_loopback_tls_material_generates_cert_and_key(tmp_path: Path) -> 
     assert key_path == token_path.parent / "loopback-key.pem"
     assert cert_path.exists()
     assert key_path.exists()
+
+
+def test_token_store_load_payload_retries_transient_empty_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    token_path = tmp_path / "tokens.json"
+    expected = {
+        "access_token": "access-token-123",
+        "refresh_token": "refresh-token-456",
+        "token_type": "Bearer",
+        "expires_in": 1800,
+        "scope": "readonly",
+    }
+    token_path.write_text(json.dumps(expected), encoding="utf-8")
+    store = SchwabTokenStore(token_path)
+    reads = {"count": 0}
+    original_read_text = Path.read_text
+
+    def _flaky_read_text(self: Path, *args, **kwargs):
+        if self == token_path:
+            reads["count"] += 1
+            if reads["count"] == 1:
+                return ""
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _flaky_read_text)
+
+    payload = store.load_payload()
+
+    assert payload["access_token"] == expected["access_token"]
+    assert reads["count"] >= 2

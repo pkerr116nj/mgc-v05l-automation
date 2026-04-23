@@ -16,6 +16,18 @@ import {
   startupControlPlaneTone,
   type OperationalReadinessModel,
 } from "../main/shared/operationalReadiness";
+import {
+  buildOperatorTriageContract,
+  type ConnectionPostureState,
+  type OperatorTriage,
+  type OperatorTriageCurrentExposure,
+  type OperatorTriageHardGate,
+  type OperatorTriageTodayPnL,
+  type OutagePostureState,
+  type PositionPostureState,
+  type RuntimePostureState,
+  type TradeAuthorityState,
+} from "../main/shared/operatorTriage";
 import { reportBootstrapEvent } from "./bootstrap";
 
 type PageId =
@@ -184,6 +196,7 @@ interface CalendarDayPoint {
   coveredSources: Array<Exclude<PnlCalendarSource, "all" | "live" | "paper">>;
   hasIntradayPartial: boolean;
   intradaySources: Array<Exclude<PnlCalendarSource, "all">>;
+  outsideLoadedCoverage?: boolean;
 }
 
 interface CalendarPlaybackVariantOption {
@@ -216,6 +229,57 @@ interface PositionsMetricItem {
   label: string;
   value: ReactNode;
   tone?: Tone;
+}
+
+interface TriageActionModel {
+  label: string;
+  detail: string;
+  onClick: () => void;
+  disabled?: boolean;
+}
+
+interface TriageGateRowModel extends OperatorTriageHardGate {
+  supplemental?: ReactNode;
+}
+
+interface DashboardBandActionModel {
+  label: string;
+  onClick: () => void;
+  tone?: Tone;
+  disabled?: boolean;
+  subtle?: boolean;
+}
+
+interface DashboardSystemTileModel {
+  key: string;
+  label: string;
+  ragLabel: "Green" | "Amber" | "Red";
+  tone: Tone;
+  status: string;
+  summary: string;
+  freshness?: string | null;
+  impact?: string | null;
+  actions: DashboardBandActionModel[];
+}
+
+interface DashboardIssueModel {
+  key: string;
+  title: string;
+  statusLabel: string;
+  tone: Tone;
+  impact: string;
+  summary?: string | null;
+  actions: DashboardBandActionModel[];
+}
+
+interface DashboardDetailCardModel {
+  key: string;
+  kicker: string;
+  title: string;
+  summary: string;
+  stats: Array<{ label: string; value: string; tone?: Tone }>;
+  notes?: string[];
+  actions: DashboardBandActionModel[];
 }
 
 function researchAnalyticsSelectionKey(row: JsonRecord | null | undefined): string {
@@ -3058,6 +3122,114 @@ function standaloneStrategyId(row: JsonRecord | null | undefined): string {
   return String(row?.standalone_strategy_id ?? row?.strategy_key ?? row?.id ?? "").trim();
 }
 
+function livePositionAverageLabel(row: JsonRecord): string {
+  const rawPayload = asRecord(row.raw_payload);
+  const average =
+    row.average_price
+    ?? row.averagePrice
+    ?? row.average_cost
+    ?? rawPayload.averagePrice
+    ?? rawPayload.taxLotAverageLongPrice
+    ?? rawPayload.averageLongPrice;
+  return average == null ? "Unavailable" : formatValue(average);
+}
+
+function livePositionDayPnlLabel(row: JsonRecord): string {
+  const rawPayload = asRecord(row.raw_payload);
+  return formatMaybePnL(
+    row.current_day_profit_loss
+    ?? row.currentDayProfitLoss
+    ?? row.current_day_pnl
+    ?? rawPayload.currentDayProfitLoss,
+  );
+}
+
+function livePositionDayPercentLabel(row: JsonRecord): string {
+  const rawPayload = asRecord(row.raw_payload);
+  const value =
+    numericOrNull(
+      row.current_day_profit_loss_percentage
+      ?? row.currentDayProfitLossPercentage
+      ?? row.current_day_pnl_percentage
+      ?? rawPayload.currentDayProfitLossPercentage,
+    );
+  return value === null ? "—" : `${value.toFixed(2)}%`;
+}
+
+function paperFillTimestampLabel(row: JsonRecord): string {
+  if (row.latest_fill_timestamp) {
+    return formatTimestamp(row.latest_fill_timestamp);
+  }
+  const tradeCount = numericOrNull(row.trade_count) ?? 0;
+  const realized = numericOrNull(row.realized_pnl) ?? 0;
+  if (tradeCount > 0 || Math.abs(realized) > 0.009) {
+    return "Closed trade logged";
+  }
+  return "No paper fill yet";
+}
+
+function paperRuntimeActivityLabel(row: JsonRecord): string {
+  const latestActivity =
+    row.last_execution_bar_evaluated_at
+    ?? row.last_processed_bar_end_ts
+    ?? row.latest_activity_timestamp
+    ?? row.last_update_timestamp
+    ?? row.latest_fill_timestamp
+    ?? row.latest_trade_timestamp;
+  return latestActivity ? formatTimestamp(latestActivity) : "No runtime activity yet";
+}
+
+function paperAuditTimestampLabel(timestamp: unknown, suffix?: unknown): string {
+  if (!timestamp) {
+    return "None in window";
+  }
+  const detail = String(suffix ?? "").trim();
+  return detail ? `${formatTimestamp(timestamp)} • ${formatValue(detail)}` : formatTimestamp(timestamp);
+}
+
+function renderStructuredStrategyLabel(value: unknown): ReactNode {
+  const label = formatValue(value);
+  if (!label || label === "—" || label === "Unknown") {
+    return label;
+  }
+  const dashMatch = label.match(/^(.*?\s-\s)(.+)$/);
+  if (dashMatch) {
+    return (
+      <span className="table-wrap-cell table-wrap-strategy">
+        <span>{dashMatch[1]}</span>
+        <span className="table-wrap-secondary">{dashMatch[2]}</span>
+      </span>
+    );
+  }
+  const slashMatch = label.match(/^(.*?\s\/\s)(.+)$/);
+  if (slashMatch) {
+    return (
+      <span className="table-wrap-cell table-wrap-strategy">
+        <span>{slashMatch[1]}</span>
+        <span className="table-wrap-secondary">{slashMatch[2]}</span>
+      </span>
+    );
+  }
+  return <span className="table-wrap-cell table-wrap-strategy">{label}</span>;
+}
+
+function renderStructuredAuditTimestamp(timestamp: unknown, suffix?: unknown): ReactNode {
+  if (!timestamp) {
+    return "None in window";
+  }
+  const primary = formatTimestamp(timestamp);
+  const detail = String(suffix ?? "").trim();
+  if (!detail) {
+    return <span className="table-wrap-cell table-wrap-time">{primary}</span>;
+  }
+  return (
+    <span className="table-wrap-cell table-wrap-time">
+      <span>{primary} •</span>
+      <span className="table-wrap-secondary">{formatValue(detail)}</span>
+    </span>
+  );
+}
+
 function standaloneStrategyLabel(row: JsonRecord | null | undefined): string {
   const identity = standaloneStrategyId(row);
   if (identity) {
@@ -4322,6 +4494,16 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       ),
     [paperSignalIntentFillAudit.rows, temporaryPaperStrategyRows, runtimeRegistryLookup],
   );
+  const signalIntentFillAuditLookup = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    for (const row of signalIntentFillAuditRows) {
+      const key = standaloneStrategyId(row);
+      if (key && !lookup.has(key)) {
+        lookup.set(key, row);
+      }
+    }
+    return lookup;
+  }, [signalIntentFillAuditRows]);
   const laneEligibilityRows = asArray<JsonRecord>(paperReadiness.lane_eligibility_rows);
   const laneRiskRows = asArray<JsonRecord>(paperReadiness.lane_risk_rows);
   const productionLink = asRecord(dashboard?.production_link);
@@ -7649,6 +7831,60 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
         };
         roster.set(meta.laneId, mergedRow);
       }
+      for (const row of [...runtimeRegistryRows, ...rawPaperOperatorLaneRows, ...strategyPerformanceRows, ...signalIntentFillAuditRows, ...temporaryPaperStrategyRows]) {
+        const laneId = String(row.lane_id ?? row.standalone_strategy_id ?? row.tracked_strategy_id ?? "").trim();
+        if (!laneId || roster.has(laneId)) {
+          continue;
+        }
+        const normalizedRow: JsonRecord = {
+          ...row,
+          lane_id: laneId,
+          branch: String(row.branch ?? row.display_name ?? row.strategy_name ?? laneId),
+          display_name: String(row.display_name ?? row.strategy_name ?? row.branch ?? laneId),
+          strategy_name: String(row.strategy_name ?? row.display_name ?? row.branch ?? laneId),
+          tracked_strategy_id: String(row.tracked_strategy_id ?? ""),
+          standalone_strategy_id: String(row.standalone_strategy_id ?? laneId),
+          instrument: String(row.instrument ?? row.symbol ?? "").trim().toUpperCase(),
+          observed_instruments: asArray<string>(row.observed_instruments).length ? asArray<string>(row.observed_instruments) : [String(row.instrument ?? row.symbol ?? "").trim().toUpperCase()].filter(Boolean),
+          strategy_family: String(row.strategy_family ?? row.source_family ?? "paper_runtime_strategy"),
+          paper_strategy_class: String(row.paper_strategy_class ?? "paper_runtime_lane"),
+          lane_class_label: String(row.lane_class_label ?? "Paper Runtime Lane"),
+          designation_label: String(row.designation_label ?? "Paper Candidate Lane"),
+          benchmark_designation: row.benchmark_designation ?? null,
+          candidate_designation: row.candidate_designation ?? null,
+          candidate_id: String(row.candidate_id ?? ""),
+          experimental_status: String(row.experimental_status ?? "paper_candidate"),
+          participation_policy: String(row.participation_policy ?? "SINGLE_ENTRY_ONLY"),
+          execution_timeframe: String(row.execution_timeframe ?? "1m"),
+          context_timeframes: asArray<string>(row.context_timeframes).length ? asArray<string>(row.context_timeframes) : ["3m"],
+          runtime_instance_present: row.runtime_instance_present === true || row.runtime_state_loaded === true || row.can_process_bars === true,
+          runtime_state_loaded: row.runtime_state_loaded === true,
+          can_process_bars: row.can_process_bars === true,
+          audit_only: false,
+          snapshot_only: false,
+          runtime_presence: String(
+            row.runtime_presence
+              ?? (row.runtime_state_loaded === true || row.can_process_bars === true ? "ACTIVE_RUNTIME" : "ATTACH_PENDING"),
+          ),
+          runtime_presence_label: String(
+            row.runtime_presence_label
+              ?? (row.runtime_state_loaded === true || row.can_process_bars === true ? "Active Runtime" : "Attach Pending"),
+          ),
+          truth_label: String(row.truth_label ?? "LIVE_PAPER_RUNTIME"),
+          current_strategy_status: String(row.current_strategy_status ?? row.strategy_status ?? "RUNNING"),
+          status: String(row.status ?? "ACTIVE"),
+          status_reason: String(row.status_reason ?? "Active paper-runtime lane surfaced from the current paper universe."),
+          total_quantity: Number(row.total_quantity ?? 0),
+          open_entry_leg_count: Number(row.open_entry_leg_count ?? 0),
+          open_add_count: Number(row.open_add_count ?? 0),
+          additional_entry_allowed: row.additional_entry_allowed ?? false,
+          net_side: String(row.net_side ?? "FLAT"),
+          last_execution_bar_evaluated_at: String(row.last_execution_bar_evaluated_at ?? ""),
+          last_completed_context_bars_at: asRecord(row.last_completed_context_bars_at),
+          config_source: String(row.config_source ?? "paper config in force"),
+        };
+        roster.set(laneId, normalizedRow);
+      }
       return [...roster.values()].sort((left, right) => {
         const leftAtp = isAtpRow(left) ? 0 : 1;
         const rightAtp = isAtpRow(right) ? 0 : 1;
@@ -7673,6 +7909,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       approvedModelRows,
       rawPaperOperatorLaneRows,
       runtimeRegistryRows,
+      signalIntentFillAuditRows,
+      strategyPerformanceRows,
       temporaryPaperStrategyRows,
       trackedStrategyRows,
       trackedStrategyDetailsById,
@@ -7975,9 +8213,24 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
   const handleCopyDrawdownSnapshot = useCallback(async () => {
     await runCommand("copy-drawdown-snapshot", () => api.copyText(JSON.stringify(drawdownSnapshot, null, 2)));
   }, [api, drawdownSnapshot]);
+  const laneEligibilityLookup = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    for (const row of laneEligibilityRows) {
+      for (const key of [
+        String(row.lane_id ?? "").trim(),
+        String(row.standalone_strategy_id ?? "").trim(),
+        String(row.tracked_strategy_id ?? "").trim(),
+      ]) {
+        if (key) {
+          lookup.set(key, row);
+        }
+      }
+    }
+    return lookup;
+  }, [laneEligibilityRows]);
   const currentPaperUniverseIdentityKeys = useMemo(() => {
     const keys = new Set<string>();
-    for (const row of dashboardRosterRows) {
+    for (const row of [...dashboardRosterRows, ...laneEligibilityRows, ...runtimeRegistryRows]) {
       for (const value of [
         String(row.lane_id ?? "").trim(),
         String(row.standalone_strategy_id ?? "").trim(),
@@ -7989,7 +8242,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       }
     }
     return keys;
-  }, [dashboardRosterRows]);
+  }, [dashboardRosterRows, laneEligibilityRows, runtimeRegistryRows]);
   const isRiskHaltedAuditRow = useCallback((row: JsonRecord | null | undefined): boolean => {
     const gating = asRecord(row?.latest_gating_state);
     const riskState = String(gating.risk_state ?? row?.risk_state ?? "").trim().toUpperCase();
@@ -8035,8 +8288,14 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
             ?? dashboardRosterLookup.get(String(row.standalone_strategy_id ?? "").trim())
             ?? dashboardRosterLookup.get(String(row.strategy_key ?? "").trim())
             ?? null;
+          const eligibilityRow =
+            laneEligibilityLookup.get(String(row.lane_id ?? "").trim())
+            ?? laneEligibilityLookup.get(String(row.standalone_strategy_id ?? "").trim())
+            ?? laneEligibilityLookup.get(String(row.strategy_key ?? "").trim())
+            ?? null;
           const latestActivityTimestamp = latestTimestamp([
             rosterRow?.latest_activity_timestamp,
+            eligibilityRow?.latest_activity_timestamp,
             row.latest_activity_timestamp,
             row.last_update_timestamp,
             asRecord(row.strategy_performance_summary).latest_activity_timestamp,
@@ -8044,17 +8303,23 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
           return {
             ...row,
             ...rosterRow,
+            ...eligibilityRow,
             latest_activity_timestamp: latestActivityTimestamp,
             latest_fault_or_blocker:
-              rosterRow?.latest_fault_or_blocker
+              eligibilityRow?.latest_fault_or_blocker
+              ?? rosterRow?.latest_fault_or_blocker
               ?? row.latest_fault_or_blocker
+              ?? eligibilityRow?.eligibility_reason
+              ?? rosterRow?.eligibility_reason
               ?? asRecord(row.latest_gating_state).latest_fault_or_blocker
               ?? null,
-            eligible_now: rosterRow?.eligible_now ?? row.eligible_now,
-            entries_enabled: rosterRow?.entries_enabled ?? row.entries_enabled,
-            operator_halt: rosterRow?.operator_halt ?? row.operator_halt,
+            eligible_now: eligibilityRow?.eligible_now ?? rosterRow?.eligible_now ?? row.eligible_now,
+            entries_enabled: eligibilityRow?.entries_enabled ?? rosterRow?.entries_enabled ?? row.entries_enabled,
+            operator_halt: eligibilityRow?.operator_halt ?? rosterRow?.operator_halt ?? row.operator_halt,
             risk_state:
-              rosterRow?.risk_state
+              eligibilityRow?.risk_state
+              ?? asRecord(eligibilityRow?.latest_gating_state).risk_state
+              ?? rosterRow?.risk_state
               ?? asRecord(rosterRow?.latest_gating_state).risk_state
               ?? row.risk_state
               ?? asRecord(row.latest_gating_state).risk_state
@@ -8081,10 +8346,14 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
             String(right.strategy_name ?? right.standalone_strategy_id ?? ""),
           );
         }),
-    [currentPaperUniverseIdentityKeys, dashboardRosterLookup, isRiskHaltedAuditRow, signalIntentFillAuditRows],
+    [currentPaperUniverseIdentityKeys, dashboardRosterLookup, isRiskHaltedAuditRow, laneEligibilityLookup, signalIntentFillAuditRows],
   );
   const livePaperExpressionSummary = useMemo(() => {
     const rows = livePaperExpressionRows;
+    const participatedToday = rows.filter((row) => (numericOrNull(row.total_fill_count) ?? 0) > 0).length;
+    const wrongSessionCount = rows.filter(
+      (row) => String(row.latest_fault_or_blocker ?? "").trim().toLowerCase() === "wrong_session",
+    ).length;
     return {
       laneCount: rows.length,
       eligibleNow: rows.filter((row) => row.eligible_now === true).length,
@@ -8094,6 +8363,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       actionableSignals: rows.reduce((sum, row) => sum + (numericOrNull(row.actionable_entry_signal_count) ?? 0), 0),
       intents: rows.reduce((sum, row) => sum + (numericOrNull(row.total_intent_count) ?? 0), 0),
       fills: rows.reduce((sum, row) => sum + (numericOrNull(row.total_fill_count) ?? 0), 0),
+      participatedToday,
+      wrongSessionCount,
     };
   }, [isRiskHaltedAuditRow, livePaperExpressionRows]);
   const atpStrategyRows = useMemo(
@@ -8941,6 +9212,38 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     () => productionRecentFills.filter((row) => String(row.symbol ?? "").trim().toUpperCase() === tradeEntrySymbol),
     [productionRecentFills, tradeEntrySymbol],
   );
+  const latestPaperFillByStrategyId = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    for (const row of paperLatestFills) {
+      const key = standaloneStrategyId(row);
+      if (!key) {
+        continue;
+      }
+      const existing = lookup.get(key);
+      const candidateTs = parseTimestampMs(row.fill_timestamp);
+      const existingTs = parseTimestampMs(existing?.fill_timestamp);
+      if (!existing || candidateTs > existingTs) {
+        lookup.set(key, row);
+      }
+    }
+    return lookup;
+  }, [paperLatestFills]);
+  const latestClosedTradeByStrategyId = useMemo(() => {
+    const lookup = new Map<string, JsonRecord>();
+    for (const row of closedStrategyTradeRows) {
+      const key = standaloneStrategyId(row);
+      if (!key) {
+        continue;
+      }
+      const existing = lookup.get(key);
+      const candidateTs = parseTimestampMs(row.exit_timestamp ?? row.entry_timestamp);
+      const existingTs = parseTimestampMs(existing?.exit_timestamp ?? existing?.entry_timestamp);
+      if (!existing || candidateTs > existingTs) {
+        lookup.set(key, row);
+      }
+    }
+    return lookup;
+  }, [closedStrategyTradeRows]);
   const combinedRecentFillRows = useMemo(
     () =>
       [
@@ -8994,6 +9297,99 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       ].sort((left, right) => parseTimestampMs(right.activity_timestamp) - parseTimestampMs(left.activity_timestamp)),
     [closedStrategyTradeLookup, closedStrategyTradeRows, paperLatestFills, productionRecentFills],
   );
+  const livePnlPaperWorkspaceRows = useMemo(
+    () =>
+      [...strategyPerformanceRows]
+        .map((row) => {
+          const strategyId = standaloneStrategyId(row);
+          const auditRow = signalIntentFillAuditLookup.get(strategyId) ?? null;
+          const latestFillRow = latestPaperFillByStrategyId.get(strategyId) ?? null;
+          const latestTradeRow = latestClosedTradeByStrategyId.get(strategyId) ?? null;
+          const latestFillTimestamp =
+            row.latest_fill_timestamp
+            ?? latestFillRow?.fill_timestamp
+            ?? latestTradeRow?.exit_timestamp
+            ?? null;
+          const latestTradeTimestamp = latestTradeRow?.exit_timestamp ?? latestTradeRow?.entry_timestamp ?? null;
+          const latestActivityTimestamp =
+            row.latest_activity_timestamp
+            ?? auditRow?.latest_activity_timestamp
+            ?? auditRow?.last_processed_bar_end_ts
+            ?? latestFillTimestamp
+            ?? latestTradeTimestamp
+            ?? null;
+          return {
+            ...row,
+            last_execution_bar_evaluated_at:
+              row.last_execution_bar_evaluated_at
+              ?? auditRow?.last_execution_bar_evaluated_at
+              ?? null,
+            last_processed_bar_end_ts:
+              row.last_processed_bar_end_ts
+              ?? auditRow?.last_processed_bar_end_ts
+              ?? null,
+            latest_fill_timestamp: latestFillTimestamp,
+            latest_trade_timestamp: latestTradeTimestamp,
+            latest_activity_timestamp: latestActivityTimestamp,
+          };
+        })
+        .sort((left, right) => {
+          const leftOpen = String(left.position_side ?? left.net_side ?? "FLAT").toUpperCase() !== "FLAT";
+          const rightOpen = String(right.position_side ?? right.net_side ?? "FLAT").toUpperCase() !== "FLAT";
+          if (Number(rightOpen) !== Number(leftOpen)) {
+            return Number(rightOpen) - Number(leftOpen);
+          }
+          const rightTs = parseTimestampMs(right.latest_fill_timestamp ?? right.latest_activity_timestamp ?? right.latest_trade_timestamp);
+          const leftTs = parseTimestampMs(left.latest_fill_timestamp ?? left.latest_activity_timestamp ?? left.latest_trade_timestamp);
+          if (rightTs !== leftTs) {
+            return rightTs - leftTs;
+          }
+          const rightPnl = Math.abs((numericOrNull(right.unrealized_pnl) ?? 0) + (numericOrNull(right.realized_pnl) ?? 0));
+          const leftPnl = Math.abs((numericOrNull(left.unrealized_pnl) ?? 0) + (numericOrNull(left.realized_pnl) ?? 0));
+          return rightPnl - leftPnl;
+        }),
+    [latestClosedTradeByStrategyId, latestPaperFillByStrategyId, signalIntentFillAuditLookup, strategyPerformanceRows],
+  );
+  const livePnlPaperWorkspaceSnapshot = useMemo(() => {
+    const realizedPnl = sumNullable(
+      livePnlPaperWorkspaceRows.map((row) => numericOrNull(row.realized_pnl)),
+    );
+    const sessionDayPnl = sumNullable(
+      livePnlPaperWorkspaceRows.map((row) => {
+        const dayPnl = numericOrNull(row.day_pnl);
+        if (dayPnl !== null) {
+          return dayPnl;
+        }
+        return numericOrNull(row.session_realized_pnl ?? row.metrics_net_pnl_cash);
+      }),
+    );
+    const openPnl = sumNullable(
+      livePnlPaperWorkspaceRows.map((row) => {
+        const openValue =
+          numericOrNull(row.unrealized_pnl)
+          ?? numericOrNull(row.open_pnl)
+          ?? numericOrNull(row.paper_open_pnl);
+        return openValue;
+      }),
+    );
+    return {
+      realizedPnl,
+      sessionDayPnl,
+      openPnl,
+      trackedCount: Math.max(
+        livePnlPaperWorkspaceRows.length,
+        livePaperExpressionSummary.laneCount,
+        numericOrNull(combinedStrategyPortfolioSnapshot.active_strategy_count) ?? 0,
+      ),
+      openPositionCount: livePnlPaperWorkspaceRows.filter(
+        (row) => String(row.position_side ?? row.net_side ?? "FLAT").toUpperCase() !== "FLAT",
+      ).length,
+    };
+  }, [
+    combinedStrategyPortfolioSnapshot.active_strategy_count,
+    livePaperExpressionSummary.laneCount,
+    livePnlPaperWorkspaceRows,
+  ]);
   const paperIntradayCurveRows = useMemo(() => {
     const latestClosedPaperDate =
       String(closedStrategyTradeRows[0]?.exit_timestamp ?? closedStrategyTradeRows[0]?.entry_timestamp ?? "").slice(0, 10) || "";
@@ -9063,8 +9459,11 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     if (snapshotDayPnl !== null && Math.abs(snapshotDayPnl) > 0.009) {
       return snapshotDayPnl;
     }
+    if (livePnlPaperWorkspaceSnapshot.sessionDayPnl !== null && Math.abs(livePnlPaperWorkspaceSnapshot.sessionDayPnl) > 0.009) {
+      return livePnlPaperWorkspaceSnapshot.sessionDayPnl;
+    }
     return paperDerivedSessionRealizedPnl;
-  }, [combinedStrategyPortfolioSnapshot.total_day_pnl, paperDerivedSessionRealizedPnl]);
+  }, [combinedStrategyPortfolioSnapshot.total_day_pnl, livePnlPaperWorkspaceSnapshot.sessionDayPnl, paperDerivedSessionRealizedPnl]);
   const liveIntradayCurveRows = useMemo(() => {
     const fills = [...productionRecentFills]
       .sort((left, right) => parseTimestampMs(left.updated_at ?? left.occurred_at) - parseTimestampMs(right.updated_at ?? right.occurred_at));
@@ -9186,6 +9585,26 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       return entries;
     },
     [selectedCalendarPlaybackItems],
+  );
+  const historicalBackcastLatestCoverageDate = useMemo(() => {
+    const ordered = [...playbackCoverageDateKeysBySource.historical_backcast].sort();
+    return ordered.length ? ordered[ordered.length - 1] : null;
+  }, [playbackCoverageDateKeysBySource]);
+  const historicalBackcastContinuationEntries = useMemo<CalendarSourceEntry[]>(
+    () => {
+      if (!historicalBackcastLatestCoverageDate) {
+        return [];
+      }
+      return paperCalendarEntries
+        .filter((entry) => entry.date > historicalBackcastLatestCoverageDate)
+        .map((entry) => ({
+          ...entry,
+          source: "historical_backcast" as const,
+          strategyId: entry.strategyId || "__paper_continuation__",
+          strategyName: entry.strategyName || "Paper Continuation",
+        }));
+    },
+    [historicalBackcastLatestCoverageDate, paperCalendarEntries],
   );
   const benchmarkReplayCalendarEntries = useMemo<CalendarSourceEntry[]>(
     () => {
@@ -9312,14 +9731,22 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
   );
   const calendarEntriesBySource = useMemo(
     () => ({
-      historical_backcast: historicalBackcastCalendarEntries,
+      historical_backcast: [...historicalBackcastCalendarEntries, ...historicalBackcastContinuationEntries],
       live: liveCalendarEntries,
       paper: paperCalendarEntries,
       benchmark_replay: benchmarkReplayCalendarEntries,
       research_execution: researchExecutionCalendarEntries,
       research_analytics: researchAnalyticsCalendarEntries,
     }),
-    [benchmarkReplayCalendarEntries, historicalBackcastCalendarEntries, liveCalendarEntries, paperCalendarEntries, researchAnalyticsCalendarEntries, researchExecutionCalendarEntries],
+    [
+      benchmarkReplayCalendarEntries,
+      historicalBackcastCalendarEntries,
+      historicalBackcastContinuationEntries,
+      liveCalendarEntries,
+      paperCalendarEntries,
+      researchAnalyticsCalendarEntries,
+      researchExecutionCalendarEntries,
+    ],
   );
   const calendarSelectedPlaybackCount = calendarPlaybackStrategyKeys === null ? calendarPlaybackStrategyOptions.length : calendarPlaybackStrategyKeys.length;
   const calendarAvailableSources = useMemo(
@@ -9381,16 +9808,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
             : `Only ${uniqueSources[0].replace(/_/g, " ")} currently exposes closed-trade daily history in the loaded workstation snapshot.`,
       };
     }
-    const baseEntries = calendarEntriesBySource[effectiveCalendarSource] ?? [];
-    const historicalBackcastPaperOverlayEntries =
-      effectiveCalendarSource === "historical_backcast"
-        ? paperCalendarEntries.filter((entry) => entry.date >= currentPaperCalendarDateKey)
-        : [];
-    const entries = [...baseEntries, ...historicalBackcastPaperOverlayEntries];
-    const includedSources =
-      effectiveCalendarSource === "historical_backcast" && historicalBackcastPaperOverlayEntries.length > 0
-        ? ["historical_backcast", "paper"] as Array<Exclude<PnlCalendarSource, "all">>
-        : [effectiveCalendarSource];
+    const entries = calendarEntriesBySource[effectiveCalendarSource] ?? [];
+    const includedSources = [effectiveCalendarSource];
     return {
         selectedSourceLabel: calendarSourceLabel(effectiveCalendarSource),
         includedSources,
@@ -9402,8 +9821,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
         entries.length > 0
           ? `${
               effectiveCalendarSource === "historical_backcast"
-                ? historicalBackcastPaperOverlayEntries.length > 0
-                  ? `Loaded historical playback studies with current New York paper-session overlay. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
+                ? historicalBackcastContinuationEntries.length > 0
+                  ? `Loaded historical playback studies through ${formatLongDate(historicalBackcastLatestCoverageDate ?? "")}, with subsequent paper-ledger continuation. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
                   : `Loaded historical playback studies. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
                 : effectiveCalendarSource === "paper"
                   ? "Persisted paper/runtime trade ledger."
@@ -9427,7 +9846,16 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                       : sentenceCase(effectiveCalendarSource)
             } daily history is not loaded in the current workstation snapshot.`,
     };
-  }, [calendarAvailableSources, calendarEntriesBySource, calendarPlaybackStrategyOptions.length, calendarSelectedPlaybackCount, currentPaperCalendarDateKey, effectiveCalendarSource, paperCalendarEntries]);
+  }, [
+    calendarAvailableSources,
+    calendarEntriesBySource,
+    calendarPlaybackStrategyOptions.length,
+    calendarSelectedPlaybackCount,
+    effectiveCalendarSource,
+    historicalBackcastContinuationEntries.length,
+    historicalBackcastLatestCoverageDate,
+    paperCalendarEntries,
+  ]);
   const calendarSourceAvailableRange = useMemo(() => {
     const dates = new Set<string>();
     for (const entry of calendarSourceSelection.entries) {
@@ -9605,6 +10033,12 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     () => (selectedCalendarDay ? calendarDayPointMap.get(selectedCalendarDay) ?? null : null),
     [calendarDayPointMap, selectedCalendarDay],
   );
+  const selectedCalendarDayOutsideCoverage = useMemo(() => {
+    if (!selectedCalendarDay || !calendarSourceAvailableRange) {
+      return false;
+    }
+    return selectedCalendarDay < calendarSourceAvailableRange.start || selectedCalendarDay > calendarSourceAvailableRange.end;
+  }, [calendarSourceAvailableRange, selectedCalendarDay]);
   const calendarDailyPnls = useMemo(() => calendarDayPoints.map((point) => point.pnl), [calendarDayPoints]);
   const calendarGrossPnl = useMemo(() => calendarDailyPnls.reduce((sum, value) => sum + value, 0), [calendarDailyPnls]);
   const calendarWinningDays = useMemo(() => calendarDailyPnls.filter((value) => value > 0).length, [calendarDailyPnls]);
@@ -10051,6 +10485,363 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
   const operatorAlertsStatusLine = operatorActiveAlertRows.length
     ? `${operatorActiveAlertRows.length} active operator alert${operatorActiveAlertRows.length === 1 ? "" : "s"} currently require visibility.`
     : "No active operator alerts are currently open.";
+  const productionOperatorStatus = asRecord(productionLink.operator_status);
+  const productionFuturesPilotStatus = asRecord(productionLink.futures_pilot_status);
+  const productionOperatorLocalAuth = asRecord(
+    productionOperatorStatus.local_operator_auth ?? productionFuturesPilotStatus.local_operator_auth ?? productionLink.local_operator_auth,
+  );
+  const triageContract = buildOperatorTriageContract({
+    desktopSourceMode: desktopState?.source.mode,
+    desktopRefreshedAt: desktopState?.refreshedAt,
+    dashboardGeneratedAt,
+    global,
+    operatorSurface,
+    runtimeReadiness,
+    runtimeValues,
+    paperReadiness,
+    portfolio,
+    laneRows,
+    currentPositions,
+    productionLinkEnabled: productionLinkEnabled(),
+    productionLink,
+    productionCapabilities,
+    productionPilotScope,
+    productionLastManualOrderPreview,
+    productionPositions,
+    productionReconciliation,
+    productionHealth,
+    productionDiagnostics,
+    productionBalances,
+    localOperatorAuth,
+    operatorActiveAlertRows,
+    operatorRecentAlertRows,
+    sameUnderlyingConflictSummary,
+  });
+  const operatorTriage = triageContract.operator_triage;
+  const triageExposure = operatorTriage.current_exposure;
+  const triageTodayPnL = operatorTriage.today_pnl;
+  const triagePositionPosture = operatorTriage.position_posture;
+  const triageGateRows: TriageGateRowModel[] = operatorTriage.hard_gates.map((row) =>
+    row.key === "operator-authority"
+      ? {
+          ...row,
+          supplemental: (
+            <OperatorAuthorityBadge
+              authState={productionOperatorLocalAuth}
+              desktopAuthState={localOperatorAuth}
+            />
+          ),
+        }
+      : row,
+  );
+  const triageFirstFailingGate = operatorTriage.hard_gates.find((row) => row.status === "fail") ?? null;
+  const triageTradeAuthority = operatorTriage.live_trade_authority;
+  const triageConnectionPosture = operatorTriage.connection_posture;
+  const triageOutagePosture = operatorTriage.outage_posture;
+  const triageRuntimePosture = operatorTriage.runtime_posture;
+  const triageDominantBlocker = operatorTriage.dominant_blocker.label;
+  const triageRootCause = operatorTriage.root_cause.detail;
+  const triageVerdictSentence = operatorTriage.verdict_sentence;
+  const triageOperatorAuthorityPass = operatorTriage.hard_gates.find((row) => row.key === "operator-authority")?.status === "pass";
+  const triagePrimaryAction: TriageActionModel =
+    !triageOperatorAuthorityPass && localOperatorAuth.auth_available === true
+      ? {
+          label: "Re-auth Local Operator",
+          detail: textOrFallback(
+            productionOperatorLocalAuth.next_action_detail ?? productionOperatorLocalAuth.detail,
+            "Prime the local operator session before any sensitive live action.",
+          ),
+          onClick: () =>
+            void runCommand("authenticate-local-operator", () =>
+              api.authenticateLocalOperator("Authenticate local operator access for live pilot actions."),
+            ),
+          disabled: busyAction !== null,
+        }
+      : triageTradeAuthority === "Blocked" && triageFirstFailingGate?.key === "broker-authority"
+        ? {
+            label: "Open Pilot / Production Control",
+            detail: "Review broker truth, pilot scope, and manual live controls.",
+            onClick: () => openOperatorPage("market"),
+          }
+        : triageTradeAuthority === "Blocked"
+          ? {
+              label: "Open Runtime Health",
+              detail: "Inspect the blocking gate and supporting evidence.",
+              onClick: () => openOperatorPage("diagnostics"),
+            }
+          : triagePositionPosture === "In Position"
+            ? {
+                label: "Open Live P&L",
+                detail: "Review current exposure and today’s P&L in the positions surface.",
+                onClick: () => openOperatorPage("positions"),
+              }
+            : {
+                label: "Open Strategy Roster",
+                detail: "Jump into the strategy workspace for lane-level review.",
+                onClick: () => openOperatorPage("strategies"),
+              };
+  const triageFallbackAction: TriageActionModel = triageTradeAuthority === "Blocked"
+    ? {
+        label: triagePositionPosture === "In Position" ? "Open Fallback Controls" : "Open Timeline",
+        detail:
+          triagePositionPosture === "In Position"
+            ? "Go to the production-control surface for external fallback and broker-native workflow."
+            : "Open the evidence-heavy timeline and alert surfaces.",
+        onClick: () => openOperatorPage(triagePositionPosture === "In Position" ? "market" : "diagnostics"),
+      }
+    : {
+        label: "Open Timeline",
+        detail: "Review the latest operator alerts and recovered events.",
+        onClick: () => openOperatorPage("diagnostics"),
+      };
+  const triageLaneSummary = {
+    live: rosterSummaryCounts.live,
+    paperActive: Number(portfolio.active_lanes_count ?? runtimeReadiness.active_lanes_count ?? dashboardRosterRows.length),
+    candidate: rosterSummaryCounts.candidate,
+    blocked: Number(portfolio.blocked_lanes_count ?? dashboardRosterRows.filter((row) => row.blocked === true).length),
+    needsReview: dashboardRosterRows.filter((row) => {
+      const warningSummary = String(row.warning_summary ?? row.top_blockers ?? "").trim();
+      return row.same_underlying_ambiguity === true || (warningSummary && warningSummary !== "No active warnings.");
+    }).length,
+  };
+  const triageRecoveredEventsCount = operatorRecentAlertRows.filter((row) => String(row.severity ?? "").trim().toUpperCase() === "RECOVERY").length;
+  const triageLastMaterialEvent = operatorRecentAlertRows[0] ?? null;
+  const triageOutageRunbook = operatorTriage.fallback.runbook_path;
+  const triageBrokerDeskPhone = operatorTriage.fallback.broker_desk_phone;
+  const latestRosterReviewRows = dashboardRosterRows.filter((row) => {
+    const warningSummary = String(row.warning_summary ?? row.top_blockers ?? "").trim();
+    return row.same_underlying_ambiguity === true || (warningSummary && warningSummary !== "No active warnings.");
+  });
+  const dashboardSystemTiles: DashboardSystemTileModel[] = operatorTriage.hard_gates.map((row) => {
+    const freshness = operatorTriageGateFreshnessLabel(row);
+    const criticalGate =
+      triagePositionPosture === "In Position" ||
+      (row.key === "runtime-readiness" && paperRuntimeRecovery.manual_action_required === true);
+    const tone: Tone = row.status === "pass" ? "good" : criticalGate ? "danger" : "warn";
+    const summary =
+      row.status === "pass"
+        ? row.key === "market-data"
+          ? "Live and fresh."
+          : row.key === "broker-authority"
+            ? "Broker truth is available."
+            : row.key === "reconciliation"
+              ? "Broker and local truth are aligned."
+              : row.key === "runtime-readiness"
+                ? `Runtime posture is ${triageRuntimePosture}.`
+                : "Operator auth is available for sensitive actions."
+        : row.reason;
+    const impact =
+      row.status === "pass"
+        ? "No action required."
+        : row.key === "market-data"
+          ? triagePositionPosture === "In Position"
+            ? "Exposure is open without fresh market data."
+            : "New live actions stay blocked."
+          : row.key === "broker-authority"
+            ? triagePositionPosture === "In Position"
+              ? "Open exposure cannot rely on in-app broker truth."
+              : "Entries, exits, and risk changes remain blocked."
+            : row.key === "reconciliation"
+              ? "Live trade authority remains fail-closed until reconciliation clears."
+              : row.key === "runtime-readiness"
+                ? "Pilot and recovery actions depend on runtime recovery."
+                : "Sensitive actions stay blocked until operator authority recovers.";
+    const actions: DashboardBandActionModel[] =
+      row.key === "market-data"
+        ? [
+            {
+              label: "Refresh",
+              onClick: () => void runAttentionAction({ label: "Refresh", description: "Refresh operator snapshot.", kind: "refresh" }),
+              subtle: false,
+            },
+            {
+              label: "Open Runtime Events",
+              onClick: () => openOperatorPage("logs"),
+              subtle: true,
+            },
+          ]
+        : row.key === "broker-authority"
+          ? [
+              {
+                label: "Auth Gate Check",
+                onClick: () => void runAttentionAction({ label: "Auth Gate Check", description: "Refresh broker authority state.", kind: "auth-gate-check" }),
+                subtle: false,
+              },
+              {
+                label: "Open Pilot Control",
+                onClick: () => openOperatorPage("market"),
+                subtle: true,
+              },
+            ]
+          : row.key === "reconciliation"
+            ? [
+                {
+                  label: "Reconcile",
+                  onClick: () => void runAttentionAction({ label: "Reconcile", description: "Run a reconciliation pass.", kind: "paper-force-reconcile" }),
+                  subtle: false,
+                  disabled: !canRunLiveActions,
+                },
+                {
+                  label: "Open Evidence",
+                  onClick: () => openOperatorPage("diagnostics"),
+                  subtle: true,
+                },
+              ]
+            : row.key === "runtime-readiness"
+              ? [
+                  {
+                    label: "Restart Runtime",
+                    onClick: () =>
+                      void runAttentionAction({
+                        label: "Restart Runtime",
+                        description: "Restart runtime with temp paper.",
+                        kind: "restart-paper-with-temp-paper",
+                      }),
+                    subtle: false,
+                    disabled: !canRunLiveActions,
+                  },
+                  {
+                    label: "Open Runtime Health",
+                    onClick: () => openOperatorPage("runtime"),
+                    subtle: true,
+                  },
+                ]
+              : [
+                  {
+                    label: localOperatorAuth.auth_available === true ? "Re-auth Local Operator" : "Auth Gate Check",
+                    onClick: () =>
+                      localOperatorAuth.auth_available === true
+                        ? void runCommand("authenticate-local-operator", () =>
+                            api.authenticateLocalOperator("Authenticate local operator access for live pilot actions."),
+                          )
+                        : void runAttentionAction({
+                            label: "Auth Gate Check",
+                            description: "Refresh operator authority state.",
+                            kind: "auth-gate-check",
+                          }),
+                    subtle: false,
+                    disabled: busyAction !== null,
+                  },
+                  {
+                    label: "Open Pilot Control",
+                    onClick: () => openOperatorPage("market"),
+                    subtle: true,
+                  },
+                ];
+    return {
+      key: row.key,
+      label: row.label,
+      ragLabel: dashboardRagLabel(tone),
+      tone,
+      status: row.status === "pass" ? "Healthy" : criticalGate ? "Blocked / Critical" : "Blocked / Review",
+      summary,
+      freshness,
+      impact,
+      actions,
+    };
+  });
+  const dashboardAttentionItems: DashboardIssueModel[] = [
+    ...(triageTradeAuthority === "Blocked"
+      ? [
+          {
+            key: "trade-authority",
+            title: triagePositionPosture === "In Position" ? "Critical outage with open exposure" : "Live trade authority blocked",
+            statusLabel: triageOutagePosture === "Critical" ? "Critical" : "Blocked",
+            tone: triageOutagePosture === "Critical" ? "danger" : "warn",
+            impact:
+              triagePositionPosture === "In Position"
+                ? `Manual fallback is required for ${formatValue(triageExposure.symbol ?? "the current position")}.`
+                : "No live entries, exits, or risk changes are allowed in-app.",
+            summary: `${triageDominantBlocker}. ${triageRootCause}`,
+            actions: [
+              { label: triagePrimaryAction.label, onClick: triagePrimaryAction.onClick, disabled: triagePrimaryAction.disabled },
+              { label: triageFallbackAction.label, onClick: triageFallbackAction.onClick, subtle: true, disabled: triageFallbackAction.disabled },
+            ],
+          } satisfies DashboardIssueModel,
+        ]
+      : []),
+    ...((researchRuntimeAttention.operatorActionRequired || researchRuntimeAttention.severityLabel !== "INFORMATIONAL")
+      ? [
+          {
+            key: "runtime-attention",
+            title: researchRuntimeAttention.title,
+            statusLabel: researchRuntimeAttention.severityLabel,
+            tone: researchRuntimeAttention.tone,
+            impact: researchRuntimeAttention.reason,
+            summary: researchRuntimeAttention.explanation,
+            actions: [
+              {
+                label: researchRuntimeAttention.primaryAction.label,
+                onClick: () => void runAttentionAction(researchRuntimeAttention.primaryAction),
+                disabled: researchRuntimeAttention.primaryAction.disabled,
+              },
+              ...(researchRuntimeAttention.secondaryAction
+                ? [{
+                    label: researchRuntimeAttention.secondaryAction.label,
+                    onClick: () => void runAttentionAction(researchRuntimeAttention.secondaryAction),
+                    subtle: true,
+                    disabled: researchRuntimeAttention.secondaryAction.disabled,
+                  }]
+                : []),
+            ],
+          } satisfies DashboardIssueModel,
+        ]
+      : []),
+    ...((paperRuntimeRecovery.manual_action_required === true || paperRuntimeRestartSuppressed)
+      ? [
+          {
+            key: "runtime-recovery",
+            title: "Startup / recovery requires operator review",
+            statusLabel: paperRuntimeRestartSuppressed ? "Suppressed" : "Recovery",
+            tone: paperRuntimeRestartSuppressed ? "danger" : "warn",
+            impact: formatValue(paperRuntimeRecoveryMessage || paperRuntimeRecoveryState),
+            summary: paperRuntimeRecoveryNextAction
+              ? `Next action: ${formatValue(paperRuntimeRecoveryNextAction)}`
+              : "Inspect runtime recovery before restarting.",
+            actions: [
+              {
+                label: "Restart Runtime",
+                onClick: () =>
+                  void runAttentionAction({
+                    label: "Restart Runtime",
+                    description: "Restart runtime with temp paper.",
+                    kind: "restart-paper-with-temp-paper",
+                  }),
+                disabled: !canRunLiveActions,
+              },
+              {
+                label: "Open Runtime Health",
+                onClick: () => openOperatorPage("runtime"),
+                subtle: true,
+              },
+            ],
+          } satisfies DashboardIssueModel,
+        ]
+      : []),
+    ...(operatorActiveAlertRows[0]
+      ? [
+          {
+            key: "active-alert",
+            title: formatValue(operatorActiveAlertRows[0].title ?? operatorActiveAlertRows[0].code ?? "Active operator alert"),
+            statusLabel: formatValue(operatorActiveAlertRows[0].severity ?? "Alert"),
+            tone: alertSeverityTone(operatorActiveAlertRows[0].severity),
+            impact: formatValue(operatorActiveAlertRows[0].message ?? "An active alert requires operator visibility."),
+            summary: formatValue(operatorActiveAlertRows[0].recommended_action ?? "Open the timeline for full context."),
+            actions: [
+              {
+                label: "Open Timeline",
+                onClick: () => openOperatorPage("diagnostics"),
+              },
+              {
+                label: "Open Runtime Events",
+                onClick: () => openOperatorPage("logs"),
+                subtle: true,
+              },
+            ],
+          } satisfies DashboardIssueModel,
+        ]
+      : []),
+  ].slice(0, 4);
   const unifiedOperatorTimelineRows = useMemo(
     () => {
       const timelineRows = paperSessionTimelineEvents.map((event, index) => {
@@ -10354,6 +11145,90 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     formatValue(liveStrategyPilotAllowedScope.timeframe ?? "5m/1m"),
     formatValue(liveStrategyPilotAllowedScope.mode ?? liveStrategyPilotSummary.execution_scope ?? "ATP_LIVE_ENTRY_PILOT"),
   ].join(" / ");
+  const dashboardDetailCards: DashboardDetailCardModel[] = [
+    {
+      key: "strategy-roster",
+      kicker: "Detail / Diagnostics",
+      title: "Strategy Roster",
+      summary: `${dashboardRosterRows.length} surfaced lanes. ${triageLaneSummary.needsReview} currently need review.`,
+      stats: [
+        { label: "Live", value: formatShortNumber(triageLaneSummary.live), tone: triageLaneSummary.live > 0 ? "good" : "muted" },
+        { label: "Candidate", value: formatShortNumber(triageLaneSummary.candidate), tone: triageLaneSummary.candidate > 0 ? "warn" : "muted" },
+        { label: "Blocked", value: formatShortNumber(triageLaneSummary.blocked), tone: triageLaneSummary.blocked > 0 ? "danger" : "good" },
+      ],
+      notes: latestRosterReviewRows.slice(0, 3).map((row) => `${compactBranchLabel(row)} — ${formatValue(row.warning_summary ?? row.top_blockers ?? "Needs review")}`),
+      actions: [{ label: "Open Strategy Roster", onClick: () => openOperatorPage("strategies"), subtle: true }],
+    },
+    {
+      key: "runtime-health",
+      kicker: "Detail / Diagnostics",
+      title: "Runtime / Recovery",
+      summary: formatValue(paperRuntimeRecoveryMessage || researchRuntimeAttention.reason || "Runtime is settled."),
+      stats: [
+        { label: "Runtime", value: triageRuntimePosture, tone: triageRuntimePosture === "Ready" ? "good" : triageRuntimePosture === "Faulted" ? "danger" : "warn" },
+        { label: "Recovery", value: formatValue(paperRuntimeRecoveryState), tone: statusTone(paperRuntimeRecoveryState) },
+        { label: "Startup", value: formatValue(paperStartupStateLabel), tone: statusTone(paperStartupStateLabel) },
+      ],
+      notes: [
+        paperRuntimeRecoveryNextAction ? `Next action: ${formatValue(paperRuntimeRecoveryNextAction)}` : "No recovery intervention is currently queued.",
+        formatValue(operationalReadiness.summaryLine ?? "Startup dependency summary unavailable."),
+      ],
+      actions: [
+        { label: "Open Runtime Health", onClick: () => openOperatorPage("runtime") },
+        {
+          label: "Restart Runtime",
+          onClick: () =>
+            void runAttentionAction({
+              label: "Restart Runtime",
+              description: "Restart runtime with temp paper.",
+              kind: "restart-paper-with-temp-paper",
+            }),
+          disabled: !canRunLiveActions,
+          subtle: true,
+        },
+      ],
+    },
+    {
+      key: "timeline",
+      kicker: "Detail / Diagnostics",
+      title: "Timeline / Alerts",
+      summary: triageLastMaterialEvent
+        ? formatValue(triageLastMaterialEvent.message ?? triageLastMaterialEvent.summary ?? triageLastMaterialEvent.title ?? "Latest material event")
+        : "No material event is currently open.",
+      stats: [
+        { label: "Active Alerts", value: formatShortNumber(operatorActiveAlertRows.length), tone: operatorActiveAlertRows.length > 0 ? "warn" : "good" },
+        { label: "Recent Events", value: formatShortNumber(operatorRecentAlertRows.length), tone: operatorRecentAlertRows.length > 0 ? "muted" : "good" },
+        { label: "Recovered", value: formatShortNumber(triageRecoveredEventsCount), tone: triageRecoveredEventsCount > 0 ? "good" : "muted" },
+      ],
+      notes: [
+        triageLastMaterialEvent
+          ? `Last material event: ${formatTimestamp(triageLastMaterialEvent.occurred_at ?? triageLastMaterialEvent.logged_at ?? triageLastMaterialEvent.timestamp)}`
+          : "No recent material timestamp is available.",
+      ],
+      actions: [
+        { label: "Open Timeline", onClick: () => openOperatorPage("diagnostics") },
+        { label: "Open Runtime Events", onClick: () => openOperatorPage("logs"), subtle: true },
+      ],
+    },
+    {
+      key: "pilot-surface",
+      kicker: "Detail / Diagnostics",
+      title: "Pilot Surface",
+      summary: formatValue(liveStrategyPilotSummary.summary_line ?? "No live strategy pilot summary artifact is available yet."),
+      stats: [
+        { label: "Runtime", value: liveStrategyPilotRuntimeLabel, tone: liveStrategyPilotRuntimeTone },
+        { label: "Entries", value: liveStrategyPilotEntriesEnabled ? "Enabled" : "Disabled", tone: liveStrategyPilotEntriesEnabled ? "good" : "warn" },
+        { label: "Broker Truth", value: liveStrategyPilotBrokerTruthAuthoritative ? "Authoritative" : "Fallback", tone: liveStrategyPilotBrokerTruthAuthoritative ? "good" : "warn" },
+      ],
+      notes: [
+        `Scope: ${liveStrategyPilotScopeLabel}`,
+        `Cycle: ${formatValue(liveStrategyPilotSummary.cycle_status ?? "waiting_for_entry")} • Pending: ${formatValue(liveStrategyPilotSummary.pending_reason ?? "None")}`,
+      ],
+      actions: [
+        { label: "Open Pilot Control", onClick: () => openOperatorPage("market") },
+      ],
+    },
+  ];
   const signalSelectivityLiveFocus = asRecord(signalSelectivityAnalysis.live_pilot_focus);
   const signalSelectivityTopFailed = asRecord(signalSelectivityLiveFocus.top_failed_predicates);
   const signalSelectivityRangeLadder = asRecord(signalSelectivityAnalysis.bear_snap_range_ladder);
@@ -10828,6 +11703,80 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
 
           {!loading && page === "home" ? (
             <>
+              <div className="triage-home-shell">
+                <OperatorTriageHeader
+                  mode={formatValue(global.mode_label ?? global.mode ?? "Unknown")}
+                  tradeAuthority={triageTradeAuthority}
+                  positionPosture={triagePositionPosture}
+                  outagePosture={triageOutagePosture}
+                  connectionPosture={triageConnectionPosture}
+                  onOpenFallback={() => openOperatorPage("market")}
+                />
+
+                <OperatorVerdictCard
+                  sentence={triageVerdictSentence}
+                  dominantBlocker={triageDominantBlocker}
+                  rootCause={triageRootCause}
+                  primaryAction={triagePrimaryAction}
+                  fallbackAction={triageFallbackAction}
+                  outagePosture={triageOutagePosture}
+                />
+
+                <ExposureAndPnLStrip
+                  triage={operatorTriage}
+                />
+
+                <HardGatesPanel
+                  rows={triageGateRows}
+                  runtimePosture={triageRuntimePosture}
+                />
+
+                {triageTradeAuthority === "Blocked" ? (
+                  <OutagePanel
+                    positionPosture={triagePositionPosture}
+                    rootCause={triageRootCause}
+                    recoverySummary={triageGateRows.filter((row) => row.status === "fail").map((row) => row.label).join(" + ") || "Recover all failed hard gates."}
+                    brokerDeskPhone={triageBrokerDeskPhone}
+                    runbookPath={typeof triageOutageRunbook === "string" ? triageOutageRunbook : null}
+                    exposure={triageExposure}
+                    brokerTruthFreshness={operatorTriageGateFreshnessByKey(triageGateRows, "broker-authority")}
+                    marketDataFreshness={operatorTriageGateFreshnessByKey(triageGateRows, "market-data")}
+                  />
+                ) : null}
+
+                <div className="triage-support-grid">
+                  <LaneSummaryBar
+                    live={triageLaneSummary.live}
+                    paperActive={triageLaneSummary.paperActive}
+                    candidate={triageLaneSummary.candidate}
+                    blocked={triageLaneSummary.blocked}
+                    needsReview={triageLaneSummary.needsReview}
+                    onOpenRoster={() => openOperatorPage("strategies")}
+                  />
+
+                  <AlertsSummaryCard
+                    activeCount={operatorActiveAlertRows.length}
+                    lastMaterialEvent={triageLastMaterialEvent}
+                    recoveredCount={triageRecoveredEventsCount}
+                    onOpenTimeline={() => openOperatorPage("diagnostics")}
+                  />
+                </div>
+
+                <DashboardSystemsBand
+                  tiles={dashboardSystemTiles}
+                />
+
+                <DashboardAttentionBand
+                  issues={dashboardAttentionItems}
+                />
+
+                <DashboardDetailBand
+                  cards={dashboardDetailCards}
+                />
+              </div>
+
+              {false ? (
+                <>
               <Section
                 title={`Strategy Roster — ${dashboardRosterRows.length} Lanes`}
                 subtitle="Benchmark, candidate, temporary, and admitted lanes in a scan-first grid. Click any card to jump into Strategy Deep-Dive."
@@ -12243,6 +13192,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                   emptyLabel="No active positions are currently open."
                 />
               </Section>
+                </>
+              ) : null}
             </>
           ) : null}
 
@@ -12888,6 +13839,9 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                     <div className={`calendar-grid ${calendarPeriod === "weekly" ? "weekly" : ""}`}>
                       {calendarGridDays.map((dateKey) => {
                         const point = calendarDayPointMap.get(dateKey) ?? null;
+                        const outsideLoadedCoverage =
+                          calendarSourceAvailableRange != null
+                          && (dateKey < calendarSourceAvailableRange.start || dateKey > calendarSourceAvailableRange.end);
                         const isSelected = selectedCalendarDay === dateKey;
                         const isToday = dateKey === new Date().toISOString().slice(0, 10);
                         const outsideMonth = calendarPeriod === "monthly" && !dateKey.startsWith(startOfMonth(calendarAnchorDate).slice(0, 7));
@@ -12901,6 +13855,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                               isSelected ? "selected" : "",
                               isToday ? "today" : "",
                               outsideMonth ? "outside-month" : "",
+                              !point && outsideLoadedCoverage ? "uncovered" : "",
                             ].filter(Boolean).join(" ")}
                             onClick={() => setSelectedCalendarDay(dateKey)}
                             data-calendar-day={dateKey}
@@ -12910,7 +13865,9 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                               <div className="calendar-day-weekend">Weekend</div>
                             ) : (
                               <>
-                                <div className={`calendar-day-pnl ${point ? pnlTone(point.pnl) : "muted"}`}>{point ? formatSignedCompactWhole(point.pnl) : "—"}</div>
+                                <div className={`calendar-day-pnl ${point ? pnlTone(point.pnl) : "muted"}`}>
+                                  {point ? formatSignedCompactWhole(point.pnl) : outsideLoadedCoverage ? "Not loaded" : "—"}
+                                </div>
                                 <div className="calendar-day-meta">
                                   <span>
                                     {point
@@ -12921,7 +13878,9 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                                         : point.coveredSources.length
                                           ? "Covered"
                                           : "0T"
-                                      : "No trades"}
+                                      : outsideLoadedCoverage
+                                        ? "Outside coverage"
+                                        : "No trades"}
                                   </span>
                                   <span>{point ? `cum:${formatSignedCompactWhole(point.cumulative)}` : ""}</span>
                                 </div>
@@ -12949,6 +13908,21 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                     onClose={() => setSelectedCalendarDay(null)}
                     onOpenStrategy={openCalendarContributionStrategy}
                   />
+                ) : selectedCalendarDay && selectedCalendarDayOutsideCoverage ? (
+                  <div className="calendar-day-detail" data-selected-calendar-day={selectedCalendarDay}>
+                    <div className="calendar-day-detail-header">
+                      <div>
+                        <div className="page-eyebrow">Selected Day</div>
+                        <div className="section-title">{formatLongDate(selectedCalendarDay)}</div>
+                        <div className="section-subtitle">{calendarSourceSelection.selectedSourceLabel} • outside loaded coverage</div>
+                      </div>
+                      <button className="panel-button subtle" onClick={() => setSelectedCalendarDay(null)}>Close</button>
+                    </div>
+                    <div className="notice-strip compact">
+                      <div><strong>Not loaded yet.</strong> This date is outside the currently loaded calendar coverage for {calendarSourceSelection.selectedSourceLabel}.</div>
+                      <div>{calendarCoverageNote ?? "Load or publish newer calendar truth to populate this date."}</div>
+                    </div>
+                  </div>
                 ) : null}
               </Section>
             </>
@@ -14956,54 +15930,69 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                     </div>
                     <DataTable
                       columns={[
-                        { key: "symbol", label: "Symbol", render: (row) => formatValue(row.symbol) },
-                        { key: "quantity", label: "Qty", render: (row) => formatValue(row.quantity) },
-                        { key: "average_price", label: "Avg", render: (row) => formatValue(row.average_price ?? row.averagePrice) },
-                        { key: "market_value", label: "Mkt Value", render: (row) => formatMaybePnL(row.market_value) },
-                        { key: "current_day_profit_loss", label: "Day P&L", render: (row) => formatMaybePnL(row.current_day_profit_loss ?? row.currentDayProfitLoss) },
-                        { key: "current_day_profit_loss_percentage", label: "Day %", render: (row) => formatValue(row.current_day_profit_loss_percentage ?? row.currentDayProfitLossPercentage) },
+                        { key: "symbol", label: "Symbol", className: "col-symbol-tight", render: (row) => formatValue(row.symbol) },
+                        { key: "quantity", label: "Qty", className: "col-qty-tight", render: (row) => formatValue(row.quantity) },
+                        { key: "average_price", label: "Avg", className: "col-price-wide", render: (row) => livePositionAverageLabel(row) },
+                        { key: "market_value", label: "Mkt Value", className: "col-pnl-wide", render: (row) => formatMaybePnL(row.market_value) },
+                        { key: "current_day_profit_loss", label: "Day P&L", className: "col-pnl-wide", render: (row) => livePositionDayPnlLabel(row) },
+                        { key: "current_day_profit_loss_percentage", label: "Day %", className: "col-percent", render: (row) => livePositionDayPercentLabel(row) },
                       ]}
                       rows={productionPositions.slice(0, 5)}
                       emptyLabel="No live-account positions are open."
+                      tableClassName="table-readable table-readable-standard"
                     />
                   </div>
                   <div className="account-panel-shell">
                     <div className="subsection-title">Paper / Simulated</div>
                     <div className="metric-grid account-metric-grid">
-                      <MetricCard label="Paper Realized (Lifetime)" value={renderPnlValue(combinedStrategyPortfolioSnapshot.total_realized_pnl)} tone={pnlTone(combinedStrategyPortfolioSnapshot.total_realized_pnl)} />
-                      <MetricCard label="Paper Open P&L" value={renderPnlValue(combinedStrategyPortfolioSnapshot.total_unrealized_pnl)} tone={pnlTone(combinedStrategyPortfolioSnapshot.total_unrealized_pnl)} />
+                      <MetricCard
+                        label="Paper Realized (Lifetime)"
+                        value={renderPnlValue(livePnlPaperWorkspaceSnapshot.realizedPnl ?? combinedStrategyPortfolioSnapshot.total_realized_pnl)}
+                        tone={pnlTone(livePnlPaperWorkspaceSnapshot.realizedPnl ?? combinedStrategyPortfolioSnapshot.total_realized_pnl)}
+                      />
+                      <MetricCard
+                        label="Paper Open P&L"
+                        value={renderPnlValue(livePnlPaperWorkspaceSnapshot.openPnl ?? combinedStrategyPortfolioSnapshot.total_unrealized_pnl)}
+                        tone={pnlTone(livePnlPaperWorkspaceSnapshot.openPnl ?? combinedStrategyPortfolioSnapshot.total_unrealized_pnl)}
+                      />
                       <MetricCard label="Paper Day P&L (Current Session)" value={renderPnlValue(paperDisplayedDayPnl)} tone={pnlTone(paperDisplayedDayPnl)} />
-                      <MetricCard label="Open Positions" value={formatShortNumber(sortedPositionsRows.filter((row) => row.paperRows.some((paperRow) => String(paperRow.position_side ?? "").toUpperCase() !== "FLAT")).length)} />
-                      <MetricCard label="Tracked Strategies" value={formatShortNumber(combinedStrategyPortfolioSnapshot.active_strategy_count)} />
+                      <MetricCard label="Open Positions" value={formatShortNumber(livePnlPaperWorkspaceSnapshot.openPositionCount)} />
+                      <MetricCard label="Tracked Strategies" value={formatShortNumber(livePnlPaperWorkspaceSnapshot.trackedCount)} />
                       <MetricCard label="Recent Fills" value={formatShortNumber(combinedRecentFillRows.filter((row) => String(row.activity_source ?? "") === "paper").length)} />
                     </div>
                     <div className="notice-strip compact">
-                      <div><strong>Lifetime vs Session</strong> Paper Realized is cumulative across the loaded paper ledger. Paper Day P&amp;L is only the current New York paper-fill session. Runtime activity timestamps do not count until a paper fill or closed trade is published.</div>
+                      <div><strong>Lifetime vs Session</strong> Paper Realized is cumulative across the loaded paper ledger. Paper Day P&amp;L is only the current New York paper-fill session. Runtime heartbeat prefers last evaluated / processed bars; trade-event timestamps are secondary.</div>
                     </div>
                     <DataTable
                       columns={[
-                        { key: "branch", label: "Strategy", render: (row) => formatValue(row.branch ?? row.strategy_name ?? row.lane_id) },
-                        { key: "instrument", label: "Symbol", render: (row) => formatValue(row.instrument) },
-                        { key: "position_side", label: "Side", render: (row) => formatValue(row.position_side ?? row.net_side ?? "FLAT") },
-                        { key: "realized_pnl", label: "Realized", render: (row) => formatMaybePnL(row.realized_pnl) },
-                        { key: "unrealized_pnl", label: "Open P&L", render: (row) => formatMaybePnL(row.unrealized_pnl) },
-                        { key: "latest_fill_timestamp", label: "Latest Paper Fill", render: (row) => formatTimestamp(row.latest_fill_timestamp) },
-                        { key: "latest_activity_timestamp", label: "Latest Runtime Activity", render: (row) => formatTimestamp(row.latest_activity_timestamp) },
+                        { key: "branch", label: "Strategy", className: "col-strategy-wide", render: (row) => renderStructuredStrategyLabel(row.branch ?? row.strategy_name ?? row.lane_id) },
+                        { key: "instrument", label: "Symbol", className: "col-symbol-tight", render: (row) => formatValue(row.instrument) },
+                        { key: "position_side", label: "Side", className: "col-side", render: (row) => formatValue(row.position_side ?? row.net_side ?? "FLAT") },
+                        { key: "realized_pnl", label: "Realized", className: "col-pnl-wide", render: (row) => formatMaybePnL(row.realized_pnl) },
+                        { key: "unrealized_pnl", label: "Open P&L", className: "col-pnl-wide", render: (row) => formatMaybePnL(row.unrealized_pnl) },
+                        { key: "latest_fill_timestamp", label: "Latest Paper Fill", className: "col-timestamp-wide", render: (row) => paperFillTimestampLabel(row) },
+                        { key: "latest_activity_timestamp", label: "Last Eval / Runtime", className: "col-timestamp-wide", render: (row) => paperRuntimeActivityLabel(row) },
                       ]}
-                      rows={strategyPerformanceRows.slice(0, 5)}
+                      rows={livePnlPaperWorkspaceRows.slice(0, 5)}
                       emptyLabel="No paper strategy positions are currently surfaced."
+                      tableClassName="table-readable table-readable-wide"
                     />
                   </div>
                 </div>
                 <div className="table-panel-shell">
                   <h3 className="subsection-title">Paper Expression Diagnostic</h3>
                   <div className="notice-strip compact">
-                    <div>Use this to separate “no setup,” “setup gated,” “intent emitted but not filled,” and “halted/risk-halted.”</div>
-                    <div>Risk halts can recur whenever a lane re-trips its lane-specific catastrophic or risk logic. A lane can also stay quiet without any halt if it is session-blocked, health-blocked, or simply sees no actionable setup.</div>
+                    <div>
+                      {formatShortNumber(livePaperExpressionSummary.eligibleNow)} can fire now · {formatShortNumber(livePaperExpressionSummary.participatedToday)} filled earlier today
+                      {livePaperExpressionSummary.wrongSessionCount > 0
+                        ? ` · ${formatShortNumber(livePaperExpressionSummary.wrongSessionCount)} currently session-blocked`
+                        : ""}
+                    </div>
                   </div>
                   <div className="metric-grid account-metric-grid">
                     <MetricCard label="Lanes Monitored" value={formatShortNumber(livePaperExpressionSummary.laneCount)} />
-                    <MetricCard label="Eligible Now" value={formatShortNumber(livePaperExpressionSummary.eligibleNow)} tone={livePaperExpressionSummary.eligibleNow > 0 ? "good" : "warn"} />
+                    <MetricCard label="Can Fire Now" value={formatShortNumber(livePaperExpressionSummary.eligibleNow)} tone={livePaperExpressionSummary.eligibleNow > 0 ? "good" : "warn"} />
+                    <MetricCard label="Filled Today" value={formatShortNumber(livePaperExpressionSummary.participatedToday)} tone={livePaperExpressionSummary.participatedToday > 0 ? "good" : "muted"} />
                     <MetricCard label="Operator Halts" value={formatShortNumber(livePaperExpressionSummary.operatorHalts)} tone={livePaperExpressionSummary.operatorHalts > 0 ? "danger" : "good"} />
                     <MetricCard label="Risk Halts" value={formatShortNumber(livePaperExpressionSummary.riskHalts)} tone={livePaperExpressionSummary.riskHalts > 0 ? "danger" : "good"} />
                     <MetricCard label="Setup-Gated Lanes" value={formatShortNumber(livePaperExpressionSummary.setupGated)} tone={livePaperExpressionSummary.setupGated > 0 ? "warn" : "good"} />
@@ -15013,32 +16002,52 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                   </div>
                   <DataTable
                     columns={[
-                      { key: "strategy_name", label: "Strategy", render: (row) => formatValue(row.strategy_name ?? row.standalone_strategy_id) },
-                      { key: "instrument", label: "Symbol", render: (row) => formatValue(row.instrument) },
-                      { key: "audit_verdict", label: "Verdict", render: (row) => <Badge label={formatValue(row.audit_verdict)} tone={auditVerdictTone(row.audit_verdict)} /> },
-                      { key: "eligible_now", label: "Eligible", render: (row) => formatValue(row.eligible_now ?? false) },
-                      { key: "entries_enabled", label: "Entries", render: (row) => formatValue(row.entries_enabled ?? false) },
-                      { key: "operator_halt", label: "Operator Halt", render: (row) => <Badge label={row.operator_halt === true ? "HALTED" : "CLEAR"} tone={row.operator_halt === true ? "danger" : "good"} /> },
+                      { key: "strategy_name", label: "Strategy", className: "col-strategy-wide", render: (row) => renderStructuredStrategyLabel(row.strategy_name ?? row.standalone_strategy_id) },
+                      { key: "instrument", label: "Symbol", className: "col-symbol-tight", render: (row) => formatValue(row.instrument) },
+                      { key: "audit_verdict", label: "Verdict", className: "col-verdict", render: (row) => <Badge label={formatValue(row.audit_verdict)} tone={auditVerdictTone(row.audit_verdict)} /> },
+                      { key: "eligible_now", label: "Can Fire Now", className: "col-flag", render: (row) => formatValue(row.eligible_now ?? false) },
+                      { key: "entries_enabled", label: "Entries", className: "col-flag", render: (row) => formatValue(row.entries_enabled ?? false) },
+                      { key: "operator_halt", label: "Operator Halt", className: "col-verdict", render: (row) => <Badge label={row.operator_halt === true ? "HALTED" : "CLEAR"} tone={row.operator_halt === true ? "danger" : "good"} /> },
                       {
                         key: "risk_state",
                         label: "Risk State",
+                        className: "col-verdict",
                         render: (row) => {
                           const gating = asRecord(row.latest_gating_state);
                           const riskState = String(gating.risk_state ?? row.risk_state ?? "OK");
                           return <Badge label={formatValue(riskState)} tone={isRiskHaltedAuditRow(row) ? "danger" : statusTone(riskState)} />;
                         },
                       },
-                      { key: "latest_fault_or_blocker", label: "Latest Blocker", render: (row) => formatValue(row.latest_fault_or_blocker ?? asRecord(row.latest_gating_state).latest_fault_or_blocker) },
-                      { key: "actionable_entry_signal_count", label: "Signals", render: (row) => formatShortNumber(row.actionable_entry_signal_count) },
-                      { key: "total_intent_count", label: "Intents", render: (row) => formatShortNumber(row.total_intent_count) },
-                      { key: "total_fill_count", label: "Fills", render: (row) => formatShortNumber(row.total_fill_count) },
-                      { key: "last_actionable_signal_timestamp", label: "Last Signal", render: (row) => formatTimestamp(row.last_actionable_signal_timestamp) },
-                      { key: "last_intent_timestamp", label: "Last Intent", render: (row) => formatTimestamp(row.last_intent_timestamp) },
-                      { key: "last_fill_timestamp", label: "Last Fill", render: (row) => formatTimestamp(row.last_fill_timestamp) },
-                      { key: "latest_activity_timestamp", label: "Latest Activity", render: (row) => formatTimestamp(row.latest_activity_timestamp ?? asRecord(row.strategy_performance_summary).latest_activity_timestamp) },
+                      {
+                        key: "latest_fault_or_blocker",
+                        label: "Latest Blocker",
+                        className: "col-blocker-wide",
+                        render: (row) =>
+                          formatValue(
+                            row.latest_fault_or_blocker
+                            ?? asRecord(row.latest_gating_state).latest_fault_or_blocker
+                            ?? (String(row.audit_verdict ?? "").trim().toUpperCase() === "NO_SETUP_OBSERVED" ? "no_setup_observed" : "No blocker recorded"),
+                          ),
+                      },
+                      { key: "actionable_entry_signal_count", label: "Signals", className: "col-count", render: (row) => formatShortNumber(row.actionable_entry_signal_count) },
+                      { key: "total_intent_count", label: "Intents", className: "col-count", render: (row) => formatShortNumber(row.total_intent_count) },
+                      { key: "total_fill_count", label: "Fills", className: "col-count", render: (row) => formatShortNumber(row.total_fill_count) },
+                      { key: "last_actionable_signal_timestamp", label: "Last Signal", className: "col-timestamp-wide", render: (row) => renderStructuredAuditTimestamp(row.last_actionable_signal_timestamp, row.last_actionable_signal_family) },
+                      { key: "last_intent_timestamp", label: "Last Intent", className: "col-timestamp-wide", render: (row) => renderStructuredAuditTimestamp(row.last_intent_timestamp, row.last_intent_type) },
+                      { key: "last_fill_timestamp", label: "Last Fill", className: "col-timestamp-wide", render: (row) => renderStructuredAuditTimestamp(row.last_fill_timestamp, row.last_fill_price) },
+                      {
+                        key: "latest_activity_timestamp",
+                        label: "Latest Activity",
+                        className: "col-timestamp-wide",
+                        render: (row) => paperRuntimeActivityLabel({
+                          ...row,
+                          latest_activity_timestamp: row.latest_activity_timestamp ?? asRecord(row.strategy_performance_summary).latest_activity_timestamp,
+                        }),
+                      },
                       {
                         key: "select",
                         label: "Detail",
+                        className: "col-detail-action",
                         render: (row) => (
                           <button
                             className="panel-button"
@@ -15052,6 +16061,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                     ]}
                     rows={livePaperExpressionRows}
                     emptyLabel="No current paper-universe expression rows are available yet."
+                    tableClassName="table-readable table-readable-xwide"
                   />
                   {selectedSignalIntentFillAuditRow && livePaperExpressionRows.some((row) => standaloneStrategyId(row) === standaloneStrategyId(selectedSignalIntentFillAuditRow)) ? (
                     <div className="notice-strip compact">
@@ -15088,31 +16098,33 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                     <h3 className="subsection-title">Working Orders</h3>
                     <DataTable
                       columns={[
-                        { key: "entered_time", label: "Time", render: (row) => formatTimestamp(row.entered_time ?? row.updated_at) },
-                        { key: "symbol", label: "Symbol", render: (row) => formatValue(row.symbol) },
-                        { key: "order_type", label: "Type", render: (row) => formatValue(row.order_type ?? row.orderType) },
-                        { key: "instruction", label: "Side", render: (row) => formatValue(row.instruction ?? row.side) },
-                        { key: "quantity", label: "Qty", render: (row) => formatValue(row.quantity) },
-                        { key: "status", label: "Status", render: (row) => <Badge label={formatValue(row.status ?? "Working")} tone={statusTone(row.status)} /> },
+                        { key: "entered_time", label: "Time", className: "col-timestamp-wide", render: (row) => formatTimestamp(row.entered_time ?? row.updated_at) },
+                        { key: "symbol", label: "Symbol", className: "col-symbol-tight", render: (row) => formatValue(row.symbol) },
+                        { key: "order_type", label: "Type", className: "col-type", render: (row) => formatValue(row.order_type ?? row.orderType) },
+                        { key: "instruction", label: "Side", className: "col-side", render: (row) => formatValue(row.instruction ?? row.side) },
+                        { key: "quantity", label: "Qty", className: "col-qty-tight", render: (row) => formatValue(row.quantity) },
+                        { key: "status", label: "Status", className: "col-verdict", render: (row) => <Badge label={formatValue(row.status ?? "Working")} tone={statusTone(row.status)} /> },
                       ]}
                       rows={productionOpenOrders.slice(0, 8)}
                       emptyLabel="No broker working orders are currently open."
+                      tableClassName="table-readable table-readable-standard"
                     />
                   </div>
                   <div className="table-panel-shell">
                     <h3 className="subsection-title">Recent Fills</h3>
                     <DataTable
                       columns={[
-                        { key: "activity_source", label: "Source", render: (row) => <Badge label={String(row.activity_source ?? "").toUpperCase() || "UNKNOWN"} tone={String(row.activity_source ?? "") === "paper" ? "muted" : "good"} /> },
-                        { key: "activity_timestamp", label: "Time", render: (row) => formatTimestamp(row.activity_timestamp) },
-                        { key: "activity_symbol", label: "Symbol", render: (row) => formatValue(row.activity_symbol) },
-                        { key: "activity_side", label: "Side", render: (row) => formatValue(row.activity_side) },
-                        { key: "activity_quantity", label: "Qty", render: (row) => formatValue(row.activity_quantity) },
-                        { key: "activity_price", label: "Price", render: (row) => formatValue(row.activity_price) },
-                        { key: "activity_realized_pnl", label: "P&L", render: (row) => row.activity_realized_pnl == null ? "—" : renderPnlValue(row.activity_realized_pnl) },
+                        { key: "activity_source", label: "Source", className: "col-verdict", render: (row) => <Badge label={String(row.activity_source ?? "").toUpperCase() || "UNKNOWN"} tone={String(row.activity_source ?? "") === "paper" ? "muted" : "good"} /> },
+                        { key: "activity_timestamp", label: "Time", className: "col-timestamp-wide", render: (row) => formatTimestamp(row.activity_timestamp) },
+                        { key: "activity_symbol", label: "Symbol", className: "col-symbol-tight", render: (row) => formatValue(row.activity_symbol) },
+                        { key: "activity_side", label: "Side", className: "col-side", render: (row) => formatValue(row.activity_side) },
+                        { key: "activity_quantity", label: "Qty", className: "col-qty-tight", render: (row) => formatValue(row.activity_quantity) },
+                        { key: "activity_price", label: "Price", className: "col-price-wide", render: (row) => formatValue(row.activity_price) },
+                        { key: "activity_realized_pnl", label: "P&L", className: "col-pnl-wide", render: (row) => row.activity_realized_pnl == null ? "—" : renderPnlValue(row.activity_realized_pnl) },
                       ]}
                       rows={combinedRecentFillRows.slice(0, 8)}
                       emptyLabel="No recent live or paper fills are available."
+                      tableClassName="table-readable table-readable-standard"
                     />
                   </div>
                 </div>
@@ -17545,6 +18557,570 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
   );
 }
 
+function OperatorTriageHeader(props: {
+  mode: string;
+  tradeAuthority: TradeAuthorityState;
+  positionPosture: PositionPostureState;
+  outagePosture: OutagePostureState;
+  connectionPosture: ConnectionPostureState;
+  onOpenFallback: () => void;
+}) {
+  return (
+    <section className="section-card triage-header-card">
+      <div className="triage-header-grid">
+        <div className="triage-header-item triage-header-item-mode">
+          <span className="triage-header-label">Mode</span>
+          <span className="triage-header-value">{props.mode}</span>
+        </div>
+        <div className={`triage-header-item triage-header-item-status ${props.tradeAuthority === "Enabled" ? "good" : "danger"}`}>
+          <span className="triage-header-label">Live Trade Authority</span>
+          <Badge label={props.tradeAuthority} tone={props.tradeAuthority === "Enabled" ? "good" : "danger"} />
+        </div>
+        <div className={`triage-header-item triage-header-item-status ${props.positionPosture === "In Position" ? "warn" : "good"}`}>
+          <span className="triage-header-label">Position Posture</span>
+          <Badge label={props.positionPosture} tone={props.positionPosture === "In Position" ? "warn" : "good"} />
+        </div>
+        <div className={`triage-header-item triage-header-item-status ${props.outagePosture === "Critical" ? "danger" : props.outagePosture === "Review" ? "warn" : "good"}`}>
+          <span className="triage-header-label">Outage Posture</span>
+          <Badge
+            label={props.outagePosture}
+            tone={props.outagePosture === "Critical" ? "danger" : props.outagePosture === "Review" ? "warn" : "good"}
+          />
+        </div>
+        <div className={`triage-header-item triage-header-item-status ${props.connectionPosture === "Live" ? "good" : props.connectionPosture === "Snapshot" ? "warn" : "danger"}`}>
+          <span className="triage-header-label">Connection Posture</span>
+          <Badge
+            label={props.connectionPosture}
+            tone={props.connectionPosture === "Live" ? "good" : props.connectionPosture === "Snapshot" ? "warn" : "danger"}
+          />
+        </div>
+        <div className="triage-header-action">
+          <button className="panel-button danger" onClick={props.onOpenFallback}>
+            Emergency Fallback
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function dashboardRagLabel(tone: Tone): "Green" | "Amber" | "Red" {
+  if (tone === "danger") {
+    return "Red";
+  }
+  if (tone === "warn") {
+    return "Amber";
+  }
+  return "Green";
+}
+
+function DashboardBandActionButton(props: DashboardBandActionModel) {
+  return (
+    <button
+      className={`panel-button ${props.subtle ? "subtle" : ""} ${props.tone === "danger" ? "danger" : ""}`.trim()}
+      disabled={props.disabled}
+      onClick={props.onClick}
+    >
+      {props.label}
+    </button>
+  );
+}
+
+function OperatorVerdictCard(props: {
+  sentence: string;
+  dominantBlocker: string;
+  rootCause: string;
+  primaryAction: TriageActionModel;
+  fallbackAction: TriageActionModel;
+  outagePosture: OutagePostureState;
+}) {
+  const tone: Tone = props.outagePosture === "Critical" ? "danger" : props.outagePosture === "Review" ? "warn" : "good";
+  return (
+    <section className={`section-card triage-verdict-card ${tone}`}>
+      <div className="triage-verdict-header">
+        <div className="triage-verdict-copy">
+          <div className="section-subtitle">Operator Verdict</div>
+          <div className="triage-verdict-sentence">{props.sentence}</div>
+        </div>
+        <Badge label={props.outagePosture} tone={tone} />
+      </div>
+      <div className="triage-verdict-grid">
+        <div className="triage-detail-card">
+          <div className="triage-detail-label">Dominant Blocker</div>
+          <div className="triage-detail-value">{props.dominantBlocker}</div>
+        </div>
+        <div className="triage-detail-card">
+          <div className="triage-detail-label">Root Cause</div>
+          <div className="triage-detail-value">{props.rootCause}</div>
+        </div>
+        <div className="triage-detail-card">
+          <div className="triage-detail-label">Primary Action</div>
+          <div className="triage-detail-value">{props.primaryAction.label}</div>
+          <div className="triage-detail-note">{props.primaryAction.detail}</div>
+        </div>
+        <div className="triage-detail-card">
+          <div className="triage-detail-label">Fallback Action</div>
+          <div className="triage-detail-value">{props.fallbackAction.label}</div>
+          <div className="triage-detail-note">{props.fallbackAction.detail}</div>
+        </div>
+      </div>
+      <div className="action-row inline">
+        <button className="panel-button" disabled={props.primaryAction.disabled} onClick={props.primaryAction.onClick}>
+          {props.primaryAction.label}
+        </button>
+        <button className="panel-button subtle" disabled={props.fallbackAction.disabled} onClick={props.fallbackAction.onClick}>
+          {props.fallbackAction.label}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function operatorTriageGateFreshnessLabel(row: OperatorTriageHardGate): string | null {
+  return row.source_timestamp ? truthFreshnessLabel(row.source_timestamp, row.checked_at) : null;
+}
+
+function operatorTriageGateFreshnessByKey(rows: OperatorTriageHardGate[], key: OperatorTriageHardGate["key"]): string | null {
+  const row = rows.find((candidate) => candidate.key === key);
+  return row ? operatorTriageGateFreshnessLabel(row) : null;
+}
+
+function ExposureAndPnLStrip(props: { triage: OperatorTriage }) {
+  return (
+    <section className="section-card triage-strip-card">
+      <div className="triage-strip-grid">
+        <CurrentExposureCard triage={props.triage} />
+        <TodayPnLCard pnl={props.triage.today_pnl} />
+      </div>
+    </section>
+  );
+}
+
+function CurrentExposureCard(props: { triage: OperatorTriage }) {
+  const exposure = props.triage.current_exposure;
+  const postureTone: Tone = props.triage.position_posture === "In Position" ? "warn" : "good";
+  const quantityLabel = exposure.quantity !== null ? formatCompactMetric(exposure.quantity, 4) : "—";
+  const symbolLabel = formatValue(exposure.symbol ?? "—");
+  const sideLabel = formatValue(exposure.side ?? "—");
+  return (
+    <div className={`triage-panel-shell triage-exposure-card ${props.triage.position_posture === "In Position" ? "live" : "flat"}`}>
+      <div className="triage-panel-header">
+        <div>
+          <div className="section-subtitle">Current Exposure</div>
+          <div className="triage-panel-title">{props.triage.position_posture}</div>
+        </div>
+        <Badge label={exposure.truth_source.label} tone={postureTone} />
+      </div>
+      <div className="triage-exposure-hero">
+        <div className="triage-exposure-symbol">{symbolLabel}</div>
+        <div className="triage-exposure-summary">
+          {props.triage.position_posture === "In Position" ? `${sideLabel} • ${quantityLabel}` : "No open exposure"}
+        </div>
+      </div>
+      <div className="triage-kv-grid">
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Instrument</span>
+          <span className="triage-kv-value">{symbolLabel}</span>
+        </div>
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Side</span>
+          <span className="triage-kv-value">{sideLabel}</span>
+        </div>
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Quantity</span>
+          <span className="triage-kv-value">{quantityLabel}</span>
+        </div>
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Average / Basis</span>
+          <span className="triage-kv-value">{formatCompactPrice(exposure.average_price)}</span>
+        </div>
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Current Mark</span>
+          <span className="triage-kv-value">{formatCompactPrice(exposure.mark_price)}</span>
+        </div>
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Risk State</span>
+          <span className="triage-kv-value">{formatValue(exposure.risk_state ?? "Unavailable")}</span>
+        </div>
+      </div>
+      <div className="triage-panel-footnote">Last known update: {formatTimestamp(exposure.as_of)}</div>
+    </div>
+  );
+}
+
+function TodayPnLCard(props: { pnl: OperatorTriageTodayPnL }) {
+  const netTone = pnlTone(props.pnl.net);
+  return (
+    <div className={`triage-panel-shell triage-pnl-card ${netTone}`}>
+      <div className="triage-panel-header">
+        <div>
+          <div className="section-subtitle">Today P&amp;L</div>
+          <div className="triage-panel-title">{formatMaybePnL(props.pnl.net)}</div>
+        </div>
+        <Badge label={props.pnl.truth_source.label} tone="muted" />
+      </div>
+      <div className={`triage-pnl-hero ${netTone}`}>
+        <div className="triage-pnl-net-label">Current Net</div>
+        <div className="triage-pnl-net-value">{formatMaybePnL(props.pnl.net)}</div>
+      </div>
+      <div className="triage-kv-grid">
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Today Realized</span>
+          <span className="triage-kv-value">{formatMaybePnL(props.pnl.realized)}</span>
+        </div>
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Current Unrealized</span>
+          <span className="triage-kv-value">{formatMaybePnL(props.pnl.unrealized)}</span>
+        </div>
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Current Net</span>
+          <span className="triage-kv-value">{formatMaybePnL(props.pnl.net)}</span>
+        </div>
+        <div className="triage-kv-item">
+          <span className="triage-kv-label">Session Drawdown</span>
+          <span className="triage-kv-value">{formatMaybePnL(props.pnl.session_drawdown)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HardGatesPanel(props: { rows: TriageGateRowModel[]; runtimePosture: RuntimePostureState }) {
+  const failingCount = props.rows.filter((row) => row.status === "fail").length;
+  return (
+    <section className="section-card triage-gates-card">
+      <div className="section-header section-header-tight">
+        <div>
+          <div className="section-title">Hard Gates</div>
+          <div className="section-subtitle">
+            {failingCount ? `${failingCount} blocking hard gate${failingCount === 1 ? "" : "s"} require attention` : "All hard gates currently passing"}
+          </div>
+        </div>
+        <Badge label={`Runtime ${props.runtimePosture}`} tone={props.runtimePosture === "Ready" ? "good" : props.runtimePosture === "Faulted" ? "danger" : "warn"} />
+      </div>
+      <div className="triage-gate-list">
+        {props.rows.map((row) => {
+          const freshness = operatorTriageGateFreshnessLabel(row);
+          const failing = row.status === "fail";
+          return (
+          <div key={row.key} className={`triage-gate-row ${failing ? "fail" : "pass"} ${row.supplemental ? "has-supplemental" : ""}`}>
+            <div className="triage-gate-main">
+              <div className="triage-gate-title-row">
+                <div className="triage-gate-title-stack">
+                  <span className="triage-gate-title">{row.label}</span>
+                  {freshness ? <span className="triage-gate-inline-meta">{freshness}</span> : null}
+                </div>
+                <Badge label={failing ? "Fail" : "Pass"} tone={failing ? "danger" : "good"} />
+              </div>
+              {failing ? <div className="triage-gate-reason">{row.reason}</div> : null}
+            </div>
+            <div className="triage-gate-meta">
+              {row.supplemental ? <div className="triage-gate-supplemental">{row.supplemental}</div> : null}
+            </div>
+          </div>
+        );})}
+      </div>
+    </section>
+  );
+}
+
+function OutagePanel(props: {
+  positionPosture: PositionPostureState;
+  rootCause: string;
+  recoverySummary: string;
+  runbookPath: string | null | undefined;
+  brokerDeskPhone: string | null | undefined;
+  exposure: OperatorTriageCurrentExposure;
+  brokerTruthFreshness: string | null;
+  marketDataFreshness: string | null;
+}) {
+  const critical = props.positionPosture === "In Position";
+  return (
+    <section className={`section-card triage-outage-card ${critical ? "danger" : "warn"}`}>
+      <div className="triage-outage-header">
+        <div>
+          <div className="section-subtitle">Outage / Fallback</div>
+          <div className="triage-outage-title">{critical ? "Critical Outage" : "Live Trading Blocked"}</div>
+        </div>
+        <Badge label={critical ? "Critical" : "Review"} tone={critical ? "danger" : "warn"} />
+      </div>
+      <div className="triage-outage-lead">
+        {critical
+          ? "Manual fallback is required while live exposure remains open."
+          : "Live trading stays blocked until all failed hard gates recover."}
+      </div>
+      <div className="triage-outage-grid">
+        <div className="triage-detail-card">
+          <div className="triage-detail-label">Reason</div>
+          <div className="triage-detail-value">{props.rootCause}</div>
+        </div>
+        <div className="triage-detail-card">
+          <div className="triage-detail-label">{critical ? "Fallback Procedure" : "What Must Recover"}</div>
+          <div className="triage-detail-value">{props.recoverySummary}</div>
+          <div className="triage-detail-note">
+            {critical
+              ? props.runbookPath
+                ? `Runbook: ${props.runbookPath}`
+                : "Use the external broker-native fallback procedure; in-app exits stay fail-closed."
+              : "Live trade authority stays blocked until every failed hard gate recovers."}
+          </div>
+        </div>
+        {critical ? (
+          <>
+            <div className="triage-detail-card">
+              <div className="triage-detail-label">Broker Desk Phone</div>
+              <div className="triage-detail-value">{props.brokerDeskPhone ?? "Not configured"}</div>
+              <div className="triage-detail-note">Config hook placeholder for the future mobile / desktop shared operator model.</div>
+            </div>
+            <div className="triage-detail-card">
+              <div className="triage-detail-label">Last Known Exposure</div>
+              <div className="triage-detail-value">
+                {formatValue(props.exposure.symbol ?? "—")} {formatValue(props.exposure.side ?? "—")} {props.exposure.quantity !== null ? formatCompactMetric(props.exposure.quantity, 4) : "—"}
+              </div>
+              <div className="triage-detail-note">{formatTimestamp(props.exposure.as_of)}</div>
+            </div>
+          </>
+        ) : null}
+      </div>
+      <div className="triage-outage-footnote-row">
+        <span>Last known broker truth: {props.brokerTruthFreshness ?? "Unavailable"}</span>
+        <span>Last known market data: {props.marketDataFreshness ?? "Unavailable"}</span>
+      </div>
+    </section>
+  );
+}
+
+function LaneSummaryBar(props: {
+  live: number;
+  paperActive: number;
+  candidate: number;
+  blocked: number;
+  needsReview: number;
+  onOpenRoster: () => void;
+}) {
+  const stats = [
+    { label: "Live", value: formatShortNumber(props.live), tone: props.live > 0 ? "good" : "muted" as Tone },
+    { label: "Paper", value: formatShortNumber(props.paperActive), tone: props.paperActive > 0 ? "good" : "muted" as Tone },
+    { label: "Candidate", value: formatShortNumber(props.candidate), tone: props.candidate > 0 ? "warn" : "muted" as Tone },
+    { label: "Blocked", value: formatShortNumber(props.blocked), tone: props.blocked > 0 ? "danger" : "good" as Tone },
+    { label: "Review", value: formatShortNumber(props.needsReview), tone: props.needsReview > 0 ? "warn" : "good" as Tone },
+  ];
+  return (
+    <section className="section-card triage-summary-card triage-support-card">
+      <div className="triage-summary-header">
+        <div>
+          <div className="section-title">Lane Summary</div>
+          <div className="section-subtitle">Counts only on the landing page</div>
+        </div>
+        <button className="panel-button subtle" onClick={props.onOpenRoster}>
+          Open Strategy Roster
+        </button>
+      </div>
+      <div className="triage-summary-stat-row">
+        {stats.map((item) => (
+          <div key={item.label} className={`triage-summary-stat ${item.tone}`}>
+            <div className="triage-summary-stat-label">{item.label}</div>
+            <div className="triage-summary-stat-value">{item.value}</div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AlertsSummaryCard(props: {
+  activeCount: number;
+  lastMaterialEvent: JsonRecord | null;
+  recoveredCount: number;
+  onOpenTimeline: () => void;
+}) {
+  const materialTimestamp = props.lastMaterialEvent?.occurred_at ?? props.lastMaterialEvent?.logged_at ?? props.lastMaterialEvent?.timestamp;
+  const materialSummary = props.lastMaterialEvent
+    ? formatValue(props.lastMaterialEvent.message ?? props.lastMaterialEvent.summary ?? props.lastMaterialEvent.title ?? "Latest material event")
+    : "No material alert or timeline event is currently open.";
+  return (
+    <section className="section-card triage-summary-card triage-support-card">
+      <div className="triage-summary-header">
+        <div>
+          <div className="section-title">Alerts Summary</div>
+          <div className="section-subtitle">Compact alert visibility only</div>
+        </div>
+        <button className="panel-button subtle" onClick={props.onOpenTimeline}>
+          Open Timeline
+        </button>
+      </div>
+      <div className="triage-alerts-grid">
+        <div className={`triage-summary-stat ${props.activeCount > 0 ? "warn" : "good"}`}>
+          <div className="triage-summary-stat-label">Active Alerts</div>
+          <div className="triage-summary-stat-value">{formatShortNumber(props.activeCount)}</div>
+        </div>
+        <div className={`triage-summary-stat ${props.recoveredCount > 0 ? "good" : "muted"}`}>
+          <div className="triage-summary-stat-label">Recovered</div>
+          <div className="triage-summary-stat-value">{formatShortNumber(props.recoveredCount)}</div>
+        </div>
+        <div className="triage-alert-callout">
+          <div className="triage-detail-label">Last Material Event</div>
+          <div className="triage-detail-value">{materialSummary}</div>
+          <div className="triage-detail-note">{materialTimestamp ? formatTimestamp(materialTimestamp) : "No recent timestamp."}</div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function DashboardSystemsBand(props: {
+  tiles: DashboardSystemTileModel[];
+}) {
+  return (
+    <section className="section-card dashboard-band dashboard-systems-band">
+      <div className="dashboard-band-header">
+        <div>
+          <div className="section-title">Systems RAG</div>
+          <div className="section-subtitle">Compact health, impact, and nearby remediation</div>
+        </div>
+      </div>
+      <div className="dashboard-systems-grid">
+        {props.tiles.map((tile) => (
+          <div key={tile.key} className={`dashboard-system-tile ${tile.tone}`}>
+            <div className="dashboard-system-header">
+              <div>
+                <div className="dashboard-system-label">{tile.label}</div>
+                <div className="dashboard-system-status">{tile.status}</div>
+              </div>
+              <Badge label={tile.ragLabel} tone={tile.tone} />
+            </div>
+            <div className="dashboard-system-summary">{tile.summary}</div>
+            <div className="dashboard-system-meta">
+              {tile.freshness ? <span>{tile.freshness}</span> : null}
+              {tile.tone !== "good" && tile.impact ? <span>{tile.impact}</span> : null}
+            </div>
+            <div className="dashboard-system-actions">
+              {tile.actions.slice(0, 2).map((action) => (
+                <DashboardBandActionButton key={`${tile.key}-${action.label}`} {...action} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DashboardAttentionBand(props: {
+  issues: DashboardIssueModel[];
+}) {
+  if (!props.issues.length) {
+    return (
+      <section className="section-card dashboard-band dashboard-attention-band quiet">
+        <div className="dashboard-band-header">
+          <div>
+            <div className="section-title">Attention / Remediation</div>
+            <div className="section-subtitle">No action required right now</div>
+          </div>
+          <Badge label="Quiet" tone="good" />
+        </div>
+      </section>
+    );
+  }
+  return (
+    <section className="section-card dashboard-band dashboard-attention-band">
+      <div className="dashboard-band-header">
+        <div>
+          <div className="section-title">Attention / Remediation</div>
+          <div className="section-subtitle">Current issues with direct next steps nearby</div>
+        </div>
+      </div>
+      <div className="dashboard-issue-list">
+        {props.issues.map((issue) => (
+          <div key={issue.key} className={`dashboard-issue-card ${issue.tone}`}>
+            <div className="dashboard-issue-header">
+              <div>
+                <div className="dashboard-issue-title">{issue.title}</div>
+                <div className="dashboard-issue-impact">{issue.impact}</div>
+              </div>
+              <Badge label={issue.statusLabel} tone={issue.tone} />
+            </div>
+            {issue.summary ? <div className="dashboard-issue-summary">{issue.summary}</div> : null}
+            <div className="dashboard-issue-actions">
+              {issue.actions.slice(0, 2).map((action) => (
+                <DashboardBandActionButton key={`${issue.key}-${action.label}`} {...action} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DashboardDetailBand(props: {
+  cards: DashboardDetailCardModel[];
+}) {
+  return (
+    <section className="section-card dashboard-band dashboard-detail-band">
+      <div className="dashboard-band-header">
+        <div>
+          <div className="section-title">Detail / Diagnostics</div>
+          <div className="section-subtitle">Supporting summaries stay quiet until you need deeper surfaces</div>
+        </div>
+      </div>
+      <div className="dashboard-detail-grid">
+        {props.cards.map((card) => (
+          <div key={card.key} className="dashboard-detail-card">
+            <div className="dashboard-detail-kicker">{card.kicker}</div>
+            <div className="dashboard-detail-title">{card.title}</div>
+            <div className="dashboard-detail-summary">{card.summary}</div>
+            <div className="dashboard-detail-stats">
+              {card.stats.map((stat) => (
+                <div key={`${card.key}-${stat.label}`} className={`dashboard-detail-stat ${stat.tone ?? "muted"}`}>
+                  <span className="dashboard-detail-stat-label">{stat.label}</span>
+                  <span className="dashboard-detail-stat-value">{stat.value}</span>
+                </div>
+              ))}
+            </div>
+            {card.notes?.length ? (
+              <div className="dashboard-detail-notes">
+                {card.notes.slice(0, 3).map((note) => (
+                  <div key={`${card.key}-${note}`} className="dashboard-detail-note">{note}</div>
+                ))}
+              </div>
+            ) : null}
+            <div className="dashboard-detail-actions">
+              {card.actions.slice(0, 2).map((action) => (
+                <DashboardBandActionButton key={`${card.key}-${action.label}`} {...action} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OperatorAuthorityBadge(props: {
+  authState: JsonRecord;
+  desktopAuthState: JsonRecord;
+}) {
+  const available = props.authState.available !== false || props.desktopAuthState.auth_available === true;
+  const sessionActive = props.authState.auth_session_active === true || props.desktopAuthState.auth_session_active === true;
+  const expiresAt = props.authState.auth_session_expires_at ?? props.desktopAuthState.auth_session_expires_at;
+  const entryAllowed = props.authState.entry_allowed !== false;
+  const flattenAllowed = props.authState.flatten_allowed !== false;
+  const sensitiveActionsAllowed = entryAllowed && flattenAllowed;
+  return (
+    <div className="triage-authority-badges">
+      <span className={`triage-authority-chip ${available ? "good" : "danger"}`}>{available ? "Auth Available" : "Auth Unavailable"}</span>
+      <span className={`triage-authority-chip ${sessionActive ? "good" : "warn"}`}>{sessionActive ? "Session Active" : "Session Inactive"}</span>
+      <span className={`triage-authority-chip ${sensitiveActionsAllowed ? "good" : "warn"}`}>
+        {sensitiveActionsAllowed ? "Sensitive Actions Allowed" : "Sensitive Actions Limited"}
+      </span>
+      <span className="triage-authority-expiry">
+        Expires: {formatTimestamp(expiresAt)}
+      </span>
+    </div>
+  );
+}
+
 function Section(props: { title: string; subtitle?: string; children: ReactNode; className?: string; headerClassName?: string }) {
   if (currentSectionPageContext && PRIMARY_WORKSTATION_PAGES.has(currentSectionPageContext) && EVIDENCE_ONLY_SECTION_TITLES.has(props.title)) {
     return null;
@@ -18721,12 +20297,13 @@ function PaperStartupPanel(props: {
 }
 
 function DataTable(props: {
-  columns: Array<{ key: string; label: string; render?: (row: JsonRecord) => ReactNode }>;
+  columns: Array<{ key: string; label: string; render?: (row: JsonRecord) => ReactNode; className?: string }>;
   rows: JsonRecord[];
   emptyLabel: string;
   onRowClick?: (row: JsonRecord) => void;
   rowKey?: (row: JsonRecord, index: number) => string;
   selectedRowKey?: string;
+  tableClassName?: string;
 }) {
   const rows = useMemo(() => props.rows ?? [], [props.rows]);
   if (!rows.length) {
@@ -18734,11 +20311,11 @@ function DataTable(props: {
   }
   return (
     <div className="table-shell">
-      <table className="data-table">
+      <table className={`data-table ${props.tableClassName ?? ""}`.trim()}>
         <thead>
           <tr>
             {props.columns.map((column) => (
-              <th key={column.key}>{column.label}</th>
+              <th key={column.key} className={column.className}>{column.label}</th>
             ))}
           </tr>
         </thead>
@@ -18752,7 +20329,7 @@ function DataTable(props: {
               onClick={props.onRowClick ? () => props.onRowClick?.(row) : undefined}
             >
               {props.columns.map((column) => (
-                <td key={column.key}>{column.render ? column.render(row) : formatValue(row[column.key])}</td>
+                <td key={column.key} className={column.className}>{column.render ? column.render(row) : formatValue(row[column.key])}</td>
               ))}
             </tr>
           );
@@ -20831,6 +22408,1456 @@ function UnifiedStrategyAnalysis({
   );
 }
 
+type UnifiedMonitorMode = "comparison" | "charts" | "leaderboard" | "rollup" | "data_quality";
+type UnifiedChartMode = "overlay" | "aggregate" | "small_multiples";
+type UnifiedCurveKey =
+  | "cumulative_realized_pnl"
+  | "normalized_equity_indexed_zero"
+  | "drawdown"
+  | "cumulative_trade_count"
+  | "rolling_average_trade";
+type UnifiedNormalizationMode = "absolute_dollars" | "per_trade" | "per_contract" | "indexed_to_zero";
+type UnifiedRollupFrequency = "daily" | "weekly";
+type UnifiedSortDirection = "asc" | "desc";
+
+const UNIFIED_MONITOR_MODE_LABELS: Record<UnifiedMonitorMode, string> = {
+  comparison: "Comparison",
+  charts: "Charts",
+  leaderboard: "Leaderboard",
+  rollup: "Rollup",
+  data_quality: "Data Quality",
+};
+
+const UNIFIED_MONITOR_CURVE_LABELS: Record<UnifiedCurveKey, string> = {
+  cumulative_realized_pnl: "Cumulative Realized P/L",
+  normalized_equity_indexed_zero: "Normalized Equity",
+  drawdown: "Drawdown",
+  cumulative_trade_count: "Cumulative Trade Count",
+  rolling_average_trade: "Rolling Avg Trade",
+};
+
+const UNIFIED_MONITOR_GROUP_LABELS: Record<string, string> = {
+  strategy_class: "Strategy Class",
+  instrument: "Instrument",
+  family: "Family",
+  evidence_lane_type: "Evidence",
+  session_scope: "Session Scope",
+};
+
+const UNIFIED_MONITOR_COLORS = [
+  "#6ee7b7",
+  "#60a5fa",
+  "#f59e0b",
+  "#f472b6",
+  "#a78bfa",
+  "#fb7185",
+  "#34d399",
+  "#f97316",
+  "#2dd4bf",
+  "#c084fc",
+];
+
+function UnifiedStrategyMonitorPage(props: { unifiedMonitor: JsonRecord }) {
+  const unifiedMonitor = props.unifiedMonitor;
+  const comparisonRows = asArray<JsonRecord>(unifiedMonitor.comparison_rows);
+  const grouping = asRecord(unifiedMonitor.grouping);
+  const selectionContract = asRecord(unifiedMonitor.selection_contract);
+  const chartSeries = asRecord(unifiedMonitor.chart_series);
+  const detailViews = asRecord(asRecord(unifiedMonitor.detail_views).by_lane_id);
+  const leaderboardViews = asRecord(asRecord(unifiedMonitor.leaderboard_views).rankings);
+  const rollupViews = asRecord(asRecord(unifiedMonitor.rollup_views).by_lane_id);
+  const dataQualityReport = asRecord(unifiedMonitor.data_quality_report);
+  const identityExceptions = asRecord(unifiedMonitor.identity_exceptions);
+  const availableGroupKeys = asArray(grouping.available_group_keys).map((value) => String(value ?? "")).filter(Boolean);
+  const defaultGroupKeys = asArray(grouping.default_group_keys).map((value) => String(value ?? "")).filter(Boolean);
+  const sortContract = asRecord(unifiedMonitor.sort_contract);
+  const sortableFields = asArray(sortContract.sortable_fields).map((value) => String(value ?? "")).filter(Boolean);
+  const defaultSort = asRecord(sortContract.default_sort);
+  const viewModes = asRecord(unifiedMonitor.view_modes);
+  const selectionDefaults = asRecord(selectionContract.default_selection_behavior);
+
+  const [activeMode, setActiveMode] = useState<UnifiedMonitorMode>(String(viewModes.default ?? "comparison") as UnifiedMonitorMode);
+  const [chartMode, setChartMode] = useState<UnifiedChartMode>("overlay");
+  const [curveKey, setCurveKey] = useState<UnifiedCurveKey>("cumulative_realized_pnl");
+  const [normalizationMode, setNormalizationMode] = useState<UnifiedNormalizationMode>("absolute_dollars");
+  const [rollupFrequency, setRollupFrequency] = useState<UnifiedRollupFrequency>("daily");
+  const [leaderboardField, setLeaderboardField] = useState("realized_pnl");
+  const [sortField, setSortField] = useState(String(defaultSort.field ?? "display_name"));
+  const [sortDirection, setSortDirection] = useState<UnifiedSortDirection>(String(defaultSort.direction ?? "asc") as UnifiedSortDirection);
+  const [groupByPrimary, setGroupByPrimary] = useState(defaultGroupKeys[0] ?? "strategy_class");
+  const [groupBySecondary, setGroupBySecondary] = useState(defaultGroupKeys[1] ?? "instrument");
+  const [groupByTertiary, setGroupByTertiary] = useState(defaultGroupKeys[2] ?? "family");
+  const [selectedStrategyClass, setSelectedStrategyClass] = useState("all");
+  const [selectedInstrument, setSelectedInstrument] = useState("all");
+  const [selectedFamily, setSelectedFamily] = useState("all");
+  const [selectedEvidenceType, setSelectedEvidenceType] = useState("all");
+  const [selectedSessionScope, setSelectedSessionScope] = useState("all");
+  const [showTemporaryPaper, setShowTemporaryPaper] = useState(selectionDefaults.include_temporary_paper !== false);
+  const [showLegacyBenchmarks, setShowLegacyBenchmarks] = useState(selectionDefaults.include_legacy_benchmarks !== false);
+  const [timePreset, setTimePreset] = useState("since_2024_01_01");
+  const [customStart, setCustomStart] = useState("2024-01-01");
+  const [customEnd, setCustomEnd] = useState("");
+  const [selectedLaneIds, setSelectedLaneIds] = useState<string[]>([]);
+  const [selectionTouched, setSelectionTouched] = useState(false);
+  const [expandedGroupIds, setExpandedGroupIds] = useState<string[]>([]);
+  const [selectedDetailLaneId, setSelectedDetailLaneId] = useState("");
+  const [detailPanelOpen, setDetailPanelOpen] = useState(false);
+  const [comparisonDensity, setComparisonDensity] = useState<"comfortable" | "compact">("comfortable");
+  const [attentionFirst, setAttentionFirst] = useState(true);
+
+  const strategyClassOptions = useMemo(() => unifiedMonitorOptionsFromRows(comparisonRows, "strategy_class"), [comparisonRows]);
+  const instrumentOptions = useMemo(() => unifiedMonitorOptionsFromRows(comparisonRows, "instrument"), [comparisonRows]);
+  const familyOptions = useMemo(() => unifiedMonitorOptionsFromRows(comparisonRows, "family"), [comparisonRows]);
+  const evidenceOptions = useMemo(() => unifiedMonitorOptionsFromRows(comparisonRows, "evidence_lane_type"), [comparisonRows]);
+  const sessionOptions = useMemo(() => unifiedMonitorSessionOptions(comparisonRows), [comparisonRows]);
+  const groupKeys = useMemo(
+    () => [groupByPrimary, groupBySecondary, groupByTertiary].filter((value, index, values) => value !== "none" && value && values.indexOf(value) === index),
+    [groupByPrimary, groupBySecondary, groupByTertiary],
+  );
+  const visibleRows = useMemo(
+    () =>
+      comparisonRows.filter((row) => {
+        if (!showTemporaryPaper && String(row.strategy_class ?? "") === "temporary_paper") {
+          return false;
+        }
+        if (!showLegacyBenchmarks && String(row.strategy_class ?? "") === "legacy_benchmark") {
+          return false;
+        }
+        if (selectedStrategyClass !== "all" && String(row.strategy_class ?? "") !== selectedStrategyClass) {
+          return false;
+        }
+        if (selectedInstrument !== "all" && String(row.instrument ?? "") !== selectedInstrument) {
+          return false;
+        }
+        if (selectedFamily !== "all" && String(row.family ?? "") !== selectedFamily) {
+          return false;
+        }
+        if (selectedEvidenceType !== "all" && String(row.evidence_lane_type ?? "") !== selectedEvidenceType) {
+          return false;
+        }
+        if (selectedSessionScope !== "all" && !asArray(row.session_scope).map((value) => String(value ?? "")).includes(selectedSessionScope)) {
+          return false;
+        }
+        return true;
+      }),
+    [
+      comparisonRows,
+      selectedEvidenceType,
+      selectedFamily,
+      selectedInstrument,
+      selectedSessionScope,
+      selectedStrategyClass,
+      showLegacyBenchmarks,
+      showTemporaryPaper,
+    ],
+  );
+  const visibleLaneIds = useMemo(
+    () => visibleRows.map((row) => String(row.lane_id ?? "")).filter(Boolean),
+    [visibleRows],
+  );
+
+  useEffect(() => {
+    setExpandedGroupIds(
+      asArray(grouping.default_group_tree)
+        .map((row) => String(asRecord(row).group_id ?? ""))
+        .filter(Boolean),
+    );
+  }, [grouping.default_group_tree]);
+
+  useEffect(() => {
+    if (!selectionTouched) {
+      setSelectedLaneIds(visibleLaneIds);
+      return;
+    }
+    setSelectedLaneIds((current) => current.filter((laneId) => visibleLaneIds.includes(laneId)));
+  }, [selectionTouched, visibleLaneIds]);
+
+  useEffect(() => {
+    if (!visibleLaneIds.length) {
+      setSelectedDetailLaneId("");
+      return;
+    }
+    if (!selectedDetailLaneId || !visibleLaneIds.includes(selectedDetailLaneId)) {
+      setSelectedDetailLaneId(visibleLaneIds[0]);
+    }
+  }, [selectedDetailLaneId, visibleLaneIds]);
+
+  const selectedRows = useMemo(
+    () => visibleRows.filter((row) => selectedLaneIds.includes(String(row.lane_id ?? ""))),
+    [selectedLaneIds, visibleRows],
+  );
+  const groupTree = useMemo(
+    () => unifiedMonitorBuildGroupTree(visibleRows, groupKeys, sortField, sortDirection, attentionFirst),
+    [attentionFirst, groupKeys, sortDirection, sortField, visibleRows],
+  );
+  const grandTotals = useMemo(() => unifiedMonitorAggregateRows(selectedRows), [selectedRows]);
+  const selectedDetailRow = selectedRows.find((row) => String(row.lane_id ?? "") === selectedDetailLaneId)
+    ?? visibleRows.find((row) => String(row.lane_id ?? "") === selectedDetailLaneId)
+    ?? selectedRows[0]
+    ?? visibleRows[0]
+    ?? null;
+  const selectedDetailView = selectedDetailRow ? asRecord(detailViews[String(selectedDetailRow.lane_id ?? "")]) : null;
+  const activeWindow = useMemo(
+    () => unifiedMonitorWindow(timePreset, customStart, customEnd),
+    [customEnd, customStart, timePreset],
+  );
+  const activeFilterSummary = useMemo(() => {
+    const parts = [
+      selectedStrategyClass !== "all" ? `Class=${sentenceCase(selectedStrategyClass.replace(/_/g, " "))}` : null,
+      selectedInstrument !== "all" ? `Instrument=${selectedInstrument}` : null,
+      selectedFamily !== "all" ? `Family=${selectedFamily}` : null,
+      selectedEvidenceType !== "all" ? `Evidence=${sentenceCase(selectedEvidenceType.replace(/_/g, " "))}` : null,
+      selectedSessionScope !== "all" ? `Session=${selectedSessionScope}` : null,
+      showTemporaryPaper ? null : "Temporary Paper Hidden",
+      showLegacyBenchmarks ? null : "Legacy Hidden",
+    ].filter(Boolean);
+    return parts.length ? parts.join(" | ") : "No additional filters";
+  }, [
+    selectedEvidenceType,
+    selectedFamily,
+    selectedInstrument,
+    selectedSessionScope,
+    selectedStrategyClass,
+    showLegacyBenchmarks,
+    showTemporaryPaper,
+  ]);
+  const selectionSummaryLabel = useMemo(() => {
+    const parts = [
+      `${selectedRows.length} selected of ${visibleRows.length} visible`,
+      activeWindow.label,
+      sentenceCase(chartMode.replace(/_/g, " ")),
+      activeFilterSummary === "No additional filters" ? "No extra filters" : activeFilterSummary,
+    ];
+    return parts.join(" · ");
+  }, [activeFilterSummary, activeWindow.label, chartMode, selectedRows.length, visibleRows.length]);
+  const aggregateChartState = useMemo(
+    () => unifiedMonitorAggregateChartState(selectedRows, chartSeries, curveKey, activeWindow, normalizationMode),
+    [activeWindow, chartSeries, curveKey, normalizationMode, selectedRows],
+  );
+  const overlaySeries = useMemo(
+    () => unifiedMonitorOverlaySeries(selectedRows, chartSeries, curveKey, activeWindow, normalizationMode),
+    [activeWindow, chartSeries, curveKey, normalizationMode, selectedRows],
+  );
+  const smallMultiplesSeries = useMemo(
+    () => overlaySeries.slice(0, 12),
+    [overlaySeries],
+  );
+  const chartDensityNote = useMemo(() => {
+    if (chartMode === "overlay" && overlaySeries.length > 12) {
+      return `Showing the first 12 of ${overlaySeries.length} supported selected lanes in overlay mode. Use filters, aggregate, or small multiples to reduce density.`;
+    }
+    if (chartMode === "small_multiples" && overlaySeries.length > 12) {
+      return `Showing the first 12 of ${overlaySeries.length} supported selected lanes in small multiples mode. Narrow the selection or use grouping filters for a cleaner comparison.`;
+    }
+    if ((chartMode === "overlay" || chartMode === "small_multiples") && selectedRows.length > overlaySeries.length && overlaySeries.length > 0) {
+      return `${overlaySeries.length} of ${selectedRows.length} selected lanes currently publish a supported ${UNIFIED_MONITOR_CURVE_LABELS[curveKey]} series for this window. Use Data Quality to inspect support gaps.`;
+    }
+    return null;
+  }, [chartMode, curveKey, overlaySeries.length, selectedRows.length]);
+  const leaderboardRows = useMemo(
+    () => unifiedMonitorLeaderboardRows(selectedRows, leaderboardField),
+    [leaderboardField, selectedRows],
+  );
+  const rollupRows = useMemo(
+    () => unifiedMonitorRollupRows(selectedRows, rollupViews, rollupFrequency),
+    [rollupFrequency, rollupViews, selectedRows],
+  );
+  const dataQualityRows = useMemo(
+    () => unifiedMonitorDataQualityRows(visibleRows),
+    [visibleRows],
+  );
+  const staleOrFaultCount = useMemo(
+    () =>
+      selectedRows.filter((row) => {
+        const status = asRecord(row.status);
+        return status.fault_present === true || String(status.freshness_state ?? "") === "stale";
+      }).length,
+    [selectedRows],
+  );
+  const openDetailForLane = useCallback((laneId: string) => {
+    setSelectedDetailLaneId(laneId);
+    setDetailPanelOpen(true);
+  }, []);
+  const liveOrFaultedCount = useMemo(
+    () =>
+      selectedRows.filter((row) => {
+        const status = asRecord(row.status);
+        return String(row.evidence_lane_type ?? "") === "paper_runtime"
+          || status.fault_present === true;
+      }).length,
+    [selectedRows],
+  );
+  const openRiskCount = useMemo(
+    () => selectedRows.filter((row) => !["", "FLAT", "UNKNOWN"].includes(String(row.position_side ?? "FLAT"))).length,
+    [selectedRows],
+  );
+
+  return (
+    <div className="unified-monitor-shell">
+      <div className="unified-monitor-tabs">
+        {(asArray(viewModes.available).map((value) => String(value ?? "")) as UnifiedMonitorMode[])
+          .filter((value) => ["comparison", "charts", "leaderboard", "rollup", "data_quality"].includes(value))
+          .map((mode) => (
+            <button
+              key={mode}
+              className={`panel-button ${activeMode === mode ? "" : "subtle"}`.trim()}
+              onClick={() => setActiveMode(mode)}
+            >
+              {UNIFIED_MONITOR_MODE_LABELS[mode]}
+            </button>
+          ))}
+      </div>
+
+      <div className="notice-strip compact unified-monitor-subtitle unified-monitor-subtitle-operator">
+        <div>{selectionSummaryLabel}</div>
+      </div>
+
+      <div className="unified-monitor-toolbar">
+        <div className="study-workbench-controls">
+          <label className="study-select-field">
+            <span>Group 1</span>
+            <select value={groupByPrimary} onChange={(event) => setGroupByPrimary(event.target.value)}>
+              {availableGroupKeys.map((value) => (
+                <option key={value} value={value}>{UNIFIED_MONITOR_GROUP_LABELS[value] ?? value}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Group 2</span>
+            <select value={groupBySecondary} onChange={(event) => setGroupBySecondary(event.target.value)}>
+              <option value="none">None</option>
+              {availableGroupKeys.map((value) => (
+                <option key={value} value={value}>{UNIFIED_MONITOR_GROUP_LABELS[value] ?? value}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Group 3</span>
+            <select value={groupByTertiary} onChange={(event) => setGroupByTertiary(event.target.value)}>
+              <option value="none">None</option>
+              {availableGroupKeys.map((value) => (
+                <option key={value} value={value}>{UNIFIED_MONITOR_GROUP_LABELS[value] ?? value}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Strategy Class</span>
+            <select value={selectedStrategyClass} onChange={(event) => setSelectedStrategyClass(event.target.value)}>
+              <option value="all">All</option>
+              {strategyClassOptions.map((value) => (
+                <option key={value} value={value}>{sentenceCase(value.replace(/_/g, " "))}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Instrument</span>
+            <select value={selectedInstrument} onChange={(event) => setSelectedInstrument(event.target.value)}>
+              <option value="all">All</option>
+              {instrumentOptions.map((value) => (
+                <option key={value} value={value}>{value}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Family</span>
+            <select value={selectedFamily} onChange={(event) => setSelectedFamily(event.target.value)}>
+              <option value="all">All</option>
+              {familyOptions.map((value) => (
+                <option key={value} value={value}>{value}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Evidence</span>
+            <select value={selectedEvidenceType} onChange={(event) => setSelectedEvidenceType(event.target.value)}>
+              <option value="all">All</option>
+              {evidenceOptions.map((value) => (
+                <option key={value} value={value}>{sentenceCase(value.replace(/_/g, " "))}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Session</span>
+            <select value={selectedSessionScope} onChange={(event) => setSelectedSessionScope(event.target.value)}>
+              <option value="all">All</option>
+              {sessionOptions.map((value) => (
+                <option key={value} value={value}>{value}</option>
+              ))}
+            </select>
+          </label>
+          <label className="study-select-field">
+            <span>Window</span>
+            <select value={timePreset} onChange={(event) => setTimePreset(event.target.value)}>
+              <option value="since_2024_01_01">Since 2024-01-01</option>
+              <option value="ytd">YTD</option>
+              <option value="last_90_days">Last 90 Days</option>
+              <option value="last_30_days">Last 30 Days</option>
+              <option value="current_month">Current Month</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          {timePreset === "custom" ? (
+            <>
+              <label className="study-select-field">
+                <span>Start</span>
+                <input type="date" value={customStart} onChange={(event) => setCustomStart(event.target.value)} />
+              </label>
+              <label className="study-select-field">
+                <span>End</span>
+                <input type="date" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)} />
+              </label>
+            </>
+          ) : null}
+        </div>
+        <div className="action-row inline unified-monitor-toggle-row">
+          {activeMode === "comparison" ? (
+            <label className="study-select-field unified-monitor-density-field">
+              <span>Density</span>
+              <select value={comparisonDensity} onChange={(event) => setComparisonDensity(event.target.value as "comfortable" | "compact")}>
+                <option value="comfortable">Comfortable</option>
+                <option value="compact">Compact</option>
+              </select>
+            </label>
+          ) : null}
+          {activeMode === "comparison" ? (
+            <label className="checkbox-inline unified-monitor-attention-toggle">
+              <input type="checkbox" checked={attentionFirst} onChange={(event) => setAttentionFirst(event.target.checked)} />
+              Attention First
+            </label>
+          ) : null}
+          <label className="checkbox-inline">
+            <input type="checkbox" checked={showTemporaryPaper} onChange={(event) => setShowTemporaryPaper(event.target.checked)} />
+            Temp
+          </label>
+          <label className="checkbox-inline">
+            <input type="checkbox" checked={showLegacyBenchmarks} onChange={(event) => setShowLegacyBenchmarks(event.target.checked)} />
+            Legacy
+          </label>
+          <button className="panel-button subtle" onClick={() => { setSelectionTouched(true); setSelectedLaneIds(visibleLaneIds); }}>
+            Select Visible
+          </button>
+          <button className="panel-button subtle" onClick={() => { setSelectionTouched(true); setSelectedLaneIds([]); }}>
+            Clear Selection
+          </button>
+          {activeMode === "comparison" && detailPanelOpen ? (
+            <button className="panel-button subtle" onClick={() => setDetailPanelOpen(false)}>
+              Hide Detail
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="metric-grid unified-monitor-summary-strip unified-monitor-summary-strip-compact">
+        <MetricCard label="Selected Lanes" value={formatShortNumber(selectedRows.length)} tone={selectedRows.length ? "good" : "warn"} />
+        <MetricCard label="Net P/L" value={unifiedMonitorMetricDisplay(grandTotals.net_pnl)} tone={unifiedMonitorPnlTone(grandTotals.net_pnl?.value)} />
+        <MetricCard label="Trades" value={unifiedMonitorMetricDisplay(grandTotals.trade_count)} tone="muted" />
+        <MetricCard label="Live / Faulted" value={`${formatShortNumber(liveOrFaultedCount)} / ${formatShortNumber(selectedRows.filter((row) => asRecord(row.status).fault_present === true).length)}`} tone={staleOrFaultCount > 0 ? "warn" : "good"} />
+        <MetricCard label="Open Risk" value={formatShortNumber(openRiskCount)} tone={openRiskCount > 0 ? "warn" : "good"} />
+      </div>
+
+      <div className={`split-panel unified-monitor-layout ${activeMode === "comparison" && detailPanelOpen ? "has-detail" : "detail-closed"}`.trim()}>
+        <div>
+          {activeMode === "comparison" ? (
+            <UnifiedMonitorComparisonTable
+              rows={visibleRows}
+              groupTree={groupTree}
+              selectedLaneIds={selectedLaneIds}
+              expandedGroupIds={expandedGroupIds}
+              selectedDetailLaneId={selectedDetailLaneId}
+              sortField={sortField}
+              sortDirection={sortDirection}
+              sortableFields={sortableFields}
+              onToggleLane={(laneId) => {
+                setSelectionTouched(true);
+                setSelectedLaneIds((current) => current.includes(laneId) ? current.filter((value) => value !== laneId) : [...current, laneId]);
+              }}
+              onToggleGroup={(laneIds) => {
+                setSelectionTouched(true);
+                setSelectedLaneIds((current) => {
+                  const allSelected = laneIds.every((laneId) => current.includes(laneId));
+                  if (allSelected) {
+                    return current.filter((laneId) => !laneIds.includes(laneId));
+                  }
+                  return Array.from(new Set([...current, ...laneIds]));
+                });
+              }}
+              onToggleExpanded={(groupId) => setExpandedGroupIds((current) => current.includes(groupId) ? current.filter((value) => value !== groupId) : [...current, groupId])}
+              onSort={(field) => {
+                if (sortField === field) {
+                  setSortDirection((current) => current === "asc" ? "desc" : "asc");
+                  return;
+                }
+                setSortField(field);
+                setSortDirection("asc");
+              }}
+              onSelectDetailLane={openDetailForLane}
+              density={comparisonDensity}
+            />
+          ) : null}
+
+          {activeMode === "charts" ? (
+            <div className="results-board-panel">
+              <div className="study-toolbar">
+                <div className="study-workbench-controls">
+                  <label className="study-select-field">
+                    <span>Series</span>
+                    <select value={curveKey} onChange={(event) => setCurveKey(event.target.value as UnifiedCurveKey)}>
+                      {Object.entries(UNIFIED_MONITOR_CURVE_LABELS).map(([key, label]) => (
+                        <option key={key} value={key}>{label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="study-select-field">
+                    <span>Chart Mode</span>
+                    <select value={chartMode} onChange={(event) => setChartMode(event.target.value as UnifiedChartMode)}>
+                      <option value="overlay">Overlay</option>
+                      <option value="aggregate">Aggregate</option>
+                      <option value="small_multiples">Small Multiples</option>
+                    </select>
+                  </label>
+                  <label className="study-select-field">
+                    <span>Normalization</span>
+                    <select value={normalizationMode} onChange={(event) => setNormalizationMode(event.target.value as UnifiedNormalizationMode)}>
+                      <option value="absolute_dollars">Absolute Dollars</option>
+                      <option value="indexed_to_zero">Indexed To Zero</option>
+                      <option value="per_trade">Per Trade</option>
+                      <option value="per_contract">Per Contract</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div className="notice-strip compact unified-monitor-subtitle">
+                <div>{selectionSummaryLabel}</div>
+                <div><strong>Chart note:</strong> {chartMode === "aggregate" ? aggregateChartState.note : "Overlay preserves lane-level dispersion and provenance boundaries."}</div>
+                {chartDensityNote ? <div><strong>Density note:</strong> {chartDensityNote}</div> : null}
+              </div>
+              {chartMode === "small_multiples" ? (
+                <div className="unified-monitor-small-multiples">
+                  {smallMultiplesSeries.length ? smallMultiplesSeries.map((series, index) => (
+                    <UnifiedMonitorLineChart
+                      key={series.id}
+                      title={series.label}
+                      subtitle={UNIFIED_MONITOR_CURVE_LABELS[curveKey]}
+                      series={[{ ...series, color: UNIFIED_MONITOR_COLORS[index % UNIFIED_MONITOR_COLORS.length] }]}
+                      emptyLabel="No supported curve data is available for this lane and window."
+                    />
+                  )) : <div className="placeholder-note">No selected lanes published a supported series for this chart and window.</div>}
+                </div>
+              ) : (
+                <UnifiedMonitorLineChart
+                  title={chartMode === "aggregate" ? "Aggregate Monitor Curves" : "Selected Strategy Curves"}
+                  subtitle={UNIFIED_MONITOR_CURVE_LABELS[curveKey]}
+                  series={(chartMode === "aggregate" ? aggregateChartState.series : overlaySeries).map((series, index) => ({
+                    ...series,
+                    color: UNIFIED_MONITOR_COLORS[index % UNIFIED_MONITOR_COLORS.length],
+                  }))}
+                  emptyLabel="No selected lanes published a supported series for this chart and window."
+                />
+              )}
+            </div>
+          ) : null}
+
+          {activeMode === "leaderboard" ? (
+            <div className="results-board-panel">
+              <div className="study-toolbar">
+                <div className="study-workbench-controls">
+                  <label className="study-select-field">
+                    <span>Rank By</span>
+                    <select value={leaderboardField} onChange={(event) => setLeaderboardField(event.target.value)}>
+                      {Object.keys(asRecord(leaderboardViews)).map((key) => (
+                        <option key={key} value={key}>{sentenceCase(key.replace(/_/g, " "))}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <DataTable
+                columns={[
+                  { key: "display_name", label: "Display Name" },
+                  { key: "instrument", label: "Instrument" },
+                  { key: "family", label: "Family" },
+                  { key: "realized_pnl", label: "Realized", render: (row) => renderPnlValue(row.realized_pnl) },
+                  { key: "net_pnl", label: "Net", render: (row) => renderPnlValue(row.net_pnl) },
+                  { key: "trade_count", label: "Trades", render: (row) => formatShortNumber(Number(row.trade_count ?? 0)) },
+                  { key: "latest_update_timestamp", label: "Latest Update", render: (row) => formatTimestamp(row.latest_update_timestamp) },
+                  { key: "freshness", label: "Freshness", render: (row) => <Badge label={String(asRecord(row.freshness).state ?? "unknown")} tone={unifiedMonitorFreshnessTone(String(asRecord(row.freshness).state ?? ""))} /> },
+                ]}
+                rows={leaderboardRows}
+                emptyLabel="No rows are available for the current selection."
+                onRowClick={(row) => openDetailForLane(String(row.lane_id ?? ""))}
+                rowKey={(row) => String(row.lane_id ?? row.strategy_key ?? "")}
+                selectedRowKey={selectedDetailLaneId}
+              />
+            </div>
+          ) : null}
+
+          {activeMode === "rollup" ? (
+            <div className="results-board-panel">
+              <div className="study-toolbar">
+                <div className="study-workbench-controls">
+                  <label className="study-select-field">
+                    <span>Frequency</span>
+                    <select value={rollupFrequency} onChange={(event) => setRollupFrequency(event.target.value as UnifiedRollupFrequency)}>
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <DataTable
+                columns={[
+                  { key: "bucket", label: rollupFrequency === "daily" ? "Day" : "Week" },
+                  { key: "lane_count", label: "Lanes", render: (row) => formatShortNumber(Number(row.lane_count ?? 0)) },
+                  { key: "realized_pnl", label: "Realized", render: (row) => renderPnlValue(row.realized_pnl) },
+                  { key: "trade_count", label: "Trades", render: (row) => formatShortNumber(Number(row.trade_count ?? 0)) },
+                ]}
+                rows={rollupRows}
+                emptyLabel="No rollup rows are available for the current selection."
+                rowKey={(row) => `${rollupFrequency}:${String(row.bucket ?? "")}`}
+              />
+            </div>
+          ) : null}
+
+          {activeMode === "data_quality" ? (
+            <div className="results-board-panel">
+              <div className="split-panel">
+                <div>
+                  <h3 className="subsection-title">Support Gaps</h3>
+                  <DataTable
+                    columns={[
+                      { key: "display_name", label: "Display Name" },
+                      { key: "lane_id", label: "Lane ID" },
+                      { key: "strategy_class", label: "Class", render: (row) => sentenceCase(String(row.strategy_class ?? "").replace(/_/g, " ")) },
+                      { key: "evidence_lane_type", label: "Evidence", render: (row) => sentenceCase(String(row.evidence_lane_type ?? "").replace(/_/g, " ")) },
+                      { key: "freshness_state", label: "Freshness", render: (row) => <Badge label={String(asRecord(row.status).freshness_state ?? "unknown")} tone={unifiedMonitorFreshnessTone(String(asRecord(row.status).freshness_state ?? ""))} /> },
+                      { key: "blocking_gap_note", label: "Gap", render: (row) => formatValue(row.blocking_gap_note ?? "None") },
+                    ]}
+                    rows={dataQualityRows}
+                    emptyLabel="No data-quality rows are available for the current selection."
+                    rowKey={(row) => String(row.lane_id ?? "")}
+                    onRowClick={(row) => openDetailForLane(String(row.lane_id ?? ""))}
+                    selectedRowKey={selectedDetailLaneId}
+                  />
+                </div>
+                <div>
+                  <h3 className="subsection-title">Identity Exceptions</h3>
+                  <JsonBlock
+                    value={{
+                      possible_duplicates: asArray(identityExceptions.possible_duplicates),
+                      naming_mismatches: asArray(identityExceptions.naming_mismatches),
+                      incomplete_mapping_candidates: asArray(identityExceptions.incomplete_mapping_candidates),
+                      low_confidence_strategy_keys: asArray(identityExceptions.low_confidence_strategy_keys),
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {activeMode === "comparison" && detailPanelOpen ? (
+        <aside className="results-side-panel unified-monitor-detail-panel">
+          <div className="results-side-header">
+            <div>
+              <div className="page-eyebrow">Drill-through Detail</div>
+              <div className="section-title">{formatValue(selectedDetailRow?.display_name ?? "Choose a lane")}</div>
+              <div className="section-subtitle">{formatValue(selectedDetailRow?.lane_id ?? "No lane selected")}</div>
+            </div>
+            <button className="panel-button subtle" onClick={() => setDetailPanelOpen(false)}>Close</button>
+          </div>
+          {selectedDetailRow && selectedDetailView ? (
+            <>
+              <div className="metric-grid">
+                <MetricCard label="Runtime Health" value={sentenceCase(String(asRecord(selectedDetailRow.status).runtime_health ?? "unknown"))} tone={unifiedMonitorRuntimeTone(String(asRecord(selectedDetailRow.status).runtime_health ?? ""))} />
+                <MetricCard label="Position" value={formatValue(selectedDetailRow.position_side ?? "FLAT")} tone={["LONG", "SHORT"].includes(String(selectedDetailRow.position_side ?? "")) ? "warn" : "good"} />
+                <MetricCard label="Freshness" value={sentenceCase(String(asRecord(selectedDetailRow.status).freshness_state ?? "unknown"))} tone={unifiedMonitorFreshnessTone(String(asRecord(selectedDetailRow.status).freshness_state ?? ""))} />
+                <MetricCard label="Fault" value={asRecord(selectedDetailRow.status).fault_present === true ? "Present" : "None"} tone={asRecord(selectedDetailRow.status).fault_present === true ? "danger" : "good"} />
+              </div>
+              <div className="notice-strip compact">
+                <div><strong>Class:</strong> {sentenceCase(String(selectedDetailRow.strategy_class ?? "").replace(/_/g, " "))}</div>
+                <div><strong>Evidence:</strong> {sentenceCase(String(selectedDetailRow.evidence_lane_type ?? "").replace(/_/g, " "))}</div>
+                <div><strong>Session Scope:</strong> {formatValue(selectedDetailRow.session_scope_label ?? "—")}</div>
+              </div>
+              <div className="split-panel">
+                <div>
+                  <h3 className="subsection-title">Identity / Classification</h3>
+                  <JsonBlock
+                    value={{
+                      identity: asRecord(selectedDetailView.identity),
+                      classification: asRecord(selectedDetailView.classification),
+                      provenance: asRecord(selectedDetailView.provenance),
+                    }}
+                  />
+                </div>
+                <div>
+                  <h3 className="subsection-title">Metric Support</h3>
+                  <JsonBlock value={selectedDetailView.metric_support ?? {}} />
+                </div>
+              </div>
+              <div className="split-panel">
+                <div>
+                  <h3 className="subsection-title">Recent Signals / Intents</h3>
+                  <JsonBlock
+                    value={{
+                      recent_signals: asArray(selectedDetailView.recent_signals),
+                      recent_order_intents: asArray(selectedDetailView.recent_order_intents),
+                    }}
+                  />
+                </div>
+                <div>
+                  <h3 className="subsection-title">Recent Fills / State</h3>
+                  <JsonBlock
+                    value={{
+                      recent_fills: asArray(selectedDetailView.recent_fills),
+                      recent_state_snapshots: asArray(selectedDetailView.recent_state_snapshots),
+                      recent_trade_summaries: asArray(selectedDetailView.recent_trade_summaries),
+                    }}
+                  />
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="placeholder-note">Select a visible lane to inspect identity, support, and recent evidence.</div>
+          )}
+        </aside>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function UnifiedMonitorComparisonTable(props: {
+  rows: JsonRecord[];
+  groupTree: JsonRecord[];
+  selectedLaneIds: string[];
+  expandedGroupIds: string[];
+  selectedDetailLaneId: string;
+  density: "comfortable" | "compact";
+  sortField: string;
+  sortDirection: UnifiedSortDirection;
+  sortableFields: string[];
+  onToggleLane: (laneId: string) => void;
+  onToggleGroup: (laneIds: string[]) => void;
+  onToggleExpanded: (groupId: string) => void;
+  onSort: (field: string) => void;
+  onSelectDetailLane: (laneId: string) => void;
+}) {
+  const columns = [
+    { key: "display_name", label: "Name" },
+    { key: "strategy_class", label: "Class" },
+    { key: "instrument", label: "Instrument" },
+    { key: "current_status", label: "Status" },
+    { key: "position_side", label: "Position" },
+    { key: "realized_pnl", label: "Realized" },
+    { key: "net_pnl", label: "Net" },
+    { key: "trade_count", label: "Trades" },
+    { key: "latest_update_timestamp", label: "Updated" },
+  ];
+  return (
+    <div className={`table-shell unified-monitor-table-shell unified-monitor-density-${props.density}`.trim()}>
+      <table className="data-table unified-monitor-table unified-monitor-table-readable">
+        <thead>
+          <tr>
+            <th>Select</th>
+            {columns.map((column) => (
+              <th
+                key={column.key}
+                className={props.sortableFields.includes(column.key) ? "is-clickable" : ""}
+                onClick={props.sortableFields.includes(column.key) ? () => props.onSort(column.key) : undefined}
+              >
+                {column.label}
+                {props.sortField === column.key ? ` ${props.sortDirection === "asc" ? "↑" : "↓"}` : ""}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {props.groupTree.length ? props.groupTree.map((group) => (
+            <UnifiedMonitorGroupRows
+              key={String(group.groupId ?? group.group_id)}
+              group={group}
+              selectedLaneIds={props.selectedLaneIds}
+              expandedGroupIds={props.expandedGroupIds}
+              selectedDetailLaneId={props.selectedDetailLaneId}
+              density={props.density}
+              onToggleLane={props.onToggleLane}
+              onToggleGroup={props.onToggleGroup}
+              onToggleExpanded={props.onToggleExpanded}
+              onSelectDetailLane={props.onSelectDetailLane}
+            />
+          )) : (
+            <tr>
+              <td colSpan={columns.length + 1}>
+                <div className="placeholder-note">No strategy lanes match the current filters.</div>
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function UnifiedMonitorGroupRows(props: {
+  group: JsonRecord;
+  selectedLaneIds: string[];
+  expandedGroupIds: string[];
+  selectedDetailLaneId: string;
+  density: "comfortable" | "compact";
+  onToggleLane: (laneId: string) => void;
+  onToggleGroup: (laneIds: string[]) => void;
+  onToggleExpanded: (groupId: string) => void;
+  onSelectDetailLane: (laneId: string) => void;
+}) {
+  const groupId = String(props.group.groupId ?? props.group.group_id ?? "");
+  const childGroups = asArray<JsonRecord>(props.group.children);
+  const rows = asArray<JsonRecord>(props.group.rows);
+  const laneIds = asArray(props.group.child_lane_ids).map((value) => String(value ?? "")).filter(Boolean);
+  const selectedCount = laneIds.filter((laneId) => props.selectedLaneIds.includes(laneId)).length;
+  const expanded = props.expandedGroupIds.includes(groupId);
+  const allRows = asArray<JsonRecord>(props.group.all_rows);
+  const subtotal = asRecord(unifiedMonitorAggregateRows(allRows.filter((row) => props.selectedLaneIds.includes(String(row.lane_id ?? "")))));
+  const statusSummary = asRecord(props.group.statusSummary);
+
+  return (
+    <>
+      <tr className="unified-monitor-group-row">
+        <td>
+          <input type="checkbox" checked={selectedCount > 0 && selectedCount === laneIds.length} onChange={() => props.onToggleGroup(laneIds)} />
+        </td>
+        <td colSpan={9}>
+          <div className="unified-monitor-group-header">
+            <div className="unified-monitor-group-title">
+              <button className="panel-button subtle unified-monitor-collapse" onClick={() => props.onToggleExpanded(groupId)}>
+                {expanded ? "−" : "+"}
+              </button>
+              <div>
+              <strong>{formatValue(props.group.label ?? props.group.group_value ?? "Group")}</strong>
+              {" "}
+              <span className="section-subtitle">
+                {formatShortNumber(Number(props.group.childCount ?? rows.length))}
+                {" "}children | {formatShortNumber(selectedCount)} selected
+              </span>
+              </div>
+            </div>
+            <div className="unified-monitor-group-metrics">
+              <span>Realized {unifiedMonitorMetricDisplay(asRecord(subtotal.realized_pnl))}</span>
+              <span>Net {unifiedMonitorMetricDisplay(asRecord(subtotal.net_pnl))}</span>
+              <span>Trades {unifiedMonitorMetricDisplay(asRecord(subtotal.trade_count))}</span>
+              <span>Stale {formatShortNumber(Number(statusSummary.stale_count ?? 0))}</span>
+              <span>Fault {formatShortNumber(Number(statusSummary.fault_count ?? 0))}</span>
+            </div>
+          </div>
+        </td>
+      </tr>
+      {expanded ? childGroups.map((child) => (
+        <UnifiedMonitorGroupRows
+          key={String(child.groupId ?? child.group_id)}
+          group={child}
+          selectedLaneIds={props.selectedLaneIds}
+          expandedGroupIds={props.expandedGroupIds}
+          selectedDetailLaneId={props.selectedDetailLaneId}
+          density={props.density}
+          onToggleLane={props.onToggleLane}
+          onToggleGroup={props.onToggleGroup}
+          onToggleExpanded={props.onToggleExpanded}
+          onSelectDetailLane={props.onSelectDetailLane}
+        />
+      )) : null}
+      {expanded ? rows.map((row) => {
+        const laneId = String(row.lane_id ?? "");
+        const status = asRecord(row.status);
+        const hasOpenPosition = !["", "FLAT", "UNKNOWN"].includes(String(row.position_side ?? "FLAT"));
+        const isStale = String(status.freshness_state ?? "") === "stale";
+        const hasFault = status.fault_present === true;
+        const hasNetPnl = (() => {
+          const metric = asRecord(asRecord(row.metrics).net_pnl);
+          return metric.supported === true && typeof metric.value === "number" && Math.abs(metric.value) > 0;
+        })();
+        return (
+          <tr
+            key={laneId}
+            className={`is-clickable unified-monitor-row ${props.selectedDetailLaneId === laneId ? "is-selected" : ""} ${hasOpenPosition ? "has-open-position" : ""} ${isStale ? "is-stale" : ""} ${hasFault ? "has-fault" : ""} ${hasNetPnl ? "has-net-pnl" : "is-quiet"}`.trim()}
+            onClick={() => props.onSelectDetailLane(laneId)}
+          >
+            <td>
+              <input
+                type="checkbox"
+                checked={props.selectedLaneIds.includes(laneId)}
+                onChange={(event) => {
+                  event.stopPropagation();
+                  props.onToggleLane(laneId);
+                }}
+              />
+            </td>
+            <td className="unified-monitor-name-cell">
+              <div className="unified-monitor-row-name">{formatValue(row.display_name ?? row.strategy_key)}</div>
+              <div className="unified-monitor-row-subtitle">{formatValue(row.family ?? "—")}</div>
+            </td>
+            <td>{sentenceCase(String(row.strategy_class ?? "").replace(/_/g, " "))}</td>
+            <td>{formatValue(row.instrument ?? "—")}</td>
+            <td><UnifiedMonitorStatusCell row={row} /></td>
+            <td>{formatValue(row.position_side ?? "FLAT")}</td>
+            <td>{unifiedMonitorMainTableMetricDisplay(asRecord(asRecord(row.metrics).realized_pnl))}</td>
+            <td>{unifiedMonitorMainTableMetricDisplay(asRecord(asRecord(row.metrics).net_pnl))}</td>
+            <td>{unifiedMonitorMainTableMetricDisplay(asRecord(asRecord(row.metrics).trade_count))}</td>
+            <td>{formatTimestamp(row.latest_update_timestamp)}</td>
+          </tr>
+        );
+      }) : null}
+    </>
+  );
+}
+
+function UnifiedMonitorStatusCell(props: { row: JsonRecord }) {
+  const status = asRecord(props.row.status);
+  const runtimeHealth = String(status.runtime_health ?? "unknown");
+  const freshness = String(status.freshness_state ?? "unknown");
+  const position = String(props.row.position_side ?? "FLAT");
+  const faultPresent = status.fault_present === true;
+  const livePosition = !["", "FLAT", "UNKNOWN"].includes(position);
+  return (
+    <div className="unified-monitor-status-cell" title={`Runtime ${runtimeHealth} • ${position} • ${freshness}${faultPresent ? " • fault present" : ""}`}>
+      <span className={`unified-monitor-status-dot tone-${unifiedMonitorRuntimeTone(runtimeHealth)}`} />
+      <span className={`unified-monitor-position-chip ${livePosition ? "is-live" : "is-flat"}`}>{position}</span>
+      {freshness !== "fresh" ? <span className={`unified-monitor-status-chip tone-${unifiedMonitorFreshnessTone(freshness)}`}>{sentenceCase(freshness)}</span> : null}
+      {faultPresent ? <span className="unified-monitor-status-fault">Fault</span> : null}
+    </div>
+  );
+}
+
+function UnifiedMonitorLineChart(props: {
+  title: string;
+  subtitle: string;
+  series: Array<{ id: string; label: string; points: Array<{ ts: string; value: number }>; color?: string }>;
+  emptyLabel: string;
+}) {
+  const populatedSeries = props.series.filter((series) => series.points.length > 0);
+  if (!populatedSeries.length) {
+    return <div className="placeholder-note">{props.emptyLabel}</div>;
+  }
+  const width = 1080;
+  const height = 360;
+  const marginLeft = 50;
+  const marginRight = 24;
+  const marginTop = 28;
+  const marginBottom = 42;
+  const plotWidth = width - marginLeft - marginRight;
+  const plotHeight = height - marginTop - marginBottom;
+  const timestamps = populatedSeries.flatMap((series) => series.points.map((point) => new Date(point.ts).getTime())).filter(Number.isFinite);
+  const values = populatedSeries.flatMap((series) => series.points.map((point) => point.value)).filter((value) => Number.isFinite(value));
+  const minTs = Math.min(...timestamps);
+  const maxTs = Math.max(...timestamps);
+  const minValue = Math.min(...values, 0);
+  const maxValue = Math.max(...values, 0);
+  const rangeTs = Math.max(maxTs - minTs, 1);
+  const rangeValue = Math.max(maxValue - minValue, 1);
+  const xFor = (ts: string) => marginLeft + ((new Date(ts).getTime() - minTs) / rangeTs) * plotWidth;
+  const yFor = (value: number) => marginTop + ((maxValue - value) / rangeValue) * plotHeight;
+  const tickTimes = timestamps.length <= 5
+    ? timestamps
+    : [minTs, minTs + rangeTs * 0.25, minTs + rangeTs * 0.5, minTs + rangeTs * 0.75, maxTs];
+
+  return (
+    <div className="calendar-chart-shell unified-monitor-chart-shell">
+      <div className="calendar-chart-header">
+        <div>
+          <div className="subsection-title">{props.title}</div>
+          <div className="section-subtitle">{props.subtitle}</div>
+        </div>
+        <div className="calendar-chart-legend">
+          {populatedSeries.map((series) => (
+            <span key={series.id} className="calendar-legend-item">
+              <span className="calendar-legend-swatch" style={{ background: series.color ?? "#6ee7b7" }} />
+              {series.label}
+            </span>
+          ))}
+        </div>
+      </div>
+      <svg className="calendar-history-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={props.title}>
+        <line x1={marginLeft} y1={marginTop} x2={marginLeft} y2={height - marginBottom} className="calendar-axis-line" />
+        <line x1={marginLeft} y1={height - marginBottom} x2={width - marginRight} y2={height - marginBottom} className="calendar-axis-line" />
+        <line x1={marginLeft} y1={yFor(0)} x2={width - marginRight} y2={yFor(0)} className="calendar-zero-line" />
+        {tickTimes.map((tick) => (
+          <g key={tick}>
+            <line x1={marginLeft + ((tick - minTs) / rangeTs) * plotWidth} y1={marginTop} x2={marginLeft + ((tick - minTs) / rangeTs) * plotWidth} y2={height - marginBottom} className="calendar-grid-line" />
+            <text x={marginLeft + ((tick - minTs) / rangeTs) * plotWidth} y={height - 14} className="calendar-axis-label" textAnchor="middle">
+              {new Date(tick).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+            </text>
+          </g>
+        ))}
+        {populatedSeries.map((series) => {
+          const path = series.points
+            .map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.ts).toFixed(2)} ${yFor(point.value).toFixed(2)}`)
+            .join(" ");
+          return <path key={series.id} d={path} fill="none" stroke={series.color ?? "#6ee7b7"} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />;
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function unifiedMonitorOptionsFromRows(rows: JsonRecord[], key: string): string[] {
+  return Array.from(new Set(rows.map((row) => String(row[key] ?? "")).filter(Boolean))).sort((left, right) => left.localeCompare(right));
+}
+
+function unifiedMonitorSessionOptions(rows: JsonRecord[]): string[] {
+  return Array.from(
+    new Set(
+      rows.flatMap((row) => asArray(row.session_scope).map((value) => String(value ?? "")).filter(Boolean)),
+    ),
+  ).sort((left, right) => left.localeCompare(right));
+}
+
+function unifiedMonitorBuildGroupTree(
+  rows: JsonRecord[],
+  groupKeys: string[],
+  sortField: string,
+  sortDirection: UnifiedSortDirection,
+  attentionFirst: boolean,
+  depth = 0,
+  parentGroupId = "",
+): JsonRecord[] {
+  if (!groupKeys.length || depth >= groupKeys.length) {
+    return [];
+  }
+  const key = groupKeys[depth];
+  const grouped = new Map<string, JsonRecord[]>();
+  rows.forEach((row) => {
+    const groupValues = asRecord(row.group_values);
+    const value = String(groupValues[key] ?? "UNKNOWN");
+    const bucket = grouped.get(value) ?? [];
+    bucket.push(row);
+    grouped.set(value, bucket);
+  });
+  return Array.from(grouped.entries())
+    .sort((left, right) => {
+      if (attentionFirst) {
+        const score = unifiedMonitorAttentionScore(right[1]) - unifiedMonitorAttentionScore(left[1]);
+        if (score !== 0) {
+          return score;
+        }
+      }
+      return left[0].localeCompare(right[0]);
+    })
+    .map(([groupValue, groupRows]) => {
+      const groupId = parentGroupId ? `${parentGroupId}|${key}:${groupValue}` : `${key}:${groupValue}`;
+      const sortedRows = [...groupRows].sort((left, right) => unifiedMonitorCompareRows(left, right, sortField, sortDirection, attentionFirst));
+      const childGroups = depth + 1 < groupKeys.length ? unifiedMonitorBuildGroupTree(sortedRows, groupKeys, sortField, sortDirection, attentionFirst, depth + 1, groupId) : [];
+      const descendantLaneIds = childGroups.length
+        ? childGroups.flatMap((child) => asArray(child.child_lane_ids).map((value) => String(value ?? "")).filter(Boolean))
+        : sortedRows.map((row) => String(row.lane_id ?? "")).filter(Boolean);
+      return {
+        groupId,
+        group_key: key,
+        group_value: groupValue,
+        label: groupValue,
+        depth,
+        all_rows: sortedRows,
+        rows: childGroups.length ? [] : sortedRows,
+        children: childGroups,
+        child_lane_ids: descendantLaneIds,
+        childCount: descendantLaneIds.length,
+        subtotal: unifiedMonitorAggregateRows(sortedRows),
+        statusSummary: {
+          stale_count: sortedRows.filter((row) => String(asRecord(row.status).freshness_state ?? "") === "stale").length,
+          fault_count: sortedRows.filter((row) => asRecord(row.status).fault_present === true).length,
+          open_position_count: sortedRows.filter((row) => !["", "FLAT", "UNKNOWN"].includes(String(row.position_side ?? "FLAT"))).length,
+        },
+      };
+    });
+}
+
+function unifiedMonitorCompareRows(left: JsonRecord, right: JsonRecord, field: string, direction: UnifiedSortDirection, attentionFirst = false): number {
+  if (attentionFirst) {
+    const attentionDelta = unifiedMonitorAttentionScore([right]) - unifiedMonitorAttentionScore([left]);
+    if (attentionDelta !== 0) {
+      return attentionDelta;
+    }
+  }
+  const leftValue = unifiedMonitorSortValue(left, field);
+  const rightValue = unifiedMonitorSortValue(right, field);
+  if (leftValue === rightValue) {
+    return String(left.display_name ?? "").localeCompare(String(right.display_name ?? ""));
+  }
+  if (leftValue === null) {
+    return 1;
+  }
+  if (rightValue === null) {
+    return -1;
+  }
+  const result = typeof leftValue === "number" && typeof rightValue === "number"
+    ? leftValue - rightValue
+    : String(leftValue).localeCompare(String(rightValue));
+  return direction === "asc" ? result : -result;
+}
+
+function unifiedMonitorSortValue(row: JsonRecord, field: string): string | number | null {
+  if (field === "freshness_state") {
+    const value = String(asRecord(row.status).freshness_state ?? "");
+    return value ? (value === "fresh" ? 0 : value === "stale" ? 1 : 2) : null;
+  }
+  if (field === "current_status") {
+    return String(row.current_status ?? "") || null;
+  }
+  if (["realized_pnl", "open_pnl", "net_pnl", "trade_count", "win_rate", "average_trade", "max_drawdown", "profit_factor"].includes(field)) {
+    const metric = asRecord(asRecord(row.metrics)[field]);
+    return metric.supported === true && typeof metric.value === "number" ? Number(metric.value) : null;
+  }
+  if (field === "latest_update_timestamp") {
+    return row.latest_update_timestamp ? new Date(String(row.latest_update_timestamp)).getTime() : null;
+  }
+  if (field === "instrument" || field === "family" || field === "display_name" || field === "strategy_class" || field === "evidence_lane_type") {
+    return String(row[field] ?? "") || null;
+  }
+  return null;
+}
+
+function unifiedMonitorAttentionScore(rows: JsonRecord[]): number {
+  return rows.reduce((score, row) => {
+    const status = asRecord(row.status);
+    if (status.fault_present === true) {
+      score += 100;
+    }
+    if (String(status.freshness_state ?? "") === "stale") {
+      score += 60;
+    }
+    if (!["", "FLAT", "UNKNOWN"].includes(String(row.position_side ?? "FLAT"))) {
+      score += 40;
+    }
+    const netMetric = asRecord(asRecord(row.metrics).net_pnl);
+    if (netMetric.supported === true && typeof netMetric.value === "number" && Math.abs(netMetric.value) > 0) {
+      score += 20;
+    }
+    if (!row.latest_update_timestamp) {
+      score += 10;
+    }
+    return score;
+  }, 0);
+}
+
+function unifiedMonitorAggregateRows(rows: JsonRecord[]): Record<string, JsonRecord> {
+  const realizedSupported = rows.length > 0 && rows.every((row) => asRecord(asRecord(row.metrics).realized_pnl).supported === true && Number.isFinite(Number(row.realized_pnl)));
+  const realizedValues = realizedSupported ? rows.map((row) => Number(row.realized_pnl)) : [];
+  const openSupported = rows.length > 0 && rows.every((row) => asRecord(asRecord(row.metrics).open_pnl).supported === true && Number.isFinite(Number(row.open_pnl)));
+  const openValues = openSupported ? rows.map((row) => Number(row.open_pnl)) : [];
+  const netSupported = rows.length > 0 && rows.every((row) => asRecord(asRecord(row.metrics).net_pnl).supported === true && Number.isFinite(Number(row.net_pnl)));
+  const netValues = netSupported ? rows.map((row) => Number(row.net_pnl)) : [];
+  const tradeSupported = rows.length > 0 && rows.every((row) => asRecord(asRecord(row.metrics).trade_count).supported === true && Number.isFinite(Number(row.trade_count)));
+  const tradeCount = tradeSupported ? rows.reduce((sum, row) => sum + Number(row.trade_count ?? 0), 0) : 0;
+  const winnerCount = rows.reduce((sum, row) => sum + Number(row.winner_count ?? 0), 0);
+  const loserCount = rows.reduce((sum, row) => sum + Number(row.loser_count ?? 0), 0);
+  const grossWinValues = rows.map((row) => Number(row.gross_win_pnl)).filter((value) => Number.isFinite(value));
+  const grossLossValues = rows.map((row) => Number(row.gross_loss_pnl_abs)).filter((value) => Number.isFinite(value));
+  const averageTrade = realizedSupported && tradeSupported && tradeCount ? (realizedValues.reduce((sum, value) => sum + value, 0) / tradeCount) : null;
+  const winRate = tradeCount && (winnerCount || loserCount) ? (winnerCount / tradeCount) * 100 : null;
+  const profitFactor = grossWinValues.length === rows.length && grossLossValues.length === rows.length
+    ? (grossLossValues.reduce((sum, value) => sum + value, 0) > 0
+      ? grossWinValues.reduce((sum, value) => sum + value, 0) / grossLossValues.reduce((sum, value) => sum + value, 0)
+      : null)
+    : null;
+  return {
+    realized_pnl: { value: realizedSupported ? realizedValues.reduce((sum, value) => sum + value, 0) : null, supported: realizedSupported, rule: "sum" },
+    open_pnl: { value: openSupported ? openValues.reduce((sum, value) => sum + value, 0) : null, supported: openSupported, rule: "conditional_sum" },
+    net_pnl: { value: netSupported ? netValues.reduce((sum, value) => sum + value, 0) : null, supported: netSupported, rule: "sum" },
+    trade_count: { value: tradeCount, supported: tradeSupported, rule: "sum" },
+    win_rate: { value: winRate, supported: winRate !== null, rule: "recompute_from_trade_counts" },
+    average_trade: { value: averageTrade, supported: averageTrade !== null, rule: "recompute_from_realized_and_trade_count" },
+    max_drawdown: { value: null, supported: false, rule: "recompute_from_aggregate_curve" },
+    profit_factor: { value: profitFactor, supported: profitFactor !== null, rule: "recompute_from_gross_win_loss" },
+  };
+}
+
+function unifiedMonitorMetricDisplay(metric: JsonRecord | undefined, options?: { percent?: boolean }): ReactNode {
+  const metricRecord = asRecord(metric);
+  if (metricRecord.supported !== true) {
+    return "Unavailable";
+  }
+  const value = metricRecord.value;
+  if (typeof value === "number") {
+    if (options?.percent) {
+      return `${value.toFixed(1)}%`;
+    }
+    if (Math.abs(value) >= 1000 || Math.abs(value) < 1) {
+      return formatMaybePnL(value);
+    }
+    return Number.isInteger(value) ? formatShortNumber(value) : value.toFixed(2);
+  }
+  return formatValue(value ?? "Unavailable");
+}
+
+function unifiedMonitorMainTableMetricDisplay(metric: JsonRecord | undefined, options?: { percent?: boolean }): ReactNode {
+  const metricRecord = asRecord(metric);
+  if (metricRecord.supported !== true) {
+    return <span title={String(metricRecord.reason ?? "Unsupported in current evidence lane.")}>—</span>;
+  }
+  return unifiedMonitorMetricDisplay(metricRecord, options);
+}
+
+function unifiedMonitorPnlTone(value: unknown): Tone {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "muted";
+  }
+  return pnlTone(value);
+}
+
+function unifiedMonitorRuntimeTone(label: string): Tone {
+  if (label === "healthy") {
+    return "good";
+  }
+  if (label === "faulted") {
+    return "danger";
+  }
+  if (label === "degraded") {
+    return "warn";
+  }
+  return "muted";
+}
+
+function unifiedMonitorFreshnessTone(label: string): Tone {
+  if (label === "fresh") {
+    return "good";
+  }
+  if (label === "stale") {
+    return "warn";
+  }
+  if (label === "snapshot") {
+    return "muted";
+  }
+  return "muted";
+}
+
+function unifiedMonitorWindow(preset: string, customStart: string, customEnd: string): { startMs: number | null; endMs: number | null; label: string } {
+  const now = new Date();
+  if (preset === "ytd") {
+    return { startMs: new Date(now.getFullYear(), 0, 1).getTime(), endMs: null, label: "YTD" };
+  }
+  if (preset === "last_90_days") {
+    return { startMs: now.getTime() - 90 * 24 * 60 * 60 * 1000, endMs: null, label: "Last 90 Days" };
+  }
+  if (preset === "last_30_days") {
+    return { startMs: now.getTime() - 30 * 24 * 60 * 60 * 1000, endMs: null, label: "Last 30 Days" };
+  }
+  if (preset === "current_month") {
+    return { startMs: new Date(now.getFullYear(), now.getMonth(), 1).getTime(), endMs: null, label: "Current Month" };
+  }
+  if (preset === "custom") {
+    return {
+      startMs: customStart ? new Date(`${customStart}T00:00:00`).getTime() : null,
+      endMs: customEnd ? new Date(`${customEnd}T23:59:59`).getTime() : null,
+      label: customEnd ? `${customStart} -> ${customEnd}` : customStart || "Custom",
+    };
+  }
+  return { startMs: new Date("2024-01-01T00:00:00").getTime(), endMs: null, label: "Since 2024-01-01" };
+}
+
+function unifiedMonitorOverlaySeries(
+  rows: JsonRecord[],
+  chartSeries: JsonRecord,
+  curveKey: UnifiedCurveKey,
+  window: { startMs: number | null; endMs: number | null },
+  normalizationMode: UnifiedNormalizationMode,
+): Array<{ id: string; label: string; points: Array<{ ts: string; value: number }> }> {
+  return rows
+    .map((row) => {
+      const laneId = String(row.lane_id ?? "");
+      const chart = asRecord(asRecord(chartSeries.series_by_lane_id)[laneId]);
+      const support = asRecord(chart.support);
+      if (support[curveKey] !== true) {
+        return null;
+      }
+      const points = unifiedMonitorNormalizeCurve(
+        unifiedMonitorFilterCurve(asArray<JsonRecord>(asRecord(chart.curves)[curveKey]), window),
+        curveKey,
+        normalizationMode,
+        asArray<JsonRecord>(asRecord(chart.curves).cumulative_trade_count),
+      );
+      if (!points.length) {
+        return null;
+      }
+      return {
+        id: laneId,
+        label: String(row.display_name ?? laneId),
+        points,
+      };
+    })
+    .filter((value): value is { id: string; label: string; points: Array<{ ts: string; value: number }> } => value !== null);
+}
+
+function unifiedMonitorAggregateChartState(
+  rows: JsonRecord[],
+  chartSeries: JsonRecord,
+  curveKey: UnifiedCurveKey,
+  window: { startMs: number | null; endMs: number | null },
+  normalizationMode: UnifiedNormalizationMode,
+): {
+  series: Array<{ id: string; label: string; points: Array<{ ts: string; value: number }> }>;
+  note: string;
+} {
+  const grouped = new Map<string, Array<{ row: JsonRecord; chart: JsonRecord }>>();
+  rows.forEach((row) => {
+    const laneId = String(row.lane_id ?? "");
+    const chart = asRecord(asRecord(chartSeries.series_by_lane_id)[laneId]);
+    if (!chart || asRecord(chart.support)[curveKey] !== true) {
+      return;
+    }
+    const bucket = String(row.evidence_lane_type ?? "unknown");
+    const current = grouped.get(bucket) ?? [];
+    current.push({ row, chart });
+    grouped.set(bucket, current);
+  });
+  const series = Array.from(grouped.entries()).map(([bucket, entries]) => ({
+    id: `aggregate:${bucket}`,
+    label: `${sentenceCase(bucket.replace(/_/g, " "))} aggregate`,
+    points: unifiedMonitorAggregateCurve(entries, curveKey, window, normalizationMode),
+  })).filter((entry) => entry.points.length);
+  const note = grouped.size > 1
+    ? "Selected lanes span multiple provenance buckets, so aggregate mode shows separate provenance-safe aggregates instead of a fake combined curve."
+    : grouped.size === 1
+      ? `Aggregate mode is summing only ${sentenceCase(Array.from(grouped.keys())[0].replace(/_/g, " "))} lanes.`
+      : "No compatible selected lanes published an aggregate-safe curve.";
+  return { series, note };
+}
+
+function unifiedMonitorAggregateCurve(
+  entries: Array<{ row: JsonRecord; chart: JsonRecord }>,
+  curveKey: UnifiedCurveKey,
+  window: { startMs: number | null; endMs: number | null },
+  normalizationMode: UnifiedNormalizationMode,
+): Array<{ ts: string; value: number }> {
+  if (!entries.length) {
+    return [];
+  }
+  if (curveKey === "rolling_average_trade") {
+    return [];
+  }
+  const curveEntries = entries.map((entry) => {
+    const curves = asRecord(entry.chart.curves);
+    const selectedCurve = curveKey === "drawdown" ? asArray<JsonRecord>(curves.cumulative_realized_pnl) : asArray<JsonRecord>(curves[curveKey]);
+    return {
+      baseCurve: unifiedMonitorFilterCurve(selectedCurve, window),
+      tradeCurve: unifiedMonitorFilterCurve(asArray<JsonRecord>(curves.cumulative_trade_count), window),
+    };
+  });
+  const timestamps = Array.from(new Set(curveEntries.flatMap((entry) => entry.baseCurve.map((point) => String(point.ts ?? ""))).filter(Boolean))).sort();
+  const raw = timestamps.map((ts) => {
+    let total = 0;
+    let totalTrades = 0;
+    curveEntries.forEach((entry) => {
+      total += unifiedMonitorValueAtOrBefore(entry.baseCurve, ts);
+      totalTrades += unifiedMonitorValueAtOrBefore(entry.tradeCurve, ts);
+    });
+    if (normalizationMode === "per_trade") {
+      return { ts, value: totalTrades > 0 ? total / totalTrades : 0 };
+    }
+    return { ts, value: total };
+  });
+  if (curveKey === "drawdown") {
+    let peak = Number.NEGATIVE_INFINITY;
+    return raw.map((point) => {
+      peak = Math.max(peak, point.value);
+      return { ts: point.ts, value: point.value - peak };
+    });
+  }
+  if (normalizationMode === "indexed_to_zero" && raw.length) {
+    const base = raw[0].value;
+    return raw.map((point) => ({ ts: point.ts, value: point.value - base }));
+  }
+  if (normalizationMode === "per_contract") {
+    return [];
+  }
+  return raw;
+}
+
+function unifiedMonitorFilterCurve(points: JsonRecord[], window: { startMs: number | null; endMs: number | null }): Array<{ ts: string; value: number }> {
+  return points
+    .map((point) => ({ ts: String(point.ts ?? ""), value: Number(point.value) }))
+    .filter((point) => point.ts && Number.isFinite(point.value))
+    .filter((point) => {
+      const ts = new Date(point.ts).getTime();
+      if (window.startMs !== null && ts < window.startMs) {
+        return false;
+      }
+      if (window.endMs !== null && ts > window.endMs) {
+        return false;
+      }
+      return true;
+    });
+}
+
+function unifiedMonitorNormalizeCurve(
+  points: Array<{ ts: string; value: number }>,
+  curveKey: UnifiedCurveKey,
+  normalizationMode: UnifiedNormalizationMode,
+  tradeCountCurve: JsonRecord[],
+): Array<{ ts: string; value: number }> {
+  if (!points.length) {
+    return [];
+  }
+  if (normalizationMode === "indexed_to_zero" && curveKey !== "drawdown") {
+    const base = points[0].value;
+    return points.map((point) => ({ ts: point.ts, value: point.value - base }));
+  }
+  if (normalizationMode === "per_trade") {
+    const trades = unifiedMonitorFilterCurve(tradeCountCurve, { startMs: null, endMs: null });
+    return points.map((point) => {
+      const tradeCount = unifiedMonitorValueAtOrBefore(trades, point.ts);
+      return { ts: point.ts, value: tradeCount > 0 ? point.value / tradeCount : 0 };
+    });
+  }
+  if (normalizationMode === "per_contract") {
+    return [];
+  }
+  return points;
+}
+
+function unifiedMonitorValueAtOrBefore(points: Array<{ ts: string; value: number }>, timestamp: string): number {
+  let latest = 0;
+  const target = new Date(timestamp).getTime();
+  points.forEach((point) => {
+    const pointTs = new Date(point.ts).getTime();
+    if (pointTs <= target) {
+      latest = point.value;
+    }
+  });
+  return latest;
+}
+
+function unifiedMonitorLeaderboardRows(rows: JsonRecord[], field: string): JsonRecord[] {
+  return [...rows].sort((left, right) => unifiedMonitorCompareRows(left, right, field, field === "max_drawdown" ? "asc" : "desc")).slice(0, 25);
+}
+
+function unifiedMonitorRollupRows(rows: JsonRecord[], rollupViews: JsonRecord, frequency: UnifiedRollupFrequency): JsonRecord[] {
+  const grouped = new Map<string, { bucket: string; realized_pnl: number; trade_count: number; lane_count: number }>();
+  rows.forEach((row) => {
+    const laneId = String(row.lane_id ?? "");
+    const laneRollups = asArray<JsonRecord>(asRecord(rollupViews[laneId])[frequency]);
+    laneRollups.forEach((entry) => {
+      const bucket = String(entry.bucket ?? "");
+      if (!bucket) {
+        return;
+      }
+      const current = grouped.get(bucket) ?? { bucket, realized_pnl: 0, trade_count: 0, lane_count: 0 };
+      current.realized_pnl += Number(entry.realized_pnl ?? 0);
+      current.trade_count += Number(entry.trade_count ?? 0);
+      current.lane_count += 1;
+      grouped.set(bucket, current);
+    });
+  });
+  return Array.from(grouped.values()).sort((left, right) => left.bucket.localeCompare(right.bucket));
+}
+
+function unifiedMonitorDataQualityRows(rows: JsonRecord[]): JsonRecord[] {
+  return [...rows].sort((left, right) => {
+    const leftScore = String(asRecord(left.status).freshness_state ?? "") === "stale" ? 0 : 1;
+    const rightScore = String(asRecord(right.status).freshness_state ?? "") === "stale" ? 0 : 1;
+    if (leftScore !== rightScore) {
+      return leftScore - rightScore;
+    }
+    return String(left.display_name ?? "").localeCompare(String(right.display_name ?? ""));
+  });
+}
+
 function StrategyHistoryReviewPage({
   analysis,
   replayStudyItems,
@@ -20854,6 +23881,10 @@ function StrategyHistoryReviewPage({
   researchAnalyticsExitReasonRows: JsonRecord[];
   researchAnalyticsSessionRows: JsonRecord[];
 }) {
+  const unifiedMonitor = asRecord(analysis.unified_monitor);
+  if (unifiedMonitor.available === true) {
+    return <UnifiedStrategyMonitorPage unifiedMonitor={unifiedMonitor} />;
+  }
   const resultsBoard = asRecord(analysis.results_board);
   const boardRows = asArray<JsonRecord>(resultsBoard.rows);
   const detailsByStrategyKey = asRecord(analysis.details_by_strategy_key);

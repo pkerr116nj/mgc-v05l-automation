@@ -259,6 +259,12 @@ class TradeRecord:
     session_segment: str
     regime_bucket: str
     volatility_bucket: str
+    participation_promoted: bool = False
+    promotion_trigger_r_multiple: float | None = None
+    promotion_ts: datetime | None = None
+    promotion_price: float | None = None
+    pnl_points_at_promotion: float | None = None
+    post_promotion_peak_open_profit_points: float | None = None
 
 
 @dataclass(frozen=True)

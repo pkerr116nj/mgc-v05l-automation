@@ -259,6 +259,28 @@ def test_strategy_analysis_builds_unified_lanes_and_comparison_presets() -> None
         "benchmark_vs_paper_runtime",
         "baseline_parity_vs_research_execution",
     }
+    unified_monitor = payload["unified_monitor"]
+    assert unified_monitor["available"] is True
+    assert unified_monitor["window_defaults"]["group_by"] == ["strategy_class", "instrument", "family"]
+    assert "comparison" in unified_monitor["view_modes"]["available"]
+    assert "charts" in unified_monitor["view_modes"]["available"]
+    assert unified_monitor["selection_contract"]["default_selection_behavior"]["mode"] == "select_all_visible_lanes"
+    assert unified_monitor["aggregate_rules"]["metric_rules"]["realized_pnl"]["mode"] == "additive"
+    comparison_rows = unified_monitor["comparison_rows"]
+    paper_row = next(row for row in comparison_rows if row["evidence_lane_type"] == "paper_runtime")
+    research_row = next(row for row in comparison_rows if row["evidence_lane_type"] == "research_execution")
+    assert paper_row["metrics"]["profit_factor"]["supported"] is True
+    assert paper_row["strategy_class"] == "ATP"
+    assert research_row["metrics"]["realized_pnl"]["supported"] is True
+    assert research_row["strategy_class"] == "ATP"
+    default_groups = unified_monitor["grouping"]["default_group_tree"]
+    assert any(group["group_key"] == "strategy_class" for group in default_groups)
+    chart_series = unified_monitor["chart_series"]["series_by_lane_id"]
+    assert chart_series[paper_row["lane_id"]]["support"]["cumulative_realized_pnl"] is True
+    assert chart_series[paper_row["lane_id"]]["support"]["rolling_average_trade"] is True
+    assert unified_monitor["leaderboard_views"]["rankings"]["realized_pnl"]
+    assert unified_monitor["rollup_views"]["by_lane_id"][paper_row["lane_id"]]["daily"]
+    assert "metric_support_by_lane" in unified_monitor["data_quality_report"]
 
 
 def test_strategy_analysis_accepts_partial_research_analytics_tenant() -> None:

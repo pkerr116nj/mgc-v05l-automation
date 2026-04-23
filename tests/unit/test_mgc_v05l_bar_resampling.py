@@ -79,6 +79,33 @@ def test_build_resampled_bars_skips_incomplete_bucket(tmp_path: Path) -> None:
     assert result.bars == []
 
 
+def test_build_resampled_bars_supports_rolling_alignment_on_each_new_source_bar(tmp_path: Path) -> None:
+    settings = _build_settings(tmp_path)
+    builder = BarBuilder(settings)
+    ny = ZoneInfo("America/New_York")
+    source = [
+        builder.normalize(_bar(datetime(2026, 3, 16, 6, 1, tzinfo=ny), "100", "101", "99", "100.5", 10)),
+        builder.normalize(_bar(datetime(2026, 3, 16, 6, 2, tzinfo=ny), "100.5", "102", "100", "101.5", 12)),
+        builder.normalize(_bar(datetime(2026, 3, 16, 6, 3, tzinfo=ny), "101.5", "103", "101", "102.5", 14)),
+        builder.normalize(_bar(datetime(2026, 3, 16, 6, 4, tzinfo=ny), "102.5", "104", "102", "103.5", 16)),
+    ]
+
+    result = build_resampled_bars(source, target_timeframe="3m", bar_builder=builder, alignment="rolling")
+
+    assert result.skipped_bucket_count == 0
+    assert len(result.bars) == 2
+    first, second = result.bars
+    assert first.end_ts == source[2].end_ts
+    assert first.open == Decimal("100")
+    assert first.close == Decimal("102.5")
+    assert second.end_ts == source[3].end_ts
+    assert second.open == Decimal("100.5")
+    assert second.high == Decimal("104")
+    assert second.low == Decimal("100")
+    assert second.close == Decimal("103.5")
+    assert second.volume == 42
+
+
 def test_build_resampled_bars_supports_hour_alias_target(tmp_path: Path) -> None:
     settings = _build_settings(tmp_path)
     builder = BarBuilder(settings)

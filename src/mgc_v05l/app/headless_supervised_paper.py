@@ -56,6 +56,7 @@ def build_headless_supervised_paper_contract(
     paper_dep = _dependency_summary(dependencies.get("paper_runtime", {}), fallback_label="Paper Runtime")
     reconciliation_dep = _dependency_summary(dependencies.get("reconciliation", {}), fallback_label="Reconciliation Needed")
 
+    health_reachable = bool(health)
     health_ready = bool(health.get("ready"))
     startup_ready = str(startup.get("overall_state") or "").upper() == "READY"
     launch_allowed = bool(startup.get("launch_allowed"))
@@ -64,7 +65,7 @@ def build_headless_supervised_paper_contract(
     runtime_running = bool(operability.get("runtime_running"))
     backend_dependency_ready = backend_dep["state"] == "READY"
     backend_attached = (
-        health_ready
+        health_reachable
         and dashboard_attached
         and backend_dependency_ready
     )
@@ -89,12 +90,12 @@ def build_headless_supervised_paper_contract(
         or "not_usable"
     )
 
-    if not health_ready:
+    if not health_reachable:
         unusable_reason = "Dashboard/backend health is not currently reachable."
         unusable_reason_code = "backend_health_unreachable"
     if usable:
         overall_state = "USABLE"
-    elif not health_ready:
+    elif not health_reachable:
         overall_state = "BACKEND_UNAVAILABLE"
     elif not backend_attached:
         overall_state = "ATTACH_INCOMPLETE"

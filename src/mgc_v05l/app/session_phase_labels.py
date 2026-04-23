@@ -30,8 +30,8 @@ def label_session_phase(timestamp: datetime) -> str:
         return "US_CASH_OPEN_IMPULSE"
     if time(10, 0) <= local_time < time(10, 30):
         return "US_OPEN_LATE"
-    if time(10, 30) <= local_time < time(14, 0):
+    if time(11, 0) <= local_time < time(13, 30):
         return "US_MIDDAY"
-    if time(14, 0) <= local_time < time(17, 0):
+    if time(13, 30) <= local_time < time(16, 0):
         return "US_LATE"
     return "UNCLASSIFIED"

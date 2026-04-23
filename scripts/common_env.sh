@@ -15,6 +15,18 @@ APP_SUPPORT_RESEARCH_RUNTIME_ROOT="${APP_SUPPORT_DIR}/research_daily_capture_run
 APP_SUPPORT_SCHWAB_ENV="${APP_SUPPORT_RESEARCH_RUNTIME_ROOT}/schwab_env.sh"
 VENV_ACTIVATE="${REPO_ROOT}/.venv/bin/activate"
 
+prepend_path_if_dir() {
+  local candidate="$1"
+  if [[ -d "${candidate}" ]]; then
+    case ":${PATH:-}:" in
+      *":${candidate}:"*) ;;
+      *)
+        PATH="${candidate}${PATH:+:${PATH}}"
+        ;;
+    esac
+  fi
+}
+
 missing_schwab_auth_env_names() {
   local missing=()
   for name in SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL; do
@@ -75,6 +87,9 @@ bootstrap_local_operator_env() {
   local resolved_schwab_env=""
   local existing_auth_missing=""
 
+  prepend_path_if_dir "/opt/homebrew/bin"
+  prepend_path_if_dir "/usr/local/bin"
+
   if [[ -f "${VENV_ACTIVATE}" ]]; then
     # shellcheck disable=SC1091
     source "${VENV_ACTIVATE}"
@@ -96,6 +111,7 @@ bootstrap_local_operator_env() {
     source "${LOCAL_DOTENV}"
   fi
 
+  export PATH
   export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
   export MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_PATH="${resolved_schwab_env}"
   export MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_KIND="$(schwab_env_source_kind_for_path "${resolved_schwab_env}")"

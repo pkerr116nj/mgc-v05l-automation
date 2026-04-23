@@ -11,7 +11,7 @@ from ..config_models import StrategySettings
 from .historical_service import HistoricalBackfillService
 from .provider_config import load_market_data_providers_config
 from .provider_interfaces import MarketDataProvider
-from .provider_models import HistoricalBarProvenance, HistoricalBarsRequest, HistoricalBarsResult, QuoteSnapshot
+from .provider_models import HistoricalBarProvenance, HistoricalBarsRequest, HistoricalBarsResult, QuoteSnapshot, TradePrint
 from .quote_service import QuoteService
 from .schwab_adapter import SchwabMarketDataAdapter
 from .schwab_auth import SchwabOAuthClient, SchwabTokenStore
@@ -154,6 +154,13 @@ class SchwabMarketDataProvider(MarketDataProvider):
 
     def subscribe_live_quotes(self, internal_symbols: list[str] | tuple[str, ...]):
         raise NotImplementedError("Schwab live streaming stays outside this pass.")
+
+    def subscribe_live_trades(self, internal_symbols: list[str] | tuple[str, ...]) -> list[TradePrint]:
+        raise NotImplementedError(
+            "Schwab live trade streaming is not wired yet. "
+            "Use market-data-live-trade-capture with --input-jsonl for offline tick capture tests, "
+            "or add a provider-specific trade stream adapter."
+        )
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:

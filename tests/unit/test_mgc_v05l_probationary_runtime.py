@@ -70,6 +70,7 @@ from mgc_v05l.execution.paper_broker import PaperBroker
 from mgc_v05l.domain.models import Bar, SignalPacket
 from mgc_v05l.execution.order_models import OrderIntent
 from mgc_v05l.market_data.live_feed import LivePollingService, _latest_completed_bar_end
+from mgc_v05l.market_data.schwab_auth import SchwabAuthError
 from mgc_v05l.market_data.session_clock import classify_sessions
 from mgc_v05l.market_data.schwab_adapter import SchwabMarketDataAdapter
 from mgc_v05l.market_data.schwab_models import (
@@ -6391,6 +6392,46 @@ def test_supervisor_operator_status_keeps_lane_specific_halts_from_poisoning_glo
     assert payload["operator_halt"] is False
     assert payload["usable_lane_count"] == 1
     assert payload["halted_lane_count"] == 1
+
+
+def test_probationary_supervisor_survives_lane_auth_read_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+    lane.spec.long_sources = ("asiaEarlyNormalBreakoutRetestHoldTurn",)
+    lane.spec.short_sources = ()
+    lane.spec.point_value = Decimal("100")
+    lane.spec.runtime_kind = "strategy_engine"
+    lane.spec.strategy_family = "unit_test_family"
+    lane.restore_startup = lambda: None
+    lane.poll_and_process = lambda: (_ for _ in ()).throw(SchwabAuthError("temporary token file decode failure"))
+
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.reconciliation_clean is True
+    assert summary.stop_reason is None
+    status_payload = json.loads(Path(summary.operator_status_path).read_text(encoding="utf-8"))
+    assert status_payload["health"]["market_data_ok"] is False
+    failures = list(status_payload.get("market_data_failures") or [])
+    assert len(failures) == 1
+    assert failures[0]["exception_type"] == "SchwabAuthError"
+    assert failures[0]["lane_id"] == "gc_lane"
 
 
 def test_probationary_paper_risk_controls_clear_stale_lane_risk_when_lane_is_rearmed(tmp_path: Path) -> None:

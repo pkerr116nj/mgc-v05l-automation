@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Any, Protocol
 
-from .provider_models import HistoricalBarsRequest, HistoricalBarsResult, QuoteSnapshot
+from .provider_models import HistoricalBarsRequest, HistoricalBarsResult, QuoteSnapshot, TradePrint
 
 
 class MarketDataProvider(Protocol):
@@ -22,3 +22,6 @@ class MarketDataProvider(Protocol):
 
     def subscribe_live_quotes(self, internal_symbols: Sequence[str]) -> Iterable[QuoteSnapshot]:
         """Return a live quote stream or raise when unsupported."""
+
+    def subscribe_live_trades(self, internal_symbols: Sequence[str]) -> Iterable[TradePrint]:
+        """Return a live trade stream suitable for authoritative OHLCV construction."""
