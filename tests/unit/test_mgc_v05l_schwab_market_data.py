@@ -120,7 +120,7 @@ def test_auth_url_construction_and_token_store_round_trip(tmp_path: Path) -> Non
     assert "client_id=app-key" in auth_url
     assert "response_type=code" in auth_url
     assert "state=state-123" in auth_url
-    assert token_set.access_token == "access-token-123"
+    assert token_set.access_token == "example-access-token-redacted"
     assert token_path.exists()
     assert client.token_store.load() == token_set
     assert transport.requests[0].form == {
@@ -182,7 +182,7 @@ def test_refresh_token_uses_basic_auth_without_client_id_and_writes_failure_diag
     client.token_store.save(
         SchwabTokenSet(
             access_token="stored-access-token",
-            refresh_token="refresh-token-456",
+            refresh_token="example-refresh-token-redacted",
             token_type="Bearer",
             expires_in=1800,
             scope="api",
@@ -196,15 +196,15 @@ def test_refresh_token_uses_basic_auth_without_client_id_and_writes_failure_diag
     assert transport.requests[0].headers["Authorization"].startswith("Basic ")
     assert transport.requests[0].form == {
         "grant_type": "refresh_token",
-        "refresh_token": "refresh-token-456",
+        "refresh_token": "example-refresh-token-redacted",
     }
     diagnostic = json.loads((tmp_path / "bootstrap_artifacts/latest_refresh_failure.json").read_text(encoding="utf-8"))
     assert diagnostic["token_endpoint_url"] == "https://api.schwabapi.com/v1/oauth/token"
     assert diagnostic["callback_url"] == "http://127.0.0.1:8182/callback"
     assert diagnostic["stored_token_fields"]["has_refresh_token"] is True
-    assert diagnostic["refresh_token_length"] == len("refresh-token-456")
-    assert diagnostic["refresh_token_head"] == "refr"
-    assert diagnostic["refresh_token_tail"] == "-456"
+    assert diagnostic["refresh_token_length"] == len("example-refresh-token-redacted")
+    assert diagnostic["refresh_token_head"] == "exam"
+    assert diagnostic["refresh_token_tail"] == "cted"
     assert diagnostic["error_text"] == "provider error: unsupported_token_type"
     assert diagnostic["provider_status_code"] == 400
     assert diagnostic["provider_response_body"] == '{"error":"unsupported_token_type"}'
@@ -215,8 +215,8 @@ def test_exchange_writes_sanitized_exchange_artifact_and_persists_refresh_token_
     transport = _FakeJsonTransport(
         [
             {
-                "access_token": "access-token-123",
-                "refresh_token": "refresh-token-456",
+                "access_token": "example-access-token-redacted",
+                "refresh_token": "example-refresh-token-redacted",
                 "id_token": "id-token-789",
                 "token_type": "Bearer",
                 "scope": "api",
@@ -241,12 +241,12 @@ def test_exchange_writes_sanitized_exchange_artifact_and_persists_refresh_token_
     persisted = client.token_store.load_payload()
     exchange_artifact = json.loads((tmp_path / "bootstrap_artifacts/latest_exchange_result.json").read_text(encoding="utf-8"))
 
-    assert persisted["refresh_token"] == "refresh-token-456"
-    assert client.token_store.load().refresh_token == "refresh-token-456"
+    assert persisted["refresh_token"] == "example-refresh-token-redacted"
+    assert client.token_store.load().refresh_token == "example-refresh-token-redacted"
     assert exchange_artifact["exchange_response_summary"]["has_access_token"] is True
     assert exchange_artifact["exchange_response_summary"]["has_refresh_token"] is True
     assert exchange_artifact["exchange_response_summary"]["has_id_token"] is True
-    assert exchange_artifact["exchange_response_summary"]["refresh_token"]["length"] == len("refresh-token-456")
+    assert exchange_artifact["exchange_response_summary"]["refresh_token"]["length"] == len("example-refresh-token-redacted")
     assert exchange_artifact["persisted_refresh_token_matches_exchange"] is True
     assert exchange_artifact["persisted_refresh_matches_exchange_access_token"] is False
     assert exchange_artifact["persisted_refresh_matches_exchange_id_token"] is False
@@ -278,8 +278,8 @@ def test_exchange_raises_when_persisted_refresh_token_differs_from_exchange_payl
     transport = _FakeJsonTransport(
         [
             {
-                "access_token": "access-token-123",
-                "refresh_token": "refresh-token-456",
+                "access_token": "example-access-token-redacted",
+                "refresh_token": "example-refresh-token-redacted",
                 "token_type": "Bearer",
                 "scope": "api",
                 "expires_in": 1800,
@@ -364,7 +364,7 @@ def test_token_response_parsing_refresh_and_expiry() -> None:
         issued_at=issued_at,
     )
 
-    assert token_set.refresh_token == "refresh-token-456"
+    assert token_set.refresh_token == "example-refresh-token-redacted"
     assert token_set.token_type == "Bearer"
     assert token_set.is_expired(datetime(2026, 3, 14, 14, 29, 45, tzinfo=timezone.utc)) is True
     assert token_set.is_expired(datetime(2026, 3, 14, 14, 15, tzinfo=timezone.utc)) is False

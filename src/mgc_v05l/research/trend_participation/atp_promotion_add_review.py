@@ -469,8 +469,11 @@ def evaluate_promotion_add_candidate(
             "added": True,
             "candidate_id": candidate.candidate_id,
             "candidate_label": candidate.label,
+            "instrument": trade.instrument,
+            "variant_id": trade.variant_id,
             "entry_ts": trade.entry_ts,
             "decision_ts": trade.decision_ts,
+            "exit_ts": trade.exit_ts,
             "position_entry_price": float(trade.entry_price),
             "position_exit_price": float(trade.exit_price),
             "trade_pnl_cash": float(trade.pnl_cash),
@@ -511,6 +514,7 @@ def _run_window_candidate_sample(
 ) -> dict[str, Any]:
     baseline_rows: list[dict[str, Any]] = []
     candidate_rows: dict[str, list[dict[str, Any]]] = {candidate.candidate_id: [] for candidate in candidates}
+    price_bars: list[ResearchBar] = []
     total_bars = 0
 
     for instrument in instruments:
@@ -539,6 +543,7 @@ def _run_window_candidate_sample(
         if not normalized_1m or not normalized_5m:
             continue
 
+        price_bars.extend(normalized_1m)
         total_bars += len(normalized_5m)
         feature_rows = build_feature_states(bars_5m=normalized_5m, bars_1m=normalized_1m)
         phase2 = build_phase2_replay_package(
@@ -582,6 +587,7 @@ def _run_window_candidate_sample(
         "bar_count": total_bars,
         "baseline_rows": baseline_rows,
         "candidate_rows": candidate_rows,
+        "price_bars": price_bars,
         "summary_row": summary_row,
     }
 
@@ -837,8 +843,14 @@ def _candidate_session_breakdown(rows: Sequence[dict[str, Any]]) -> dict[str, An
 
 def _baseline_trade_row(trade: TradeRecord) -> dict[str, Any]:
     return {
+        "instrument": trade.instrument,
+        "variant_id": trade.variant_id,
+        "family": trade.family,
         "entry_ts": trade.entry_ts,
         "decision_ts": trade.decision_ts,
+        "exit_ts": trade.exit_ts,
+        "entry_price": float(trade.entry_price),
+        "exit_price": float(trade.exit_price),
         "pnl_cash": float(trade.pnl_cash),
         "mfe_points": float(trade.mfe_points),
         "mae_points": float(trade.mae_points),
@@ -867,8 +879,11 @@ def _no_add_result(*, trade: TradeRecord, candidate: PromotionAddCandidate, reas
         "added": False,
         "candidate_id": candidate.candidate_id,
         "candidate_label": candidate.label,
+        "instrument": trade.instrument,
+        "variant_id": trade.variant_id,
         "entry_ts": trade.entry_ts,
         "decision_ts": trade.decision_ts,
+        "exit_ts": trade.exit_ts,
         "position_entry_price": float(trade.entry_price),
         "position_exit_price": float(trade.exit_price),
         "trade_pnl_cash": float(trade.pnl_cash),

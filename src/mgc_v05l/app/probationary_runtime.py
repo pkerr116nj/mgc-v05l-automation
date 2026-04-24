@@ -3468,16 +3468,33 @@ class ProbationaryPaperLaneRuntime:
             "startup_restore_validation": dict(self._startup_restore_validation or {}),
         }
 
+    def _should_skip_live_poll(self, observed_at: datetime) -> bool:
+        state = self.strategy_engine.state
+        if _session_restriction_matches_now(observed_at, self.spec.session_restriction):
+            return False
+        if state.position_side != PositionSide.FLAT:
+            return False
+        if state.internal_position_qty != 0 or state.broker_position_qty != 0:
+            return False
+        if state.open_broker_order_id is not None:
+            return False
+        if state.reconcile_required:
+            return False
+        return True
+
     def poll_and_process(self) -> tuple[int, dict[str, Any], Path]:
+        observed_at = datetime.now(self.settings.timezone_info)
         latest_processed_end_ts = self.repositories.processed_bars.latest_end_ts()
-        bars = self.live_polling_service.poll_bars(
-            SchwabLivePollRequest(
-                internal_symbol=self.settings.symbol,
-                since=latest_processed_end_ts,
-            ),
-            internal_timeframe=self.settings.resolved_execution_timeframe,
-            default_is_final=True,
-        )
+        bars: list[Bar] = []
+        if not self._should_skip_live_poll(observed_at):
+            bars = self.live_polling_service.poll_bars(
+                SchwabLivePollRequest(
+                    internal_symbol=self.settings.symbol,
+                    since=latest_processed_end_ts,
+                ),
+                internal_timeframe=self.settings.resolved_execution_timeframe,
+                default_is_final=True,
+            )
         for bar in bars:
             self.strategy_engine.process_bar(bar)
             self._apply_canary_lifecycle(bar)
@@ -6371,6 +6388,7 @@ class ProbationaryPaperSupervisor:
                     risk_state=risk_state,
                     structured_logger=self._structured_logger,
                     risk_events=risk_events,
+                    reconciliation_clean=reconciliation_clean,
                 )
                 status_path = _write_probationary_supervisor_operator_status(
                     settings=self._settings,
@@ -6381,6 +6399,7 @@ class ProbationaryPaperSupervisor:
                     lane_metrics=lane_metrics,
                     market_data_ok=not market_data_failures,
                     market_data_failures=market_data_failures,
+                    reconciliation_clean=reconciliation_clean,
                 )
 
                 if not reconciliation_clean:
@@ -8404,18 +8423,20 @@ def _probationary_desk_risk_summary(
     lanes: Sequence[ProbationaryPaperLaneRuntime],
     lane_metrics: dict[str, ProbationaryPaperLaneMetrics],
     risk_state: ProbationaryPaperRiskRuntimeState,
+    reconciliation_clean: bool | None = None,
 ) -> dict[str, Any]:
     desk_realized = sum((metrics.realized_pnl for metrics in lane_metrics.values()), Decimal("0"))
     desk_unrealized = sum((metrics.unrealized_pnl for metrics in lane_metrics.values()), Decimal("0"))
     desk_total = desk_realized + desk_unrealized
-    reconciliation_clean = all(
-        _reconcile_paper_runtime(
-            repositories=lane.repositories,
-            strategy_engine=lane.strategy_engine,
-            execution_engine=lane.execution_engine,
-        )["clean"]
-        for lane in lanes
-    )
+    if reconciliation_clean is None:
+        reconciliation_clean = all(
+            _reconcile_paper_runtime(
+                repositories=lane.repositories,
+                strategy_engine=lane.strategy_engine,
+                execution_engine=lane.execution_engine,
+            )["clean"]
+            for lane in lanes
+        )
     faulted = any(lane.strategy_engine.state.fault_code is not None for lane in lanes)
     desk_state = "OK"
     reason = risk_state.desk_last_trigger_reason
@@ -8461,6 +8482,7 @@ def _write_probationary_paper_risk_artifacts(
     risk_state: ProbationaryPaperRiskRuntimeState,
     structured_logger: StructuredLogger,
     risk_events: Sequence[dict[str, Any]],
+    reconciliation_clean: bool | None = None,
 ) -> None:
     runtime_dir = settings.probationary_artifacts_path / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -8475,6 +8497,7 @@ def _write_probationary_paper_risk_artifacts(
         lanes=lanes,
         lane_metrics=lane_metrics,
         risk_state=risk_state,
+        reconciliation_clean=reconciliation_clean,
     )
     structured_logger._write_json(  # noqa: SLF001
         runtime_dir / "paper_risk_runtime_state.json",
@@ -8593,6 +8616,7 @@ def _write_probationary_supervisor_operator_status(
     lane_metrics: dict[str, ProbationaryPaperLaneMetrics] | None = None,
     market_data_ok: bool = True,
     market_data_failures: Sequence[dict[str, Any]] | None = None,
+    reconciliation_clean: bool | None = None,
 ) -> Path:
     now_local = datetime.now(settings.timezone_info)
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -8606,14 +8630,15 @@ def _write_probationary_supervisor_operator_status(
     executable_lanes = [lane for lane in lanes if getattr(lane.spec, "runtime_kind", "") not in non_authority_runtime_kinds] or list(lanes)
     all_flat = all(lane.strategy_engine.state.position_side == PositionSide.FLAT for lane in lanes)
     broker_ok = all(lane.execution_engine.broker.is_connected() for lane in lanes)
-    reconciliation_clean = all(
-        _reconcile_paper_runtime(
-            repositories=lane.repositories,
-            strategy_engine=lane.strategy_engine,
-            execution_engine=lane.execution_engine,
-        )["clean"]
-        for lane in lanes
-    )
+    if reconciliation_clean is None:
+        reconciliation_clean = all(
+            _reconcile_paper_runtime(
+                repositories=lane.repositories,
+                strategy_engine=lane.strategy_engine,
+                execution_engine=lane.execution_engine,
+            )["clean"]
+            for lane in lanes
+        )
     resolved_lane_metrics = lane_metrics or {
         lane.spec.lane_id: ProbationaryPaperLaneMetrics(
             session_date=risk_state.session_date,
@@ -8642,6 +8667,7 @@ def _write_probationary_supervisor_operator_status(
         lanes=lanes,
         lane_metrics=resolved_lane_metrics,
         risk_state=risk_state,
+        reconciliation_clean=reconciliation_clean,
     )
     restore_rows = [
         row
@@ -14370,15 +14396,25 @@ def _load_bars_for_session_date(engine, session_date: date, settings: StrategySe
 
 
 def _load_open_order_intent_rows(repositories: RepositorySet) -> list[dict[str, Any]]:
-    intent_rows = repositories.order_intents.list_all()
-    fill_rows = repositories.fills.list_all()
-    filled_order_intent_ids = {row["order_intent_id"] for row in fill_rows}
-    return [
-        row
-        for row in intent_rows
-        if row["order_intent_id"] not in filled_order_intent_ids
-        and row.get("order_status") not in {OrderStatus.CANCELLED.value, OrderStatus.REJECTED.value, OrderStatus.FILLED.value}
-    ]
+    with repositories.engine.begin() as connection:
+        unresolved_statement = select(order_intents_table).where(
+            order_intents_table.c.order_status.not_in(
+                [OrderStatus.CANCELLED.value, OrderStatus.REJECTED.value, OrderStatus.FILLED.value]
+            )
+        )
+        unresolved_statement = repositories.order_intents._apply_runtime_identity_filters(unresolved_statement)  # noqa: SLF001
+        intent_rows = connection.execute(unresolved_statement).mappings().all()
+        if not intent_rows:
+            return []
+        intent_ids = [str(row["order_intent_id"]) for row in intent_rows]
+        filled_statement = select(fills_table.c.order_intent_id).where(fills_table.c.order_intent_id.in_(intent_ids))
+        filled_statement = repositories.fills._apply_runtime_identity_filters(filled_statement)  # noqa: SLF001
+        filled_order_intent_ids = {
+            str(row.order_intent_id)
+            for row in connection.execute(filled_statement).all()
+            if row.order_intent_id is not None
+        }
+    return [dict(row) for row in intent_rows if str(row["order_intent_id"]) not in filled_order_intent_ids]
 
 
 def _restore_validation_state_snapshot(
@@ -15110,8 +15146,14 @@ def _load_table_rows_for_session_date(
     session_date: date,
     timezone_info,
 ) -> list[dict[str, Any]]:
+    session_start = datetime.combine(session_date, dt_time.min, tzinfo=timezone_info)
+    session_end = session_start + timedelta(days=1)
     with engine.begin() as connection:
-        rows = connection.execute(select(table)).mappings().all()
+        rows = connection.execute(
+            select(table)
+            .where(getattr(table.c, timestamp_column) >= session_start.isoformat())
+            .where(getattr(table.c, timestamp_column) < session_end.isoformat())
+        ).mappings().all()
     filtered: list[dict[str, Any]] = []
     for row in rows:
         timestamp = row.get(timestamp_column)

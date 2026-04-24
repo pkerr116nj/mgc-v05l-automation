@@ -15,19 +15,14 @@
   "data_source_precedence": {
     "historical_research": {
       "1m": [
-        "historical_1m_canonical",
-        "databento_historical",
-        "schwab_history"
+        "historical_1m_canonical"
       ],
       "5m": [
         "historical_5m_canonical",
-        "internal",
-        "resampled_1m_to_5m",
-        "schwab_history"
+        "vendor_5m_extended"
       ],
       "10m": [
         "historical_10m_canonical",
-        "resampled_1m_to_10m",
         "historical_1m_canonical"
       ]
     },

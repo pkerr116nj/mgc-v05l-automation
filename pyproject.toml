@@ -30,7 +30,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["mgc_automation", "mgc_automation.*", "mgc_v05l", "mgc_v05l.*"]
+include = ["mgc_automation", "mgc_automation.*", "mgc_v05l", "mgc_v05l.*", "validation_layer", "validation_layer.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

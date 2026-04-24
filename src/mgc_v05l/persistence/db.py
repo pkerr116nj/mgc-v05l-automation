@@ -5,12 +5,15 @@ from sqlalchemy.engine import Engine
 
 metadata = MetaData()
 
+SQLITE_BUSY_TIMEOUT_MS = 30000
+SQLITE_WAL_AUTOCHECKPOINT_PAGES = 10000
+
 
 def build_engine(database_url: str) -> Engine:
     """Create the SQLAlchemy engine for the configured SQLite database."""
     connect_args = {}
     if database_url.startswith("sqlite"):
-        connect_args["timeout"] = 30
+        connect_args["timeout"] = SQLITE_BUSY_TIMEOUT_MS / 1000
     engine = create_engine(database_url, future=True, connect_args=connect_args)
     if engine.dialect.name == "sqlite":
         _configure_sqlite_engine(engine)
@@ -24,7 +27,10 @@ def _configure_sqlite_engine(engine: Engine) -> None:
         try:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+            # Keep live runtimes from spending excessive time in auto-checkpoints
+            # while many per-lane SQLite databases are active at once.
+            cursor.execute(f"PRAGMA wal_autocheckpoint={SQLITE_WAL_AUTOCHECKPOINT_PAGES}")
         finally:
             cursor.close()
 

@@ -78,8 +78,8 @@ def test_loopback_auth_exchanges_callback_code_and_persists_tokens(tmp_path: Pat
     transport = _FakeJsonTransport(
         [
             {
-                "access_token": "access-token-123",
-                "refresh_token": "refresh-token-456",
+                "access_token": "example-access-token-redacted",
+                "refresh_token": "example-refresh-token-redacted",
                 "token_type": "Bearer",
                 "expires_in": 1800,
                 "scope": "readonly",
@@ -138,13 +138,12 @@ def test_loopback_auth_exchanges_callback_code_and_persists_tokens(tmp_path: Pat
     assert result.tls_cert_file == str(tmp_path / "loopback-cert.pem")
     assert result.tls_key_file == str(tmp_path / "loopback-key.pem")
     assert stored is not None
-    assert stored.access_token == "access-token-123"
-    assert stored.refresh_token == "refresh-token-456"
+    assert stored.access_token == "example-access-token-redacted"
+    assert stored.refresh_token == "example-refresh-token-redacted"
     assert transport.requests[0].form == {
         "grant_type": "authorization_code",
         "code": "auth-code-abc",
         "redirect_uri": "https://127.0.0.1:8818/callback",
-        "client_id": "app-key",
     }
 
 
@@ -204,8 +203,8 @@ def test_ensure_loopback_tls_material_generates_cert_and_key(tmp_path: Path) -> 
 def test_token_store_load_payload_retries_transient_empty_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     token_path = tmp_path / "tokens.json"
     expected = {
-        "access_token": "access-token-123",
-        "refresh_token": "refresh-token-456",
+        "access_token": "example-access-token-redacted",
+        "refresh_token": "example-refresh-token-redacted",
         "token_type": "Bearer",
         "expires_in": 1800,
         "scope": "readonly",

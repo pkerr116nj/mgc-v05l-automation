@@ -1,6 +1,6 @@
 {
-  "access_token": "access-token-123",
-  "refresh_token": "refresh-token-456",
+  "access_token": "example-access-token-redacted",
+  "refresh_token": "example-refresh-token-redacted",
   "token_type": "Bearer",
   "expires_in": 1800,
   "scope": "marketdata"

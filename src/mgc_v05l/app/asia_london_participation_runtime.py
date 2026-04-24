@@ -150,7 +150,6 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
             return SignalPacket(**payload)
         floor_reason = _volatility_floor_reason(definition=definition, segment_bars=segment_bars)
         if floor_reason is not None:
-            payload["analysis_notes"] = (entry_reason, floor_reason)
             return SignalPacket(**payload)
 
         payload.update(
@@ -163,7 +162,6 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
                 "short_entry": definition.side == "SHORT",
                 "long_entry_source": definition.source_id if definition.side == "LONG" else None,
                 "short_entry_source": definition.source_id if definition.side == "SHORT" else None,
-                "analysis_notes": (entry_reason,),
             }
         )
         return SignalPacket(**payload)

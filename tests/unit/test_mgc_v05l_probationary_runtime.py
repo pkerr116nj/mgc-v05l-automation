@@ -49,6 +49,7 @@ from mgc_v05l.app.probationary_runtime import (
     build_probationary_paper_readiness,
     build_probationary_paper_runner,
     _build_exit_parity_summary,
+    _load_open_order_intent_rows,
     _run_probationary_live_timing_validation,
     _paper_soak_validation_bars,
     run_probationary_paper_soak_validation,
@@ -2778,6 +2779,115 @@ def test_probationary_paper_lane_operator_status_reports_post_cycle_execution_an
     assert payload["context_timeframes"] == ["5m"]
     assert payload["last_execution_bar_evaluated_at"] == "2026-04-02T10:53:00-04:00"
     assert payload["last_completed_context_bars_at"] == {"5m": "2026-04-02T10:50:00-04:00"}
+
+
+def test_probationary_paper_lane_skips_live_poll_when_flat_and_out_of_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    spec = next(spec for spec in _load_probationary_paper_lane_specs(settings) if spec.lane_id == "mgc_us_late_pause_resume_long")
+    lane_settings = _build_probationary_paper_lane_settings(settings, spec)
+    repositories = RepositorySet(build_engine(lane_settings.database_url))
+    structured_logger = StructuredLogger(lane_settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger)
+    strategy_engine = StrategyEngine(
+        settings=lane_settings,
+        repositories=repositories,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+
+    class FakeLivePollingService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll_bars(self, *args, **kwargs):
+            self.calls += 1
+            return []
+
+    live_polling_service = FakeLivePollingService()
+    lane_runtime = ProbationaryPaperLaneRuntime(
+        spec=spec,
+        settings=lane_settings,
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        live_polling_service=live_polling_service,
+        structured_logger=ProbationaryLaneStructuredLogger(
+            lane_id=spec.lane_id,
+            symbol=spec.symbol,
+            root_logger=StructuredLogger(tmp_path / "root"),
+            lane_logger=structured_logger,
+        ),
+        alert_dispatcher=alert_dispatcher,
+    )
+    monkeypatch.setattr(probationary_runtime_module, "_session_restriction_matches_now", lambda now, restriction: False)
+
+    lane_runtime.poll_and_process()
+
+    payload = json.loads((lane_settings.probationary_artifacts_path / "operator_status.json").read_text(encoding="utf-8"))
+    assert live_polling_service.calls == 0
+    assert payload["new_bars_last_cycle"] == 0
+
+
+def test_probationary_paper_lane_keeps_live_poll_when_position_open_out_of_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    spec = next(spec for spec in _load_probationary_paper_lane_specs(settings) if spec.lane_id == "mgc_us_late_pause_resume_long")
+    lane_settings = _build_probationary_paper_lane_settings(settings, spec)
+    repositories = RepositorySet(build_engine(lane_settings.database_url))
+    structured_logger = StructuredLogger(lane_settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger)
+    strategy_engine = StrategyEngine(
+        settings=lane_settings,
+        repositories=repositories,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("100"),
+        entry_timestamp=datetime(2026, 4, 2, 10, 0, tzinfo=ZoneInfo("America/New_York")),
+        strategy_status=StrategyStatus.IN_LONG_K,
+    )
+
+    class FakeLivePollingService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll_bars(self, *args, **kwargs):
+            self.calls += 1
+            return []
+
+    live_polling_service = FakeLivePollingService()
+    lane_runtime = ProbationaryPaperLaneRuntime(
+        spec=spec,
+        settings=lane_settings,
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        live_polling_service=live_polling_service,
+        structured_logger=ProbationaryLaneStructuredLogger(
+            lane_id=spec.lane_id,
+            symbol=spec.symbol,
+            root_logger=StructuredLogger(tmp_path / "root"),
+            lane_logger=structured_logger,
+        ),
+        alert_dispatcher=alert_dispatcher,
+    )
+    monkeypatch.setattr(probationary_runtime_module, "_session_restriction_matches_now", lambda now, restriction: False)
+
+    lane_runtime.poll_and_process()
+
+    assert live_polling_service.calls == 1
 
 
 def test_paper_runtime_restores_pending_order_state_and_reconciles_cleanly(tmp_path: Path) -> None:
@@ -6532,6 +6642,87 @@ def test_supervisor_operator_status_exposes_lane_reason_and_unblock_action(tmp_p
     assert payload["lanes"][0]["unblock_action"] == "Manual inspection required"
 
 
+def test_supervisor_operator_status_uses_supplied_reconciliation_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+
+    def _unexpected_reconcile(**_kwargs):
+        raise AssertionError("reconciliation should not be recomputed when already supplied")
+
+    monkeypatch.setattr(probationary_runtime_module, "_reconcile_paper_runtime", _unexpected_reconcile)
+
+    path = _write_probationary_supervisor_operator_status(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=StructuredLogger(tmp_path),
+        risk_state=ProbationaryPaperRiskRuntimeState(session_date="2026-03-19"),
+        latest_operator_control=None,
+        reconciliation_clean=True,
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert payload["health"]["reconciliation_clean"] is True
+
+
+def test_paper_risk_artifacts_use_supplied_reconciliation_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+    metrics = {
+        "gc_lane": ProbationaryPaperLaneMetrics(
+            session_date="2026-03-19",
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_pnl=Decimal("0"),
+            closed_trades=0,
+            losing_closed_trades=0,
+            intent_count=0,
+            fill_count=0,
+            open_order_count=0,
+            position_side="FLAT",
+            internal_position_qty=0,
+            broker_position_qty=0,
+            open_entry_leg_count=0,
+            open_add_count=0,
+            additional_entry_allowed=False,
+            entry_price=None,
+            last_mark=None,
+            last_processed_bar_end_ts=None,
+        )
+    }
+
+    def _unexpected_reconcile(**_kwargs):
+        raise AssertionError("reconciliation should not be recomputed when already supplied")
+
+    monkeypatch.setattr(probationary_runtime_module, "_reconcile_paper_runtime", _unexpected_reconcile)
+
+    _write_probationary_paper_risk_artifacts(
+        settings=settings,
+        lanes=[lane],
+        lane_metrics=metrics,
+        risk_state=ProbationaryPaperRiskRuntimeState(session_date="2026-03-19"),
+        structured_logger=StructuredLogger(tmp_path),
+        risk_events=[],
+        reconciliation_clean=True,
+    )
+
+    payload = json.loads((settings.probationary_artifacts_path / "runtime" / "paper_desk_risk_snapshot.json").read_text(encoding="utf-8"))
+    assert payload["reconciliation_clean"] is True
+
+
 def test_supervisor_operator_status_exposes_live_lane_eligibility_truth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _build_probationary_paper_settings(tmp_path)
     us_lane = _seed_test_lane(
@@ -6592,3 +6783,60 @@ def test_supervisor_operator_status_exposes_live_lane_eligibility_truth(tmp_path
     assert lane_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["current_detected_session"] == "ASIA_EARLY"
     assert lane_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligible_now"] is True
     assert lane_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligibility_reason"] is None
+
+
+def test_load_open_order_intent_rows_excludes_filled_and_closed_rows(tmp_path: Path) -> None:
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+    now = datetime(2026, 3, 19, 3, 0, tzinfo=timezone.utc)
+    open_intent = OrderIntent(
+        order_intent_id="open-intent",
+        bar_id="bar-open",
+        symbol="GC",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=now,
+        reason_code="test_open",
+    )
+    filled_intent = OrderIntent(
+        order_intent_id="filled-intent",
+        bar_id="bar-filled",
+        symbol="GC",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=now,
+        reason_code="test_filled",
+    )
+    cancelled_intent = OrderIntent(
+        order_intent_id="cancelled-intent",
+        bar_id="bar-cancelled",
+        symbol="GC",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=now,
+        reason_code="test_cancelled",
+    )
+    lane.repositories.order_intents.save(open_intent, OrderStatus.PENDING)
+    lane.repositories.order_intents.save(filled_intent, OrderStatus.PENDING)
+    lane.repositories.order_intents.save(cancelled_intent, OrderStatus.CANCELLED)
+    lane.repositories.fills.save(
+        FillEvent(
+            order_intent_id="filled-intent",
+            broker_order_id="broker-1",
+            fill_timestamp=now,
+            fill_price=Decimal("100"),
+            quantity=1,
+            intent_type=OrderIntentType.BUY_TO_OPEN,
+            order_status=OrderStatus.FILLED,
+        )
+    )
+
+    rows = _load_open_order_intent_rows(lane.repositories)
+
+    assert [row["order_intent_id"] for row in rows] == ["open-intent"]

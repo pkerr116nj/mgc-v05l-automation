@@ -94,6 +94,9 @@ def run_asia_london_participation_optimization(
     end_date: str | date | None = None,
     output_dir: str | Path | None = None,
     config_paths: list[str] | list[Path] | tuple[str | Path, ...] | None = None,
+    long_variant_ids: tuple[str, ...] | list[str] | None = None,
+    short_variant_ids: tuple[str, ...] | list[str] | None = None,
+    gate_modes: tuple[str, ...] | list[str] = ("base", "atp_bias_gate"),
 ) -> dict[str, Any]:
     resolved_symbols = tuple(sorted({str(symbol).strip().upper() for symbol in (symbols or DEFAULT_SYMBOLS) if str(symbol).strip()}))
     resolved_output_dir = Path(output_dir or DEFAULT_OPTIMIZATION_OUTPUT_DIR).resolve()
@@ -105,40 +108,31 @@ def run_asia_london_participation_optimization(
 
     long_specs = {
         spec.variant_id: replace(spec, tick_size=TICK_SIZES["GC"])
-        for spec in build_long_variant_specs(selected_ids=list(DEFAULT_LONG_VARIANT_IDS))
+        for spec in build_long_variant_specs(selected_ids=list(long_variant_ids or DEFAULT_LONG_VARIANT_IDS))
         if spec.decision_timeframe == "3m"
     }
     short_specs = {
         spec.variant_id: replace(spec, tick_size=TICK_SIZES["GC"])
-        for spec in build_short_variant_specs(selected_ids=list(DEFAULT_SHORT_VARIANT_IDS))
+        for spec in build_short_variant_specs(selected_ids=list(short_variant_ids or DEFAULT_SHORT_VARIANT_IDS))
         if spec.decision_timeframe == "3m"
     }
+    normalized_gate_modes = tuple(str(mode).strip() for mode in gate_modes if str(mode).strip())
+    if not normalized_gate_modes:
+        raise ValueError("At least one gate mode is required for Asia-London participation optimization.")
 
     optimization_variants: list[OptimizationVariant] = []
     for variant_id, spec in long_specs.items():
-        optimization_variants.append(
-            OptimizationVariant(side="LONG", variant_id=variant_id, description=spec.description, gate_mode="base")
-        )
-        optimization_variants.append(
-            OptimizationVariant(
-                side="LONG",
-                variant_id=variant_id,
-                description=f"{spec.description} + ATP bias gate",
-                gate_mode="atp_bias_gate",
+        for gate_mode in normalized_gate_modes:
+            description = spec.description if gate_mode == "base" else f"{spec.description} + ATP bias gate"
+            optimization_variants.append(
+                OptimizationVariant(side="LONG", variant_id=variant_id, description=description, gate_mode=gate_mode)
             )
-        )
     for variant_id, spec in short_specs.items():
-        optimization_variants.append(
-            OptimizationVariant(side="SHORT", variant_id=variant_id, description=spec.description, gate_mode="base")
-        )
-        optimization_variants.append(
-            OptimizationVariant(
-                side="SHORT",
-                variant_id=variant_id,
-                description=f"{spec.description} + ATP bias gate",
-                gate_mode="atp_bias_gate",
+        for gate_mode in normalized_gate_modes:
+            description = spec.description if gate_mode == "base" else f"{spec.description} + ATP bias gate"
+            optimization_variants.append(
+                OptimizationVariant(side="SHORT", variant_id=variant_id, description=description, gate_mode=gate_mode)
             )
-        )
 
     symbol_reports: dict[str, Any] = {}
     for symbol in resolved_symbols:
@@ -205,7 +199,9 @@ def run_asia_london_participation_optimization(
         "definition": {
             "symbols": list(resolved_symbols),
             "hold_segments": list(HOLD_SEGMENTS),
-            "optimization_modes": ["base", "atp_bias_gate"],
+            "optimization_modes": list(normalized_gate_modes),
+            "long_variant_ids": sorted(long_specs.keys()),
+            "short_variant_ids": sorted(short_specs.keys()),
             "start_date": start_day.isoformat() if start_day else None,
             "end_date": end_day.isoformat() if end_day else None,
         },
