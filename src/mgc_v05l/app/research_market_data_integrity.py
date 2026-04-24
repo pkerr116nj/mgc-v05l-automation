@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start", default=None, help="Explicit ISO start timestamp for execution modes.")
     parser.add_argument("--end", default=None, help="Explicit ISO end timestamp for audit/maintenance execution modes.")
     parser.add_argument("--symbol", action="append", default=None, help="Optional symbol override for execution modes.")
+    parser.add_argument("--symbols", default=None, help="Optional comma-separated symbol scope.")
+    parser.add_argument(
+        "--phase-timeout-seconds",
+        type=float,
+        default=20.0,
+        help="Timeout guard for expensive audit phases such as duplicate/overlap scans.",
+    )
     return parser
 
 
@@ -55,10 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     warehouse_root = Path(args.warehouse_root)
     end_ts = _parse_timestamp(args.end) if args.end else None
     provider_cfg = load_market_data_providers_config(args.provider_config)
-    symbols = [str(item).strip().upper() for item in (args.symbol or provider_cfg.databento.pilot_symbols.keys())]
+    symbols = _resolve_symbols(args, provider_cfg=provider_cfg)
 
     if args.mode == "audit":
-        output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT / _output_stamp(end_ts=end_ts)
+        output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT / _output_stamp(end_ts=end_ts, symbols=symbols)
         result = run_research_data_integrity_audit(
             output_dir=output_dir,
             replay_db_path=replay_db_path,
@@ -67,6 +75,9 @@ def main(argv: list[str] | None = None) -> int:
             provider_config=args.provider_config,
             start_date=args.start_date,
             end_timestamp=end_ts,
+            symbols=symbols,
+            phase_timeout_seconds=args.phase_timeout_seconds,
+            progress_callback=_stderr_progress_callback,
         )
         print(json.dumps(_json_ready(result), indent=2, sort_keys=True))
         return 0
@@ -119,10 +130,40 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
-def _output_stamp(*, end_ts: datetime | None) -> str:
+def _output_stamp(*, end_ts: datetime | None, symbols: list[str] | None = None) -> str:
+    symbol_suffix = ""
+    if symbols:
+        symbol_suffix = "_" + "_".join(symbol.lower() for symbol in symbols)
     if end_ts is None:
-        return "latest"
-    return f"full_20240101_{end_ts.strftime('%Y%m%d')}"
+        return f"latest{symbol_suffix}"
+    return f"full_20240101_{end_ts.strftime('%Y%m%d')}{symbol_suffix}"
+
+
+def _resolve_symbols(args: argparse.Namespace, *, provider_cfg: Any) -> list[str]:
+    resolved = [str(item).strip().upper() for item in (args.symbol or [])]
+    if args.symbols:
+        resolved.extend(str(item).strip().upper() for item in str(args.symbols).split(",") if str(item).strip())
+    if resolved:
+        return sorted(dict.fromkeys(resolved))
+    return [str(item).strip().upper() for item in provider_cfg.databento.pilot_symbols.keys()]
+
+
+def _stderr_progress_callback(event: dict[str, Any]) -> None:
+    phase = event.get("phase")
+    if event.get("event") == "start":
+        detail = event.get("detail") or {}
+        detail_suffix = f" detail={json.dumps(detail, sort_keys=True)}" if detail else ""
+        print(f"[research-market-data-integrity] phase={phase} status=running{detail_suffix}", file=sys.stderr, flush=True)
+        return
+    status = event.get("status")
+    duration = event.get("duration_seconds")
+    reason = event.get("reason")
+    reason_suffix = f" reason={reason}" if reason else ""
+    print(
+        f"[research-market-data-integrity] phase={phase} status={status} duration_seconds={duration}{reason_suffix}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _json_ready(value: Any) -> Any:

@@ -5,12 +5,14 @@ from __future__ import annotations
 import csv
 import json
 import sqlite3
+import sys
+import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import median
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 from zoneinfo import ZoneInfo
 
 import pyarrow.parquet as pq
@@ -46,6 +48,7 @@ FORBIDDEN_RESEARCH_SOURCES = (
     "databento_live",
 )
 TRADE_DATASETS = ("lane_entries", "lane_closed_trades")
+DEFAULT_AUDIT_PHASE_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,15 @@ class IntegritySourcePolicy:
     execution_only_sources: tuple[str, ...] = FORBIDDEN_RESEARCH_SOURCES
 
 
+@dataclass(frozen=True)
+class AuditPhaseTimeout(RuntimeError):
+    phase: str
+    timeout_seconds: float
+
+    def __str__(self) -> str:
+        return f"audit phase '{self.phase}' exceeded timeout={self.timeout_seconds}s"
+
+
 def run_research_data_integrity_audit(
     *,
     output_dir: Path,
@@ -68,26 +80,379 @@ def run_research_data_integrity_audit(
     start_date: str = "2024-01-01",
     end_timestamp: datetime | None = None,
     lane_symbol_map: dict[str, list[str]] | None = None,
+    symbols: Sequence[str] | None = None,
+    phase_timeout_seconds: float = DEFAULT_AUDIT_PHASE_TIMEOUT_SECONDS,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     policy = IntegritySourcePolicy()
-    provider_cfg = load_market_data_providers_config(provider_config)
-    instruments = tuple(sorted(symbol.upper() for symbol in provider_cfg.databento.pilot_symbols))
     latest_target = (end_timestamp or datetime.now(tz=NEW_YORK)).astimezone(NEW_YORK)
+    phase_rows: list[dict[str, Any]] = []
+    progress_rows: list[dict[str, Any]] = []
+    provider_cfg = load_market_data_providers_config(provider_config)
+    requested_symbols = [str(symbol).strip().upper() for symbol in (symbols or ())]
+    instruments = _resolve_instruments(provider_cfg=provider_cfg, requested_symbols=requested_symbols)
+    payload = _build_audit_payload_skeleton(
+        replay_db_path=replay_db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_config,
+        policy=policy,
+        instruments=instruments,
+        requested_symbols=requested_symbols,
+        start_date=start_date,
+        latest_target=latest_target,
+    )
+    artifacts: dict[str, str] = {}
+    lane_map = lane_symbol_map or {symbol: list(lanes) for symbol, lanes in DEFAULT_BASKET.items()}
     canonical_service = CanonicalMarketDataMaintenanceService(
         database_url=_database_url_from_path(replay_db_path),
         provider_config_path=provider_config,
     )
-    replay_audit = _audit_replay_database(
-        replay_db_path=replay_db_path,
-        instruments=instruments,
-        policy=policy,
-        canonical_service=canonical_service,
-    )
-    warehouse_audit = _audit_warehouse(warehouse_root=warehouse_root)
+
+    try:
+        _run_audit_phase(
+            "registry_load",
+            phase_rows=phase_rows,
+            progress_rows=progress_rows,
+            progress_callback=progress_callback,
+            detail={"instrument_count": len(instruments)},
+            fn=lambda: None,
+        )
+        canonical_phase = _run_audit_phase(
+            "canonical_1m_coverage",
+            phase_rows=phase_rows,
+            progress_rows=progress_rows,
+            progress_callback=progress_callback,
+            detail={"symbols": list(instruments)},
+            fn=lambda: _audit_canonical_replay_coverage(
+                replay_db_path=replay_db_path,
+                instruments=instruments,
+                policy=policy,
+                canonical_service=canonical_service,
+            ),
+        )
+        payload["replay_audit"].update(canonical_phase)
+        payload["sample_coverage"]["actual_replay_latest_timestamp"] = payload["replay_audit"]["global_latest_canonical_1m_ts"]
+
+        overlap_phase = _run_audit_phase(
+            "source_overlap_checks",
+            phase_rows=phase_rows,
+            progress_rows=progress_rows,
+            progress_callback=progress_callback,
+            detail={"timeout_seconds": phase_timeout_seconds},
+            fn=lambda: _audit_source_overlap_checks(
+                replay_db_path=replay_db_path,
+                instruments=instruments,
+                policy=policy,
+                phase_timeout_seconds=phase_timeout_seconds,
+            ),
+        )
+        payload["replay_audit"].update(overlap_phase)
+
+        warehouse_audit = _run_audit_phase(
+            "warehouse_integrity_checks",
+            phase_rows=phase_rows,
+            progress_rows=progress_rows,
+            progress_callback=progress_callback,
+            fn=lambda: _audit_warehouse(warehouse_root=warehouse_root),
+        )
+        payload["warehouse_audit"] = warehouse_audit
+
+        alignment_bundle = _run_audit_phase(
+            "trade_replay_artifact_alignment",
+            phase_rows=phase_rows,
+            progress_rows=progress_rows,
+            progress_callback=progress_callback,
+            fn=lambda: _build_alignment_bundle(
+                replay_db_path=replay_db_path,
+                warehouse_root=warehouse_root,
+                provider_config=provider_config,
+                instruments=instruments,
+                replay_audit=payload["replay_audit"],
+                warehouse_audit=payload["warehouse_audit"],
+                lane_symbol_map=lane_map,
+                start_date=start_date,
+                latest_target=latest_target,
+                policy=policy,
+            ),
+        )
+        payload["trade_alignment"] = alignment_bundle["trade_alignment"]
+        payload["health"] = alignment_bundle["health"]
+        payload["repair_plan"] = alignment_bundle["repair_plan"]
+        payload["daily_maintenance_plan"] = alignment_bundle["daily_maintenance_plan"]
+        payload["audit_runtime"]["status"] = "completed"
+    except AuditPhaseTimeout as exc:
+        payload["audit_runtime"]["status"] = "blocked"
+        payload["audit_runtime"]["reason"] = "audit_phase_timeout"
+        payload["audit_runtime"]["phase"] = exc.phase
+        payload["health"] = _build_blocked_health(
+            replay_audit=payload["replay_audit"],
+            phase=exc.phase,
+            reason="audit_phase_timeout",
+        )
+        payload["trade_alignment"]["analysis_allowed"] = False
+        payload["trade_alignment"]["blocking_issues"] = [
+            f"audit blocked before trade/replay alignment completed (phase={exc.phase})"
+        ]
+    except Exception as exc:
+        payload["audit_runtime"]["status"] = "failed"
+        payload["audit_runtime"]["reason"] = type(exc).__name__
+        payload["audit_runtime"]["phase"] = phase_rows[-1]["phase"] if phase_rows else "unknown"
+        payload["audit_runtime"]["error"] = str(exc)
+        payload["health"] = _build_blocked_health(
+            replay_audit=payload["replay_audit"],
+            phase=payload["audit_runtime"]["phase"],
+            reason=type(exc).__name__,
+        )
+        payload["trade_alignment"]["analysis_allowed"] = False
+        payload["trade_alignment"]["blocking_issues"] = [
+            f"audit failed before trade/replay alignment completed (phase={payload['audit_runtime']['phase']}, reason={type(exc).__name__})"
+        ]
+    finally:
+        payload["audit_runtime"]["phase_rows"] = phase_rows
+        payload["audit_runtime"]["progress_rows"] = progress_rows
+
+    try:
+        artifacts = _run_audit_phase(
+            "report_write",
+            phase_rows=phase_rows,
+            progress_rows=progress_rows,
+            progress_callback=progress_callback,
+            fn=lambda: _write_artifacts(output_dir=output_dir, payload=payload),
+        )
+    except Exception as exc:
+        payload["audit_runtime"]["status"] = "failed" if payload["audit_runtime"]["status"] == "completed" else payload["audit_runtime"]["status"]
+        payload["audit_runtime"]["report_write_error"] = str(exc)
+        artifacts = _write_fallback_artifacts(output_dir=output_dir, payload=payload)
+
+    payload["audit_runtime"]["phase_rows"] = phase_rows
+    payload["audit_runtime"]["progress_rows"] = progress_rows
+    payload["audit_runtime"]["artifact_write_completed"] = bool(artifacts)
+    payload["analysis_allowed"] = bool(payload["trade_alignment"]["analysis_allowed"])
+    payload["overall_status"] = payload["health"]["overall_status"]
+    if artifacts:
+        artifacts = _write_artifacts(output_dir=output_dir, payload=payload)
+    return {"payload": payload, "artifacts": artifacts}
+
+
+def _build_audit_payload_skeleton(
+    *,
+    replay_db_path: Path,
+    warehouse_root: Path,
+    provider_config: str | Path | None,
+    policy: IntegritySourcePolicy,
+    instruments: Sequence[str],
+    requested_symbols: Sequence[str],
+    start_date: str,
+    latest_target: datetime,
+) -> dict[str, Any]:
+    return {
+        "module": "Research Market Data Integrity",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "replay_db_path": str(replay_db_path.resolve()),
+        "warehouse_root": str(warehouse_root.resolve()),
+        "provider_config_path": str(provider_config_path(provider_config)),
+        "policy": asdict(policy),
+        "instrument_registry": {
+            "instrument_count": len(instruments),
+            "instruments": list(instruments),
+            "requested_symbols": list(requested_symbols),
+            "unknown_requested_symbols": sorted(set(requested_symbols) - set(instruments)),
+            "all_instruments_treated_equally": True,
+        },
+        "sample_coverage": {
+            "requested_start_date": start_date,
+            "requested_latest_target": latest_target.isoformat(),
+            "actual_replay_latest_timestamp": None,
+        },
+        "replay_audit": {
+            "coverage_rows": [],
+            "monthly_density_rows": [],
+            "canonical_coverage_rows": [],
+            "duplicate_rows": [],
+            "session_audit": {
+                "per_month_session_counts": [],
+                "session_gap_rows": [],
+                "partial_session_rows": [],
+            },
+            "source_overlap_rows": [],
+            "five_minute_surface_rows": [],
+            "global_latest_canonical_1m_ts": None,
+        },
+        "warehouse_audit": {"dataset_reports": _empty_dataset_reports()},
+        "trade_alignment": {"symbol_rows": [], "blocking_issues": [], "analysis_allowed": False},
+        "health": {"overall_status": "pending", "can_assert_complete_and_reliable": False, "instrument_rows": [], "blocking_issues": []},
+        "repair_plan": {"missing_ranges": [], "repair_commands": [], "warehouse_rebuild_commands": [], "trade_rematerialization_commands": [], "do_not_run_strategy_research_yet": True},
+        "daily_maintenance_plan": {"mode_supported": ["incremental_update", "full_backfill", "dry_run_validation"], "per_instrument": [], "daily_commands": [], "warehouse_commands": [], "trade_commands": []},
+        "audit_runtime": {
+            "status": "running",
+            "reason": None,
+            "phase": None,
+            "phase_rows": [],
+            "progress_rows": [],
+        },
+    }
+
+
+def _empty_dataset_reports() -> dict[str, Any]:
+    return {
+        "raw_bars_1m": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
+        "derived_bars_5m": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
+        "lane_entries": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
+        "lane_closed_trades": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
+    }
+
+
+def _resolve_instruments(
+    *,
+    provider_cfg: Any,
+    requested_symbols: Sequence[str],
+) -> tuple[str, ...]:
+    registry = tuple(sorted(symbol.upper() for symbol in provider_cfg.databento.pilot_symbols))
+    if not requested_symbols:
+        return registry
+    requested = tuple(sorted({symbol.upper() for symbol in requested_symbols}))
+    return tuple(symbol for symbol in registry if symbol in requested)
+
+
+def _run_audit_phase(
+    phase: str,
+    *,
+    phase_rows: list[dict[str, Any]],
+    progress_rows: list[dict[str, Any]],
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    fn: Callable[[], Any],
+    detail: dict[str, Any] | None = None,
+) -> Any:
+    started_at = datetime.now(UTC).isoformat()
+    start_monotonic = time.monotonic()
+    start_event = {"phase": phase, "event": "start", "started_at": started_at, "detail": detail or {}}
+    progress_rows.append(start_event)
+    if progress_callback is not None:
+        progress_callback(dict(start_event))
+    try:
+        result = fn()
+    except Exception as exc:
+        duration_seconds = round(time.monotonic() - start_monotonic, 3)
+        phase_row = {
+            "phase": phase,
+            "status": "blocked" if isinstance(exc, AuditPhaseTimeout) else "failed",
+            "started_at": started_at,
+            "finished_at": datetime.now(UTC).isoformat(),
+            "duration_seconds": duration_seconds,
+            "reason": "audit_phase_timeout" if isinstance(exc, AuditPhaseTimeout) else type(exc).__name__,
+        }
+        phase_rows.append(phase_row)
+        end_event = {**phase_row, "event": "end"}
+        progress_rows.append(end_event)
+        if progress_callback is not None:
+            progress_callback(dict(end_event))
+        raise
+    duration_seconds = round(time.monotonic() - start_monotonic, 3)
+    phase_row = {
+        "phase": phase,
+        "status": "completed",
+        "started_at": started_at,
+        "finished_at": datetime.now(UTC).isoformat(),
+        "duration_seconds": duration_seconds,
+    }
+    phase_rows.append(phase_row)
+    end_event = {**phase_row, "event": "end"}
+    progress_rows.append(end_event)
+    if progress_callback is not None:
+        progress_callback(dict(end_event))
+    return result
+
+
+def _audit_canonical_replay_coverage(
+    *,
+    replay_db_path: Path,
+    instruments: Sequence[str],
+    policy: IntegritySourcePolicy,
+    canonical_service: CanonicalMarketDataMaintenanceService,
+) -> dict[str, Any]:
+    conn = sqlite3.connect(replay_db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        coverage_rows = _coverage_rows(conn=conn, instruments=instruments)
+        monthly_density_rows = _monthly_density_rows(conn=conn, instruments=instruments)
+        session_audit = _session_audit(conn=conn, instruments=instruments)
+    finally:
+        conn.close()
+
+    canonical_coverage_rows: list[dict[str, Any]] = []
+    for instrument in instruments:
+        coverage = canonical_service.audit_coverage(symbol=instrument, timeframe="1m", data_source=policy.canonical_1m_source)
+        canonical_coverage_rows.append(
+            {
+                "instrument": instrument,
+                "timeframe": "1m",
+                "data_source": policy.canonical_1m_source,
+                "bar_count": coverage.bar_count,
+                "earliest_ts": coverage.earliest,
+                "latest_ts": coverage.latest,
+                "gap_count": coverage.gap_count,
+                "missing_bar_count": int(sum(gap.missing_minutes for gap in coverage.gaps)),
+            }
+        )
+    latest = max((row["latest_ts"] for row in canonical_coverage_rows if row["latest_ts"]), default=None)
+    return {
+        "coverage_rows": coverage_rows,
+        "monthly_density_rows": monthly_density_rows,
+        "canonical_coverage_rows": canonical_coverage_rows,
+        "session_audit": session_audit,
+        "global_latest_canonical_1m_ts": latest,
+    }
+
+
+def _audit_source_overlap_checks(
+    *,
+    replay_db_path: Path,
+    instruments: Sequence[str],
+    policy: IntegritySourcePolicy,
+    phase_timeout_seconds: float,
+) -> dict[str, Any]:
+    conn = sqlite3.connect(replay_db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        duplicate_rows = _run_sqlite_phase_with_timeout(
+            conn,
+            phase="source_overlap_checks",
+            timeout_seconds=phase_timeout_seconds,
+            fn=lambda: _duplicate_rows(conn=conn, instruments=instruments),
+        )
+        source_overlap_rows = _run_sqlite_phase_with_timeout(
+            conn,
+            phase="source_overlap_checks",
+            timeout_seconds=phase_timeout_seconds,
+            fn=lambda: _source_overlap_rows(conn=conn, instruments=instruments),
+        )
+        five_minute_rows = _five_minute_surface_rows(conn=conn, instruments=instruments, policy=policy)
+    finally:
+        conn.close()
+    return {
+        "duplicate_rows": duplicate_rows,
+        "source_overlap_rows": source_overlap_rows,
+        "five_minute_surface_rows": five_minute_rows,
+    }
+
+
+def _build_alignment_bundle(
+    *,
+    replay_db_path: Path,
+    warehouse_root: Path,
+    provider_config: str | Path | None,
+    instruments: Sequence[str],
+    replay_audit: dict[str, Any],
+    warehouse_audit: dict[str, Any],
+    lane_symbol_map: dict[str, list[str]],
+    start_date: str,
+    latest_target: datetime,
+    policy: IntegritySourcePolicy,
+) -> dict[str, Any]:
     trade_alignment = _audit_trade_alignment(
         replay_audit=replay_audit,
         warehouse_audit=warehouse_audit,
-        lane_symbol_map=lane_symbol_map or {symbol: list(lanes) for symbol, lanes in DEFAULT_BASKET.items()},
+        lane_symbol_map=lane_symbol_map,
     )
     health = _build_health_report(
         replay_audit=replay_audit,
@@ -114,32 +479,68 @@ def run_research_data_integrity_audit(
         replay_audit=replay_audit,
         latest_target=latest_target,
     )
-    payload = {
-        "module": "Research Market Data Integrity",
-        "generated_at": datetime.now(UTC).isoformat(),
-        "replay_db_path": str(replay_db_path.resolve()),
-        "warehouse_root": str(warehouse_root.resolve()),
-        "provider_config_path": str(provider_config_path(provider_config)),
-        "policy": asdict(policy),
-        "instrument_registry": {
-            "instrument_count": len(instruments),
-            "instruments": list(instruments),
-            "all_instruments_treated_equally": True,
-        },
-        "sample_coverage": {
-            "requested_start_date": start_date,
-            "requested_latest_target": latest_target.isoformat(),
-            "actual_replay_latest_timestamp": replay_audit["global_latest_canonical_1m_ts"],
-        },
-        "replay_audit": replay_audit,
-        "warehouse_audit": warehouse_audit,
+    return {
         "trade_alignment": trade_alignment,
         "health": health,
         "repair_plan": repair_plan,
         "daily_maintenance_plan": daily_plan,
     }
-    artifacts = _write_artifacts(output_dir=output_dir, payload=payload)
-    return {"payload": payload, "artifacts": artifacts}
+
+
+def _build_blocked_health(
+    *,
+    replay_audit: dict[str, Any],
+    phase: str,
+    reason: str,
+) -> dict[str, Any]:
+    instrument_rows = [
+        {
+            "instrument": row["instrument"],
+            "latest_timestamp": row.get("latest_ts"),
+            "missing_bars": row.get("missing_bar_count", 0),
+            "missing_sessions": 0,
+            "duplicate_bar_count": 0,
+            "warehouse_duplicate_bar_count": 0,
+            "source_consistency_ok": None,
+            "warehouse_1m_aligned": None,
+            "warehouse_5m_aligned": None,
+            "trade_artifact_fresh": None,
+            "status": "blocked",
+            "issues": [f"audit_blocked:{phase}:{reason}"],
+        }
+        for row in replay_audit.get("canonical_coverage_rows", [])
+    ]
+    return {
+        "overall_status": "blocked",
+        "can_assert_complete_and_reliable": False,
+        "instrument_rows": instrument_rows,
+        "blocking_issues": [f"audit blocked in phase={phase} reason={reason}"],
+    }
+
+
+def _run_sqlite_phase_with_timeout(
+    conn: sqlite3.Connection,
+    *,
+    phase: str,
+    timeout_seconds: float,
+    fn: Callable[[], Any],
+) -> Any:
+    if timeout_seconds <= 0:
+        return fn()
+    deadline = time.monotonic() + timeout_seconds
+
+    def _progress_handler() -> int:
+        return 1 if time.monotonic() >= deadline else 0
+
+    conn.set_progress_handler(_progress_handler, 10_000)
+    try:
+        return fn()
+    except sqlite3.OperationalError as exc:
+        if "interrupted" in str(exc).lower():
+            raise AuditPhaseTimeout(phase=phase, timeout_seconds=timeout_seconds) from exc
+        raise
+    finally:
+        conn.set_progress_handler(None, 0)
 
 
 def execute_research_market_data_backfill(
@@ -933,6 +1334,7 @@ def _write_artifacts(*, output_dir: Path, payload: dict[str, Any]) -> dict[str, 
     session_gap_csv = layout["reports"] / "research_market_data_session_gaps.csv"
     duplicate_csv = layout["reports"] / "research_market_data_duplicates.csv"
     health_json = layout["reports"] / "research_market_data_health.json"
+    runtime_json = layout["reports"] / "research_market_data_audit_runtime.json"
     repair_plan_json = layout["reports"] / "research_market_data_repair_plan.json"
     daily_plan_json = layout["reports"] / "research_market_data_daily_plan.json"
     source_policy_json = layout["reports"] / "research_market_data_source_policy.json"
@@ -944,6 +1346,7 @@ def _write_artifacts(*, output_dir: Path, payload: dict[str, Any]) -> dict[str, 
     _write_csv(session_gap_csv, payload["replay_audit"]["session_audit"]["session_gap_rows"])
     _write_csv(duplicate_csv, payload["replay_audit"]["duplicate_rows"])
     health_json.write_text(json.dumps(payload["health"], indent=2, sort_keys=True), encoding="utf-8")
+    runtime_json.write_text(json.dumps(payload["audit_runtime"], indent=2, sort_keys=True), encoding="utf-8")
     repair_plan_json.write_text(json.dumps(payload["repair_plan"], indent=2, sort_keys=True), encoding="utf-8")
     daily_plan_json.write_text(json.dumps(payload["daily_maintenance_plan"], indent=2, sort_keys=True), encoding="utf-8")
     source_policy_json.write_text(json.dumps(payload["policy"], indent=2, sort_keys=True), encoding="utf-8")
@@ -960,6 +1363,7 @@ def _write_artifacts(*, output_dir: Path, payload: dict[str, Any]) -> dict[str, 
                 "session_gap_csv": str(session_gap_csv),
                 "duplicate_csv": str(duplicate_csv),
                 "health_json": str(health_json),
+                "runtime_json": str(runtime_json),
                 "repair_plan_json": str(repair_plan_json),
                 "daily_plan_json": str(daily_plan_json),
                 "source_policy_json": str(source_policy_json),
@@ -974,6 +1378,7 @@ def _write_artifacts(*, output_dir: Path, payload: dict[str, Any]) -> dict[str, 
         "session_gap_csv": str(session_gap_csv),
         "duplicate_csv": str(duplicate_csv),
         "health_json": str(health_json),
+        "runtime_json": str(runtime_json),
         "repair_plan_json": str(repair_plan_json),
         "daily_plan_json": str(daily_plan_json),
         "source_policy_json": str(source_policy_json),
@@ -982,15 +1387,39 @@ def _write_artifacts(*, output_dir: Path, payload: dict[str, Any]) -> dict[str, 
     }
 
 
+def _write_fallback_artifacts(*, output_dir: Path, payload: dict[str, Any]) -> dict[str, str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_json_path = output_dir / "research_market_data_integrity_summary.partial.json"
+    summary_md_path = output_dir / "research_market_data_integrity_summary.partial.md"
+    summary_json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    summary_md_path.write_text(_render_markdown(payload), encoding="utf-8")
+    return {
+        "summary_json_path": str(summary_json_path),
+        "summary_md_path": str(summary_md_path),
+    }
+
+
 def _render_markdown(payload: dict[str, Any]) -> str:
     health = payload["health"]
+    audit_runtime = payload.get("audit_runtime", {})
+    phase_rows = list(audit_runtime.get("phase_rows", []))
+    slowest_phase = max(phase_rows, key=lambda row: float(row.get("duration_seconds") or 0), default=None)
     lines = [
         "# Research Market Data Integrity",
         "",
         "## Overall Health",
         f"- overall_status={health['overall_status']}",
         f"- can_assert_complete_and_reliable={health['can_assert_complete_and_reliable']}",
+        f"- audit_status={audit_runtime.get('status')}",
+        f"- audit_phase={audit_runtime.get('phase') or 'none'}",
+        f"- audit_reason={audit_runtime.get('reason') or 'none'}",
         f"- instrument_count={payload['instrument_registry']['instrument_count']}",
+        f"- requested_symbols={', '.join(payload['instrument_registry'].get('requested_symbols') or []) or 'all'}",
+        "",
+        "## Audit Runtime",
+        f"- phase_count={len(phase_rows)}",
+        f"- slowest_phase={slowest_phase['phase'] if slowest_phase else 'none'}",
+        f"- slowest_phase_duration_seconds={slowest_phase['duration_seconds'] if slowest_phase else 0}",
         "",
         "## Blocking Issues",
     ]

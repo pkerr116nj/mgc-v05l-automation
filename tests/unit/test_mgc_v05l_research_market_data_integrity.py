@@ -4,6 +4,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta
 from decimal import Decimal
+import importlib
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,8 @@ from mgc_v05l.persistence.db import create_schema
 from mgc_v05l.persistence.repositories import RepositorySet
 from mgc_v05l.research.trend_participation.storage import materialize_parquet_dataset
 from mgc_v05l.research.warehouse_historical_evaluator.layout import build_layout as build_warehouse_layout
+
+integrity_module = importlib.import_module("mgc_v05l.market_data.research_data_integrity")
 
 
 def _provider_config(tmp_path: Path) -> Path:
@@ -366,3 +369,118 @@ def test_research_market_data_integrity_daily_plan_shape_and_read_only_audit(tmp
     assert daily_plan["mode_supported"] == ["incremental_update", "full_backfill", "dry_run_validation"]
     assert len(daily_plan["per_instrument"]) == 2
     assert "next_incremental_start" in daily_plan["per_instrument"][0]
+
+
+def test_research_market_data_integrity_scoped_symbol_audit_and_phase_timings(tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    db_path = tmp_path / "replay.sqlite3"
+    warehouse_root = tmp_path / "warehouse"
+    _seed_sqlite(db_path)
+    ny = ZoneInfo("America/New_York")
+    _materialize_warehouse(
+        warehouse_root,
+        raw_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
+        derived_latest=datetime(2026, 3, 2, 18, 5, tzinfo=ny),
+        trade_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
+    )
+
+    progress_events: list[dict[str, object]] = []
+    result = run_research_data_integrity_audit(
+        output_dir=tmp_path / "report",
+        replay_db_path=db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_cfg,
+        lane_symbol_map={"MGC": ["test_lane__MGC"]},
+        symbols=["MGC"],
+        progress_callback=progress_events.append,
+    )
+
+    payload = result["payload"]
+    assert payload["instrument_registry"]["instruments"] == ["MGC"]
+    assert payload["instrument_registry"]["instrument_count"] == 1
+    assert {row["instrument"] for row in payload["replay_audit"]["canonical_coverage_rows"]} == {"MGC"}
+    phase_names = [row["phase"] for row in payload["audit_runtime"]["phase_rows"]]
+    assert phase_names == [
+        "registry_load",
+        "canonical_1m_coverage",
+        "source_overlap_checks",
+        "warehouse_integrity_checks",
+        "trade_replay_artifact_alignment",
+        "report_write",
+    ]
+    assert all(float(row["duration_seconds"]) >= 0 for row in payload["audit_runtime"]["phase_rows"])
+    assert any(event["phase"] == "canonical_1m_coverage" and event["event"] == "start" for event in progress_events)
+    assert any(event["phase"] == "canonical_1m_coverage" and event["event"] == "end" for event in progress_events)
+
+
+def test_research_market_data_integrity_writes_partial_report_on_timeout(monkeypatch, tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    db_path = tmp_path / "replay.sqlite3"
+    warehouse_root = tmp_path / "warehouse"
+    _seed_sqlite(db_path)
+    ny = ZoneInfo("America/New_York")
+    _materialize_warehouse(
+        warehouse_root,
+        raw_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
+        derived_latest=datetime(2026, 3, 2, 18, 5, tzinfo=ny),
+        trade_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
+    )
+
+    def _raise_timeout(**_: object) -> dict[str, object]:
+        raise integrity_module.AuditPhaseTimeout(phase="source_overlap_checks", timeout_seconds=0.01)
+
+    monkeypatch.setattr(integrity_module, "_audit_source_overlap_checks", _raise_timeout)
+
+    result = run_research_data_integrity_audit(
+        output_dir=tmp_path / "report",
+        replay_db_path=db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_cfg,
+        lane_symbol_map={"MGC": ["test_lane__MGC"]},
+        symbols=["MGC"],
+    )
+
+    payload = result["payload"]
+    assert payload["audit_runtime"]["status"] == "blocked"
+    assert payload["audit_runtime"]["reason"] == "audit_phase_timeout"
+    assert payload["audit_runtime"]["phase"] == "source_overlap_checks"
+    assert payload["health"]["overall_status"] == "blocked"
+    assert payload["analysis_allowed"] is False
+    summary_path = Path(result["artifacts"]["summary_json_path"])
+    assert summary_path.exists()
+    summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary_payload["audit_runtime"]["status"] == "blocked"
+
+
+def test_research_market_data_integrity_writes_partial_report_on_failure(monkeypatch, tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    db_path = tmp_path / "replay.sqlite3"
+    warehouse_root = tmp_path / "warehouse"
+    _seed_sqlite(db_path)
+    ny = ZoneInfo("America/New_York")
+    _materialize_warehouse(
+        warehouse_root,
+        raw_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
+        derived_latest=datetime(2026, 3, 2, 18, 5, tzinfo=ny),
+        trade_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
+    )
+
+    def _raise_failure(**_: object) -> dict[str, object]:
+        raise RuntimeError("synthetic warehouse failure")
+
+    monkeypatch.setattr(integrity_module, "_audit_warehouse", _raise_failure)
+
+    result = run_research_data_integrity_audit(
+        output_dir=tmp_path / "report",
+        replay_db_path=db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_cfg,
+        lane_symbol_map={"MGC": ["test_lane__MGC"]},
+        symbols=["MGC"],
+    )
+
+    payload = result["payload"]
+    assert payload["audit_runtime"]["status"] == "failed"
+    assert payload["audit_runtime"]["reason"] == "RuntimeError"
+    assert payload["analysis_allowed"] is False
+    assert Path(result["artifacts"]["summary_json_path"]).exists()
