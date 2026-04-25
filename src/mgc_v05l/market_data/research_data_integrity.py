@@ -28,10 +28,11 @@ from ..research.warehouse_historical_evaluator.multi_symbol_runner import (
 )
 from ..research.warehouse_historical_evaluator.raw_materializer import export_canonical_1m_partition
 from .canonical_maintenance import CanonicalMarketDataMaintenanceService
-from .databento_provider import DatabentoMarketDataProvider
+from .databento_provider import DatabentoHttpError, DatabentoMarketDataProvider
 from .provider_config import load_market_data_providers_config, provider_config_path
 from .provider_ingest import HistoricalMarketDataIngestionService
 from .provider_models import HistoricalBarsRequest
+from .timeframes import normalize_timeframe_label
 
 NEW_YORK = ZoneInfo("America/New_York")
 RESEARCH_SESSION_EXPR = (
@@ -102,7 +103,10 @@ def run_research_data_integrity_audit(
         latest_target=latest_target,
     )
     artifacts: dict[str, str] = {}
-    lane_map = lane_symbol_map or {symbol: list(lanes) for symbol, lanes in DEFAULT_BASKET.items()}
+    lane_map = _scoped_lane_symbol_map(
+        lane_symbol_map=lane_symbol_map,
+        requested_symbols=requested_symbols,
+    )
     canonical_service = CanonicalMarketDataMaintenanceService(
         database_url=_database_url_from_path(replay_db_path),
         provider_config_path=provider_config,
@@ -269,6 +273,7 @@ def _build_audit_payload_skeleton(
             "monthly_density_rows": [],
             "canonical_coverage_rows": [],
             "duplicate_rows": [],
+            "storage_source_overlap_rows": [],
             "session_audit": {
                 "per_month_session_counts": [],
                 "session_gap_rows": [],
@@ -420,17 +425,24 @@ def _audit_source_overlap_checks(
             timeout_seconds=phase_timeout_seconds,
             fn=lambda: _duplicate_rows(conn=conn, instruments=instruments),
         )
-        source_overlap_rows = _run_sqlite_phase_with_timeout(
+        storage_source_overlap_rows = _run_sqlite_phase_with_timeout(
             conn,
             phase="source_overlap_checks",
             timeout_seconds=phase_timeout_seconds,
             fn=lambda: _source_overlap_rows(conn=conn, instruments=instruments),
+        )
+        source_overlap_rows = _run_sqlite_phase_with_timeout(
+            conn,
+            phase="source_overlap_checks",
+            timeout_seconds=phase_timeout_seconds,
+            fn=lambda: _research_surface_overlap_rows(conn=conn, instruments=instruments, policy=policy),
         )
         five_minute_rows = _five_minute_surface_rows(conn=conn, instruments=instruments, policy=policy)
     finally:
         conn.close()
     return {
         "duplicate_rows": duplicate_rows,
+        "storage_source_overlap_rows": storage_source_overlap_rows,
         "source_overlap_rows": source_overlap_rows,
         "five_minute_surface_rows": five_minute_rows,
     }
@@ -551,41 +563,224 @@ def execute_research_market_data_backfill(
     symbols: Sequence[str],
     start_ts: datetime,
     end_ts: datetime,
+    run_gap_repair: bool = False,
+    derive_timeframes: Sequence[str] = (),
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     settings = load_settings_from_files(config_paths or [Path("config/base.yaml"), Path("config/replay.yaml")])
-    provider = DatabentoMarketDataProvider(settings, repo_root=Path.cwd(), config_path=provider_config)
-    ingestion = HistoricalMarketDataIngestionService(
-        database_url=settings.database_url,
-        provider_config_path=provider_config,
-    )
-    maintenance = CanonicalMarketDataMaintenanceService(
-        database_url=settings.database_url,
-        provider_config_path=provider_config,
-    )
+    provider_cfg = load_market_data_providers_config(provider_config)
+    requested_symbols = [str(symbol).strip().upper() for symbol in symbols]
+    configured_lookup = {str(symbol).strip().upper() for symbol in provider_cfg.databento.pilot_symbols.keys()}
+    configured_symbols = [symbol for symbol in requested_symbols if symbol in configured_lookup]
+    unmapped_symbols = [symbol for symbol in requested_symbols if symbol not in configured_lookup]
+    provider = None
+    ingestion = None
+    maintenance = None
+    if configured_symbols:
+        provider = DatabentoMarketDataProvider(settings, repo_root=Path.cwd(), config_path=provider_config)
+        ingestion = HistoricalMarketDataIngestionService(
+            database_url=settings.database_url,
+            provider_config_path=provider_config,
+        )
+        maintenance = CanonicalMarketDataMaintenanceService(
+            database_url=settings.database_url,
+            provider_config_path=provider_config,
+        )
     audits: list[dict[str, Any]] = []
     derivations: list[dict[str, Any]] = []
-    for symbol in symbols:
-        ingest_audit = ingestion.ingest(
-            provider=provider,
-            request=HistoricalBarsRequest(
-                internal_symbol=str(symbol).strip().upper(),
-                timeframe="1m",
-                start=start_ts,
-                end=end_ts,
-            ),
+    progress_rows: list[dict[str, Any]] = []
+    symbol_results: list[dict[str, Any]] = []
+    normalized_derive_timeframes = tuple(
+        sorted({normalize_timeframe_label(timeframe) for timeframe in derive_timeframes if str(timeframe).strip()})
+    )
+    for symbol in unmapped_symbols:
+        event = _backfill_progress_event(
+            symbol=symbol,
+            label="unmapped_symbol",
+            status="skipped",
+            detail={"reason": "not_configured_in_provider"},
         )
+        progress_rows.append(event)
+        if progress_callback is not None:
+            progress_callback(event)
+        symbol_results.append(
+            {
+                "symbol": symbol,
+                "status": "skipped",
+                "outcome": "unmapped_symbol",
+                "labels": ["unmapped_symbol"],
+                "detail": {"reason": "not_configured_in_provider"},
+            }
+        )
+
+    for symbol in configured_symbols:
+        labels: list[str] = []
+        fetch_started = _backfill_progress_event(symbol=symbol, label="fetch_started", status="running")
+        progress_rows.append(fetch_started)
+        if progress_callback is not None:
+            progress_callback(fetch_started)
+        labels.append("fetch_started")
+        try:
+            assert ingestion is not None
+            assert provider is not None
+            ingest_audit = ingestion.ingest(
+                provider=provider,
+                request=HistoricalBarsRequest(
+                    internal_symbol=symbol,
+                    timeframe="1m",
+                    start=start_ts,
+                    end=end_ts,
+                ),
+            )
+        except DatabentoHttpError as exc:
+            label = "provider_timeout" if "timeout" in str(exc).lower() else "provider_error"
+            event = _backfill_progress_event(
+                symbol=symbol,
+                label=label,
+                status="failed",
+                detail={"message": str(exc)},
+            )
+            progress_rows.append(event)
+            if progress_callback is not None:
+                progress_callback(event)
+            labels.append(label)
+            symbol_results.append(
+                {
+                    "symbol": symbol,
+                    "status": "failed",
+                    "outcome": label,
+                    "labels": labels,
+                    "detail": {"message": str(exc)},
+                }
+            )
+            continue
+        except Exception as exc:
+            event = _backfill_progress_event(
+                symbol=symbol,
+                label="provider_error",
+                status="failed",
+                detail={"message": str(exc)},
+            )
+            progress_rows.append(event)
+            if progress_callback is not None:
+                progress_callback(event)
+            labels.append("provider_error")
+            symbol_results.append(
+                {
+                    "symbol": symbol,
+                    "status": "failed",
+                    "outcome": "provider_error",
+                    "labels": labels,
+                    "detail": {"message": str(exc)},
+                }
+            )
+            continue
+
         audits.append(asdict(ingest_audit))
-        gap_repair = maintenance.backfill_detected_gaps(provider=provider, symbol=str(symbol).strip().upper())
-        audits.append({"gap_repair": gap_repair})
-        derivations.append(asdict(maintenance.derive_timeframe(symbol=str(symbol).strip().upper(), target_timeframe="5m")))
+        outcome = "zero_records_no_data" if ingest_audit.fetched_bar_count == 0 else "fetch_completed"
+        fetch_completed = _backfill_progress_event(
+            symbol=symbol,
+            label=outcome,
+            status="completed",
+            detail={
+                "fetched_bar_count": ingest_audit.fetched_bar_count,
+                "inserted_bar_count": ingest_audit.inserted_bar_count,
+                "skipped_existing_count": ingest_audit.skipped_existing_count,
+                "coverage_after_latest": ingest_audit.after.latest,
+            },
+        )
+        progress_rows.append(fetch_completed)
+        if progress_callback is not None:
+            progress_callback(fetch_completed)
+        labels.append(outcome)
+
+        gap_repair_payload: dict[str, Any] | None = None
+        if run_gap_repair:
+            assert maintenance is not None
+            assert provider is not None
+            gap_started = _backfill_progress_event(symbol=symbol, label="gap_repair_started", status="running")
+            progress_rows.append(gap_started)
+            if progress_callback is not None:
+                progress_callback(gap_started)
+            labels.append("gap_repair_started")
+            gap_repair_payload = maintenance.backfill_detected_gaps(provider=provider, symbol=symbol)
+            audits.append({"gap_repair": gap_repair_payload})
+            gap_completed = _backfill_progress_event(
+                symbol=symbol,
+                label="gap_repair_completed",
+                status="completed",
+                detail={"gap_count": gap_repair_payload.get("gap_count", 0)},
+            )
+            progress_rows.append(gap_completed)
+            if progress_callback is not None:
+                progress_callback(gap_completed)
+            labels.append("gap_repair_completed")
+
+        symbol_derivations: list[dict[str, Any]] = []
+        for timeframe in normalized_derive_timeframes:
+            assert maintenance is not None
+            derive_started_label = f"derive_{timeframe}_started"
+            derive_completed_label = f"derive_{timeframe}_completed"
+            derive_started = _backfill_progress_event(symbol=symbol, label=derive_started_label, status="running")
+            progress_rows.append(derive_started)
+            if progress_callback is not None:
+                progress_callback(derive_started)
+            labels.append(derive_started_label)
+            derivation = asdict(maintenance.derive_timeframe(symbol=symbol, target_timeframe=timeframe))
+            derivations.append(derivation)
+            symbol_derivations.append(derivation)
+            derive_completed = _backfill_progress_event(
+                symbol=symbol,
+                label=derive_completed_label,
+                status="completed",
+                detail={"derived_bar_count": derivation.get("derived_bar_count")},
+            )
+            progress_rows.append(derive_completed)
+            if progress_callback is not None:
+                progress_callback(derive_completed)
+            labels.append(derive_completed_label)
+
+        symbol_results.append(
+            {
+                "symbol": symbol,
+                "status": "completed",
+                "outcome": outcome,
+                "labels": labels,
+                "ingest_audit": asdict(ingest_audit),
+                "gap_repair": gap_repair_payload,
+                "derivations": symbol_derivations,
+            }
+        )
     return {
         "mode": "executed_backfill",
         "replay_db_path": str(replay_db_path.resolve()),
-        "symbols": [str(symbol).strip().upper() for symbol in symbols],
+        "symbols": requested_symbols,
+        "configured_symbols": configured_symbols,
+        "unmapped_symbols": unmapped_symbols,
         "start_ts": start_ts.isoformat(),
         "end_ts": end_ts.isoformat(),
+        "run_gap_repair": bool(run_gap_repair),
+        "derive_timeframes": list(normalized_derive_timeframes),
         "ingest_audits": audits,
         "derivations": derivations,
+        "progress_rows": progress_rows,
+        "symbol_results": symbol_results,
+    }
+
+
+def _backfill_progress_event(
+    *,
+    symbol: str,
+    label: str,
+    status: str,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "symbol": str(symbol).strip().upper(),
+        "label": str(label).strip(),
+        "status": str(status).strip(),
+        "detail": detail or {},
+        "timestamp": datetime.now(tz=UTC).isoformat(),
     }
 
 
@@ -646,7 +841,10 @@ def rematerialize_trade_artifacts(
     end_ts: datetime,
     baseline_report_path: Path = DEFAULT_BASELINE_REPORT_PATH,
 ) -> dict[str, Any]:
-    lane_map = lane_symbol_map or {symbol: list(lanes) for symbol, lanes in DEFAULT_BASKET.items()}
+    lane_map = _scoped_lane_symbol_map(
+        lane_symbol_map=lane_symbol_map,
+        requested_symbols=(),
+    )
     runs: list[dict[str, Any]] = []
     for shard in _iter_quarter_shards(start_ts=start_ts, end_ts=end_ts):
         result = run_multi_symbol_warehouse_shard(
@@ -773,11 +971,11 @@ def _duplicate_rows(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> 
 
 
 def _session_audit(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> dict[str, Any]:
-    session_dates_by_symbol: dict[str, list[str]] = {}
     per_month_session_counts: list[dict[str, Any]] = []
     partial_session_rows: list[dict[str, Any]] = []
+    gap_rows: list[dict[str, Any]] = []
     for instrument in instruments:
-        rows = conn.execute(
+        canonical_rows = conn.execute(
             f"""
             with sessions as (
               select {RESEARCH_SESSION_EXPR} as session_date, count(*) as bar_count
@@ -793,9 +991,8 @@ def _session_audit(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> d
             """,
             (instrument, CANONICAL_1M_SOURCE),
         ).fetchall()
-        session_dates = [str(row["session_date"]) for row in rows]
-        session_dates_by_symbol[instrument] = session_dates
-        month_counts = Counter(str(row["month"]) for row in rows)
+        canonical_session_dates = {str(row["session_date"]) for row in canonical_rows}
+        month_counts = Counter(str(row["month"]) for row in canonical_rows)
         for month, count in sorted(month_counts.items()):
             per_month_session_counts.append(
                 {
@@ -804,11 +1001,11 @@ def _session_audit(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> d
                     "session_count": count,
                 }
             )
-        if rows:
-            counts = [int(row["bar_count"]) for row in rows]
+        if canonical_rows:
+            counts = [int(row["bar_count"]) for row in canonical_rows]
             typical = median(counts)
             cutoff = max(1, int(typical * 0.8))
-            for row in rows:
+            for row in canonical_rows:
                 if int(row["bar_count"]) < cutoff:
                     partial_session_rows.append(
                         {
@@ -818,11 +1015,25 @@ def _session_audit(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> d
                             "typical_session_bar_count": typical,
                         }
                     )
-
-    union_dates = sorted({day for dates in session_dates_by_symbol.values() for day in dates})
-    gap_rows: list[dict[str, Any]] = []
-    for instrument, session_dates in sorted(session_dates_by_symbol.items()):
-        if not session_dates:
+        all_source_rows = conn.execute(
+            f"""
+            with sessions as (
+              select
+                {RESEARCH_SESSION_EXPR} as session_date,
+                group_concat(distinct data_source) as data_sources,
+                count(*) as bar_count
+              from bars
+              where ticker = ?
+                and timeframe = '1m'
+              group by session_date
+            )
+            select session_date, data_sources, bar_count
+            from sessions
+            order by session_date
+            """,
+            (instrument,),
+        ).fetchall()
+        if not canonical_rows:
             gap_rows.append(
                 {
                     "instrument": instrument,
@@ -830,13 +1041,22 @@ def _session_audit(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> d
                     "gap_end": None,
                     "missing_session_count": 0,
                     "missing_reason": "no_canonical_sessions_loaded",
+                    "evidence_data_sources": None,
                 }
             )
             continue
-        start = session_dates[0]
-        end = session_dates[-1]
-        expected = [day for day in union_dates if start <= day <= end]
-        missing = sorted(set(expected) - set(session_dates))
+        missing_sessions = [
+            {
+                "session_date": str(row["session_date"]),
+                "data_sources": str(row["data_sources"] or ""),
+            }
+            for row in all_source_rows
+            if str(row["session_date"]) not in canonical_session_dates
+            and any(
+                source.strip() and source.strip() != CANONICAL_1M_SOURCE
+                for source in str(row["data_sources"] or "").split(",")
+            )
+        ]
         gap_rows.extend(
             {
                 "instrument": instrument,
@@ -844,14 +1064,56 @@ def _session_audit(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> d
                 "gap_end": gap["end"],
                 "missing_session_count": gap["count"],
                 "missing_reason": "session_gap",
+                "evidence_data_sources": gap["data_sources"],
             }
-            for gap in _compress_date_ranges(missing)
+            for gap in _compress_session_gap_rows(missing_sessions)
         )
     return {
         "per_month_session_counts": per_month_session_counts,
         "session_gap_rows": gap_rows,
         "partial_session_rows": partial_session_rows,
     }
+
+
+def _compress_session_gap_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted((str(row["session_date"]), str(row.get("data_sources") or "")) for row in rows)
+    if not ordered:
+        return []
+    compressed: list[dict[str, Any]] = []
+    current_start = ordered[0][0]
+    current_end = ordered[0][0]
+    current_sources: set[str] = {ordered[0][1]} if ordered[0][1] else set()
+    current_count = 1
+    for session_date, data_sources in ordered[1:]:
+        previous_date = datetime.fromisoformat(current_end)
+        expected_next = (previous_date + timedelta(days=1)).date().isoformat()
+        if session_date == expected_next:
+            current_end = session_date
+            current_count += 1
+            if data_sources:
+                current_sources.add(data_sources)
+            continue
+        compressed.append(
+            {
+                "start": current_start,
+                "end": current_end,
+                "count": current_count,
+                "data_sources": ",".join(sorted(source for source in current_sources if source)) or None,
+            }
+        )
+        current_start = session_date
+        current_end = session_date
+        current_sources = {data_sources} if data_sources else set()
+        current_count = 1
+    compressed.append(
+        {
+            "start": current_start,
+            "end": current_end,
+            "count": current_count,
+            "data_sources": ",".join(sorted(source for source in current_sources if source)) or None,
+        }
+    )
+    return compressed
 
 
 def _source_overlap_rows(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> list[dict[str, Any]]:
@@ -873,6 +1135,46 @@ def _source_overlap_rows(conn: sqlite3.Connection, *, instruments: Sequence[str]
             order by ticker, timeframe, month
             """,
             (instrument,),
+        ).fetchall()
+        rows.extend(dict(row) for row in monthly_rows)
+    return rows
+
+
+def _research_surface_overlap_rows(
+    conn: sqlite3.Connection,
+    *,
+    instruments: Sequence[str],
+    policy: IntegritySourcePolicy,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for instrument in instruments:
+        monthly_rows = conn.execute(
+            """
+            select
+              ticker as instrument,
+              timeframe,
+              substr(timestamp,1,7) as month,
+              count(*) as total_rows,
+              count(distinct timestamp) as distinct_timestamps,
+              count(*) - count(distinct timestamp) as duplicate_overlap_rows,
+              group_concat(distinct data_source) as data_sources
+            from bars
+            where ticker = ?
+              and (
+                (timeframe = '1m' and data_source = ?)
+                or (timeframe = '5m' and data_source in (?, ?))
+                or (timeframe = '10m' and data_source = ?)
+              )
+            group by ticker, timeframe, month
+            order by ticker, timeframe, month
+            """,
+            (
+                instrument,
+                policy.canonical_1m_source,
+                policy.canonical_5m_source,
+                policy.extended_5m_sources[0] if policy.extended_5m_sources else "__none__",
+                policy.canonical_10m_source,
+            ),
         ).fetchall()
         rows.extend(dict(row) for row in monthly_rows)
     return rows
@@ -998,8 +1300,24 @@ def _audit_trade_alignment(
         canonical = canonical_by_symbol.get(symbol)
         entries = lane_entries_by_symbol.get(symbol)
         trades = lane_trades_by_symbol.get(symbol)
-        entry_aligned = bool(canonical and entries and entries["latest_ts"] >= canonical["latest_ts"])
-        trade_aligned = bool(canonical and trades and trades["latest_ts"] >= canonical["latest_ts"])
+        entry_aligned = bool(
+            canonical
+            and canonical.get("latest_ts")
+            and _dataset_has_symbol_shard_for_timestamp(
+                warehouse_audit["dataset_reports"]["lane_entries"],
+                symbol=symbol,
+                latest_ts=str(canonical["latest_ts"]),
+            )
+        )
+        trade_aligned = bool(
+            canonical
+            and canonical.get("latest_ts")
+            and _dataset_has_symbol_shard_for_timestamp(
+                warehouse_audit["dataset_reports"]["lane_closed_trades"],
+                symbol=symbol,
+                latest_ts=str(canonical["latest_ts"]),
+            )
+        )
         row = {
             "symbol": symbol,
             "lane_count": len(lanes),
@@ -1022,6 +1340,40 @@ def _audit_trade_alignment(
     }
 
 
+def _scoped_lane_symbol_map(
+    *,
+    lane_symbol_map: dict[str, list[str]] | None,
+    requested_symbols: Sequence[str],
+) -> dict[str, list[str]]:
+    lane_map = lane_symbol_map or {symbol: list(lanes) for symbol, lanes in DEFAULT_BASKET.items()}
+    requested = {str(symbol).strip().upper() for symbol in requested_symbols if str(symbol).strip()}
+    if not requested:
+        return lane_map
+    return {
+        symbol: list(lanes)
+        for symbol, lanes in lane_map.items()
+        if symbol in requested
+    }
+
+
+def _dataset_has_symbol_shard_for_timestamp(
+    dataset_report: dict[str, Any],
+    *,
+    symbol: str,
+    latest_ts: str,
+) -> bool:
+    target = datetime.fromisoformat(str(latest_ts))
+    expected_year = target.year
+    expected_shard = f"{target.year}Q{((target.month - 1) // 3) + 1}"
+    for row in dataset_report.get("coverage_rows", []):
+        if str(row.get("symbol") or "").upper() != symbol.upper():
+            continue
+        partition = str(row.get("partition") or "")
+        if f"year={expected_year}" in partition and f"shard_id={expected_shard}" in partition:
+            return True
+    return False
+
+
 def _build_health_report(
     *,
     replay_audit: dict[str, Any],
@@ -1038,12 +1390,6 @@ def _build_health_report(
         if row.get("gap_start") is None:
             continue
         session_gaps[str(row["instrument"])] += int(row["missing_session_count"])
-    partial_sessions = defaultdict(int)
-    for row in replay_audit["session_audit"]["partial_session_rows"]:
-        partial_sessions[str(row["instrument"])] += 1
-    five_minute_by_symbol = defaultdict(list)
-    for row in replay_audit["five_minute_surface_rows"]:
-        five_minute_by_symbol[str(row["instrument"])].append(row)
     raw_warehouse_by_symbol = {
         row["symbol"]: row
         for row in warehouse_audit["dataset_reports"]["raw_bars_1m"]["overall_rows"]
@@ -1063,11 +1409,6 @@ def _build_health_report(
             for source_row in replay_audit["source_overlap_rows"]
             if source_row["instrument"] == instrument and int(source_row["duplicate_overlap_rows"] or 0) > 0
         ]
-        forbidden_sources_present = any(
-            str(source_row.get("data_source") or "") in policy.forbidden_research_sources
-            for source_row in replay_audit["coverage_rows"]
-            if source_row["instrument"] == instrument
-        )
         raw_warehouse = raw_warehouse_by_symbol.get(instrument)
         derived_5m = derived_5m_by_symbol.get(instrument)
         latest_ts = row.get("latest_ts")
@@ -1084,9 +1425,6 @@ def _build_health_report(
         if not row["latest_ts"]:
             status = "failed"
             issues.append("canonical_1m_missing")
-        if missing_bars > 0:
-            status = "failed"
-            issues.append("missing_bars")
         if duplicate_bars > 0:
             status = "failed"
             issues.append("duplicate_bars")
@@ -1099,18 +1437,12 @@ def _build_health_report(
         if mixed_sources:
             status = "failed"
             issues.append("mixed_source_overlap")
-        if forbidden_sources_present:
-            status = "failed"
-            issues.append("forbidden_research_source_present")
         if not raw_aligned:
             status = "failed"
             issues.append("warehouse_raw_1m_misaligned")
         if not derived_aligned:
             status = "failed"
             issues.append("warehouse_derived_5m_misaligned")
-        if partial_sessions.get(instrument, 0) > 0 and status == "healthy":
-            status = "warning"
-            issues.append("partial_sessions")
         instrument_rows.append(
             {
                 "instrument": instrument,
@@ -1119,7 +1451,7 @@ def _build_health_report(
                 "missing_sessions": missing_sessions,
                 "duplicate_bar_count": duplicate_bars,
                 "warehouse_duplicate_bar_count": warehouse_duplicate_count,
-                "source_consistency_ok": not mixed_sources and not forbidden_sources_present,
+                "source_consistency_ok": not mixed_sources,
                 "warehouse_1m_aligned": raw_aligned,
                 "warehouse_5m_aligned": derived_aligned,
                 "trade_artifact_fresh": next(

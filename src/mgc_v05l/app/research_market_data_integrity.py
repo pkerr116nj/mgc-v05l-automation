@@ -47,6 +47,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbol", action="append", default=None, help="Optional symbol override for execution modes.")
     parser.add_argument("--symbols", default=None, help="Optional comma-separated symbol scope.")
     parser.add_argument(
+        "--with-gap-repair",
+        action="store_true",
+        help="For backfill mode, run gap repair after canonical 1m fetch. Disabled by default.",
+    )
+    parser.add_argument(
+        "--derive-timeframe",
+        action="append",
+        default=None,
+        help="For backfill mode, explicitly derive canonical higher timeframes after fetch (e.g. --derive-timeframe 5m).",
+    )
+    parser.add_argument(
         "--phase-timeout-seconds",
         type=float,
         default=20.0,
@@ -92,6 +103,9 @@ def main(argv: list[str] | None = None) -> int:
             symbols=symbols,
             start_ts=_parse_timestamp(args.start),
             end_ts=_parse_timestamp(args.end),
+            run_gap_repair=bool(args.with_gap_repair),
+            derive_timeframes=args.derive_timeframe or (),
+            progress_callback=_stderr_backfill_callback,
         )
         print(json.dumps(_json_ready(result), indent=2, sort_keys=True))
         return 0
@@ -161,6 +175,19 @@ def _stderr_progress_callback(event: dict[str, Any]) -> None:
     reason_suffix = f" reason={reason}" if reason else ""
     print(
         f"[research-market-data-integrity] phase={phase} status={status} duration_seconds={duration}{reason_suffix}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _stderr_backfill_callback(event: dict[str, Any]) -> None:
+    symbol = event.get("symbol")
+    label = event.get("label")
+    status = event.get("status")
+    detail = event.get("detail") or {}
+    detail_suffix = f" detail={json.dumps(detail, sort_keys=True)}" if detail else ""
+    print(
+        f"[research-market-data-backfill] symbol={symbol} label={label} status={status}{detail_suffix}",
         file=sys.stderr,
         flush=True,
     )

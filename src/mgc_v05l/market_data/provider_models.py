@@ -115,6 +115,7 @@ class HistoricalIngestAudit:
     before: CoverageSnapshot
     after: CoverageSnapshot
     change: CoverageChange
+    fetched_bar_count: int
     inserted_bar_count: int
     skipped_existing_count: int
     ingest_run_id: str

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 import importlib
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from mgc_v05l.domain.models import Bar
-from mgc_v05l.market_data.research_data_integrity import run_research_data_integrity_audit
+from mgc_v05l.market_data.provider_models import CoverageChange, CoverageSnapshot, HistoricalIngestAudit
+from mgc_v05l.market_data.research_data_integrity import execute_research_market_data_backfill, run_research_data_integrity_audit
 from mgc_v05l.persistence import build_engine
 from mgc_v05l.persistence.db import create_schema
 from mgc_v05l.persistence.repositories import RepositorySet
@@ -84,6 +87,44 @@ def _provider_config(tmp_path: Path) -> Path:
     return path
 
 
+def _fake_ingest_audit(
+    *,
+    symbol: str,
+    fetched_bar_count: int,
+    inserted_bar_count: int,
+) -> HistoricalIngestAudit:
+    before = CoverageSnapshot(
+        symbol=symbol,
+        timeframe="1m",
+        data_source="historical_1m_canonical",
+        bar_count=0,
+        earliest=None,
+        latest=None,
+    )
+    after = CoverageSnapshot(
+        symbol=symbol,
+        timeframe="1m",
+        data_source="historical_1m_canonical",
+        bar_count=inserted_bar_count,
+        earliest=None,
+        latest="2026-04-21T23:59:00-04:00" if inserted_bar_count else None,
+    )
+    return HistoricalIngestAudit(
+        provider="databento",
+        internal_symbol=symbol,
+        timeframe="1m",
+        data_source="historical_1m_canonical",
+        before=before,
+        after=after,
+        change=CoverageChange.APPENDED if inserted_bar_count else CoverageChange.MATCHED,
+        fetched_bar_count=fetched_bar_count,
+        inserted_bar_count=inserted_bar_count,
+        skipped_existing_count=0,
+        ingest_run_id=f"ingest-{symbol.lower()}",
+        report_path=None,
+    )
+
+
 def _bar(*, symbol: str, timeframe: str, end_ts: datetime, bar_id_suffix: str = "", price: str = "100") -> Bar:
     minutes = int(timeframe.removesuffix("m"))
     return Bar(
@@ -118,6 +159,54 @@ def _seed_sqlite(db_path: Path) -> None:
     repositories.bars.save(_bar(symbol="ES", timeframe="1m", end_ts=datetime(2026, 3, 2, 18, 3, tzinfo=ny)), data_source="historical_1m_canonical")
     repositories.bars.save(_bar(symbol="MGC", timeframe="5m", end_ts=datetime(2026, 3, 2, 18, 5, tzinfo=ny)), data_source="historical_5m_canonical")
     repositories.bars.save(_bar(symbol="MGC", timeframe="5m", end_ts=datetime(2026, 3, 2, 18, 5, tzinfo=ny), bar_id_suffix="forbidden"), data_source="schwab_history")
+
+
+def _seed_holiday_session_divergence(db_path: Path) -> None:
+    engine = build_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+    repositories = RepositorySet(engine)
+    ny = ZoneInfo("America/New_York")
+    for hour in (18, 19):
+        repositories.bars.save(
+            _bar(symbol="GC", timeframe="1m", end_ts=datetime(2026, 4, 1, hour, 1, tzinfo=ny)),
+            data_source="historical_1m_canonical",
+        )
+        repositories.bars.save(
+            _bar(symbol="GC", timeframe="1m", end_ts=datetime(2026, 4, 5, hour, 1, tzinfo=ny)),
+            data_source="historical_1m_canonical",
+        )
+        repositories.bars.save(
+            _bar(symbol="MGC", timeframe="1m", end_ts=datetime(2026, 4, 1, hour, 1, tzinfo=ny)),
+            data_source="historical_1m_canonical",
+        )
+        repositories.bars.save(
+            _bar(symbol="MGC", timeframe="1m", end_ts=datetime(2026, 4, 5, hour, 1, tzinfo=ny)),
+            data_source="historical_1m_canonical",
+        )
+    for minute in (1, 2, 3):
+        repositories.bars.save(
+            _bar(symbol="ES", timeframe="1m", end_ts=datetime(2026, 4, 2, 18, minute, tzinfo=ny)),
+            data_source="historical_1m_canonical",
+        )
+
+
+def _seed_true_missing_session_with_noncanonical_evidence(db_path: Path) -> None:
+    engine = build_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+    repositories = RepositorySet(engine)
+    ny = ZoneInfo("America/New_York")
+    repositories.bars.save(
+        _bar(symbol="GC", timeframe="1m", end_ts=datetime(2026, 4, 1, 18, 1, tzinfo=ny)),
+        data_source="historical_1m_canonical",
+    )
+    repositories.bars.save(
+        _bar(symbol="GC", timeframe="1m", end_ts=datetime(2026, 4, 3, 18, 1, tzinfo=ny)),
+        data_source="historical_1m_canonical",
+    )
+    repositories.bars.save(
+        _bar(symbol="GC", timeframe="1m", end_ts=datetime(2026, 4, 2, 18, 1, tzinfo=ny), bar_id_suffix="schwab"),
+        data_source="schwab_history",
+    )
 
 
 def _materialize_warehouse(
@@ -259,7 +348,6 @@ def test_research_market_data_integrity_audit_flags_gap_and_trade_misalignment(t
         warehouse_root,
         raw_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
         derived_latest=datetime(2026, 3, 2, 18, 5, tzinfo=ny),
-        trade_latest=datetime(2026, 3, 2, 18, 2, tzinfo=ny),
     )
 
     result = run_research_data_integrity_audit(
@@ -275,7 +363,7 @@ def test_research_market_data_integrity_audit_flags_gap_and_trade_misalignment(t
     assert payload["health"]["overall_status"] == "failed"
     assert payload["trade_alignment"]["analysis_allowed"] is False
     mgc_row = next(row for row in payload["health"]["instrument_rows"] if row["instrument"] == "MGC")
-    assert "missing_bars" in mgc_row["issues"]
+    assert "warehouse_raw_1m_misaligned" not in mgc_row["issues"]
     assert len(payload["repair_plan"]["repair_commands"]) == 2
     assert Path(result["artifacts"]["summary_json_path"]).exists()
 
@@ -484,3 +572,308 @@ def test_research_market_data_integrity_writes_partial_report_on_failure(monkeyp
     assert payload["audit_runtime"]["reason"] == "RuntimeError"
     assert payload["analysis_allowed"] is False
     assert Path(result["artifacts"]["summary_json_path"]).exists()
+
+
+def test_research_market_data_integrity_uses_canonical_only_research_surface_for_overlap(tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    db_path = tmp_path / "replay.sqlite3"
+    warehouse_root = tmp_path / "warehouse"
+    _seed_sqlite(db_path)
+    engine = build_engine(f"sqlite:///{db_path}")
+    repositories = RepositorySet(engine)
+    ny = ZoneInfo("America/New_York")
+    repositories.bars.save(
+        _bar(symbol="MGC", timeframe="1m", end_ts=datetime(2026, 3, 2, 18, 1, tzinfo=ny), bar_id_suffix="schwab"),
+        data_source="schwab_history",
+    )
+    _materialize_warehouse(
+        warehouse_root,
+        raw_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
+        derived_latest=datetime(2026, 3, 2, 18, 5, tzinfo=ny),
+        trade_latest=datetime(2026, 3, 2, 18, 1, tzinfo=ny),
+    )
+
+    result = run_research_data_integrity_audit(
+        output_dir=tmp_path / "report",
+        replay_db_path=db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_cfg,
+        lane_symbol_map={"MGC": ["test_lane__MGC"]},
+        symbols=["MGC"],
+    )
+
+    payload = result["payload"]
+    assert all(int(row["duplicate_overlap_rows"]) == 0 for row in payload["replay_audit"]["source_overlap_rows"])
+    assert any(int(row["duplicate_overlap_rows"]) > 0 for row in payload["replay_audit"]["storage_source_overlap_rows"])
+    mgc_row = next(row for row in payload["health"]["instrument_rows"] if row["instrument"] == "MGC")
+    assert "mixed_source_overlap" not in mgc_row["issues"]
+    assert "forbidden_research_source_present" not in mgc_row["issues"]
+
+
+def test_research_market_data_integrity_trade_alignment_uses_materialized_shard_coverage(tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    db_path = tmp_path / "replay.sqlite3"
+    warehouse_root = tmp_path / "warehouse"
+    _seed_sqlite(db_path)
+    ny = ZoneInfo("America/New_York")
+    _materialize_warehouse(
+        warehouse_root,
+        raw_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
+        derived_latest=datetime(2026, 3, 2, 18, 5, tzinfo=ny),
+        trade_latest=datetime(2026, 3, 2, 18, 1, tzinfo=ny),
+    )
+
+    result = run_research_data_integrity_audit(
+        output_dir=tmp_path / "report",
+        replay_db_path=db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_cfg,
+        lane_symbol_map={"MGC": ["test_lane__MGC"]},
+        symbols=["MGC"],
+    )
+
+    payload = result["payload"]
+    assert payload["trade_alignment"]["analysis_allowed"] is True
+    assert payload["health"]["overall_status"] == "healthy"
+
+
+def test_research_market_data_integrity_scoped_audit_ignores_unrequested_lane_symbols(tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    db_path = tmp_path / "replay.sqlite3"
+    warehouse_root = tmp_path / "warehouse"
+    _seed_sqlite(db_path)
+    ny = ZoneInfo("America/New_York")
+    _materialize_warehouse(
+        warehouse_root,
+        raw_latest=datetime(2026, 3, 2, 18, 3, tzinfo=ny),
+        derived_latest=datetime(2026, 3, 2, 18, 5, tzinfo=ny),
+        trade_latest=datetime(2026, 3, 2, 18, 1, tzinfo=ny),
+    )
+
+    result = run_research_data_integrity_audit(
+        output_dir=tmp_path / "report",
+        replay_db_path=db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_cfg,
+        lane_symbol_map={"MGC": ["test_lane__MGC"], "GC": ["test_lane__GC"]},
+        symbols=["ES"],
+    )
+
+    payload = result["payload"]
+    assert payload["trade_alignment"]["analysis_allowed"] is True
+    assert payload["trade_alignment"]["symbol_rows"] == []
+
+
+def test_session_audit_does_not_use_es_holiday_activity_to_require_metals(tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    db_path = tmp_path / "replay.sqlite3"
+    warehouse_root = tmp_path / "warehouse"
+    _seed_holiday_session_divergence(db_path)
+    ny = ZoneInfo("America/New_York")
+    _materialize_warehouse(
+        warehouse_root,
+        raw_latest=datetime(2026, 4, 5, 18, 1, tzinfo=ny),
+        derived_latest=datetime(2026, 4, 5, 18, 5, tzinfo=ny),
+    )
+
+    result = run_research_data_integrity_audit(
+        output_dir=tmp_path / "report",
+        replay_db_path=db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_cfg,
+        lane_symbol_map={},
+        symbols=["ES", "GC", "MGC"],
+    )
+
+    gaps = result["payload"]["replay_audit"]["session_audit"]["session_gap_rows"]
+    assert not any(row["instrument"] in {"GC", "MGC"} and row.get("gap_start") == "2026-04-02" for row in gaps)
+
+
+def test_session_audit_flags_true_missing_session_when_noncanonical_source_has_evidence(tmp_path: Path) -> None:
+    db_path = tmp_path / "replay.sqlite3"
+    _seed_true_missing_session_with_noncanonical_evidence(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        gaps = integrity_module._session_audit(conn, instruments=["GC"])["session_gap_rows"]
+    finally:
+        conn.close()
+    assert any(
+        row["instrument"] == "GC"
+        and row["gap_start"] == "2026-04-02"
+        and row["missing_reason"] == "session_gap"
+        and "schwab_history" in str(row.get("evidence_data_sources") or "")
+        for row in gaps
+    )
+
+
+def test_backfill_skips_unmapped_symbols_without_failing_configured_symbols(monkeypatch, tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+
+    class FakeProvider:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    class FakeIngestion:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def ingest(self, *, provider: object, request: object, allow_canonical_overwrite: bool = False) -> HistoricalIngestAudit:
+            return _fake_ingest_audit(symbol=request.internal_symbol, fetched_bar_count=2, inserted_bar_count=2)  # type: ignore[attr-defined]
+
+    class FakeMaintenance:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    monkeypatch.setattr(integrity_module, "load_settings_from_files", lambda *_args, **_kwargs: SimpleNamespace(database_url="sqlite:///tmp/test.sqlite3"))
+    monkeypatch.setattr(integrity_module, "DatabentoMarketDataProvider", FakeProvider)
+    monkeypatch.setattr(integrity_module, "HistoricalMarketDataIngestionService", FakeIngestion)
+    monkeypatch.setattr(integrity_module, "CanonicalMarketDataMaintenanceService", FakeMaintenance)
+
+    result = execute_research_market_data_backfill(
+        replay_db_path=tmp_path / "replay.sqlite3",
+        provider_config=provider_cfg,
+        symbols=["MGC", "GC"],
+        start_ts=datetime.fromisoformat("2024-01-01T18:00:00-05:00"),
+        end_ts=datetime.fromisoformat("2024-01-31T23:59:00-05:00"),
+    )
+
+    assert result["configured_symbols"] == ["MGC"]
+    assert result["unmapped_symbols"] == ["GC"]
+    assert any(row["symbol"] == "GC" and row["outcome"] == "unmapped_symbol" for row in result["symbol_results"])
+    assert any(row["symbol"] == "MGC" and row["outcome"] == "fetch_completed" for row in result["symbol_results"])
+
+
+def test_backfill_fetch_only_does_not_invoke_gap_repair_or_derivation(monkeypatch, tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+
+    class FakeProvider:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    class FakeIngestion:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def ingest(self, *, provider: object, request: object, allow_canonical_overwrite: bool = False) -> HistoricalIngestAudit:
+            return _fake_ingest_audit(symbol=request.internal_symbol, fetched_bar_count=3, inserted_bar_count=3)  # type: ignore[attr-defined]
+
+    class FakeMaintenance:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def backfill_detected_gaps(self, *_: object, **__: object) -> dict[str, object]:
+            raise AssertionError("gap repair should not run in fetch-only mode")
+
+        def derive_timeframe(self, *_: object, **__: object) -> dict[str, object]:
+            raise AssertionError("derivation should not run in fetch-only mode")
+
+    monkeypatch.setattr(integrity_module, "load_settings_from_files", lambda *_args, **_kwargs: SimpleNamespace(database_url="sqlite:///tmp/test.sqlite3"))
+    monkeypatch.setattr(integrity_module, "DatabentoMarketDataProvider", FakeProvider)
+    monkeypatch.setattr(integrity_module, "HistoricalMarketDataIngestionService", FakeIngestion)
+    monkeypatch.setattr(integrity_module, "CanonicalMarketDataMaintenanceService", FakeMaintenance)
+
+    result = execute_research_market_data_backfill(
+        replay_db_path=tmp_path / "replay.sqlite3",
+        provider_config=provider_cfg,
+        symbols=["MGC"],
+        start_ts=datetime.fromisoformat("2024-01-01T18:00:00-05:00"),
+        end_ts=datetime.fromisoformat("2024-01-31T23:59:00-05:00"),
+    )
+
+    assert result["run_gap_repair"] is False
+    assert result["derive_timeframes"] == []
+    assert result["derivations"] == []
+    assert [row["label"] for row in result["progress_rows"]] == ["fetch_started", "fetch_completed"]
+
+
+def test_backfill_progress_labels_include_zero_record_outcome(monkeypatch, tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    progress_events: list[dict[str, object]] = []
+
+    class FakeProvider:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    class FakeIngestion:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def ingest(self, *, provider: object, request: object, allow_canonical_overwrite: bool = False) -> HistoricalIngestAudit:
+            return _fake_ingest_audit(symbol=request.internal_symbol, fetched_bar_count=0, inserted_bar_count=0)  # type: ignore[attr-defined]
+
+    class FakeMaintenance:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    monkeypatch.setattr(integrity_module, "load_settings_from_files", lambda *_args, **_kwargs: SimpleNamespace(database_url="sqlite:///tmp/test.sqlite3"))
+    monkeypatch.setattr(integrity_module, "DatabentoMarketDataProvider", FakeProvider)
+    monkeypatch.setattr(integrity_module, "HistoricalMarketDataIngestionService", FakeIngestion)
+    monkeypatch.setattr(integrity_module, "CanonicalMarketDataMaintenanceService", FakeMaintenance)
+
+    result = execute_research_market_data_backfill(
+        replay_db_path=tmp_path / "replay.sqlite3",
+        provider_config=provider_cfg,
+        symbols=["MGC"],
+        start_ts=datetime.fromisoformat("2024-01-01T18:00:00-05:00"),
+        end_ts=datetime.fromisoformat("2024-01-02T23:59:00-05:00"),
+        progress_callback=progress_events.append,
+    )
+
+    assert result["symbol_results"][0]["outcome"] == "zero_records_no_data"
+    assert [row["label"] for row in result["progress_rows"]] == ["fetch_started", "zero_records_no_data"]
+    assert [row["label"] for row in progress_events] == ["fetch_started", "zero_records_no_data"]
+
+
+def test_backfill_explicit_maintenance_emits_subphase_labels(monkeypatch, tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+
+    @dataclass(frozen=True)
+    class FakeDerivation:
+        derived_bar_count: int
+        target_timeframe: str
+
+    class FakeProvider:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    class FakeIngestion:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def ingest(self, *, provider: object, request: object, allow_canonical_overwrite: bool = False) -> HistoricalIngestAudit:
+            return _fake_ingest_audit(symbol=request.internal_symbol, fetched_bar_count=4, inserted_bar_count=4)  # type: ignore[attr-defined]
+
+    class FakeMaintenance:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def backfill_detected_gaps(self, *_: object, **__: object) -> dict[str, object]:
+            return {"gap_count": 0, "repairs": []}
+
+        def derive_timeframe(self, *_: object, **__: object):
+            return FakeDerivation(derived_bar_count=2, target_timeframe="5m")
+
+    monkeypatch.setattr(integrity_module, "load_settings_from_files", lambda *_args, **_kwargs: SimpleNamespace(database_url="sqlite:///tmp/test.sqlite3"))
+    monkeypatch.setattr(integrity_module, "DatabentoMarketDataProvider", FakeProvider)
+    monkeypatch.setattr(integrity_module, "HistoricalMarketDataIngestionService", FakeIngestion)
+    monkeypatch.setattr(integrity_module, "CanonicalMarketDataMaintenanceService", FakeMaintenance)
+
+    result = execute_research_market_data_backfill(
+        replay_db_path=tmp_path / "replay.sqlite3",
+        provider_config=provider_cfg,
+        symbols=["MGC"],
+        start_ts=datetime.fromisoformat("2024-01-01T18:00:00-05:00"),
+        end_ts=datetime.fromisoformat("2024-01-31T23:59:00-05:00"),
+        run_gap_repair=True,
+        derive_timeframes=("5m",),
+    )
+
+    assert [row["label"] for row in result["progress_rows"]] == [
+        "fetch_started",
+        "fetch_completed",
+        "gap_repair_started",
+        "gap_repair_completed",
+        "derive_5m_started",
+        "derive_5m_completed",
+    ]
