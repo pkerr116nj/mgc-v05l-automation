@@ -165,6 +165,30 @@
       "exchange": "CME",
       "description": "Euro FX futures volume-based front continuous"
     },
+    "6A": {
+      "request_symbol": "6A.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "Australian dollar futures volume-based front continuous"
+    },
+    "6B": {
+      "request_symbol": "6B.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "British pound futures volume-based front continuous"
+    },
     "6J": {
       "request_symbol": "6J.v.0",
       "dataset": "GLBX.MDP3",
@@ -200,6 +224,78 @@
       "asset_class": "future",
       "exchange": "COMEX",
       "description": "E-mini copper futures volume-based front continuous"
+    },
+    "MBT": {
+      "request_symbol": "MBT.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "Micro Bitcoin futures volume-based front continuous"
+    },
+    "NG": {
+      "request_symbol": "NG.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "NYMEX",
+      "description": "Henry Hub natural gas futures volume-based front continuous"
+    },
+    "YM": {
+      "request_symbol": "YM.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CBOT",
+      "description": "E-mini Dow futures volume-based front continuous"
+    },
+    "ZT": {
+      "request_symbol": "ZT.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CBOT",
+      "description": "2-year Treasury note futures volume-based front continuous"
+    },
+    "ZF": {
+      "request_symbol": "ZF.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CBOT",
+      "description": "5-year Treasury note futures volume-based front continuous"
+    },
+    "ZB": {
+      "request_symbol": "ZB.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CBOT",
+      "description": "U.S. Treasury bond futures volume-based front continuous"
     },
     "ZN": {
       "request_symbol": "ZN.v.0",
