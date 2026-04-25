@@ -1116,8 +1116,20 @@ def test_backfill_surfaces_staged_fetch_progress_labels(monkeypatch, tmp_path: P
 def test_warehouse_rebuild_iterates_multiple_quarters_and_emits_progress(monkeypatch, tmp_path: Path) -> None:
     raw_calls: list[tuple[str, str]] = []
     derived_calls: list[tuple[str, str]] = []
-    engine = build_engine(f"sqlite:///{tmp_path / 'replay.sqlite3'}")
+    replay_db_path = tmp_path / "replay.sqlite3"
+    engine = build_engine(f"sqlite:///{replay_db_path}")
     create_schema(engine)
+    repositories = RepositorySet(engine)
+    ny = ZoneInfo("America/New_York")
+    for symbol in ("ZT", "ZF"):
+        repositories.bars.save(
+            _bar(symbol=symbol, timeframe="1m", end_ts=datetime(2024, 1, 1, 18, 1, tzinfo=ny)),
+            data_source="historical_1m_canonical",
+        )
+        repositories.bars.save(
+            _bar(symbol=symbol, timeframe="1m", end_ts=datetime(2024, 7, 15, 23, 59, tzinfo=ny)),
+            data_source="historical_1m_canonical",
+        )
 
     def _fake_export(
         *,
@@ -1163,7 +1175,7 @@ def test_warehouse_rebuild_iterates_multiple_quarters_and_emits_progress(monkeyp
     progress_events: list[dict[str, object]] = []
     result = rebuild_canonical_warehouse_surfaces(
         warehouse_root=tmp_path / "warehouse",
-        replay_db_path=tmp_path / "replay.sqlite3",
+        replay_db_path=replay_db_path,
         instruments=["ZT", "ZF"],
         start_ts=datetime.fromisoformat("2024-01-01T18:00:00-05:00"),
         end_ts=datetime.fromisoformat("2024-07-15T23:59:00-04:00"),
@@ -1174,10 +1186,10 @@ def test_warehouse_rebuild_iterates_multiple_quarters_and_emits_progress(monkeyp
     assert planned_shards == ["2024Q1", "2024Q2", "2024Q3"]
     assert raw_calls == [
         ("ZF", "2024Q1"),
-        ("ZT", "2024Q1"),
         ("ZF", "2024Q2"),
-        ("ZT", "2024Q2"),
         ("ZF", "2024Q3"),
+        ("ZT", "2024Q1"),
+        ("ZT", "2024Q2"),
         ("ZT", "2024Q3"),
     ]
     expected_derived_calls = []
@@ -1198,6 +1210,111 @@ def test_warehouse_rebuild_iterates_multiple_quarters_and_emits_progress(monkeyp
     assert "derived_daily_started" in labels
     assert "symbol_shard_completed" in labels
     assert labels[-1] == "rebuild_completed"
+
+
+def test_warehouse_rebuild_uses_earliest_canonical_start_per_symbol_when_start_omitted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "replay.sqlite3"
+    engine = build_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+    repositories = RepositorySet(engine)
+    ny = ZoneInfo("America/New_York")
+
+    repositories.bars.save(
+        _bar(symbol="GC", timeframe="1m", end_ts=datetime(2020, 1, 1, 18, 1, tzinfo=ny)),
+        data_source="historical_1m_canonical",
+    )
+    repositories.bars.save(
+        _bar(symbol="GC", timeframe="1m", end_ts=datetime(2026, 4, 21, 23, 59, tzinfo=ny)),
+        data_source="historical_1m_canonical",
+    )
+    repositories.bars.save(
+        _bar(symbol="MGC", timeframe="1m", end_ts=datetime(2021, 4, 1, 18, 1, tzinfo=ny)),
+        data_source="historical_1m_canonical",
+    )
+    repositories.bars.save(
+        _bar(symbol="MGC", timeframe="1m", end_ts=datetime(2026, 4, 21, 23, 59, tzinfo=ny)),
+        data_source="historical_1m_canonical",
+    )
+
+    raw_calls: list[tuple[str, str, datetime, datetime]] = []
+    derived_calls: list[tuple[str, str, str]] = []
+
+    def _fake_export(
+        *,
+        root_dir: Path,
+        sqlite_path: Path,
+        symbol: str,
+        shard_id: str,
+        start_ts: datetime,
+        end_ts: datetime,
+        data_source: str = "historical_1m_canonical",
+    ) -> dict[str, object]:
+        raw_calls.append((symbol, shard_id, start_ts, end_ts))
+        partition_path = root_dir / "datasets" / "raw_bars_1m" / f"symbol={symbol}" / f"year={start_ts.year}" / f"shard_id={shard_id}" / "bars.parquet"
+        return {
+            "partition_path": str(partition_path),
+            "row_count": 10,
+            "raw_version": f"{symbol}-{shard_id}",
+            "coverage": {"start": start_ts.isoformat(), "end": end_ts.isoformat()},
+            "cache": {"cache_hit": False},
+        }
+
+    def _fake_derive(
+        *,
+        root_dir: Path,
+        symbol: str,
+        shard_id: str,
+        year: int,
+        timeframe: str,
+        raw_partition_path: Path,
+        raw_version: str,
+        materialized_ts: datetime | None = None,
+    ) -> dict[str, object]:
+        derived_calls.append((symbol, shard_id, timeframe))
+        partition_path = root_dir / "datasets" / f"derived_bars_{timeframe}" / f"symbol={symbol}" / f"year={year}" / f"shard_id={shard_id}" / "bars.parquet"
+        coverage_start = next(
+            start
+            for raw_symbol, raw_shard, start, _ in raw_calls
+            if raw_symbol == symbol and raw_shard == shard_id
+        )
+        return {
+            "partition_path": str(partition_path),
+            "row_count": 2,
+            "coverage": {"start": coverage_start.isoformat(), "end": coverage_start.isoformat()},
+            "cache": {"cache_hit": False},
+        }
+
+    monkeypatch.setattr(integrity_module, "export_canonical_1m_partition", _fake_export)
+    monkeypatch.setattr(integrity_module, "materialize_derived_timeframe_partition", _fake_derive)
+
+    result = rebuild_canonical_warehouse_surfaces(
+        warehouse_root=tmp_path / "warehouse",
+        replay_db_path=db_path,
+        instruments=["GC", "MGC"],
+        start_ts=None,
+        end_ts=datetime.fromisoformat("2026-04-21T23:59:00-04:00"),
+    )
+
+    assert result["symbol_ranges"]["GC"]["canonical_start_ts"] == "2020-01-01T18:01:00-05:00"
+    assert result["symbol_ranges"]["GC"]["effective_start_ts"] == "2020-01-01T18:01:00-05:00"
+    assert result["symbol_ranges"]["MGC"]["canonical_start_ts"] == "2021-04-01T18:01:00-04:00"
+    assert result["symbol_ranges"]["MGC"]["effective_start_ts"] == "2021-04-01T18:01:00-04:00"
+    assert result["planned_shards"][0]["shard_id"] == "2020Q1"
+    assert result["planned_shards"][-1]["shard_id"] == "2026Q2"
+
+    gc_shards = [row["shard_id"] for row in result["planned_symbol_shards"] if row["symbol"] == "GC"]
+    mgc_shards = [row["shard_id"] for row in result["planned_symbol_shards"] if row["symbol"] == "MGC"]
+    assert gc_shards[0] == "2020Q1"
+    assert mgc_shards[0] == "2021Q2"
+
+    assert raw_calls[0][0] == "GC"
+    assert raw_calls[0][1] == "2020Q1"
+    assert raw_calls[0][2].isoformat() == "2020-01-01T18:01:00-05:00"
+    assert ("GC", "2020Q1", "5m") in derived_calls
+    assert ("MGC", "2021Q2", "daily") in derived_calls
 
 
 def test_warehouse_rebuild_ensures_supporting_indexes(tmp_path: Path) -> None:

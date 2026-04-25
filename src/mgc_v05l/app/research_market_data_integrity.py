@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "warehouse-rebuild":
         if args.end is None:
             raise SystemExit("--mode warehouse-rebuild requires --end.")
-        start_ts = _parse_timestamp(args.start) if args.start else datetime.fromisoformat("2024-01-01T18:00:00-05:00")
+        start_ts = _parse_timestamp(args.start) if args.start else None
         derived_timeframes = _resolve_warehouse_derived_timeframes(args)
         result = rebuild_canonical_warehouse_surfaces(
             warehouse_root=warehouse_root,

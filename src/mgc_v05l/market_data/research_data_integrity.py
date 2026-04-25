@@ -998,7 +998,7 @@ def rebuild_canonical_warehouse_surfaces(
     warehouse_root: Path,
     replay_db_path: Path,
     instruments: Sequence[str],
-    start_ts: datetime,
+    start_ts: datetime | None,
     end_ts: datetime,
     derived_timeframes: Sequence[str] = PHASE_A_WAREHOUSE_DERIVED_TIMEFRAMES,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -1010,7 +1010,19 @@ def rebuild_canonical_warehouse_surfaces(
         timeframe for timeframe in PHASE_A_WAREHOUSE_DERIVED_TIMEFRAMES
         if timeframe in {str(item).strip().lower() for item in derived_timeframes}
     )
-    shards = _iter_quarter_shards(start_ts=start_ts, end_ts=end_ts)
+    symbol_ranges = _resolve_canonical_rebuild_ranges(
+        sqlite_path=replay_db_path,
+        instruments=normalized_symbols,
+        explicit_start_ts=start_ts,
+        end_ts=end_ts,
+    )
+    planned_symbol_shards: list[dict[str, Any]] = []
+    planned_shards_by_id: dict[str, dict[str, Any]] = {}
+    for symbol in normalized_symbols:
+        symbol_start_ts = datetime.fromisoformat(str(symbol_ranges[symbol]["effective_start_ts"]))
+        for shard in _iter_quarter_shards(start_ts=symbol_start_ts, end_ts=end_ts):
+            planned_symbol_shards.append({"symbol": symbol, **shard})
+            planned_shards_by_id.setdefault(shard["shard_id"], shard)
     results: list[dict[str, Any]] = []
     ensured_indexes = _ensure_research_rebuild_indexes(replay_db_path)
     _emit_warehouse_rebuild_progress(
@@ -1022,13 +1034,16 @@ def rebuild_canonical_warehouse_surfaces(
         status="running",
         detail={
             "symbol_count": len(normalized_symbols),
-            "shard_count": len(shards),
+            "shard_count": len(planned_symbol_shards),
             "derived_timeframes": list(normalized_timeframes),
             "ensured_indexes": ensured_indexes,
+            "symbol_ranges": symbol_ranges,
         },
     )
-    for shard in shards:
-        for symbol in normalized_symbols:
+    for symbol in normalized_symbols:
+        symbol_start_ts = datetime.fromisoformat(str(symbol_ranges[symbol]["effective_start_ts"]))
+        symbol_shards = _iter_quarter_shards(start_ts=symbol_start_ts, end_ts=end_ts)
+        for shard in symbol_shards:
             _emit_warehouse_rebuild_progress(
                 progress_callback=progress_callback,
                 symbol=symbol,
@@ -1132,11 +1147,62 @@ def rebuild_canonical_warehouse_surfaces(
         "warehouse_root": str(warehouse_root),
         "replay_db_path": str(replay_db_path),
         "symbols": normalized_symbols,
-        "planned_shards": shards,
+        "symbol_ranges": symbol_ranges,
+        "planned_shards": sorted(planned_shards_by_id.values(), key=lambda item: str(item["shard_id"])),
+        "planned_symbol_shards": planned_symbol_shards,
         "derived_timeframes": list(normalized_timeframes),
         "ensured_indexes": ensured_indexes,
         "results": results,
     }
+
+
+def _resolve_canonical_rebuild_ranges(
+    *,
+    sqlite_path: Path,
+    instruments: Sequence[str],
+    explicit_start_ts: datetime | None,
+    end_ts: datetime,
+) -> dict[str, dict[str, str]]:
+    if not instruments:
+        return {}
+    sqlite_path = sqlite_path.resolve()
+    conn = sqlite3.connect(sqlite_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        placeholders = ",".join("?" for _ in instruments)
+        rows = conn.execute(
+            f"""
+            select ticker as instrument, min(timestamp) as earliest_ts, max(timestamp) as latest_ts
+            from bars
+            where ticker in ({placeholders})
+              and timeframe = '1m'
+              and data_source = ?
+              and timestamp <= ?
+            group by ticker
+            order by ticker
+            """,
+            (*instruments, CANONICAL_1M_SOURCE, end_ts.isoformat()),
+        ).fetchall()
+    finally:
+        conn.close()
+    by_symbol = {str(row["instrument"]).upper(): dict(row) for row in rows}
+    resolved: dict[str, dict[str, str]] = {}
+    for instrument in instruments:
+        row = by_symbol.get(instrument)
+        if row is None or not row.get("earliest_ts"):
+            raise RuntimeError(
+                f"No canonical 1m coverage found for {instrument} before rebuild end={end_ts.isoformat()}."
+            )
+        canonical_start_ts = datetime.fromisoformat(str(row["earliest_ts"]))
+        effective_start_ts = canonical_start_ts
+        if explicit_start_ts is not None:
+            effective_start_ts = max(canonical_start_ts, explicit_start_ts)
+        resolved[instrument] = {
+            "canonical_start_ts": canonical_start_ts.isoformat(),
+            "effective_start_ts": effective_start_ts.isoformat(),
+            "canonical_latest_ts": str(row["latest_ts"]),
+        }
+    return resolved
 
 
 def rematerialize_trade_artifacts(
