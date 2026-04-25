@@ -56,3 +56,92 @@ def test_common_env_loads_app_support_schwab_env_when_repo_local_file_is_missing
     assert source_path == str(env_path)
     assert resolved_token_path == str(token_path)
     assert auth_status == "ready"
+
+
+def test_research_market_data_integrity_runner_sources_project_dotenv(tmp_path: Path) -> None:
+    dotenv_path = REPO_ROOT / ".env"
+    original_env = dotenv_path.read_text(encoding="utf-8") if dotenv_path.exists() else None
+    stub_path = tmp_path / "stub_python.sh"
+    stub_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "printf 'DATABENTO_API_KEY present: %s\\n' \"$( [[ -n \"${DATABENTO_API_KEY:-}\" ]] && echo True || echo False )\"",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+
+    try:
+        dotenv_path.write_text('export DATABENTO_API_KEY=\"TEST_VALUE\"\\n', encoding="utf-8")
+        env = os.environ.copy()
+        env.pop("DATABENTO_API_KEY", None)
+        env["RESEARCH_MARKET_DATA_INTEGRITY_PYTHON_BIN"] = str(stub_path)
+        completed = subprocess.run(
+            [
+                "bash",
+                "scripts/run_research_market_data_integrity.sh",
+                "--mode",
+                "audit",
+                "--symbols",
+                "GC",
+                "--end",
+                "2026-04-21T23:59:00-04:00",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        if original_env is None:
+            dotenv_path.unlink(missing_ok=True)
+        else:
+            dotenv_path.write_text(original_env, encoding="utf-8")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "DATABENTO_API_KEY present: True" in completed.stdout
+
+
+def test_research_market_data_integrity_runner_backfill_fails_loudly_without_key(tmp_path: Path) -> None:
+    dotenv_path = REPO_ROOT / ".env"
+    original_env = dotenv_path.read_text(encoding="utf-8") if dotenv_path.exists() else None
+    stub_path = tmp_path / "stub_python.sh"
+    stub_path.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
+    stub_path.chmod(0o755)
+
+    try:
+        dotenv_path.write_text("", encoding="utf-8")
+        env = os.environ.copy()
+        env.pop("DATABENTO_API_KEY", None)
+        env["RESEARCH_MARKET_DATA_INTEGRITY_PYTHON_BIN"] = str(stub_path)
+        completed = subprocess.run(
+            [
+                "bash",
+                "scripts/run_research_market_data_integrity.sh",
+                "--mode",
+                "backfill",
+                "--symbols",
+                "GC",
+                "--start",
+                "2024-01-01T18:00:00-05:00",
+                "--end",
+                "2026-04-21T23:59:00-04:00",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        if original_env is None:
+            dotenv_path.unlink(missing_ok=True)
+        else:
+            dotenv_path.write_text(original_env, encoding="utf-8")
+
+    assert completed.returncode == 1
+    assert "requires DATABENTO_API_KEY" in completed.stderr

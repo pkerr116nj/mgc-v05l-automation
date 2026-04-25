@@ -718,7 +718,14 @@ def test_backfill_skips_unmapped_symbols_without_failing_configured_symbols(monk
         def __init__(self, *_: object, **__: object) -> None:
             pass
 
-        def ingest(self, *, provider: object, request: object, allow_canonical_overwrite: bool = False) -> HistoricalIngestAudit:
+        def ingest(
+            self,
+            *,
+            provider: object,
+            request: object,
+            allow_canonical_overwrite: bool = False,
+            progress_callback: object | None = None,
+        ) -> HistoricalIngestAudit:
             return _fake_ingest_audit(symbol=request.internal_symbol, fetched_bar_count=2, inserted_bar_count=2)  # type: ignore[attr-defined]
 
     class FakeMaintenance:
@@ -755,7 +762,14 @@ def test_backfill_fetch_only_does_not_invoke_gap_repair_or_derivation(monkeypatc
         def __init__(self, *_: object, **__: object) -> None:
             pass
 
-        def ingest(self, *, provider: object, request: object, allow_canonical_overwrite: bool = False) -> HistoricalIngestAudit:
+        def ingest(
+            self,
+            *,
+            provider: object,
+            request: object,
+            allow_canonical_overwrite: bool = False,
+            progress_callback: object | None = None,
+        ) -> HistoricalIngestAudit:
             return _fake_ingest_audit(symbol=request.internal_symbol, fetched_bar_count=3, inserted_bar_count=3)  # type: ignore[attr-defined]
 
     class FakeMaintenance:
@@ -784,7 +798,7 @@ def test_backfill_fetch_only_does_not_invoke_gap_repair_or_derivation(monkeypatc
     assert result["run_gap_repair"] is False
     assert result["derive_timeframes"] == []
     assert result["derivations"] == []
-    assert [row["label"] for row in result["progress_rows"]] == ["fetch_started", "fetch_completed"]
+    assert [row["label"] for row in result["progress_rows"]] == ["request_started", "fetch_completed"]
 
 
 def test_backfill_progress_labels_include_zero_record_outcome(monkeypatch, tmp_path: Path) -> None:
@@ -799,7 +813,14 @@ def test_backfill_progress_labels_include_zero_record_outcome(monkeypatch, tmp_p
         def __init__(self, *_: object, **__: object) -> None:
             pass
 
-        def ingest(self, *, provider: object, request: object, allow_canonical_overwrite: bool = False) -> HistoricalIngestAudit:
+        def ingest(
+            self,
+            *,
+            provider: object,
+            request: object,
+            allow_canonical_overwrite: bool = False,
+            progress_callback: object | None = None,
+        ) -> HistoricalIngestAudit:
             return _fake_ingest_audit(symbol=request.internal_symbol, fetched_bar_count=0, inserted_bar_count=0)  # type: ignore[attr-defined]
 
     class FakeMaintenance:
@@ -821,8 +842,8 @@ def test_backfill_progress_labels_include_zero_record_outcome(monkeypatch, tmp_p
     )
 
     assert result["symbol_results"][0]["outcome"] == "zero_records_no_data"
-    assert [row["label"] for row in result["progress_rows"]] == ["fetch_started", "zero_records_no_data"]
-    assert [row["label"] for row in progress_events] == ["fetch_started", "zero_records_no_data"]
+    assert [row["label"] for row in result["progress_rows"]] == ["request_started", "zero_records_no_data"]
+    assert [row["label"] for row in progress_events] == ["request_started", "zero_records_no_data"]
 
 
 def test_backfill_explicit_maintenance_emits_subphase_labels(monkeypatch, tmp_path: Path) -> None:
@@ -841,7 +862,14 @@ def test_backfill_explicit_maintenance_emits_subphase_labels(monkeypatch, tmp_pa
         def __init__(self, *_: object, **__: object) -> None:
             pass
 
-        def ingest(self, *, provider: object, request: object, allow_canonical_overwrite: bool = False) -> HistoricalIngestAudit:
+        def ingest(
+            self,
+            *,
+            provider: object,
+            request: object,
+            allow_canonical_overwrite: bool = False,
+            progress_callback: object | None = None,
+        ) -> HistoricalIngestAudit:
             return _fake_ingest_audit(symbol=request.internal_symbol, fetched_bar_count=4, inserted_bar_count=4)  # type: ignore[attr-defined]
 
     class FakeMaintenance:
@@ -870,10 +898,65 @@ def test_backfill_explicit_maintenance_emits_subphase_labels(monkeypatch, tmp_pa
     )
 
     assert [row["label"] for row in result["progress_rows"]] == [
-        "fetch_started",
+        "request_started",
         "fetch_completed",
         "gap_repair_started",
         "gap_repair_completed",
         "derive_5m_started",
         "derive_5m_completed",
+    ]
+
+
+def test_backfill_surfaces_staged_fetch_progress_labels(monkeypatch, tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+
+    class FakeProvider:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    class FakeIngestion:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def ingest(
+            self,
+            *,
+            provider: object,
+            request: object,
+            allow_canonical_overwrite: bool = False,
+            progress_callback: object | None = None,
+        ) -> HistoricalIngestAudit:
+            assert progress_callback is not None
+            progress_callback({"label": "download_started", "status": "running", "detail": {}})
+            progress_callback({"label": "download_completed", "status": "completed", "detail": {"byte_count": 42}})
+            progress_callback({"label": "parse_started", "status": "running", "detail": {}})
+            progress_callback({"label": "rows_persisted", "status": "running", "detail": {"rows_in_batch": 2}})
+            progress_callback({"label": "parse_completed", "status": "completed", "detail": {"fetched_bar_count": 2}})
+            return _fake_ingest_audit(symbol=request.internal_symbol, fetched_bar_count=2, inserted_bar_count=2)  # type: ignore[attr-defined]
+
+    class FakeMaintenance:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    monkeypatch.setattr(integrity_module, "load_settings_from_files", lambda *_args, **_kwargs: SimpleNamespace(database_url="sqlite:///tmp/test.sqlite3"))
+    monkeypatch.setattr(integrity_module, "DatabentoMarketDataProvider", FakeProvider)
+    monkeypatch.setattr(integrity_module, "HistoricalMarketDataIngestionService", FakeIngestion)
+    monkeypatch.setattr(integrity_module, "CanonicalMarketDataMaintenanceService", FakeMaintenance)
+
+    result = execute_research_market_data_backfill(
+        replay_db_path=tmp_path / "replay.sqlite3",
+        provider_config=provider_cfg,
+        symbols=["MGC"],
+        start_ts=datetime.fromisoformat("2024-01-01T18:00:00-05:00"),
+        end_ts=datetime.fromisoformat("2024-01-31T23:59:00-05:00"),
+    )
+
+    assert [row["label"] for row in result["progress_rows"]] == [
+        "request_started",
+        "download_started",
+        "download_completed",
+        "parse_started",
+        "rows_persisted",
+        "parse_completed",
+        "fetch_completed",
     ]

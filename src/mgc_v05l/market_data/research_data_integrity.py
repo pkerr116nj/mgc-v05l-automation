@@ -615,11 +615,24 @@ def execute_research_market_data_backfill(
 
     for symbol in configured_symbols:
         labels: list[str] = []
-        fetch_started = _backfill_progress_event(symbol=symbol, label="fetch_started", status="running")
-        progress_rows.append(fetch_started)
+        request_started = _backfill_progress_event(symbol=symbol, label="request_started", status="running")
+        progress_rows.append(request_started)
         if progress_callback is not None:
-            progress_callback(fetch_started)
-        labels.append("fetch_started")
+            progress_callback(request_started)
+        labels.append("request_started")
+
+        def _emit_ingest_progress(event: dict[str, Any], *, _symbol: str = symbol) -> None:
+            emitted = _backfill_progress_event(
+                symbol=_symbol,
+                label=str(event.get("label")),
+                status=str(event.get("status")),
+                detail=dict(event.get("detail") or {}),
+            )
+            progress_rows.append(emitted)
+            if progress_callback is not None:
+                progress_callback(emitted)
+            labels.append(str(event.get("label")))
+
         try:
             assert ingestion is not None
             assert provider is not None
@@ -631,6 +644,7 @@ def execute_research_market_data_backfill(
                     start=start_ts,
                     end=end_ts,
                 ),
+                progress_callback=_emit_ingest_progress,
             )
         except DatabentoHttpError as exc:
             label = "provider_timeout" if "timeout" in str(exc).lower() else "provider_error"

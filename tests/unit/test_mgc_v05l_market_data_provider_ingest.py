@@ -20,6 +20,20 @@ class _FakeDatabentoTransport:
         return list(self._lines)
 
 
+class _FakeStagedDatabentoTransport:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = list(lines)
+        self.request_lines_called = False
+
+    def request_lines(self, *, url: str, headers: dict[str, str], form: dict[str, object]) -> list[str]:
+        self.request_lines_called = True
+        raise AssertionError("staged ingest should not fall back to request_lines")
+
+    def download_to_file(self, *, url: str, headers: dict[str, str], form: dict[str, object], destination: Path) -> dict[str, object]:
+        destination.write_text("\n".join(self._lines) + "\n", encoding="utf-8")
+        return {"byte_count": destination.stat().st_size}
+
+
 def _build_settings(tmp_path: Path):
     overlay_path = tmp_path / "overlay.yaml"
     overlay_path.write_text(
@@ -113,6 +127,72 @@ def test_historical_ingest_merges_into_canonical_base_with_provenance(tmp_path: 
     assert second_audit.change is CoverageChange.MATCHED
     assert second_audit.inserted_bar_count == 0
     assert second_audit.skipped_existing_count == 2
+
+
+def test_historical_ingest_stages_and_persists_batches_incrementally(tmp_path: Path) -> None:
+    settings = _build_settings(tmp_path)
+    transport = _FakeStagedDatabentoTransport(
+        [
+            json.dumps(
+                {
+                    "ts_event": "2026-02-03T18:00:00+00:00",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.75,
+                    "close": 10.25,
+                    "volume": 12,
+                    "symbol": "MGCG6",
+                    "instrument_id": 123,
+                    "publisher_id": 1,
+                }
+            ),
+            json.dumps(
+                {
+                    "ts_event": "2026-02-03T18:01:00+00:00",
+                    "open": 10.25,
+                    "high": 10.75,
+                    "low": 10.0,
+                    "close": 10.5,
+                    "volume": 20,
+                    "symbol": "MGCG6",
+                    "instrument_id": 123,
+                    "publisher_id": 1,
+                }
+            ),
+        ]
+    )
+    client = DatabentoHistoricalHttpClient(
+        api_key="test-key",
+        base_url="https://hist.databento.com/v0",
+        transport=transport,
+    )
+    provider = DatabentoMarketDataProvider(settings, api_key="test-key", client=client)
+    provider._staged_parse_batch_size = 1  # type: ignore[attr-defined]
+    ingestion = HistoricalMarketDataIngestionService(database_url=settings.database_url)
+    progress_events: list[dict[str, object]] = []
+
+    audit = ingestion.ingest(
+        provider=provider,
+        request=HistoricalBarsRequest(
+            internal_symbol="MGC",
+            timeframe="1m",
+            start=datetime.fromisoformat("2026-02-03T18:00:00+00:00"),
+            end=datetime.fromisoformat("2026-02-03T18:02:00+00:00"),
+        ),
+        progress_callback=progress_events.append,
+    )
+
+    assert transport.request_lines_called is False
+    assert audit.inserted_bar_count == 2
+    assert audit.fetched_bar_count == 2
+    assert [event["label"] for event in progress_events] == [
+        "download_started",
+        "download_completed",
+        "parse_started",
+        "rows_persisted",
+        "rows_persisted",
+        "parse_completed",
+    ]
 
 
 def test_historical_ingest_keeps_existing_other_source_rows_at_same_timestamp(tmp_path: Path) -> None:

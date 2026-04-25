@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -19,7 +20,15 @@ from .bar_builder import BarBuilder
 from .bar_models import build_bar_id
 from .provider_config import DatabentoProviderConfig, load_market_data_providers_config
 from .provider_interfaces import MarketDataProvider
-from .provider_models import HistoricalBarProvenance, HistoricalBarsRequest, HistoricalBarsResult, QuoteSnapshot, TradePrint
+from .provider_models import (
+    HistoricalBarProvenance,
+    HistoricalBarsBatch,
+    HistoricalBarsRequest,
+    HistoricalBarsResult,
+    HistoricalBarsStage,
+    QuoteSnapshot,
+    TradePrint,
+)
 from .timeframes import normalize_timeframe_label, timeframe_minutes
 
 
@@ -30,6 +39,9 @@ class DatabentoHttpError(RuntimeError):
 class DatabentoTransport(Protocol):
     def request_lines(self, *, url: str, headers: dict[str, str], form: dict[str, Any]) -> list[str]:
         """Execute a Databento request and return decoded lines."""
+
+    def download_to_file(self, *, url: str, headers: dict[str, str], form: dict[str, Any], destination: Path) -> dict[str, Any]:
+        """Execute a Databento request and stream the decoded response into a local file."""
 
 
 class UrllibDatabentoTransport:
@@ -50,6 +62,25 @@ class UrllibDatabentoTransport:
         except URLError as exc:  # pragma: no cover - exercised in integration only
             raise DatabentoHttpError(f"Databento transport error: {exc}") from exc
         return [line for line in payload.splitlines() if line.strip()]
+
+    def download_to_file(self, *, url: str, headers: dict[str, str], form: dict[str, Any], destination: Path) -> dict[str, Any]:
+        body = urlencode({key: _encode_form_value(value) for key, value in form.items()}).encode("utf-8")
+        request = Request(url=url, method="POST", headers=headers, data=body)
+        byte_count = 0
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response, destination.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 128)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    byte_count += len(chunk)
+        except HTTPError as exc:  # pragma: no cover - exercised in integration only
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise DatabentoHttpError(f"Databento HTTP error {exc.code}: {detail}") from exc
+        except URLError as exc:  # pragma: no cover - exercised in integration only
+            raise DatabentoHttpError(f"Databento transport error: {exc}") from exc
+        return {"byte_count": byte_count}
 
 
 @dataclass(frozen=True)
@@ -104,11 +135,68 @@ class DatabentoHistoricalHttpClient:
         )
         return [json.loads(line) for line in lines]
 
+    def download_range_to_file(
+        self,
+        *,
+        dataset: str,
+        request_symbol: str,
+        schema_name: str,
+        start: datetime,
+        end: datetime | None,
+        stype_in: str,
+        stype_out: str,
+        encoding: str,
+        compression: str,
+        pretty_px: bool,
+        pretty_ts: bool,
+        map_symbols: bool,
+        limit: int | None,
+        destination: Path,
+    ) -> dict[str, Any]:
+        headers = {
+            "Accept": "application/x-ndjson",
+            "Authorization": _basic_auth_header(self.api_key),
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        form: dict[str, Any] = {
+            "dataset": dataset,
+            "symbols": request_symbol,
+            "schema": schema_name,
+            "start": start.astimezone(UTC).isoformat(),
+            "stype_in": stype_in,
+            "stype_out": stype_out,
+            "encoding": encoding,
+            "compression": compression,
+            "pretty_px": pretty_px,
+            "pretty_ts": pretty_ts,
+            "map_symbols": map_symbols,
+        }
+        if end is not None:
+            form["end"] = end.astimezone(UTC).isoformat()
+        if limit is not None:
+            form["limit"] = int(limit)
+        if hasattr(self.transport, "download_to_file"):
+            return self.transport.download_to_file(
+                url=f"{self.base_url.rstrip('/')}/timeseries.get_range",
+                headers=headers,
+                form=form,
+                destination=destination,
+            )
+        lines = self.transport.request_lines(
+            url=f"{self.base_url.rstrip('/')}/timeseries.get_range",
+            headers=headers,
+            form=form,
+        )
+        payload = "\n".join(lines)
+        destination.write_text(f"{payload}\n" if payload else "", encoding="utf-8")
+        return {"byte_count": destination.stat().st_size}
+
 
 class DatabentoMarketDataProvider(MarketDataProvider):
     """Provider implementation for Databento historical bars."""
 
     provider_id = "databento"
+    _staged_parse_batch_size = 5_000
 
     def __init__(
         self,
@@ -250,6 +338,93 @@ class DatabentoMarketDataProvider(MarketDataProvider):
             bar_provenance=provenance,
         )
 
+    def stage_historical_bars(self, request: HistoricalBarsRequest) -> HistoricalBarsStage:
+        symbol_config, interval, schema_name = self._resolve_request_metadata(request)
+        with NamedTemporaryFile(
+            mode="wb",
+            suffix=f"_{request.internal_symbol.lower()}_{interval}.ndjson",
+            prefix="databento_stage_",
+            delete=False,
+        ) as handle:
+            staged_path = Path(handle.name)
+        try:
+            download_metadata = self._client.download_range_to_file(
+                dataset=symbol_config.dataset,
+                request_symbol=symbol_config.request_symbol,
+                schema_name=schema_name,
+                start=request.start,
+                end=request.end,
+                stype_in=symbol_config.stype_in,
+                stype_out=symbol_config.stype_out,
+                encoding=self._config.encoding,
+                compression=self._config.compression,
+                pretty_px=self._config.pretty_px,
+                pretty_ts=self._config.pretty_ts,
+                map_symbols=self._config.map_symbols,
+                limit=request.limit,
+                destination=staged_path,
+            )
+        except Exception:
+            staged_path.unlink(missing_ok=True)
+            raise
+        return HistoricalBarsStage(
+            provider=self.provider_id,
+            data_source=self._config.canonical_data_source_by_timeframe.get(interval, f"databento_{interval}_canonical"),
+            internal_symbol=request.internal_symbol,
+            timeframe=interval,
+            ingest_time=datetime.now(UTC),
+            staged_path=str(staged_path),
+            dataset=symbol_config.dataset,
+            schema_name=schema_name,
+            stype_in=symbol_config.stype_in,
+            stype_out=symbol_config.stype_out,
+            request_symbol=symbol_config.request_symbol,
+            provenance_tag=self._config.provenance_tag,
+            metadata={
+                "description": symbol_config.description,
+                "exchange": symbol_config.exchange,
+                "api_base_url": self._config.historical_base_url,
+                **download_metadata,
+            },
+        )
+
+    def iter_staged_historical_bar_batches(
+        self,
+        stage: HistoricalBarsStage,
+        *,
+        request: HistoricalBarsRequest,
+        batch_size: int | None = None,
+    ):
+        symbol_config, interval, _schema_name = self._resolve_request_metadata(request)
+        resolved_batch_size = max(1, int(batch_size or self._staged_parse_batch_size))
+        bars: list[Bar] = []
+        provenance: dict[str, HistoricalBarProvenance] = {}
+        staged_path = Path(stage.staged_path)
+        with staged_path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                if not _looks_like_ohlcv_record(record):
+                    continue
+                bar, item_provenance = self._normalize_record(
+                    request=request,
+                    interval=interval,
+                    record=record,
+                    symbol_config=symbol_config,
+                    schema_name=stage.schema_name or "",
+                    ingest_time=stage.ingest_time,
+                )
+                bars.append(bar)
+                provenance[bar.bar_id] = item_provenance
+                if len(bars) >= resolved_batch_size:
+                    yield HistoricalBarsBatch(bars=list(bars), bar_provenance=dict(provenance))
+                    bars.clear()
+                    provenance.clear()
+        if bars:
+            yield HistoricalBarsBatch(bars=list(bars), bar_provenance=dict(provenance))
+
     def fetch_quotes(self, internal_symbols: list[str] | tuple[str, ...]) -> list[QuoteSnapshot]:
         raise NotImplementedError("Databento live quotes are not wired in this pass.")
 
@@ -268,6 +443,83 @@ class DatabentoMarketDataProvider(MarketDataProvider):
             "Use market-data-live-trade-capture with --input-jsonl for offline tick capture tests, "
             "or add the provider-specific live trade adapter first."
         )
+
+    def _resolve_request_metadata(
+        self, request: HistoricalBarsRequest
+    ) -> tuple[Any, str, str]:
+        if not self._api_key:
+            raise RuntimeError(
+                f"Databento historical access requires {self._config.api_key_env} to be set in the environment."
+            )
+        normalized_timeframe = normalize_timeframe_label(request.timeframe)
+        symbol_config = self._config.pilot_symbols.get(request.internal_symbol)
+        if symbol_config is None:
+            raise ValueError(f"No Databento pilot symbol mapping configured for {request.internal_symbol!r}.")
+        schema_name = symbol_config.schema_by_timeframe.get(normalized_timeframe)
+        if schema_name is None:
+            raise ValueError(
+                f"No Databento schema is configured for {request.internal_symbol!r} {normalized_timeframe!r}."
+            )
+        return symbol_config, normalized_timeframe, schema_name
+
+    def _normalize_record(
+        self,
+        *,
+        request: HistoricalBarsRequest,
+        interval: str,
+        record: dict[str, Any],
+        symbol_config: Any,
+        schema_name: str,
+        ingest_time: datetime,
+    ) -> tuple[Bar, HistoricalBarProvenance]:
+        header = _record_header(record)
+        start_ts = _parse_timestamp(_record_timestamp(record), settings=self._settings)
+        end_ts = start_ts + timedelta(minutes=timeframe_minutes(interval))
+        bar = self._bar_builder.require_finalized(
+            self._bar_builder.normalize(
+                Bar(
+                    bar_id=build_bar_id(request.internal_symbol, interval, end_ts),
+                    symbol=request.internal_symbol,
+                    timeframe=interval,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    open=Decimal(str(record["open"])),
+                    high=Decimal(str(record["high"])),
+                    low=Decimal(str(record["low"])),
+                    close=Decimal(str(record["close"])),
+                    volume=int(record.get("volume") or 0),
+                    is_final=True,
+                    session_asia=False,
+                    session_london=False,
+                    session_us=False,
+                    session_allowed=False,
+                )
+            )
+        )
+        provenance = HistoricalBarProvenance(
+            provider=self.provider_id,
+            dataset=symbol_config.dataset,
+            schema_name=schema_name,
+            raw_symbol=_record_raw_symbol(
+                record,
+                stype_out=symbol_config.stype_out,
+                request_symbol=symbol_config.request_symbol,
+            ),
+            stype_in=symbol_config.stype_in,
+            stype_out=symbol_config.stype_out,
+            interval=interval,
+            ingest_time=ingest_time,
+            coverage_start=None,
+            coverage_end=None,
+            provenance_tag=self._config.provenance_tag,
+            request_symbol=symbol_config.request_symbol,
+            provider_metadata={
+                "instrument_id": header.get("instrument_id"),
+                "publisher_id": header.get("publisher_id"),
+                "response_symbol": str(record.get("symbol") or "").strip() or None,
+            },
+        )
+        return bar, provenance
 
 
 def _basic_auth_header(api_key: str) -> str:

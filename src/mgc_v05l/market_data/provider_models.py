@@ -97,6 +97,29 @@ class HistoricalBarsResult:
 
 
 @dataclass(frozen=True)
+class HistoricalBarsStage:
+    provider: str
+    data_source: str
+    internal_symbol: str
+    timeframe: str
+    ingest_time: datetime
+    staged_path: str
+    dataset: str | None = None
+    schema_name: str | None = None
+    stype_in: str | None = None
+    stype_out: str | None = None
+    request_symbol: str | None = None
+    provenance_tag: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class HistoricalBarsBatch:
+    bars: list[Bar]
+    bar_provenance: dict[str, HistoricalBarProvenance] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class CoverageSnapshot:
     symbol: str
     timeframe: str
