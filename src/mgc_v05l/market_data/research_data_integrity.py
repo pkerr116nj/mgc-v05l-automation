@@ -71,6 +71,10 @@ class AuditPhaseTimeout(RuntimeError):
         return f"audit phase '{self.phase}' exceeded timeout={self.timeout_seconds}s"
 
 
+class EmptyConfiguredScope(RuntimeError):
+    """Raised to short-circuit audit execution when the requested scope has no configured symbols."""
+
+
 def run_research_data_integrity_audit(
     *,
     output_dir: Path,
@@ -121,6 +125,41 @@ def run_research_data_integrity_audit(
             detail={"instrument_count": len(instruments)},
             fn=lambda: None,
         )
+        if not instruments:
+            payload["audit_runtime"]["status"] = "completed"
+            payload["audit_runtime"]["reason"] = "empty_configured_scope"
+            payload["audit_runtime"]["phase"] = "registry_load"
+            payload["trade_alignment"] = {
+                "symbol_rows": [],
+                "blocking_issues": ["empty_configured_scope"],
+                "analysis_allowed": False,
+                "reason": "empty_configured_scope",
+            }
+            payload["health"] = {
+                "overall_status": "skipped",
+                "can_assert_complete_and_reliable": False,
+                "instrument_rows": [],
+                "blocking_issues": ["empty_configured_scope"],
+                "reason": "empty_configured_scope",
+                "unmapped_symbols": payload["instrument_registry"]["unknown_requested_symbols"],
+            }
+            payload["repair_plan"] = {
+                "missing_ranges": [],
+                "repair_commands": [],
+                "warehouse_rebuild_commands": [],
+                "trade_rematerialization_commands": [],
+                "do_not_run_strategy_research_yet": True,
+                "reason": "empty_configured_scope",
+            }
+            payload["daily_maintenance_plan"] = {
+                "mode_supported": ["incremental_update", "full_backfill", "dry_run_validation"],
+                "per_instrument": [],
+                "daily_commands": [],
+                "warehouse_commands": [],
+                "trade_commands": [],
+                "reason": "empty_configured_scope",
+            }
+            raise EmptyConfiguredScope
         canonical_phase = _run_audit_phase(
             "canonical_1m_coverage",
             phase_rows=phase_rows,
@@ -197,6 +236,8 @@ def run_research_data_integrity_audit(
         payload["trade_alignment"]["blocking_issues"] = [
             f"audit blocked before trade/replay alignment completed (phase={exc.phase})"
         ]
+    except EmptyConfiguredScope:
+        pass
     except Exception as exc:
         payload["audit_runtime"]["status"] = "failed"
         payload["audit_runtime"]["reason"] = type(exc).__name__

@@ -664,6 +664,33 @@ def test_research_market_data_integrity_scoped_audit_ignores_unrequested_lane_sy
     assert payload["trade_alignment"]["symbol_rows"] == []
 
 
+def test_research_market_data_integrity_empty_configured_scope_short_circuits_cleanly(tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    db_path = tmp_path / "replay.sqlite3"
+    warehouse_root = tmp_path / "warehouse"
+
+    result = run_research_data_integrity_audit(
+        output_dir=tmp_path / "report",
+        replay_db_path=db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_cfg,
+        lane_symbol_map={},
+        symbols=["YM", "MBT"],
+    )
+
+    payload = result["payload"]
+    assert payload["instrument_registry"]["instrument_count"] == 0
+    assert payload["instrument_registry"]["unknown_requested_symbols"] == ["MBT", "YM"]
+    assert payload["analysis_allowed"] is False
+    assert payload["overall_status"] == "skipped"
+    assert payload["audit_runtime"]["status"] == "completed"
+    assert payload["audit_runtime"]["reason"] == "empty_configured_scope"
+    assert payload["health"]["reason"] == "empty_configured_scope"
+    assert payload["health"]["unmapped_symbols"] == ["MBT", "YM"]
+    phase_names = [row["phase"] for row in payload["audit_runtime"]["phase_rows"]]
+    assert phase_names == ["registry_load", "report_write"]
+
+
 def test_session_audit_does_not_use_es_holiday_activity_to_require_metals(tmp_path: Path) -> None:
     provider_cfg = _provider_config(tmp_path)
     db_path = tmp_path / "replay.sqlite3"
