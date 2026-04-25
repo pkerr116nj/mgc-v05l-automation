@@ -11,6 +11,7 @@ from typing import Any
 
 from ..config_models import load_settings_from_files
 from ..market_data.research_data_integrity import (
+    PHASE_A_WAREHOUSE_DERIVED_TIMEFRAMES,
     execute_research_market_data_backfill,
     rebuild_canonical_warehouse_surfaces,
     rematerialize_trade_artifacts,
@@ -63,6 +64,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=20.0,
         help="Timeout guard for expensive audit phases such as duplicate/overlap scans.",
     )
+    parser.add_argument(
+        "--skip-warehouse-checks",
+        action="store_true",
+        help="For audit mode, validate replay/canonical fetch state only and skip warehouse/trade alignment checks.",
+    )
+    parser.add_argument(
+        "--derived-timeframes",
+        default=None,
+        help="For warehouse-rebuild mode, optional comma-separated derived timeframe override. Defaults to the Phase A set.",
+    )
     return parser
 
 
@@ -88,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             end_timestamp=end_ts,
             symbols=symbols,
             phase_timeout_seconds=args.phase_timeout_seconds,
+            skip_warehouse_checks=bool(args.skip_warehouse_checks),
             progress_callback=_stderr_progress_callback,
         )
         print(json.dumps(_json_ready(result), indent=2, sort_keys=True))
@@ -114,12 +126,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.end is None:
             raise SystemExit("--mode warehouse-rebuild requires --end.")
         start_ts = _parse_timestamp(args.start) if args.start else datetime.fromisoformat("2024-01-01T18:00:00-05:00")
+        derived_timeframes = _resolve_warehouse_derived_timeframes(args)
         result = rebuild_canonical_warehouse_surfaces(
             warehouse_root=warehouse_root,
             replay_db_path=replay_db_path,
             instruments=symbols,
             start_ts=start_ts,
             end_ts=_parse_timestamp(args.end),
+            derived_timeframes=derived_timeframes,
             progress_callback=_stderr_warehouse_rebuild_callback,
         )
         print(json.dumps(_json_ready(result), indent=2, sort_keys=True))
@@ -161,6 +175,20 @@ def _resolve_symbols(args: argparse.Namespace, *, provider_cfg: Any) -> list[str
     if resolved:
         return sorted(dict.fromkeys(resolved))
     return [str(item).strip().upper() for item in provider_cfg.databento.pilot_symbols.keys()]
+
+
+def _resolve_warehouse_derived_timeframes(args: argparse.Namespace) -> list[str]:
+    if not args.derived_timeframes:
+        return list(PHASE_A_WAREHOUSE_DERIVED_TIMEFRAMES)
+    requested = [str(item).strip().lower() for item in str(args.derived_timeframes).split(",") if str(item).strip()]
+    allowed = set(PHASE_A_WAREHOUSE_DERIVED_TIMEFRAMES)
+    invalid = [timeframe for timeframe in requested if timeframe not in allowed]
+    if invalid:
+        raise SystemExit(
+            f"--derived-timeframes only supports the Phase A set: {', '.join(PHASE_A_WAREHOUSE_DERIVED_TIMEFRAMES)}. "
+            f"Invalid: {', '.join(sorted(invalid))}"
+        )
+    return list(dict.fromkeys(requested))
 
 
 def _stderr_progress_callback(event: dict[str, Any]) -> None:

@@ -21,6 +21,10 @@ def test_bootstrap_storage_skeleton_creates_layout_and_catalog(tmp_path: Path) -
     contracts_catalog = json.loads((root / "manifests" / "contracts_catalog.json").read_text())
     dataset_names = {item["dataset_name"] for item in contracts_catalog["dataset_contracts"]}
     assert "raw_bars_1m" in dataset_names
+    assert "derived_bars_15m" in dataset_names
+    assert "derived_bars_60m" in dataset_names
+    assert "derived_bars_240m" in dataset_names
+    assert "derived_bars_daily" in dataset_names
     assert "lane_candidates" in dataset_names
     assert "lane_entries" in dataset_names
     assert "lane_closed_trades" in dataset_names
@@ -41,5 +45,5 @@ def test_bootstrap_storage_skeleton_creates_layout_and_catalog(tmp_path: Path) -
     finally:
         connection.close()
 
-    assert dataset_contract_count >= 10
+    assert dataset_contract_count >= 14
     assert shard_contract_count == 1

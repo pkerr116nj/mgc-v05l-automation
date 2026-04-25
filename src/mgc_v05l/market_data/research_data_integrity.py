@@ -59,6 +59,8 @@ KNOWN_NONBLOCKING_SESSION_GAP_EXCEPTIONS: dict[tuple[str, str], dict[str, str]] 
         "reason": "databento_continuous_zero_records_exact_session_window",
     }
 }
+PHASE_A_WAREHOUSE_DERIVED_TIMEFRAMES: tuple[str, ...] = ("5m", "15m", "60m", "240m", "daily")
+PHASE_A_WAREHOUSE_INTRADAY_TIMEFRAMES: tuple[str, ...] = ("5m", "15m", "60m", "240m")
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,7 @@ def run_research_data_integrity_audit(
     lane_symbol_map: dict[str, list[str]] | None = None,
     symbols: Sequence[str] | None = None,
     phase_timeout_seconds: float = DEFAULT_AUDIT_PHASE_TIMEOUT_SECONDS,
+    skip_warehouse_checks: bool = False,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     policy = IntegritySourcePolicy()
@@ -200,33 +203,56 @@ def run_research_data_integrity_audit(
         )
         payload["replay_audit"].update(overlap_phase)
 
-        warehouse_audit = _run_audit_phase(
-            "warehouse_integrity_checks",
-            phase_rows=phase_rows,
-            progress_rows=progress_rows,
-            progress_callback=progress_callback,
-            fn=lambda: _audit_warehouse(warehouse_root=warehouse_root),
-        )
-        payload["warehouse_audit"] = warehouse_audit
+        if skip_warehouse_checks:
+            payload["warehouse_audit"] = {
+                "dataset_reports": _empty_dataset_reports(),
+                "audit_skipped": True,
+                "reason": "skip_warehouse_checks",
+            }
+            alignment_bundle = _run_audit_phase(
+                "trade_replay_artifact_alignment",
+                phase_rows=phase_rows,
+                progress_rows=progress_rows,
+                progress_callback=progress_callback,
+                fn=lambda: _build_fetch_only_validation_bundle(
+                    replay_db_path=replay_db_path,
+                    warehouse_root=warehouse_root,
+                    provider_config=provider_config,
+                    instruments=instruments,
+                    replay_audit=payload["replay_audit"],
+                    start_date=start_date,
+                    latest_target=latest_target,
+                    policy=policy,
+                ),
+            )
+        else:
+            warehouse_audit = _run_audit_phase(
+                "warehouse_integrity_checks",
+                phase_rows=phase_rows,
+                progress_rows=progress_rows,
+                progress_callback=progress_callback,
+                fn=lambda: _audit_warehouse(warehouse_root=warehouse_root),
+            )
+            payload["warehouse_audit"] = warehouse_audit
 
-        alignment_bundle = _run_audit_phase(
-            "trade_replay_artifact_alignment",
-            phase_rows=phase_rows,
-            progress_rows=progress_rows,
-            progress_callback=progress_callback,
-            fn=lambda: _build_alignment_bundle(
-                replay_db_path=replay_db_path,
-                warehouse_root=warehouse_root,
-                provider_config=provider_config,
-                instruments=instruments,
-                replay_audit=payload["replay_audit"],
-                warehouse_audit=payload["warehouse_audit"],
-                lane_symbol_map=lane_map,
-                start_date=start_date,
-                latest_target=latest_target,
-                policy=policy,
-            ),
-        )
+            alignment_bundle = _run_audit_phase(
+                "trade_replay_artifact_alignment",
+                phase_rows=phase_rows,
+                progress_rows=progress_rows,
+                progress_callback=progress_callback,
+                fn=lambda: _build_alignment_bundle(
+                    replay_db_path=replay_db_path,
+                    warehouse_root=warehouse_root,
+                    provider_config=provider_config,
+                    instruments=instruments,
+                    replay_audit=payload["replay_audit"],
+                    warehouse_audit=payload["warehouse_audit"],
+                    lane_symbol_map=lane_map,
+                    start_date=start_date,
+                    latest_target=latest_target,
+                    policy=policy,
+                ),
+            )
         payload["trade_alignment"] = alignment_bundle["trade_alignment"]
         payload["health"] = alignment_bundle["health"]
         payload["repair_plan"] = alignment_bundle["repair_plan"]
@@ -352,6 +378,10 @@ def _empty_dataset_reports() -> dict[str, Any]:
     return {
         "raw_bars_1m": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
         "derived_bars_5m": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
+        "derived_bars_15m": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
+        "derived_bars_60m": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
+        "derived_bars_240m": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
+        "derived_bars_daily": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
         "lane_entries": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
         "lane_closed_trades": {"root": None, "file_count": 0, "coverage_rows": [], "overall_rows": [], "duplicate_rows": []},
     }
@@ -541,6 +571,68 @@ def _build_alignment_bundle(
         replay_audit=replay_audit,
         latest_target=latest_target,
     )
+    return {
+        "trade_alignment": trade_alignment,
+        "health": health,
+        "repair_plan": repair_plan,
+        "daily_maintenance_plan": daily_plan,
+    }
+
+
+def _build_fetch_only_validation_bundle(
+    *,
+    replay_db_path: Path,
+    warehouse_root: Path,
+    provider_config: str | Path | None,
+    instruments: Sequence[str],
+    replay_audit: dict[str, Any],
+    start_date: str,
+    latest_target: datetime,
+    policy: IntegritySourcePolicy,
+) -> dict[str, Any]:
+    trade_alignment = {
+        "symbol_rows": [],
+        "blocking_issues": [],
+        "analysis_allowed": True,
+        "mode": "fetch_only_validation",
+    }
+    health = _build_fetch_only_health_report(
+        replay_audit=replay_audit,
+        trade_alignment=trade_alignment,
+        policy=policy,
+    )
+    repair_plan = {
+        "missing_ranges": [],
+        "repair_commands": _build_backfill_commands(
+            replay_db_path=replay_db_path,
+            provider_config_override=provider_config,
+            instruments=instruments,
+            latest_target=latest_target,
+            start_date=start_date,
+        ),
+        "warehouse_rebuild_commands": _build_warehouse_commands(
+            replay_db_path=replay_db_path,
+            warehouse_root=warehouse_root,
+            latest_target=latest_target,
+            mode="repair",
+        ),
+        "trade_rematerialization_commands": _build_trade_commands(
+            replay_db_path=replay_db_path,
+            warehouse_root=warehouse_root,
+            latest_target=latest_target,
+        ),
+        "do_not_run_strategy_research_yet": True,
+        "validation_scope": "fetch_only_replay",
+    }
+    daily_plan = _build_daily_maintenance_plan(
+        replay_db_path=replay_db_path,
+        warehouse_root=warehouse_root,
+        provider_config_path=provider_config,
+        instruments=instruments,
+        replay_audit=replay_audit,
+        latest_target=latest_target,
+    )
+    daily_plan["validation_scope"] = "fetch_only_replay"
     return {
         "trade_alignment": trade_alignment,
         "health": health,
@@ -908,11 +1000,16 @@ def rebuild_canonical_warehouse_surfaces(
     instruments: Sequence[str],
     start_ts: datetime,
     end_ts: datetime,
+    derived_timeframes: Sequence[str] = PHASE_A_WAREHOUSE_DERIVED_TIMEFRAMES,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     warehouse_root = warehouse_root.resolve()
     replay_db_path = replay_db_path.resolve()
     normalized_symbols = sorted({str(item).strip().upper() for item in instruments})
+    normalized_timeframes = tuple(
+        timeframe for timeframe in PHASE_A_WAREHOUSE_DERIVED_TIMEFRAMES
+        if timeframe in {str(item).strip().lower() for item in derived_timeframes}
+    )
     shards = _iter_quarter_shards(start_ts=start_ts, end_ts=end_ts)
     results: list[dict[str, Any]] = []
     ensured_indexes = _ensure_research_rebuild_indexes(replay_db_path)
@@ -926,6 +1023,7 @@ def rebuild_canonical_warehouse_surfaces(
         detail={
             "symbol_count": len(normalized_symbols),
             "shard_count": len(shards),
+            "derived_timeframes": list(normalized_timeframes),
             "ensured_indexes": ensured_indexes,
         },
     )
@@ -963,45 +1061,48 @@ def rebuild_canonical_warehouse_surfaces(
                     "cache_hit": bool(raw_result.get("cache", {}).get("cache_hit")),
                 },
             )
-            _emit_warehouse_rebuild_progress(
-                progress_callback=progress_callback,
-                symbol=symbol,
-                timeframe="5m",
-                shard_id=shard["shard_id"],
-                label="derived_5m_started",
-                status="running",
-            )
-            derived_5m = materialize_derived_timeframe_partition(
-                root_dir=warehouse_root,
-                symbol=symbol,
-                shard_id=shard["shard_id"],
-                year=shard["year"],
-                timeframe="5m",
-                raw_partition_path=Path(raw_result["partition_path"]),
-                raw_version=str(raw_result["raw_version"]),
-            )
-            _emit_warehouse_rebuild_progress(
-                progress_callback=progress_callback,
-                symbol=symbol,
-                timeframe="5m",
-                shard_id=shard["shard_id"],
-                label="derived_5m_completed",
-                status="completed",
-                detail={
-                    "row_count": int(derived_5m["row_count"]),
-                    "cache_hit": bool(derived_5m.get("cache", {}).get("cache_hit")),
-                },
-            )
-            results.append(
-                {
-                    "symbol": symbol,
-                    "shard_id": shard["shard_id"],
-                    "raw_row_count": int(raw_result["row_count"]),
-                    "derived_5m_row_count": int(derived_5m["row_count"]),
-                    "raw_partition_path": str(raw_result["partition_path"]),
-                    "derived_5m_partition_path": str(derived_5m["partition_path"]),
-                }
-            )
+            derived_results: dict[str, dict[str, Any]] = {}
+            for timeframe in normalized_timeframes:
+                _emit_warehouse_rebuild_progress(
+                    progress_callback=progress_callback,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    shard_id=shard["shard_id"],
+                    label=f"derived_{timeframe}_started",
+                    status="running",
+                )
+                derived_result = materialize_derived_timeframe_partition(
+                    root_dir=warehouse_root,
+                    symbol=symbol,
+                    shard_id=shard["shard_id"],
+                    year=shard["year"],
+                    timeframe=timeframe,
+                    raw_partition_path=Path(raw_result["partition_path"]),
+                    raw_version=str(raw_result["raw_version"]),
+                )
+                derived_results[timeframe] = derived_result
+                _emit_warehouse_rebuild_progress(
+                    progress_callback=progress_callback,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    shard_id=shard["shard_id"],
+                    label=f"derived_{timeframe}_completed",
+                    status="completed",
+                    detail={
+                        "row_count": int(derived_result["row_count"]),
+                        "cache_hit": bool(derived_result.get("cache", {}).get("cache_hit")),
+                    },
+                )
+            result_row = {
+                "symbol": symbol,
+                "shard_id": shard["shard_id"],
+                "raw_row_count": int(raw_result["row_count"]),
+                "raw_partition_path": str(raw_result["partition_path"]),
+            }
+            for timeframe, derived_result in derived_results.items():
+                result_row[f"derived_{timeframe}_row_count"] = int(derived_result["row_count"])
+                result_row[f"derived_{timeframe}_partition_path"] = str(derived_result["partition_path"])
+            results.append(result_row)
             _emit_warehouse_rebuild_progress(
                 progress_callback=progress_callback,
                 symbol=symbol,
@@ -1011,7 +1112,10 @@ def rebuild_canonical_warehouse_surfaces(
                 status="completed",
                 detail={
                     "raw_row_count": int(raw_result["row_count"]),
-                    "derived_5m_row_count": int(derived_5m["row_count"]),
+                    "derived_row_counts": {
+                        timeframe: int(derived_result["row_count"])
+                        for timeframe, derived_result in derived_results.items()
+                    },
                 },
             )
     _emit_warehouse_rebuild_progress(
@@ -1029,6 +1133,7 @@ def rebuild_canonical_warehouse_surfaces(
         "replay_db_path": str(replay_db_path),
         "symbols": normalized_symbols,
         "planned_shards": shards,
+        "derived_timeframes": list(normalized_timeframes),
         "ensured_indexes": ensured_indexes,
         "results": results,
     }
@@ -1451,6 +1556,10 @@ def _audit_warehouse(*, warehouse_root: Path) -> dict[str, Any]:
     dataset_rows = {
         "raw_bars_1m": _warehouse_dataset_report(layout["raw_bars_1m"], parquet_name="bars.parquet", ts_col="bar_ts"),
         "derived_bars_5m": _warehouse_dataset_report(layout["derived_bars_5m"], parquet_name="bars.parquet", ts_col="bar_ts"),
+        "derived_bars_15m": _warehouse_dataset_report(layout["derived_bars_15m"], parquet_name="bars.parquet", ts_col="bar_ts"),
+        "derived_bars_60m": _warehouse_dataset_report(layout["derived_bars_60m"], parquet_name="bars.parquet", ts_col="bar_ts"),
+        "derived_bars_240m": _warehouse_dataset_report(layout["derived_bars_240m"], parquet_name="bars.parquet", ts_col="bar_ts"),
+        "derived_bars_daily": _warehouse_dataset_report(layout["derived_bars_daily"], parquet_name="bars.parquet", ts_col="bar_ts"),
         "lane_entries": _warehouse_dataset_report(layout["lane_entries"], parquet_name="entries.parquet", ts_col="entry_ts"),
         "lane_closed_trades": _warehouse_dataset_report(layout["lane_closed_trades"], parquet_name="closed_trades.parquet", ts_col="entry_ts"),
     }
@@ -1720,6 +1829,84 @@ def _build_health_report(
         "can_assert_complete_and_reliable": overall == "healthy",
         "instrument_rows": instrument_rows,
         "blocking_issues": blocking_issues + list(trade_alignment["blocking_issues"]),
+    }
+
+
+def _build_fetch_only_health_report(
+    *,
+    replay_audit: dict[str, Any],
+    trade_alignment: dict[str, Any],
+    policy: IntegritySourcePolicy,
+) -> dict[str, Any]:
+    duplicates = {
+        (row["instrument"], row["timeframe"], row["data_source"]): row
+        for row in replay_audit["duplicate_rows"]
+    }
+    session_gaps = defaultdict(int)
+    accepted_session_gaps = defaultdict(int)
+    for row in replay_audit["session_audit"]["session_gap_rows"]:
+        if row.get("gap_start") is None:
+            continue
+        if bool(row.get("blocking", True)):
+            session_gaps[str(row["instrument"])] += int(row["missing_session_count"])
+        else:
+            accepted_session_gaps[str(row["instrument"])] += int(row["missing_session_count"])
+
+    instrument_rows: list[dict[str, Any]] = []
+    blocking_issues: list[str] = []
+    for row in replay_audit["canonical_coverage_rows"]:
+        instrument = str(row["instrument"])
+        duplicate_row = duplicates.get((instrument, "1m", policy.canonical_1m_source))
+        mixed_sources = [
+            source_row
+            for source_row in replay_audit["source_overlap_rows"]
+            if source_row["instrument"] == instrument and int(source_row["duplicate_overlap_rows"] or 0) > 0
+        ]
+        missing_bars = int(row["missing_bar_count"])
+        duplicate_bars = int(duplicate_row["duplicate_bar_count"]) if duplicate_row else 0
+        missing_sessions = int(session_gaps.get(instrument, 0))
+        accepted_missing_sessions = int(accepted_session_gaps.get(instrument, 0))
+        status = "healthy"
+        issues: list[str] = []
+        if not row["latest_ts"]:
+            status = "failed"
+            issues.append("canonical_1m_missing")
+        if duplicate_bars > 0:
+            status = "failed"
+            issues.append("duplicate_bars")
+        if missing_sessions > 0:
+            status = "failed"
+            issues.append("missing_sessions")
+        if mixed_sources:
+            status = "failed"
+            issues.append("mixed_source_overlap")
+        instrument_rows.append(
+            {
+                "instrument": instrument,
+                "latest_timestamp": row.get("latest_ts"),
+                "missing_bars": missing_bars,
+                "missing_sessions": missing_sessions,
+                "accepted_missing_sessions": accepted_missing_sessions,
+                "duplicate_bar_count": duplicate_bars,
+                "warehouse_duplicate_bar_count": None,
+                "source_consistency_ok": not mixed_sources,
+                "warehouse_1m_aligned": None,
+                "warehouse_5m_aligned": None,
+                "trade_artifact_fresh": None,
+                "status": status,
+                "issues": issues,
+            }
+        )
+        if status == "failed":
+            blocking_issues.append(f"{instrument}: {', '.join(issues)}")
+
+    overall = "failed" if blocking_issues or not trade_alignment["analysis_allowed"] else "healthy"
+    return {
+        "overall_status": overall,
+        "can_assert_complete_and_reliable": overall == "healthy",
+        "instrument_rows": instrument_rows,
+        "blocking_issues": blocking_issues + list(trade_alignment["blocking_issues"]),
+        "validation_scope": "fetch_only_replay",
     }
 
 

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from ..trend_participation.storage import materialize_parquet_dataset
 from ._warehouse_common import read_stage_cache_manifest, stable_cache_key, write_stage_cache_manifest
@@ -13,6 +14,15 @@ from .layout import build_layout
 from .raw_materializer import build_dataset_partition_path, coverage_range
 
 DERIVED_PARTITION_CACHE_VERSION = "warehouse_derived_partition_v2"
+NEW_YORK = ZoneInfo("America/New_York")
+PHASE_A_INTRADAY_TIMEFRAME_MINUTES = {
+    "5m": 5,
+    "10m": 10,
+    "15m": 15,
+    "60m": 60,
+    "240m": 240,
+}
+PHASE_A_DAILY_TIMEFRAME = "daily"
 
 
 def materialize_derived_timeframe_partition(
@@ -148,6 +158,12 @@ def _derive_timeframe_rows(
     raw_version: str,
     materialized_ts: datetime,
 ) -> list[dict[str, Any]]:
+    if timeframe == PHASE_A_DAILY_TIMEFRAME:
+        return _derive_daily_rows(
+            raw_rows=raw_rows,
+            raw_version=raw_version,
+            materialized_ts=materialized_ts,
+        )
     buckets: dict[datetime, list[dict[str, Any]]] = {}
     for row in raw_rows:
         bucket_end = _bucket_end(row["bar_ts"], minutes)
@@ -206,10 +222,53 @@ def _is_complete_bucket(bucket_rows: list[dict[str, Any]], *, bucket_end: dateti
 
 
 def _timeframe_minutes(timeframe: str) -> int:
-    mapping = {"5m": 5, "10m": 10}
-    if timeframe not in mapping:
+    if timeframe == PHASE_A_DAILY_TIMEFRAME:
+        return 0
+    if timeframe not in PHASE_A_INTRADAY_TIMEFRAME_MINUTES:
         raise RuntimeError(f"Unsupported derived timeframe: {timeframe}")
-    return mapping[timeframe]
+    return PHASE_A_INTRADAY_TIMEFRAME_MINUTES[timeframe]
+
+
+def _derive_daily_rows(
+    *,
+    raw_rows: list[dict[str, Any]],
+    raw_version: str,
+    materialized_ts: datetime,
+) -> list[dict[str, Any]]:
+    sessions: dict[date, list[dict[str, Any]]] = {}
+    for row in raw_rows:
+        session_key = _session_date(row["bar_ts"])
+        sessions.setdefault(session_key, []).append(row)
+    derived_rows: list[dict[str, Any]] = []
+    for session_key, session_rows in sorted(sessions.items(), key=lambda item: item[0]):
+        ordered = sorted(session_rows, key=lambda item: item["bar_ts"])
+        first = ordered[0]
+        last = ordered[-1]
+        derived_rows.append(
+            {
+                "symbol": first["symbol"],
+                "timeframe": PHASE_A_DAILY_TIMEFRAME,
+                "bar_ts": last["bar_ts"],
+                "open": first["open"],
+                "high": max(row["high"] for row in ordered),
+                "low": min(row["low"] for row in ordered),
+                "close": last["close"],
+                "volume": sum(row["volume"] for row in ordered),
+                "source_data_source": first["data_source"],
+                "derived_rule": "session_date_daily_aggregate_from_canonical_1m",
+                "materialized_from_raw_version": raw_version,
+                "materialized_ts": materialized_ts,
+                "provenance_tag": f"derived:{PHASE_A_DAILY_TIMEFRAME}:{raw_version}:{session_key.isoformat()}",
+            }
+        )
+    return derived_rows
+
+
+def _session_date(timestamp: datetime) -> date:
+    local_ts = timestamp.astimezone(NEW_YORK)
+    if local_ts.timetz().replace(tzinfo=None) >= time(18, 0):
+        return local_ts.date()
+    return (local_ts - timedelta(days=1)).date()
 
 
 def _require_pyarrow():

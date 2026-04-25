@@ -524,6 +524,39 @@ def test_research_market_data_integrity_scoped_symbol_audit_and_phase_timings(tm
     assert any(event["phase"] == "canonical_1m_coverage" and event["event"] == "end" for event in progress_events)
 
 
+def test_research_market_data_integrity_fetch_only_validation_skips_warehouse_checks(tmp_path: Path) -> None:
+    provider_cfg = _provider_config(tmp_path)
+    db_path = tmp_path / "replay.sqlite3"
+    warehouse_root = tmp_path / "warehouse"
+    _seed_sqlite(db_path)
+
+    result = run_research_data_integrity_audit(
+        output_dir=tmp_path / "report",
+        replay_db_path=db_path,
+        warehouse_root=warehouse_root,
+        provider_config=provider_cfg,
+        lane_symbol_map={"MGC": ["test_lane__MGC"]},
+        symbols=["MGC"],
+        skip_warehouse_checks=True,
+    )
+
+    payload = result["payload"]
+    assert payload["analysis_allowed"] is True
+    assert payload["overall_status"] == "healthy"
+    assert payload["health"]["validation_scope"] == "fetch_only_replay"
+    assert payload["trade_alignment"]["mode"] == "fetch_only_validation"
+    assert payload["warehouse_audit"]["audit_skipped"] is True
+    assert payload["warehouse_audit"]["reason"] == "skip_warehouse_checks"
+    phase_names = [row["phase"] for row in payload["audit_runtime"]["phase_rows"]]
+    assert phase_names == [
+        "registry_load",
+        "canonical_1m_coverage",
+        "source_overlap_checks",
+        "trade_replay_artifact_alignment",
+        "report_write",
+    ]
+
+
 def test_research_market_data_integrity_writes_partial_report_on_timeout(monkeypatch, tmp_path: Path) -> None:
     provider_cfg = _provider_config(tmp_path)
     db_path = tmp_path / "replay.sqlite3"
@@ -1116,7 +1149,7 @@ def test_warehouse_rebuild_iterates_multiple_quarters_and_emits_progress(monkeyp
         raw_version: str,
         materialized_ts: datetime | None = None,
     ) -> dict[str, object]:
-        derived_calls.append((symbol, shard_id))
+        derived_calls.append((symbol, shard_id, timeframe))
         partition_path = root_dir / "datasets" / f"derived_bars_{timeframe}" / f"symbol={symbol}" / f"year={year}" / f"shard_id={shard_id}" / "bars.parquet"
         return {
             "partition_path": str(partition_path),
@@ -1147,7 +1180,11 @@ def test_warehouse_rebuild_iterates_multiple_quarters_and_emits_progress(monkeyp
         ("ZF", "2024Q3"),
         ("ZT", "2024Q3"),
     ]
-    assert derived_calls == raw_calls
+    expected_derived_calls = []
+    for symbol, shard_id in raw_calls:
+        for timeframe in ("5m", "15m", "60m", "240m", "daily"):
+            expected_derived_calls.append((symbol, shard_id, timeframe))
+    assert derived_calls == expected_derived_calls
     assert len(result["results"]) == 6
     labels = [str(row["label"]) for row in progress_events]
     assert labels[0] == "rebuild_started"
@@ -1155,6 +1192,10 @@ def test_warehouse_rebuild_iterates_multiple_quarters_and_emits_progress(monkeyp
     assert "raw_1m_completed" in labels
     assert "derived_5m_started" in labels
     assert "derived_5m_completed" in labels
+    assert "derived_15m_started" in labels
+    assert "derived_60m_started" in labels
+    assert "derived_240m_started" in labels
+    assert "derived_daily_started" in labels
     assert "symbol_shard_completed" in labels
     assert labels[-1] == "rebuild_completed"
 

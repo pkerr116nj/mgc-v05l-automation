@@ -85,6 +85,10 @@ def refresh_query_views(*, connection, dataset_root: Path) -> None:
     _register_view(connection, "raw_bars_1m", dataset_root / "datasets" / "raw_bars_1m", dataset_name="raw_bars_1m")
     _register_view(connection, "derived_bars_5m", dataset_root / "datasets" / "derived_bars_5m", dataset_name="derived_bars_5m")
     _register_view(connection, "derived_bars_10m", dataset_root / "datasets" / "derived_bars_10m", dataset_name="derived_bars_10m")
+    _register_view(connection, "derived_bars_15m", dataset_root / "datasets" / "derived_bars_15m", dataset_name="derived_bars_15m")
+    _register_view(connection, "derived_bars_60m", dataset_root / "datasets" / "derived_bars_60m", dataset_name="derived_bars_60m")
+    _register_view(connection, "derived_bars_240m", dataset_root / "datasets" / "derived_bars_240m", dataset_name="derived_bars_240m")
+    _register_view(connection, "derived_bars_daily", dataset_root / "datasets" / "derived_bars_daily", dataset_name="derived_bars_daily")
     _register_view(
         connection,
         "shared_features_5m",
