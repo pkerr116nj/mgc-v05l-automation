@@ -213,6 +213,25 @@ def _seed_true_missing_session_with_noncanonical_evidence(db_path: Path) -> None
     )
 
 
+def _seed_mbt_nonblocking_provider_gap(db_path: Path) -> None:
+    engine = build_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+    repositories = RepositorySet(engine)
+    ny = ZoneInfo("America/New_York")
+    repositories.bars.save(
+        _bar(symbol="MBT", timeframe="1m", end_ts=datetime(2026, 3, 13, 18, 1, tzinfo=ny)),
+        data_source="historical_1m_canonical",
+    )
+    repositories.bars.save(
+        _bar(symbol="MBT", timeframe="1m", end_ts=datetime(2026, 3, 16, 20, 1, tzinfo=ny)),
+        data_source="historical_1m_canonical",
+    )
+    repositories.bars.save(
+        _bar(symbol="MBT", timeframe="1m", end_ts=datetime(2026, 3, 15, 18, 1, tzinfo=ny), bar_id_suffix="schwab"),
+        data_source="schwab_history",
+    )
+
+
 def _materialize_warehouse(
     root: Path,
     *,
@@ -736,6 +755,74 @@ def test_session_audit_flags_true_missing_session_when_noncanonical_source_has_e
         and "schwab_history" in str(row.get("evidence_data_sources") or "")
         for row in gaps
     )
+
+
+def test_session_audit_classifies_known_provider_no_data_gap_as_nonblocking(tmp_path: Path) -> None:
+    db_path = tmp_path / "replay.sqlite3"
+    _seed_mbt_nonblocking_provider_gap(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        session_audit = integrity_module._session_audit(conn, instruments=["MBT"])
+    finally:
+        conn.close()
+    assert session_audit["session_gap_rows"] == [
+        {
+            "instrument": "MBT",
+            "gap_start": "2026-03-15",
+            "gap_end": "2026-03-15",
+            "missing_session_count": 1,
+            "missing_reason": "provider_continuous_no_data",
+            "gap_reason": "databento_continuous_zero_records_exact_session_window",
+            "blocking": False,
+            "evidence_data_sources": "schwab_history",
+        }
+    ]
+
+    health = integrity_module._build_health_report(
+        replay_audit={
+            "duplicate_rows": [],
+            "source_overlap_rows": [],
+            "canonical_coverage_rows": [
+                {
+                    "instrument": "MBT",
+                    "latest_ts": "2026-04-21T23:59:00-04:00",
+                    "missing_bar_count": 0,
+                }
+            ],
+            "session_audit": session_audit,
+        },
+        warehouse_audit={
+            "dataset_reports": {
+                "raw_bars_1m": {
+                    "overall_rows": [
+                        {
+                            "symbol": "MBT",
+                            "latest_ts": "2026-04-21T23:59:00-04:00",
+                            "duplicate_timestamp_count": 0,
+                        }
+                    ]
+                },
+                "derived_bars_5m": {
+                    "overall_rows": [
+                        {
+                            "symbol": "MBT",
+                            "latest_ts": "2026-04-22T03:55:00+00:00",
+                            "duplicate_timestamp_count": 0,
+                        }
+                    ]
+                },
+            }
+        },
+        trade_alignment={"analysis_allowed": True, "blocking_issues": [], "symbol_rows": []},
+        policy=integrity_module.IntegritySourcePolicy(),
+    )
+    assert health["overall_status"] == "healthy"
+    assert health["blocking_issues"] == []
+    assert health["instrument_rows"][0]["instrument"] == "MBT"
+    assert health["instrument_rows"][0]["accepted_missing_sessions"] == 1
+    assert health["instrument_rows"][0]["missing_sessions"] == 0
+    assert health["instrument_rows"][0]["status"] == "healthy"
 
 
 def test_backfill_skips_unmapped_symbols_without_failing_configured_symbols(monkeypatch, tmp_path: Path) -> None:

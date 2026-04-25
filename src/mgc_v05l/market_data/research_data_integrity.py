@@ -50,6 +50,15 @@ FORBIDDEN_RESEARCH_SOURCES = (
 )
 TRADE_DATASETS = ("lane_entries", "lane_closed_trades")
 DEFAULT_AUDIT_PHASE_TIMEOUT_SECONDS = 20.0
+KNOWN_NONBLOCKING_SESSION_GAP_EXCEPTIONS: dict[tuple[str, str], dict[str, str]] = {
+    (
+        "MBT",
+        "2026-03-15",
+    ): {
+        "classification": "provider_continuous_no_data",
+        "reason": "databento_continuous_zero_records_exact_session_window",
+    }
+}
 
 
 @dataclass(frozen=True)
@@ -1242,17 +1251,25 @@ def _session_audit(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> d
                 for source in str(row["data_sources"] or "").split(",")
             )
         ]
-        gap_rows.extend(
-            {
-                "instrument": instrument,
-                "gap_start": gap["start"],
-                "gap_end": gap["end"],
-                "missing_session_count": gap["count"],
-                "missing_reason": "session_gap",
-                "evidence_data_sources": gap["data_sources"],
-            }
-            for gap in _compress_session_gap_rows(missing_sessions)
-        )
+        for gap in _compress_session_gap_rows(missing_sessions):
+            classification = _classify_session_gap_exception(
+                instrument=instrument,
+                gap_start=gap["start"],
+                gap_end=gap["end"],
+                evidence_data_sources=gap["data_sources"],
+            )
+            gap_rows.append(
+                {
+                    "instrument": instrument,
+                    "gap_start": gap["start"],
+                    "gap_end": gap["end"],
+                    "missing_session_count": gap["count"],
+                    "missing_reason": classification["gap_classification"],
+                    "gap_reason": classification["gap_reason"],
+                    "blocking": classification["blocking"],
+                    "evidence_data_sources": classification["evidence_data_sources"],
+                }
+            )
     return {
         "per_month_session_counts": per_month_session_counts,
         "session_gap_rows": gap_rows,
@@ -1299,6 +1316,30 @@ def _compress_session_gap_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str,
         }
     )
     return compressed
+
+
+def _classify_session_gap_exception(
+    *,
+    instrument: str,
+    gap_start: str | None,
+    gap_end: str | None,
+    evidence_data_sources: str | None,
+) -> dict[str, Any]:
+    if gap_start is not None and gap_start == gap_end:
+        exception = KNOWN_NONBLOCKING_SESSION_GAP_EXCEPTIONS.get((instrument, gap_start))
+        if exception is not None:
+            return {
+                "blocking": False,
+                "gap_classification": exception["classification"],
+                "gap_reason": exception["reason"],
+                "evidence_data_sources": evidence_data_sources,
+            }
+    return {
+        "blocking": True,
+        "gap_classification": "session_gap",
+        "gap_reason": "noncanonical_source_has_session_evidence",
+        "evidence_data_sources": evidence_data_sources,
+    }
 
 
 def _source_overlap_rows(conn: sqlite3.Connection, *, instruments: Sequence[str]) -> list[dict[str, Any]]:
@@ -1571,10 +1612,14 @@ def _build_health_report(
         for row in replay_audit["duplicate_rows"]
     }
     session_gaps = defaultdict(int)
+    accepted_session_gaps = defaultdict(int)
     for row in replay_audit["session_audit"]["session_gap_rows"]:
         if row.get("gap_start") is None:
             continue
-        session_gaps[str(row["instrument"])] += int(row["missing_session_count"])
+        if bool(row.get("blocking", True)):
+            session_gaps[str(row["instrument"])] += int(row["missing_session_count"])
+        else:
+            accepted_session_gaps[str(row["instrument"])] += int(row["missing_session_count"])
     raw_warehouse_by_symbol = {
         row["symbol"]: row
         for row in warehouse_audit["dataset_reports"]["raw_bars_1m"]["overall_rows"]
@@ -1605,6 +1650,7 @@ def _build_health_report(
         missing_bars = int(row["missing_bar_count"])
         duplicate_bars = int(duplicate_row["duplicate_bar_count"]) if duplicate_row else 0
         missing_sessions = int(session_gaps.get(instrument, 0))
+        accepted_missing_sessions = int(accepted_session_gaps.get(instrument, 0))
         status = "healthy"
         issues: list[str] = []
         if not row["latest_ts"]:
@@ -1634,6 +1680,7 @@ def _build_health_report(
                 "latest_timestamp": latest_ts,
                 "missing_bars": missing_bars,
                 "missing_sessions": missing_sessions,
+                "accepted_missing_sessions": accepted_missing_sessions,
                 "duplicate_bar_count": duplicate_bars,
                 "warehouse_duplicate_bar_count": warehouse_duplicate_count,
                 "source_consistency_ok": not mixed_sources,
