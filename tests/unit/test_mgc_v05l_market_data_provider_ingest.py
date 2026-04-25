@@ -13,23 +13,77 @@ from mgc_v05l.market_data.provider_models import CoverageChange, HistoricalBarsR
 
 
 class _FakeDatabentoTransport:
-    def __init__(self, lines: list[str]) -> None:
+    def __init__(self, lines: list[str], *, billable_size: int = 1024) -> None:
         self._lines = list(lines)
+        self._billable_size = billable_size
+
+    def request_text(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        method: str = "POST",
+        form: dict[str, object] | None = None,
+        query: dict[str, object] | None = None,
+    ) -> str:
+        if url.endswith("metadata.get_billable_size"):
+            return str(self._billable_size)
+        return "\n".join(self._lines)
+
+    def request_json(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        method: str = "POST",
+        form: dict[str, object] | None = None,
+        query: dict[str, object] | None = None,
+    ):
+        raise AssertionError("JSON endpoints are not expected in this fake transport")
 
     def request_lines(self, *, url: str, headers: dict[str, str], form: dict[str, object]) -> list[str]:
         return list(self._lines)
 
 
 class _FakeStagedDatabentoTransport:
-    def __init__(self, lines: list[str]) -> None:
+    def __init__(self, lines: list[str], *, billable_size: int = 1024) -> None:
         self._lines = list(lines)
+        self._billable_size = billable_size
         self.request_lines_called = False
+
+    def request_text(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        method: str = "POST",
+        form: dict[str, object] | None = None,
+        query: dict[str, object] | None = None,
+    ) -> str:
+        if url.endswith("metadata.get_billable_size"):
+            return str(self._billable_size)
+        raise AssertionError(f"Unexpected text endpoint: {url}")
+
+    def request_json(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        method: str = "POST",
+        form: dict[str, object] | None = None,
+        query: dict[str, object] | None = None,
+    ):
+        raise AssertionError("JSON endpoints are not expected in this fake transport")
 
     def request_lines(self, *, url: str, headers: dict[str, str], form: dict[str, object]) -> list[str]:
         self.request_lines_called = True
         raise AssertionError("staged ingest should not fall back to request_lines")
 
     def download_to_file(self, *, url: str, headers: dict[str, str], form: dict[str, object], destination: Path) -> dict[str, object]:
+        destination.write_text("\n".join(self._lines) + "\n", encoding="utf-8")
+        return {"byte_count": destination.stat().st_size}
+
+    def download_url_to_file(self, *, url: str, headers: dict[str, str], destination: Path) -> dict[str, object]:
         destination.write_text("\n".join(self._lines) + "\n", encoding="utf-8")
         return {"byte_count": destination.stat().st_size}
 
@@ -185,6 +239,8 @@ def test_historical_ingest_stages_and_persists_batches_incrementally(tmp_path: P
     assert transport.request_lines_called is False
     assert audit.inserted_bar_count == 2
     assert audit.fetched_bar_count == 2
+    assert audit.metadata["route"] == "staged_get_range"
+    assert audit.metadata["manifest_path"]
     assert [event["label"] for event in progress_events] == [
         "download_started",
         "download_completed",
@@ -193,6 +249,10 @@ def test_historical_ingest_stages_and_persists_batches_incrementally(tmp_path: P
         "rows_persisted",
         "parse_completed",
     ]
+    manifest = json.loads(Path(audit.metadata["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["route"] == "staged_get_range"
+    assert manifest["status"] == "completed"
+    assert manifest["artifact_rows"][0]["persist_status"] == "completed"
 
 
 def test_historical_ingest_keeps_existing_other_source_rows_at_same_timestamp(tmp_path: Path) -> None:

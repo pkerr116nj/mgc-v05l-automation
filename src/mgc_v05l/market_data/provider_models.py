@@ -104,12 +104,17 @@ class HistoricalBarsStage:
     timeframe: str
     ingest_time: datetime
     staged_path: str
+    staged_artifact_paths: tuple[str, ...] = ()
     dataset: str | None = None
     schema_name: str | None = None
     stype_in: str | None = None
     stype_out: str | None = None
     request_symbol: str | None = None
     provenance_tag: str = ""
+    route: str | None = None
+    fallback_route: str | None = None
+    estimated_billable_bytes: int | None = None
+    manifest_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -117,6 +122,8 @@ class HistoricalBarsStage:
 class HistoricalBarsBatch:
     bars: list[Bar]
     bar_provenance: dict[str, HistoricalBarProvenance] = field(default_factory=dict)
+    artifact_path: str | None = None
+    artifact_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -143,3 +150,4 @@ class HistoricalIngestAudit:
     skipped_existing_count: int
     ingest_run_id: str
     report_path: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)

@@ -751,6 +751,10 @@ def execute_research_market_data_backfill(
                 "inserted_bar_count": ingest_audit.inserted_bar_count,
                 "skipped_existing_count": ingest_audit.skipped_existing_count,
                 "coverage_after_latest": ingest_audit.after.latest,
+                "route": ingest_audit.metadata.get("route"),
+                "fallback_route": ingest_audit.metadata.get("fallback_route"),
+                "request_size_estimate_bytes": ingest_audit.metadata.get("request_size_estimate_bytes"),
+                "manifest_path": ingest_audit.metadata.get("manifest_path"),
             },
         )
         progress_rows.append(fetch_completed)
@@ -811,6 +815,10 @@ def execute_research_market_data_backfill(
                 "outcome": outcome,
                 "labels": labels,
                 "ingest_audit": asdict(ingest_audit),
+                "route": ingest_audit.metadata.get("route"),
+                "fallback_route": ingest_audit.metadata.get("fallback_route"),
+                "request_size_estimate_bytes": ingest_audit.metadata.get("request_size_estimate_bytes"),
+                "manifest_path": ingest_audit.metadata.get("manifest_path"),
                 "gap_repair": gap_repair_payload,
                 "derivations": symbol_derivations,
             }

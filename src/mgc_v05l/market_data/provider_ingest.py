@@ -30,6 +30,7 @@ from .provider_models import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPORT_DIR = REPO_ROOT / "outputs" / "reports" / "market_data_ingest"
+DEFAULT_MANIFEST_DIR = DEFAULT_REPORT_DIR / "manifests"
 
 
 class HistoricalMarketDataIngestionService:
@@ -48,6 +49,8 @@ class HistoricalMarketDataIngestionService:
         self._provider_config = load_market_data_providers_config(provider_config_path)
         self._report_dir = report_dir
         self._report_dir.mkdir(parents=True, exist_ok=True)
+        self._manifest_dir = DEFAULT_MANIFEST_DIR
+        self._manifest_dir.mkdir(parents=True, exist_ok=True)
 
     def ingest(
         self,
@@ -115,6 +118,9 @@ class HistoricalMarketDataIngestionService:
         if progress_callback is not None:
             progress_callback({"label": "download_started", "status": "running", "detail": {}})
         stage: HistoricalBarsStage = provider.stage_historical_bars(request)
+        manifest_path = self._manifest_dir / f"historical_backfill_{request.internal_symbol.lower()}_{request.timeframe}_{uuid4()}.json"
+        manifest = self._initial_backfill_manifest(stage=stage, request=request)
+        self._write_backfill_manifest(manifest_path, manifest)
         if progress_callback is not None:
             progress_callback(
                 {
@@ -123,6 +129,11 @@ class HistoricalMarketDataIngestionService:
                     "detail": {
                         "staged_path": stage.staged_path,
                         "byte_count": stage.metadata.get("byte_count"),
+                        "route": stage.route,
+                        "fallback_route": stage.fallback_route,
+                        "request_size_estimate_bytes": stage.estimated_billable_bytes,
+                        "artifact_count": len(stage.staged_artifact_paths),
+                        "manifest_path": str(manifest_path),
                     },
                 }
             )
@@ -135,6 +146,18 @@ class HistoricalMarketDataIngestionService:
         fetched = 0
         coverage_start: datetime | None = None
         coverage_end: datetime | None = None
+        manifest_status = "completed"
+        manifest_reason: str | None = None
+        artifact_stats: dict[str, dict[str, Any]] = {
+            str(row["path"]): {
+                "parse_status": "pending",
+                "persist_status": "pending",
+                "fetched_bar_count": 0,
+                "inserted_bar_count": 0,
+                "skipped_existing_count": 0,
+            }
+            for row in manifest.get("artifact_rows", [])
+        }
         try:
             with self._engine.begin() as connection:
                 self._insert_ingest_run(
@@ -160,12 +183,18 @@ class HistoricalMarketDataIngestionService:
                     ),
                 )
                 for batch in provider.iter_staged_historical_bar_batches(stage, request=request):
+                    artifact_key = str(batch.artifact_path or "")
+                    artifact_row = artifact_stats.get(artifact_key)
+                    if artifact_row is not None:
+                        artifact_row["parse_status"] = "running"
                     fetched += len(batch.bars)
                     if batch.bars:
                         batch_start = batch.bars[0].start_ts
                         batch_end = batch.bars[-1].end_ts
                         coverage_start = batch_start if coverage_start is None or batch_start < coverage_start else coverage_start
                         coverage_end = batch_end if coverage_end is None or batch_end > coverage_end else coverage_end
+                    previous_inserted = inserted
+                    previous_skipped = skipped
                     inserted, skipped = self._persist_batch(
                         connection=connection,
                         ingest_run_id=ingest_run_id,
@@ -193,6 +222,11 @@ class HistoricalMarketDataIngestionService:
                         inserted=inserted,
                         skipped=skipped,
                     )
+                    if artifact_row is not None:
+                        artifact_row["persist_status"] = "running"
+                        artifact_row["fetched_bar_count"] += len(batch.bars)
+                        artifact_row["inserted_bar_count"] += inserted - previous_inserted
+                        artifact_row["skipped_existing_count"] += skipped - previous_skipped
                     if progress_callback is not None:
                         progress_callback(
                             {
@@ -203,9 +237,20 @@ class HistoricalMarketDataIngestionService:
                                     "fetched_bar_count": fetched,
                                     "inserted_bar_count": inserted,
                                     "skipped_existing_count": skipped,
+                                    "artifact_path": batch.artifact_path,
+                                    "route": stage.route,
                                 },
                             }
                         )
+                for artifact_row in artifact_stats.values():
+                    if artifact_row["parse_status"] == "running":
+                        artifact_row["parse_status"] = "completed"
+                    if artifact_row["persist_status"] == "running":
+                        artifact_row["persist_status"] = "completed"
+                    if artifact_row["parse_status"] == "pending":
+                        artifact_row["parse_status"] = "zero_records_no_data"
+                    if artifact_row["persist_status"] == "pending":
+                        artifact_row["persist_status"] = "zero_records_no_data"
                 if coverage_start is not None or coverage_end is not None:
                     connection.execute(
                         market_data_bar_provenance_table.update()
@@ -231,10 +276,43 @@ class HistoricalMarketDataIngestionService:
                         "inserted_bar_count": inserted,
                         "skipped_existing_count": skipped,
                         "fetched_bar_count": fetched,
+                        "route": stage.route,
+                        "fallback_route": stage.fallback_route,
+                        "request_size_estimate_bytes": stage.estimated_billable_bytes,
+                        "manifest_path": str(manifest_path),
                     },
                 )
+        except Exception as exc:
+            manifest_status = "failed"
+            manifest_reason = type(exc).__name__
+            raise
         finally:
-            Path(stage.staged_path).unlink(missing_ok=True)
+            manifest["ingest_run_id"] = ingest_run_id
+            manifest["parse_status"] = manifest_status
+            manifest["persist_status"] = manifest_status
+            manifest["fetched_bar_count"] = fetched
+            manifest["inserted_bar_count"] = inserted
+            manifest["skipped_existing_count"] = skipped
+            manifest["status"] = manifest_status
+            manifest["reason"] = manifest_reason
+            manifest["artifact_rows"] = [
+                {
+                    **row,
+                    **artifact_stats.get(str(row["path"]), {}),
+                }
+                for row in manifest.get("artifact_rows", [])
+            ]
+            self._write_backfill_manifest(manifest_path, manifest)
+            cleanup = bool(stage.metadata.get("cleanup_staged_files_on_success"))
+            if cleanup:
+                for artifact_path in stage.staged_artifact_paths:
+                    Path(artifact_path).unlink(missing_ok=True)
+                stage_root = Path(stage.staged_path)
+                manifest_stage_path = Path(stage.manifest_path) if stage.manifest_path else None
+                if manifest_stage_path is not None:
+                    manifest_stage_path.unlink(missing_ok=True)
+                if stage_root.exists() and not any(stage_root.iterdir()):
+                    stage_root.rmdir()
         if progress_callback is not None:
             progress_callback(
                 {
@@ -244,6 +322,8 @@ class HistoricalMarketDataIngestionService:
                         "fetched_bar_count": fetched,
                         "inserted_bar_count": inserted,
                         "skipped_existing_count": skipped,
+                        "route": stage.route,
+                        "manifest_path": str(manifest_path),
                     },
                 }
             )
@@ -258,6 +338,14 @@ class HistoricalMarketDataIngestionService:
             inserted_bar_count=inserted,
             skipped_existing_count=skipped,
             ingest_run_id=ingest_run_id,
+            metadata={
+                "route": stage.route,
+                "fallback_route": stage.fallback_route,
+                "request_size_estimate_bytes": stage.estimated_billable_bytes,
+                "manifest_path": str(manifest_path),
+                "staged_path": stage.staged_path,
+                "artifact_paths": list(stage.staged_artifact_paths),
+            },
         )
 
     def _coverage_snapshot(self, *, symbol: str, timeframe: str, data_source: str) -> CoverageSnapshot:
@@ -412,6 +500,7 @@ class HistoricalMarketDataIngestionService:
         inserted_bar_count: int,
         skipped_existing_count: int,
         ingest_run_id: str,
+        metadata: dict[str, Any] | None = None,
     ) -> HistoricalIngestAudit:
         change = _coverage_change(before=before, after=after)
         if before.earliest and after.earliest and after.earliest > before.earliest:
@@ -430,6 +519,7 @@ class HistoricalMarketDataIngestionService:
             inserted_bar_count=inserted_bar_count,
             skipped_existing_count=skipped_existing_count,
             ingest_run_id=ingest_run_id,
+            metadata=dict(metadata or {}),
         )
         report_path = self._report_dir / f"historical_ingest_{request.internal_symbol.lower()}_{request.timeframe}_{ingest_run_id}.json"
         report_path.write_text(json.dumps(asdict(payload), indent=2, sort_keys=True), encoding="utf-8")
@@ -446,7 +536,34 @@ class HistoricalMarketDataIngestionService:
             skipped_existing_count=payload.skipped_existing_count,
             ingest_run_id=payload.ingest_run_id,
             report_path=str(report_path),
+            metadata=dict(payload.metadata),
         )
+
+    def _initial_backfill_manifest(self, *, stage: HistoricalBarsStage, request: HistoricalBarsRequest) -> dict[str, Any]:
+        return {
+            "provider": stage.provider,
+            "internal_symbol": stage.internal_symbol,
+            "resolved_provider_symbol": stage.request_symbol,
+            "timeframe": stage.timeframe,
+            "request_start": request.start.isoformat(),
+            "request_end": request.end.isoformat() if request.end is not None else None,
+            "request_size_estimate_bytes": stage.estimated_billable_bytes,
+            "route": stage.route,
+            "fallback_route": stage.fallback_route,
+            "staged_path": stage.staged_path,
+            "artifact_rows": list(stage.metadata.get("artifact_rows") or []),
+            "status": "running",
+            "parse_status": "running",
+            "persist_status": "pending",
+            "fetched_bar_count": 0,
+            "inserted_bar_count": 0,
+            "skipped_existing_count": 0,
+            "ingest_run_id": None,
+        }
+
+    def _write_backfill_manifest(self, manifest_path: Path, payload: dict[str, Any]) -> None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _storage_bar_id(data_source: str, bar_id: str) -> str:
