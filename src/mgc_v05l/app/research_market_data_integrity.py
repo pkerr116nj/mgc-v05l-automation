@@ -120,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             instruments=symbols,
             start_ts=start_ts,
             end_ts=_parse_timestamp(args.end),
+            progress_callback=_stderr_warehouse_rebuild_callback,
         )
         print(json.dumps(_json_ready(result), indent=2, sort_keys=True))
         return 0
@@ -188,6 +189,21 @@ def _stderr_backfill_callback(event: dict[str, Any]) -> None:
     detail_suffix = f" detail={json.dumps(detail, sort_keys=True)}" if detail else ""
     print(
         f"[research-market-data-backfill] symbol={symbol} label={label} status={status}{detail_suffix}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _stderr_warehouse_rebuild_callback(event: dict[str, Any]) -> None:
+    symbol = event.get("symbol") or "-"
+    timeframe = event.get("timeframe") or "-"
+    shard_id = event.get("shard_id") or "-"
+    label = event.get("label")
+    status = event.get("status")
+    detail = event.get("detail") or {}
+    detail_suffix = f" detail={json.dumps(detail, sort_keys=True)}" if detail else ""
+    print(
+        f"[research-market-data-warehouse] symbol={symbol} timeframe={timeframe} shard={shard_id} label={label} status={status}{detail_suffix}",
         file=sys.stderr,
         flush=True,
     )

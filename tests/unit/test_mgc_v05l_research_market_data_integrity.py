@@ -12,7 +12,11 @@ from zoneinfo import ZoneInfo
 
 from mgc_v05l.domain.models import Bar
 from mgc_v05l.market_data.provider_models import CoverageChange, CoverageSnapshot, HistoricalIngestAudit
-from mgc_v05l.market_data.research_data_integrity import execute_research_market_data_backfill, run_research_data_integrity_audit
+from mgc_v05l.market_data.research_data_integrity import (
+    execute_research_market_data_backfill,
+    rebuild_canonical_warehouse_surfaces,
+    run_research_data_integrity_audit,
+)
 from mgc_v05l.persistence import build_engine
 from mgc_v05l.persistence.db import create_schema
 from mgc_v05l.persistence.repositories import RepositorySet
@@ -986,4 +990,109 @@ def test_backfill_surfaces_staged_fetch_progress_labels(monkeypatch, tmp_path: P
         "rows_persisted",
         "parse_completed",
         "fetch_completed",
+    ]
+
+
+def test_warehouse_rebuild_iterates_multiple_quarters_and_emits_progress(monkeypatch, tmp_path: Path) -> None:
+    raw_calls: list[tuple[str, str]] = []
+    derived_calls: list[tuple[str, str]] = []
+    engine = build_engine(f"sqlite:///{tmp_path / 'replay.sqlite3'}")
+    create_schema(engine)
+
+    def _fake_export(
+        *,
+        root_dir: Path,
+        sqlite_path: Path,
+        symbol: str,
+        shard_id: str,
+        start_ts: datetime,
+        end_ts: datetime,
+        data_source: str = "historical_1m_canonical",
+    ) -> dict[str, object]:
+        raw_calls.append((symbol, shard_id))
+        partition_path = root_dir / "datasets" / "raw_bars_1m" / f"symbol={symbol}" / f"year={start_ts.year}" / f"shard_id={shard_id}" / "bars.parquet"
+        return {
+            "partition_path": str(partition_path),
+            "row_count": 10,
+            "raw_version": f"{symbol}-{shard_id}",
+            "cache": {"cache_hit": False},
+        }
+
+    def _fake_derive(
+        *,
+        root_dir: Path,
+        symbol: str,
+        shard_id: str,
+        year: int,
+        timeframe: str,
+        raw_partition_path: Path,
+        raw_version: str,
+        materialized_ts: datetime | None = None,
+    ) -> dict[str, object]:
+        derived_calls.append((symbol, shard_id))
+        partition_path = root_dir / "datasets" / f"derived_bars_{timeframe}" / f"symbol={symbol}" / f"year={year}" / f"shard_id={shard_id}" / "bars.parquet"
+        return {
+            "partition_path": str(partition_path),
+            "row_count": 2,
+            "cache": {"cache_hit": False},
+        }
+
+    monkeypatch.setattr(integrity_module, "export_canonical_1m_partition", _fake_export)
+    monkeypatch.setattr(integrity_module, "materialize_derived_timeframe_partition", _fake_derive)
+
+    progress_events: list[dict[str, object]] = []
+    result = rebuild_canonical_warehouse_surfaces(
+        warehouse_root=tmp_path / "warehouse",
+        replay_db_path=tmp_path / "replay.sqlite3",
+        instruments=["ZT", "ZF"],
+        start_ts=datetime.fromisoformat("2024-01-01T18:00:00-05:00"),
+        end_ts=datetime.fromisoformat("2024-07-15T23:59:00-04:00"),
+        progress_callback=progress_events.append,
+    )
+
+    planned_shards = [row["shard_id"] for row in result["planned_shards"]]
+    assert planned_shards == ["2024Q1", "2024Q2", "2024Q3"]
+    assert raw_calls == [
+        ("ZF", "2024Q1"),
+        ("ZT", "2024Q1"),
+        ("ZF", "2024Q2"),
+        ("ZT", "2024Q2"),
+        ("ZF", "2024Q3"),
+        ("ZT", "2024Q3"),
+    ]
+    assert derived_calls == raw_calls
+    assert len(result["results"]) == 6
+    labels = [str(row["label"]) for row in progress_events]
+    assert labels[0] == "rebuild_started"
+    assert "raw_1m_started" in labels
+    assert "raw_1m_completed" in labels
+    assert "derived_5m_started" in labels
+    assert "derived_5m_completed" in labels
+    assert "symbol_shard_completed" in labels
+    assert labels[-1] == "rebuild_completed"
+
+
+def test_warehouse_rebuild_ensures_supporting_indexes(tmp_path: Path) -> None:
+    db_path = tmp_path / "replay.sqlite3"
+    engine = build_engine(f"sqlite:///{db_path}")
+    create_schema(engine)
+
+    ensured = integrity_module._ensure_research_rebuild_indexes(db_path)
+
+    connection = sqlite3.connect(db_path)
+    try:
+        index_names = {
+            row[0]
+            for row in connection.execute(
+                "select name from sqlite_master where type='index'"
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+
+    assert "ix_bars_symbol_timeframe_source_end_ts" in index_names
+    assert "ix_market_data_bar_provenance_bar_source_ingest" in index_names
+    assert ensured == [
+        "ix_bars_symbol_timeframe_source_end_ts",
+        "ix_market_data_bar_provenance_bar_source_ingest",
     ]

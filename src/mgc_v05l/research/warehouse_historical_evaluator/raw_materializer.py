@@ -144,7 +144,28 @@ def load_canonical_1m_rows(
     try:
         rows = connection.execute(
             """
-            with ranked_provenance as (
+            with filtered_bars as (
+                select
+                    b.bar_id,
+                    b.symbol,
+                    b.timeframe,
+                    b.end_ts,
+                    b.open,
+                    b.high,
+                    b.low,
+                    b.close,
+                    b.volume,
+                    b.created_at,
+                    b.data_source
+                from bars b
+                where
+                    b.symbol = ?
+                    and b.timeframe = '1m'
+                    and b.data_source = ?
+                    and b.end_ts >= ?
+                    and b.end_ts <= ?
+            ),
+            ranked_provenance as (
                 select
                     p.*,
                     row_number() over (
@@ -152,44 +173,39 @@ def load_canonical_1m_rows(
                         order by p.ingest_time desc, p.provenance_id desc
                     ) as rn
                 from market_data_bar_provenance p
+                inner join filtered_bars fb on fb.bar_id = p.bar_id
                 where p.data_source = ?
             ),
             latest_provenance as (
                 select * from ranked_provenance where rn = 1
             )
             select
-                b.symbol,
-                b.end_ts as bar_ts,
-                b.open,
-                b.high,
-                b.low,
-                b.close,
-                b.volume,
+                fb.symbol,
+                fb.end_ts as bar_ts,
+                fb.open,
+                fb.high,
+                fb.low,
+                fb.close,
+                fb.volume,
                 coalesce(lp.provider, 'unknown') as provider,
                 lp.dataset as dataset,
                 lp.schema_name as schema_name,
-                coalesce(lp.raw_symbol, lp.request_symbol, lp.internal_symbol, b.symbol) as instrument_identity,
-                b.data_source,
-                coalesce(lp.ingest_time, b.created_at) as ingest_ts,
+                coalesce(lp.raw_symbol, lp.request_symbol, lp.internal_symbol, fb.symbol) as instrument_identity,
+                fb.data_source,
+                coalesce(lp.ingest_time, fb.created_at) as ingest_ts,
                 lp.coverage_start as coverage_window_start,
                 lp.coverage_end as coverage_window_end,
-                coalesce(lp.provenance_tag, b.data_source || ':' || b.symbol || ':' || b.timeframe) as provenance_tag
-            from bars b
-            left join latest_provenance lp on lp.bar_id = b.bar_id
-            where
-                b.symbol = ?
-                and b.timeframe = '1m'
-                and b.data_source = ?
-                and b.end_ts >= ?
-                and b.end_ts <= ?
-            order by b.end_ts asc
+                coalesce(lp.provenance_tag, fb.data_source || ':' || fb.symbol || ':' || fb.timeframe) as provenance_tag
+            from filtered_bars fb
+            left join latest_provenance lp on lp.bar_id = fb.bar_id
+            order by fb.end_ts asc
             """,
             [
-                data_source,
                 symbol,
                 data_source,
                 start_ts.isoformat(),
                 end_ts.isoformat(),
+                data_source,
             ],
         ).fetchall()
     finally:

@@ -839,6 +839,51 @@ def _backfill_progress_event(
     }
 
 
+def _warehouse_rebuild_progress_event(
+    *,
+    symbol: str | None,
+    timeframe: str | None,
+    shard_id: str | None,
+    label: str,
+    status: str,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event = {
+        "symbol": str(symbol).strip().upper() if symbol else None,
+        "timeframe": str(timeframe).strip().lower() if timeframe else None,
+        "shard_id": str(shard_id).strip() if shard_id else None,
+        "label": str(label).strip(),
+        "status": str(status).strip(),
+        "detail": detail or {},
+        "timestamp": datetime.now(tz=UTC).isoformat(),
+    }
+    return event
+
+
+def _emit_warehouse_rebuild_progress(
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    symbol: str | None,
+    timeframe: str | None,
+    shard_id: str | None,
+    label: str,
+    status: str,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        _warehouse_rebuild_progress_event(
+            symbol=symbol,
+            timeframe=timeframe,
+            shard_id=shard_id,
+            label=label,
+            status=status,
+            detail=detail,
+        )
+    )
+
+
 def rebuild_canonical_warehouse_surfaces(
     *,
     warehouse_root: Path,
@@ -846,12 +891,41 @@ def rebuild_canonical_warehouse_surfaces(
     instruments: Sequence[str],
     start_ts: datetime,
     end_ts: datetime,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     warehouse_root = warehouse_root.resolve()
     replay_db_path = replay_db_path.resolve()
+    normalized_symbols = sorted({str(item).strip().upper() for item in instruments})
+    shards = _iter_quarter_shards(start_ts=start_ts, end_ts=end_ts)
     results: list[dict[str, Any]] = []
-    for shard in _iter_quarter_shards(start_ts=start_ts, end_ts=end_ts):
-        for symbol in sorted({str(item).strip().upper() for item in instruments}):
+    ensured_indexes = _ensure_research_rebuild_indexes(replay_db_path)
+    _emit_warehouse_rebuild_progress(
+        progress_callback=progress_callback,
+        symbol=None,
+        timeframe=None,
+        shard_id=None,
+        label="rebuild_started",
+        status="running",
+        detail={
+            "symbol_count": len(normalized_symbols),
+            "shard_count": len(shards),
+            "ensured_indexes": ensured_indexes,
+        },
+    )
+    for shard in shards:
+        for symbol in normalized_symbols:
+            _emit_warehouse_rebuild_progress(
+                progress_callback=progress_callback,
+                symbol=symbol,
+                timeframe="1m",
+                shard_id=shard["shard_id"],
+                label="raw_1m_started",
+                status="running",
+                detail={
+                    "start_ts": shard["start_ts"].isoformat(),
+                    "end_ts": shard["end_ts"].isoformat(),
+                },
+            )
             raw_result = export_canonical_1m_partition(
                 root_dir=warehouse_root,
                 sqlite_path=replay_db_path,
@@ -859,6 +933,26 @@ def rebuild_canonical_warehouse_surfaces(
                 shard_id=shard["shard_id"],
                 start_ts=shard["start_ts"],
                 end_ts=shard["end_ts"],
+            )
+            _emit_warehouse_rebuild_progress(
+                progress_callback=progress_callback,
+                symbol=symbol,
+                timeframe="1m",
+                shard_id=shard["shard_id"],
+                label="raw_1m_completed",
+                status="completed",
+                detail={
+                    "row_count": int(raw_result["row_count"]),
+                    "cache_hit": bool(raw_result.get("cache", {}).get("cache_hit")),
+                },
+            )
+            _emit_warehouse_rebuild_progress(
+                progress_callback=progress_callback,
+                symbol=symbol,
+                timeframe="5m",
+                shard_id=shard["shard_id"],
+                label="derived_5m_started",
+                status="running",
             )
             derived_5m = materialize_derived_timeframe_partition(
                 root_dir=warehouse_root,
@@ -868,6 +962,18 @@ def rebuild_canonical_warehouse_surfaces(
                 timeframe="5m",
                 raw_partition_path=Path(raw_result["partition_path"]),
                 raw_version=str(raw_result["raw_version"]),
+            )
+            _emit_warehouse_rebuild_progress(
+                progress_callback=progress_callback,
+                symbol=symbol,
+                timeframe="5m",
+                shard_id=shard["shard_id"],
+                label="derived_5m_completed",
+                status="completed",
+                detail={
+                    "row_count": int(derived_5m["row_count"]),
+                    "cache_hit": bool(derived_5m.get("cache", {}).get("cache_hit")),
+                },
             )
             results.append(
                 {
@@ -879,10 +985,34 @@ def rebuild_canonical_warehouse_surfaces(
                     "derived_5m_partition_path": str(derived_5m["partition_path"]),
                 }
             )
+            _emit_warehouse_rebuild_progress(
+                progress_callback=progress_callback,
+                symbol=symbol,
+                timeframe=None,
+                shard_id=shard["shard_id"],
+                label="symbol_shard_completed",
+                status="completed",
+                detail={
+                    "raw_row_count": int(raw_result["row_count"]),
+                    "derived_5m_row_count": int(derived_5m["row_count"]),
+                },
+            )
+    _emit_warehouse_rebuild_progress(
+        progress_callback=progress_callback,
+        symbol=None,
+        timeframe=None,
+        shard_id=None,
+        label="rebuild_completed",
+        status="completed",
+        detail={"result_count": len(results)},
+    )
     return {
         "mode": "executed_warehouse_rebuild",
         "warehouse_root": str(warehouse_root),
         "replay_db_path": str(replay_db_path),
+        "symbols": normalized_symbols,
+        "planned_shards": shards,
+        "ensured_indexes": ensured_indexes,
         "results": results,
     }
 
@@ -1888,6 +2018,28 @@ def _iter_quarter_shards(*, start_ts: datetime, end_ts: datetime) -> list[dict[s
             )
         cursor = next_quarter
     return shards
+
+
+def _ensure_research_rebuild_indexes(sqlite_path: Path) -> list[str]:
+    sqlite_path = sqlite_path.resolve()
+    statements = {
+        "ix_bars_symbol_timeframe_source_end_ts": (
+            "create index if not exists ix_bars_symbol_timeframe_source_end_ts "
+            "on bars(symbol, timeframe, data_source, end_ts)"
+        ),
+        "ix_market_data_bar_provenance_bar_source_ingest": (
+            "create index if not exists ix_market_data_bar_provenance_bar_source_ingest "
+            "on market_data_bar_provenance(bar_id, data_source, ingest_time, provenance_id)"
+        ),
+    }
+    connection = sqlite3.connect(sqlite_path)
+    try:
+        for statement in statements.values():
+            connection.execute(statement)
+        connection.commit()
+    finally:
+        connection.close()
+    return list(statements.keys())
 
 
 def _database_url_from_path(path: Path) -> str:
