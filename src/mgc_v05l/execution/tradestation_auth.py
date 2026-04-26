@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 
 class TradeStationAuthError(RuntimeError):
@@ -17,6 +18,37 @@ class TradeStationAuthError(RuntimeError):
 class TradeStationEnvironment(str, Enum):
     SIM = "sim"
     LIVE = "live"
+
+
+TRADESTATION_AUTHORIZE_URL = "https://signin.tradestation.com/authorize"
+TRADESTATION_API_AUDIENCE = "https://api.tradestation.com"
+
+
+@dataclass(frozen=True)
+class TradeStationOAuthConfig:
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+    authorize_url: str = TRADESTATION_AUTHORIZE_URL
+    audience: str = TRADESTATION_API_AUDIENCE
+
+
+@dataclass(frozen=True)
+class TradeStationOAuthClient:
+    """Local authorize-URL helper for Stage 1B read-only bootstrap."""
+
+    config: TradeStationOAuthConfig
+
+    def build_authorize_url(self, *, state: str, scopes: list[str]) -> str:
+        query = {
+            "response_type": "code",
+            "client_id": self.config.client_id,
+            "redirect_uri": self.config.redirect_uri,
+            "audience": self.config.audience,
+            "scope": " ".join(str(item).strip() for item in scopes if str(item).strip()),
+            "state": state,
+        }
+        return f"{self.config.authorize_url}?{urlencode(query)}"
 
 
 @dataclass(frozen=True)

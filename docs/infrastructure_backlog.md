@@ -54,3 +54,8 @@
 
 - Raw storage `schwab_history` coexistence months remain observable but non-blocking.
 - Research read-surface contamination remains zero.
+
+## 8. Broker / Portfolio Truth Evolution
+
+- Future architecture should allow multiple broker feeds and multiple portfolio-truth sources.
+- The current forward execution and portfolio-truth path remains TradeStation-only until Stage 1B read-only validation is completed and accepted.
