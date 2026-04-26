@@ -1,0 +1,41 @@
+{
+  "vix_daily": {
+    "source_url": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv",
+    "asof_time_et": "16:15:00",
+    "version": "v1",
+    "level_buckets": [
+      {
+        "label": "LOW",
+        "min": null,
+        "max": 18.0
+      },
+      {
+        "label": "MID",
+        "min": 18.0,
+        "max": 25.0
+      },
+      {
+        "label": "HIGH",
+        "min": 25.0,
+        "max": null
+      }
+    ],
+    "change_pct_buckets": [
+      {
+        "label": "DOWN",
+        "min": null,
+        "max": -0.03
+      },
+      {
+        "label": "FLAT",
+        "min": -0.03,
+        "max": 0.03
+      },
+      {
+        "label": "UP",
+        "min": 0.03,
+        "max": null
+      }
+    ]
+  }
+}

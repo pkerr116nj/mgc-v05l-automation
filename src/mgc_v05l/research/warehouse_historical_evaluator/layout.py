@@ -17,6 +17,8 @@ def build_layout(root_dir: Path) -> dict[str, Path]:
         "derived_bars_60m": root / "datasets" / "derived_bars_60m",
         "derived_bars_240m": root / "datasets" / "derived_bars_240m",
         "derived_bars_daily": root / "datasets" / "derived_bars_daily",
+        "vix_daily": root / "datasets" / "vix_daily",
+        "vol_regime_daily": root / "datasets" / "vol_regime_daily",
         "shared_features_5m": root / "datasets" / "shared_features_5m",
         "shared_features_1m_timing": root / "datasets" / "shared_features_1m_timing",
         "family_event_tables": root / "datasets" / "family_event_tables",

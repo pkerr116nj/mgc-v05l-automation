@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..trend_participation.models import ResearchBar
+from ..regime.vix_join import attach_vix_asof
+from ..regime.vix_regime_builder import load_vol_regime_rows
 from ..trend_participation.storage import build_layout, materialize_parquet_dataset, write_storage_manifest
 from .probabilistic_pass1 import _coerce_ts, _load_warehouse_bars, _quantile, _try_connect_duckdb
 from .probabilistic_pass2 import _coerce_row, _merge_rows
@@ -24,6 +26,7 @@ def run_probabilistic_pass5(
     pass1_root: Path,
     warehouse_root: Path,
     output_dir: Path,
+    regime_mode: str = "realized_only",
 ) -> dict[str, Any]:
     pass1_root = pass1_root.resolve()
     warehouse_root = warehouse_root.resolve()
@@ -69,9 +72,11 @@ def run_probabilistic_pass5(
         )
         for row in filtered_rows
     ]
+    if regime_mode in {"vix_only", "realized_plus_vix"}:
+        enriched_rows = _attach_vix_regimes(enriched_rows, warehouse_root=warehouse_root, regime_mode=regime_mode)
 
-    regime_expectancy_rows = _build_regime_metric_rows(enriched_rows)
-    instrument_regime_rows = _build_instrument_regime_rows(enriched_rows)
+    regime_expectancy_rows = _build_regime_metric_rows(enriched_rows, regime_mode=regime_mode)
+    instrument_regime_rows = _build_instrument_regime_rows(enriched_rows, regime_mode=regime_mode)
     time_cluster_rows = _build_time_cluster_rows(enriched_rows)
     edge_class_rows = _build_edge_classification_rows(regime_expectancy_rows)
 
@@ -108,7 +113,9 @@ def run_probabilistic_pass5(
         "assumptions": {
             "do_not_trust_min_rows": DO_NOT_TRUST_MIN_ROWS,
             "stack_filter": "INDEX + 60m AGREE + confirmation + NOT_COMPRESSED",
+            "regime_mode": regime_mode,
             "volatility_proxy": "daily_regime_bucket suffix: EXPANDED vs NORMAL",
+            "vix_join_policy": "most_recent_vix_asof_ts_lte_decision_ts",
             "trend_regime": "daily directional regime plus 240m agreement",
             "prior_session_behavior": "prior session trend fraction and range ratio vs 20-day median",
             "index_alignment": "same-direction candidate present in both SPX and NDX root groups at decision timestamp",
@@ -264,20 +271,52 @@ def _trend_regime(daily_regime_bucket: str, direction_240m_state: str, agreement
     return "COUNTERTREND_OR_MIXED"
 
 
-def _regime_dimensions() -> tuple[str, ...]:
-    return (
-        "volatility_regime",
+def _regime_dimensions(regime_mode: str) -> tuple[str, ...]:
+    shared = (
         "trend_regime",
         "prior_session_behavior",
         "prior_session_range_regime",
         "index_environment",
     )
+    if regime_mode == "realized_only":
+        return ("volatility_regime",) + shared
+    if regime_mode == "vix_only":
+        return (
+            "vix_level_bucket",
+            "vix_change_bucket",
+            "vix_combined_bucket",
+        ) + shared
+    if regime_mode == "realized_plus_vix":
+        return (
+            "volatility_regime",
+            "vix_level_bucket",
+            "vix_change_bucket",
+            "vix_combined_bucket",
+            "realized_plus_vix_bucket",
+        ) + shared
+    raise RuntimeError(f"Unsupported regime mode: {regime_mode}")
 
 
-def _build_regime_metric_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+def _attach_vix_regimes(rows: Sequence[dict[str, Any]], *, warehouse_root: Path, regime_mode: str) -> list[dict[str, Any]]:
+    if regime_mode == "realized_only":
+        return list(rows)
+    vix_rows = load_vol_regime_rows(warehouse_root)
+    enriched = attach_vix_asof(rows, vix_rows=vix_rows)
+    payload: list[dict[str, Any]] = []
+    for row in enriched:
+        payload.append(
+            {
+                **row,
+                "realized_plus_vix_bucket": f"{row['volatility_regime']}|{row['vix_combined_bucket']}",
+            }
+        )
+    return payload
+
+
+def _build_regime_metric_rows(rows: Sequence[dict[str, Any]], *, regime_mode: str) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     baseline_map = _baseline_map(rows)
-    for dimension in _regime_dimensions():
+    for dimension in _regime_dimensions(regime_mode):
         grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         for row in rows:
             grouped.setdefault((str(row["sample_split"]), str(row["timing_within_asia"]), str(row[dimension])), []).append(row)
@@ -299,9 +338,9 @@ def _build_regime_metric_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, 
     return payload
 
 
-def _build_instrument_regime_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_instrument_regime_rows(rows: Sequence[dict[str, Any]], *, regime_mode: str) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
-    for dimension in _regime_dimensions():
+    for dimension in _regime_dimensions(regime_mode):
         grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
         for row in rows:
             grouped.setdefault((str(row["sample_split"]), str(row["instrument"]), str(row["timing_within_asia"]), str(row[dimension])), []).append(row)
@@ -369,6 +408,8 @@ def _build_edge_classification_rows(regime_rows: Sequence[dict[str, Any]]) -> li
                     "timing_within_asia": timing,
                     "development_row_count": int(development["row_count"]),
                     "holdout_row_count": int(holdout["row_count"]),
+                    "min_row_count_across_splits": min_count,
+                    "do_not_trust": trust_flag,
                     "development_avg_return_60m": float(development["avg_return_60m"]),
                     "holdout_avg_return_60m": float(holdout["avg_return_60m"]),
                     "development_win_rate_60m": float(development["win_rate_60m"]),

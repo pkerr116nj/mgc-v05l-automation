@@ -79,6 +79,28 @@ DERIVED_BAR_COLUMNS = (
     ColumnContract("provenance_tag", "string", False, "Derived provenance tag."),
 )
 
+VIX_DAILY_COLUMNS = (
+    ColumnContract("vix_trade_date", "string", False, "Cboe VIX trade date in YYYY-MM-DD form."),
+    ColumnContract("vix_asof_ts", "timestamp_tz", False, "Timestamp when the daily VIX close becomes usable."),
+    ColumnContract("vix_open", "double", True, "Official VIX open, when published."),
+    ColumnContract("vix_high", "double", True, "Official VIX high, when published."),
+    ColumnContract("vix_low", "double", True, "Official VIX low, when published."),
+    ColumnContract("vix_close", "double", False, "Official VIX close."),
+    ColumnContract("source", "string", False, "Upstream source identifier."),
+    ColumnContract("loaded_at", "timestamp_tz", False, "Ingestion timestamp."),
+)
+
+VOL_REGIME_DAILY_COLUMNS = (
+    ColumnContract("vix_trade_date", "string", False, "Cboe VIX trade date in YYYY-MM-DD form."),
+    ColumnContract("vix_asof_ts", "timestamp_tz", False, "Timestamp when the daily VIX close becomes usable."),
+    ColumnContract("vix_close", "double", False, "Official VIX close."),
+    ColumnContract("vix_change_abs", "double", True, "Absolute close-to-close change."),
+    ColumnContract("vix_change_pct", "double", True, "Percent close-to-close change."),
+    ColumnContract("vix_level_bucket", "string", False, "Configured VIX level bucket."),
+    ColumnContract("vix_change_bucket", "string", False, "Configured VIX change bucket."),
+    ColumnContract("vix_combined_bucket", "string", False, "Configured combined VIX regime bucket."),
+)
+
 SHARED_FEATURE_5M_COLUMNS = (
     ColumnContract("symbol", "string", False, "Canonical root or contract symbol."),
     ColumnContract("shard_id", "string", False, "Evaluation shard id."),
@@ -322,6 +344,22 @@ DEFAULT_DATASET_CONTRACTS: tuple[DatasetContract, ...] = (
         description="Session-date aligned daily bars derived from canonical 1m.",
         columns=DERIVED_BAR_COLUMNS,
         metadata={"timeframe": "daily", "source_data_source": "historical_1m_canonical"},
+    ),
+    DatasetContract(
+        dataset_name="vix_daily",
+        truth_class="reference_market_data",
+        partitioning=(),
+        description="Official Cboe daily VIX reference history with explicit as-of availability timestamps.",
+        columns=VIX_DAILY_COLUMNS,
+        metadata={"source_data_source": "cboe_official_daily_history"},
+    ),
+    DatasetContract(
+        dataset_name="vol_regime_daily",
+        truth_class="derived_reference_regime_layer",
+        partitioning=(),
+        description="Daily VIX regime table derived from official Cboe closes and config-driven buckets.",
+        columns=VOL_REGIME_DAILY_COLUMNS,
+        metadata={"source_data_source": "cboe_official_daily_history"},
     ),
     DatasetContract(
         dataset_name="shared_features_5m",

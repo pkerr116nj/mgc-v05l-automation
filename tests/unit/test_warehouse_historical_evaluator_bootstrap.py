@@ -25,6 +25,8 @@ def test_bootstrap_storage_skeleton_creates_layout_and_catalog(tmp_path: Path) -
     assert "derived_bars_60m" in dataset_names
     assert "derived_bars_240m" in dataset_names
     assert "derived_bars_daily" in dataset_names
+    assert "vix_daily" in dataset_names
+    assert "vol_regime_daily" in dataset_names
     assert "lane_candidates" in dataset_names
     assert "lane_entries" in dataset_names
     assert "lane_closed_trades" in dataset_names

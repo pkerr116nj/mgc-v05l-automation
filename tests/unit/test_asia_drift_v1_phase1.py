@@ -81,6 +81,27 @@ def _uptrend_session_with_break() -> list[ResearchBar]:
     return bars
 
 
+def _uptrend_session_with_pullback_first_bar_at_1805() -> list[ResearchBar]:
+    return [
+        ResearchBar(
+            instrument=bar.instrument,
+            timeframe=bar.timeframe,
+            start_ts=bar.start_ts + timedelta(minutes=5),
+            end_ts=bar.end_ts + timedelta(minutes=5),
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+            session_label=bar.session_label,
+            session_segment=bar.session_segment,
+            source=bar.source,
+            provenance=bar.provenance,
+        )
+        for bar in _uptrend_session_with_pullback()
+    ]
+
+
 def _chop_session() -> list[ResearchBar]:
     base = datetime(2026, 3, 2, 18, 0, tzinfo=NY)
     prices = [100.0, 100.2, 99.95, 100.18, 99.92, 100.16, 99.90, 100.14, 99.88, 100.12]
@@ -132,6 +153,16 @@ def test_feature_engine_identifies_long_drift_on_orderly_session(tmp_path: Path)
     assert strongest.long_drift_score > strongest.short_drift_score
     assert strongest.efficiency_ratio_12 > 0.5
     assert any(row.pullback_state in {NORMAL_PULLBACK, "STRETCHED_BUT_VALID"} for row in tradable_rows)
+
+
+def test_feature_engine_treats_first_1805_bar_as_anchor_observed(tmp_path: Path) -> None:
+    run = run_asia_drift_phase1_from_bars(
+        output_dir=tmp_path / "phase1_long_1805_anchor",
+        bars_5m=_uptrend_session_with_pullback_first_bar_at_1805(),
+    )
+
+    assert any(row.anchor_observed for row in run.feature_rows)
+    assert any(row.regime == ASIA_DRIFT_LONG for row in run.feature_rows)
 
 
 def test_feature_engine_rejects_chop_session(tmp_path: Path) -> None:

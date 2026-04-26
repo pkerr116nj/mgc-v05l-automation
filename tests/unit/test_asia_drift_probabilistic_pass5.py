@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from mgc_v05l.research.asia_drift.probabilistic_pass5 import (
     _build_edge_classification_rows,
+    _attach_vix_regimes,
     _build_index_alignment_lookup,
     _prior_session_behavior_bucket,
     _prior_session_range_bucket,
+    _regime_dimensions,
     _trend_regime,
     _volatility_regime,
 )
+from mgc_v05l.research.trend_participation.storage import materialize_parquet_dataset
+from mgc_v05l.research.warehouse_historical_evaluator.layout import build_layout
 
 
 def test_volatility_and_trend_regimes_are_bucketed_consistently() -> None:
@@ -93,3 +98,58 @@ def test_edge_classification_marks_edge_on_only_when_both_splits_support_it() ->
     early = next(row for row in rows if row["timing_within_asia"] == "EARLY_ASIA")
     assert late["edge_classification_candidate"] == "EDGE_ON_CANDIDATE"
     assert early["edge_classification_candidate"] == "EDGE_OFF_CANDIDATE"
+
+
+def test_regime_dimensions_expand_by_mode() -> None:
+    assert "volatility_regime" in _regime_dimensions("realized_only")
+    assert "vix_level_bucket" in _regime_dimensions("vix_only")
+    assert "realized_plus_vix_bucket" in _regime_dimensions("realized_plus_vix")
+
+
+def test_attach_vix_regimes_uses_asof_join_and_combined_bucket(tmp_path: Path) -> None:
+    warehouse_root = tmp_path / "warehouse"
+    layout = build_layout(warehouse_root)
+    materialize_parquet_dataset(
+        layout["vol_regime_daily"] / "vol_regime_daily.parquet",
+        [
+            {
+                "vix_trade_date": "2026-03-13",
+                "vix_asof_ts": "2026-03-13T20:15:00+00:00",
+                "vix_close": 21.0,
+                "vix_change_abs": 1.0,
+                "vix_change_pct": 0.05,
+                "vix_level_bucket": "MID",
+                "vix_change_bucket": "UP",
+                "vix_combined_bucket": "MID_UP",
+            },
+            {
+                "vix_trade_date": "2026-03-16",
+                "vix_asof_ts": "2026-03-16T20:15:00+00:00",
+                "vix_close": 18.0,
+                "vix_change_abs": -3.0,
+                "vix_change_pct": -0.142857,
+                "vix_level_bucket": "MID",
+                "vix_change_bucket": "DOWN",
+                "vix_combined_bucket": "MID_DOWN",
+            },
+        ],
+    )
+
+    rows = _attach_vix_regimes(
+        [
+            {
+                "decision_ts": "2026-03-16T15:00:00-04:00",
+                "volatility_regime": "LOW_VOL",
+            },
+            {
+                "decision_ts": "2026-03-16T18:00:00-04:00",
+                "volatility_regime": "HIGH_VOL",
+            },
+        ],
+        warehouse_root=warehouse_root,
+        regime_mode="vix_only",
+    )
+
+    assert rows[0]["vix_trade_date"] == "2026-03-13"
+    assert rows[1]["vix_trade_date"] == "2026-03-16"
+    assert rows[1]["realized_plus_vix_bucket"] == "HIGH_VOL|MID_DOWN"

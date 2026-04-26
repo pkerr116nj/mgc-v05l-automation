@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from datetime import date, datetime, timedelta
 from statistics import fmean, median
 from typing import Sequence
 
+from ...market_data.timeframes import timeframe_minutes
 from ..trend_participation.models import ResearchBar
 from ..trend_participation.state_layers import rolling_atr, rolling_ema
 from .models import AsiaDriftCalibrationProfile, AsiaDriftFeatureRow, DriftAssessment, PullbackAssessment
@@ -291,7 +293,10 @@ def _build_instrument_feature_rows(
         )
         provisional_session_id = f"{bar.instrument.lower()}__{session_date.isoformat()}__asia_drift_v1"
         if provisional_session_id not in anchor_observed_by_session:
-            anchor_observed_by_session[provisional_session_id] = local_time == DEFAULT_SESSION_CONFIG.session_anchor
+            anchor_observed_by_session[provisional_session_id] = _anchor_observed_for_bar(
+                local_time=local_time,
+                timeframe=bar.timeframe,
+            )
 
         scope = derive_session_scope(
             instrument=bar.instrument,
@@ -300,7 +305,8 @@ def _build_instrument_feature_rows(
             anchor_observed=anchor_observed_by_session[provisional_session_id],
         )
         anchor_observed_by_session[scope.asia_drift_session_id] = (
-            anchor_observed_by_session.get(scope.asia_drift_session_id, False) or local_time == DEFAULT_SESSION_CONFIG.session_anchor
+            anchor_observed_by_session.get(scope.asia_drift_session_id, False)
+            or _anchor_observed_for_bar(local_time=local_time, timeframe=bar.timeframe)
         )
         scope = derive_session_scope(
             instrument=bar.instrument,
@@ -1219,3 +1225,10 @@ def _reason_category(reason: str | None) -> str | None:
 
 def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def _anchor_observed_for_bar(*, local_time, timeframe: str) -> bool:
+    anchor_dt = datetime.combine(date(2000, 1, 1), DEFAULT_SESSION_CONFIG.session_anchor)
+    local_dt = datetime.combine(date(2000, 1, 1), local_time)
+    observed_deadline = anchor_dt + timedelta(minutes=timeframe_minutes(timeframe))
+    return anchor_dt <= local_dt <= observed_deadline
