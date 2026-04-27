@@ -72,6 +72,9 @@ class IbkrSession:
         now = occurred_at or datetime.now(timezone.utc)
         self._state = replace(self._state, last_heartbeat_at=now)
 
+    def select_account(self, account_id: str | None) -> None:
+        self._state = replace(self._state, account_id=account_id)
+
     def seed_next_valid_order_id(self, next_valid_order_id: int) -> None:
         self._order_id_allocator.seed(next_valid_order_id)
         self._state = replace(self._state, next_valid_order_id=self._order_id_allocator.next_order_id)
