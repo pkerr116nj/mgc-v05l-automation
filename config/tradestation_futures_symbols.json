@@ -1,0 +1,58 @@
+{
+  "ES": {
+    "internal_symbol": "ES",
+    "broker_symbol": "ESM26",
+    "root": "ES",
+    "asset_class": "FUTURE",
+    "exchange": "CME",
+    "expiry": "202606",
+    "multiplier": 50,
+    "tick_size": 0.25,
+    "tick_value": 12.5,
+    "currency": "USD",
+    "notes": "Provisional June 2026 E-mini S&P 500 contract metadata. CME product specs support the multiplier and minimum tick. TradeStation broker symbol syntax is not yet verified against the API and may require a prefix, alternate month encoding, or different venue code.",
+    "verification_status": "provisional"
+  },
+  "MES": {
+    "internal_symbol": "MES",
+    "broker_symbol": "MESM26",
+    "root": "MES",
+    "asset_class": "FUTURE",
+    "exchange": "CME",
+    "expiry": "202606",
+    "multiplier": 5,
+    "tick_size": 0.25,
+    "tick_value": 1.25,
+    "currency": "USD",
+    "notes": "Provisional June 2026 Micro E-mini S&P 500 contract metadata. CME product specs support the multiplier and minimum tick. TradeStation broker symbol syntax is not yet verified against the API and may require a prefix, alternate month encoding, or different venue code.",
+    "verification_status": "provisional"
+  },
+  "NQ": {
+    "internal_symbol": "NQ",
+    "broker_symbol": "NQM26",
+    "root": "NQ",
+    "asset_class": "FUTURE",
+    "exchange": "CME",
+    "expiry": "202606",
+    "multiplier": 20,
+    "tick_size": 0.25,
+    "tick_value": 5.0,
+    "currency": "USD",
+    "notes": "Provisional June 2026 E-mini Nasdaq-100 contract metadata. CME product specs support the multiplier and minimum tick. TradeStation broker symbol syntax is not yet verified against the API and may require a prefix, alternate month encoding, or different venue code.",
+    "verification_status": "provisional"
+  },
+  "MNQ": {
+    "internal_symbol": "MNQ",
+    "broker_symbol": "MNQM26",
+    "root": "MNQ",
+    "asset_class": "FUTURE",
+    "exchange": "CME",
+    "expiry": "202606",
+    "multiplier": 2,
+    "tick_size": 0.25,
+    "tick_value": 0.5,
+    "currency": "USD",
+    "notes": "Provisional June 2026 Micro E-mini Nasdaq-100 contract metadata. CME product specs support the multiplier and minimum tick. TradeStation broker symbol syntax is not yet verified against the API and may require a prefix, alternate month encoding, or different venue code.",
+    "verification_status": "provisional"
+  }
+}
