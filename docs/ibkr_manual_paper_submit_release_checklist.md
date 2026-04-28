@@ -24,6 +24,7 @@ If any item is incomplete, the repo is not ready to submit one paper order.
 - [ ] Preview must be generated first
 - [ ] Preview includes exact digest
 - [ ] Preview includes delayed quote warning when applicable
+- [ ] Preview includes delayed quote snapshot, chosen limit price, and distance from quote
 - [ ] Preview includes open-order baseline
 - [ ] Preview states no order was submitted, staged, or transmitted
 - [ ] Preview invalidates if material fields change
@@ -42,6 +43,9 @@ If any item is incomplete, the repo is not ready to submit one paper order.
 - [ ] Market orders fail closed
 - [ ] Non-whitelisted contracts fail closed
 - [ ] Missing limit price fails closed
+- [ ] Delayed quote unavailable fails closed
+- [ ] Delayed quote stale fails closed
+- [ ] Far-away placeholder limit fails closed
 - [ ] Bracket/OCO is blocked
 - [ ] Automation and scheduler paths are blocked
 
@@ -64,6 +68,7 @@ If any item is incomplete, the repo is not ready to submit one paper order.
 - [ ] Open-order baseline freshness is required
 - [ ] Contract qualification freshness is required
 - [ ] Submit re-checks digest and all material preview fields
+- [ ] Submit re-checks delayed quote freshness or requires a fresh preview
 - [ ] Open orders are re-read immediately after submit
 - [ ] Order id is captured from broker truth
 - [ ] Order details are verified against the preview
@@ -87,6 +92,7 @@ If any item is incomplete, the repo is not ready to submit one paper order.
 - [ ] Cancel event is logged
 - [ ] Cancel verification event is logged
 - [ ] Digest is logged
+- [ ] Quote snapshot, chosen limit, and distance from quote are logged
 - [ ] Error codes and messages are logged
 - [ ] Broker order id is logged when present
 - [ ] Audit log is append-only
@@ -119,4 +125,3 @@ If any item is incomplete, the repo is not ready to submit one paper order.
 - [ ] Every item above is complete before one paper submit/cancel test is allowed
 
 If this checklist is not fully complete, the correct outcome is no submit implementation.
-

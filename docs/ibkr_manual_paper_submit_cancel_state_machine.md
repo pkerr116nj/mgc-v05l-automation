@@ -64,6 +64,9 @@ Required preview contents:
 - limit price
 - tif
 - delayed quote warning
+- delayed quote snapshot
+- quote reference field used for pricing
+- distance from quote
 - open-order baseline
 - digest
 
@@ -106,6 +109,7 @@ Required re-checks before any future submit:
 - same qty
 - same order type
 - same limit price
+- same delayed quote snapshot or a fresh re-preview if the quote changed
 - same tif
 - same digest
 - same open-order baseline freshness
@@ -125,6 +129,7 @@ Meaning:
 
 Required follow-up:
 
+- if TWS shows a manual confirmation dialog, the operator handles it before broker-truth verification starts
 - immediately re-read open orders
 - verify one matching order appears
 
@@ -240,9 +245,9 @@ Allowed transitions:
 - no multi-order loop
 - no approval reuse
 - no auto-cancel assumption
+- no far-away placeholder limit price
 - no strategy-driven path into any submit-capable state
 
 ## Safety Property
 
 If the operator cannot produce the exact preview digest and typed phrase for the unchanged preview, the single paper submit cannot happen.
-

@@ -70,6 +70,8 @@ _SUCCESS_ORDER_STATUS = {"Submitted", "PreSubmitted", "ApiPending", "PendingSubm
 _CANCELLED_ORDER_STATUS = {"Cancelled", "ApiCancelled"}
 _FAILED_ORDER_STATUS = {"Inactive"}
 _MANUAL_CONFIRMATION_WAIT_STATE = "SUBMIT_SENT_AWAITING_TWS_MANUAL_CONFIRMATION"
+_DEFAULT_DELAYED_QUOTE_MAX_AGE_SECONDS = 30.0
+_DEFAULT_NEAR_MARKET_MAX_DISTANCE_TICKS = 50.0
 
 
 class IbkrManualPaperSubmitError(RuntimeError):
@@ -93,6 +95,8 @@ class IbkrManualPaperSubmitConfig:
     time_in_force: str = _EXPECTED_TIF
     timeout_seconds: float = 15.0
     manual_confirmation_timeout_seconds: float = 90.0
+    delayed_quote_max_age_seconds: float = _DEFAULT_DELAYED_QUOTE_MAX_AGE_SECONDS
+    near_market_max_distance_ticks: float = _DEFAULT_NEAR_MARKET_MAX_DISTANCE_TICKS
     caller_path: str = "manual_cli"
     submit: bool = False
     approval_digest: str | None = None
@@ -460,9 +464,56 @@ def run_ibkr_manual_paper_submit_test(
                 },
             )
         )
-        preview_payload = _build_submit_preview_payload(
+        pricing_context = _build_delayed_quote_pricing_context(
+            config=config,
             requested_order=requested_order,
             context=context,
+        )
+        guardrail_checks.extend(_delayed_quote_pricing_guardrails(pricing_context))
+        if any(check["blocking"] and not check["passed"] for check in guardrail_checks):
+            detail = _first_failed_guardrail_detail(guardrail_checks)
+            _record_audit(
+                audit_events,
+                event_type="failed_closed",
+                config=config,
+                classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
+                detail=detail,
+                extra={
+                    "quote_snapshot": pricing_context.get("quote_snapshot"),
+                    "limit_price": requested_order.get("limit_price"),
+                    "distance_from_quote": pricing_context.get("distance_from_reference_price"),
+                    "distance_ticks": pricing_context.get("distance_ticks"),
+                },
+            )
+            report = _build_report(
+                config=config,
+                started_at=started_at,
+                classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
+                caller_check=caller_check,
+                environment_lock=environment_lock,
+                context={**context, "pricing_context": pricing_context},
+                requested_order=requested_order,
+                guardrail_checks=guardrail_checks,
+                preview_payload=None,
+                preview_digest="",
+                expected_phrase="",
+                audit_events=audit_events,
+                lifecycle_result={
+                    "status": "blocked",
+                    "detail": detail,
+                },
+            )
+            return IbkrManualPaperSubmitArtifacts(
+                classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
+                report=report,
+                audit_events=audit_events,
+                open_order_before=context["open_orders_before"],
+                open_order_after_submit=_not_run_snapshot("Submit did not run."),
+                open_order_after_cancel=_not_run_snapshot("Cancel did not run."),
+            )
+        preview_payload = _build_submit_preview_payload(
+            requested_order=requested_order,
+            context={**context, "pricing_context": pricing_context},
             guardrail_checks=guardrail_checks,
         )
         preview_digest = build_preview_digest(preview_payload)
@@ -490,6 +541,10 @@ def run_ibkr_manual_paper_submit_test(
                 "account_id": context["selected_account_id"],
                 "preview_digest": preview_digest,
                 "quote_source_label": context["quote_context"].get("quote_source_label"),
+                "quote_snapshot": pricing_context.get("quote_snapshot"),
+                "limit_price": requested_order.get("limit_price"),
+                "distance_from_quote": pricing_context.get("distance_from_reference_price"),
+                "distance_ticks": pricing_context.get("distance_ticks"),
             },
         )
 
@@ -501,7 +556,7 @@ def run_ibkr_manual_paper_submit_test(
                 classification=classification,
                 caller_check=caller_check,
                 environment_lock=environment_lock,
-                context=context,
+                context={**context, "pricing_context": pricing_context},
                 requested_order=requested_order,
                 guardrail_checks=guardrail_checks,
                 preview_payload=preview_payload,
@@ -548,7 +603,7 @@ def run_ibkr_manual_paper_submit_test(
                 classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
                 caller_check=caller_check,
                 environment_lock=environment_lock,
-                context=context,
+                context={**context, "pricing_context": pricing_context},
                 requested_order=requested_order,
                 guardrail_checks=guardrail_checks,
                 preview_payload=preview_payload,
@@ -587,7 +642,7 @@ def run_ibkr_manual_paper_submit_test(
             classification=classification,
             caller_check=caller_check,
             environment_lock=environment_lock,
-            context=context,
+            context={**context, "pricing_context": pricing_context},
             requested_order=requested_order,
             guardrail_checks=guardrail_checks,
             preview_payload=preview_payload,
@@ -724,6 +779,12 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
         "",
         f"- delayed quote label: `{preview.get('quote_source_label')}`",
         f"- delayed quote warning: {preview.get('live_market_data_warning')}",
+        f"- quote snapshot: `{preview.get('quote_snapshot')}`",
+        f"- reference price source: `{preview.get('reference_price_source')}`",
+        f"- reference price: `{preview.get('reference_price')}`",
+        f"- chosen limit price: `{preview.get('limit_price')}`",
+        f"- distance from quote: `{preview.get('distance_from_quote')}`",
+        f"- distance in ticks: `{preview.get('distance_ticks')}`",
         f"- estimated_notional: `{preview.get('estimated_notional')}`",
         f"- estimated_tick_value: `{preview.get('estimated_tick_value')}`",
         "",
@@ -778,6 +839,118 @@ def _submit_input_guardrails(requested_order: dict[str, Any]) -> dict[str, dict[
             "detail": "Only DAY time-in-force is allowed in the first manual paper submit/cancel harness.",
         },
     }
+
+
+def _build_delayed_quote_pricing_context(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    requested_order: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    quote_context = dict(context.get("quote_context") or {})
+    contract_report = dict(context.get("contract_report") or {})
+    contract_details = dict(contract_report.get("api_contract_details", [{}])[0] if contract_report.get("api_contract_details") else {})
+    min_tick = _coerce_float(contract_details.get("min_tick"))
+    limit_price = _coerce_float(requested_order.get("limit_price"))
+    reference_price, reference_source = _select_delayed_reference_price(quote_context)
+    quote_updated_at = _parse_iso_timestamp(quote_context.get("updated_at"))
+    quote_age_seconds = (
+        max(0.0, (datetime.now(timezone.utc) - quote_updated_at).total_seconds())
+        if quote_updated_at is not None
+        else None
+    )
+    distance_from_reference_price = (
+        None
+        if limit_price is None or reference_price is None
+        else float(reference_price) - float(limit_price)
+    )
+    distance_ticks = (
+        None
+        if distance_from_reference_price is None or min_tick in (None, 0.0)
+        else float(distance_from_reference_price) / float(min_tick)
+    )
+    return {
+        "quote_snapshot": {
+            "source_label": quote_context.get("quote_source_label"),
+            "updated_at": quote_context.get("updated_at"),
+            "quote_age_seconds": quote_age_seconds,
+            "bid_price": quote_context.get("bid_price"),
+            "ask_price": quote_context.get("ask_price"),
+            "last_price": quote_context.get("last_price"),
+            "close_price": quote_context.get("close_price"),
+            "response_indication": quote_context.get("response_indication"),
+        },
+        "reference_price": reference_price,
+        "reference_price_source": reference_source,
+        "distance_from_reference_price": distance_from_reference_price,
+        "distance_ticks": distance_ticks,
+        "min_tick": min_tick,
+        "max_distance_ticks": float(config.near_market_max_distance_ticks),
+        "max_quote_age_seconds": float(config.delayed_quote_max_age_seconds),
+    }
+
+
+def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[dict[str, Any]]:
+    quote_snapshot = dict(pricing_context.get("quote_snapshot") or {})
+    quote_source = str(quote_snapshot.get("source_label") or "").strip().upper()
+    quote_age_seconds = pricing_context.get("quote_snapshot", {}).get("quote_age_seconds")
+    distance_from_reference_price = pricing_context.get("distance_from_reference_price")
+    distance_ticks = pricing_context.get("distance_ticks")
+    max_distance_ticks = pricing_context.get("max_distance_ticks")
+    return [
+        _guardrail_check(
+            "delayed_quote_available",
+            passed=quote_source == "DELAYED" and pricing_context.get("reference_price") is not None,
+            blocking=True,
+            detail="The first manual paper submit/cancel test requires a delayed bid or last quote snapshot. If delayed quote data is unavailable, fail closed rather than guessing a price.",
+        ),
+        _guardrail_check(
+            "delayed_quote_fresh",
+            passed=quote_age_seconds is not None and float(quote_age_seconds) <= float(pricing_context.get("max_quote_age_seconds") or 0.0),
+            blocking=True,
+            detail=(
+                "The delayed quote snapshot must be fresh before preview. If the delayed quote is stale, fail closed rather than guessing a price."
+            ),
+        ),
+        _guardrail_check(
+            "near_market_non_marketable_buy_limit",
+            passed=(
+                distance_from_reference_price is not None
+                and float(distance_from_reference_price) > 0.0
+                and (
+                    distance_ticks is None
+                    or (
+                        float(distance_ticks) >= 1.0
+                        and float(distance_ticks) <= float(max_distance_ticks or 0.0)
+                    )
+                )
+            ),
+            blocking=True,
+            detail=(
+                "For BUY 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the current delayed bid/last, close enough to be accepted by TWS, and not a far-away placeholder limit."
+            ),
+        ),
+    ]
+
+
+def _select_delayed_reference_price(quote_context: dict[str, Any]) -> tuple[float | None, str | None]:
+    bid_price = _coerce_float(quote_context.get("bid_price"))
+    if bid_price is not None:
+        return bid_price, "bid_price"
+    last_price = _coerce_float(quote_context.get("last_price"))
+    if last_price is not None:
+        return last_price, "last_price"
+    return None, None
+
+
+def _parse_iso_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def _preflight_guardrail_checks(
@@ -1130,6 +1303,8 @@ def _probe_delayed_quote_context(
         "ask_price": active_probe.get("ask_price"),
         "last_price": active_probe.get("last_price"),
         "close_price": active_probe.get("close_price"),
+        "updated_at": active_probe.get("updated_at"),
+        "response_indication": active_probe.get("response_indication"),
         "delayed_data_warning_present": bool(warning) or bool(delayed_probe.get("any_tick_returned")),
     }
 
@@ -1184,6 +1359,7 @@ def _request_market_data_snapshot(
         "request_id": request_id,
         "market_data_type_requested": market_data_type,
         "market_data_type_reported": raw_row.get("market_data_type"),
+        "updated_at": raw_row.get("updated_at"),
         "response_code": response_code,
         "response_message": response_message,
         "response_indication": indication,
@@ -1204,6 +1380,7 @@ def _execute_submit_cancel_lifecycle(
     preview_digest: str,
     manual_confirmation_fn: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
+    pricing_context = dict(context.get("pricing_context") or {})
     refreshed_before_submit = _refresh_open_orders_snapshot(
         runtime=runtime,
         selected_account_id=context["selected_account_id"],
@@ -1241,7 +1418,14 @@ def _execute_submit_cancel_lifecycle(
         config=config,
         classification=None,
         detail="Submitted one manual paper limit order to TWS.",
-        extra={"order_id": order_id, "preview_digest": preview_digest},
+        extra={
+            "order_id": order_id,
+            "preview_digest": preview_digest,
+            "quote_snapshot": pricing_context.get("quote_snapshot"),
+            "limit_price": requested_order.get("limit_price"),
+            "distance_from_quote": pricing_context.get("distance_from_reference_price"),
+            "distance_ticks": pricing_context.get("distance_ticks"),
+        },
     )
     _record_audit(
         audit_events,
@@ -1606,6 +1790,7 @@ def _build_submit_preview_payload(
     contract_report = dict(context["contract_report"])
     contract_details = dict(contract_report.get("api_contract_details", [{}])[0] if contract_report.get("api_contract_details") else {})
     quote_context = dict(context["quote_context"])
+    pricing_context = dict(context.get("pricing_context") or {})
     multiplier = _coerce_float(contract_details.get("multiplier")) or _coerce_float(contract_report.get("qualified_contract", {}).get("multiplier"))
     min_tick = _coerce_float(contract_details.get("min_tick"))
     quantity = float(requested_order["quantity"])
@@ -1647,6 +1832,11 @@ def _build_submit_preview_payload(
             "quote_source_label": quote_context.get("quote_source_label"),
             "live_market_data_available": quote_context.get("live_market_data_available"),
             "live_market_data_warning": quote_context.get("live_market_data_warning"),
+            "quote_snapshot": pricing_context.get("quote_snapshot"),
+            "reference_price": pricing_context.get("reference_price"),
+            "reference_price_source": pricing_context.get("reference_price_source"),
+            "distance_from_reference_price": pricing_context.get("distance_from_reference_price"),
+            "distance_ticks": pricing_context.get("distance_ticks"),
         },
         "open_order_baseline": {
             "open_order_count": context["open_orders_before"].get("open_order_count"),
@@ -1680,6 +1870,7 @@ def _build_report(
     lifecycle_result: dict[str, Any],
 ) -> dict[str, Any]:
     quote_context = dict(context.get("quote_context") or {})
+    pricing_context = dict(context.get("pricing_context") or {})
     contract_report = dict(context.get("contract_report") or {})
     contract_details = dict(contract_report.get("api_contract_details", [{}])[0] if contract_report.get("api_contract_details") else {})
     multiplier = _coerce_float(contract_details.get("multiplier")) or _coerce_float(contract_report.get("qualified_contract", {}).get("multiplier"))
@@ -1709,6 +1900,11 @@ def _build_report(
             "time_in_force": requested_order["time_in_force"],
             "quote_source_label": quote_context.get("quote_source_label"),
             "live_market_data_warning": quote_context.get("live_market_data_warning"),
+            "quote_snapshot": pricing_context.get("quote_snapshot"),
+            "reference_price": pricing_context.get("reference_price"),
+            "reference_price_source": pricing_context.get("reference_price_source"),
+            "distance_from_quote": pricing_context.get("distance_from_reference_price"),
+            "distance_ticks": pricing_context.get("distance_ticks"),
             "estimated_notional": estimated_notional,
             "estimated_tick_value": estimated_tick_value,
             "preview_digest": preview_digest,

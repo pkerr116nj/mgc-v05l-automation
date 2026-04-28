@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,7 +35,7 @@ def test_submit_cannot_occur_without_exact_digest(monkeypatch) -> None:
     expected_phrase = build_submit_approval_phrase(
         selected_account_id="DUM882026",
         digest="wrong-digest",
-        requested_order={"symbol": "MGC", "expiry": "202606", "action": "BUY", "quantity": 1.0, "order_type": "LMT", "limit_price": 4500.0, "time_in_force": "DAY"},
+        requested_order={"symbol": "MGC", "expiry": "202606", "action": "BUY", "quantity": 1.0, "order_type": "LMT", "limit_price": 4639.7, "time_in_force": "DAY"},
         delayed_quote_warning="Live market data is unavailable in this paper session. The preview uses delayed data only.",
     )
 
@@ -113,6 +114,42 @@ def test_strategy_style_caller_fails_closed() -> None:
     assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
 
 
+def test_delayed_quote_unavailable_fails_closed(monkeypatch) -> None:
+    _patch_harness_context(monkeypatch, context_override={"quote_context": _quote_context(has_quote=False, updated_at=None, bid_price=None, last_price=None)})
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(limit_price=4639.7),
+        stack_provider=_manual_stack,
+    )
+
+    assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
+    assert any(check["name"] == "delayed_quote_available" and check["passed"] is False for check in artifacts.report["guardrail_checks"])
+
+
+def test_stale_delayed_quote_fails_closed(monkeypatch) -> None:
+    _patch_harness_context(monkeypatch, context_override={"quote_context": _quote_context(updated_at="2020-01-01T00:00:00+00:00")})
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(limit_price=4639.7),
+        stack_provider=_manual_stack,
+    )
+
+    assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
+    assert any(check["name"] == "delayed_quote_fresh" and check["passed"] is False for check in artifacts.report["guardrail_checks"])
+
+
+def test_far_away_placeholder_limit_fails_closed(monkeypatch) -> None:
+    _patch_harness_context(monkeypatch)
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(limit_price=4500.0),
+        stack_provider=_manual_stack,
+    )
+
+    assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
+    assert any(check["name"] == "near_market_non_marketable_buy_limit" and check["passed"] is False for check in artifacts.report["guardrail_checks"])
+
+
 def test_audit_serialization_works(tmp_path: Path) -> None:
     artifacts = IbkrManualPaperSubmitArtifacts(
         classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_PARTIAL",
@@ -131,6 +168,11 @@ def test_audit_serialization_works(tmp_path: Path) -> None:
                 "expected_approval_phrase": "APPROVE ...",
                 "quote_source_label": "DELAYED",
                 "live_market_data_warning": "Delayed only.",
+                "quote_snapshot": {"bid_price": 4639.8, "last_price": 4640.0, "updated_at": "2026-04-28T12:00:00+00:00"},
+                "reference_price_source": "bid_price",
+                "reference_price": 4639.8,
+                "distance_from_quote": 0.1,
+                "distance_ticks": 1.0,
                 "estimated_notional": 45000.0,
                 "estimated_tick_value": 1.0,
             },
@@ -374,7 +416,7 @@ def test_audit_includes_manual_confirmation_events(monkeypatch) -> None:
     assert "manual_confirmation_response_recorded" in _event_types(audit_events)
 
 
-def _patch_harness_context(monkeypatch) -> None:
+def _patch_harness_context(monkeypatch, context_override: dict[str, object] | None = None) -> None:
     monkeypatch.setattr(
         "mgc_v05l.execution.ibkr_manual_paper_submit._build_runtime",
         lambda **_: SimpleNamespace(
@@ -394,7 +436,7 @@ def _patch_harness_context(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "mgc_v05l.execution.ibkr_manual_paper_submit._collect_truth_and_preview_context",
-        lambda **_: _context(),
+        lambda **_: _merge_context_override(_context(), context_override or {}),
     )
 
 
@@ -461,15 +503,7 @@ def _context() -> dict[str, object]:
             ],
         },
         "quote_context": {
-            "quote_source_label": "DELAYED",
-            "live_market_data_warning": "Live market data is unavailable in this paper session. The preview uses delayed data only.",
-            "bid_price": 4639.8,
-            "ask_price": 4640.0,
-            "last_price": 4640.0,
-            "close_price": 4693.7,
-            "live_market_data_available": False,
-            "has_quote": True,
-            "delayed_data_warning_present": True,
+            **_quote_context(),
         },
         "errors": [],
         "audit_events": [],
@@ -483,7 +517,7 @@ def _config(
     symbol: str = "MGC",
     quantity: float = 1.0,
     order_type: str = "LMT",
-    limit_price: float | None = 4500.0,
+    limit_price: float | None = 4639.7,
     caller_path: str = "manual_cli",
     submit: bool = False,
     approval_digest: str | None = None,
@@ -521,7 +555,7 @@ def _requested_order() -> dict[str, object]:
         "action": "BUY",
         "quantity": 1.0,
         "order_type": "LMT",
-        "limit_price": 4500.0,
+        "limit_price": 4639.7,
         "time_in_force": "DAY",
     }
 
@@ -561,3 +595,36 @@ def _fake_runtime(*, latest_order_status: dict[str, object] | None = None) -> Si
         transport=_FakeTransport(),
         client=SimpleNamespace(request_open_orders=lambda: None),
     )
+
+
+def _quote_context(
+    *,
+    has_quote: bool = True,
+    updated_at: str | None = None,
+    bid_price: float | None = 4639.8,
+    ask_price: float | None = 4640.0,
+    last_price: float | None = 4640.0,
+    close_price: float | None = 4693.7,
+) -> dict[str, object]:
+    if updated_at is None:
+        updated_at = datetime.now(timezone.utc).isoformat()
+    return {
+        "quote_source_label": "DELAYED" if has_quote else "UNAVAILABLE",
+        "live_market_data_warning": "Live market data is unavailable in this paper session. The preview uses delayed data only.",
+        "bid_price": bid_price,
+        "ask_price": ask_price,
+        "last_price": last_price,
+        "close_price": close_price,
+        "live_market_data_available": False,
+        "has_quote": has_quote,
+        "delayed_data_warning_present": True,
+        "updated_at": updated_at,
+        "response_indication": "delayed_only" if has_quote else "unavailable",
+    }
+
+
+def _merge_context_override(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
+    merged = dict(base)
+    for key, value in override.items():
+        merged[key] = value
+    return merged

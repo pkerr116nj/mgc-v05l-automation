@@ -68,6 +68,7 @@ This design assumes:
 - account, position, open-order, and contract truth already work in read-only mode
 - the committed preview harness already generates deterministic preview digests
 - delayed quote context is available when permissioned and clearly labeled
+- the first paper test must use a delayed quote anchored near-market non-marketable limit, not a far-away placeholder price
 - no submit-capable object exists today
 
 Reference context:
@@ -157,6 +158,9 @@ Required typed confirmation content:
 - limit price
 - time in force
 - delayed quote warning
+- delayed quote snapshot
+- reference quote field used for pricing
+- distance from delayed quote
 - preview digest
 
 Recommended confirmation phrase:
@@ -194,6 +198,9 @@ The preview that feeds the first submit test must display:
 - limit price
 - time in force
 - current delayed quote if available, labeled `DELAYED`
+- quote snapshot used to choose the limit price
+- chosen limit price
+- distance from the delayed quote
 - explicit note when live market data is unavailable
 - estimated notional
 - estimated tick value
@@ -211,14 +218,16 @@ The safest first test should be:
 - quantity: `1`
 - order type: `LMT`
 - time in force: `DAY`
-- price: deliberately non-marketable relative to the delayed quote
+- price: near-market but non-marketable relative to the delayed quote
+- for `BUY 1 MGC 202606 LMT DAY`, set the limit slightly below the current delayed bid or delayed last
+- do not use a far-away placeholder limit
 - operator objective: validate submit visibility and cancel verification, not fill behavior
 
 Why this shape is safest:
 
 - `MGC` is smaller than `GC`
 - `qty=1` caps exposure
-- non-marketable `LMT` reduces fill risk
+- a near-market non-marketable `LMT` reduces fill risk without drifting far enough from the quote to trigger broker rejection on distance checks
 - `DAY` avoids overnight persistence
 - manual cancel validates the full lifecycle while minimizing unintended execution risk
 
@@ -253,6 +262,8 @@ Before a future paper submit is allowed, all of the following must still be true
 - order type still equals `LMT`
 - time in force still equals `DAY`
 - limit price still equals the preview value
+- delayed quote snapshot is still present and fresh enough to justify the chosen limit price
+- the chosen limit remains slightly below the delayed bid/last rather than far away from market
 - open-order baseline is still fresh
 - operator acknowledged delayed quote limitations
 - no unexpected open orders appeared since preview
@@ -345,6 +356,9 @@ Required audit fields:
 - quantity
 - order type
 - limit price
+- quote snapshot used for pricing
+- quote reference field used for pricing
+- distance from delayed quote
 - tif
 - delayed quote warning status
 - preview digest
@@ -364,6 +378,9 @@ The first submit-capable implementation must fail closed on:
 - non-whitelisted contract
 - market order attempt
 - missing limit price
+- delayed quote unavailable
+- delayed quote stale
+- limit price too far from the delayed quote
 - digest mismatch
 - stale open-order baseline
 - cancel verification that cannot prove final state
@@ -403,7 +420,8 @@ Before submit code is allowed, the future implementation should prove:
 - preview gate works
 - exact digest approval works
 - typed phrase approval works
-- non-marketable one-lot `MGC 202606` `LMT DAY` submit can be observed in open-order truth
+- near-market non-marketable one-lot `MGC 202606` `LMT DAY` submit can be observed in open-order truth
+- delayed quote snapshot, chosen limit, and distance-from-quote are captured in preview and audit logging
 - cancel can be requested manually
 - cancel can be verified by broker truth
 - audit trail is complete
