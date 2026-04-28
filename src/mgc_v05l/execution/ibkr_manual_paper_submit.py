@@ -3714,6 +3714,41 @@ def _build_submit_bridge(*, wrapper_cls: type[Any], client_cls: type[Any], colle
             collector.record_callback("accountDownloadEnd", account_id=str(accountName))
             collector.account_download_end()
 
+        def updatePortfolio(  # noqa: N802
+            self,
+            contract: Any,
+            position: float,
+            marketPrice: float,
+            marketValue: float,
+            averageCost: float,
+            unrealizedPNL: float,
+            realizedPNL: float,
+            accountName: str,
+        ) -> None:
+            collector.record_callback(
+                "updatePortfolio",
+                account_id=str(accountName),
+                contract=_contract_payload(contract),
+                quantity=float(position),
+                market_price=float(marketPrice),
+                market_value=float(marketValue),
+                average_cost=float(averageCost),
+                unrealized_pnl=float(unrealizedPNL),
+                realized_pnl=float(realizedPNL),
+            )
+            update_portfolio_fn = getattr(collector, "update_portfolio", None)
+            if callable(update_portfolio_fn):
+                update_portfolio_fn(
+                    account_id=accountName,
+                    contract=_contract_payload(contract),
+                    quantity=position,
+                    market_price=marketPrice,
+                    market_value=marketValue,
+                    average_cost=averageCost,
+                    unrealized_pnl=unrealizedPNL,
+                    realized_pnl=realizedPNL,
+                )
+
         def position(self, account: str, contract: Any, pos: float, avgCost: float) -> None:  # noqa: N802
             collector.record_callback(
                 "position",
