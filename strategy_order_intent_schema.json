@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "enum": [
+        "BUY",
+        "EXIT",
+        "HOLD",
+        "NO_ACTION",
+        "SELL"
+      ],
+      "type": "string"
+    },
+    "contract_month": {
+      "type": "string"
+    },
+    "contract_target": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "current_strategy_state": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "intent_id": {
+      "type": "string"
+    },
+    "limit_price_model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "order_type": {
+      "type": "string"
+    },
+    "paper_only": {
+      "const": true,
+      "type": "boolean"
+    },
+    "quantity": {
+      "minimum": 0,
+      "type": "number"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "risk_tags": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "signal_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "strategy_id": {
+      "type": "string"
+    },
+    "symbol": {
+      "type": "string"
+    },
+    "time_in_force": {
+      "type": "string"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "required": [
+    "strategy_id",
+    "symbol",
+    "contract_month",
+    "action",
+    "quantity",
+    "order_type",
+    "limit_price_model",
+    "time_in_force",
+    "reason",
+    "timestamp",
+    "risk_tags",
+    "paper_only"
+  ],
+  "title": "IBKR Paper Strategy Order Intent",
+  "type": "object"
+}

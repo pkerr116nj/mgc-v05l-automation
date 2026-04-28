@@ -46,12 +46,11 @@ def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfi
 def test_schema_contains_required_fields() -> None:
     schema = strategy_order_intent_schema()
 
-    assert schema["properties"]["strategy_id"]["enum"] == [
-        "ATP_COMPANION_V1_ASIA_US",
-        "ATP_COMPANION_V1_GC_ASIA_US",
-        "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK",
-    ]
+    assert schema["properties"]["strategy_id"]["type"] == "string"
+    assert schema["properties"]["action"]["enum"] == ["BUY", "EXIT", "HOLD", "NO_ACTION", "SELL"]
     assert "paper_only" in schema["required"]
+    assert "current_strategy_state" in schema["properties"]
+    assert "contract_target" in schema["properties"]
 
 
 def test_write_schema_file(tmp_path: Path) -> None:
