@@ -36,6 +36,7 @@ from .ibkr_paper_order_preview import (
     _FORBIDDEN_CALLER_SUBSTRINGS,
     evaluate_paper_preview_environment_lock,
 )
+from .ibkr_paper_strategy_governance import load_paper_strategy_governance_status
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from .ibkr_position_reconciliation import (
     _collect_account_truth,
@@ -73,6 +74,7 @@ _ALLOWED_LIMIT_PRICE_MODELS = {
     "DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
     "DELAYED_BID_MINUS_1T_RESTING_BUY",
 }
+_SCHEMA_ACTIONS = {"BUY", "SELL", "HOLD", "EXIT", "NO_ACTION"}
 _ARTIFACT_STEM = "ibkr_paper_strategy_bridge"
 
 
@@ -189,18 +191,21 @@ def strategy_order_intent_schema() -> dict[str, Any]:
         ],
         "properties": {
             "intent_id": {"type": "string"},
-            "strategy_id": {"type": "string", "enum": sorted(_SUPPORTED_STRATEGY_IDS)},
-            "symbol": {"type": "string", "enum": ["MGC", "GC"]},
-            "contract_month": {"type": "string", "enum": [_EXPECTED_CONTRACT_MONTH]},
-            "action": {"type": "string", "enum": ["BUY", "SELL"]},
-            "quantity": {"type": "number", "enum": [_EXPECTED_QUANTITY]},
-            "order_type": {"type": "string", "enum": [_EXPECTED_ORDER_TYPE]},
-            "limit_price_model": {"type": "string", "enum": sorted(_ALLOWED_LIMIT_PRICE_MODELS)},
-            "time_in_force": {"type": "string", "enum": [_EXPECTED_TIF]},
+            "strategy_id": {"type": "string"},
+            "symbol": {"type": "string"},
+            "contract_month": {"type": "string"},
+            "action": {"type": "string", "enum": sorted(_SCHEMA_ACTIONS)},
+            "quantity": {"type": "number", "minimum": 0},
+            "order_type": {"type": "string"},
+            "limit_price_model": {"type": ["string", "null"]},
+            "time_in_force": {"type": "string"},
             "reason": {"type": "string"},
             "timestamp": {"type": "string", "format": "date-time"},
             "risk_tags": {"type": "array", "items": {"type": "string"}},
             "paper_only": {"type": "boolean", "const": True},
+            "current_strategy_state": {"type": ["object", "null"]},
+            "contract_target": {"type": ["object", "null"]},
+            "signal_id": {"type": ["string", "null"]},
         },
         "additionalProperties": False,
     }
@@ -220,6 +225,7 @@ def run_ibkr_paper_strategy_bridge(
     environment_lock = evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port)
     caller_gate = evaluate_strategy_bridge_caller(caller_path=config.caller_path, stack_provider=stack_provider)
     monitor_status = load_paper_strategy_monitor_status(repo_root=config.repo_root)
+    governance_status = load_paper_strategy_governance_status(repo_root=config.repo_root, strategy_id=config.strategy_id)
     runtime: _Runtime | None = None
     _record_bridge_audit(
         audit_events,
@@ -234,6 +240,7 @@ def run_ibkr_paper_strategy_bridge(
         environment_lock=environment_lock,
         caller_gate=caller_gate,
         monitor_status=monitor_status,
+        governance_status=governance_status,
     )
     static_failures = [row for row in static_checks if row.get("blocking") and not row.get("passed")]
     if static_failures:
@@ -261,6 +268,7 @@ def run_ibkr_paper_strategy_bridge(
                 "caller_gate": caller_gate,
                 "environment_lock_check": environment_lock,
                 "paper_strategy_monitor_status": monitor_status,
+                "paper_strategy_governance_status": governance_status,
                 "preflight_checks": static_checks,
                 "detail": detail,
                 "errors": [],
@@ -362,6 +370,7 @@ def run_ibkr_paper_strategy_bridge(
                 environment_lock=environment_lock,
                 account_truth=account_truth,
                 selected_account_id=selected_account_id,
+                paper_strategy_governance_status=governance_status,
                 positions=positions,
                 open_orders=open_orders,
                 quote_context=quote_context,
@@ -420,6 +429,7 @@ def run_ibkr_paper_strategy_bridge(
             caller_gate=caller_gate,
             environment_lock=environment_lock,
             paper_strategy_monitor_status=monitor_status,
+            paper_strategy_governance_status=governance_status,
             account_truth=account_truth,
             selected_account_id=selected_account_id,
             positions=positions,
@@ -455,6 +465,7 @@ def run_ibkr_paper_strategy_bridge(
             },
             "intent": intent.to_dict(),
             "paper_strategy_monitor_status": monitor_status,
+            "paper_strategy_governance_status": governance_status,
             "detail": str(exc),
             "errors": [] if runtime is None else list(runtime.collector.errors),
         }
@@ -498,6 +509,8 @@ def render_ibkr_paper_strategy_bridge_markdown(report: dict[str, Any]) -> str:
     exact_contract = dict(report.get("qualified_contract_report", {}).get("qualified_contract") or {})
     current_position_quantity = report.get("current_position_quantity")
     monitor_status = dict(report.get("paper_strategy_monitor_status") or {})
+    governance_status = dict(report.get("paper_strategy_governance_status") or {})
+    governance_row = dict(governance_status.get("selected_strategy") or {})
     lines = [
         "# IBKR Paper Strategy Bridge Report",
         "",
@@ -513,6 +526,9 @@ def render_ibkr_paper_strategy_bridge_markdown(report: dict[str, Any]) -> str:
         f"- current open-order count: `{report.get('open_orders', {}).get('open_order_count')}`",
         f"- paper strategy monitor classification: `{monitor_status.get('classification')}`",
         f"- strategy submit allowed: `{monitor_status.get('submit_allowed')}`",
+        f"- governance classification: `{governance_status.get('classification')}`",
+        f"- governance strategy status: `{governance_row.get('strategy_status')}`",
+        f"- governance submit allowed: `{governance_status.get('submit_allowed')}`",
         "",
         "## Summary",
         "",
@@ -700,10 +716,12 @@ def _build_static_preflight_checks(
     environment_lock: dict[str, Any],
     caller_gate: dict[str, Any],
     monitor_status: dict[str, Any],
+    governance_status: dict[str, Any],
 ) -> list[dict[str, Any]]:
     monitor_exact_contract = dict(monitor_status.get("exact_contract") or {})
     monitor_health = str(monitor_status.get("health_classification") or monitor_status.get("monitor_health") or "").strip().upper()
     monitor_account_matches = str(monitor_status.get("account_id") or "").strip() == config.account_id
+    governance_row = dict(governance_status.get("selected_strategy") or {})
     monitor_contract_matches = (
         str(monitor_exact_contract.get("symbol") or "").strip().upper() == config.symbol
         and str(monitor_exact_contract.get("expiry") or "").strip() == _EXPECTED_EXACT_EXPIRY
@@ -716,6 +734,14 @@ def _build_static_preflight_checks(
             "Paper strategy monitor allows submit."
             if monitor_status.get("submit_allowed")
             else f"Paper strategy monitor blocked submit: {', '.join(list(monitor_status.get('block_reasons') or [])) or 'unknown_reason'}"
+        )
+    )
+    governance_detail = str(
+        governance_status.get("detail")
+        or (
+            "Paper strategy governance allows submit."
+            if governance_status.get("submit_allowed")
+            else f"Paper strategy governance blocked submit: {', '.join(list(governance_status.get('block_reasons') or [])) or 'unknown_reason'}"
         )
     )
     return [
@@ -775,6 +801,31 @@ def _build_static_preflight_checks(
             (not config.submit) or bool(monitor_status.get("submit_allowed")),
             True,
             monitor_detail,
+        ),
+        _check(
+            "paper_strategy_governance_runtime_present",
+            (not config.submit) or bool(governance_status),
+            True,
+            "Submit-capable paper strategy orders require a live per-strategy governance status file.",
+        ),
+        _check(
+            "paper_strategy_governance_strategy_present",
+            (not config.submit) or bool(governance_row),
+            True,
+            f"Submit-capable paper strategy orders require a governance row for strategy identity {config.strategy_id}.",
+        ),
+        _check(
+            "paper_strategy_governance_status_allowed",
+            (not config.submit)
+            or str(governance_row.get("strategy_status") or "").strip().upper() not in {"PAUSED", "DISABLED", "KILL_CANDIDATE"},
+            True,
+            "Submit-capable paper strategy orders require the strategy governance status to stay out of PAUSED / DISABLED / KILL_CANDIDATE.",
+        ),
+        _check(
+            "paper_strategy_governance_submit_gate",
+            (not config.submit) or bool(governance_status.get("submit_allowed")),
+            True,
+            governance_detail,
         ),
     ]
 
@@ -867,6 +918,7 @@ def _build_report(
     caller_gate: dict[str, Any],
     environment_lock: dict[str, Any],
     paper_strategy_monitor_status: dict[str, Any],
+    paper_strategy_governance_status: dict[str, Any],
     account_truth: dict[str, Any],
     selected_account_id: str,
     positions: dict[str, Any],
@@ -898,6 +950,7 @@ def _build_report(
         "caller_gate": caller_gate,
         "environment_lock_check": environment_lock,
         "paper_strategy_monitor_status": paper_strategy_monitor_status,
+        "paper_strategy_governance_status": paper_strategy_governance_status,
         "account_truth": account_truth,
         "positions": positions,
         "open_orders": open_orders,
