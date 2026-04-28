@@ -83,13 +83,15 @@ def test_submit_requires_manual_harness_bundle(tmp_path: Path) -> None:
 def test_submit_is_blocked_when_paper_strategy_monitor_disallows_submit(tmp_path: Path) -> None:
     status_path = tmp_path / "outputs" / "reports" / "paper_strategy_monitor"
     status_path.mkdir(parents=True, exist_ok=True)
-    (status_path / "paper_strategy_monitor_status.json").write_text(
+    (status_path / "paper_strategy_monitor_runtime_status.json").write_text(
         json.dumps(
             {
-                "classification": "PAPER_STRATEGY_POSITION_ADOPTED",
+                "classification": "PAPER_STRATEGY_MONITOR_PARTIAL",
                 "submit_allowed": False,
                 "block_reasons": ["paper_runtime_stale", "working_open_order_present"],
                 "detail": "Paper runtime is stale and a broker order is already open.",
+                "last_broker_refresh_timestamp": "2999-01-01T00:00:00+00:00",
+                "freshness_window_seconds": 60.0,
             }
         ),
         encoding="utf-8",

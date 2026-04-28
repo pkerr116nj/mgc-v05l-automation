@@ -7,9 +7,13 @@ import json
 from pathlib import Path
 
 from ..execution.ibkr_paper_strategy_monitor import (
+    IbkrPaperStrategyMonitorDaemonConfig,
     IbkrPaperStrategyMonitorConfig,
     render_ibkr_paper_strategy_monitor_markdown,
+    render_ibkr_paper_strategy_monitor_daemon_markdown,
+    run_ibkr_paper_strategy_monitor_daemon,
     run_ibkr_paper_strategy_monitor,
+    write_ibkr_paper_strategy_monitor_daemon_artifacts,
     write_ibkr_paper_strategy_monitor_artifacts,
 )
 
@@ -38,6 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ledger-path", type=Path, default=REPO_ROOT / "var" / "paper_strategy_position_ledger.json", help="Persistent strategy-position ledger path.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Artifact output directory.")
     parser.add_argument("--recent-fill-lookback-minutes", type=int, default=240, help="Execution lookback window used for ownership adoption.")
+    parser.add_argument("--daemon", action="store_true", help="Run the polling monitor loop instead of a single snapshot pass.")
+    parser.add_argument("--poll-interval-seconds", type=float, default=10.0, help="Polling interval for daemon mode.")
+    parser.add_argument("--max-cycles", type=int, default=3, help="Number of polling cycles to run in daemon mode.")
+    parser.add_argument("--freshness-window-seconds", type=float, default=45.0, help="How fresh runtime monitor output must remain for bridge submit gating.")
     parser.add_argument("--overwrite", action="store_true", help="Allow writing into a non-empty output directory.")
     return parser
 
@@ -64,6 +72,29 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=output_dir,
         recent_fill_lookback_minutes=int(args.recent_fill_lookback_minutes),
     )
+    if bool(args.daemon):
+        daemon_artifacts = run_ibkr_paper_strategy_monitor_daemon(
+            config=IbkrPaperStrategyMonitorDaemonConfig(
+                monitor_config=config,
+                poll_interval_seconds=float(args.poll_interval_seconds),
+                max_cycles=int(args.max_cycles),
+                freshness_window_seconds=float(args.freshness_window_seconds),
+            )
+        )
+        write_ibkr_paper_strategy_monitor_daemon_artifacts(
+            config=IbkrPaperStrategyMonitorDaemonConfig(
+                monitor_config=config,
+                poll_interval_seconds=float(args.poll_interval_seconds),
+                max_cycles=int(args.max_cycles),
+                freshness_window_seconds=float(args.freshness_window_seconds),
+            ),
+            artifacts=daemon_artifacts,
+        )
+        print(json.dumps(daemon_artifacts.runtime_status, indent=2, sort_keys=True))
+        print()
+        print(render_ibkr_paper_strategy_monitor_daemon_markdown(daemon_artifacts.daemon_report))
+        return daemon_artifacts.exit_code
+
     artifacts = run_ibkr_paper_strategy_monitor(config=config)
     write_ibkr_paper_strategy_monitor_artifacts(config=config, artifacts=artifacts)
     print(json.dumps(artifacts.status, indent=2, sort_keys=True))

@@ -4,9 +4,12 @@ import json
 from pathlib import Path
 
 from mgc_v05l.execution.ibkr_paper_strategy_monitor import (
+    IbkrPaperStrategyMonitorDaemonConfig,
     IbkrPaperStrategyMonitorConfig,
     load_paper_strategy_monitor_status,
+    run_ibkr_paper_strategy_monitor_daemon,
     run_ibkr_paper_strategy_monitor,
+    write_ibkr_paper_strategy_monitor_daemon_artifacts,
     write_ibkr_paper_strategy_monitor_artifacts,
 )
 
@@ -210,6 +213,37 @@ def test_write_artifacts_and_load_status(tmp_path: Path) -> None:
     write_ibkr_paper_strategy_monitor_artifacts(config=config, artifacts=artifacts)
 
     status = load_paper_strategy_monitor_status(repo_root=tmp_path)
-    assert status["classification"] in {"PAPER_STRATEGY_POSITION_ADOPTED", "PAPER_STRATEGY_MONITOR_ACTIVE"}
+    assert status["classification"] == "PAPER_STRATEGY_MONITOR_BLOCKED"
+    assert "paper_strategy_monitor_snapshot_only" in status["block_reasons"]
     assert (tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_strategy_position_ledger.json").exists()
     assert (tmp_path / "var" / "paper_strategy_position_ledger.json").exists()
+
+
+def test_daemon_writes_runtime_status_and_loader_prefers_fresh_runtime_file(tmp_path: Path) -> None:
+    _write_ownership_evidence(tmp_path)
+    monitor_config = _config(tmp_path)
+    daemon_config = IbkrPaperStrategyMonitorDaemonConfig(
+        monitor_config=monitor_config,
+        poll_interval_seconds=0.0,
+        max_cycles=2,
+        freshness_window_seconds=60.0,
+    )
+
+    artifacts = run_ibkr_paper_strategy_monitor_daemon(
+        config=daemon_config,
+        sleep_fn=lambda _: None,
+        cycle_runner=lambda **_: run_ibkr_paper_strategy_monitor(
+            config=monitor_config,
+            reconciliation_runner=lambda **__: _Artifacts(_reconciliation_report()),
+            dashboard_fetcher=lambda ___: _dashboard_payload(stale=False),
+        ),
+    )
+    write_ibkr_paper_strategy_monitor_daemon_artifacts(config=daemon_config, artifacts=artifacts)
+
+    status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+    assert artifacts.classification == "PAPER_STRATEGY_MONITOR_ACTIVE"
+    assert status["classification"] == "PAPER_STRATEGY_MONITOR_ACTIVE"
+    assert status["submit_allowed"] is True
+    assert status["continuous_monitor_active"] is True
+    assert status["freshness_window_seconds"] == 60.0
+    assert (tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_strategy_monitor_runtime_status.json").exists()
