@@ -701,6 +701,15 @@ def _build_static_preflight_checks(
     caller_gate: dict[str, Any],
     monitor_status: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    monitor_exact_contract = dict(monitor_status.get("exact_contract") or {})
+    monitor_health = str(monitor_status.get("health_classification") or monitor_status.get("monitor_health") or "").strip().upper()
+    monitor_account_matches = str(monitor_status.get("account_id") or "").strip() == config.account_id
+    monitor_contract_matches = (
+        str(monitor_exact_contract.get("symbol") or "").strip().upper() == config.symbol
+        and str(monitor_exact_contract.get("expiry") or "").strip() == _EXPECTED_EXACT_EXPIRY
+        and int(monitor_exact_contract.get("con_id") or 0) == _EXPECTED_CON_ID
+        and str(monitor_exact_contract.get("local_symbol") or "").strip().upper() == _EXPECTED_LOCAL_SYMBOL
+    )
     monitor_detail = str(
         monitor_status.get("detail")
         or (
@@ -721,6 +730,36 @@ def _build_static_preflight_checks(
         _check("tif_lock", intent.time_in_force == _EXPECTED_TIF, True, "Only DAY time-in-force is allowed in the phase-1 paper bridge."),
         _check("limit_price_model_lock", intent.limit_price_model in _ALLOWED_LIMIT_PRICE_MODELS, True, "Limit-price model must be one of the explicitly allowed paper bridge models."),
         _check("kill_switch_inactive", not Path(config.kill_switch_path).exists(), True, f"Kill-switch path {config.kill_switch_path} must not exist."),
+        _check(
+            "paper_strategy_monitor_runtime_present",
+            (not config.submit) or bool(monitor_status),
+            True,
+            "Submit-capable paper strategy orders require a live paper strategy monitor runtime status file.",
+        ),
+        _check(
+            "paper_strategy_monitor_running",
+            (not config.submit) or bool(monitor_status.get("monitor_running")),
+            True,
+            "Submit-capable paper strategy orders require the paper strategy monitor service to be actively running.",
+        ),
+        _check(
+            "paper_strategy_monitor_health",
+            (not config.submit) or monitor_health == "HEALTHY",
+            True,
+            f"Submit-capable paper strategy orders require a HEALTHY paper strategy monitor, not {monitor_health or 'UNKNOWN'}.",
+        ),
+        _check(
+            "paper_strategy_monitor_account_match",
+            (not config.submit) or monitor_account_matches,
+            True,
+            "Submit-capable paper strategy orders require the live monitor account to match DUM882026.",
+        ),
+        _check(
+            "paper_strategy_monitor_contract_match",
+            (not config.submit) or monitor_contract_matches,
+            True,
+            "Submit-capable paper strategy orders require the live monitor exact contract to match MGC 20260626 / conId 712565978 / localSymbol MGCM6.",
+        ),
         _check(
             "manual_harness_bundle_present_for_submit",
             (not config.submit) or (

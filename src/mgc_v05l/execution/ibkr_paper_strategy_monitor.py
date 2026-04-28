@@ -29,6 +29,10 @@ _EXPECTED_LOCAL_SYMBOL = "MGCM6"
 _DEFAULT_DASHBOARD_URL = "http://127.0.0.1:8790/api/dashboard"
 _DEFAULT_LEDGER_PATH = Path("var") / "paper_strategy_position_ledger.json"
 _DEFAULT_OUTPUT_DIR = Path("outputs") / "reports" / "paper_strategy_monitor"
+_DEFAULT_VAR_RUNTIME_STATUS_PATH = Path("var") / "paper_strategy_monitor_runtime_status.json"
+_DEFAULT_VAR_PNL_SNAPSHOT_PATH = Path("var") / "paper_strategy_pnl_snapshot.json"
+_DEFAULT_VAR_HEARTBEAT_PATH = Path("var") / "paper_strategy_monitor_heartbeat.json"
+_DEFAULT_VAR_AUDIT_PATH = Path("var") / "paper_strategy_monitor_audit.jsonl"
 _DEFAULT_BRIDGE_REPORT_PATH = Path("outputs") / "reports" / "ibkr_paper_strategy_bridge" / "ibkr_paper_strategy_bridge_report.json"
 _DEFAULT_PREPARED_BUNDLE_PATH = (
     Path("outputs")
@@ -65,6 +69,10 @@ class IbkrPaperStrategyMonitorConfig:
     local_symbol: str = _EXPECTED_LOCAL_SYMBOL
     dashboard_url: str = _DEFAULT_DASHBOARD_URL
     ledger_path: Path = _DEFAULT_LEDGER_PATH
+    runtime_status_path: Path = _DEFAULT_VAR_RUNTIME_STATUS_PATH
+    pnl_snapshot_path: Path = _DEFAULT_VAR_PNL_SNAPSHOT_PATH
+    heartbeat_path: Path = _DEFAULT_VAR_HEARTBEAT_PATH
+    runtime_audit_path: Path = _DEFAULT_VAR_AUDIT_PATH
     output_dir: Path = _DEFAULT_OUTPUT_DIR
     recent_fill_lookback_minutes: int = 240
     bridge_report_path: Path = _DEFAULT_BRIDGE_REPORT_PATH
@@ -92,6 +100,7 @@ class IbkrPaperStrategyMonitorDaemonConfig:
     poll_interval_seconds: float = 10.0
     max_cycles: int = 3
     freshness_window_seconds: float = 45.0
+    reconnect_backoff_seconds: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -249,6 +258,9 @@ def write_ibkr_paper_strategy_monitor_artifacts(
     persistent_ledger_path = config.repo_root / config.ledger_path
     persistent_ledger_path.parent.mkdir(parents=True, exist_ok=True)
     persistent_ledger_path.write_text(json.dumps(artifacts.ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    persistent_pnl_path = config.repo_root / config.pnl_snapshot_path
+    persistent_pnl_path.parent.mkdir(parents=True, exist_ok=True)
+    persistent_pnl_path.write_text(json.dumps(artifacts.pnl_snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     (output_dir / "paper_strategy_position_ledger.json").write_text(
         json.dumps(artifacts.ledger, indent=2, sort_keys=True) + "\n",
@@ -273,8 +285,10 @@ def run_ibkr_paper_strategy_monitor_daemon(
     config: IbkrPaperStrategyMonitorDaemonConfig,
     sleep_fn: Callable[[float], None] = time.sleep,
     cycle_runner: Callable[..., IbkrPaperStrategyMonitorArtifacts] = run_ibkr_paper_strategy_monitor,
+    should_stop: Callable[[], bool] | None = None,
 ) -> IbkrPaperStrategyMonitorDaemonArtifacts:
     runtime_audit_events: list[dict[str, Any]] = []
+    written_runtime_audit_count = 0
     started_at = _utc_now()
     _record_runtime_audit(
         runtime_audit_events,
@@ -283,18 +297,46 @@ def run_ibkr_paper_strategy_monitor_daemon(
         config=config,
         extra={"max_cycles": config.max_cycles, "poll_interval_seconds": config.poll_interval_seconds},
     )
+    _write_runtime_heartbeat(
+        config=config.monitor_config,
+        payload={
+            "generated_at": started_at,
+            "monitor_running": True,
+            "last_poll_time": started_at,
+            "last_successful_broker_refresh": None,
+            "poll_interval_seconds": float(config.poll_interval_seconds),
+            "freshness_window_seconds": float(config.freshness_window_seconds),
+            "health": "STARTING",
+        },
+    )
+    written_runtime_audit_count = _flush_runtime_audit_events(
+        config=config.monitor_config,
+        runtime_audit_events=runtime_audit_events,
+        written_count=written_runtime_audit_count,
+    )
     cycles: list[dict[str, Any]] = []
     latest_cycle: IbkrPaperStrategyMonitorArtifacts | None = None
     latest_error: str | None = None
+    max_cycles = int(config.max_cycles)
+    cycle_index = 0
 
-    for index in range(max(1, int(config.max_cycles))):
+    while max_cycles <= 0 or cycle_index < max_cycles:
+        if should_stop is not None and should_stop():
+            _record_runtime_audit(
+                runtime_audit_events,
+                "daemon_stop_requested",
+                "Continuous paper strategy monitor received a stop request.",
+                config=config,
+            )
+            break
+        cycle_index += 1
         cycle_started_at = _utc_now()
         try:
             latest_cycle = cycle_runner(config=config.monitor_config)
             write_ibkr_paper_strategy_monitor_artifacts(config=config.monitor_config, artifacts=latest_cycle)
             cycles.append(
                 {
-                    "cycle_index": index + 1,
+                    "cycle_index": cycle_index,
                     "started_at": cycle_started_at,
                     "finished_at": _utc_now(),
                     "classification": latest_cycle.classification,
@@ -303,6 +345,19 @@ def run_ibkr_paper_strategy_monitor_daemon(
                     "submit_allowed": latest_cycle.status.get("submit_allowed"),
                 }
             )
+            current_runtime_status = _build_runtime_status(
+                config=config,
+                started_at=started_at,
+                cycles=cycles,
+                latest_cycle=latest_cycle,
+                latest_error=None,
+                monitor_running=True,
+            )
+            _write_live_runtime_files(
+                config=config.monitor_config,
+                runtime_status=current_runtime_status,
+                latest_cycle=latest_cycle,
+            )
             _record_runtime_audit(
                 runtime_audit_events,
                 "cycle_completed",
@@ -310,16 +365,34 @@ def run_ibkr_paper_strategy_monitor_daemon(
                 config=config,
                 extra=cycles[-1],
             )
+            written_runtime_audit_count = _flush_runtime_audit_events(
+                config=config.monitor_config,
+                runtime_audit_events=runtime_audit_events,
+                written_count=written_runtime_audit_count,
+            )
         except Exception as exc:
             latest_error = str(exc)
             cycles.append(
                 {
-                    "cycle_index": index + 1,
+                    "cycle_index": cycle_index,
                     "started_at": cycle_started_at,
                     "finished_at": _utc_now(),
                     "classification": "PAPER_STRATEGY_MONITOR_DISCONNECTED",
                     "error": latest_error,
                 }
+            )
+            current_runtime_status = _build_runtime_status(
+                config=config,
+                started_at=started_at,
+                cycles=cycles,
+                latest_cycle=latest_cycle,
+                latest_error=latest_error,
+                monitor_running=True,
+            )
+            _write_live_runtime_files(
+                config=config.monitor_config,
+                runtime_status=current_runtime_status,
+                latest_cycle=latest_cycle,
             )
             _record_runtime_audit(
                 runtime_audit_events,
@@ -328,8 +401,18 @@ def run_ibkr_paper_strategy_monitor_daemon(
                 config=config,
                 extra=cycles[-1],
             )
+            written_runtime_audit_count = _flush_runtime_audit_events(
+                config=config.monitor_config,
+                runtime_audit_events=runtime_audit_events,
+                written_count=written_runtime_audit_count,
+            )
+            if max_cycles > 0 and cycle_index >= max_cycles:
+                break
+            sleep_fn(float(config.reconnect_backoff_seconds))
+            continue
+        if should_stop is not None and should_stop():
             break
-        if index + 1 < max(1, int(config.max_cycles)):
+        if max_cycles <= 0 or cycle_index < max_cycles:
             sleep_fn(float(config.poll_interval_seconds))
 
     runtime_status = _build_runtime_status(
@@ -338,11 +421,25 @@ def run_ibkr_paper_strategy_monitor_daemon(
         cycles=cycles,
         latest_cycle=latest_cycle,
         latest_error=latest_error,
+        monitor_running=False,
+    )
+    _write_live_runtime_files(
+        config=config.monitor_config,
+        runtime_status=runtime_status,
+        latest_cycle=latest_cycle,
+    )
+    written_runtime_audit_count = _flush_runtime_audit_events(
+        config=config.monitor_config,
+        runtime_audit_events=runtime_audit_events,
+        written_count=written_runtime_audit_count,
     )
     daemon_report = {
         "classification": runtime_status.get("classification"),
         "generated_at": _utc_now(),
         "runtime_status_path": str((config.monitor_config.repo_root / config.monitor_config.output_dir / _RUNTIME_STATUS_FILENAME).resolve()),
+        "persistent_runtime_status_path": str((config.monitor_config.repo_root / config.monitor_config.runtime_status_path).resolve()),
+        "persistent_heartbeat_path": str((config.monitor_config.repo_root / config.monitor_config.heartbeat_path).resolve()),
+        "persistent_runtime_audit_path": str((config.monitor_config.repo_root / config.monitor_config.runtime_audit_path).resolve()),
         "poll_interval_seconds": float(config.poll_interval_seconds),
         "freshness_window_seconds": float(config.freshness_window_seconds),
         "cycles_completed": len(cycles),
@@ -384,14 +481,28 @@ def write_ibkr_paper_strategy_monitor_daemon_artifacts(
         json.dumps(artifacts.runtime_status, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    persistent_runtime_status_path = config.monitor_config.repo_root / config.monitor_config.runtime_status_path
+    persistent_runtime_status_path.parent.mkdir(parents=True, exist_ok=True)
+    persistent_runtime_status_path.write_text(
+        json.dumps(artifacts.runtime_status, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     with (output_dir / _RUNTIME_AUDIT_FILENAME).open("a", encoding="utf-8") as handle:
+        for row in artifacts.runtime_audit_events:
+            handle.write(json.dumps(row, sort_keys=True))
+            handle.write("\n")
+    persistent_runtime_audit_path = config.monitor_config.repo_root / config.monitor_config.runtime_audit_path
+    persistent_runtime_audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with persistent_runtime_audit_path.open("a", encoding="utf-8") as handle:
         for row in artifacts.runtime_audit_events:
             handle.write(json.dumps(row, sort_keys=True))
             handle.write("\n")
 
 
 def load_paper_strategy_monitor_status(*, repo_root: Path) -> dict[str, Any]:
-    runtime_path = repo_root / _DEFAULT_OUTPUT_DIR / _RUNTIME_STATUS_FILENAME
+    runtime_path = repo_root / _DEFAULT_VAR_RUNTIME_STATUS_PATH
+    if not runtime_path.exists():
+        runtime_path = repo_root / _DEFAULT_OUTPUT_DIR / _RUNTIME_STATUS_FILENAME
     if runtime_path.exists():
         try:
             runtime_status = dict(json.loads(runtime_path.read_text(encoding="utf-8")))
@@ -402,24 +513,43 @@ def load_paper_strategy_monitor_status(*, repo_root: Path) -> dict[str, Any]:
                 "block_reasons": ["paper_strategy_monitor_runtime_status_invalid"],
                 "detail": "Paper strategy monitor runtime status could not be decoded.",
             }
+        reasons = list(runtime_status.get("block_reasons") or [])
+        runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed"))
+        if not bool(runtime_status.get("monitor_running")):
+            runtime_status["submit_allowed"] = False
+            if "paper_strategy_monitor_not_running" not in reasons:
+                reasons.append("paper_strategy_monitor_not_running")
         freshness_window = float(runtime_status.get("freshness_window_seconds") or 0.0)
-        refreshed_at = _parse_datetime(runtime_status.get("last_broker_refresh_timestamp"))
+        refreshed_at = _parse_datetime(
+            runtime_status.get("last_successful_broker_refresh") or runtime_status.get("last_broker_refresh_timestamp")
+        )
+        stale = True
         if freshness_window > 0.0 and refreshed_at is not None:
             age_seconds = max(0.0, (datetime.now(timezone.utc) - refreshed_at).total_seconds())
             runtime_status["age_seconds"] = age_seconds
-            runtime_status["stale"] = age_seconds > freshness_window
-            if runtime_status["stale"]:
+            stale = age_seconds > freshness_window
+            runtime_status["stale"] = stale
+            if stale:
                 runtime_status["submit_allowed"] = False
-                reasons = list(runtime_status.get("block_reasons") or [])
                 if "paper_strategy_monitor_runtime_stale" not in reasons:
                     reasons.append("paper_strategy_monitor_runtime_stale")
-                runtime_status["block_reasons"] = reasons
         elif freshness_window > 0.0:
+            stale = True
+            runtime_status["stale"] = True
             runtime_status["submit_allowed"] = False
-            reasons = list(runtime_status.get("block_reasons") or [])
             if "paper_strategy_monitor_runtime_refresh_missing" not in reasons:
                 reasons.append("paper_strategy_monitor_runtime_refresh_missing")
-            runtime_status["block_reasons"] = reasons
+        else:
+            stale = bool(runtime_status.get("stale"))
+            runtime_status["stale"] = stale
+        health = str(runtime_status.get("health_classification") or runtime_status.get("monitor_health") or "").strip().upper()
+        if health and health != "HEALTHY":
+            runtime_status["submit_allowed"] = False
+            normalized = f"paper_strategy_monitor_health_{health.lower()}"
+            if normalized not in reasons:
+                reasons.append(normalized)
+        runtime_status["block_reasons"] = reasons
+        runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed")) and bool(runtime_status.get("monitor_running")) and not stale and health == "HEALTHY"
         return runtime_status
 
     path = repo_root / _DEFAULT_OUTPUT_DIR / "paper_strategy_monitor_status.json"
@@ -818,36 +948,73 @@ def _build_runtime_status(
     cycles: list[dict[str, Any]],
     latest_cycle: IbkrPaperStrategyMonitorArtifacts | None,
     latest_error: str | None,
+    monitor_running: bool,
 ) -> dict[str, Any]:
     latest_cycle_status = {} if latest_cycle is None else dict(latest_cycle.status)
     latest_cycle_pnl = {} if latest_cycle is None else dict(latest_cycle.pnl_snapshot)
+    latest_cycle_report = {} if latest_cycle is None else dict(latest_cycle.broker_report)
+    generated_at = _utc_now()
     last_refresh_timestamp = None
     if latest_cycle is not None:
         last_refresh_timestamp = latest_cycle_status.get("generated_at") or latest_cycle_pnl.get("generated_at")
     block_reasons = list(latest_cycle_status.get("block_reasons") or [])
     classification = "PAPER_STRATEGY_MONITOR_BLOCKED"
-    monitor_health = "UNAVAILABLE"
+    monitor_health = "ERROR"
+    health_classification = "ERROR"
+
+    provider_snapshot = dict(latest_cycle_report.get("provider_snapshot") or {})
+    provider_health = dict(provider_snapshot.get("health") or {})
+    latest_errors = list(latest_cycle_report.get("errors") or [])
+    last_error = latest_error or (latest_errors[-1] if latest_errors else None)
+    last_refresh = _parse_datetime(last_refresh_timestamp)
+    stale = True
+    age_seconds: float | None = None
+    if last_refresh is not None:
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - last_refresh).total_seconds())
+        stale = age_seconds > float(config.freshness_window_seconds)
     if latest_error is not None:
         classification = "PAPER_STRATEGY_MONITOR_DISCONNECTED"
         monitor_health = "DISCONNECTED"
+        health_classification = "DISCONNECTED"
         if "monitor_disconnected" not in block_reasons:
             block_reasons.append("monitor_disconnected")
+    elif stale:
+        classification = "PAPER_STRATEGY_MONITOR_PARTIAL" if latest_cycle is not None else "PAPER_STRATEGY_MONITOR_BLOCKED"
+        monitor_health = "STALE"
+        health_classification = "STALE"
+        if "paper_strategy_monitor_runtime_stale" not in block_reasons:
+            block_reasons.append("paper_strategy_monitor_runtime_stale")
+    elif "ledger_broker_mismatch" in block_reasons:
+        classification = "PAPER_STRATEGY_MONITOR_PARTIAL"
+        monitor_health = "DEGRADED"
+        health_classification = "LEDGER_BROKER_MISMATCH"
+    elif "orphan_broker_position" in block_reasons:
+        classification = "PAPER_STRATEGY_MONITOR_PARTIAL"
+        monitor_health = "DEGRADED"
+        health_classification = "ORPHAN_BROKER_POSITION"
+    elif "working_open_order_present" in block_reasons:
+        classification = "PAPER_STRATEGY_MONITOR_PARTIAL"
+        monitor_health = "DEGRADED"
+        health_classification = "OPEN_ORDER_PRESENT"
+    elif latest_cycle is not None and bool(latest_cycle_status.get("ownership_proven")):
+        classification = "PAPER_STRATEGY_MONITOR_ACTIVE"
+        monitor_health = "HEALTHY"
+        health_classification = "HEALTHY"
     elif latest_cycle is not None:
-        if latest_cycle_status.get("ownership_proven") and not block_reasons:
-            classification = "PAPER_STRATEGY_MONITOR_ACTIVE"
-            monitor_health = "HEALTHY"
-        elif block_reasons:
-            classification = "PAPER_STRATEGY_MONITOR_PARTIAL"
-            monitor_health = "DEGRADED"
-        else:
-            classification = "PAPER_STRATEGY_MONITOR_PARTIAL"
-            monitor_health = "DEGRADED"
+        classification = "PAPER_STRATEGY_MONITOR_PARTIAL"
+        monitor_health = "DEGRADED"
+        health_classification = "ERROR"
+
+    if not monitor_running:
+        if "paper_strategy_monitor_not_running" not in block_reasons:
+            block_reasons.append("paper_strategy_monitor_not_running")
 
     return {
         "classification": classification,
-        "generated_at": _utc_now(),
+        "generated_at": generated_at,
         "runtime_started_at": started_at,
-        "runtime_finished_at": _utc_now(),
+        "runtime_finished_at": None if monitor_running else generated_at,
+        "monitor_running": monitor_running,
         "poll_interval_seconds": float(config.poll_interval_seconds),
         "freshness_window_seconds": float(config.freshness_window_seconds),
         "cycles_completed": len(cycles),
@@ -860,18 +1027,26 @@ def _build_runtime_status(
         "unrealized_pnl": latest_cycle_pnl.get("unrealized_pnl"),
         "realized_pnl": latest_cycle_pnl.get("realized_pnl"),
         "open_order_count": latest_cycle_status.get("open_order_count"),
+        "last_poll_time": generated_at,
+        "last_successful_broker_refresh": last_refresh_timestamp,
         "last_broker_refresh_timestamp": last_refresh_timestamp,
+        "ibkr_connection_state": "CONNECTED" if bool(provider_health.get("connected")) else ("DISCONNECTED" if latest_error else "UNKNOWN"),
         "monitor_health": monitor_health,
-        "stale": False,
+        "health_classification": health_classification,
+        "stale": stale,
+        "age_seconds": age_seconds,
         "pnl_source": latest_cycle_pnl.get("pnl_source"),
-        "submit_allowed": bool(latest_cycle_status.get("submit_allowed")) and classification == "PAPER_STRATEGY_MONITOR_ACTIVE",
+        "submit_allowed": bool(monitor_running) and not stale and classification == "PAPER_STRATEGY_MONITOR_ACTIVE" and health_classification == "HEALTHY",
         "block_reasons": block_reasons,
-        "continuous_monitor_active": True,
-        "continuous_unrealized_pnl_tracking_active": classification == "PAPER_STRATEGY_MONITOR_ACTIVE",
-        "continuous_realized_pnl_tracking_active": classification == "PAPER_STRATEGY_MONITOR_ACTIVE",
+        "continuous_monitor_active": bool(monitor_running),
+        "continuous_unrealized_pnl_tracking_active": bool(monitor_running),
+        "continuous_realized_pnl_tracking_active": bool(monitor_running),
         "persistent_strategy_position_ledger": bool(latest_cycle_status.get("persistent_strategy_position_ledger")),
         "monitoring_scope": "polling_runtime",
         "cycles": cycles,
+        "broker_ledger_match": "MATCH" if "ledger_broker_mismatch" not in block_reasons else "MISMATCH",
+        "error_count": len(latest_errors) + (1 if latest_error else 0),
+        "last_error": last_error,
         "detail": latest_error or latest_cycle_status.get("detail"),
     }
 
@@ -919,6 +1094,75 @@ def _record_runtime_audit(
     if extra:
         row.update(extra)
     audit_events.append(row)
+
+
+def _write_live_runtime_files(
+    *,
+    config: IbkrPaperStrategyMonitorConfig,
+    runtime_status: dict[str, Any],
+    latest_cycle: IbkrPaperStrategyMonitorArtifacts | None,
+) -> None:
+    output_dir = config.repo_root / config.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    runtime_status_path = config.repo_root / config.runtime_status_path
+    runtime_status_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_status_path.write_text(json.dumps(runtime_status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (output_dir / _RUNTIME_STATUS_FILENAME).write_text(json.dumps(runtime_status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if latest_cycle is not None:
+        ledger_path = config.repo_root / config.ledger_path
+        pnl_path = config.repo_root / config.pnl_snapshot_path
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        pnl_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.write_text(json.dumps(latest_cycle.ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        pnl_path.write_text(json.dumps(latest_cycle.pnl_snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    heartbeat_payload = {
+        "generated_at": _utc_now(),
+        "monitor_running": bool(runtime_status.get("monitor_running")),
+        "last_poll_time": runtime_status.get("last_poll_time"),
+        "last_successful_broker_refresh": runtime_status.get("last_successful_broker_refresh"),
+        "health_classification": runtime_status.get("health_classification"),
+        "monitor_health": runtime_status.get("monitor_health"),
+        "stale": runtime_status.get("stale"),
+        "error_count": runtime_status.get("error_count"),
+        "last_error": runtime_status.get("last_error"),
+    }
+    _write_runtime_heartbeat(config=config, payload=heartbeat_payload)
+
+
+def _flush_runtime_audit_events(
+    *,
+    config: IbkrPaperStrategyMonitorConfig,
+    runtime_audit_events: list[dict[str, Any]],
+    written_count: int,
+) -> int:
+    new_rows = runtime_audit_events[written_count:]
+    if not new_rows:
+        return written_count
+    runtime_audit_path = config.repo_root / config.runtime_audit_path
+    runtime_audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with runtime_audit_path.open("a", encoding="utf-8") as handle:
+        for row in new_rows:
+            handle.write(json.dumps(row, sort_keys=True))
+            handle.write("\n")
+    output_dir = config.repo_root / config.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / _RUNTIME_AUDIT_FILENAME).open("a", encoding="utf-8") as handle:
+        for row in new_rows:
+            handle.write(json.dumps(row, sort_keys=True))
+            handle.write("\n")
+    return len(runtime_audit_events)
+
+
+def _write_runtime_heartbeat(*, config: IbkrPaperStrategyMonitorConfig, payload: dict[str, Any]) -> None:
+    heartbeat_path = config.repo_root / config.heartbeat_path
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output_dir = config.repo_root / config.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "paper_strategy_monitor_heartbeat.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _latest_matching_execution_row(report: dict[str, Any]) -> dict[str, Any] | None:

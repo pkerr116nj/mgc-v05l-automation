@@ -67,6 +67,7 @@ from .strategy_analysis import build_strategy_analysis_payload
 from .strategy_identity import build_standalone_strategy_identity
 from .strategy_runtime_registry import build_standalone_strategy_definitions
 from .tracked_paper_strategies import build_tracked_paper_strategies_payload
+from ..execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from ..research.platform import build_discovered_research_analytics_payload, read_research_analytics_dataset
 from ..market_data import (
     SchwabAuthError,
@@ -357,6 +358,21 @@ class OperatorDashboardService:
         self._paper_tracked_strategies_path = self._dashboard_artifacts_dir / "paper_tracked_strategies_snapshot.json"
         self._paper_tracked_strategy_details_path = (
             self._dashboard_artifacts_dir / "paper_tracked_strategy_details_snapshot.json"
+        )
+        self._paper_ibkr_strategy_monitor_snapshot_path = (
+            self._dashboard_artifacts_dir / "paper_ibkr_strategy_monitor_snapshot.json"
+        )
+        self._paper_ibkr_strategy_monitor_runtime_status_path = (
+            self._repo_root / "var" / "paper_strategy_monitor_runtime_status.json"
+        )
+        self._paper_ibkr_strategy_monitor_ledger_path = (
+            self._repo_root / "var" / "paper_strategy_position_ledger.json"
+        )
+        self._paper_ibkr_strategy_monitor_pnl_path = (
+            self._repo_root / "var" / "paper_strategy_pnl_snapshot.json"
+        )
+        self._paper_ibkr_strategy_monitor_heartbeat_path = (
+            self._repo_root / "var" / "paper_strategy_monitor_heartbeat.json"
         )
         self._paper_runtime_config_paths_override_path = (
             self._repo_root
@@ -990,6 +1006,7 @@ class OperatorDashboardService:
                     paper=paper,
                     generated_at=generated_at,
                 )
+                paper["ibkr_strategy_monitor"] = self._paper_ibkr_strategy_monitor_payload(generated_at=generated_at)
                 lane_registry["diagnostics"] = self._lane_registry_diagnostics(
                     lane_registry=lane_registry,
                     approved_quant_baselines=approved_quant_baselines,
@@ -1104,6 +1121,7 @@ class OperatorDashboardService:
                 _write_json_file(self._paper_non_approved_lanes_path, paper["non_approved_lanes"])
                 _write_json_file(self._paper_temporary_paper_strategies_path, paper["temporary_paper_strategies"])
                 _write_json_file(self._paper_tracked_strategies_path, paper["tracked_strategies"])
+                _write_json_file(self._paper_ibkr_strategy_monitor_snapshot_path, paper["ibkr_strategy_monitor"])
                 _write_json_file(
                     self._paper_tracked_strategy_details_path,
                     {
@@ -6820,6 +6838,55 @@ class OperatorDashboardService:
                 "alerts": "/api/operator-artifact/paper-alerts",
                 "reconciliation": "/api/operator-artifact/paper-reconciliation",
             },
+        }
+
+    def _paper_ibkr_strategy_monitor_payload(self, *, generated_at: str) -> dict[str, Any]:
+        runtime_status = load_paper_strategy_monitor_status(repo_root=self._repo_root)
+        heartbeat = _load_json_file(self._paper_ibkr_strategy_monitor_heartbeat_path)
+        ledger = _load_json_file(self._paper_ibkr_strategy_monitor_ledger_path)
+        pnl_snapshot = _load_json_file(self._paper_ibkr_strategy_monitor_pnl_path)
+        active_position = dict((ledger.get("positions") or [None])[0] or {})
+        orphan_position = dict((ledger.get("orphan_positions") or [None])[0] or {})
+        exact_contract = dict(runtime_status.get("exact_contract") or {})
+        if not exact_contract:
+            exact_contract = {
+                "symbol": active_position.get("symbol"),
+                "expiry": active_position.get("expiry"),
+                "con_id": active_position.get("con_id"),
+                "local_symbol": active_position.get("local_symbol"),
+            }
+        block_reasons = list(runtime_status.get("block_reasons") or [])
+        return {
+            "generated_at": generated_at,
+            "runtime_status_path": str(self._paper_ibkr_strategy_monitor_runtime_status_path),
+            "heartbeat_path": str(self._paper_ibkr_strategy_monitor_heartbeat_path),
+            "ledger_path": str(self._paper_ibkr_strategy_monitor_ledger_path),
+            "pnl_snapshot_path": str(self._paper_ibkr_strategy_monitor_pnl_path),
+            "monitor_running": bool(runtime_status.get("monitor_running")),
+            "classification": runtime_status.get("classification"),
+            "health": runtime_status.get("health_classification") or runtime_status.get("monitor_health"),
+            "stale": runtime_status.get("stale"),
+            "submit_allowed": runtime_status.get("submit_allowed"),
+            "block_reasons": block_reasons,
+            "block_reason_summary": ", ".join(block_reasons) if block_reasons else None,
+            "last_poll_time": runtime_status.get("last_poll_time"),
+            "last_successful_broker_refresh": runtime_status.get("last_successful_broker_refresh"),
+            "ibkr_connection_state": runtime_status.get("ibkr_connection_state"),
+            "strategy_id": runtime_status.get("strategy_id") or active_position.get("strategy_id"),
+            "account_id": runtime_status.get("account_id") or active_position.get("account_id"),
+            "exact_contract": exact_contract,
+            "position_quantity": runtime_status.get("broker_position_quantity", active_position.get("quantity")),
+            "average_entry_price": runtime_status.get("average_entry_price", active_position.get("average_entry_price")),
+            "unrealized_pnl": runtime_status.get("unrealized_pnl", pnl_snapshot.get("unrealized_pnl")),
+            "realized_pnl": runtime_status.get("realized_pnl", pnl_snapshot.get("realized_pnl")),
+            "open_orders": runtime_status.get("open_order_count"),
+            "broker_ledger_match": runtime_status.get("broker_ledger_match"),
+            "pnl_source": runtime_status.get("pnl_source", pnl_snapshot.get("pnl_source")),
+            "heartbeat": heartbeat,
+            "active_position": active_position,
+            "orphan_position": orphan_position,
+            "continuous_monitor_active": runtime_status.get("continuous_monitor_active"),
+            "runtime_status_detail": runtime_status.get("detail"),
         }
 
     def _paper_soak_validation_payload(self, paper: dict[str, Any]) -> dict[str, Any]:

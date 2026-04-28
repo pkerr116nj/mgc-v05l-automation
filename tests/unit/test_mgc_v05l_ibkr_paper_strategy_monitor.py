@@ -242,8 +242,82 @@ def test_daemon_writes_runtime_status_and_loader_prefers_fresh_runtime_file(tmp_
 
     status = load_paper_strategy_monitor_status(repo_root=tmp_path)
     assert artifacts.classification == "PAPER_STRATEGY_MONITOR_ACTIVE"
-    assert status["classification"] == "PAPER_STRATEGY_MONITOR_ACTIVE"
-    assert status["submit_allowed"] is True
-    assert status["continuous_monitor_active"] is True
+    assert status["submit_allowed"] is False
+    assert "paper_strategy_monitor_not_running" in status["block_reasons"]
     assert status["freshness_window_seconds"] == 60.0
     assert (tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_strategy_monitor_runtime_status.json").exists()
+    assert (tmp_path / "var" / "paper_strategy_monitor_runtime_status.json").exists()
+    assert (tmp_path / "var" / "paper_strategy_monitor_heartbeat.json").exists()
+    assert (tmp_path / "var" / "paper_strategy_monitor_audit.jsonl").exists()
+
+
+def test_load_status_allows_submit_when_runtime_is_healthy_and_running(tmp_path: Path) -> None:
+    runtime_path = tmp_path / "var" / "paper_strategy_monitor_runtime_status.json"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+                "monitor_running": True,
+                "submit_allowed": True,
+                "block_reasons": [],
+                "health_classification": "HEALTHY",
+                "account_id": "DUM882026",
+                "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+                "last_successful_broker_refresh": "2999-01-01T00:00:00+00:00",
+                "freshness_window_seconds": 60.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+
+    assert status["submit_allowed"] is True
+    assert status["stale"] is False
+
+
+def test_load_status_blocks_when_runtime_is_stale(tmp_path: Path) -> None:
+    runtime_path = tmp_path / "var" / "paper_strategy_monitor_runtime_status.json"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+                "monitor_running": True,
+                "submit_allowed": True,
+                "block_reasons": [],
+                "health_classification": "HEALTHY",
+                "last_successful_broker_refresh": "2000-01-01T00:00:00+00:00",
+                "freshness_window_seconds": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+
+    assert status["submit_allowed"] is False
+    assert status["stale"] is True
+    assert "paper_strategy_monitor_runtime_stale" in status["block_reasons"]
+
+
+def test_daemon_reports_disconnected_cycle_without_crashing(tmp_path: Path) -> None:
+    _write_ownership_evidence(tmp_path)
+    monitor_config = _config(tmp_path)
+    daemon_config = IbkrPaperStrategyMonitorDaemonConfig(
+        monitor_config=monitor_config,
+        poll_interval_seconds=0.0,
+        max_cycles=1,
+        freshness_window_seconds=60.0,
+    )
+
+    artifacts = run_ibkr_paper_strategy_monitor_daemon(
+        config=daemon_config,
+        sleep_fn=lambda _: None,
+        cycle_runner=lambda **_: (_ for _ in ()).throw(RuntimeError("tws disconnected")),
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_MONITOR_DISCONNECTED"
+    assert artifacts.runtime_status["health_classification"] == "DISCONNECTED"
+    assert artifacts.runtime_status["submit_allowed"] is False

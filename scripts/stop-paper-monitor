@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common_env.sh"
+
+PID_FILE="${REPO_ROOT}/var/paper_strategy_monitor_service.pid"
+
+if [[ ! -f "${PID_FILE}" ]]; then
+  echo "IBKR paper strategy monitor service is not running."
+  exit 0
+fi
+
+service_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+if [[ -n "${service_pid}" ]] && kill -0 "${service_pid}" 2>/dev/null; then
+  kill -TERM "${service_pid}" 2>/dev/null || true
+  echo "Sent TERM to IBKR paper strategy monitor service pid ${service_pid}."
+else
+  echo "IBKR paper strategy monitor pid file exists, but the process is not running."
+fi
+rm -f "${PID_FILE}"

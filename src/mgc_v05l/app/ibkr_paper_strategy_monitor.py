@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
+import threading
 from pathlib import Path
 
 from ..execution.ibkr_paper_strategy_monitor import (
@@ -73,14 +75,26 @@ def main(argv: list[str] | None = None) -> int:
         recent_fill_lookback_minutes=int(args.recent_fill_lookback_minutes),
     )
     if bool(args.daemon):
+        stop_event = threading.Event()
+
+        def _request_stop(_signum: int, _frame: object) -> None:
+            stop_event.set()
+
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, _request_stop)
+        signal.signal(signal.SIGTERM, _request_stop)
         daemon_artifacts = run_ibkr_paper_strategy_monitor_daemon(
             config=IbkrPaperStrategyMonitorDaemonConfig(
                 monitor_config=config,
                 poll_interval_seconds=float(args.poll_interval_seconds),
                 max_cycles=int(args.max_cycles),
                 freshness_window_seconds=float(args.freshness_window_seconds),
-            )
+            ),
+            should_stop=stop_event.is_set,
         )
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
         write_ibkr_paper_strategy_monitor_daemon_artifacts(
             config=IbkrPaperStrategyMonitorDaemonConfig(
                 monitor_config=config,
