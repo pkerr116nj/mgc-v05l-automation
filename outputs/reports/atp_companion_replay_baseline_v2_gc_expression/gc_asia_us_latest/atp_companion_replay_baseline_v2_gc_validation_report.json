@@ -1,0 +1,89 @@
+{
+  "classification": "REPLAY_BASELINE_V2_BUILT",
+  "rows": [
+    {
+      "metric": "trade_count",
+      "expected": 4512,
+      "observed": 4512,
+      "tolerance": 0,
+      "passed": true
+    },
+    {
+      "metric": "net_pnl_cash",
+      "expected": 100193.4167,
+      "observed": 100193.4167,
+      "tolerance": 0.0002,
+      "passed": true
+    },
+    {
+      "metric": "average_trade_pnl_cash",
+      "expected": 22.206,
+      "observed": 22.206,
+      "tolerance": 0.0002,
+      "passed": true
+    },
+    {
+      "metric": "median_trade_pnl_cash",
+      "expected": 38.5,
+      "observed": 38.5,
+      "tolerance": 0.0002,
+      "passed": true
+    },
+    {
+      "metric": "win_rate",
+      "expected": 53.7456,
+      "observed": 53.7456,
+      "tolerance": 0.0002,
+      "passed": true
+    },
+    {
+      "metric": "profit_factor",
+      "expected": 1.132,
+      "observed": 1.132,
+      "tolerance": 0.0002,
+      "passed": true
+    },
+    {
+      "metric": "max_drawdown",
+      "expected": 26404.2583,
+      "observed": 26404.2583,
+      "tolerance": 0.0002,
+      "passed": true
+    },
+    {
+      "metric": "largest_win",
+      "expected": 3892.5667,
+      "observed": 3892.5667,
+      "tolerance": 0.0002,
+      "passed": true
+    },
+    {
+      "metric": "largest_loss",
+      "expected": -5832.4583,
+      "observed": -5832.4583,
+      "tolerance": 0.0002,
+      "passed": true
+    },
+    {
+      "metric": "max_consecutive_losers",
+      "expected": 9,
+      "observed": 9,
+      "tolerance": 0,
+      "passed": true
+    },
+    {
+      "metric": "asia_net_pnl_cash",
+      "expected": 87122.55,
+      "observed": 87122.55,
+      "tolerance": 0.0002,
+      "passed": true
+    },
+    {
+      "metric": "us_net_pnl_cash",
+      "expected": 13070.8667,
+      "observed": 13070.8667,
+      "tolerance": 0.0002,
+      "passed": true
+    }
+  ]
+}

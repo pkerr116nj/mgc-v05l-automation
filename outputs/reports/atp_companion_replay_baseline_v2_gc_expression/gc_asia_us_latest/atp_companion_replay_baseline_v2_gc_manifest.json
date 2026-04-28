@@ -1,0 +1,132 @@
+{
+  "artifact_version": "atp_companion_replay_truth_v1",
+  "artifacts": {
+    "benchmark_position_rows_path": "/Users/patrick/Documents/MGC-v05l-automation/outputs/reports/atp_companion_replay_baseline_v2_gc_expression/gc_asia_us_latest/atp_companion_replay_baseline_v2_gc_benchmark_position_rows.jsonl",
+    "replay_trades_path": "/Users/patrick/Documents/MGC-v05l-automation/outputs/reports/atp_companion_replay_baseline_v2_gc_expression/gc_asia_us_latest/atp_companion_replay_baseline_v2_gc_trades.jsonl",
+    "validation_csv_path": "/Users/patrick/Documents/MGC-v05l-automation/outputs/reports/atp_companion_replay_baseline_v2_gc_expression/gc_asia_us_latest/atp_companion_replay_baseline_v2_gc_validation_report.csv"
+  },
+  "baseline_exit_policy": "fixed_target_time_stop",
+  "baseline_id": "atp_companion_replay_baseline_v2_gc_expression",
+  "bundle_contract": {
+    "context_bundle_ids": {
+      "GC": "f419f06b087a40c9"
+    },
+    "feature_bundle_ids": {
+      "GC": "808a3dce75c84a58"
+    },
+    "scope_bundle_ids": {
+      "GC:ASIA/US": "47ad524b2bd17ccd"
+    }
+  },
+  "classification": "REPLAY_BASELINE_V2_BUILT",
+  "command": "PYTHONPATH=src ./.venv/bin/python -m mgc_v05l.app.atp_companion_replay_baseline_v2_gc_expression_feasibility --output-dir /Users/patrick/Documents/MGC-v05l-automation/outputs/reports/atp_companion_replay_baseline_v2_gc_expression/gc_asia_us_latest",
+  "entry_exit_semantics": {
+    "allow_pre_5m_context_participation": false,
+    "entry_activation_basis": "rolling_5m_on_1m",
+    "execution_model": "ATP_5M_CONTEXT_1M_EXECUTABLE_VWAP",
+    "exit_policy": "fixed_target_time_stop",
+    "quality_bucket_policy": null,
+    "sides": [
+      "LONG"
+    ],
+    "variant_overrides": {}
+  },
+  "execution_model": "ATP_5M_CONTEXT_1M_EXECUTABLE_VWAP",
+  "generated_at": "2026-04-28T01:44:40.550455+00:00",
+  "generator_module": "src/mgc_v05l/app/atp_companion_replay_baseline_v2_gc_expression_feasibility.py",
+  "instruments": [
+    "GC"
+  ],
+  "promotion_add_exit_policy": "inherits_frozen_baseline_exit",
+  "reference_baseline_note": "Old v1 remains materialized-only and not controlling truth. This GC expression is built against the replay-safe ATP Companion Replay Baseline v2 framework.",
+  "session_treatment": {
+    "ASIA": "EXECUTABLE_RESEARCH_EXPRESSION",
+    "LONDON": "DIAGNOSTIC_ONLY_NOT_EXECUTED",
+    "US": "EXECUTABLE_RESEARCH_EXPRESSION"
+  },
+  "sessions": [
+    "ASIA",
+    "US"
+  ],
+  "shared_date_span": {
+    "end_timestamp": "2026-04-10T17:00:00-04:00",
+    "start_timestamp": "2024-01-01T18:01:00-05:00"
+  },
+  "source_config": {
+    "baseline_config_path": "config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us.yaml",
+    "baseline_target_id": "atp_companion_v1__candidate_gc_asia_us",
+    "reference_candidate_config_path": "config/probationary_pattern_engine_paper_atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only.yaml",
+    "reference_candidate_id": "promotion_1_075r_favorable_only",
+    "review_config": {
+      "allow_pre_5m_context_participation": false,
+      "baseline_id": "atp_companion_replay_baseline_v2_gc_expression",
+      "entry_activation_basis": "rolling_5m_on_1m",
+      "exit_policy": "fixed_target_time_stop",
+      "quality_bucket_policy": null,
+      "scope_bundle_id": "47ad524b2bd17ccd",
+      "variant_overrides": {}
+    },
+    "review_config_hash": "b603d95c9e48ef69",
+    "source_selection_hash": "c069611a8a2ee042"
+  },
+  "source_db": "/Users/patrick/Documents/MGC-v05l-automation/mgc_v05l.replay.sqlite3",
+  "source_generator_module": "src/mgc_v05l/app/atp_companion_full_history_review.py",
+  "source_hashes": {
+    "bundle_id": "47ad524b2bd17ccd",
+    "feature_bundle_id": "808a3dce75c84a58",
+    "reference_mgc_scope_bundle_id": "f8991b61e7ece888",
+    "selected_sources_hash": "c069611a8a2ee042",
+    "variant_overrides_hash": "44136fa355b3678a"
+  },
+  "source_mode": "generated_scope_bundle_current_v2_semantics",
+  "summary_metrics": {
+    "asia_net_pnl_cash": 87122.55,
+    "average_trade_pnl_cash": 22.206,
+    "largest_loss": -5832.4583,
+    "largest_win": 3892.5667,
+    "london_diagnostic_status": "DIAGNOSTIC_ONLY_NOT_EXECUTED",
+    "max_consecutive_losers": 9,
+    "max_drawdown": 26404.2583,
+    "median_trade_pnl_cash": 38.5,
+    "net_pnl_cash": 100193.4167,
+    "profit_factor": 1.132,
+    "trade_count": 4512,
+    "us_net_pnl_cash": 13070.8667,
+    "win_rate": 53.7456
+  },
+  "validated_source_paths": {
+    "full_history_review_path": null,
+    "materialized_truth_path": null
+  },
+  "validation_reference": {
+    "expected": {
+      "asia_net_pnl_cash": 87122.55,
+      "average_trade_pnl_cash": 22.206,
+      "largest_loss": -5832.4583,
+      "largest_win": 3892.5667,
+      "london_diagnostic_status": "DIAGNOSTIC_ONLY_NOT_EXECUTED",
+      "max_consecutive_losers": 9,
+      "max_drawdown": 26404.2583,
+      "median_trade_pnl_cash": 38.5,
+      "net_pnl_cash": 100193.4167,
+      "profit_factor": 1.132,
+      "trade_count": 4512,
+      "us_net_pnl_cash": 13070.8667,
+      "win_rate": 53.7456
+    },
+    "observed": {
+      "asia_net_pnl_cash": 87122.55,
+      "average_trade_pnl_cash": 22.206,
+      "largest_loss": -5832.4583,
+      "largest_win": 3892.5667,
+      "max_consecutive_losers": 9,
+      "max_drawdown": 26404.2583,
+      "median_trade_pnl_cash": 38.5,
+      "net_pnl_cash": 100193.4167,
+      "profit_factor": 1.132,
+      "trade_count": 4512,
+      "us_net_pnl_cash": 13070.8667,
+      "win_rate": 53.7456
+    }
+  }
+}

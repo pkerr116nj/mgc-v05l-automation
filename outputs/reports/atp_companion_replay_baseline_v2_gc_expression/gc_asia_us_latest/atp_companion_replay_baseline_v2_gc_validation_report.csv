@@ -1,0 +1,13 @@
+metric,expected,observed,tolerance,passed
+trade_count,4512,4512,0,True
+net_pnl_cash,100193.4167,100193.4167,0.0002,True
+average_trade_pnl_cash,22.206,22.206,0.0002,True
+median_trade_pnl_cash,38.5,38.5,0.0002,True
+win_rate,53.7456,53.7456,0.0002,True
+profit_factor,1.132,1.132,0.0002,True
+max_drawdown,26404.2583,26404.2583,0.0002,True
+largest_win,3892.5667,3892.5667,0.0002,True
+largest_loss,-5832.4583,-5832.4583,0.0002,True
+max_consecutive_losers,9,9,0,True
+asia_net_pnl_cash,87122.55,87122.55,0.0002,True
+us_net_pnl_cash,13070.8667,13070.8667,0.0002,True
