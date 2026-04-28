@@ -82,7 +82,7 @@ _MARKETABLE_LIMIT_LABEL = "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER"
 _NON_MARKETABLE_LIMIT_LABEL = "NEAR_MARKET_NON_MARKETABLE_LIMIT"
 _FILLED_ORDER_STATUS = {"Filled"}
 _PARTIAL_FILL_STATUS = {"PartiallyFilled"}
-_ORDER_REJECTION_ERROR_CODES = {10268, 201, 202}
+_ORDER_REJECTION_ERROR_CODES = {478, 10268, 201, 202}
 
 
 class IbkrManualPaperSubmitError(RuntimeError):
@@ -477,6 +477,8 @@ class IbkrManualPaperSubmitTransport:
         raw_contract.lastTradeDateOrContractMonth = contract.expiry
         raw_contract.multiplier = contract.multiplier
         raw_contract.tradingClass = contract.trading_class
+        if contract.con_id is not None and getattr(contract, "local_symbol", None):
+            raw_contract.localSymbol = contract.local_symbol
         if contract.con_id is not None:
             raw_contract.conId = int(contract.con_id)
         return raw_contract
@@ -1280,6 +1282,12 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
     preview = dict(report.get("preview") or {})
     lifecycle = dict(report.get("submit_cancel_lifecycle") or {})
     rejection = dict(lifecycle.get("rejection") or {})
+    frozen_preview_bundle = dict(report.get("frozen_preview_bundle") or {})
+    contract_report = dict(frozen_preview_bundle.get("contract_report") or {})
+    qualified_contract = dict(contract_report.get("qualified_contract") or {})
+    latest_order_status = dict(lifecycle.get("latest_order_status") or {})
+    fill_verification = dict(lifecycle.get("fill_verification") or {})
+    positions_after_submit = dict(fill_verification.get("positions_after_submit") or {})
     test_mode = str(preview.get("test_mode") or "").strip().upper()
     title = "# IBKR Manual Paper Fill Test Report" if test_mode == _FILL_TEST_MODE else "# IBKR Manual Paper Submit Report"
     lines = [
@@ -1347,6 +1355,7 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
         lines.extend(
             [
                 f"- rejection code: `{rejection.get('error_code')}`",
+                f"- rejection reason: `{rejection.get('reason')}`",
                 f"- rejection message: {rejection.get('error_message')}",
                 f"- unsupported attribute: `{rejection.get('unsupported_attribute')}`",
                 "- no second order was submitted",
@@ -1357,6 +1366,40 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
             lines.append("- cancel 10147 was expected after rejection because no order was working")
         if not list((lifecycle.get("fill_verification") or {}).get("executions_after_submit") or []):
             lines.append("- no MGC execution or position change was attributed to this run")
+    elif str(report.get("classification") or "").strip().upper() == "PAPER_ORDER_FILLED":
+        lines.extend(
+            [
+                f"- environment: `{environment.get('configured_mode')} / {environment.get('configured_host')} / {environment.get('configured_port')}`",
+                f"- account: `{report.get('account_id')}`",
+                f"- client id: `{connection.get('client_id')}`",
+                f"- exact qualified contract was used: `MGC {qualified_contract.get('expiry')}` / `conId={qualified_contract.get('con_id')}` / `localSymbol={qualified_contract.get('local_symbol')}`",
+                f"- order was `BUY 1 LMT DAY @ {preview.get('limit_price')}`",
+                f"- order id: `{lifecycle.get('submitted_order_id')}`",
+                f"- perm id: `{lifecycle.get('submitted_perm_id')}`",
+                f"- final status: `{fill_verification.get('final_status') or latest_order_status.get('status')}`",
+                f"- fill price: `{latest_order_status.get('last_fill_price')}`",
+                f"- filled quantity: `{fill_verification.get('filled_quantity')}`",
+                "- no EtradeOnly rejection",
+                "- no expiry-conflict rejection",
+                "- no second order was submitted",
+                "- no retry was attempted",
+                "- no strategy path was involved",
+                "- this proves app-to-IBKR paper submit-and-fill plumbing works",
+            ]
+        )
+        mgc_positions = [
+            row
+            for row in list(positions_after_submit.get("positions") or [])
+            if str(row.get("symbol") or "").strip().upper() == "MGC"
+        ]
+        if any(str(row.get("quantity")) == "0.0" for row in mgc_positions):
+            lines.extend(
+                [
+                    "- remaining follow-up: execution truth and orderStatus truth are solid",
+                    "- immediate post-submit position snapshot still showed MGC quantity 0.0",
+                    "- position refresh/reconciliation after fill must be tightened before position state is treated as authoritative immediately after execution",
+                ]
+            )
     lines.extend(
         [
             "",
@@ -1983,22 +2026,9 @@ def _qualify_mgc_contract(
     )
     ok = bool(event_ok and contract_rows)
     api_details = contract_rows[0] if contract_rows else {}
+    if api_details:
+        qualified = _qualified_contract_with_api_details(qualified, api_details)
     qualified_dict = _qualified_contract_to_dict(qualified)
-    if api_details.get("con_id") is not None:
-        qualified_dict["con_id"] = api_details["con_id"]
-        qualified = IbkrQualifiedContract(
-            internal_symbol=qualified.internal_symbol,
-            broker_symbol=qualified.broker_symbol,
-            local_symbol=qualified.local_symbol,
-            security_type=qualified.security_type,
-            exchange=qualified.exchange,
-            currency=qualified.currency,
-            expiry=qualified.expiry,
-            multiplier=qualified.multiplier,
-            trading_class=qualified.trading_class,
-            con_id=api_details["con_id"],
-            metadata=qualified.metadata,
-        )
     return {
         "ok": ok,
         "detail": (
@@ -2015,6 +2045,32 @@ def _qualify_mgc_contract(
         "qualified_contract_identifier": api_details.get("con_id") or qualified.local_symbol,
         "api_contract_details": contract_rows,
     }
+
+
+def _qualified_contract_with_api_details(
+    qualified: IbkrQualifiedContract,
+    api_details: dict[str, Any],
+) -> IbkrQualifiedContract:
+    exact_expiry = str(api_details.get("expiry") or qualified.expiry or "").strip() or qualified.expiry
+    local_symbol = str(api_details.get("local_symbol") or qualified.local_symbol or "").strip() or qualified.local_symbol
+    exchange = str(api_details.get("exchange") or qualified.exchange or "").strip() or qualified.exchange
+    currency = str(api_details.get("currency") or qualified.currency or "").strip() or qualified.currency
+    multiplier = str(api_details.get("multiplier") or qualified.multiplier or "").strip() or qualified.multiplier
+    trading_class = str(api_details.get("trading_class") or qualified.trading_class or "").strip() or qualified.trading_class
+    con_id = api_details.get("con_id") if api_details.get("con_id") is not None else qualified.con_id
+    return IbkrQualifiedContract(
+        internal_symbol=qualified.internal_symbol,
+        broker_symbol=qualified.broker_symbol,
+        local_symbol=local_symbol,
+        security_type=qualified.security_type,
+        exchange=exchange,
+        currency=currency,
+        expiry=exact_expiry,
+        multiplier=multiplier,
+        trading_class=trading_class,
+        con_id=con_id,
+        metadata=qualified.metadata,
+    )
 
 
 def _probe_delayed_quote_context(
@@ -2232,6 +2288,14 @@ def _extract_unsupported_attribute(message: str | None) -> str | None:
     return str(match.group(1) or "").strip() or None
 
 
+def _rejection_reason(error_code: int | None, error_message: str | None) -> str | None:
+    if int(error_code or 0) == 478:
+        return "contract_expiry_conflict"
+    if _extract_unsupported_attribute(error_message) is not None:
+        return "unsupported_attribute"
+    return None
+
+
 def _detect_order_rejection(
     *,
     collector: IbkrManualPaperSubmitCollector,
@@ -2251,6 +2315,7 @@ def _detect_order_rejection(
     error_code = int(latest_error.get("code", 0)) if latest_error is not None else None
     error_message = str(latest_error.get("message") or "").strip() if latest_error is not None else None
     unsupported_attribute = _extract_unsupported_attribute(error_message)
+    rejection_reason = _rejection_reason(error_code, error_message)
     detail = (
         f"IBKR rejected the paper order before it became broker-visible: {error_message}"
         if error_message
@@ -2261,6 +2326,7 @@ def _detect_order_rejection(
         "error_code": error_code,
         "error_message": error_message,
         "unsupported_attribute": unsupported_attribute,
+        "reason": rejection_reason,
         "latest_order_status": latest_status,
         "detail": detail,
     }

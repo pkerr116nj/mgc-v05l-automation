@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from mgc_v05l.brokers.ibkr import IbkrQualifiedContract
 from mgc_v05l.execution.ibkr_manual_paper_submit import (
     _FILL_TEST_MODE,
     _MANUAL_CONFIRMATION_WAIT_STATE,
@@ -12,9 +13,12 @@ from mgc_v05l.execution.ibkr_manual_paper_submit import (
     _configure_minimal_futures_limit_order,
     _detect_order_rejection,
     _execute_submit_cancel_lifecycle,
+    _qualified_contract_with_api_details,
     artifact_stem_for_test_mode,
     IbkrManualPaperSubmitArtifacts,
     IbkrManualPaperSubmitConfig,
+    IbkrManualPaperSubmitTransport,
+    IbkrReadOnlyApiTransportConfig,
     build_submit_approval_phrase,
     evaluate_cancel_verification,
     render_ibkr_manual_paper_submit_markdown,
@@ -280,6 +284,99 @@ def test_manual_mgc_futures_order_omits_unsupported_stock_only_attributes() -> N
     assert raw_order.outsideRth is False
 
 
+def test_qualified_mgc_submit_payload_uses_exact_last_trade_date() -> None:
+    qualified = IbkrQualifiedContract(
+        internal_symbol="MGC",
+        broker_symbol="MGC",
+        local_symbol="MGCM26",
+        security_type="FUT",
+        exchange="COMEX",
+        currency="USD",
+        expiry="202606",
+        multiplier="10",
+        trading_class="MGC",
+        con_id=712565978,
+        metadata={"contract_month": "202606"},
+    )
+    exact = _qualified_contract_with_api_details(
+        qualified,
+        {
+            "con_id": 712565978,
+            "expiry": "20260626",
+            "local_symbol": "MGCM6",
+            "exchange": "COMEX",
+            "currency": "USD",
+            "multiplier": "10",
+            "trading_class": "MGC",
+        },
+    )
+
+    class _FakeContract:
+        pass
+
+    transport = IbkrManualPaperSubmitTransport(
+        client=SimpleNamespace(record_event=lambda *args, **kwargs: None),
+        collector=SimpleNamespace(),
+        config=IbkrReadOnlyApiTransportConfig(host="127.0.0.1", port=7497, client_id=1, read_only=False),
+        module_loader=lambda name: SimpleNamespace(Contract=_FakeContract) if name == "ibapi.contract" else SimpleNamespace(),
+    )
+    raw_contract = transport._raw_contract(exact)
+
+    assert exact.expiry == "20260626"
+    assert raw_contract.lastTradeDateOrContractMonth == "20260626"
+    assert raw_contract.conId == 712565978
+    assert raw_contract.localSymbol == "MGCM6"
+
+
+def test_unqualified_contract_lookup_does_not_force_local_symbol() -> None:
+    unqualified = IbkrQualifiedContract(
+        internal_symbol="MGC",
+        broker_symbol="MGC",
+        local_symbol="MGCM26",
+        security_type="FUT",
+        exchange="COMEX",
+        currency="USD",
+        expiry="202606",
+        multiplier="10",
+        trading_class="MGC",
+        con_id=None,
+        metadata={"contract_month": "202606"},
+    )
+
+    class _FakeContract:
+        pass
+
+    transport = IbkrManualPaperSubmitTransport(
+        client=SimpleNamespace(record_event=lambda *args, **kwargs: None),
+        collector=SimpleNamespace(),
+        config=IbkrReadOnlyApiTransportConfig(host="127.0.0.1", port=7497, client_id=1, read_only=False),
+        module_loader=lambda name: SimpleNamespace(Contract=_FakeContract) if name == "ibapi.contract" else SimpleNamespace(),
+    )
+    raw_contract = transport._raw_contract(unqualified)
+
+    assert raw_contract.lastTradeDateOrContractMonth == "202606"
+    assert not hasattr(raw_contract, "localSymbol")
+
+
+def test_error_478_is_classified_as_paper_order_rejected_with_contract_expiry_conflict() -> None:
+    collector = SimpleNamespace(
+        errors=[
+            {
+                "request_id": 1,
+                "code": 478,
+                "message": "Parameters in request conflicts with contract parameters received by contract id: requested expiry 202606, in contract 20260626;",
+            }
+        ],
+        latest_order_status=lambda order_id: None,
+    )
+
+    rejection = _detect_order_rejection(collector=collector, order_id=1)
+
+    assert rejection is not None
+    assert rejection["reason"] == "contract_expiry_conflict"
+    assert _classify_submit_lifecycle(_FILL_TEST_MODE, "rejected") == "PAPER_ORDER_REJECTED"
+
+
 def test_error_10268_is_classified_as_paper_order_rejected_with_unsupported_attribute() -> None:
     collector = SimpleNamespace(
         errors=[
@@ -354,6 +451,141 @@ def test_markdown_classification_matches_structured_json_for_rejection() -> None
     assert "classification: `PAPER_ORDER_REJECTED`" in markdown
     assert "unsupported attribute: `EtradeOnly`" in markdown
     assert "cancel 10147 was expected after rejection because no order was working" in markdown
+
+
+def test_markdown_rejection_can_report_contract_expiry_conflict() -> None:
+    payload = {
+        "classification": "PAPER_ORDER_REJECTED",
+        "generated_at": "2026-04-28T12:56:45+00:00",
+        "account_id": "DUM882026",
+        "connection_check": {"client_id": 9137},
+        "environment_lock_check": {
+            "configured_mode": "PAPER",
+            "configured_host": "127.0.0.1",
+            "configured_port": 7497,
+        },
+        "preview": {
+            "test_mode": _FILL_TEST_MODE,
+            "preview_digest": "digest",
+            "expected_approval_phrase": "APPROVE ...",
+            "quote_source_label": "DELAYED",
+            "live_market_data_warning": "Delayed only.",
+            "quote_snapshot": {"ask_price": 4599.8},
+            "reference_price_source": "ask_price",
+            "reference_price": 4599.8,
+            "limit_price": 4599.9,
+            "distance_from_quote": 0.1,
+            "distance_ticks": 1.0,
+            "pricing_label": "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER",
+            "intended_to_fill": True,
+            "estimated_notional": 45999.0,
+            "estimated_tick_value": 1.0,
+        },
+        "guardrail_checks": [],
+        "submit_cancel_lifecycle": {
+            "status": "rejected",
+            "detail": "IBKR rejected the paper order before it became broker-visible: Parameters in request conflicts with contract parameters received by contract id: requested expiry 202606, in contract 20260626;",
+            "rejection": {
+                "reason": "contract_expiry_conflict",
+                "error_code": 478,
+                "error_message": "Parameters in request conflicts with contract parameters received by contract id: requested expiry 202606, in contract 20260626;",
+                "unsupported_attribute": None,
+            },
+            "fill_verification": {"executions_after_submit": []},
+            "manual_confirmation": {
+                "state": _MANUAL_CONFIRMATION_WAIT_STATE,
+                "operator_outcome": "approved",
+            },
+        },
+        "errors": [
+            {"code": 478, "message": "Parameters in request conflicts with contract parameters received by contract id: requested expiry 202606, in contract 20260626;"},
+            {"code": 10147, "message": "OrderId 1 that needs to be cancelled is not found."},
+        ],
+        "audit_event_count": 4,
+    }
+
+    markdown = render_ibkr_manual_paper_submit_markdown(payload)
+
+    assert "classification: `PAPER_ORDER_REJECTED`" in markdown
+    assert "rejection code: `478`" in markdown
+    assert "cancel 10147 was expected after rejection because no order was working" in markdown
+
+
+def test_markdown_fill_can_report_exact_contract_and_position_follow_up() -> None:
+    payload = {
+        "classification": "PAPER_ORDER_FILLED",
+        "generated_at": "2026-04-28T13:08:32+00:00",
+        "account_id": "DUM882026",
+        "connection_check": {"client_id": 9157},
+        "environment_lock_check": {
+            "configured_mode": "PAPER",
+            "configured_host": "127.0.0.1",
+            "configured_port": 7497,
+        },
+        "preview": {
+            "test_mode": _FILL_TEST_MODE,
+            "preview_digest": "digest",
+            "expected_approval_phrase": "APPROVE ...",
+            "quote_source_label": "DELAYED",
+            "live_market_data_warning": "Delayed only.",
+            "quote_snapshot": {"ask_price": 4608.7},
+            "reference_price_source": "ask_price",
+            "reference_price": 4608.7,
+            "limit_price": 4608.8,
+            "distance_from_quote": 0.1,
+            "distance_ticks": 1.0,
+            "pricing_label": "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER",
+            "intended_to_fill": True,
+            "estimated_notional": 46088.0,
+            "estimated_tick_value": 1.0,
+        },
+        "frozen_preview_bundle": {
+            "contract_report": {
+                "qualified_contract": {
+                    "expiry": "20260626",
+                    "con_id": 712565978,
+                    "local_symbol": "MGCM6",
+                }
+            }
+        },
+        "guardrail_checks": [],
+        "submit_cancel_lifecycle": {
+            "status": "filled",
+            "detail": "Submitted one manual paper MGC limit order and verified the fill through broker truth.",
+            "submitted_order_id": 1,
+            "submitted_perm_id": 490708929,
+            "latest_order_status": {
+                "status": "Filled",
+                "last_fill_price": 4589.6,
+            },
+            "fill_verification": {
+                "final_status": "Filled",
+                "filled_quantity": 1.0,
+                "positions_after_submit": {
+                    "positions": [
+                        {
+                            "symbol": "MGC",
+                            "quantity": "0.0",
+                        }
+                    ]
+                },
+            },
+            "manual_confirmation": {
+                "state": _MANUAL_CONFIRMATION_WAIT_STATE,
+                "operator_outcome": "approved",
+            },
+        },
+        "errors": [],
+        "audit_event_count": 11,
+    }
+
+    markdown = render_ibkr_manual_paper_submit_markdown(payload)
+
+    assert "classification: `PAPER_ORDER_FILLED`" in markdown
+    assert "exact qualified contract was used: `MGC 20260626` / `conId=712565978` / `localSymbol=MGCM6`" in markdown
+    assert "fill price: `4589.6`" in markdown
+    assert "this proves app-to-IBKR paper submit-and-fill plumbing works" in markdown
+    assert "immediate post-submit position snapshot still showed MGC quantity 0.0" in markdown
 
 
 def test_cancel_verification_logic_with_mocks() -> None:
