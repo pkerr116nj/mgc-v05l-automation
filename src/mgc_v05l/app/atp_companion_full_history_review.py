@@ -7,6 +7,7 @@ import csv
 import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Sequence
@@ -22,6 +23,11 @@ from ..research.trend_participation.atp_promotion_add_review import (
     _trade_window_bars,
     default_atp_promotion_add_candidates,
     evaluate_promotion_add_candidate,
+)
+from ..research.trend_participation.phase3_timing import (
+    ATP_REPLAY_EXIT_POLICY_FIXED_TARGET,
+    _bar_vwap,
+    _minute_fast_ema_map,
 )
 from ..research.platform import ensure_symbol_context_bundle, last_source_discovery_metadata, stable_hash, write_json_manifest
 from ..research.platform.analytics import build_research_analytics_views
@@ -43,6 +49,7 @@ DEFAULT_RESEARCH_PLATFORM_ROOT = REPO_ROOT / "outputs" / "research_platform"
 DEFAULT_PLATFORM_SUBSTRATE_ROOT = REPO_ROOT / "outputs" / "research_platform" / "atp_substrate"
 DEFAULT_EXPERIMENT_REGISTRY_ROOT = DEFAULT_RESEARCH_PLATFORM_ROOT / "registry"
 DEFAULT_RESEARCH_ANALYTICS_ROOT = DEFAULT_RESEARCH_PLATFORM_ROOT / "analytics" / "atp_companion"
+ATP_COMPANION_REPLAY_TRUTH_ARTIFACT_VERSION = "atp_companion_replay_truth_v1"
 
 
 @dataclass(frozen=True)
@@ -209,11 +216,310 @@ def _json_ready(value: Any) -> Any:
         return [_json_ready(item) for item in value]
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, Enum):
+        return value.value
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, date):
         return value.isoformat()
     return value
+
+
+def _candidate_reference_snapshot(
+    *,
+    trade: Any,
+    minute_bars: Sequence[Any],
+    candidate: Any,
+    point_value: float,
+    eligibility_timestamps: Sequence[Any] | None = None,
+) -> dict[str, Any]:
+    result = evaluate_promotion_add_candidate(
+        trade=trade,
+        minute_bars=minute_bars,
+        candidate=candidate,
+        point_value=point_value,
+    )
+    return {
+        "candidate_id": candidate.candidate_id,
+        "candidate_label": candidate.label,
+        "progress_r_multiple": float(candidate.progress_r_multiple),
+        "allowed_price_quality_states": list(candidate.allowed_price_quality_states),
+        "require_positive_reacceleration": bool(candidate.require_positive_reacceleration),
+        "require_low_above_entry": bool(candidate.require_low_above_entry),
+        "max_adds_per_trade": int(candidate.max_adds_per_trade),
+        "eligibility_timestamps": list(eligibility_timestamps or []),
+        "added": bool(result.get("added")),
+        "add_reason": result.get("add_reason"),
+        "add_entry_ts": result.get("add_entry_ts"),
+        "add_exit_ts": result.get("add_exit_ts"),
+        "add_trigger_price": result.get("add_trigger_price"),
+        "add_entry_price": result.get("add_entry_price"),
+        "add_pnl_cash": result.get("add_pnl_cash"),
+        "add_pnl_points": result.get("add_pnl_points"),
+        "modeled_exit_dependency": result.get("modeled_exit_dependency"),
+    }
+
+
+def _minute_path_rows(*, trade: Any, minute_bars: Sequence[Any]) -> list[dict[str, Any]]:
+    if not minute_bars:
+        return []
+    initial_risk = max(abs(float(trade.entry_price) - float(trade.stop_price)), 1e-9)
+    minute_ema = _minute_fast_ema_map(minute_bars)
+    threshold_trigger_price = float(trade.entry_price) + 0.75 * initial_risk if trade.side == "LONG" else float(trade.entry_price) - 0.75 * initial_risk
+    rows: list[dict[str, Any]] = []
+    previous_bar: Any | None = None
+    for bar in minute_bars:
+        positive_reacceleration = (
+            previous_bar is not None
+            and (
+                (
+                    trade.side == "LONG"
+                    and float(bar.close) > float(previous_bar.close)
+                    and float(bar.high) >= float(previous_bar.high)
+                )
+                or (
+                    trade.side == "SHORT"
+                    and float(bar.close) < float(previous_bar.close)
+                    and float(bar.low) <= float(previous_bar.low)
+                )
+            )
+        )
+        high_progress_r = (
+            (float(bar.high) - float(trade.entry_price)) / initial_risk
+            if trade.side == "LONG"
+            else (float(trade.entry_price) - float(bar.low)) / initial_risk
+        )
+        low_progress_r = (
+            (float(bar.low) - float(trade.entry_price)) / initial_risk
+            if trade.side == "LONG"
+            else (float(trade.entry_price) - float(bar.high)) / initial_risk
+        )
+        add_entry_price_075 = max(float(bar.open), threshold_trigger_price) if trade.side == "LONG" else min(float(bar.open), threshold_trigger_price)
+        band_reference = max(float(bar.high) - float(bar.low), initial_risk, 1e-9)
+        bar_vwap = _bar_vwap(bar)
+        vwap_favorable_reference = add_entry_price_075 <= bar_vwap if trade.side == "LONG" else add_entry_price_075 >= bar_vwap
+        close_above_fast_ema = float(bar.close) >= float(minute_ema.get(bar.end_ts, float(bar.close))) if trade.side == "LONG" else float(bar.close) <= float(minute_ema.get(bar.end_ts, float(bar.close)))
+        low_above_entry = float(bar.low) > float(trade.entry_price) if trade.side == "LONG" else float(bar.high) < float(trade.entry_price)
+        eligible_reference = (
+            (float(bar.high) >= threshold_trigger_price if trade.side == "LONG" else float(bar.low) <= threshold_trigger_price)
+            and vwap_favorable_reference
+            and positive_reacceleration
+            and close_above_fast_ema
+            and low_above_entry
+            and bar.end_ts < trade.exit_ts
+        )
+        rows.append(
+            {
+                "instrument": getattr(bar, "instrument", None),
+                "timeframe": getattr(bar, "timeframe", None),
+                "start_ts": bar.start_ts,
+                "end_ts": bar.end_ts,
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": int(bar.volume),
+                "session_segment": getattr(bar, "session_segment", None),
+                "session_label": getattr(bar, "session_label", None),
+                "bar_vwap": round(float(bar_vwap), 6),
+                "band_reference": round(float(band_reference), 6),
+                "minute_fast_ema": round(float(minute_ema.get(bar.end_ts, float(bar.close))), 6),
+                "positive_reacceleration": bool(positive_reacceleration),
+                "close_above_fast_ema": bool(close_above_fast_ema),
+                "low_above_entry": bool(low_above_entry),
+                "high_progress_r_multiple": round(float(high_progress_r), 6),
+                "low_progress_r_multiple": round(float(low_progress_r), 6),
+                "reference_trigger_price_075r": round(float(threshold_trigger_price), 6),
+                "reference_add_entry_price_075r": round(float(add_entry_price_075), 6),
+                "reference_vwap_favorable_075r": bool(vwap_favorable_reference),
+                "eligible_for_reference_candidate": bool(eligible_reference),
+                "source": getattr(bar, "source", None),
+                "provenance": getattr(bar, "provenance", None),
+                "trading_calendar": getattr(bar, "trading_calendar", None),
+            }
+        )
+        previous_bar = bar
+    return rows
+
+
+def _trade_record_replay_row(trade: Any) -> dict[str, Any]:
+    return {
+        "instrument": trade.instrument,
+        "variant_id": trade.variant_id,
+        "family": trade.family,
+        "side": trade.side,
+        "live_eligible": bool(trade.live_eligible),
+        "shadow_only": bool(trade.shadow_only),
+        "conflict_outcome": trade.conflict_outcome.value,
+        "decision_id": trade.decision_id,
+        "decision_ts": trade.decision_ts,
+        "entry_ts": trade.entry_ts,
+        "exit_ts": trade.exit_ts,
+        "entry_price": float(trade.entry_price),
+        "exit_price": float(trade.exit_price),
+        "stop_price": float(trade.stop_price),
+        "target_price": float(trade.target_price) if trade.target_price is not None else None,
+        "pnl_points": float(trade.pnl_points),
+        "gross_pnl_cash": float(trade.gross_pnl_cash),
+        "pnl_cash": float(trade.pnl_cash),
+        "fees_paid": float(trade.fees_paid),
+        "slippage_cost": float(trade.slippage_cost),
+        "mfe_points": float(trade.mfe_points),
+        "mae_points": float(trade.mae_points),
+        "bars_held_1m": int(trade.bars_held_1m),
+        "hold_minutes": float(trade.hold_minutes),
+        "exit_reason": trade.exit_reason,
+        "is_reentry": bool(trade.is_reentry),
+        "reentry_type": trade.reentry_type,
+        "stopout": bool(trade.stopout),
+        "setup_signature": trade.setup_signature,
+        "setup_quality_bucket": trade.setup_quality_bucket,
+        "session_segment": trade.session_segment,
+        "regime_bucket": trade.regime_bucket,
+        "volatility_bucket": trade.volatility_bucket,
+        "participation_promoted": bool(trade.participation_promoted),
+        "promotion_trigger_r_multiple": trade.promotion_trigger_r_multiple,
+        "promotion_ts": trade.promotion_ts,
+        "promotion_price": trade.promotion_price,
+        "pnl_points_at_promotion": trade.pnl_points_at_promotion,
+        "post_promotion_peak_open_profit_points": trade.post_promotion_peak_open_profit_points,
+    }
+
+
+def iter_replay_truth_trade_rows(
+    *,
+    asia_scope: MaterializedScopeTruth,
+    trade_windows_by_scope: dict[tuple[str, tuple[str, ...]], dict[str, list[Any]]],
+    reference_candidate: Any,
+) -> Any:
+    asia_windows = trade_windows_by_scope[(asia_scope.symbol, asia_scope.allowed_sessions)]
+    for row in asia_scope.trade_rows:
+        trade = row["trade_record"]
+        minute_bars = asia_windows.get(str(row["trade_id"])) or []
+        initial_risk = max(abs(float(trade.entry_price) - float(trade.stop_price)), 1e-9)
+        minute_path = _minute_path_rows(trade=trade, minute_bars=minute_bars)
+        eligibility_timestamps = [path_row["end_ts"] for path_row in minute_path if path_row["eligible_for_reference_candidate"]]
+        yield {
+            "trade_id": str(row["trade_id"]),
+            "instrument": trade.instrument,
+            "session": trade.session_segment,
+            "direction": trade.side,
+            "decision_ts": trade.decision_ts,
+            "entry_ts": trade.entry_ts,
+            "exit_ts": trade.exit_ts,
+            "entry_price": float(trade.entry_price),
+            "exit_price": float(trade.exit_price),
+            "baseline_pnl_cash": float(trade.pnl_cash),
+            "stop_price": float(trade.stop_price),
+            "target_price": float(trade.target_price) if trade.target_price is not None else None,
+            "initial_risk_points": round(float(initial_risk), 6),
+            "r_unit_points": round(float(initial_risk), 6),
+            "point_value": float(asia_scope.point_value),
+            "bars_held_1m": int(trade.bars_held_1m),
+            "hold_minutes": float(trade.hold_minutes),
+            "exit_reason": trade.exit_reason,
+            "family": trade.family,
+            "trade_record": _trade_record_replay_row(trade),
+            "minute_path": minute_path,
+            "reference_candidate_075r": _candidate_reference_snapshot(
+                trade=trade,
+                minute_bars=minute_bars,
+                candidate=reference_candidate,
+                point_value=float(asia_scope.point_value),
+                eligibility_timestamps=eligibility_timestamps,
+            ),
+        }
+
+
+def build_replay_truth_manifest(
+    *,
+    source_db: Path,
+    run_start: datetime,
+    run_end: datetime,
+    baseline_target: EvaluationTarget,
+    data_substrate: dict[str, Any],
+    review_config: dict[str, Any] | None,
+    scope_bundle_ids: dict[str, str],
+    feature_bundle_ids: dict[str, str],
+    context_bundle_ids: dict[str, str | None],
+    reference_candidate: Any,
+    materialized_truth_path: Path | None = None,
+    full_history_review_path: Path | None = None,
+) -> dict[str, Any]:
+    return {
+        "artifact_version": ATP_COMPANION_REPLAY_TRUTH_ARTIFACT_VERSION,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "source_generator_module": "src/mgc_v05l/app/atp_companion_full_history_review.py",
+        "execution_model": "ATP_5M_CONTEXT_1M_EXECUTABLE_VWAP",
+        "baseline_exit_policy": ATP_REPLAY_EXIT_POLICY_FIXED_TARGET,
+        "promotion_add_exit_policy": "inherits_frozen_baseline_exit",
+        "source_db": str(source_db.resolve()),
+        "shared_date_span": {
+            "start_timestamp": run_start.isoformat(),
+            "end_timestamp": run_end.isoformat(),
+        },
+        "source_config": {
+            "review_config": review_config or {},
+            "review_config_hash": stable_hash(review_config or {}),
+            "baseline_target_id": baseline_target.target_id,
+            "baseline_config_path": baseline_target.config_path,
+            "reference_candidate_id": reference_candidate.candidate_id,
+            "reference_candidate_config_path": "config/probationary_pattern_engine_paper_atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only.yaml",
+            "source_selection_hash": stable_hash(data_substrate.get("selected_sources") or {}),
+        },
+        "bundle_contract": {
+            "scope_bundle_ids": scope_bundle_ids,
+            "feature_bundle_ids": feature_bundle_ids,
+            "context_bundle_ids": context_bundle_ids,
+        },
+        "validated_source_paths": {
+            "materialized_truth_path": str(materialized_truth_path.resolve()) if materialized_truth_path else None,
+            "full_history_review_path": str(full_history_review_path.resolve()) if full_history_review_path else None,
+        },
+    }
+
+
+def build_replay_truth_payload(
+    *,
+    source_db: Path,
+    run_start: datetime,
+    run_end: datetime,
+    baseline_target: EvaluationTarget,
+    baseline_scope: MaterializedScopeTruth,
+    asia_scope: MaterializedScopeTruth,
+    trade_windows_by_scope: dict[tuple[str, tuple[str, ...]], dict[str, list[Any]]],
+    data_substrate: dict[str, Any],
+    review_config: dict[str, Any] | None,
+    scope_bundle_ids: dict[str, str],
+    feature_bundle_ids: dict[str, str],
+    context_bundle_ids: dict[str, str | None],
+    reference_candidate: Any,
+    materialized_truth_path: Path | None = None,
+    full_history_review_path: Path | None = None,
+) -> dict[str, Any]:
+    payload = build_replay_truth_manifest(
+        source_db=source_db,
+        run_start=run_start,
+        run_end=run_end,
+        baseline_target=baseline_target,
+        data_substrate=data_substrate,
+        review_config=review_config,
+        scope_bundle_ids=scope_bundle_ids,
+        feature_bundle_ids=feature_bundle_ids,
+        context_bundle_ids=context_bundle_ids,
+        reference_candidate=reference_candidate,
+        materialized_truth_path=materialized_truth_path,
+        full_history_review_path=full_history_review_path,
+    )
+    payload["benchmark_position_rows"] = _base_position_rows(baseline_scope.trade_rows)
+    payload["mgc_asia_replay_trades"] = list(
+        iter_replay_truth_trade_rows(
+            asia_scope=asia_scope,
+            trade_windows_by_scope=trade_windows_by_scope,
+            reference_candidate=reference_candidate,
+        )
+    )
+    return payload
 
 
 def _source_selection_coverage_row(selection: Any) -> dict[str, Any]:
