@@ -7,13 +7,17 @@ from types import SimpleNamespace
 
 from mgc_v05l.brokers.ibkr import IbkrQualifiedContract
 from mgc_v05l.execution.ibkr_manual_paper_submit import (
+    _CLOSE_TEST_MODE,
     _FILL_TEST_MODE,
     _MANUAL_CONFIRMATION_WAIT_STATE,
     _classify_submit_lifecycle,
     _configure_minimal_futures_limit_order,
     _detect_order_rejection,
+    _derive_marketable_limit_price,
+    _exact_contract_position_quantity,
     _execute_submit_cancel_lifecycle,
     _qualified_contract_with_api_details,
+    _submit_input_guardrails,
     artifact_stem_for_test_mode,
     IbkrManualPaperSubmitArtifacts,
     IbkrManualPaperSubmitConfig,
@@ -375,6 +379,74 @@ def test_error_478_is_classified_as_paper_order_rejected_with_contract_expiry_co
     assert rejection is not None
     assert rejection["reason"] == "contract_expiry_conflict"
     assert _classify_submit_lifecycle(_FILL_TEST_MODE, "rejected") == "PAPER_ORDER_REJECTED"
+
+
+def test_close_mode_requires_sell_and_classifies_close_outcomes() -> None:
+    buy_guardrails = _submit_input_guardrails(
+        {
+            "symbol": "MGC",
+            "expiry": "202606",
+            "action": "BUY",
+            "quantity": 1.0,
+            "order_type": "LMT",
+            "limit_price": 4639.7,
+            "time_in_force": "DAY",
+        },
+        test_mode=_CLOSE_TEST_MODE,
+        require_limit_price=True,
+    )
+    sell_guardrails = _submit_input_guardrails(
+        {
+            "symbol": "MGC",
+            "expiry": "202606",
+            "action": "SELL",
+            "quantity": 1.0,
+            "order_type": "LMT",
+            "limit_price": 4639.7,
+            "time_in_force": "DAY",
+        },
+        test_mode=_CLOSE_TEST_MODE,
+        require_limit_price=True,
+    )
+
+    assert buy_guardrails["supported_action"]["passed"] is False
+    assert sell_guardrails["supported_action"]["passed"] is True
+    assert _classify_submit_lifecycle(_CLOSE_TEST_MODE, "filled_flat") == "PAPER_CLOSE_FILLED_FLAT"
+    assert _classify_submit_lifecycle(_CLOSE_TEST_MODE, "rejected") == "PAPER_CLOSE_REJECTED"
+    assert _classify_submit_lifecycle(_CLOSE_TEST_MODE, "fill_timeout_cancelled") == "PAPER_CLOSE_NOT_FILLED_CANCELLED"
+    assert _classify_submit_lifecycle(_CLOSE_TEST_MODE, "close_position_not_flat") == "PAPER_CLOSE_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW"
+
+
+def test_close_mode_derives_marketable_limit_below_delayed_bid() -> None:
+    limit_price = _derive_marketable_limit_price(
+        quote_context={"bid_price": 4608.5, "last_price": 4608.6},
+        contract_report={"api_contract_details": [{"min_tick": 0.1}]},
+        offset_ticks=1.0,
+        test_mode=_CLOSE_TEST_MODE,
+        action="SELL",
+    )
+
+    assert limit_price == 4608.4
+
+
+def test_exact_contract_position_quantity_matches_local_symbol_and_expiry() -> None:
+    quantity = _exact_contract_position_quantity(
+        positions_snapshot={
+            "positions": [
+                {"symbol": "MGC", "local_symbol": "MGCM6", "expiry": "20260626", "quantity": "1.0"},
+                {"symbol": "MGC", "local_symbol": "MGCQ6", "expiry": "20260827", "quantity": "2.0"},
+            ]
+        },
+        contract_report={
+            "qualified_contract": {
+                "broker_symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "expiry": "20260626",
+            }
+        },
+    )
+
+    assert quantity == 1.0
 
 
 def test_error_10268_is_classified_as_paper_order_rejected_with_unsupported_attribute() -> None:

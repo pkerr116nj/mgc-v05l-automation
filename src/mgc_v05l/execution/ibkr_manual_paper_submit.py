@@ -78,7 +78,9 @@ _DEFAULT_FILL_TIMEOUT_SECONDS = 8.0
 _TICK_COMPARISON_EPSILON = 1e-9
 _RESTING_TEST_MODE = "PAPER_RESTING_TEST"
 _FILL_TEST_MODE = "PAPER_FILL_TEST"
+_CLOSE_TEST_MODE = "PAPER_CLOSE_TEST"
 _MARKETABLE_LIMIT_LABEL = "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER"
+_CLOSE_MARKETABLE_LIMIT_LABEL = "MARKETABLE_LIMIT_INTENDED_TO_CLOSE_IN_PAPER"
 _NON_MARKETABLE_LIMIT_LABEL = "NEAR_MARKET_NON_MARKETABLE_LIMIT"
 _FILLED_ORDER_STATUS = {"Filled"}
 _PARTIAL_FILL_STATUS = {"PartiallyFilled"}
@@ -576,7 +578,9 @@ def run_ibkr_manual_paper_submit_test(
     input_checks = _submit_input_guardrails(
         requested_order,
         test_mode=config.test_mode,
-        require_limit_price=not (not config.submit and str(config.test_mode).upper() == _FILL_TEST_MODE),
+        require_limit_price=not (
+            not config.submit and str(config.test_mode).upper() in {_FILL_TEST_MODE, _CLOSE_TEST_MODE}
+        ),
     )
     guardrail_checks = _preflight_guardrail_checks(
         caller_check=caller_check,
@@ -1086,14 +1090,20 @@ def build_submit_approval_phrase(
 
 
 def _blocked_classification_for_mode(test_mode: str) -> str:
+    if str(test_mode or "").strip().upper() == _CLOSE_TEST_MODE:
+        return "IBKR_MANUAL_PAPER_CLOSE_TEST_BLOCKED"
     return "IBKR_MANUAL_PAPER_FILL_TEST_BLOCKED" if str(test_mode or "").strip().upper() == _FILL_TEST_MODE else "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
 
 
 def _preview_only_classification_for_mode(test_mode: str) -> str:
+    if str(test_mode or "").strip().upper() == _CLOSE_TEST_MODE:
+        return "IBKR_MANUAL_PAPER_CLOSE_TEST_PARTIAL"
     return "IBKR_MANUAL_PAPER_FILL_TEST_PARTIAL" if str(test_mode or "").strip().upper() == _FILL_TEST_MODE else "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_PARTIAL"
 
 
 def _passed_classification_for_mode(test_mode: str) -> str:
+    if str(test_mode or "").strip().upper() == _CLOSE_TEST_MODE:
+        return "IBKR_MANUAL_PAPER_CLOSE_TEST_PASSED"
     return "IBKR_MANUAL_PAPER_FILL_TEST_PASSED" if str(test_mode or "").strip().upper() == _FILL_TEST_MODE else "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_PASSED"
 
 
@@ -1101,6 +1111,8 @@ def artifact_stem_for_test_mode(test_mode: str) -> str:
     normalized = str(test_mode or "").strip().upper()
     if normalized == _FILL_TEST_MODE:
         return "ibkr_manual_paper_fill_test"
+    if normalized == _CLOSE_TEST_MODE:
+        return "ibkr_manual_paper_close_test"
     return "ibkr_manual_paper_submit"
 
 
@@ -1289,7 +1301,13 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
     fill_verification = dict(lifecycle.get("fill_verification") or {})
     positions_after_submit = dict(fill_verification.get("positions_after_submit") or {})
     test_mode = str(preview.get("test_mode") or "").strip().upper()
-    title = "# IBKR Manual Paper Fill Test Report" if test_mode == _FILL_TEST_MODE else "# IBKR Manual Paper Submit Report"
+    if test_mode == _FILL_TEST_MODE:
+        title = "# IBKR Manual Paper Fill Test Report"
+    elif test_mode == _CLOSE_TEST_MODE:
+        title = "# IBKR Manual Paper Close Test Report"
+    else:
+        title = "# IBKR Manual Paper Submit Report"
+    action_scope = "BUY only" if test_mode != _CLOSE_TEST_MODE else "SELL only"
     lines = [
         title,
         "",
@@ -1310,6 +1328,7 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
         "- MGC 202606 only",
         "- LMT DAY only",
         "- qty = 1 only",
+        f"- {action_scope}",
         "- no market orders",
         "- no bracket/OCO",
         "- no strategy linkage",
@@ -1323,7 +1342,7 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
         f"- preview digest: `{preview.get('preview_digest')}`",
         f"- expected approval phrase: `{preview.get('expected_approval_phrase')}`",
         f"- lifecycle status: `{lifecycle.get('status')}`",
-        f"- lifecycle detail: {lifecycle.get('detail')}",
+        f"- lifecycle detail: {_markdown_scalar(lifecycle.get('detail'))}",
         f"- manual confirmation state: `{lifecycle.get('manual_confirmation', {}).get('state')}`",
         f"- manual confirmation outcome: `{lifecycle.get('manual_confirmation', {}).get('operator_outcome')}`",
         "",
@@ -1400,6 +1419,33 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
                     "- position refresh/reconciliation after fill must be tightened before position state is treated as authoritative immediately after execution",
                 ]
             )
+    elif str(report.get("classification") or "").strip().upper() == "PAPER_CLOSE_FILLED_FLAT":
+        close_position_verification = dict(lifecycle.get("close_position_verification") or {})
+        lines.extend(
+            [
+                f"- environment: `{environment.get('configured_mode')} / {environment.get('configured_host')} / {environment.get('configured_port')}`",
+                f"- account: `{report.get('account_id')}`",
+                f"- client id: `{connection.get('client_id')}`",
+                f"- exact qualified contract was used: `MGC {qualified_contract.get('expiry')}` / `conId={qualified_contract.get('con_id')}` / `localSymbol={qualified_contract.get('local_symbol')}`",
+                f"- order was `SELL 1 LMT DAY @ {preview.get('limit_price')}`",
+                f"- order id: `{lifecycle.get('submitted_order_id')}`",
+                f"- perm id: `{lifecycle.get('submitted_perm_id')}`",
+                f"- final status: `{fill_verification.get('final_status') or latest_order_status.get('status')}`",
+                f"- last fill price: `{latest_order_status.get('last_fill_price')}`",
+                f"- filled quantity: `{fill_verification.get('filled_quantity')}`",
+                f"- post-close MGC quantity: `{close_position_verification.get('exact_position_quantity')}`",
+                "- the confirmed long MGC paper position was flattened through broker truth",
+                "- no second order was submitted",
+                "- no retry was attempted",
+                "- no strategy path was involved",
+                "- execution list includes prior MGC rows, so close truth is anchored to `orderStatus=Filled`, `permId=490708935`, and the reconciled flat position",
+                "- app-path BUY open filled",
+                "- long position reconciled",
+                "- app-path SELL close filled",
+                "- flat position reconciled",
+                "- manual paper open-close loop is proven",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -1422,6 +1468,14 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _markdown_scalar(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        if len(value) == 1:
+            return str(value[0])
+        return ", ".join(str(item) for item in value)
+    return str(value)
 
 
 def render_ibkr_order_observation_diagnostic_markdown(report: dict[str, Any]) -> str:
@@ -1462,14 +1516,21 @@ def _submit_input_guardrails(
     test_mode: str,
     require_limit_price: bool,
 ) -> dict[str, dict[str, Any]]:
+    normalized_mode = str(test_mode or "").strip().upper()
+    expected_action = "SELL" if normalized_mode == _CLOSE_TEST_MODE else _EXPECTED_ACTION
+    action_detail = (
+        "Only SELL is allowed in the manual paper close harness."
+        if normalized_mode == _CLOSE_TEST_MODE
+        else "Only BUY is allowed in the first manual paper submit/cancel harness."
+    )
     return {
         "whitelisted_contract": {
             "passed": requested_order.get("symbol") == _EXPECTED_SYMBOL and requested_order.get("expiry") == _EXPECTED_EXPIRY,
             "detail": "Only MGC 202606 is allowed in the first manual paper submit/cancel harness.",
         },
         "supported_action": {
-            "passed": requested_order.get("action") == _EXPECTED_ACTION,
-            "detail": "Only BUY is allowed in the first manual paper submit/cancel harness.",
+            "passed": requested_order.get("action") == expected_action,
+            "detail": action_detail,
         },
         "quantity_cap": {
             "passed": float(requested_order.get("quantity") or 0.0) == _EXPECTED_QUANTITY,
@@ -1547,31 +1608,45 @@ def _resolve_requested_order_for_preview(
 ) -> dict[str, Any]:
     resolved = dict(requested_order)
     normalized_mode = str(config.test_mode or "").strip().upper()
-    if normalized_mode not in {_RESTING_TEST_MODE, _FILL_TEST_MODE}:
+    if normalized_mode not in {_RESTING_TEST_MODE, _FILL_TEST_MODE, _CLOSE_TEST_MODE}:
         raise IbkrManualPaperSubmitError(f"Unsupported manual paper test mode: {config.test_mode}")
-    if normalized_mode == _FILL_TEST_MODE:
+    if normalized_mode in {_FILL_TEST_MODE, _CLOSE_TEST_MODE}:
         if resolved.get("limit_price") is None:
-            resolved["limit_price"] = _derive_fill_limit_price(
+            resolved["limit_price"] = _derive_marketable_limit_price(
                 quote_context=quote_context,
                 contract_report=contract_report,
                 offset_ticks=config.fill_limit_offset_ticks,
+                test_mode=normalized_mode,
+                action=str(resolved.get("action") or "").strip().upper(),
             )
     return resolved
 
 
-def _derive_fill_limit_price(
+def _derive_marketable_limit_price(
     *,
     quote_context: dict[str, Any],
     contract_report: dict[str, Any],
     offset_ticks: float,
+    test_mode: str,
+    action: str,
 ) -> float:
-    reference_price, _ = _select_fill_reference_price(quote_context)
+    normalized_mode = str(test_mode or "").strip().upper()
+    normalized_action = str(action or "").strip().upper()
+    if normalized_mode == _CLOSE_TEST_MODE or normalized_action == "SELL":
+        reference_price, _ = _select_close_reference_price(quote_context)
+        missing_detail = "PAPER_CLOSE_TEST requires a delayed bid/last reference price."
+    else:
+        reference_price, _ = _select_fill_reference_price(quote_context)
+        missing_detail = "PAPER_FILL_TEST requires a delayed ask/last reference price."
     if reference_price is None:
-        raise IbkrManualPaperSubmitError("PAPER_FILL_TEST requires a delayed ask/last reference price.")
+        raise IbkrManualPaperSubmitError(missing_detail)
     min_tick = _contract_min_tick(contract_report)
     if min_tick is None or min_tick <= 0.0:
-        raise IbkrManualPaperSubmitError("PAPER_FILL_TEST requires a valid contract minTick to derive a marketable limit.")
-    limit_price = float(reference_price) + max(1.0, float(offset_ticks)) * float(min_tick)
+        raise IbkrManualPaperSubmitError("The manual paper marketable-limit tests require a valid contract minTick.")
+    if normalized_mode == _CLOSE_TEST_MODE or normalized_action == "SELL":
+        limit_price = float(reference_price) - max(1.0, float(offset_ticks)) * float(min_tick)
+    else:
+        limit_price = float(reference_price) + max(1.0, float(offset_ticks)) * float(min_tick)
     return _round_price_to_tick(limit_price, min_tick)
 
 
@@ -1598,7 +1673,9 @@ def _build_delayed_quote_pricing_context(
     contract_details = dict(contract_report.get("api_contract_details", [{}])[0] if contract_report.get("api_contract_details") else {})
     min_tick = _coerce_float(contract_details.get("min_tick"))
     limit_price = _coerce_float(requested_order.get("limit_price"))
-    if str(config.test_mode).upper() == _FILL_TEST_MODE:
+    normalized_mode = str(config.test_mode).upper()
+    normalized_action = str(requested_order.get("action") or "").strip().upper()
+    if normalized_mode == _FILL_TEST_MODE:
         reference_price, reference_source = _select_fill_reference_price(quote_context)
         price_relation = "above_reference"
         distance_from_reference_price = (
@@ -1607,6 +1684,16 @@ def _build_delayed_quote_pricing_context(
             else float(limit_price) - float(reference_price)
         )
         pricing_label = _MARKETABLE_LIMIT_LABEL
+        intended_to_fill = True
+    elif normalized_mode == _CLOSE_TEST_MODE or normalized_action == "SELL":
+        reference_price, reference_source = _select_close_reference_price(quote_context)
+        price_relation = "below_reference"
+        distance_from_reference_price = (
+            None
+            if limit_price is None or reference_price is None
+            else float(reference_price) - float(limit_price)
+        )
+        pricing_label = _CLOSE_MARKETABLE_LIMIT_LABEL
         intended_to_fill = True
     else:
         reference_price, reference_source = _select_delayed_reference_price(quote_context)
@@ -1677,6 +1764,11 @@ def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[d
         ),
     ]
     if pricing_context.get("intended_to_fill"):
+        detail = (
+            "For PAPER_FILL_TEST BUY 1 MGC 202606 LMT DAY, the chosen limit must be slightly above the delayed ask/last so it is a marketable limit intended to fill in paper, while remaining near-market rather than far away."
+            if str(pricing_context.get("pricing_label") or "").strip().upper() != _CLOSE_MARKETABLE_LIMIT_LABEL
+            else "For PAPER_CLOSE_TEST SELL 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the delayed bid/last so it is a marketable limit intended to fill in paper while remaining near-market rather than far away."
+        )
         checks.append(
             _guardrail_check(
                 "marketable_limit_intended_to_fill",
@@ -1692,9 +1784,7 @@ def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[d
                     )
                 ),
                 blocking=True,
-                detail=(
-                    "For PAPER_FILL_TEST BUY 1 MGC 202606 LMT DAY, the chosen limit must be slightly above the delayed ask/last so it is a marketable limit intended to fill in paper, while remaining near-market rather than far away."
-                ),
+                detail=detail,
             )
         )
     else:
@@ -1739,6 +1829,35 @@ def _select_fill_reference_price(quote_context: dict[str, Any]) -> tuple[float |
     if last_price is not None:
         return last_price, "last_price"
     return None, None
+
+
+def _select_close_reference_price(quote_context: dict[str, Any]) -> tuple[float | None, str | None]:
+    bid_price = _coerce_float(quote_context.get("bid_price"))
+    if bid_price is not None:
+        return bid_price, "bid_price"
+    last_price = _coerce_float(quote_context.get("last_price"))
+    if last_price is not None:
+        return last_price, "last_price"
+    return None, None
+
+
+def _exact_contract_position_quantity(*, positions_snapshot: dict[str, Any], contract_report: dict[str, Any]) -> float | None:
+    qualified_contract = dict(contract_report.get("qualified_contract") or {})
+    expected_symbol = str(qualified_contract.get("broker_symbol") or _EXPECTED_SYMBOL).strip().upper()
+    expected_expiry = str(qualified_contract.get("expiry") or "").strip()
+    expected_local_symbol = str(qualified_contract.get("local_symbol") or "").strip().upper()
+    for row in list(positions_snapshot.get("positions") or []):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        expiry = str(row.get("expiry") or "").strip()
+        local_symbol = str(row.get("local_symbol") or "").strip().upper()
+        if symbol != expected_symbol:
+            continue
+        if expected_expiry and expiry != expected_expiry:
+            continue
+        if expected_local_symbol and local_symbol != expected_local_symbol:
+            continue
+        return _coerce_float(row.get("quantity"))
+    return None
 
 
 def _parse_iso_timestamp(value: Any) -> datetime | None:
@@ -1971,6 +2090,20 @@ def _collect_truth_and_preview_context(
             _audit_row("contract_qualified", config=config, detail="MGC 202606 qualified successfully.", extra={"qualified_contract_identifier": contract_report.get("qualified_contract_identifier")}),
         ]
     )
+    if str(config.test_mode or "").strip().upper() == _CLOSE_TEST_MODE:
+        exact_quantity = _exact_contract_position_quantity(positions_snapshot=positions, contract_report=contract_report)
+        if exact_quantity != 1.0:
+            raise IbkrManualPaperSubmitError(
+                "Manual paper close test requires an exact current long MGC position quantity of 1.0 before preview."
+            )
+        audit_events.append(
+            _audit_row(
+                "exact_long_position_confirmed",
+                config=config,
+                detail="Exact long MGC position confirmed before close preview.",
+                extra={"quantity": exact_quantity},
+            )
+        )
     return {
         "selected_account_id": selected_account_id,
         "connection_check": {
@@ -2409,6 +2542,47 @@ def _build_fill_verification_payload(
     }
 
 
+def _verify_close_position_flat(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    runtime: _SubmitRuntime,
+    selected_account_id: str,
+    sleep_fn: Callable[[float], None],
+    contract_report: dict[str, Any],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(float(config.post_approval_observation_seconds), 5.0)
+    last_positions = _not_run_snapshot("Close verification did not capture broker positions.")
+    while time.monotonic() < deadline:
+        last_positions = _refresh_positions_snapshot(
+            runtime=runtime,
+            selected_account_id=selected_account_id,
+            timeout_seconds=min(5.0, max(1.0, deadline - time.monotonic())),
+            sleep_fn=sleep_fn,
+        )
+        exact_quantity = _exact_contract_position_quantity(
+            positions_snapshot=last_positions,
+            contract_report=contract_report,
+        )
+        if exact_quantity in (None, 0.0):
+            return {
+                "verified": True,
+                "detail": "Broker position truth verified that the exact MGC position is flat after the close fill.",
+                "positions_after_close_fill": last_positions,
+                "exact_position_quantity": exact_quantity,
+            }
+        sleep_fn(0.25)
+    exact_quantity = _exact_contract_position_quantity(
+        positions_snapshot=last_positions,
+        contract_report=contract_report,
+    )
+    return {
+        "verified": False,
+        "detail": "Broker position truth did not verify the exact MGC position as flat within the allowed close-verification window.",
+        "positions_after_close_fill": last_positions,
+        "exact_position_quantity": exact_quantity,
+    }
+
+
 def _execute_fill_test_lifecycle(
     *,
     config: IbkrManualPaperSubmitConfig,
@@ -2419,6 +2593,7 @@ def _execute_fill_test_lifecycle(
     order_id: int,
     requested_order: dict[str, Any],
     perm_id: int | None,
+    contract_report: dict[str, Any],
 ) -> dict[str, Any]:
     observation_window_seconds = max(float(config.fill_timeout_seconds), float(config.post_approval_observation_seconds))
     deadline = time.monotonic() + observation_window_seconds
@@ -2494,6 +2669,46 @@ def _execute_fill_test_lifecycle(
             completed_order_rows=last_completed_order_rows,
         )
         if fill_verification["verified"]:
+            normalized_mode = str(config.test_mode or "").strip().upper()
+            if normalized_mode == _CLOSE_TEST_MODE:
+                close_position_verification = _verify_close_position_flat(
+                    config=config,
+                    runtime=runtime,
+                    selected_account_id=selected_account_id,
+                    sleep_fn=sleep_fn,
+                    contract_report=contract_report,
+                )
+                _record_audit(
+                    audit_events,
+                    event_type="close_position_verification_completed",
+                    config=config,
+                    classification=None,
+                    detail=str(close_position_verification.get("detail") or ""),
+                    extra={
+                        "order_id": order_id,
+                        "perm_id": effective_perm_id,
+                        "verified": bool(close_position_verification.get("verified")),
+                        "exact_position_quantity": close_position_verification.get("exact_position_quantity"),
+                    },
+                )
+                return {
+                    "status": "filled_flat" if close_position_verification.get("verified") else "close_position_not_flat",
+                    "detail": (
+                        "Submitted one manual paper MGC close order, verified the SELL fill through broker truth, and reconciled the exact position flat."
+                        if close_position_verification.get("verified")
+                        else str(close_position_verification.get("detail") or "Close fill verified, but exact flat position could not be confirmed.")
+                    ),
+                    "submitted_order_id": order_id,
+                    "submitted_perm_id": effective_perm_id,
+                    "open_order_after_submit": last_open_orders,
+                    "open_order_after_cancel": _not_run_snapshot("Cancel was not needed because the close order filled."),
+                    "latest_order_status": latest_status,
+                    "fill_verification": fill_verification,
+                    "close_position_verification": close_position_verification,
+                    "positions_after_submit": close_position_verification.get("positions_after_close_fill") or last_positions,
+                    "executions_after_submit": last_execution_rows,
+                    "completed_orders_after_submit": last_completed_order_rows,
+                }
             _record_audit(
                 audit_events,
                 event_type="fill_verified",
@@ -2671,7 +2886,7 @@ def _execute_submit_cancel_lifecycle(
             detail="Operator approved the TWS dialog. Broker open-order verification is starting now.",
             extra={"order_id": order_id},
         )
-        if str(config.test_mode or "").strip().upper() == _FILL_TEST_MODE:
+        if str(config.test_mode or "").strip().upper() in {_FILL_TEST_MODE, _CLOSE_TEST_MODE}:
             return {
                 **_execute_fill_test_lifecycle(
                     config=config,
@@ -2682,6 +2897,7 @@ def _execute_submit_cancel_lifecycle(
                     order_id=order_id,
                     requested_order=requested_order,
                     perm_id=None,
+                    contract_report=context["contract_report"],
                 ),
                 "manual_confirmation": manual_confirmation,
             }
@@ -3267,6 +3483,23 @@ def _classify_submit_lifecycle(test_mode: str, status: str) -> str:
         }:
             return "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW"
         return _blocked_classification_for_mode(test_mode)
+    if normalized_mode == _CLOSE_TEST_MODE:
+        if status == "filled_flat":
+            return "PAPER_CLOSE_FILLED_FLAT"
+        if status in {"rejected", "manual_confirmation_rejected_no_order", "manual_confirmation_rejected_order_cancelled"}:
+            return "PAPER_CLOSE_REJECTED"
+        if status in {"fill_timeout_cancelled", "partial_fill_cancelled", "manual_confirmation_timeout_order_cancelled"}:
+            return "PAPER_CLOSE_NOT_FILLED_CANCELLED"
+        if status in {
+            "close_position_not_flat",
+            "submit_verification_failed",
+            "cancel_verification_failed",
+            "approval_invalidated",
+            "manual_confirmation_timeout",
+            "manual_confirmation_unavailable",
+        }:
+            return "PAPER_CLOSE_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW"
+        return _blocked_classification_for_mode(test_mode)
     if status == "passed":
         return _passed_classification_for_mode(test_mode)
     if status in {
@@ -3295,6 +3528,8 @@ def _extra_artifacts_from_lifecycle(lifecycle_result: dict[str, Any]) -> dict[st
         payload["completed_orders_after_submit"] = lifecycle_result.get("completed_orders_after_submit")
     if lifecycle_result.get("fill_verification") is not None:
         payload["fill_verification"] = lifecycle_result.get("fill_verification")
+    if lifecycle_result.get("close_position_verification") is not None:
+        payload["close_position_verification"] = lifecycle_result.get("close_position_verification")
     return payload
 
 
