@@ -114,8 +114,6 @@ def run_ibkr_paper_strategy_governance(
         identity.identity_id: identity.lane_id
         for identity in shared_strategy_identities()
     }
-    global_monitor_owner = str(monitor_status.get("strategy_id") or "").strip()
-
     strategy_rows: list[dict[str, Any]] = []
     pause_rows: list[dict[str, Any]] = []
     seen_lane_ids: set[str] = set()
@@ -133,7 +131,7 @@ def run_ibkr_paper_strategy_governance(
             monitor_status=monitor_status,
             trade_stats=trade_stats_by_lane.get(str(inventory_row.get("strategy_id") or ""), {}),
             shared_strategy_id=shared_identity_map.get(str(inventory_row.get("strategy_id") or "")),
-            global_monitor_owner=global_monitor_owner,
+            global_monitor_owner="",
         )
         strategy_rows.append(row)
         if list(row.get("pause_reasons") or []):
@@ -172,7 +170,7 @@ def run_ibkr_paper_strategy_governance(
             monitor_status=monitor_status,
             trade_stats=trade_stats_by_lane.get(synthetic_lane_id, {}),
             shared_strategy_id=bridge_strategy_id,
-            global_monitor_owner=global_monitor_owner,
+            global_monitor_owner="",
         )
         strategy_rows.append(row)
         seen_lane_ids.add(synthetic_lane_id)
@@ -404,8 +402,6 @@ def _build_governance_row(
     if "broker_ledger_mismatch" in inventory_blockers:
         pause_reasons.append("broker_ledger_mismatch")
         reconciliation_error_count += 1
-    if instrument in _SUPPORTED_EXECUTABLE_INSTRUMENTS and current_quantity > 0.0 and lane_id != global_monitor_owner and bridge_strategy_id != global_monitor_owner:
-        submit_block_reasons.append("conflicting_owned_position_under_other_strategy")
     if bool(monitor_status.get("stale")):
         submit_block_reasons.append("paper_monitor_stale")
     if str(monitor_status.get("health_classification") or "").upper() != "HEALTHY":

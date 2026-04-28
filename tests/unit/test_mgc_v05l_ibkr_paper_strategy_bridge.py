@@ -48,6 +48,66 @@ def _healthy_lane_governance() -> dict[str, object]:
     }
 
 
+def _healthy_exposure() -> dict[str, object]:
+    return {
+        "classification": "PAPER_EXPOSURE_ATTRIBUTION_READY",
+        "submit_allowed": True,
+        "block_reasons": [],
+        "detail": "Exposure attribution allows submit.",
+    }
+
+
+def _write_runtime_files(
+    tmp_path: Path,
+    *,
+    monitor_status: dict[str, object] | None = None,
+    governance_status: dict[str, object] | None = None,
+    ledger_positions: list[dict[str, object]] | None = None,
+) -> None:
+    var_dir = tmp_path / "var"
+    var_dir.mkdir(parents=True, exist_ok=True)
+    (var_dir / "paper_strategy_monitor_runtime_status.json").write_text(
+        json.dumps(
+            monitor_status
+            or {
+                "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+                "monitor_running": True,
+                "submit_allowed": True,
+                "health_classification": "HEALTHY",
+                "account_id": "DUM882026",
+                "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+                "block_reasons": [],
+                "last_successful_broker_refresh": "2999-01-01T00:00:00+00:00",
+                "freshness_window_seconds": 60.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (var_dir / "per_strategy_paper_status.json").write_text(
+        json.dumps(
+            governance_status
+            or {
+                "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+                "submit_allowed": True,
+                "block_reasons": [],
+                "selected_strategy": {
+                    "strategy_id": "atp_companion_v1_asia_us",
+                    "bridge_strategy_id": "ATP_COMPANION_V1_ASIA_US",
+                    "strategy_status": "PROBATION_ACTIVE",
+                    "submit_allowed": True,
+                    "submit_block_reasons": [],
+                },
+                "strategies": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (var_dir / "paper_strategy_position_ledger.json").write_text(
+        json.dumps({"positions": ledger_positions or [], "orphan_positions": []}),
+        encoding="utf-8",
+    )
+
+
 def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfig:
     payload = {
         "repo_root": tmp_path,
@@ -143,6 +203,7 @@ def test_ported_gc_lane_passes_static_submit_gate_with_mgc_execution_proxy(tmp_p
             "block_reasons": [],
         },
         governance_status=_healthy_lane_governance(),
+        exposure_status=_healthy_exposure(),
     )
 
     assert next(row for row in checks if row["name"] == "strategy_allowlist")["passed"] is True
@@ -220,6 +281,7 @@ def test_preflight_blocks_when_monitor_runtime_is_missing(tmp_path: Path) -> Non
         caller_gate={"passed": True, "detail": "manual cli"},
         monitor_status={},
         governance_status={},
+        exposure_status={},
     )
 
     failure = next(row for row in checks if row["name"] == "paper_strategy_monitor_runtime_present")
@@ -262,6 +324,7 @@ def test_preflight_passes_healthy_monitor_gate(tmp_path: Path) -> None:
             "block_reasons": [],
         },
         governance_status=_healthy_governance(),
+        exposure_status=_healthy_exposure(),
     )
 
     assert all(
@@ -307,6 +370,7 @@ def test_preflight_blocks_when_monitor_contract_mismatches(tmp_path: Path) -> No
             "block_reasons": [],
         },
         governance_status=_healthy_governance(),
+        exposure_status=_healthy_exposure(),
     )
 
     failure = next(row for row in checks if row["name"] == "paper_strategy_monitor_contract_match")
@@ -360,6 +424,7 @@ def test_preflight_blocks_when_governance_status_is_paused(tmp_path: Path) -> No
                 "submit_block_reasons": ["paused"],
             },
         },
+        exposure_status=_healthy_exposure(),
     )
 
     failure = next(row for row in checks if row["name"] == "paper_strategy_governance_status_allowed")
@@ -400,3 +465,35 @@ def test_write_artifacts_and_markdown(tmp_path: Path) -> None:
     assert "PAPER_STRATEGY_BRIDGE_READY" in markdown
     assert (tmp_path / "per_strategy_paper_status_summary.json").exists()
     assert (tmp_path / "ibkr_paper_strategy_bridge_audit.jsonl").exists()
+
+
+def test_submit_blocks_when_exposure_gate_rejects_duplicate_strategy_buy(tmp_path: Path) -> None:
+    _write_runtime_files(
+        tmp_path,
+        ledger_positions=[
+            {
+                "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+                "symbol": "MGC",
+                "contract_month": "202606",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "local_symbol": "MGCM6",
+                "quantity": 1.0,
+                "side": "LONG",
+                "state": "OPEN",
+            }
+        ],
+    )
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            submit=True,
+            manual_frozen_preview_path=tmp_path / "preview.json",
+            approval_digest="digest",
+            approval_phrase="phrase",
+        )
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
+    assert "duplicate_strategy_entry_while_position_open" in json.dumps(artifacts.report)

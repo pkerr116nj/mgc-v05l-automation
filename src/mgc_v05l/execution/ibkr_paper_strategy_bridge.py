@@ -36,6 +36,7 @@ from .ibkr_paper_order_preview import (
     _FORBIDDEN_CALLER_SUBSTRINGS,
     evaluate_paper_preview_environment_lock,
 )
+from .ibkr_paper_strategy_exposure import evaluate_paper_strategy_exposure_gate
 from .ibkr_paper_strategy_governance import load_paper_strategy_governance_status
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from .ibkr_paper_strategy_porting import lane_submit_bridge_adapter
@@ -228,6 +229,15 @@ def run_ibkr_paper_strategy_bridge(
     caller_gate = evaluate_strategy_bridge_caller(caller_path=config.caller_path, stack_provider=stack_provider)
     monitor_status = load_paper_strategy_monitor_status(repo_root=config.repo_root)
     governance_status = load_paper_strategy_governance_status(repo_root=config.repo_root, strategy_id=config.strategy_id)
+    governance_row = dict(governance_status.get("selected_strategy") or {})
+    exposure_status = evaluate_paper_strategy_exposure_gate(
+        repo_root=config.repo_root,
+        strategy_id=config.strategy_id,
+        bridge_strategy_id=str(governance_row.get("bridge_strategy_id") or "").strip() or None,
+        action=config.action,
+        quantity=config.quantity,
+        executable_symbol=config.symbol,
+    )
     runtime: _Runtime | None = None
     _record_bridge_audit(
         audit_events,
@@ -243,6 +253,7 @@ def run_ibkr_paper_strategy_bridge(
         caller_gate=caller_gate,
         monitor_status=monitor_status,
         governance_status=governance_status,
+        exposure_status=exposure_status,
     )
     static_failures = [row for row in static_checks if row.get("blocking") and not row.get("passed")]
     if static_failures:
@@ -271,6 +282,7 @@ def run_ibkr_paper_strategy_bridge(
                 "environment_lock_check": environment_lock,
                 "paper_strategy_monitor_status": monitor_status,
                 "paper_strategy_governance_status": governance_status,
+                "paper_strategy_exposure_status": exposure_status,
                 "preflight_checks": static_checks,
                 "detail": detail,
                 "errors": [],
@@ -432,6 +444,7 @@ def run_ibkr_paper_strategy_bridge(
             environment_lock=environment_lock,
             paper_strategy_monitor_status=monitor_status,
             paper_strategy_governance_status=governance_status,
+            paper_strategy_exposure_status=exposure_status,
             account_truth=account_truth,
             selected_account_id=selected_account_id,
             positions=positions,
@@ -468,6 +481,7 @@ def run_ibkr_paper_strategy_bridge(
             "intent": intent.to_dict(),
             "paper_strategy_monitor_status": monitor_status,
             "paper_strategy_governance_status": governance_status,
+            "paper_strategy_exposure_status": exposure_status,
             "detail": str(exc),
             "errors": [] if runtime is None else list(runtime.collector.errors),
         }
@@ -513,6 +527,7 @@ def render_ibkr_paper_strategy_bridge_markdown(report: dict[str, Any]) -> str:
     monitor_status = dict(report.get("paper_strategy_monitor_status") or {})
     governance_status = dict(report.get("paper_strategy_governance_status") or {})
     governance_row = dict(governance_status.get("selected_strategy") or {})
+    exposure_status = dict(report.get("paper_strategy_exposure_status") or {})
     lines = [
         "# IBKR Paper Strategy Bridge Report",
         "",
@@ -531,6 +546,8 @@ def render_ibkr_paper_strategy_bridge_markdown(report: dict[str, Any]) -> str:
         f"- governance classification: `{governance_status.get('classification')}`",
         f"- governance strategy status: `{governance_row.get('strategy_status')}`",
         f"- governance submit allowed: `{governance_status.get('submit_allowed')}`",
+        f"- exposure gate classification: `{exposure_status.get('classification')}`",
+        f"- exposure submit allowed: `{exposure_status.get('submit_allowed')}`",
         "",
         "## Summary",
         "",
@@ -687,18 +704,18 @@ def _build_preflight_checks(
         checks.append(
             _check(
                 "position_gate_buy_to_open",
-                current_position_quantity in (None, 0.0),
                 True,
-                "BUY intents require the exact MGC position to be flat so the bridge cannot pyramid or flip a live paper position.",
+                True,
+                "BUY intents are governed by per-strategy exposure attribution; aggregate broker flat is not required when stacking is explicitly allowed.",
             )
         )
     else:
         checks.append(
             _check(
                 "position_gate_sell_to_close",
-                current_position_quantity == 1.0,
                 True,
-                "SELL intents require an exact current long MGC position quantity of 1.0 so the bridge cannot sell-to-open or flip short.",
+                True,
+                "SELL and EXIT intents are governed by per-strategy exposure attribution; aggregate broker quantity alone is not treated as ownership proof.",
             )
         )
     _record_bridge_audit(
@@ -719,6 +736,7 @@ def _build_static_preflight_checks(
     caller_gate: dict[str, Any],
     monitor_status: dict[str, Any],
     governance_status: dict[str, Any],
+    exposure_status: dict[str, Any],
 ) -> list[dict[str, Any]]:
     monitor_exact_contract = dict(monitor_status.get("exact_contract") or {})
     monitor_health = str(monitor_status.get("health_classification") or monitor_status.get("monitor_health") or "").strip().upper()
@@ -747,11 +765,19 @@ def _build_static_preflight_checks(
             else f"Paper strategy governance blocked submit: {', '.join(list(governance_status.get('block_reasons') or [])) or 'unknown_reason'}"
         )
     )
+    exposure_detail = str(
+        exposure_status.get("detail")
+        or (
+            "Paper strategy exposure attribution allows submit."
+            if exposure_status.get("submit_allowed")
+            else f"Paper strategy exposure attribution blocked submit: {', '.join(list(exposure_status.get('block_reasons') or [])) or 'unknown_reason'}"
+        )
+    )
     return [
         _check("manual_cli_only", caller_gate["passed"], True, caller_gate["detail"]),
         _check("paper_environment_lock", environment_lock["passed"], True, str(environment_lock.get("port_policy") or environment_lock.get("detail") or "Environment lock failed.")),
         _check("paper_only_intent", bool(intent.paper_only), True, "Intent must remain explicitly paper-only."),
-        _check("strategy_allowlist", intent.strategy_id in _SUPPORTED_STRATEGY_IDS, True, "Only the ATP Companion baseline and explicitly ported paper strategy lane identities are allowed in the paper bridge."),
+        _check("strategy_allowlist", intent.strategy_id in _SUPPORTED_STRATEGY_IDS or lane_adapter is not None, True, "Only the ATP Companion baseline and explicitly ported paper strategy lane identities are allowed in the paper bridge."),
         _check("executable_contract_whitelist", intent.symbol == _EXPECTED_SYMBOL, True, "Phase 1 executable contract is MGC only, even when the source strategy lane is GC."),
         _check("contract_month_lock", intent.contract_month == _EXPECTED_CONTRACT_MONTH, True, "Only MGC 202606 is allowed in the paper bridge."),
         _check(
@@ -835,6 +861,12 @@ def _build_static_preflight_checks(
             (not config.submit) or bool(governance_status.get("submit_allowed")),
             True,
             governance_detail,
+        ),
+        _check(
+            "paper_strategy_exposure_gate",
+            (not config.submit) or bool(exposure_status.get("submit_allowed")),
+            True,
+            exposure_detail,
         ),
     ]
 
@@ -928,6 +960,7 @@ def _build_report(
     environment_lock: dict[str, Any],
     paper_strategy_monitor_status: dict[str, Any],
     paper_strategy_governance_status: dict[str, Any],
+    paper_strategy_exposure_status: dict[str, Any],
     account_truth: dict[str, Any],
     selected_account_id: str,
     positions: dict[str, Any],
@@ -960,6 +993,7 @@ def _build_report(
         "environment_lock_check": environment_lock,
         "paper_strategy_monitor_status": paper_strategy_monitor_status,
         "paper_strategy_governance_status": paper_strategy_governance_status,
+        "paper_strategy_exposure_status": paper_strategy_exposure_status,
         "account_truth": account_truth,
         "positions": positions,
         "open_orders": open_orders,
