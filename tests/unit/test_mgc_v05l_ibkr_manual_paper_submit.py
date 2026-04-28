@@ -6,8 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mgc_v05l.execution.ibkr_manual_paper_submit import (
+    _FILL_TEST_MODE,
     _MANUAL_CONFIRMATION_WAIT_STATE,
     _execute_submit_cancel_lifecycle,
+    artifact_stem_for_test_mode,
     IbkrManualPaperSubmitArtifacts,
     IbkrManualPaperSubmitConfig,
     build_submit_approval_phrase,
@@ -30,17 +32,24 @@ def test_preview_only_default_does_not_submit(monkeypatch) -> None:
     assert artifacts.report["submit_cancel_lifecycle"]["status"] == "preview_only"
 
 
-def test_submit_cannot_occur_without_exact_digest(monkeypatch) -> None:
-    _patch_harness_context(monkeypatch)
+def test_submit_cannot_occur_without_exact_digest(monkeypatch, tmp_path: Path) -> None:
+    _, frozen_path = _preview_bundle(monkeypatch, tmp_path)
     expected_phrase = build_submit_approval_phrase(
         selected_account_id="DUM882026",
         digest="wrong-digest",
         requested_order={"symbol": "MGC", "expiry": "202606", "action": "BUY", "quantity": 1.0, "order_type": "LMT", "limit_price": 4639.7, "time_in_force": "DAY"},
         delayed_quote_warning="Live market data is unavailable in this paper session. The preview uses delayed data only.",
+        test_mode="PAPER_RESTING_TEST",
     )
 
     artifacts = run_ibkr_manual_paper_submit_test(
-        config=_config(submit=True, approval_digest="wrong-digest", approval_phrase=expected_phrase),
+        config=_config(
+            submit=True,
+            approval_digest="wrong-digest",
+            approval_phrase=expected_phrase,
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+        ),
         stack_provider=_manual_stack,
     )
 
@@ -48,11 +57,17 @@ def test_submit_cannot_occur_without_exact_digest(monkeypatch) -> None:
     assert artifacts.report["submit_cancel_lifecycle"]["status"] == "approval_blocked"
 
 
-def test_submit_cannot_occur_without_typed_phrase(monkeypatch) -> None:
-    _patch_harness_context(monkeypatch)
+def test_submit_cannot_occur_without_typed_phrase(monkeypatch, tmp_path: Path) -> None:
+    _, frozen_path = _preview_bundle(monkeypatch, tmp_path)
 
     artifacts = run_ibkr_manual_paper_submit_test(
-        config=_config(submit=True, approval_digest="whatever", approval_phrase=None),
+        config=_config(
+            submit=True,
+            approval_digest="whatever",
+            approval_phrase=None,
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+        ),
         stack_provider=_manual_stack,
     )
 
@@ -60,11 +75,17 @@ def test_submit_cannot_occur_without_typed_phrase(monkeypatch) -> None:
     assert artifacts.report["submit_cancel_lifecycle"]["status"] == "approval_blocked"
 
 
-def test_digest_mismatch_fails_closed(monkeypatch) -> None:
-    _patch_harness_context(monkeypatch)
+def test_digest_mismatch_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    _, frozen_path = _preview_bundle(monkeypatch, tmp_path)
 
     artifacts = run_ibkr_manual_paper_submit_test(
-        config=_config(submit=True, approval_digest="mismatch", approval_phrase="mismatch"),
+        config=_config(
+            submit=True,
+            approval_digest="mismatch",
+            approval_phrase="mismatch",
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+        ),
         stack_provider=_manual_stack,
     )
 
@@ -416,6 +437,170 @@ def test_audit_includes_manual_confirmation_events(monkeypatch) -> None:
     assert "manual_confirmation_response_recorded" in _event_types(audit_events)
 
 
+def test_frozen_preview_payload_does_not_change_on_submit(monkeypatch, tmp_path: Path) -> None:
+    preview_artifacts, frozen_path = _preview_bundle(monkeypatch, tmp_path, test_mode=_FILL_TEST_MODE, limit_price=None)
+    frozen_bundle = json.loads(frozen_path.read_text(encoding="utf-8"))
+    captured: dict[str, object] = {}
+
+    def _fake_lifecycle(**kwargs):
+        captured["preview_payload"] = kwargs["preview_payload"]
+        captured["requested_order"] = kwargs["requested_order"]
+        return {
+            "status": "filled",
+            "detail": "filled",
+            "open_order_after_submit": {"open_orders": []},
+            "open_order_after_cancel": {"status": "not_run"},
+            "latest_order_status": {"status": "Filled", "order_id": 1},
+            "fill_verification": {"verified": True},
+            "executions_after_submit": [],
+            "completed_orders_after_submit": [],
+            "positions_after_submit": {"position_count": 0},
+        }
+
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._execute_submit_cancel_lifecycle",
+        _fake_lifecycle,
+    )
+
+    submit_artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=True,
+            approval_digest=str(preview_artifacts.report["preview"]["preview_digest"]),
+            approval_phrase=str(preview_artifacts.report["preview"]["expected_approval_phrase"]),
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+            test_mode=_FILL_TEST_MODE,
+            limit_price=None,
+        ),
+        stack_provider=_manual_stack,
+    )
+
+    assert submit_artifacts.classification == "IBKR_MANUAL_PAPER_FILL_TEST_PASSED"
+    assert captured["preview_payload"] == frozen_bundle["preview_payload"]
+    assert captured["requested_order"] == frozen_bundle["requested_order"]
+    assert json.loads(frozen_path.read_text(encoding="utf-8")) == frozen_bundle
+
+
+def test_stale_approval_fails_if_preview_payload_changes(monkeypatch, tmp_path: Path) -> None:
+    preview_artifacts, frozen_path = _preview_bundle(monkeypatch, tmp_path, test_mode=_FILL_TEST_MODE, limit_price=None)
+    original_digest = str(preview_artifacts.report["preview"]["preview_digest"])
+    original_phrase = str(preview_artifacts.report["preview"]["expected_approval_phrase"])
+    frozen_bundle = json.loads(frozen_path.read_text(encoding="utf-8"))
+    frozen_bundle["requested_order"]["limit_price"] = 4640.2
+    frozen_bundle["preview_payload"]["hypothetical_order"]["limit_price"] = 4640.2
+    from mgc_v05l.execution.ibkr_paper_order_preview import build_preview_digest as _build_preview_digest
+
+    new_digest = _build_preview_digest(frozen_bundle["preview_payload"])
+    frozen_bundle["preview_digest"] = new_digest
+    frozen_bundle["expected_approval_phrase"] = build_submit_approval_phrase(
+        selected_account_id="DUM882026",
+        digest=new_digest,
+        requested_order=frozen_bundle["requested_order"],
+        delayed_quote_warning="Live market data is unavailable in this paper session. The preview uses delayed data only.",
+        test_mode=_FILL_TEST_MODE,
+    )
+    frozen_path.write_text(json.dumps(frozen_bundle, indent=2, sort_keys=True), encoding="utf-8")
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=True,
+            approval_digest=original_digest,
+            approval_phrase=original_phrase,
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+            test_mode=_FILL_TEST_MODE,
+            limit_price=None,
+        ),
+        stack_provider=_manual_stack,
+    )
+
+    assert artifacts.classification == "IBKR_MANUAL_PAPER_FILL_TEST_BLOCKED"
+    assert artifacts.report["submit_cancel_lifecycle"]["status"] == "approval_blocked"
+
+
+def test_paper_fill_test_uses_ask_side_marketable_limit_for_buy(monkeypatch, tmp_path: Path) -> None:
+    preview_artifacts, frozen_path = _preview_bundle(monkeypatch, tmp_path, test_mode=_FILL_TEST_MODE, limit_price=None)
+    preview = preview_artifacts.report["preview"]
+
+    assert preview_artifacts.classification == "IBKR_MANUAL_PAPER_FILL_TEST_PARTIAL"
+    assert preview["reference_price_source"] == "ask_price"
+    assert preview["limit_price"] == 4640.1
+    assert round(float(preview["distance_from_quote"]), 4) == 0.1
+    assert preview["pricing_label"] == "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER"
+    assert preview["intended_to_fill"] is True
+    assert artifact_stem_for_test_mode(_FILL_TEST_MODE) in str(frozen_path)
+
+
+def test_fill_timeout_invokes_cancel_path(monkeypatch) -> None:
+    runtime = _fake_runtime(latest_order_status={"status": "Submitted", "order_id": 1, "perm_id": 999001})
+    refresh_rows = [
+        {
+            "provider_snapshot": {},
+            "positions": {"position_count": 0},
+            "open_orders": {"selected_account_id": "DUM882026", "open_order_count": 1, "open_orders": [{"broker_order_id": 1, "perm_id": 999001, "status": "Submitted"}]},
+            "executions": [],
+            "completed_orders": [],
+        }
+    ]
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._refresh_execution_truth",
+        lambda **kwargs: refresh_rows[0],
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._refresh_open_orders_snapshot",
+        lambda **kwargs: refresh_rows[0]["open_orders"],
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._snapshot_digest",
+        lambda snapshot: "baseline",
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._cancel_and_verify_visible_order",
+        lambda **kwargs: (
+            kwargs["audit_events"].append({"event_type": "cancel_requested"}),
+            kwargs["audit_events"].append({"event_type": "cancel_verified"}),
+            {
+                "detail": "Cancelled successfully.",
+                "open_order_after_submit": kwargs["after_submit"],
+                "open_order_after_cancel": {"selected_account_id": "DUM882026", "open_order_count": 0, "open_orders": []},
+                "latest_order_status": {"status": "Cancelled", "perm_id": 999001},
+                "cancel_verification": {"verified": True, "final_status": "Cancelled", "detail": "Cancel verified."},
+            },
+        )[-1],
+    )
+
+    audit_events: list[dict[str, object]] = []
+    result = _execute_submit_cancel_lifecycle(
+        config=_config(
+            submit=True,
+            approval_digest="digest",
+            approval_phrase="phrase",
+            test_mode=_FILL_TEST_MODE,
+            limit_price=None,
+            fill_timeout_seconds=0.01,
+        ),
+        runtime=runtime,
+        context=_context(),
+        requested_order={**_requested_order(), "limit_price": 4640.1},
+        sleep_fn=lambda _: None,
+        audit_events=audit_events,
+        preview_payload={},
+        preview_digest="digest",
+        manual_confirmation_fn=lambda **kwargs: {
+            "state": _MANUAL_CONFIRMATION_WAIT_STATE,
+            "operator_outcome": "approved",
+            "response_text": "approved",
+            "detail": "Operator approved the dialog.",
+            "timed_out": False,
+        },
+    )
+
+    assert result["status"] == "fill_timeout_cancelled"
+    assert "fill_verification_timeout" in _event_types(audit_events)
+    assert "cancel_requested" in _event_types(audit_events)
+    assert "cancel_verified" in _event_types(audit_events)
+
+
 def _patch_harness_context(monkeypatch, context_override: dict[str, object] | None = None) -> None:
     monkeypatch.setattr(
         "mgc_v05l.execution.ibkr_manual_paper_submit._build_runtime",
@@ -522,6 +707,10 @@ def _config(
     submit: bool = False,
     approval_digest: str | None = None,
     approval_phrase: str | None = None,
+    test_mode: str = "PAPER_RESTING_TEST",
+    output_dir: Path | None = None,
+    frozen_preview_path: Path | None = None,
+    fill_timeout_seconds: float = 8.0,
 ) -> IbkrManualPaperSubmitConfig:
     return IbkrManualPaperSubmitConfig(
         repo_root=Path("."),
@@ -537,11 +726,38 @@ def _config(
         order_type=order_type,
         limit_price=limit_price,
         time_in_force="DAY",
+        test_mode=test_mode,
+        fill_timeout_seconds=fill_timeout_seconds,
         caller_path=caller_path,
         submit=submit,
         approval_digest=approval_digest,
         approval_phrase=approval_phrase,
+        output_dir=output_dir,
+        frozen_preview_path=frozen_preview_path,
     )
+
+
+def _preview_bundle(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    test_mode: str = "PAPER_RESTING_TEST",
+    limit_price: float | None = 4639.7,
+) -> tuple[IbkrManualPaperSubmitArtifacts, Path]:
+    _patch_harness_context(monkeypatch)
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=False,
+            test_mode=test_mode,
+            limit_price=limit_price,
+            output_dir=tmp_path,
+        ),
+        stack_provider=_manual_stack,
+    )
+    write_ibkr_manual_paper_submit_artifacts(output_dir=tmp_path, artifacts=artifacts)
+    frozen_path = tmp_path / f"{artifact_stem_for_test_mode(test_mode)}_frozen_preview.json"
+    assert frozen_path.exists()
+    return artifacts, frozen_path
 
 
 def _manual_stack() -> list[SimpleNamespace]:

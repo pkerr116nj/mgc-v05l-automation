@@ -1,4 +1,4 @@
-"""Manual-only IBKR paper submit/cancel test harness for one MGC limit order."""
+"""Manual-only IBKR paper order harness for controlled paper plumbing tests."""
 
 from __future__ import annotations
 
@@ -72,6 +72,15 @@ _FAILED_ORDER_STATUS = {"Inactive"}
 _MANUAL_CONFIRMATION_WAIT_STATE = "SUBMIT_SENT_AWAITING_TWS_MANUAL_CONFIRMATION"
 _DEFAULT_DELAYED_QUOTE_MAX_AGE_SECONDS = 30.0
 _DEFAULT_NEAR_MARKET_MAX_DISTANCE_TICKS = 50.0
+_DEFAULT_FILL_LIMIT_OFFSET_TICKS = 1.0
+_DEFAULT_FILL_TIMEOUT_SECONDS = 8.0
+_TICK_COMPARISON_EPSILON = 1e-9
+_RESTING_TEST_MODE = "PAPER_RESTING_TEST"
+_FILL_TEST_MODE = "PAPER_FILL_TEST"
+_MARKETABLE_LIMIT_LABEL = "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER"
+_NON_MARKETABLE_LIMIT_LABEL = "NEAR_MARKET_NON_MARKETABLE_LIMIT"
+_FILLED_ORDER_STATUS = {"Filled"}
+_PARTIAL_FILL_STATUS = {"PartiallyFilled"}
 
 
 class IbkrManualPaperSubmitError(RuntimeError):
@@ -93,14 +102,21 @@ class IbkrManualPaperSubmitConfig:
     order_type: str = _EXPECTED_ORDER_TYPE
     limit_price: float | None = None
     time_in_force: str = _EXPECTED_TIF
+    test_mode: str = _RESTING_TEST_MODE
     timeout_seconds: float = 15.0
+    fill_timeout_seconds: float = _DEFAULT_FILL_TIMEOUT_SECONDS
     manual_confirmation_timeout_seconds: float = 90.0
     delayed_quote_max_age_seconds: float = _DEFAULT_DELAYED_QUOTE_MAX_AGE_SECONDS
     near_market_max_distance_ticks: float = _DEFAULT_NEAR_MARKET_MAX_DISTANCE_TICKS
+    fill_limit_offset_ticks: float = _DEFAULT_FILL_LIMIT_OFFSET_TICKS
     caller_path: str = "manual_cli"
     submit: bool = False
     approval_digest: str | None = None
     approval_phrase: str | None = None
+    output_dir: Path | None = None
+    frozen_preview_path: Path | None = None
+    diagnostic_dry_run: bool = False
+    post_approval_observation_seconds: float = 15.0
 
 
 @dataclass(frozen=True)
@@ -111,10 +127,13 @@ class IbkrManualPaperSubmitArtifacts:
     open_order_before: dict[str, Any]
     open_order_after_submit: dict[str, Any]
     open_order_after_cancel: dict[str, Any]
+    artifact_stem: str = "ibkr_manual_paper_submit"
+    extra_artifacts: dict[str, Any] | None = None
+    callback_timeline: list[dict[str, Any]] | None = None
 
     @property
     def exit_code(self) -> int:
-        return 0 if self.classification != "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED" else 1
+        return 0 if not str(self.classification or "").endswith("_BLOCKED") else 1
 
 
 @dataclass
@@ -132,6 +151,19 @@ class IbkrManualPaperSubmitCollector(IbkrReadOnlyProbeCollector):
         super().__init__(client)
         self.order_status_rows: dict[int, list[dict[str, Any]]] = {}
         self._order_status_ready: dict[int, threading.Event] = {}
+        self.completed_orders_ready = threading.Event()
+        self._executions_ready: dict[int, threading.Event] = {}
+        self.callback_timeline: list[dict[str, Any]] = []
+
+    def record_callback(self, callback_name: str, **payload: Any) -> None:
+        self.callback_timeline.append(
+            {
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "source": "callback",
+                "callback_name": str(callback_name),
+                **dict(payload),
+            }
+        )
 
     def order_status_event(self, order_id: int) -> threading.Event:
         return self._order_status_ready.setdefault(int(order_id), threading.Event())
@@ -208,6 +240,74 @@ class IbkrManualPaperSubmitCollector(IbkrReadOnlyProbeCollector):
     def latest_order_status(self, order_id: int) -> dict[str, Any] | None:
         rows = self.order_status_rows.get(int(order_id), [])
         return rows[-1] if rows else None
+
+    def executions_event(self, request_id: int) -> threading.Event:
+        return self._executions_ready.setdefault(int(request_id), threading.Event())
+
+    def reset_completed_orders_ready(self) -> None:
+        self.completed_orders_ready.clear()
+
+    def reset_executions_ready(self, request_id: int) -> None:
+        self.executions_event(int(request_id)).clear()
+
+    def completed_order(
+        self,
+        *,
+        account_id: str,
+        broker_order_id: int,
+        client_id: int,
+        perm_id: int | None,
+        contract: dict[str, Any],
+        status: str,
+        quantity: str | int | float,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        self._adapter.completed_order(
+            account_id=account_id,
+            broker_order_id=broker_order_id,
+            client_id=client_id,
+            perm_id=perm_id,
+            contract=contract,
+            status=status,
+            quantity=quantity,
+            completed_at=occurred_at,
+        )
+
+    def completed_orders_end(self, *, occurred_at: datetime | None = None) -> None:
+        self._adapter.completed_orders_end(occurred_at=occurred_at)
+        self.completed_orders_ready.set()
+
+    def exec_details(
+        self,
+        *,
+        request_id: int,
+        account_id: str,
+        execution_id: str,
+        broker_order_id: int | None,
+        client_id: int | None,
+        perm_id: int | None,
+        contract: dict[str, Any],
+        side: str | None,
+        quantity: str | int | float,
+        price: str | int | float | None,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        self._adapter.exec_details(
+            account_id=account_id,
+            execution_id=execution_id,
+            broker_order_id=broker_order_id,
+            client_id=client_id,
+            perm_id=perm_id,
+            contract=contract,
+            side=side,
+            quantity=quantity,
+            price=price,
+            executed_at=occurred_at,
+        )
+
+    def exec_details_end(self, *, request_id: int, occurred_at: datetime | None = None) -> None:
+        self._adapter.exec_details_end(occurred_at=occurred_at)
+        self.executions_event(int(request_id)).set()
 
 
 class IbkrManualPaperSubmitTransport:
@@ -299,6 +399,20 @@ class IbkrManualPaperSubmitTransport:
     def req_all_open_orders(self) -> None:
         self._ensure_bridge().reqAllOpenOrders()
 
+    def req_open_orders(self) -> None:
+        self._ensure_bridge().reqOpenOrders()
+
+    def req_completed_orders(self, *, api_only: bool) -> None:
+        self._ensure_bridge().reqCompletedOrders(bool(api_only))
+
+    def req_executions(self, *, request_id: int) -> None:
+        execution_module = self._module_loader("ibapi.execution")
+        filter_cls = getattr(execution_module, "ExecutionFilter", None)
+        if filter_cls is None:
+            raise IbkrManualPaperSubmitError("Installed ibapi package is missing ExecutionFilter.")
+        execution_filter = filter_cls()
+        self._ensure_bridge().reqExecutions(int(request_id), execution_filter)
+
     def req_contract_details(self, *, request_id: int, contract: IbkrQualifiedContract) -> None:
         self._ensure_bridge().reqContractDetails(int(request_id), self._raw_contract(contract))
 
@@ -389,19 +503,46 @@ def run_ibkr_manual_paper_submit_test(
 ) -> IbkrManualPaperSubmitArtifacts:
     started_at = datetime.now(timezone.utc)
     audit_events: list[dict[str, Any]] = []
+    frozen_preview_bundle: dict[str, Any] | None = None
+    frozen_preview_path = frozen_preview_path_for_config(config)
     requested_order = _normalize_requested_order(config)
+    if config.submit:
+        if frozen_preview_path is None:
+            detail = "Submit requires a frozen preview bundle path. Generate a preview first and re-run submit with the saved frozen preview payload."
+            return _blocked_artifacts(
+                config=config,
+                started_at=started_at,
+                requested_order=requested_order,
+                caller_check=evaluate_manual_preview_caller(caller_path=config.caller_path, stack_provider=stack_provider),
+                environment_lock=evaluate_paper_preview_environment_lock(
+                    mode=config.mode,
+                    host=config.host,
+                    port=config.port,
+                ),
+                guardrail_checks=[],
+                audit_events=audit_events,
+                detail=detail,
+            )
+        frozen_preview_bundle = _load_frozen_preview_bundle(frozen_preview_path)
+        requested_order = _normalize_requested_order_from_bundle(frozen_preview_bundle)
     caller_check = evaluate_manual_preview_caller(caller_path=config.caller_path, stack_provider=stack_provider)
     environment_lock = evaluate_paper_preview_environment_lock(
         mode=config.mode,
         host=config.host,
         port=config.port,
     )
-    input_checks = _submit_input_guardrails(requested_order)
+    input_checks = _submit_input_guardrails(
+        requested_order,
+        test_mode=config.test_mode,
+        require_limit_price=not (not config.submit and str(config.test_mode).upper() == _FILL_TEST_MODE),
+    )
     guardrail_checks = _preflight_guardrail_checks(
         caller_check=caller_check,
         environment_lock=environment_lock,
         input_guardrails=input_checks,
     )
+    if frozen_preview_bundle is not None:
+        guardrail_checks.extend(_frozen_preview_bundle_guardrails(config=config, frozen_preview_bundle=frozen_preview_bundle))
     _record_audit(
         audit_events,
         event_type="environment_lock_checked",
@@ -451,6 +592,7 @@ def run_ibkr_manual_paper_submit_test(
             sleep_fn=sleep_fn,
             started_at=started_at,
             requested_order=requested_order,
+            collect_quote=not config.submit,
         )
         audit_events.extend(context["audit_events"])
         guardrail_checks.extend(
@@ -464,92 +606,121 @@ def run_ibkr_manual_paper_submit_test(
                 },
             )
         )
-        pricing_context = _build_delayed_quote_pricing_context(
-            config=config,
-            requested_order=requested_order,
-            context=context,
-        )
-        guardrail_checks.extend(_delayed_quote_pricing_guardrails(pricing_context))
-        if any(check["blocking"] and not check["passed"] for check in guardrail_checks):
-            detail = _first_failed_guardrail_detail(guardrail_checks)
+        if config.submit:
+            context, requested_order, preview_payload, preview_digest, expected_phrase, pricing_context = _prepare_frozen_submit_context(
+                config=config,
+                context=context,
+                requested_order=requested_order,
+                frozen_preview_bundle=frozen_preview_bundle or {},
+            )
+        else:
+            requested_order = _resolve_requested_order_for_preview(
+                config=config,
+                requested_order=requested_order,
+                contract_report=context["contract_report"],
+                quote_context=context["quote_context"],
+            )
+            pricing_context = _build_delayed_quote_pricing_context(
+                config=config,
+                requested_order=requested_order,
+                context=context,
+            )
+            guardrail_checks.extend(_delayed_quote_pricing_guardrails(pricing_context))
+            if any(check["blocking"] and not check["passed"] for check in guardrail_checks):
+                detail = _first_failed_guardrail_detail(guardrail_checks)
+                _record_audit(
+                    audit_events,
+                    event_type="failed_closed",
+                    config=config,
+                    classification=_blocked_classification_for_mode(config.test_mode),
+                    detail=detail,
+                    extra={
+                        "quote_snapshot": pricing_context.get("quote_snapshot"),
+                        "limit_price": requested_order.get("limit_price"),
+                        "distance_from_quote": pricing_context.get("distance_from_reference_price"),
+                        "distance_ticks": pricing_context.get("distance_ticks"),
+                    },
+                )
+                report = _build_report(
+                    config=config,
+                    started_at=started_at,
+                    classification=_blocked_classification_for_mode(config.test_mode),
+                    caller_check=caller_check,
+                    environment_lock=environment_lock,
+                    context={**context, "pricing_context": pricing_context},
+                    requested_order=requested_order,
+                    guardrail_checks=guardrail_checks,
+                    preview_payload=None,
+                    preview_digest="",
+                    expected_phrase="",
+                    audit_events=audit_events,
+                    lifecycle_result={
+                        "status": "blocked",
+                        "detail": detail,
+                    },
+                    frozen_preview_bundle=None,
+                )
+                return IbkrManualPaperSubmitArtifacts(
+                    classification=_blocked_classification_for_mode(config.test_mode),
+                    report=report,
+                    audit_events=audit_events,
+                    open_order_before=context["open_orders_before"],
+                    open_order_after_submit=_not_run_snapshot("Submit did not run."),
+                    open_order_after_cancel=_not_run_snapshot("Cancel did not run."),
+                    artifact_stem=artifact_stem_for_test_mode(config.test_mode),
+                    callback_timeline=_build_callback_timeline(runtime),
+                )
+            preview_payload = _build_submit_preview_payload(
+                requested_order=requested_order,
+                context={**context, "pricing_context": pricing_context},
+                guardrail_checks=guardrail_checks,
+                test_mode=config.test_mode,
+            )
+            preview_digest = build_preview_digest(preview_payload)
+            expected_phrase = build_submit_approval_phrase(
+                selected_account_id=context["selected_account_id"],
+                digest=preview_digest,
+                requested_order=requested_order,
+                delayed_quote_warning=context["quote_context"].get("live_market_data_warning"),
+                test_mode=config.test_mode,
+            )
+            guardrail_checks.append(
+                _guardrail_check(
+                    "deterministic_preview_digest_generated",
+                    passed=bool(preview_digest),
+                    blocking=True,
+                    detail="The preview digest is a SHA-256 hash of the deterministic preview payload.",
+                )
+            )
             _record_audit(
                 audit_events,
-                event_type="failed_closed",
+                event_type="preview_generated",
                 config=config,
-                classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
-                detail=detail,
+                classification=None,
+                detail="Preview digest generated for the single-order manual paper test.",
                 extra={
+                    "account_id": context["selected_account_id"],
+                    "preview_digest": preview_digest,
+                    "quote_source_label": context["quote_context"].get("quote_source_label"),
                     "quote_snapshot": pricing_context.get("quote_snapshot"),
                     "limit_price": requested_order.get("limit_price"),
                     "distance_from_quote": pricing_context.get("distance_from_reference_price"),
                     "distance_ticks": pricing_context.get("distance_ticks"),
+                    "test_mode": config.test_mode,
                 },
             )
-            report = _build_report(
+            frozen_preview_bundle = _build_frozen_preview_bundle(
                 config=config,
-                started_at=started_at,
-                classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
-                caller_check=caller_check,
-                environment_lock=environment_lock,
-                context={**context, "pricing_context": pricing_context},
+                preview_payload=preview_payload,
+                preview_digest=preview_digest,
+                expected_phrase=expected_phrase,
                 requested_order=requested_order,
-                guardrail_checks=guardrail_checks,
-                preview_payload=None,
-                preview_digest="",
-                expected_phrase="",
-                audit_events=audit_events,
-                lifecycle_result={
-                    "status": "blocked",
-                    "detail": detail,
-                },
+                context=context,
+                pricing_context=pricing_context,
             )
-            return IbkrManualPaperSubmitArtifacts(
-                classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
-                report=report,
-                audit_events=audit_events,
-                open_order_before=context["open_orders_before"],
-                open_order_after_submit=_not_run_snapshot("Submit did not run."),
-                open_order_after_cancel=_not_run_snapshot("Cancel did not run."),
-            )
-        preview_payload = _build_submit_preview_payload(
-            requested_order=requested_order,
-            context={**context, "pricing_context": pricing_context},
-            guardrail_checks=guardrail_checks,
-        )
-        preview_digest = build_preview_digest(preview_payload)
-        expected_phrase = build_submit_approval_phrase(
-            selected_account_id=context["selected_account_id"],
-            digest=preview_digest,
-            requested_order=requested_order,
-            delayed_quote_warning=context["quote_context"].get("live_market_data_warning"),
-        )
-        guardrail_checks.append(
-            _guardrail_check(
-                "deterministic_preview_digest_generated",
-                passed=bool(preview_digest),
-                blocking=True,
-                detail="The preview digest is a SHA-256 hash of the deterministic preview payload.",
-            )
-        )
-        _record_audit(
-            audit_events,
-            event_type="preview_generated",
-            config=config,
-            classification=None,
-            detail="Preview digest generated for the single-order manual paper test.",
-            extra={
-                "account_id": context["selected_account_id"],
-                "preview_digest": preview_digest,
-                "quote_source_label": context["quote_context"].get("quote_source_label"),
-                "quote_snapshot": pricing_context.get("quote_snapshot"),
-                "limit_price": requested_order.get("limit_price"),
-                "distance_from_quote": pricing_context.get("distance_from_reference_price"),
-                "distance_ticks": pricing_context.get("distance_ticks"),
-            },
-        )
 
         if not config.submit:
-            classification = "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_PARTIAL"
+            classification = _preview_only_classification_for_mode(config.test_mode)
             report = _build_report(
                 config=config,
                 started_at=started_at,
@@ -567,6 +738,7 @@ def run_ibkr_manual_paper_submit_test(
                     "status": "preview_only",
                     "detail": "Preview-only default prevented submit because no explicit submit flags were provided.",
                 },
+                frozen_preview_bundle=frozen_preview_bundle,
             )
             return IbkrManualPaperSubmitArtifacts(
                 classification=classification,
@@ -575,6 +747,8 @@ def run_ibkr_manual_paper_submit_test(
                 open_order_before=context["open_orders_before"],
                 open_order_after_submit=_not_run_snapshot("Submit was not requested."),
                 open_order_after_cancel=_not_run_snapshot("Cancel was not requested because submit did not run."),
+                artifact_stem=artifact_stem_for_test_mode(config.test_mode),
+                callback_timeline=_build_callback_timeline(runtime),
             )
 
         approval = _validate_submit_approval(
@@ -600,7 +774,7 @@ def run_ibkr_manual_paper_submit_test(
             report = _build_report(
                 config=config,
                 started_at=started_at,
-                classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
+                classification=_blocked_classification_for_mode(config.test_mode),
                 caller_check=caller_check,
                 environment_lock=environment_lock,
                 context={**context, "pricing_context": pricing_context},
@@ -614,14 +788,17 @@ def run_ibkr_manual_paper_submit_test(
                     "status": "approval_blocked",
                     "detail": approval["detail"],
                 },
+                frozen_preview_bundle=frozen_preview_bundle,
             )
             return IbkrManualPaperSubmitArtifacts(
-                classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
+                classification=_blocked_classification_for_mode(config.test_mode),
                 report=report,
                 audit_events=audit_events,
                 open_order_before=context["open_orders_before"],
                 open_order_after_submit=_not_run_snapshot("Submit was blocked by approval validation."),
                 open_order_after_cancel=_not_run_snapshot("Cancel was not requested because submit was blocked."),
+                artifact_stem=artifact_stem_for_test_mode(config.test_mode),
+                callback_timeline=_build_callback_timeline(runtime),
             )
 
         lifecycle_result = _execute_submit_cancel_lifecycle(
@@ -635,7 +812,7 @@ def run_ibkr_manual_paper_submit_test(
             preview_digest=preview_digest,
             manual_confirmation_fn=manual_confirmation_fn or _prompt_for_tws_manual_confirmation,
         )
-        classification = _classify_submit_lifecycle(lifecycle_result["status"])
+        classification = _classify_submit_lifecycle(config.test_mode, lifecycle_result["status"])
         report = _build_report(
             config=config,
             started_at=started_at,
@@ -650,6 +827,7 @@ def run_ibkr_manual_paper_submit_test(
             expected_phrase=expected_phrase,
             audit_events=audit_events,
             lifecycle_result=lifecycle_result,
+            frozen_preview_bundle=frozen_preview_bundle,
         )
         return IbkrManualPaperSubmitArtifacts(
             classification=classification,
@@ -658,6 +836,12 @@ def run_ibkr_manual_paper_submit_test(
             open_order_before=context["open_orders_before"],
             open_order_after_submit=lifecycle_result["open_order_after_submit"],
             open_order_after_cancel=lifecycle_result["open_order_after_cancel"],
+            artifact_stem=artifact_stem_for_test_mode(config.test_mode),
+            extra_artifacts={
+                "positions_before": context["positions"],
+                **_extra_artifacts_from_lifecycle(lifecycle_result),
+            },
+            callback_timeline=_build_callback_timeline(runtime),
         )
     except Exception as exc:
         return _blocked_artifacts(
@@ -678,21 +862,299 @@ def run_ibkr_manual_paper_submit_test(
                 pass
 
 
+def run_ibkr_order_observation_diagnostic(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    transport_factory: Callable[..., Any] = IbkrManualPaperSubmitTransport,
+    module_loader: Callable[[str], Any] | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    stack_provider: Callable[[], list[Any]] = inspect.stack,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    started_at = datetime.now(timezone.utc)
+    audit_events: list[dict[str, Any]] = []
+    requested_order = _normalize_requested_order(config)
+    caller_check = evaluate_manual_preview_caller(caller_path=config.caller_path, stack_provider=stack_provider)
+    environment_lock = evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port)
+    guardrail_checks = _preflight_guardrail_checks(
+        caller_check=caller_check,
+        environment_lock=environment_lock,
+        input_guardrails={},
+    )
+    runtime: _SubmitRuntime | None = None
+    try:
+        if any(check["blocking"] and not check["passed"] for check in guardrail_checks):
+            detail = _first_failed_guardrail_detail(guardrail_checks)
+            report = {
+                "classification": "IBKR_ORDER_OBSERVATION_BLOCKED",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": started_at.isoformat(),
+                "mode": config.mode,
+                "host": config.host,
+                "port": config.port,
+                "account_id": config.account_id,
+                "manual_caller_check": caller_check,
+                "environment_lock_check": environment_lock,
+                "guardrail_checks": guardrail_checks,
+                "diagnosis": {
+                    "likely_root_cause": "preflight_guardrail_block",
+                    "conclusion": detail,
+                },
+            }
+            return report, []
+        runtime = _build_runtime(config=config, transport_factory=transport_factory, module_loader=module_loader)
+        runtime.transport.connect()
+        _start_runtime(runtime)
+        if not _wait_for_connection_ready(
+            transport=runtime.transport,
+            collector=runtime.collector,
+            timeout_seconds=config.timeout_seconds,
+            sleep_fn=sleep_fn,
+        ):
+            latest_error = runtime.collector.latest_error(codes=_SEVERE_CONNECTION_ERROR_CODES) or runtime.collector.latest_error()
+            raise IbkrManualPaperSubmitError(
+                (
+                    f"TWS paper observation diagnostic handshake failed: {latest_error['message']}"
+                    if latest_error is not None
+                    else f"TWS paper observation diagnostic handshake did not complete within {config.timeout_seconds:.1f}s."
+                )
+            )
+        context = _collect_truth_and_preview_context(
+            config=config,
+            runtime=runtime,
+            sleep_fn=sleep_fn,
+            started_at=started_at,
+            requested_order=requested_order,
+            collect_quote=False,
+        )
+        open_orders_snapshot = _refresh_open_orders_snapshot(
+            runtime=runtime,
+            selected_account_id=context["selected_account_id"],
+            timeout_seconds=config.timeout_seconds,
+            sleep_fn=sleep_fn,
+        )
+        execution_truth = _refresh_execution_truth(
+            runtime=runtime,
+            config=config,
+            selected_account_id=context["selected_account_id"],
+            timeout_seconds=config.timeout_seconds,
+            sleep_fn=sleep_fn,
+        )
+        positions_after = _refresh_positions_snapshot(
+            runtime=runtime,
+            selected_account_id=context["selected_account_id"],
+            timeout_seconds=config.timeout_seconds,
+            sleep_fn=sleep_fn,
+        )
+        callback_timeline = _build_callback_timeline(runtime)
+        callback_summary = _count_timeline_entries(callback_timeline, "callback_name")
+        request_summary = _count_timeline_entries(callback_timeline, "request_type")
+        diagnosis = _diagnose_order_observation(
+            callback_summary=callback_summary,
+            request_summary=request_summary,
+            callback_timeline=callback_timeline,
+            report_errors=list(context.get("errors") or []),
+            executions_snapshot=execution_truth["executions"],
+            completed_orders_snapshot=execution_truth["completed_orders"],
+            positions_snapshot=positions_after,
+        )
+        classification = diagnosis["classification"]
+        report = {
+            "classification": classification,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": started_at.isoformat(),
+            "mode": config.mode,
+            "host": config.host,
+            "port": config.port,
+            "account_id": context["selected_account_id"],
+            "connection_check": context["connection_check"],
+            "next_valid_order_id": runtime.session.state.next_valid_order_id,
+            "manual_caller_check": caller_check,
+            "environment_lock_check": environment_lock,
+            "guardrail_checks": guardrail_checks,
+            "open_order_snapshot": open_orders_snapshot,
+            "positions_snapshot": positions_after,
+            "executions_snapshot": execution_truth["executions"],
+            "completed_orders_snapshot": execution_truth["completed_orders"],
+            "callback_summary": callback_summary,
+            "request_summary": request_summary,
+            "callback_timeline_event_count": len(callback_timeline),
+            "diagnosis": diagnosis,
+            "errors": list(context.get("errors") or []),
+        }
+        return report, callback_timeline
+    except Exception as exc:
+        callback_timeline = _build_callback_timeline(runtime) if runtime is not None else []
+        report = {
+            "classification": "IBKR_ORDER_OBSERVATION_BLOCKED",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": started_at.isoformat(),
+            "mode": config.mode,
+            "host": config.host,
+            "port": config.port,
+            "account_id": config.account_id,
+            "connection_check": {
+                "connected": False if runtime is None else runtime.session.state.connected,
+                "client_id": config.client_id,
+                "detail": str(exc),
+            },
+            "manual_caller_check": caller_check,
+            "environment_lock_check": environment_lock,
+            "guardrail_checks": guardrail_checks,
+            "callback_summary": _count_timeline_entries(callback_timeline, "callback_name"),
+            "request_summary": _count_timeline_entries(callback_timeline, "request_type"),
+            "callback_timeline_event_count": len(callback_timeline),
+            "diagnosis": {
+                "classification": "IBKR_ORDER_OBSERVATION_BLOCKED",
+                "likely_root_cause": "diagnostic_blocked",
+                "conclusion": str(exc),
+            },
+            "errors": [],
+        }
+        return report, callback_timeline
+    finally:
+        if runtime is not None:
+            try:
+                runtime.transport.disconnect()
+            except Exception:
+                pass
+
+
 def build_submit_approval_phrase(
     *,
     selected_account_id: str,
     digest: str,
     requested_order: dict[str, Any],
     delayed_quote_warning: str | None,
+    test_mode: str,
 ) -> str:
     delayed_ack = "yes" if str(delayed_quote_warning or "").strip() else "no"
     return (
         "APPROVE IBKR PAPER SUBMIT "
         f"account={selected_account_id} mode=PAPER host=127.0.0.1 port=7497 "
+        f"test_mode={str(test_mode or '').strip().upper()} "
         f"contract={requested_order['symbol']} {requested_order['expiry']} "
         f"action={requested_order['action']} qty=1 type=LMT price={requested_order['limit_price']} "
         f"tif=DAY digest={digest} delayed_quote_ack={delayed_ack}"
     )
+
+
+def _blocked_classification_for_mode(test_mode: str) -> str:
+    return "IBKR_MANUAL_PAPER_FILL_TEST_BLOCKED" if str(test_mode or "").strip().upper() == _FILL_TEST_MODE else "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
+
+
+def _preview_only_classification_for_mode(test_mode: str) -> str:
+    return "IBKR_MANUAL_PAPER_FILL_TEST_PARTIAL" if str(test_mode or "").strip().upper() == _FILL_TEST_MODE else "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_PARTIAL"
+
+
+def _passed_classification_for_mode(test_mode: str) -> str:
+    return "IBKR_MANUAL_PAPER_FILL_TEST_PASSED" if str(test_mode or "").strip().upper() == _FILL_TEST_MODE else "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_PASSED"
+
+
+def artifact_stem_for_test_mode(test_mode: str) -> str:
+    normalized = str(test_mode or "").strip().upper()
+    if normalized == _FILL_TEST_MODE:
+        return "ibkr_manual_paper_fill_test"
+    return "ibkr_manual_paper_submit"
+
+
+def frozen_preview_path_for_config(config: IbkrManualPaperSubmitConfig) -> Path | None:
+    if config.frozen_preview_path is not None:
+        return Path(config.frozen_preview_path)
+    if config.output_dir is None:
+        return None
+    return Path(config.output_dir) / f"{artifact_stem_for_test_mode(config.test_mode)}_frozen_preview.json"
+
+
+def _build_frozen_preview_bundle(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    preview_payload: dict[str, Any],
+    preview_digest: str,
+    expected_phrase: str,
+    requested_order: dict[str, Any],
+    context: dict[str, Any],
+    pricing_context: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "test_mode": str(config.test_mode or "").strip().upper(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "account_id": context["selected_account_id"],
+        "preview_digest": preview_digest,
+        "expected_approval_phrase": expected_phrase,
+        "preview_payload": preview_payload,
+        "requested_order": requested_order,
+        "open_order_baseline_digest": context["open_order_baseline_digest"],
+        "open_order_before": context["open_orders_before"],
+        "contract_report": {
+            "qualified_contract_identifier": context["contract_report"].get("qualified_contract_identifier"),
+            "qualified_contract": context["contract_report"].get("qualified_contract"),
+            "api_contract_details": context["contract_report"].get("api_contract_details"),
+        },
+        "pricing_context": pricing_context,
+    }
+
+
+def _normalize_requested_order_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(bundle.get("requested_order") or {})
+    if not payload:
+        raise IbkrManualPaperSubmitError("Frozen preview bundle is missing requested_order.")
+    return {
+        "symbol": str(payload.get("symbol") or "").strip().upper(),
+        "expiry": str(payload.get("expiry") or "").strip(),
+        "action": str(payload.get("action") or "").strip().upper(),
+        "quantity": float(payload.get("quantity") or 0.0),
+        "order_type": str(payload.get("order_type") or "").strip().upper(),
+        "limit_price": _coerce_float(payload.get("limit_price")),
+        "time_in_force": str(payload.get("time_in_force") or "").strip().upper(),
+    }
+
+
+def _frozen_preview_bundle_guardrails(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    frozen_preview_bundle: dict[str, Any],
+) -> list[dict[str, Any]]:
+    bundle_test_mode = str(frozen_preview_bundle.get("test_mode") or "").strip().upper()
+    bundle_account_id = str(frozen_preview_bundle.get("account_id") or "").strip() or None
+    return [
+        _guardrail_check(
+            "frozen_preview_bundle_present",
+            passed=True,
+            blocking=True,
+            detail="Submit can proceed only from a previously generated frozen preview bundle.",
+        ),
+        _guardrail_check(
+            "frozen_preview_test_mode_matches_submit_mode",
+            passed=bundle_test_mode == str(config.test_mode or "").strip().upper(),
+            blocking=True,
+            detail="The frozen preview bundle test mode must match the current manual harness mode.",
+        ),
+        _guardrail_check(
+            "expected_account_matches_frozen_preview",
+            passed=(config.account_id is None or config.account_id == bundle_account_id),
+            blocking=True,
+            detail="If an expected account is supplied, it must match the frozen preview account id exactly.",
+        ),
+    ]
+
+
+def _load_frozen_preview_bundle(path: Path) -> dict[str, Any]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise IbkrManualPaperSubmitError(f"Frozen preview bundle at {path} is not a JSON object.")
+    preview_payload = payload.get("preview_payload")
+    if not isinstance(preview_payload, dict):
+        raise IbkrManualPaperSubmitError(f"Frozen preview bundle at {path} is missing preview_payload.")
+    expected_digest = str(payload.get("preview_digest") or "").strip()
+    if not expected_digest:
+        raise IbkrManualPaperSubmitError(f"Frozen preview bundle at {path} is missing preview_digest.")
+    recomputed = build_preview_digest(preview_payload)
+    if recomputed != expected_digest:
+        raise IbkrManualPaperSubmitError(
+            f"Frozen preview bundle at {path} no longer matches its stored digest. Expected {expected_digest}, recomputed {recomputed}."
+        )
+    return payload
 
 
 def write_ibkr_manual_paper_submit_artifacts(
@@ -702,28 +1164,67 @@ def write_ibkr_manual_paper_submit_artifacts(
 ) -> None:
     reports_dir = Path(output_dir)
     reports_dir.mkdir(parents=True, exist_ok=True)
-    (reports_dir / "ibkr_manual_paper_submit_report.json").write_text(
+    artifact_stem = str(artifacts.artifact_stem or "ibkr_manual_paper_submit")
+    (reports_dir / f"{artifact_stem}_report.json").write_text(
         json.dumps(artifacts.report, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    (reports_dir / "ibkr_manual_paper_submit_report.md").write_text(
+    (reports_dir / f"{artifact_stem}_report.md").write_text(
         render_ibkr_manual_paper_submit_markdown(artifacts.report),
         encoding="utf-8",
     )
-    (reports_dir / "ibkr_manual_paper_submit_open_order_before.json").write_text(
+    (reports_dir / f"{artifact_stem}_open_order_before.json").write_text(
         json.dumps(artifacts.open_order_before, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    (reports_dir / "ibkr_manual_paper_submit_open_order_after_submit.json").write_text(
+    (reports_dir / f"{artifact_stem}_open_order_after_submit.json").write_text(
         json.dumps(artifacts.open_order_after_submit, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    (reports_dir / "ibkr_manual_paper_submit_open_order_after_cancel.json").write_text(
+    (reports_dir / f"{artifact_stem}_open_order_after_cancel.json").write_text(
         json.dumps(artifacts.open_order_after_cancel, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    with (reports_dir / "ibkr_manual_paper_submit_audit.jsonl").open("a", encoding="utf-8") as handle:
+    frozen_preview = artifacts.report.get("frozen_preview_bundle")
+    if frozen_preview is not None:
+        (reports_dir / f"{artifact_stem}_frozen_preview.json").write_text(
+            json.dumps(frozen_preview, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    for name, payload in dict(artifacts.extra_artifacts or {}).items():
+        (reports_dir / f"{artifact_stem}_{name}.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    if artifacts.callback_timeline is not None:
+        with (reports_dir / f"{artifact_stem}_callback_timeline.jsonl").open("w", encoding="utf-8") as handle:
+            for row in artifacts.callback_timeline:
+                handle.write(json.dumps(row, sort_keys=True))
+                handle.write("\n")
+    with (reports_dir / f"{artifact_stem}_audit.jsonl").open("a", encoding="utf-8") as handle:
         for row in artifacts.audit_events:
+            handle.write(json.dumps(row, sort_keys=True))
+            handle.write("\n")
+
+
+def write_ibkr_order_observation_diagnostic_artifacts(
+    *,
+    output_dir: Path,
+    report: dict[str, Any],
+    callback_timeline: list[dict[str, Any]],
+) -> None:
+    reports_dir = Path(output_dir)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    (reports_dir / "ibkr_order_observation_diagnostic_report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    (reports_dir / "ibkr_order_observation_diagnostic_report.md").write_text(
+        render_ibkr_order_observation_diagnostic_markdown(report),
+        encoding="utf-8",
+    )
+    with (reports_dir / "ibkr_order_callback_timeline.jsonl").open("w", encoding="utf-8") as handle:
+        for row in callback_timeline:
             handle.write(json.dumps(row, sort_keys=True))
             handle.write("\n")
 
@@ -733,8 +1234,10 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
     environment = dict(report.get("environment_lock_check") or {})
     preview = dict(report.get("preview") or {})
     lifecycle = dict(report.get("submit_cancel_lifecycle") or {})
+    test_mode = str(preview.get("test_mode") or "").strip().upper()
+    title = "# IBKR Manual Paper Fill Test Report" if test_mode == _FILL_TEST_MODE else "# IBKR Manual Paper Submit Report"
     lines = [
-        "# IBKR Manual Paper Submit Report",
+        title,
         "",
         f"- classification: `{report.get('classification')}`",
         f"- generated_at: `{report.get('generated_at')}`",
@@ -762,6 +1265,7 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
         "- live port 7496 fails closed",
         "- IB Gateway ports 4001 and 4002 fail closed",
         "- unknown ports fail closed",
+        f"- test mode: `{test_mode}`",
         f"- preview digest: `{preview.get('preview_digest')}`",
         f"- expected approval phrase: `{preview.get('expected_approval_phrase')}`",
         f"- lifecycle status: `{lifecycle.get('status')}`",
@@ -785,6 +1289,8 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
         f"- chosen limit price: `{preview.get('limit_price')}`",
         f"- distance from quote: `{preview.get('distance_from_quote')}`",
         f"- distance in ticks: `{preview.get('distance_ticks')}`",
+        f"- pricing label: `{preview.get('pricing_label')}`",
+        f"- intended to fill: `{preview.get('intended_to_fill')}`",
         f"- estimated_notional: `{preview.get('estimated_notional')}`",
         f"- estimated_tick_value: `{preview.get('estimated_tick_value')}`",
         "",
@@ -808,7 +1314,44 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _submit_input_guardrails(requested_order: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def render_ibkr_order_observation_diagnostic_markdown(report: dict[str, Any]) -> str:
+    connection = dict(report.get("connection_check") or {})
+    diagnosis = dict(report.get("diagnosis") or {})
+    callback_summary = dict(report.get("callback_summary") or {})
+    request_summary = dict(report.get("request_summary") or {})
+    lines = [
+        "# IBKR Order Observation Diagnostic Report",
+        "",
+        f"- classification: `{report.get('classification')}`",
+        f"- generated_at: `{report.get('generated_at')}`",
+        f"- account_id: `{report.get('account_id')}`",
+        f"- mode/host/port: `{report.get('mode')} / {report.get('host')} / {report.get('port')}`",
+        f"- client_id: `{connection.get('client_id')}`",
+        f"- next_valid_order_id: `{report.get('next_valid_order_id')}`",
+        f"- callback_timeline_events: `{report.get('callback_timeline_event_count')}`",
+        "",
+        "## Diagnosis",
+        "",
+        f"- likely_root_cause: `{diagnosis.get('likely_root_cause')}`",
+        f"- conclusion: {diagnosis.get('conclusion')}",
+        "",
+        "## Callback Summary",
+        "",
+    ]
+    for name in sorted(callback_summary):
+        lines.append(f"- {name}: `{callback_summary.get(name)}`")
+    lines.extend(["", "## Request Summary", ""])
+    for name in sorted(request_summary):
+        lines.append(f"- {name}: `{request_summary.get(name)}`")
+    return "\n".join(lines)
+
+
+def _submit_input_guardrails(
+    requested_order: dict[str, Any],
+    *,
+    test_mode: str,
+    require_limit_price: bool,
+) -> dict[str, dict[str, Any]]:
     return {
         "whitelisted_contract": {
             "passed": requested_order.get("symbol") == _EXPECTED_SYMBOL and requested_order.get("expiry") == _EXPECTED_EXPIRY,
@@ -827,11 +1370,19 @@ def _submit_input_guardrails(requested_order: dict[str, Any]) -> dict[str, dict[
             "detail": "Only LMT orders are allowed in the first manual paper submit/cancel harness.",
         },
         "limit_price_present": {
-            "passed": requested_order.get("limit_price") is not None,
-            "detail": "A limit price is required for the first manual paper submit/cancel harness.",
+            "passed": (requested_order.get("limit_price") is not None) if require_limit_price else True,
+            "detail": (
+                "A limit price is required for the first manual paper submit/cancel harness."
+                if str(test_mode).upper() != _FILL_TEST_MODE
+                else "A limit price must be derivable from the frozen fill-test preview payload before submit."
+            ),
         },
         "limit_price_positive": {
-            "passed": requested_order.get("limit_price") is not None and float(requested_order.get("limit_price")) > 0.0,
+            "passed": (
+                requested_order.get("limit_price") is not None and float(requested_order.get("limit_price")) > 0.0
+            )
+            if require_limit_price
+            else True,
             "detail": "The limit price must be positive.",
         },
         "time_in_force_supported": {
@@ -839,6 +1390,91 @@ def _submit_input_guardrails(requested_order: dict[str, Any]) -> dict[str, dict[
             "detail": "Only DAY time-in-force is allowed in the first manual paper submit/cancel harness.",
         },
     }
+
+
+def _prepare_frozen_submit_context(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    context: dict[str, Any],
+    requested_order: dict[str, Any],
+    frozen_preview_bundle: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, str, dict[str, Any]]:
+    bundle_requested_order = _normalize_requested_order_from_bundle(frozen_preview_bundle)
+    preview_payload = dict(frozen_preview_bundle.get("preview_payload") or {})
+    preview_digest = str(frozen_preview_bundle.get("preview_digest") or "").strip()
+    expected_phrase = str(frozen_preview_bundle.get("expected_approval_phrase") or "").strip()
+    pricing_context = dict(frozen_preview_bundle.get("pricing_context") or {})
+    frozen_account_id = str(frozen_preview_bundle.get("account_id") or "").strip()
+    if context["selected_account_id"] != frozen_account_id:
+        raise IbkrManualPaperSubmitError(
+            f"Frozen preview bundle account {frozen_account_id} does not match the connected broker account {context['selected_account_id']}."
+        )
+    live_contract_identifier = context["contract_report"].get("qualified_contract_identifier")
+    frozen_contract_identifier = (frozen_preview_bundle.get("contract_report") or {}).get("qualified_contract_identifier")
+    if frozen_contract_identifier is not None and live_contract_identifier is not None and frozen_contract_identifier != live_contract_identifier:
+        raise IbkrManualPaperSubmitError(
+            "The currently qualified MGC contract does not match the frozen preview bundle. Generate a new preview before submitting."
+        )
+    context = {
+        **context,
+        "quote_context": dict(preview_payload.get("quote_context") or {}),
+        "open_order_baseline_digest": str(frozen_preview_bundle.get("open_order_baseline_digest") or ""),
+        "frozen_preview_bundle": frozen_preview_bundle,
+    }
+    if not context["open_order_baseline_digest"]:
+        raise IbkrManualPaperSubmitError("Frozen preview bundle is missing the open-order baseline digest.")
+    _ = requested_order
+    _ = config
+    return context, bundle_requested_order, preview_payload, preview_digest, expected_phrase, pricing_context
+
+
+def _resolve_requested_order_for_preview(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    requested_order: dict[str, Any],
+    contract_report: dict[str, Any],
+    quote_context: dict[str, Any],
+) -> dict[str, Any]:
+    resolved = dict(requested_order)
+    normalized_mode = str(config.test_mode or "").strip().upper()
+    if normalized_mode not in {_RESTING_TEST_MODE, _FILL_TEST_MODE}:
+        raise IbkrManualPaperSubmitError(f"Unsupported manual paper test mode: {config.test_mode}")
+    if normalized_mode == _FILL_TEST_MODE:
+        if resolved.get("limit_price") is None:
+            resolved["limit_price"] = _derive_fill_limit_price(
+                quote_context=quote_context,
+                contract_report=contract_report,
+                offset_ticks=config.fill_limit_offset_ticks,
+            )
+    return resolved
+
+
+def _derive_fill_limit_price(
+    *,
+    quote_context: dict[str, Any],
+    contract_report: dict[str, Any],
+    offset_ticks: float,
+) -> float:
+    reference_price, _ = _select_fill_reference_price(quote_context)
+    if reference_price is None:
+        raise IbkrManualPaperSubmitError("PAPER_FILL_TEST requires a delayed ask/last reference price.")
+    min_tick = _contract_min_tick(contract_report)
+    if min_tick is None or min_tick <= 0.0:
+        raise IbkrManualPaperSubmitError("PAPER_FILL_TEST requires a valid contract minTick to derive a marketable limit.")
+    limit_price = float(reference_price) + max(1.0, float(offset_ticks)) * float(min_tick)
+    return _round_price_to_tick(limit_price, min_tick)
+
+
+def _contract_min_tick(contract_report: dict[str, Any]) -> float | None:
+    contract_details = dict(contract_report.get("api_contract_details", [{}])[0] if contract_report.get("api_contract_details") else {})
+    return _coerce_float(contract_details.get("min_tick"))
+
+
+def _round_price_to_tick(price: float, min_tick: float) -> float:
+    if min_tick <= 0.0:
+        return float(price)
+    ticks = round(float(price) / float(min_tick))
+    return round(ticks * float(min_tick), 8)
 
 
 def _build_delayed_quote_pricing_context(
@@ -852,17 +1488,31 @@ def _build_delayed_quote_pricing_context(
     contract_details = dict(contract_report.get("api_contract_details", [{}])[0] if contract_report.get("api_contract_details") else {})
     min_tick = _coerce_float(contract_details.get("min_tick"))
     limit_price = _coerce_float(requested_order.get("limit_price"))
-    reference_price, reference_source = _select_delayed_reference_price(quote_context)
+    if str(config.test_mode).upper() == _FILL_TEST_MODE:
+        reference_price, reference_source = _select_fill_reference_price(quote_context)
+        price_relation = "above_reference"
+        distance_from_reference_price = (
+            None
+            if limit_price is None or reference_price is None
+            else float(limit_price) - float(reference_price)
+        )
+        pricing_label = _MARKETABLE_LIMIT_LABEL
+        intended_to_fill = True
+    else:
+        reference_price, reference_source = _select_delayed_reference_price(quote_context)
+        price_relation = "below_reference"
+        distance_from_reference_price = (
+            None
+            if limit_price is None or reference_price is None
+            else float(reference_price) - float(limit_price)
+        )
+        pricing_label = _NON_MARKETABLE_LIMIT_LABEL
+        intended_to_fill = False
     quote_updated_at = _parse_iso_timestamp(quote_context.get("updated_at"))
     quote_age_seconds = (
         max(0.0, (datetime.now(timezone.utc) - quote_updated_at).total_seconds())
         if quote_updated_at is not None
         else None
-    )
-    distance_from_reference_price = (
-        None
-        if limit_price is None or reference_price is None
-        else float(reference_price) - float(limit_price)
     )
     distance_ticks = (
         None
@@ -884,6 +1534,9 @@ def _build_delayed_quote_pricing_context(
         "reference_price_source": reference_source,
         "distance_from_reference_price": distance_from_reference_price,
         "distance_ticks": distance_ticks,
+        "price_relation": price_relation,
+        "pricing_label": pricing_label,
+        "intended_to_fill": intended_to_fill,
         "min_tick": min_tick,
         "max_distance_ticks": float(config.near_market_max_distance_ticks),
         "max_quote_age_seconds": float(config.delayed_quote_max_age_seconds),
@@ -897,7 +1550,7 @@ def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[d
     distance_from_reference_price = pricing_context.get("distance_from_reference_price")
     distance_ticks = pricing_context.get("distance_ticks")
     max_distance_ticks = pricing_context.get("max_distance_ticks")
-    return [
+    checks = [
         _guardrail_check(
             "delayed_quote_available",
             passed=quote_source == "DELAYED" and pricing_context.get("reference_price") is not None,
@@ -912,31 +1565,66 @@ def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[d
                 "The delayed quote snapshot must be fresh before preview. If the delayed quote is stale, fail closed rather than guessing a price."
             ),
         ),
-        _guardrail_check(
-            "near_market_non_marketable_buy_limit",
-            passed=(
-                distance_from_reference_price is not None
-                and float(distance_from_reference_price) > 0.0
-                and (
-                    distance_ticks is None
-                    or (
-                        float(distance_ticks) >= 1.0
-                        and float(distance_ticks) <= float(max_distance_ticks or 0.0)
-                    )
-                )
-            ),
-            blocking=True,
-            detail=(
-                "For BUY 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the current delayed bid/last, close enough to be accepted by TWS, and not a far-away placeholder limit."
-            ),
-        ),
     ]
+    if pricing_context.get("intended_to_fill"):
+        checks.append(
+            _guardrail_check(
+                "marketable_limit_intended_to_fill",
+                passed=(
+                    distance_from_reference_price is not None
+                    and float(distance_from_reference_price) > 0.0
+                    and (
+                        distance_ticks is None
+                        or (
+                            float(distance_ticks) >= (1.0 - _TICK_COMPARISON_EPSILON)
+                            and float(distance_ticks) <= (float(max_distance_ticks or 0.0) + _TICK_COMPARISON_EPSILON)
+                        )
+                    )
+                ),
+                blocking=True,
+                detail=(
+                    "For PAPER_FILL_TEST BUY 1 MGC 202606 LMT DAY, the chosen limit must be slightly above the delayed ask/last so it is a marketable limit intended to fill in paper, while remaining near-market rather than far away."
+                ),
+            )
+        )
+    else:
+        checks.append(
+            _guardrail_check(
+                "near_market_non_marketable_buy_limit",
+                passed=(
+                    distance_from_reference_price is not None
+                    and float(distance_from_reference_price) > 0.0
+                    and (
+                        distance_ticks is None
+                        or (
+                            float(distance_ticks) >= (1.0 - _TICK_COMPARISON_EPSILON)
+                            and float(distance_ticks) <= (float(max_distance_ticks or 0.0) + _TICK_COMPARISON_EPSILON)
+                        )
+                    )
+                ),
+                blocking=True,
+                detail=(
+                    "For BUY 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the current delayed bid/last, close enough to be accepted by TWS, and not a far-away placeholder limit."
+                ),
+            )
+        )
+    return checks
 
 
 def _select_delayed_reference_price(quote_context: dict[str, Any]) -> tuple[float | None, str | None]:
     bid_price = _coerce_float(quote_context.get("bid_price"))
     if bid_price is not None:
         return bid_price, "bid_price"
+    last_price = _coerce_float(quote_context.get("last_price"))
+    if last_price is not None:
+        return last_price, "last_price"
+    return None, None
+
+
+def _select_fill_reference_price(quote_context: dict[str, Any]) -> tuple[float | None, str | None]:
+    ask_price = _coerce_float(quote_context.get("ask_price"))
+    if ask_price is not None:
+        return ask_price, "ask_price"
     last_price = _coerce_float(quote_context.get("last_price"))
     if last_price is not None:
         return last_price, "last_price"
@@ -1044,6 +1732,7 @@ def _collect_truth_and_preview_context(
     sleep_fn: Callable[[float], None],
     started_at: datetime,
     requested_order: dict[str, Any],
+    collect_quote: bool = True,
 ) -> dict[str, Any]:
     audit_events: list[dict[str, Any]] = []
     runtime.client.request_managed_accounts()
@@ -1153,12 +1842,16 @@ def _collect_truth_and_preview_context(
     )
     if not contract_report["ok"]:
         raise IbkrManualPaperSubmitError(str(contract_report["detail"]))
-    quote_context = _probe_delayed_quote_context(
-        transport=runtime.transport,
-        collector=runtime.collector,
-        contract=contract_report["qualified_contract_object"],
-        timeout_seconds=config.timeout_seconds,
-        sleep_fn=sleep_fn,
+    quote_context = (
+        _probe_delayed_quote_context(
+            transport=runtime.transport,
+            collector=runtime.collector,
+            contract=contract_report["qualified_contract_object"],
+            timeout_seconds=config.timeout_seconds,
+            sleep_fn=sleep_fn,
+        )
+        if collect_quote
+        else {}
     )
     audit_events.extend(
         [
@@ -1368,6 +2061,299 @@ def _request_market_data_snapshot(
     }
 
 
+def _refresh_positions_snapshot(
+    *,
+    runtime: _SubmitRuntime,
+    selected_account_id: str,
+    timeout_seconds: float,
+    sleep_fn: Callable[[float], None],
+) -> dict[str, Any]:
+    runtime.client.request_positions()
+    runtime.client.record_event("req_positions_invoked", payload={"selected_account_id": selected_account_id})
+    runtime.collector.positions_ready.clear()
+    runtime.transport.req_positions()
+    if not _wait_for_event(
+        runtime.collector.positions_ready,
+        collector=runtime.collector,
+        timeout_seconds=timeout_seconds,
+        sleep_fn=sleep_fn,
+    ):
+        latest_error = runtime.collector.latest_error()
+        raise IbkrManualPaperSubmitError(
+            (
+                f"Position refresh did not complete: {latest_error['message']}"
+                if latest_error is not None
+                else f"Position refresh did not complete within {timeout_seconds:.1f}s."
+            )
+        )
+    return _build_positions_snapshot(client=runtime.client, selected_account_id=selected_account_id)
+
+
+def _refresh_execution_truth(
+    *,
+    runtime: _SubmitRuntime,
+    config: IbkrManualPaperSubmitConfig,
+    selected_account_id: str,
+    timeout_seconds: float,
+    sleep_fn: Callable[[float], None],
+) -> dict[str, Any]:
+    execution_request_id = 9701
+    runtime.client.request_completed_orders()
+    runtime.client.record_event("req_completed_orders_invoked", payload={"api_only": False})
+    runtime.collector.reset_completed_orders_ready()
+    runtime.transport.req_completed_orders(api_only=False)
+    runtime.client.request_executions()
+    runtime.client.record_event("req_executions_invoked", payload={"request_id": execution_request_id})
+    runtime.collector.reset_executions_ready(execution_request_id)
+    runtime.transport.req_executions(request_id=execution_request_id)
+    completed_ok = _wait_for_event(
+        runtime.collector.completed_orders_ready,
+        collector=runtime.collector,
+        timeout_seconds=timeout_seconds,
+        sleep_fn=sleep_fn,
+    )
+    executions_ok = _wait_for_event(
+        runtime.collector.executions_event(execution_request_id),
+        collector=runtime.collector,
+        timeout_seconds=timeout_seconds,
+        sleep_fn=sleep_fn,
+    )
+    if not completed_ok or not executions_ok:
+        latest_error = runtime.collector.latest_error()
+        raise IbkrManualPaperSubmitError(
+            (
+                f"Execution/fill refresh did not complete: {latest_error['message']}"
+                if latest_error is not None
+                else f"Execution/fill refresh did not complete within {timeout_seconds:.1f}s."
+            )
+        )
+    provider = IbkrExecutionProvider(config.repo_root, session=runtime.session, client=runtime.client)
+    snapshot = provider.snapshot_state(force_refresh=True)
+    positions = _build_positions_snapshot(client=runtime.client, selected_account_id=selected_account_id)
+    open_orders = _build_open_orders_snapshot(client=runtime.client, selected_account_id=selected_account_id)
+    return {
+        "provider_snapshot": snapshot,
+        "positions": positions,
+        "open_orders": open_orders,
+        "executions": _extract_execution_rows(snapshot),
+        "completed_orders": _extract_completed_order_rows(snapshot),
+    }
+
+
+def _extract_execution_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = snapshot.get("executions")
+    if isinstance(rows, list):
+        return [dict(row) for row in rows]
+    orders = dict(snapshot.get("orders") or {})
+    recent_fill_rows = orders.get("recent_fill_rows")
+    if isinstance(recent_fill_rows, list):
+        return [dict(row) for row in recent_fill_rows]
+    return []
+
+
+def _extract_completed_order_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = snapshot.get("completed_orders")
+    if isinstance(rows, list):
+        return [dict(row) for row in rows]
+    return []
+
+
+def _matches_order_identity(row: dict[str, Any], *, order_id: int, perm_id: int | None) -> bool:
+    broker_order_id = row.get("broker_order_id")
+    if broker_order_id is not None and str(broker_order_id) == str(order_id):
+        return True
+    raw_payload = dict(row.get("raw_payload") or {})
+    row_perm_id = row.get("perm_id")
+    if row_perm_id is None:
+        row_perm_id = raw_payload.get("perm_id")
+    return perm_id is not None and row_perm_id is not None and str(row_perm_id) == str(perm_id)
+
+
+def _matching_execution_rows(rows: list[dict[str, Any]], *, order_id: int, perm_id: int | None) -> list[dict[str, Any]]:
+    return [dict(row) for row in rows if _matches_order_identity(dict(row), order_id=order_id, perm_id=perm_id)]
+
+
+def _filled_quantity_for_order(
+    *,
+    latest_status: dict[str, Any] | None,
+    execution_rows: list[dict[str, Any]],
+) -> float:
+    if latest_status is not None and latest_status.get("filled") is not None:
+        return float(latest_status.get("filled") or 0.0)
+    quantity = 0.0
+    for row in execution_rows:
+        quantity += float(_coerce_float(row.get("quantity")) or 0.0)
+    return quantity
+
+
+def _build_fill_verification_payload(
+    *,
+    requested_order: dict[str, Any],
+    latest_status: dict[str, Any] | None,
+    open_orders_after_submit: dict[str, Any],
+    positions_after_submit: dict[str, Any],
+    execution_rows: list[dict[str, Any]],
+    completed_order_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requested_quantity = float(requested_order.get("quantity") or 0.0)
+    submitted_row = _find_open_order(open_orders_after_submit, int(latest_status.get("order_id") or 0)) if latest_status else None
+    order_status = str((latest_status or {}).get("status") or "").strip() or None
+    completed_status = str((completed_order_rows[-1].get("status") if completed_order_rows else "") or "").strip() or None
+    final_status = order_status or completed_status or (submitted_row.get("status") if submitted_row else None)
+    filled_quantity = _filled_quantity_for_order(latest_status=latest_status, execution_rows=execution_rows)
+    fully_filled = bool(
+        (final_status in _FILLED_ORDER_STATUS)
+        or (requested_quantity > 0.0 and filled_quantity >= requested_quantity)
+    )
+    partial_fill = bool(
+        not fully_filled
+        and (
+            final_status in _PARTIAL_FILL_STATUS
+            or (0.0 < filled_quantity < requested_quantity)
+        )
+    )
+    detail = (
+        "Broker truth verified a full paper fill."
+        if fully_filled
+        else (
+            "Broker truth verified a partial fill."
+            if partial_fill
+            else "Broker truth has not yet verified a fill."
+        )
+    )
+    return {
+        "verified": fully_filled,
+        "partial_fill": partial_fill,
+        "filled_quantity": filled_quantity,
+        "requested_quantity": requested_quantity,
+        "final_status": final_status,
+        "detail": detail,
+        "positions_after_submit": positions_after_submit,
+        "executions_after_submit": execution_rows,
+        "completed_orders_after_submit": completed_order_rows,
+        "open_order_after_submit": open_orders_after_submit,
+    }
+
+
+def _execute_fill_test_lifecycle(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    runtime: _SubmitRuntime,
+    selected_account_id: str,
+    sleep_fn: Callable[[float], None],
+    audit_events: list[dict[str, Any]],
+    order_id: int,
+    requested_order: dict[str, Any],
+    perm_id: int | None,
+) -> dict[str, Any]:
+    observation_window_seconds = max(float(config.fill_timeout_seconds), float(config.post_approval_observation_seconds))
+    deadline = time.monotonic() + observation_window_seconds
+    last_open_orders = _not_run_snapshot("Submit verification did not capture broker open-order truth.")
+    last_positions = _not_run_snapshot("Submit verification did not capture broker positions.")
+    last_execution_rows: list[dict[str, Any]] = []
+    last_completed_order_rows: list[dict[str, Any]] = []
+    latest_status = runtime.collector.latest_order_status(order_id)
+    while time.monotonic() < deadline:
+        remaining = max(1.0, min(5.0, deadline - time.monotonic()))
+        truth = _refresh_execution_truth(
+            runtime=runtime,
+            config=config,
+            selected_account_id=selected_account_id,
+            timeout_seconds=remaining,
+            sleep_fn=sleep_fn,
+        )
+        last_open_orders = truth["open_orders"]
+        last_positions = truth["positions"]
+        latest_status = runtime.collector.latest_order_status(order_id)
+        open_row = _find_open_order(last_open_orders, order_id)
+        effective_perm_id = perm_id if perm_id is not None else (open_row.get("perm_id") if open_row else (latest_status.get("perm_id") if latest_status else None))
+        last_execution_rows = _matching_execution_rows(truth["executions"], order_id=order_id, perm_id=effective_perm_id)
+        last_completed_order_rows = _matching_execution_rows(truth["completed_orders"], order_id=order_id, perm_id=effective_perm_id)
+        fill_verification = _build_fill_verification_payload(
+            requested_order=requested_order,
+            latest_status=latest_status,
+            open_orders_after_submit=last_open_orders,
+            positions_after_submit=last_positions,
+            execution_rows=last_execution_rows,
+            completed_order_rows=last_completed_order_rows,
+        )
+        if fill_verification["verified"]:
+            _record_audit(
+                audit_events,
+                event_type="fill_verified",
+                config=config,
+                classification=None,
+                detail=fill_verification["detail"],
+                extra={"order_id": order_id, "perm_id": effective_perm_id, "final_status": fill_verification.get("final_status")},
+            )
+            return {
+                "status": "filled",
+                "detail": "Submitted one manual paper MGC limit order and verified the fill through broker truth.",
+                "submitted_order_id": order_id,
+                "submitted_perm_id": effective_perm_id,
+                "open_order_after_submit": last_open_orders,
+                "open_order_after_cancel": _not_run_snapshot("Cancel was not needed because the order filled."),
+                "latest_order_status": latest_status,
+                "fill_verification": fill_verification,
+                "positions_after_submit": last_positions,
+                "executions_after_submit": last_execution_rows,
+                "completed_orders_after_submit": last_completed_order_rows,
+            }
+        sleep_fn(0.25)
+    latest_status = runtime.collector.latest_order_status(order_id)
+    open_row = _find_open_order(last_open_orders, order_id)
+    effective_perm_id = perm_id if perm_id is not None else (open_row.get("perm_id") if open_row else (latest_status.get("perm_id") if latest_status else None))
+    fill_verification = _build_fill_verification_payload(
+        requested_order=requested_order,
+        latest_status=latest_status,
+        open_orders_after_submit=last_open_orders,
+        positions_after_submit=last_positions,
+        execution_rows=last_execution_rows,
+        completed_order_rows=last_completed_order_rows,
+    )
+    _record_audit(
+        audit_events,
+        event_type="fill_verification_timeout",
+        config=config,
+        classification=None,
+        detail="The paper fill test did not verify a complete fill within the allowed timeout; the harness is attempting cancel verification.",
+        extra={
+            "order_id": order_id,
+            "perm_id": effective_perm_id,
+            "partial_fill": fill_verification.get("partial_fill"),
+            "observation_window_seconds": observation_window_seconds,
+        },
+    )
+    cancel_result = _cancel_and_verify_visible_order(
+        config=config,
+        runtime=runtime,
+        selected_account_id=selected_account_id,
+        sleep_fn=sleep_fn,
+        audit_events=audit_events,
+        order_id=order_id,
+        perm_id=effective_perm_id,
+        after_submit=last_open_orders,
+    )
+    return {
+        "status": "partial_fill_cancelled" if fill_verification.get("partial_fill") else "fill_timeout_cancelled",
+        "detail": (
+            "The order partially filled and the remaining paper order was cancelled and verified."
+            if fill_verification.get("partial_fill")
+            else "The order did not verify a fill within the timeout, so the working paper order was cancelled and verified."
+        ),
+        "submitted_order_id": order_id,
+        "submitted_perm_id": effective_perm_id,
+        "open_order_after_submit": last_open_orders,
+        "open_order_after_cancel": cancel_result["open_order_after_cancel"],
+        "latest_order_status": cancel_result["latest_order_status"],
+        "cancel_verification": cancel_result["cancel_verification"],
+        "fill_verification": fill_verification,
+        "positions_after_submit": last_positions,
+        "executions_after_submit": last_execution_rows,
+        "completed_orders_after_submit": last_completed_order_rows,
+    }
+
+
 def _execute_submit_cancel_lifecycle(
     *,
     config: IbkrManualPaperSubmitConfig,
@@ -1469,6 +2455,20 @@ def _execute_submit_cancel_lifecycle(
             detail="Operator approved the TWS dialog. Broker open-order verification is starting now.",
             extra={"order_id": order_id},
         )
+        if str(config.test_mode or "").strip().upper() == _FILL_TEST_MODE:
+            return {
+                **_execute_fill_test_lifecycle(
+                    config=config,
+                    runtime=runtime,
+                    selected_account_id=context["selected_account_id"],
+                    sleep_fn=sleep_fn,
+                    audit_events=audit_events,
+                    order_id=order_id,
+                    requested_order=requested_order,
+                    perm_id=None,
+                ),
+                "manual_confirmation": manual_confirmation,
+            }
         after_submit = _wait_for_submitted_order_visibility(
             runtime=runtime,
             selected_account_id=context["selected_account_id"],
@@ -1786,6 +2786,7 @@ def _build_submit_preview_payload(
     requested_order: dict[str, Any],
     context: dict[str, Any],
     guardrail_checks: list[dict[str, Any]],
+    test_mode: str,
 ) -> dict[str, Any]:
     contract_report = dict(context["contract_report"])
     contract_details = dict(contract_report.get("api_contract_details", [{}])[0] if contract_report.get("api_contract_details") else {})
@@ -1827,6 +2828,9 @@ def _build_submit_preview_payload(
             "order_type": requested_order["order_type"],
             "limit_price": requested_order["limit_price"],
             "time_in_force": requested_order["time_in_force"],
+            "test_mode": str(test_mode or "").strip().upper(),
+            "pricing_label": pricing_context.get("pricing_label"),
+            "intended_to_fill": bool(pricing_context.get("intended_to_fill")),
         },
         "quote_context": {
             "quote_source_label": quote_context.get("quote_source_label"),
@@ -1837,6 +2841,8 @@ def _build_submit_preview_payload(
             "reference_price_source": pricing_context.get("reference_price_source"),
             "distance_from_reference_price": pricing_context.get("distance_from_reference_price"),
             "distance_ticks": pricing_context.get("distance_ticks"),
+            "pricing_label": pricing_context.get("pricing_label"),
+            "intended_to_fill": bool(pricing_context.get("intended_to_fill")),
         },
         "open_order_baseline": {
             "open_order_count": context["open_orders_before"].get("open_order_count"),
@@ -1868,6 +2874,7 @@ def _build_report(
     expected_phrase: str,
     audit_events: list[dict[str, Any]],
     lifecycle_result: dict[str, Any],
+    frozen_preview_bundle: dict[str, Any] | None,
 ) -> dict[str, Any]:
     quote_context = dict(context.get("quote_context") or {})
     pricing_context = dict(context.get("pricing_context") or {})
@@ -1891,6 +2898,7 @@ def _build_report(
         "positions": context["positions"],
         "open_order_before": context["open_orders_before"],
         "preview": {
+            "test_mode": str(config.test_mode or "").strip().upper(),
             "symbol": requested_order["symbol"],
             "expiry": requested_order["expiry"],
             "action": requested_order["action"],
@@ -1905,12 +2913,15 @@ def _build_report(
             "reference_price_source": pricing_context.get("reference_price_source"),
             "distance_from_quote": pricing_context.get("distance_from_reference_price"),
             "distance_ticks": pricing_context.get("distance_ticks"),
+            "pricing_label": pricing_context.get("pricing_label"),
+            "intended_to_fill": bool(pricing_context.get("intended_to_fill")),
             "estimated_notional": estimated_notional,
             "estimated_tick_value": estimated_tick_value,
             "preview_digest": preview_digest,
             "expected_approval_phrase": expected_phrase,
         },
         "preview_payload": preview_payload,
+        "frozen_preview_bundle": frozen_preview_bundle,
         "guardrail_checks": guardrail_checks,
         "submit_cancel_lifecycle": lifecycle_result,
         "audit_event_count": len(audit_events),
@@ -1934,15 +2945,16 @@ def _blocked_artifacts(
     audit_events: list[dict[str, Any]],
     detail: str,
 ) -> IbkrManualPaperSubmitArtifacts:
+    classification = _blocked_classification_for_mode(config.test_mode)
     _record_audit(
         audit_events,
         event_type="failed_closed",
         config=config,
-        classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
+        classification=classification,
         detail=detail,
     )
     report = {
-        "classification": "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
+        "classification": classification,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "started_at": started_at.isoformat(),
         "account_id": config.account_id,
@@ -1961,6 +2973,7 @@ def _blocked_artifacts(
         "positions": {},
         "open_order_before": _not_run_snapshot("Open-order baseline was not captured."),
         "preview": {
+            "test_mode": str(config.test_mode or "").strip().upper(),
             "symbol": requested_order.get("symbol"),
             "expiry": requested_order.get("expiry"),
             "action": requested_order.get("action"),
@@ -1982,18 +2995,37 @@ def _blocked_artifacts(
         "next_manual_check": environment_lock.get("next_manual_check") or _tws_manual_check_message(config.host, config.port),
     }
     return IbkrManualPaperSubmitArtifacts(
-        classification="IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED",
+        classification=classification,
         report=report,
         audit_events=audit_events,
         open_order_before=_not_run_snapshot("Open-order baseline was not captured."),
         open_order_after_submit=_not_run_snapshot("Submit did not run."),
         open_order_after_cancel=_not_run_snapshot("Cancel did not run."),
+        artifact_stem=artifact_stem_for_test_mode(config.test_mode),
     )
 
 
-def _classify_submit_lifecycle(status: str) -> str:
+def _classify_submit_lifecycle(test_mode: str, status: str) -> str:
+    normalized_mode = str(test_mode or "").strip().upper()
+    if normalized_mode == _FILL_TEST_MODE:
+        if status == "filled":
+            return _passed_classification_for_mode(test_mode)
+        if status in {
+            "preview_only",
+            "submit_verification_failed",
+            "cancel_verification_failed",
+            "approval_invalidated",
+            "manual_confirmation_timeout",
+            "manual_confirmation_timeout_order_cancelled",
+            "manual_confirmation_rejected_no_order",
+            "manual_confirmation_rejected_order_cancelled",
+            "fill_timeout_cancelled",
+            "partial_fill_cancelled",
+        }:
+            return _preview_only_classification_for_mode(test_mode)
+        return _blocked_classification_for_mode(test_mode)
     if status == "passed":
-        return "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_PASSED"
+        return _passed_classification_for_mode(test_mode)
     if status in {
         "preview_only",
         "submit_verification_failed",
@@ -2004,10 +3036,23 @@ def _classify_submit_lifecycle(status: str) -> str:
         "manual_confirmation_rejected_no_order",
         "manual_confirmation_rejected_order_cancelled",
     }:
-        return "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_PARTIAL"
-    if status == "manual_confirmation_unavailable":
-        return "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
-    return "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
+        return _preview_only_classification_for_mode(test_mode)
+    return _blocked_classification_for_mode(test_mode)
+
+
+def _extra_artifacts_from_lifecycle(lifecycle_result: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if lifecycle_result.get("latest_order_status") is not None:
+        payload["order_status_after_submit"] = lifecycle_result.get("latest_order_status")
+    if lifecycle_result.get("positions_after_submit") is not None:
+        payload["positions_after_submit"] = lifecycle_result.get("positions_after_submit")
+    if lifecycle_result.get("executions_after_submit") is not None:
+        payload["executions_after_submit"] = lifecycle_result.get("executions_after_submit")
+    if lifecycle_result.get("completed_orders_after_submit") is not None:
+        payload["completed_orders_after_submit"] = lifecycle_result.get("completed_orders_after_submit")
+    if lifecycle_result.get("fill_verification") is not None:
+        payload["fill_verification"] = lifecycle_result.get("fill_verification")
+    return payload
 
 
 def _record_audit(
@@ -2058,7 +3103,10 @@ def _refresh_open_orders_snapshot(
     sleep_fn: Callable[[float], None],
 ) -> dict[str, Any]:
     runtime.client.request_open_orders()
+    runtime.client.record_event("req_open_orders_invoked", payload={"selected_account_id": selected_account_id})
     runtime.collector.reset_open_orders_ready()
+    runtime.transport.req_open_orders()
+    runtime.client.record_event("req_all_open_orders_invoked", payload={"selected_account_id": selected_account_id})
     runtime.transport.req_all_open_orders()
     if not _wait_for_event(
         runtime.collector.open_orders_ready,
@@ -2075,6 +3123,117 @@ def _refresh_open_orders_snapshot(
             )
         )
     return _build_open_orders_snapshot(client=runtime.client, selected_account_id=selected_account_id)
+
+
+def _build_callback_timeline(runtime: _SubmitRuntime) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+    request_log_fn = getattr(runtime.client, "request_log", None)
+    requests = request_log_fn() if callable(request_log_fn) else ()
+    for request in requests:
+        timeline.append(
+            {
+                "observed_at": request.requested_at.isoformat(),
+                "source": "request_log",
+                "request_type": request.request_type,
+                **dict(request.details or {}),
+            }
+        )
+    drain_events_fn = getattr(runtime.client, "drain_events", None)
+    events = drain_events_fn() if callable(drain_events_fn) else ()
+    for event in events:
+        timeline.append(
+            {
+                "observed_at": event.occurred_at.isoformat(),
+                "source": "client_event",
+                "event_type": event.event_type,
+                **dict(event.payload or {}),
+            }
+        )
+    timeline.extend(list(getattr(runtime.collector, "callback_timeline", []) or []))
+    timeline.sort(key=lambda row: str(row.get("observed_at") or ""))
+    return timeline
+
+
+def _count_timeline_entries(timeline: list[dict[str, Any]], field_name: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in timeline:
+        key = str(row.get(field_name) or "").strip()
+        if not key:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _diagnose_order_observation(
+    *,
+    callback_summary: dict[str, int],
+    request_summary: dict[str, int],
+    callback_timeline: list[dict[str, Any]],
+    report_errors: list[dict[str, Any]],
+    executions_snapshot: list[dict[str, Any]],
+    completed_orders_snapshot: list[dict[str, Any]],
+    positions_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    _ = callback_timeline
+    likely_root_cause = "observation_gap_after_manual_approval"
+    conclusion = (
+        "The partial paper-fill result was more likely caused by incomplete broker-truth observation after manual TWS approval than by a proven accepted order. "
+        "The harness attempted submit and later cancel, but it recorded no openOrder, orderStatus, execDetails, or completedOrder callbacks for the submitted order."
+    )
+    blocking_gaps: list[str] = []
+    if callback_summary.get("nextValidId", 0) == 0:
+        blocking_gaps.append("nextValidId callback was not observed.")
+    if callback_summary.get("openOrderEnd", 0) == 0:
+        blocking_gaps.append("openOrderEnd callback was not observed during order observation requests.")
+    if callback_summary.get("execDetailsEnd", 0) == 0:
+        blocking_gaps.append("execDetailsEnd callback was not observed during execution requests.")
+    if callback_summary.get("completedOrdersEnd", 0) == 0:
+        blocking_gaps.append("completedOrdersEnd callback was not observed during completed-order requests.")
+    if request_summary.get("open_orders", 0) == 0 or request_summary.get("executions", 0) == 0 or request_summary.get("completed_orders", 0) == 0:
+        blocking_gaps.append("Not all observation requests were recorded in the client request log.")
+    order_callbacks_seen = any(
+        callback_summary.get(name, 0) > 0
+        for name in ("openOrder", "orderStatus", "execDetails", "completedOrder")
+    )
+    mgc_execution_seen = any(str(row.get("symbol") or "").strip().upper() == _EXPECTED_SYMBOL for row in executions_snapshot)
+    mgc_completed_seen = any(str(row.get("symbol") or "").strip().upper() == _EXPECTED_SYMBOL for row in completed_orders_snapshot)
+    mgc_position_seen = any(
+        str(row.get("symbol") or "").strip().upper() == _EXPECTED_SYMBOL
+        for row in list(positions_snapshot.get("positions") or [])
+    )
+    if mgc_execution_seen or mgc_completed_seen or mgc_position_seen:
+        likely_root_cause = "harness_failed_to_correlate_fill_truth"
+        conclusion = (
+            "The first manual paper submit very likely did transmit and fill. The dry-run observation pass found an MGC position plus execDetails/completedOrder truth, "
+            "which points to a harness observation problem: the post-approval window was too short and later IBKR truth surfaced under permId-based records with broker_order_id=0 / client_id=0, "
+            "so the original run did not correlate that fill back to submitted order id 1."
+        )
+    elif order_callbacks_seen:
+        likely_root_cause = "order_callbacks_present_but_submit_gap_unclear"
+        conclusion = (
+            "The observation stack is capable of receiving order-related callbacks, so the first partial result may have been caused by timing, transmission, or a very fast order-state transition."
+        )
+    elif callback_summary.get("openOrderEnd", 0) and callback_summary.get("execDetailsEnd", 0) and callback_summary.get("completedOrdersEnd", 0):
+        likely_root_cause = "order_not_transmitted_or_not_broker_visible"
+        conclusion = (
+            "The observation stack appears healthy for passive requests, but the first submit produced no order-related callbacks or broker-visible order rows. "
+            "That points more toward the order not being transmitted, not being accepted into a broker-visible state, or being handled entirely inside the TWS confirmation path."
+        )
+    if any(int(row.get("code", 0)) in _SEVERE_CONNECTION_ERROR_CODES for row in report_errors):
+        blocking_gaps.append("Severe IBKR connection errors were observed during the session.")
+    classification = "IBKR_ORDER_OBSERVATION_READY_FOR_RETEST" if not blocking_gaps else "IBKR_ORDER_OBSERVATION_NEEDS_FIX"
+    return {
+        "classification": classification,
+        "likely_root_cause": likely_root_cause,
+        "conclusion": conclusion,
+        "blocking_gaps": blocking_gaps,
+        "recommended_instrumentation": [
+            "Capture callback timeline rows for nextValidId, openOrder, openOrderEnd, orderStatus, error, execDetails, execDetailsEnd, completedOrder, completedOrdersEnd.",
+            "Keep request-log evidence for reqOpenOrders, reqAllOpenOrders, reqExecutions, reqCompletedOrders, and reqPositions after manual approval.",
+            "Extend the post-approval observation window before classifying fill timeout.",
+            "Preserve order-id and nextValidId state in the report so future retests can correlate broker responses to the exact submitted order id.",
+        ],
+    }
 
 
 def _wait_for_submitted_order_visibility(
@@ -2291,18 +3450,35 @@ def _build_submit_bridge(*, wrapper_cls: type[Any], client_cls: type[Any], colle
             client_cls.__init__(self, wrapper=self)
 
         def nextValidId(self, orderId: int) -> None:  # noqa: N802
+            collector.record_callback("nextValidId", order_id=int(orderId))
             collector.next_valid_id(orderId)
 
         def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
+            collector.record_callback("managedAccounts", accounts_list=str(accountsList or ""))
             collector.managed_accounts(accountsList)
 
         def updateAccountValue(self, key: str, value: str, currency: str, accountName: str) -> None:  # noqa: N802
+            collector.record_callback(
+                "updateAccountValue",
+                key=str(key),
+                value=str(value),
+                currency=str(currency),
+                account_id=str(accountName),
+            )
             collector.update_account_value(account_id=accountName, key=key, value=value, currency=currency)
 
         def accountDownloadEnd(self, accountName: str) -> None:  # noqa: N802, ARG002
+            collector.record_callback("accountDownloadEnd", account_id=str(accountName))
             collector.account_download_end()
 
         def position(self, account: str, contract: Any, pos: float, avgCost: float) -> None:  # noqa: N802
+            collector.record_callback(
+                "position",
+                account_id=str(account),
+                contract=_contract_payload(contract),
+                quantity=float(pos),
+                average_cost=float(avgCost),
+            )
             collector.position(
                 account_id=account,
                 contract=_contract_payload(contract),
@@ -2311,9 +3487,21 @@ def _build_submit_bridge(*, wrapper_cls: type[Any], client_cls: type[Any], colle
             )
 
         def positionEnd(self) -> None:  # noqa: N802
+            collector.record_callback("positionEnd")
             collector.position_end()
 
         def openOrder(self, orderId: int, contract: Any, order: Any, orderState: Any) -> None:  # noqa: N802
+            collector.record_callback(
+                "openOrder",
+                order_id=int(orderId),
+                account_id=str(getattr(order, "account", "") or ""),
+                client_id=int(getattr(order, "clientId", 0) or 0),
+                perm_id=getattr(order, "permId", None),
+                contract=_contract_payload(contract),
+                status=str(getattr(orderState, "status", "") or ""),
+                total_quantity=getattr(order, "totalQuantity", 0),
+                limit_price=getattr(order, "lmtPrice", None),
+            )
             collector.open_order(
                 account_id=getattr(order, "account", "") or "",
                 broker_order_id=orderId,
@@ -2328,34 +3516,107 @@ def _build_submit_bridge(*, wrapper_cls: type[Any], client_cls: type[Any], colle
             )
 
         def openOrderEnd(self) -> None:  # noqa: N802
+            collector.record_callback("openOrderEnd")
             collector.open_order_end()
 
+        def completedOrder(self, contract: Any, order: Any, orderState: Any) -> None:  # noqa: N802
+            collector.record_callback(
+                "completedOrder",
+                order_id=int(getattr(order, "orderId", 0) or 0),
+                account_id=str(getattr(order, "account", "") or ""),
+                client_id=int(getattr(order, "clientId", 0) or 0),
+                perm_id=getattr(order, "permId", None),
+                contract=_contract_payload(contract),
+                status=str(getattr(orderState, "status", "") or ""),
+                total_quantity=getattr(order, "totalQuantity", 0),
+            )
+            collector.completed_order(
+                account_id=getattr(order, "account", "") or "",
+                broker_order_id=getattr(order, "orderId", 0),
+                client_id=getattr(order, "clientId", 0),
+                perm_id=getattr(order, "permId", None),
+                contract=_contract_payload(contract),
+                status=getattr(orderState, "status", "") or "",
+                quantity=getattr(order, "totalQuantity", 0),
+            )
+
+        def completedOrdersEnd(self) -> None:  # noqa: N802
+            collector.record_callback("completedOrdersEnd")
+            collector.completed_orders_end()
+
         def accountSummary(self, reqId: int, account: str, tag: str, value: str, currency: str) -> None:  # noqa: N802
+            collector.record_callback(
+                "accountSummary",
+                request_id=int(reqId),
+                account_id=str(account),
+                tag=str(tag),
+                value=str(value),
+                currency=str(currency),
+            )
             collector.account_summary(request_id=reqId, account_id=account, tag=tag, value=value, currency=currency)
 
         def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802
+            collector.record_callback("accountSummaryEnd", request_id=int(reqId))
             collector.account_summary_end(request_id=reqId)
 
         def contractDetails(self, reqId: int, contractDetails: Any) -> None:  # noqa: N802
+            collector.record_callback("contractDetails", request_id=int(reqId))
             collector.contract_details(request_id=reqId, contract_details=contractDetails)
 
         def contractDetailsEnd(self, reqId: int) -> None:  # noqa: N802
+            collector.record_callback("contractDetailsEnd", request_id=int(reqId))
             collector.contract_details_end(request_id=reqId)
 
         def marketDataType(self, reqId: int, marketDataType: int) -> None:  # noqa: N802
+            collector.record_callback("marketDataType", request_id=int(reqId), market_data_type=int(marketDataType))
             collector.market_data_type(request_id=reqId, market_data_type=marketDataType)
 
         def tickPrice(self, reqId: int, tickType: int, price: float, attrib: Any) -> None:  # noqa: N802, ARG002
+            collector.record_callback("tickPrice", request_id=int(reqId), tick_type=int(tickType), price=float(price))
             collector.tick_price(request_id=reqId, tick_type=tickType, price=price)
 
         def tickSize(self, reqId: int, tickType: int, size: int) -> None:  # noqa: N802
+            collector.record_callback("tickSize", request_id=int(reqId), tick_type=int(tickType), size=int(size))
             collector.tick_size(request_id=reqId, tick_type=tickType, size=size)
 
         def tickString(self, reqId: int, tickType: int, value: str) -> None:  # noqa: N802
+            collector.record_callback("tickString", request_id=int(reqId), tick_type=int(tickType), value=str(value))
             collector.tick_string(request_id=reqId, tick_type=tickType, value=value)
 
         def tickSnapshotEnd(self, reqId: int) -> None:  # noqa: N802
+            collector.record_callback("tickSnapshotEnd", request_id=int(reqId))
             collector.tick_snapshot_end(request_id=reqId)
+
+        def execDetails(self, reqId: int, contract: Any, execution: Any) -> None:  # noqa: N802
+            collector.record_callback(
+                "execDetails",
+                request_id=int(reqId),
+                account_id=str(getattr(execution, "acctNumber", "") or ""),
+                execution_id=str(getattr(execution, "execId", "") or ""),
+                broker_order_id=getattr(execution, "orderId", None),
+                client_id=getattr(execution, "clientId", None),
+                perm_id=getattr(execution, "permId", None),
+                side=getattr(execution, "side", None),
+                quantity=getattr(execution, "shares", 0),
+                price=getattr(execution, "price", None),
+                contract=_contract_payload(contract),
+            )
+            collector.exec_details(
+                request_id=reqId,
+                account_id=getattr(execution, "acctNumber", "") or "",
+                execution_id=getattr(execution, "execId", "") or "",
+                broker_order_id=getattr(execution, "orderId", None),
+                client_id=getattr(execution, "clientId", None),
+                perm_id=getattr(execution, "permId", None),
+                contract=_contract_payload(contract),
+                side=getattr(execution, "side", None),
+                quantity=getattr(execution, "shares", 0),
+                price=getattr(execution, "price", None),
+            )
+
+        def execDetailsEnd(self, reqId: int) -> None:  # noqa: N802
+            collector.record_callback("execDetailsEnd", request_id=int(reqId))
+            collector.exec_details_end(request_id=reqId)
 
         def orderStatus(  # noqa: N802
             self,
@@ -2371,6 +3632,20 @@ def _build_submit_bridge(*, wrapper_cls: type[Any], client_cls: type[Any], colle
             whyHeld: str,
             mktCapPrice: float,
         ) -> None:
+            collector.record_callback(
+                "orderStatus",
+                order_id=int(orderId),
+                status=str(status),
+                filled=float(filled),
+                remaining=float(remaining),
+                avg_fill_price=float(avgFillPrice),
+                perm_id=int(permId) if permId is not None else None,
+                parent_id=int(parentId) if parentId is not None else None,
+                last_fill_price=float(lastFillPrice),
+                client_id=int(clientId) if clientId is not None else None,
+                why_held=str(whyHeld or ""),
+                mkt_cap_price=float(mktCapPrice),
+            )
             collector.order_status(
                 order_id=orderId,
                 status=status,
@@ -2386,6 +3661,12 @@ def _build_submit_bridge(*, wrapper_cls: type[Any], client_cls: type[Any], colle
             )
 
         def error(self, reqId: int, errorCode: int, errorString: str, *args: Any) -> None:  # noqa: N802, ARG002
+            collector.record_callback(
+                "error",
+                request_id=int(reqId),
+                error_code=int(errorCode),
+                error_message=str(errorString),
+            )
             collector.error(code=errorCode, message=errorString, request_id=reqId)
 
     return _Bridge()

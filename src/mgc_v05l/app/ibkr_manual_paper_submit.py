@@ -8,7 +8,9 @@ from pathlib import Path
 
 from ..execution.ibkr_manual_paper_submit import (
     IbkrManualPaperSubmitConfig,
+    run_ibkr_order_observation_diagnostic,
     run_ibkr_manual_paper_submit_test,
+    write_ibkr_order_observation_diagnostic_artifacts,
     write_ibkr_manual_paper_submit_artifacts,
 )
 
@@ -32,9 +34,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--action", default="BUY", help="Initial scope only allows BUY.")
     parser.add_argument("--quantity", type=float, default=1.0, help="Initial scope only allows quantity 1.")
     parser.add_argument("--order-type", default="LMT", help="Initial scope only allows LMT.")
-    parser.add_argument("--limit-price", type=float, required=True, help="Required hypothetical and submitted limit price.")
+    parser.add_argument("--limit-price", type=float, default=None, help="Optional preview limit price. PAPER_FILL_TEST derives a marketable limit from the delayed ask/last when omitted.")
     parser.add_argument("--time-in-force", default="DAY", help="Initial scope only allows DAY.")
+    parser.add_argument("--test-mode", default="PAPER_RESTING_TEST", choices=("PAPER_RESTING_TEST", "PAPER_FILL_TEST"), help="Manual test mode. PAPER_FILL_TEST is intended for one controlled paper fill attempt.")
     parser.add_argument("--timeout-seconds", type=float, default=15.0, help="Truth refresh and lifecycle timeout in seconds.")
+    parser.add_argument("--fill-timeout-seconds", type=float, default=8.0, help="How long PAPER_FILL_TEST waits for broker-truth fill verification before canceling.")
+    parser.add_argument("--post-approval-observation-seconds", type=float, default=15.0, help="How long the manual harness keeps observing broker truth after TWS approval before declaring a fill-timeout path.")
+    parser.add_argument("--fill-limit-offset-ticks", type=float, default=1.0, help="Tick offset applied above delayed ask/last for PAPER_FILL_TEST BUY previews.")
     parser.add_argument(
         "--manual-confirmation-timeout-seconds",
         type=float,
@@ -44,7 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--submit", action="store_true", help="Explicitly attempt one paper submit/cancel lifecycle after preview and approval validation.")
     parser.add_argument("--approval-digest", default=None, help="Exact preview digest required for submit.")
     parser.add_argument("--approval-phrase", default=None, help="Exact typed confirmation phrase required for submit.")
+    parser.add_argument("--diagnostic-dry-run", action="store_true", help="Do not submit anything. Instead exercise the callback and order-observation stack and write a diagnostic report.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Artifact output directory.")
+    parser.add_argument("--frozen-preview-path", type=Path, default=None, help="Optional explicit frozen preview bundle path. Submit requires a previously generated bundle.")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing a non-empty output directory.")
     return parser
 
@@ -67,13 +75,29 @@ def main(argv: list[str] | None = None) -> int:
         order_type=str(args.order_type or "").strip().upper(),
         limit_price=float(args.limit_price) if args.limit_price is not None else None,
         time_in_force=str(args.time_in_force or "").strip().upper(),
+        test_mode=str(args.test_mode or "").strip().upper(),
         timeout_seconds=float(args.timeout_seconds),
+        fill_timeout_seconds=float(args.fill_timeout_seconds),
+        post_approval_observation_seconds=float(args.post_approval_observation_seconds),
+        fill_limit_offset_ticks=float(args.fill_limit_offset_ticks),
         manual_confirmation_timeout_seconds=float(args.manual_confirmation_timeout_seconds),
         caller_path="manual_cli",
         submit=bool(args.submit),
         approval_digest=str(args.approval_digest or "").strip() or None,
         approval_phrase=str(args.approval_phrase or "").strip() or None,
+        output_dir=output_dir,
+        frozen_preview_path=Path(args.frozen_preview_path) if args.frozen_preview_path is not None else None,
+        diagnostic_dry_run=bool(args.diagnostic_dry_run),
     )
+    if config.diagnostic_dry_run:
+        report, callback_timeline = run_ibkr_order_observation_diagnostic(config=config)
+        write_ibkr_order_observation_diagnostic_artifacts(
+            output_dir=output_dir,
+            report=report,
+            callback_timeline=callback_timeline,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report.get("classification") != "IBKR_ORDER_OBSERVATION_BLOCKED" else 1
     artifacts = run_ibkr_manual_paper_submit_test(config=config)
     write_ibkr_manual_paper_submit_artifacts(output_dir=output_dir, artifacts=artifacts)
     print(json.dumps(artifacts.report, indent=2, sort_keys=True))
