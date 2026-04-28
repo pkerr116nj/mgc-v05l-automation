@@ -21,6 +21,14 @@ _SUPPORTED_EXECUTABLE_INSTRUMENTS = {"MGC", "GC"}
 _INITIAL_EXECUTABLE_INSTRUMENT = "MGC"
 _ATP_LANE_ID = "atp_companion_v1_asia_us"
 _ATP_STRATEGY_ID = "ATP_COMPANION_V1_ASIA_US"
+_GC_PHASE1_SUBMIT_LANE_IDS = (
+    "gc_1x_all_lanes__asia_early_long",
+    "gc_1x_all_lanes__asia_early_short",
+    "gc_1x_all_lanes__us_early_short",
+    "gc_1x_all_lanes__us_midday_short",
+    "gc_1x_asia_london_participation__asia_london_long_v5",
+    "gc_1x_asia_london_participation__asia_london_short_v2",
+)
 _NEXT_NON_ATP_SUBMIT_LANE_ID = "gc_1x_all_lanes__asia_early_long"
 _FIRST_NON_ATP_SUBMIT_LANE_ID = "gc_1x_asia_london_participation__asia_london_long_v5"
 _ATP_CONTRACT = {
@@ -36,35 +44,23 @@ _ADAPTER_REPORT_MD = "ibkr_strategy_intent_adapter_report.md"
 _INVENTORY_CSV = "ibkr_live_paper_strategy_inventory.csv"
 _STATUS_CSV = "per_strategy_ibkr_paper_status.csv"
 _INTENT_JSONL = "per_strategy_order_intent_examples.jsonl"
+_GC_PHASE1_PROXY_TARGET = {
+    "symbol": "MGC",
+    "contract_month": "202606",
+    "expiry": "20260626",
+    "con_id": 712565978,
+    "local_symbol": "MGCM6",
+    "friendly_label": "MGC 202606",
+}
 _SUBMIT_CAPABLE_LANE_ADAPTERS: dict[str, dict[str, Any]] = {
-    _NEXT_NON_ATP_SUBMIT_LANE_ID: {
-        "lane_id": _NEXT_NON_ATP_SUBMIT_LANE_ID,
+    lane_id: {
+        "lane_id": lane_id,
         "source_instrument": "GC",
-        "bridge_execution_target": {
-            "symbol": "MGC",
-            "contract_month": "202606",
-            "expiry": "20260626",
-            "con_id": 712565978,
-            "local_symbol": "MGCM6",
-            "friendly_label": "MGC 202606",
-        },
-        "current_order_destination": "ibkr_paper_bridge_submit_capable",
-        "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
-    },
-    _FIRST_NON_ATP_SUBMIT_LANE_ID: {
-        "lane_id": _FIRST_NON_ATP_SUBMIT_LANE_ID,
-        "source_instrument": "GC",
-        "bridge_execution_target": {
-            "symbol": "MGC",
-            "contract_month": "202606",
-            "expiry": "20260626",
-            "con_id": 712565978,
-            "local_symbol": "MGCM6",
-            "friendly_label": "MGC 202606",
-        },
+        "bridge_execution_target": dict(_GC_PHASE1_PROXY_TARGET),
         "current_order_destination": "ibkr_paper_bridge_submit_capable",
         "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
     }
+    for lane_id in _GC_PHASE1_SUBMIT_LANE_IDS
 }
 
 

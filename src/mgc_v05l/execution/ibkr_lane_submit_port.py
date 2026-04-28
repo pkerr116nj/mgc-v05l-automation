@@ -25,7 +25,11 @@ _REPORT_MD = "ibkr_lane_submit_port_report.md"
 _AUDIT_JSONL = "ibkr_lane_submit_port_audit.jsonl"
 _PREFERRED_LANES = (
     "gc_1x_all_lanes__asia_early_long",
+    "gc_1x_all_lanes__asia_early_short",
+    "gc_1x_all_lanes__us_early_short",
+    "gc_1x_all_lanes__us_midday_short",
     "gc_1x_asia_london_participation__asia_london_long_v5",
+    "gc_1x_asia_london_participation__asia_london_short_v2",
 )
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
@@ -41,6 +45,7 @@ class IbkrLaneSubmitPortConfig:
     submit: bool = True
     client_id: int = 9241
     timeout_seconds: float = 15.0
+    strategy_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,7 +61,7 @@ def run_ibkr_lane_submit_port(*, config: IbkrLaneSubmitPortConfig) -> IbkrLaneSu
     porting_artifacts = run_ibkr_paper_strategy_porting(config=porting_config)
     write_ibkr_paper_strategy_porting_artifacts(config=porting_config, artifacts=porting_artifacts)
     monitor_status = load_paper_strategy_monitor_status(repo_root=config.repo_root)
-    selected_lane = _select_lane(report=porting_artifacts.report, repo_root=config.repo_root)
+    selected_lane = _select_lane(report=porting_artifacts.report, repo_root=config.repo_root, strategy_id=config.strategy_id)
     if not selected_lane:
         report = {
             "classification": "PAPER_LANE_PREFLIGHT_BLOCKED",
@@ -156,12 +161,14 @@ def render_ibkr_lane_submit_port_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _select_lane(*, report: dict[str, Any], repo_root: Path) -> dict[str, Any]:
+def _select_lane(*, report: dict[str, Any], repo_root: Path, strategy_id: str | None = None) -> dict[str, Any]:
     rows = list(report.get("inventory_rows") or [])
     governance_rows = {
         str(row.get("strategy_id") or ""): row for row in list(_load_governance_rows(repo_root) or [])
     }
-    for preferred in _PREFERRED_LANES:
+    requested = str(strategy_id or "").strip()
+    search_order = (requested,) if requested else _PREFERRED_LANES
+    for preferred in search_order:
         row = next((candidate for candidate in rows if str(candidate.get("strategy_id") or "") == preferred), None)
         if row is None:
             continue
@@ -209,6 +216,8 @@ def _build_checks(
     adapter: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     governance_row = dict(governance_status.get("selected_strategy") or {})
+    action = str(intent_row.get("action") or "").upper()
+    requires_live_submit_gate = action in {"BUY", "SELL", "EXIT"}
     return [
         _check("paper_environment_lock", True, True, "Lane-port pass remains hard-locked to PAPER / 127.0.0.1 / 7497 / DUM882026."),
         _check("selected_lane_present", bool(inventory_row), True, "A selected non-ATP GC/MGC lane must be present in the live inventory."),
@@ -217,7 +226,12 @@ def _build_checks(
         _check("monitor_fresh_and_healthy", bool(monitor_status.get("monitor_running")) and not bool(monitor_status.get("stale")) and str(monitor_status.get("health_classification") or "").upper() == "HEALTHY", True, "Monitor must be running, fresh, and HEALTHY."),
         _check("governance_row_present", bool(governance_row), True, "Selected lane requires a governance row."),
         _check("governance_status_allowed", str(governance_row.get("strategy_status") or "").upper() not in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}, True, "Governance status must remain submit-eligible."),
-        _check("governance_submit_allowed", bool(governance_status.get("submit_allowed")), True, "Governance submit gate must remain open for the selected lane."),
+        _check(
+            "governance_submit_allowed",
+            (not requires_live_submit_gate) or bool(governance_status.get("submit_allowed")),
+            True,
+            "Governance submit gate must remain open before any real BUY / SELL / EXIT order can be sent for the selected lane.",
+        ),
         _check("route_blockers_empty", len(list(intent_row.get("route_blockers") or [])) == 0, True, "Selected lane must have no IBKR routing blockers."),
         _check("no_conflicting_open_orders", int(monitor_status.get("open_order_count") or 0) == 0, True, "No conflicting broker open order is allowed."),
     ]

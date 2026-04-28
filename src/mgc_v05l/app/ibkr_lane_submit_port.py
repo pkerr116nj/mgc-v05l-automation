@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Artifact output directory.")
     parser.add_argument("--overwrite", action="store_true", help="Allow writing into a non-empty output directory.")
     parser.add_argument("--no-submit", action="store_true", help="Disable live bridge submit even if the selected lane emits an actionable intent.")
+    parser.add_argument("--strategy-id", type=str, default=None, help="Optional specific supported GC/MGC lane to port through the shared bridge.")
     return parser
 
 
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=REPO_ROOT,
         output_dir=output_dir,
         submit=not bool(args.no_submit),
+        strategy_id=args.strategy_id,
     )
     artifacts = run_ibkr_lane_submit_port(config=config)
     write_ibkr_lane_submit_port_artifacts(config=config, artifacts=artifacts)
