@@ -23,7 +23,10 @@ _DEFAULT_PORTING_OUTPUT_DIR = Path("outputs") / "reports" / "ibkr_strategy_porti
 _REPORT_JSON = "ibkr_lane_submit_port_report.json"
 _REPORT_MD = "ibkr_lane_submit_port_report.md"
 _AUDIT_JSONL = "ibkr_lane_submit_port_audit.jsonl"
-_PREFERRED_LANES = ("gc_1x_asia_london_participation__asia_london_long_v5",)
+_PREFERRED_LANES = (
+    "gc_1x_all_lanes__asia_early_long",
+    "gc_1x_asia_london_participation__asia_london_long_v5",
+)
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
 _EXPECTED_PORT = 7497
@@ -163,6 +166,8 @@ def _select_lane(*, report: dict[str, Any], repo_root: Path) -> dict[str, Any]:
         if row is None:
             continue
         gov = governance_rows.get(preferred, {})
+        if not gov:
+            continue
         if str(row.get("instrument") or "") not in {"GC", "MGC"}:
             continue
         if str(gov.get("strategy_status") or "WATCHLIST") in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
