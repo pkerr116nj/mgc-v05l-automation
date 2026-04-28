@@ -8,6 +8,9 @@ from types import SimpleNamespace
 from mgc_v05l.execution.ibkr_manual_paper_submit import (
     _FILL_TEST_MODE,
     _MANUAL_CONFIRMATION_WAIT_STATE,
+    _classify_submit_lifecycle,
+    _configure_minimal_futures_limit_order,
+    _detect_order_rejection,
     _execute_submit_cancel_lifecycle,
     artifact_stem_for_test_mode,
     IbkrManualPaperSubmitArtifacts,
@@ -220,6 +223,137 @@ def test_audit_serialization_works(tmp_path: Path) -> None:
     payload = json.loads((tmp_path / "ibkr_manual_paper_submit_report.json").read_text(encoding="utf-8"))
     markdown = render_ibkr_manual_paper_submit_markdown(payload)
     assert "manual CLI only" in markdown
+
+
+def test_manual_mgc_futures_order_does_not_include_etradeonly() -> None:
+    raw_order = SimpleNamespace(
+        eTradeOnly=True,
+        firmQuoteOnly=True,
+        nbboPriceCap=999.0,
+        auctionStrategy=0,
+        discretionaryAmt=1.0,
+        outsideRth=True,
+    )
+
+    _configure_minimal_futures_limit_order(
+        raw_order,
+        order_id=1,
+        account_id="DUM882026",
+        action="BUY",
+        quantity=1.0,
+        limit_price=4599.6,
+        time_in_force="DAY",
+        common_module=SimpleNamespace(UNSET_DOUBLE=-1.0, UNSET_INTEGER=-1),
+    )
+
+    assert raw_order.eTradeOnly is False
+    assert raw_order.orderType == "LMT"
+    assert raw_order.tif == "DAY"
+    assert raw_order.transmit is True
+
+
+def test_manual_mgc_futures_order_omits_unsupported_stock_only_attributes() -> None:
+    raw_order = SimpleNamespace(
+        eTradeOnly=True,
+        firmQuoteOnly=True,
+        nbboPriceCap=999.0,
+        auctionStrategy=7,
+        discretionaryAmt=1.0,
+        outsideRth=True,
+    )
+
+    _configure_minimal_futures_limit_order(
+        raw_order,
+        order_id=1,
+        account_id="DUM882026",
+        action="BUY",
+        quantity=1.0,
+        limit_price=4599.6,
+        time_in_force="DAY",
+        common_module=SimpleNamespace(UNSET_DOUBLE=-1.0, UNSET_INTEGER=-1),
+    )
+
+    assert raw_order.firmQuoteOnly is False
+    assert raw_order.nbboPriceCap == -1.0
+    assert raw_order.auctionStrategy == -1
+    assert raw_order.discretionaryAmt == -1.0
+    assert raw_order.outsideRth is False
+
+
+def test_error_10268_is_classified_as_paper_order_rejected_with_unsupported_attribute() -> None:
+    collector = SimpleNamespace(
+        errors=[
+            {
+                "request_id": 1,
+                "code": 10268,
+                "message": "The 'EtradeOnly' order attribute is not supported.",
+            }
+        ],
+        latest_order_status=lambda order_id: None,
+    )
+
+    rejection = _detect_order_rejection(collector=collector, order_id=1)
+
+    assert rejection is not None
+    assert rejection["unsupported_attribute"] == "EtradeOnly"
+    assert _classify_submit_lifecycle(_FILL_TEST_MODE, "rejected") == "PAPER_ORDER_REJECTED"
+
+
+def test_markdown_classification_matches_structured_json_for_rejection() -> None:
+    payload = {
+        "classification": "PAPER_ORDER_REJECTED",
+        "generated_at": "2026-04-28T12:33:22+00:00",
+        "account_id": "DUM882026",
+        "connection_check": {"client_id": 9074},
+        "environment_lock_check": {
+            "configured_mode": "PAPER",
+            "configured_host": "127.0.0.1",
+            "configured_port": 7497,
+        },
+        "preview": {
+            "test_mode": _FILL_TEST_MODE,
+            "preview_digest": "digest",
+            "expected_approval_phrase": "APPROVE ...",
+            "quote_source_label": "DELAYED",
+            "live_market_data_warning": "Delayed only.",
+            "quote_snapshot": {"ask_price": 4599.5},
+            "reference_price_source": "ask_price",
+            "reference_price": 4599.5,
+            "limit_price": 4599.6,
+            "distance_from_quote": 0.1,
+            "distance_ticks": 1.0,
+            "pricing_label": "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER",
+            "intended_to_fill": True,
+            "estimated_notional": 45996.0,
+            "estimated_tick_value": 1.0,
+        },
+        "guardrail_checks": [],
+        "submit_cancel_lifecycle": {
+            "status": "rejected",
+            "detail": "IBKR rejected the paper order before it became broker-visible: The 'EtradeOnly' order attribute is not supported.",
+            "rejection": {
+                "error_code": 10268,
+                "error_message": "The 'EtradeOnly' order attribute is not supported.",
+                "unsupported_attribute": "EtradeOnly",
+            },
+            "fill_verification": {"executions_after_submit": []},
+            "manual_confirmation": {
+                "state": _MANUAL_CONFIRMATION_WAIT_STATE,
+                "operator_outcome": "approved",
+            },
+        },
+        "errors": [
+            {"code": 10268, "message": "The 'EtradeOnly' order attribute is not supported."},
+            {"code": 10147, "message": "OrderId 1 that needs to be cancelled is not found."},
+        ],
+        "audit_event_count": 4,
+    }
+
+    markdown = render_ibkr_manual_paper_submit_markdown(payload)
+
+    assert "classification: `PAPER_ORDER_REJECTED`" in markdown
+    assert "unsupported attribute: `EtradeOnly`" in markdown
+    assert "cancel 10147 was expected after rejection because no order was working" in markdown
 
 
 def test_cancel_verification_logic_with_mocks() -> None:
@@ -475,7 +609,7 @@ def test_frozen_preview_payload_does_not_change_on_submit(monkeypatch, tmp_path:
         stack_provider=_manual_stack,
     )
 
-    assert submit_artifacts.classification == "IBKR_MANUAL_PAPER_FILL_TEST_PASSED"
+    assert submit_artifacts.classification == "PAPER_ORDER_FILLED"
     assert captured["preview_payload"] == frozen_bundle["preview_payload"]
     assert captured["requested_order"] == frozen_bundle["requested_order"]
     assert json.loads(frozen_path.read_text(encoding="utf-8")) == frozen_bundle
@@ -607,7 +741,7 @@ def _patch_harness_context(monkeypatch, context_override: dict[str, object] | No
         lambda **_: SimpleNamespace(
             transport=SimpleNamespace(connect=lambda: None, disconnect=lambda: None),
             session=SimpleNamespace(state=SimpleNamespace(connected=True)),
-            collector=SimpleNamespace(latest_error=lambda **kwargs: None),
+            collector=SimpleNamespace(latest_error=lambda **kwargs: None, errors=[]),
             client=SimpleNamespace(),
         ),
     )
@@ -795,6 +929,7 @@ class _FakeTransport:
 class _FakeCollector:
     def __init__(self, latest_order_status: dict[str, object] | None = None) -> None:
         self._latest_order_status = latest_order_status
+        self.errors: list[dict[str, object]] = []
 
     def reset_order_status_event(self, order_id: int) -> None:
         _ = order_id

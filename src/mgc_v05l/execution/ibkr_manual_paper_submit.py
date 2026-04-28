@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import re
 import select
 import sys
 import threading
@@ -81,6 +82,7 @@ _MARKETABLE_LIMIT_LABEL = "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER"
 _NON_MARKETABLE_LIMIT_LABEL = "NEAR_MARKET_NON_MARKETABLE_LIMIT"
 _FILLED_ORDER_STATUS = {"Filled"}
 _PARTIAL_FILL_STATUS = {"PartiallyFilled"}
+_ORDER_REJECTION_ERROR_CODES = {10268, 201, 202}
 
 
 class IbkrManualPaperSubmitError(RuntimeError):
@@ -440,14 +442,17 @@ class IbkrManualPaperSubmitTransport:
         if order_cls is None:
             raise IbkrManualPaperSubmitError("Installed ibapi package is missing Order.")
         raw_order = order_cls()
-        raw_order.orderId = int(order_id)
-        raw_order.account = str(account_id)
-        raw_order.action = str(action)
-        raw_order.totalQuantity = float(quantity)
-        raw_order.orderType = "LMT"
-        raw_order.lmtPrice = float(limit_price)
-        raw_order.tif = str(time_in_force)
-        raw_order.transmit = True
+        common_module = self._module_loader("ibapi.common")
+        _configure_minimal_futures_limit_order(
+            raw_order,
+            order_id=order_id,
+            account_id=account_id,
+            action=action,
+            quantity=quantity,
+            limit_price=limit_price,
+            time_in_force=time_in_force,
+            common_module=common_module,
+        )
         self._ensure_bridge().placeOrder(int(order_id), self._raw_contract(contract), raw_order)
 
     def cancel_order(self, *, order_id: int) -> None:
@@ -490,6 +495,41 @@ class IbkrManualPaperSubmitTransport:
                 collector=self._collector,
             )
         return self._bridge
+
+
+def _configure_minimal_futures_limit_order(
+    raw_order: Any,
+    *,
+    order_id: int,
+    account_id: str,
+    action: str,
+    quantity: float,
+    limit_price: float,
+    time_in_force: str,
+    common_module: Any | None,
+) -> None:
+    unset_double = getattr(common_module, "UNSET_DOUBLE", None) if common_module is not None else None
+    unset_integer = getattr(common_module, "UNSET_INTEGER", None) if common_module is not None else None
+    raw_order.orderId = int(order_id)
+    raw_order.account = str(account_id)
+    raw_order.action = str(action)
+    raw_order.totalQuantity = float(quantity)
+    raw_order.orderType = "LMT"
+    raw_order.lmtPrice = float(limit_price)
+    raw_order.tif = str(time_in_force)
+    raw_order.transmit = True
+    if hasattr(raw_order, "eTradeOnly"):
+        raw_order.eTradeOnly = False
+    if hasattr(raw_order, "firmQuoteOnly"):
+        raw_order.firmQuoteOnly = False
+    if hasattr(raw_order, "nbboPriceCap") and unset_double is not None:
+        raw_order.nbboPriceCap = unset_double
+    if hasattr(raw_order, "auctionStrategy") and unset_integer is not None:
+        raw_order.auctionStrategy = unset_integer
+    if hasattr(raw_order, "discretionaryAmt") and unset_double is not None:
+        raw_order.discretionaryAmt = unset_double
+    if hasattr(raw_order, "outsideRth"):
+        raw_order.outsideRth = False
 
 
 def run_ibkr_manual_paper_submit_test(
@@ -813,13 +853,18 @@ def run_ibkr_manual_paper_submit_test(
             manual_confirmation_fn=manual_confirmation_fn or _prompt_for_tws_manual_confirmation,
         )
         classification = _classify_submit_lifecycle(config.test_mode, lifecycle_result["status"])
+        report_context = {
+            **context,
+            "pricing_context": pricing_context,
+            "errors": list(runtime.collector.errors),
+        }
         report = _build_report(
             config=config,
             started_at=started_at,
             classification=classification,
             caller_check=caller_check,
             environment_lock=environment_lock,
-            context={**context, "pricing_context": pricing_context},
+            context=report_context,
             requested_order=requested_order,
             guardrail_checks=guardrail_checks,
             preview_payload=preview_payload,
@@ -1234,6 +1279,7 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
     environment = dict(report.get("environment_lock_check") or {})
     preview = dict(report.get("preview") or {})
     lifecycle = dict(report.get("submit_cancel_lifecycle") or {})
+    rejection = dict(lifecycle.get("rejection") or {})
     test_mode = str(preview.get("test_mode") or "").strip().upper()
     title = "# IBKR Manual Paper Fill Test Report" if test_mode == _FILL_TEST_MODE else "# IBKR Manual Paper Submit Report"
     lines = [
@@ -1294,9 +1340,30 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
         f"- estimated_notional: `{preview.get('estimated_notional')}`",
         f"- estimated_tick_value: `{preview.get('estimated_tick_value')}`",
         "",
-        "## Guardrails",
+        "## Outcome",
         "",
     ]
+    if rejection:
+        lines.extend(
+            [
+                f"- rejection code: `{rejection.get('error_code')}`",
+                f"- rejection message: {rejection.get('error_message')}",
+                f"- unsupported attribute: `{rejection.get('unsupported_attribute')}`",
+                "- no second order was submitted",
+                "- no working order was left open",
+            ]
+        )
+        if any(int(row.get("code", 0)) == 10147 for row in list(report.get("errors") or [])):
+            lines.append("- cancel 10147 was expected after rejection because no order was working")
+        if not list((lifecycle.get("fill_verification") or {}).get("executions_after_submit") or []):
+            lines.append("- no MGC execution or position change was attributed to this run")
+    lines.extend(
+        [
+            "",
+        "## Guardrails",
+        "",
+        ]
+    )
     for check in list(report.get("guardrail_checks") or []):
         lines.append(
             f"- {check.get('name')}: `{'PASS' if check.get('passed') else 'FAIL'}`"
@@ -2158,6 +2225,47 @@ def _extract_completed_order_rows(snapshot: dict[str, Any]) -> list[dict[str, An
     return []
 
 
+def _extract_unsupported_attribute(message: str | None) -> str | None:
+    match = re.search(r"'([^']+)' order attribute is not supported", str(message or ""))
+    if match is None:
+        return None
+    return str(match.group(1) or "").strip() or None
+
+
+def _detect_order_rejection(
+    *,
+    collector: IbkrManualPaperSubmitCollector,
+    order_id: int,
+) -> dict[str, Any] | None:
+    latest_error = next(
+        (
+            dict(row)
+            for row in reversed(list(collector.errors))
+            if int(row.get("request_id", -1)) == int(order_id) and int(row.get("code", 0)) in _ORDER_REJECTION_ERROR_CODES
+        ),
+        None,
+    )
+    latest_status = collector.latest_order_status(order_id)
+    if latest_error is None and str((latest_status or {}).get("status") or "").strip() not in _FAILED_ORDER_STATUS:
+        return None
+    error_code = int(latest_error.get("code", 0)) if latest_error is not None else None
+    error_message = str(latest_error.get("message") or "").strip() if latest_error is not None else None
+    unsupported_attribute = _extract_unsupported_attribute(error_message)
+    detail = (
+        f"IBKR rejected the paper order before it became broker-visible: {error_message}"
+        if error_message
+        else "IBKR rejected the paper order before it became broker-visible."
+    )
+    return {
+        "rejected": True,
+        "error_code": error_code,
+        "error_message": error_message,
+        "unsupported_attribute": unsupported_attribute,
+        "latest_order_status": latest_status,
+        "detail": detail,
+    }
+
+
 def _matches_order_identity(row: dict[str, Any], *, order_id: int, perm_id: int | None) -> bool:
     broker_order_id = row.get("broker_order_id")
     if broker_order_id is not None and str(broker_order_id) == str(order_id):
@@ -2269,6 +2377,48 @@ def _execute_fill_test_lifecycle(
         effective_perm_id = perm_id if perm_id is not None else (open_row.get("perm_id") if open_row else (latest_status.get("perm_id") if latest_status else None))
         last_execution_rows = _matching_execution_rows(truth["executions"], order_id=order_id, perm_id=effective_perm_id)
         last_completed_order_rows = _matching_execution_rows(truth["completed_orders"], order_id=order_id, perm_id=effective_perm_id)
+        rejection = _detect_order_rejection(collector=runtime.collector, order_id=order_id)
+        if rejection is not None:
+            _record_audit(
+                audit_events,
+                event_type="submit_rejected",
+                config=config,
+                classification=None,
+                detail=str(rejection.get("detail") or "IBKR rejected the paper order."),
+                extra={
+                    "order_id": order_id,
+                    "perm_id": effective_perm_id,
+                    "error_code": rejection.get("error_code"),
+                    "unsupported_attribute": rejection.get("unsupported_attribute"),
+                },
+            )
+            return {
+                "status": "rejected",
+                "detail": rejection.get("detail"),
+                "submitted_order_id": order_id,
+                "submitted_perm_id": effective_perm_id,
+                "open_order_after_submit": last_open_orders,
+                "open_order_after_cancel": _not_run_snapshot(
+                    "Cancel was not attempted because IBKR rejected the order before it became broker-visible."
+                ),
+                "latest_order_status": rejection.get("latest_order_status"),
+                "rejection": rejection,
+                "fill_verification": {
+                    "verified": False,
+                    "partial_fill": False,
+                    "filled_quantity": 0.0,
+                    "requested_quantity": float(requested_order.get("quantity") or 0.0),
+                    "final_status": str((rejection.get("latest_order_status") or {}).get("status") or "").strip() or None,
+                    "detail": rejection.get("detail"),
+                    "positions_after_submit": last_positions,
+                    "executions_after_submit": last_execution_rows,
+                    "completed_orders_after_submit": last_completed_order_rows,
+                    "open_order_after_submit": last_open_orders,
+                },
+                "positions_after_submit": last_positions,
+                "executions_after_submit": last_execution_rows,
+                "completed_orders_after_submit": last_completed_order_rows,
+            }
         fill_verification = _build_fill_verification_payload(
             requested_order=requested_order,
             latest_status=latest_status,
@@ -2610,6 +2760,34 @@ def _execute_submit_cancel_lifecycle(
     latest_status = runtime.collector.latest_order_status(order_id)
     perm_id = submitted_row.get("perm_id") if submitted_row else (latest_status.get("perm_id") if latest_status else None)
     if submitted_row is None:
+        rejection = _detect_order_rejection(collector=runtime.collector, order_id=order_id)
+        if rejection is not None:
+            _record_audit(
+                audit_events,
+                event_type="submit_rejected",
+                config=config,
+                classification=None,
+                detail=str(rejection.get("detail") or "IBKR rejected the paper order."),
+                extra={
+                    "order_id": order_id,
+                    "perm_id": perm_id,
+                    "error_code": rejection.get("error_code"),
+                    "unsupported_attribute": rejection.get("unsupported_attribute"),
+                },
+            )
+            return {
+                "status": "rejected",
+                "detail": rejection.get("detail"),
+                "submitted_order_id": order_id,
+                "submitted_perm_id": perm_id,
+                "open_order_after_submit": after_submit,
+                "open_order_after_cancel": _not_run_snapshot(
+                    "Cancel was not attempted because IBKR rejected the order before it became broker-visible."
+                ),
+                "latest_order_status": rejection.get("latest_order_status"),
+                "manual_confirmation": manual_confirmation,
+                "rejection": rejection,
+            }
         detail = "Operator approved the TWS dialog, but broker open-order truth could not verify the expected order by exact order id."
         _record_audit(
             audit_events,
@@ -3009,20 +3187,19 @@ def _classify_submit_lifecycle(test_mode: str, status: str) -> str:
     normalized_mode = str(test_mode or "").strip().upper()
     if normalized_mode == _FILL_TEST_MODE:
         if status == "filled":
-            return _passed_classification_for_mode(test_mode)
+            return "PAPER_ORDER_FILLED"
+        if status in {"passed", "fill_timeout_cancelled", "partial_fill_cancelled", "manual_confirmation_timeout_order_cancelled"}:
+            return "PAPER_ORDER_SUBMITTED_NOT_FILLED_CANCELLED"
+        if status in {"rejected", "manual_confirmation_rejected_no_order", "manual_confirmation_rejected_order_cancelled"}:
+            return "PAPER_ORDER_REJECTED"
         if status in {
-            "preview_only",
             "submit_verification_failed",
             "cancel_verification_failed",
             "approval_invalidated",
             "manual_confirmation_timeout",
-            "manual_confirmation_timeout_order_cancelled",
-            "manual_confirmation_rejected_no_order",
-            "manual_confirmation_rejected_order_cancelled",
-            "fill_timeout_cancelled",
-            "partial_fill_cancelled",
+            "manual_confirmation_unavailable",
         }:
-            return _preview_only_classification_for_mode(test_mode)
+            return "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW"
         return _blocked_classification_for_mode(test_mode)
     if status == "passed":
         return _passed_classification_for_mode(test_mode)
