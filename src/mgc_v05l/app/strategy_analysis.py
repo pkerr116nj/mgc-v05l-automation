@@ -3117,7 +3117,10 @@ def _decimal_to_string(value: Decimal | None) -> str | None:
 def _latest_rows_from_table(db_path: Path | None, table_name: str, order_column: str, *, limit: int) -> list[dict[str, Any]]:
     if db_path is None or not db_path.exists():
         return []
-    connection = sqlite3.connect(db_path)
+    try:
+        connection = sqlite3.connect(db_path)
+    except (OSError, sqlite3.Error):
+        return []
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(

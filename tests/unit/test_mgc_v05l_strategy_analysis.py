@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from math import inf
+import sqlite3
 
+import mgc_v05l.app.strategy_analysis as strategy_analysis_module
 from mgc_v05l.app.strategy_analysis import (
     LANE_TYPE_BENCHMARK_REPLAY,
     LANE_TYPE_HISTORICAL_PLAYBACK,
@@ -1102,3 +1104,25 @@ def test_strategy_analysis_can_surface_published_research_analytics_as_read_only
     assert lane["metrics"]["net_pnl"]["value"] == 125.0
     report_row = next(row for row in payload["results_board"]["rows"] if row["lane_type"] == LANE_TYPE_RESEARCH_ANALYTICS)
     assert report_row["history_review_support"]["trade_history"]["available"] is True
+
+
+def test_strategy_analysis_latest_rows_from_table_returns_empty_when_sqlite_connect_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "broken.sqlite"
+    db_path.write_text("", encoding="utf-8")
+
+    def _raise_connect(path):  # noqa: ANN001
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(strategy_analysis_module.sqlite3, "connect", _raise_connect)
+
+    rows = strategy_analysis_module._latest_rows_from_table(
+        db_path,
+        "order_intents",
+        "created_at",
+        limit=5,
+    )
+
+    assert rows == []

@@ -7038,6 +7038,28 @@ def test_dashboard_snapshot_builds_unified_strategy_analysis_surface(tmp_path: P
     assert service.operator_artifact_file("strategy-analysis")[0] == strategy_analysis_path
 
 
+def test_record_snapshot_warning_accepts_section_message_signature() -> None:
+    token = operator_dashboard_module._SNAPSHOT_WARNINGS.set([])
+    try:
+        operator_dashboard_module._record_snapshot_warning(
+            section="strategy_analysis",
+            message="lane-local sqlite evidence is temporarily unavailable",
+            severity="warning",
+        )
+        warnings = operator_dashboard_module._SNAPSHOT_WARNINGS.get()
+    finally:
+        operator_dashboard_module._SNAPSHOT_WARNINGS.reset(token)
+
+    assert warnings == [
+        {
+            "section": "strategy_analysis",
+            "reader": "warning",
+            "path": None,
+            "detail": "lane-local sqlite evidence is temporarily unavailable",
+        }
+    ]
+
+
 def test_dashboard_strategy_performance_tags_temporary_paper_metrics_bucket(tmp_path: Path) -> None:
     repo_root = tmp_path
     lane_db = repo_root / "atpe_lane.sqlite3"

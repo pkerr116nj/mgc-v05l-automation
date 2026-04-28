@@ -15462,17 +15462,33 @@ def _snapshot_warning_section(path: Path) -> str:
     return "artifacts"
 
 
-def _record_snapshot_warning(path: Path, *, reader: str, detail: str) -> None:
+def _record_snapshot_warning(
+    path: Path | None = None,
+    *,
+    reader: str | None = None,
+    detail: str | None = None,
+    section: str | None = None,
+    message: str | None = None,
+    severity: str | None = None,
+) -> None:
     warnings = _SNAPSHOT_WARNINGS.get()
+    resolved_detail = str(detail or message or "")
+    resolved_section = section or (_snapshot_warning_section(path) if path is not None else "artifacts")
+    resolved_reader = reader or severity or "warning"
     entry = {
-        "section": _snapshot_warning_section(path),
-        "reader": reader,
-        "path": str(path),
-        "detail": detail,
+        "section": resolved_section,
+        "reader": resolved_reader,
+        "path": str(path) if path is not None else None,
+        "detail": resolved_detail,
     }
     if warnings is not None:
         warnings.append(entry)
-    _TRANSPORT_LOGGER.info("dashboard snapshot degraded %s %s: %s", reader, path, detail)
+    _TRANSPORT_LOGGER.info(
+        "dashboard snapshot degraded %s %s: %s",
+        resolved_reader,
+        path,
+        resolved_detail,
+    )
 
 
 def _summarize_snapshot_warnings(warnings: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
