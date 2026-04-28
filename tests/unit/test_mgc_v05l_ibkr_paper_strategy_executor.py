@@ -5,8 +5,11 @@ from pathlib import Path
 
 from mgc_v05l.execution.ibkr_paper_strategy_executor import (
     IbkrPaperStrategyExecutorConfig,
+    IbkrPaperStrategyExecutorLoopConfig,
     run_ibkr_paper_strategy_executor,
+    run_ibkr_paper_strategy_executor_loop,
     write_ibkr_paper_strategy_executor_artifacts,
+    write_ibkr_paper_strategy_executor_loop_artifacts,
 )
 
 
@@ -189,6 +192,29 @@ def test_reconciliation_failure_when_exit_delegate_does_not_flatten_cleanly(tmp_
     assert artifacts.report["decision"] == "EXIT_LONG"
 
 
+def test_exit_long_uses_reconciled_ledger_quantity_not_hard_coded_order_size(tmp_path: Path) -> None:
+    _write_monitor(tmp_path)
+    _write_ledger(tmp_path, quantity=0.5, side="LONG")
+    _write_dashboard_snapshot(tmp_path, strategy_hint="EXIT_LONG")
+    observed: dict[str, object] = {}
+
+    class _CloseArtifacts:
+        classification = "PAPER_CLOSE_FILLED_FLAT"
+        report = {"summary": "filled flat"}
+
+    def _close_runner(*, config):
+        observed["quantity"] = config.quantity
+        return _CloseArtifacts()
+
+    artifacts = run_ibkr_paper_strategy_executor(
+        config=_config(tmp_path, quantity=1.0),
+        close_runner=_close_runner,
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_EXECUTOR_EXIT_FILLED_FLAT"
+    assert observed["quantity"] == 0.5
+
+
 def test_write_artifacts_serializes_report_and_summary_csv(tmp_path: Path) -> None:
     _write_monitor(tmp_path)
     _write_ledger(tmp_path, quantity=1.0, side="LONG")
@@ -203,3 +229,84 @@ def test_write_artifacts_serializes_report_and_summary_csv(tmp_path: Path) -> No
     assert (output_dir / "ibkr_paper_strategy_executor_report.md").exists()
     assert (output_dir / "ibkr_paper_strategy_executor_audit.jsonl").exists()
     assert (output_dir / "per_strategy_paper_status_summary.csv").exists()
+
+
+def test_loop_holding_classification_and_runtime_files(tmp_path: Path) -> None:
+    _write_monitor(tmp_path)
+    _write_ledger(tmp_path, quantity=1.0, side="LONG")
+    _write_dashboard_snapshot(tmp_path)
+    config = _config(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_executor_loop(
+        config=IbkrPaperStrategyExecutorLoopConfig(
+            executor_config=config,
+            poll_interval_seconds=0.0,
+            max_cycles=2,
+        ),
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_EXECUTOR_LOOP_HOLDING"
+    assert artifacts.runtime_status["cycles_completed"] == 2
+    assert artifacts.runtime_status["last_executor_decision"] == "HOLD_LONG"
+    assert artifacts.runtime_status["loop_running"] is False
+
+    write_ibkr_paper_strategy_executor_loop_artifacts(
+        config=IbkrPaperStrategyExecutorLoopConfig(
+            executor_config=config,
+            poll_interval_seconds=0.0,
+            max_cycles=2,
+        ),
+        artifacts=artifacts,
+    )
+    output_dir = tmp_path / "outputs" / "reports" / "ibkr_paper_strategy_executor"
+    assert (output_dir / "paper_strategy_executor_loop_status.json").exists()
+    assert (output_dir / "paper_strategy_executor_loop_report.md").exists()
+    assert (output_dir / "paper_strategy_executor_loop_audit.jsonl").exists()
+    assert (tmp_path / "var" / "paper_strategy_executor_loop_status.json").exists()
+    assert (tmp_path / "var" / "paper_strategy_executor_loop_audit.jsonl").exists()
+
+
+def test_loop_blocks_when_monitor_is_stale(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, stale=True, age_seconds=120.0)
+    _write_ledger(tmp_path, quantity=1.0, side="LONG")
+    _write_dashboard_snapshot(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_executor_loop(
+        config=IbkrPaperStrategyExecutorLoopConfig(
+            executor_config=_config(tmp_path),
+            poll_interval_seconds=0.0,
+            max_cycles=1,
+            stop_on_blocked=True,
+        ),
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_EXECUTOR_LOOP_BLOCKED"
+    assert artifacts.runtime_status["last_executor_decision"] == "BLOCKED_NEEDS_REVIEW"
+
+
+def test_loop_stops_cleanly_when_stop_requested(tmp_path: Path) -> None:
+    _write_monitor(tmp_path)
+    _write_ledger(tmp_path, quantity=1.0, side="LONG")
+    _write_dashboard_snapshot(tmp_path)
+
+    stop_state = {"count": 0}
+
+    def _should_stop() -> bool:
+        stop_state["count"] += 1
+        return stop_state["count"] > 1
+
+    artifacts = run_ibkr_paper_strategy_executor_loop(
+        config=IbkrPaperStrategyExecutorLoopConfig(
+            executor_config=_config(tmp_path),
+            poll_interval_seconds=0.0,
+            max_cycles=0,
+        ),
+        sleep_fn=lambda _seconds: None,
+        should_stop=_should_stop,
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_EXECUTOR_LOOP_STOPPED"
+    assert artifacts.runtime_status["cycles_completed"] == 1
+    assert artifacts.runtime_status["loop_running"] is False

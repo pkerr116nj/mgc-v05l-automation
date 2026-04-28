@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+import time
 
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from .ibkr_unattended_paper_close import (
@@ -35,6 +36,11 @@ _DEFAULT_MONITOR_FRESHNESS_SECONDS = 45.0
 _REPORT_BASENAME = "ibkr_paper_strategy_executor_report"
 _AUDIT_BASENAME = "ibkr_paper_strategy_executor_audit.jsonl"
 _STATUS_SUMMARY_BASENAME = "per_strategy_paper_status_summary.csv"
+_LOOP_STATUS_BASENAME = "paper_strategy_executor_loop_status.json"
+_LOOP_AUDIT_BASENAME = "paper_strategy_executor_loop_audit.jsonl"
+_LOOP_REPORT_BASENAME = "paper_strategy_executor_loop_report.md"
+_VAR_LOOP_STATUS_PATH = Path("var") / "paper_strategy_executor_loop_status.json"
+_VAR_LOOP_AUDIT_PATH = Path("var") / "paper_strategy_executor_loop_audit.jsonl"
 
 
 class IbkrPaperStrategyExecutorError(RuntimeError):
@@ -77,6 +83,29 @@ class IbkrPaperStrategyExecutorArtifacts:
             "PAPER_STRATEGY_EXECUTOR_BLOCKED",
             "PAPER_STRATEGY_EXECUTOR_RECONCILIATION_FAILED",
         } else 1
+
+
+@dataclass(frozen=True)
+class IbkrPaperStrategyExecutorLoopConfig:
+    executor_config: IbkrPaperStrategyExecutorConfig
+    poll_interval_seconds: float = 45.0
+    max_cycles: int = 0
+    stop_on_blocked: bool = False
+    loop_status_path: Path = _VAR_LOOP_STATUS_PATH
+    loop_audit_path: Path = _VAR_LOOP_AUDIT_PATH
+
+
+@dataclass(frozen=True)
+class IbkrPaperStrategyExecutorLoopArtifacts:
+    classification: str
+    runtime_status: dict[str, Any]
+    report: dict[str, Any]
+    audit_events: list[dict[str, Any]]
+    latest_cycle: IbkrPaperStrategyExecutorArtifacts | None
+
+    @property
+    def exit_code(self) -> int:
+        return 0 if self.classification not in {"PAPER_STRATEGY_EXECUTOR_LOOP_BLOCKED"} else 1
 
 
 def run_ibkr_paper_strategy_executor(
@@ -166,6 +195,7 @@ def run_ibkr_paper_strategy_executor(
             decision = "BLOCKED_NEEDS_REVIEW"
             decision_reason = "Supervised submit is disabled in executor configuration."
         else:
+            exit_quantity = _resolved_exit_quantity(strategy_position=strategy_position, max_quantity=float(config.quantity))
             delegated_artifacts = close_runner(
                 config=IbkrUnattendedPaperCloseConfig(
                     repo_root=config.repo_root,
@@ -178,7 +208,7 @@ def run_ibkr_paper_strategy_executor(
                     symbol=config.symbol,
                     contract_month=config.contract_month,
                     action="SELL",
-                    quantity=float(config.quantity),
+                    quantity=float(exit_quantity),
                     exact_expiry=config.exact_expiry,
                     con_id=int(config.con_id),
                     local_symbol=config.local_symbol,
@@ -246,6 +276,143 @@ def write_ibkr_paper_strategy_executor_artifacts(
     _write_status_summary_csv(output_dir / _STATUS_SUMMARY_BASENAME, report=artifacts.report)
 
 
+def run_ibkr_paper_strategy_executor_loop(
+    *,
+    config: IbkrPaperStrategyExecutorLoopConfig,
+    close_runner: Callable[..., Any] = run_ibkr_unattended_paper_close,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    should_stop: Callable[[], bool] | None = None,
+) -> IbkrPaperStrategyExecutorLoopArtifacts:
+    audit_events: list[dict[str, Any]] = []
+    cycles: list[dict[str, Any]] = []
+    latest_cycle: IbkrPaperStrategyExecutorArtifacts | None = None
+    stop_requested = should_stop or (lambda: False)
+    started_at = _utc_now()
+    _record_loop_audit(
+        audit_events,
+        event_type="loop_started",
+        detail="Supervised IBKR paper strategy executor loop started.",
+        config=config,
+    )
+    cycle_index = 0
+    while True:
+        if stop_requested():
+            classification = "PAPER_STRATEGY_EXECUTOR_LOOP_STOPPED"
+            reason = "Stop requested before the next supervised executor cycle began."
+            break
+        if config.max_cycles > 0 and cycle_index >= int(config.max_cycles):
+            classification = _final_loop_classification(latest_cycle=latest_cycle)
+            reason = f"Reached configured max cycles ({config.max_cycles})."
+            break
+        cycle_index += 1
+        cycle_started_at = _utc_now()
+        latest_cycle = run_ibkr_paper_strategy_executor(config=config.executor_config, close_runner=close_runner)
+        cycle_row = {
+            "cycle_index": cycle_index,
+            "started_at": cycle_started_at,
+            "finished_at": _utc_now(),
+            "classification": latest_cycle.classification,
+            "decision": latest_cycle.report.get("decision"),
+            "decision_reason": latest_cycle.report.get("decision_reason"),
+            "position_quantity": dict(latest_cycle.report.get("strategy_position") or {}).get("quantity"),
+            "open_order_count": dict(latest_cycle.report.get("paper_strategy_monitor_status") or {}).get("open_order_count"),
+        }
+        cycles.append(cycle_row)
+        _record_loop_audit(
+            audit_events,
+            event_type="cycle_completed",
+            detail="Completed one supervised paper strategy executor cycle.",
+            config=config,
+            extra=cycle_row,
+        )
+        runtime_status = _build_loop_runtime_status(
+            config=config,
+            classification=_loop_runtime_classification_from_cycle(latest_cycle=latest_cycle),
+            latest_cycle=latest_cycle,
+            cycles=cycles,
+            loop_running=True,
+        )
+        _write_loop_runtime_files(config=config, runtime_status=runtime_status, audit_events=audit_events)
+        if latest_cycle.classification == "PAPER_STRATEGY_EXECUTOR_EXIT_FILLED_FLAT":
+            classification = "PAPER_STRATEGY_EXECUTOR_LOOP_EXITED_FLAT"
+            reason = "Strategy executor produced EXIT_LONG and reconciled the paper position flat."
+            break
+        if latest_cycle.classification == "PAPER_STRATEGY_EXECUTOR_BLOCKED" and config.stop_on_blocked:
+            classification = "PAPER_STRATEGY_EXECUTOR_LOOP_BLOCKED"
+            reason = "Loop is configured to stop immediately when a blocking supervised executor state is encountered."
+            break
+        if stop_requested():
+            classification = "PAPER_STRATEGY_EXECUTOR_LOOP_STOPPED"
+            reason = "Stop requested after the latest supervised executor cycle completed."
+            break
+        sleep_fn(float(config.poll_interval_seconds))
+
+    runtime_status = _build_loop_runtime_status(
+        config=config,
+        classification=classification,
+        latest_cycle=latest_cycle,
+        cycles=cycles,
+        stop_reason=reason,
+        loop_running=False,
+    )
+    report = {
+        "generated_at": _utc_now(),
+        "classification": classification,
+        "started_at": started_at,
+        "finished_at": _utc_now(),
+        "stop_reason": reason,
+        "strategy_id": config.executor_config.strategy_id,
+        "account_id": config.executor_config.account_id,
+        "mode": config.executor_config.mode,
+        "host": config.executor_config.host,
+        "port": config.executor_config.port,
+        "poll_interval_seconds": config.poll_interval_seconds,
+        "max_cycles": config.max_cycles,
+        "cycles_completed": len(cycles),
+        "latest_cycle_classification": None if latest_cycle is None else latest_cycle.classification,
+        "latest_cycle_decision": None if latest_cycle is None else latest_cycle.report.get("decision"),
+        "latest_cycle_report": None if latest_cycle is None else latest_cycle.report,
+        "runtime_status": runtime_status,
+    }
+    _record_loop_audit(
+        audit_events,
+        event_type="loop_finished",
+        detail="Supervised IBKR paper strategy executor loop finished.",
+        config=config,
+        extra={"classification": classification, "stop_reason": reason, "cycles_completed": len(cycles)},
+    )
+    _write_loop_runtime_files(config=config, runtime_status=runtime_status, audit_events=audit_events)
+    return IbkrPaperStrategyExecutorLoopArtifacts(
+        classification=classification,
+        runtime_status=runtime_status,
+        report=report,
+        audit_events=audit_events,
+        latest_cycle=latest_cycle,
+    )
+
+
+def write_ibkr_paper_strategy_executor_loop_artifacts(
+    *,
+    config: IbkrPaperStrategyExecutorLoopConfig,
+    artifacts: IbkrPaperStrategyExecutorLoopArtifacts,
+) -> None:
+    output_dir = config.executor_config.repo_root / config.executor_config.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / _LOOP_STATUS_BASENAME).write_text(
+        json.dumps(artifacts.runtime_status, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / _LOOP_REPORT_BASENAME).write_text(
+        render_ibkr_paper_strategy_executor_loop_markdown(artifacts.report) + "\n",
+        encoding="utf-8",
+    )
+    with (output_dir / _LOOP_AUDIT_BASENAME).open("w", encoding="utf-8") as handle:
+        for row in artifacts.audit_events:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    if artifacts.latest_cycle is not None:
+        _write_status_summary_csv(output_dir / _STATUS_SUMMARY_BASENAME, report=artifacts.latest_cycle.report)
+
+
 def render_ibkr_paper_strategy_executor_markdown(report: dict[str, Any]) -> str:
     monitor = dict(report.get("paper_strategy_monitor_status") or {})
     position = dict(report.get("strategy_position") or {})
@@ -272,6 +439,9 @@ def render_ibkr_paper_strategy_executor_markdown(report: dict[str, Any]) -> str:
         f"- dashboard source mode: `{dashboard.get('source_mode')}`",
         f"- supervised launch allowed: `{dashboard.get('launch_allowed')}`",
         f"- session classification: `{dashboard.get('session_classification')}`",
+        "- scope: `single-lane supervised paper executor for ATP_COMPANION_V1_ASIA_US only`",
+        "- execution mode: `exit-only while the owned strategy position is long; flat state is monitor-only until entry support is implemented later`",
+        "- generalization: `decisioning and exit sizing are derived from current ledger plus broker truth, not from one hard-coded order/permId/execution history`",
     ]
     delegated = dict(report.get("delegated_result") or {})
     if delegated:
@@ -279,6 +449,38 @@ def render_ibkr_paper_strategy_executor_markdown(report: dict[str, Any]) -> str:
     for row in list(report.get("preflight_checks") or []):
         if not row.get("passed"):
             lines.append(f"- blocked check: `{row.get('name')}` -> `{row.get('detail')}`")
+    return "\n".join(lines)
+
+
+def render_ibkr_paper_strategy_executor_loop_markdown(report: dict[str, Any]) -> str:
+    runtime = dict(report.get("runtime_status") or {})
+    latest = dict(report.get("latest_cycle_report") or {})
+    lines = [
+        "# IBKR Paper Strategy Executor Loop",
+        "",
+        f"- classification: `{report.get('classification')}`",
+        f"- strategy: `{report.get('strategy_id')}`",
+        f"- account: `{report.get('account_id')}`",
+        f"- environment: `{report.get('mode')} / {report.get('host')} / {report.get('port')}`",
+        f"- poll interval seconds: `{report.get('poll_interval_seconds')}`",
+        f"- max cycles: `{report.get('max_cycles')}`",
+        f"- cycles completed: `{report.get('cycles_completed')}`",
+        f"- stop reason: `{report.get('stop_reason')}`",
+        f"- latest cycle classification: `{report.get('latest_cycle_classification')}`",
+        f"- latest cycle decision: `{report.get('latest_cycle_decision')}`",
+        f"- loop running: `{runtime.get('loop_running')}`",
+        f"- monitor health: `{dict(runtime.get('paper_strategy_monitor_status') or {}).get('health_classification')}`",
+        f"- stale: `{dict(runtime.get('paper_strategy_monitor_status') or {}).get('stale')}`",
+        f"- open orders: `{dict(runtime.get('paper_strategy_monitor_status') or {}).get('open_order_count')}`",
+        f"- current quantity: `{dict(runtime.get('strategy_position') or {}).get('quantity')}`",
+        f"- current side: `{dict(runtime.get('strategy_position') or {}).get('side')}`",
+        "- scope: `single-lane supervised paper loop`",
+        "- execution mode: `exit-only for the currently owned strategy position`",
+        "- engine boundary: `not a full entry/exit autonomous strategy engine yet`",
+        "- state model: `generalizes from reconciled ledger/broker state rather than from one specific adopted trade`",
+    ]
+    if latest:
+        lines.append(f"- latest decision reason: `{latest.get('decision_reason')}`")
     return "\n".join(lines)
 
 
@@ -387,6 +589,19 @@ def _derive_strategy_decision(
     return "BLOCKED_NEEDS_REVIEW", "The supervised executor could not map the current ledger position into a safe FLAT/LONG state."
 
 
+def _resolved_exit_quantity(*, strategy_position: dict[str, Any] | None, max_quantity: float) -> float:
+    if strategy_position is None:
+        raise IbkrPaperStrategyExecutorError("EXIT_LONG requires a current reconciled strategy position.")
+    quantity = float(strategy_position.get("quantity") or 0.0)
+    if quantity <= 0.0:
+        raise IbkrPaperStrategyExecutorError("EXIT_LONG requires a positive reconciled strategy quantity.")
+    if quantity > float(max_quantity):
+        raise IbkrPaperStrategyExecutorError(
+            f"EXIT_LONG requires reconciled strategy quantity <= configured max quantity ({max_quantity})."
+        )
+    return quantity
+
+
 def _extract_strategy_decision_hint(*, dashboard_snapshot: dict[str, Any], strategy_id: str) -> str | None:
     paper = dict(dashboard_snapshot.get("paper") or {})
     tracked = dict(paper.get("tracked_strategies") or {})
@@ -470,12 +685,97 @@ def _build_report(
             "con_id": config.con_id,
             "local_symbol": config.local_symbol,
         },
+        "scope": {
+            "single_lane": True,
+            "strategy_scope": [config.strategy_id],
+            "contract_scope": [f"{config.symbol} {config.exact_expiry} / conId={config.con_id} / localSymbol={config.local_symbol}"],
+            "paper_only": True,
+            "exit_only_while_long": True,
+            "entry_support_implemented": False,
+            "generalized_from_ledger_broker_state": True,
+        },
         "paper_strategy_monitor_status": monitor_status,
         "dashboard_gate": dashboard_gate,
         "strategy_position": strategy_position,
         "preflight_checks": preflight_checks,
         "delegated_result": delegated_result,
     }
+
+
+def _build_loop_runtime_status(
+    *,
+    config: IbkrPaperStrategyExecutorLoopConfig,
+    classification: str,
+    latest_cycle: IbkrPaperStrategyExecutorArtifacts | None,
+    cycles: list[dict[str, Any]],
+    stop_reason: str | None = None,
+    loop_running: bool,
+) -> dict[str, Any]:
+    latest_report = {} if latest_cycle is None else dict(latest_cycle.report)
+    monitor = dict(latest_report.get("paper_strategy_monitor_status") or {})
+    position = dict(latest_report.get("strategy_position") or {})
+    return {
+        "generated_at": _utc_now(),
+        "classification": classification,
+        "loop_running": bool(loop_running),
+        "strategy_id": config.executor_config.strategy_id,
+        "account_id": config.executor_config.account_id,
+        "mode": config.executor_config.mode,
+        "host": config.executor_config.host,
+        "port": config.executor_config.port,
+        "poll_interval_seconds": float(config.poll_interval_seconds),
+        "max_cycles": int(config.max_cycles),
+        "cycles_completed": len(cycles),
+        "last_cycle": None if not cycles else cycles[-1],
+        "paper_strategy_monitor_status": monitor,
+        "strategy_position": position,
+        "last_executor_classification": None if latest_cycle is None else latest_cycle.classification,
+        "last_executor_decision": latest_report.get("decision"),
+        "last_executor_decision_reason": latest_report.get("decision_reason"),
+        "stop_reason": stop_reason,
+        "last_refresh_timestamp": _utc_now(),
+    }
+
+
+def _write_loop_runtime_files(
+    *,
+    config: IbkrPaperStrategyExecutorLoopConfig,
+    runtime_status: dict[str, Any],
+    audit_events: list[dict[str, Any]],
+) -> None:
+    status_path = config.executor_config.repo_root / config.loop_status_path
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps(runtime_status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    audit_path = config.executor_config.repo_root / config.loop_audit_path
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with audit_path.open("w", encoding="utf-8") as handle:
+        for row in audit_events:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _loop_runtime_classification_from_cycle(*, latest_cycle: IbkrPaperStrategyExecutorArtifacts | None) -> str:
+    if latest_cycle is None:
+        return "PAPER_STRATEGY_EXECUTOR_LOOP_BLOCKED"
+    mapping = {
+        "PAPER_STRATEGY_EXECUTOR_HOLDING_LONG": "PAPER_STRATEGY_EXECUTOR_LOOP_HOLDING",
+        "PAPER_STRATEGY_EXECUTOR_NO_ACTION": "PAPER_STRATEGY_EXECUTOR_LOOP_ACTIVE",
+        "PAPER_STRATEGY_EXECUTOR_EXIT_FILLED_FLAT": "PAPER_STRATEGY_EXECUTOR_LOOP_EXITED_FLAT",
+        "PAPER_STRATEGY_EXECUTOR_BLOCKED": "PAPER_STRATEGY_EXECUTOR_LOOP_BLOCKED",
+        "PAPER_STRATEGY_EXECUTOR_RECONCILIATION_FAILED": "PAPER_STRATEGY_EXECUTOR_LOOP_BLOCKED",
+    }
+    return mapping.get(latest_cycle.classification, "PAPER_STRATEGY_EXECUTOR_LOOP_BLOCKED")
+
+
+def _final_loop_classification(*, latest_cycle: IbkrPaperStrategyExecutorArtifacts | None) -> str:
+    if latest_cycle is None:
+        return "PAPER_STRATEGY_EXECUTOR_LOOP_BLOCKED"
+    if latest_cycle.classification == "PAPER_STRATEGY_EXECUTOR_EXIT_FILLED_FLAT":
+        return "PAPER_STRATEGY_EXECUTOR_LOOP_EXITED_FLAT"
+    if latest_cycle.classification == "PAPER_STRATEGY_EXECUTOR_HOLDING_LONG":
+        return "PAPER_STRATEGY_EXECUTOR_LOOP_HOLDING"
+    if latest_cycle.classification == "PAPER_STRATEGY_EXECUTOR_NO_ACTION":
+        return "PAPER_STRATEGY_EXECUTOR_LOOP_ACTIVE"
+    return "PAPER_STRATEGY_EXECUTOR_LOOP_BLOCKED"
 
 
 def _write_status_summary_csv(path: Path, *, report: dict[str, Any]) -> None:
@@ -516,6 +816,28 @@ def _record_audit(
             "host": config.host,
             "port": config.port,
             "client_id": config.client_id,
+            "detail": detail,
+            **dict(extra or {}),
+        }
+    )
+
+
+def _record_loop_audit(
+    audit_events: list[dict[str, Any]],
+    *,
+    event_type: str,
+    detail: str,
+    config: IbkrPaperStrategyExecutorLoopConfig,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    audit_events.append(
+        {
+            "event_type": event_type,
+            "observed_at": _utc_now(),
+            "mode": config.executor_config.mode,
+            "host": config.executor_config.host,
+            "port": config.executor_config.port,
+            "client_id": config.executor_config.client_id,
             "detail": detail,
             **dict(extra or {}),
         }

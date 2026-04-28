@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
+import threading
 from pathlib import Path
 
 from ..execution.ibkr_paper_strategy_executor import (
     IbkrPaperStrategyExecutorConfig,
+    IbkrPaperStrategyExecutorLoopConfig,
     render_ibkr_paper_strategy_executor_markdown,
+    render_ibkr_paper_strategy_executor_loop_markdown,
     run_ibkr_paper_strategy_executor,
+    run_ibkr_paper_strategy_executor_loop,
     write_ibkr_paper_strategy_executor_artifacts,
+    write_ibkr_paper_strategy_executor_loop_artifacts,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -38,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Artifact output directory.")
     parser.add_argument("--dashboard-freshness-seconds", type=float, default=120.0, help="Maximum allowed age for dashboard snapshot evidence.")
     parser.add_argument("--monitor-freshness-seconds", type=float, default=45.0, help="Maximum allowed age for live monitor runtime evidence.")
+    parser.add_argument("--loop", action="store_true", help="Run the supervised executor repeatedly until stopped or until it exits the current long position.")
+    parser.add_argument("--poll-interval-seconds", type=float, default=45.0, help="Polling interval for loop mode.")
+    parser.add_argument("--max-cycles", type=int, default=0, help="Maximum loop cycles to run. Use 0 to run until stopped.")
+    parser.add_argument("--stop-on-blocked", action="store_true", help="Stop loop mode immediately if a cycle returns a blocked classification.")
     parser.add_argument("--overwrite", action="store_true", help="Allow writing into a non-empty output directory.")
     return parser
 
@@ -64,6 +74,40 @@ def main(argv: list[str] | None = None) -> int:
         dashboard_freshness_seconds=float(args.dashboard_freshness_seconds),
         monitor_freshness_seconds=float(args.monitor_freshness_seconds),
     )
+    if bool(args.loop):
+        stop_event = threading.Event()
+
+        def _request_stop(_signum: int, _frame: object) -> None:
+            stop_event.set()
+
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, _request_stop)
+        signal.signal(signal.SIGTERM, _request_stop)
+        artifacts = run_ibkr_paper_strategy_executor_loop(
+            config=IbkrPaperStrategyExecutorLoopConfig(
+                executor_config=config,
+                poll_interval_seconds=float(args.poll_interval_seconds),
+                max_cycles=int(args.max_cycles),
+                stop_on_blocked=bool(args.stop_on_blocked),
+            ),
+            should_stop=stop_event.is_set,
+        )
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        write_ibkr_paper_strategy_executor_loop_artifacts(
+            config=IbkrPaperStrategyExecutorLoopConfig(
+                executor_config=config,
+                poll_interval_seconds=float(args.poll_interval_seconds),
+                max_cycles=int(args.max_cycles),
+                stop_on_blocked=bool(args.stop_on_blocked),
+            ),
+            artifacts=artifacts,
+        )
+        print(json.dumps(artifacts.runtime_status, indent=2, sort_keys=True))
+        print()
+        print(render_ibkr_paper_strategy_executor_loop_markdown(artifacts.report))
+        return artifacts.exit_code
     artifacts = run_ibkr_paper_strategy_executor(config=config)
     write_ibkr_paper_strategy_executor_artifacts(config=config, artifacts=artifacts)
     print(json.dumps(artifacts.report, indent=2, sort_keys=True))
