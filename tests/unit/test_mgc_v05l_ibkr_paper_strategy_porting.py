@@ -74,6 +74,22 @@ def _write_signal_audit(tmp_path: Path) -> None:
     payload = {
         "rows": [
             {
+                "id": "asia_london_participation_core_v1__GC",
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "instrument": "GC",
+                "family": "asia_london_participation_core_v1",
+                "current_strategy_status": "READY",
+                "entries_enabled": True,
+                "eligible_now": False,
+                "audit_verdict": "INSUFFICIENT_HISTORY",
+                "last_actionable_signal_family": None,
+                "last_actionable_signal_timestamp": None,
+                "last_recent_long_setup": False,
+                "last_recent_short_setup": False,
+                "last_intent_type": None,
+                "last_fill_timestamp": None,
+            },
+            {
                 "id": "asia_london_participation_core_v1__MGC",
                 "lane_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
                 "instrument": "MGC",
@@ -132,6 +148,14 @@ def _write_strategy_performance(tmp_path: Path) -> None:
     payload = {
         "rows": [
             {
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "instrument": "GC",
+                "strategy_family": "asia_london_participation_core_v1",
+                "standalone_strategy_id": "asia_london_participation_core_v1__GC",
+                "position_side": "FLAT",
+                "status": "READY",
+            },
+            {
                 "lane_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
                 "instrument": "MGC",
                 "strategy_family": "asia_london_participation_core_v1",
@@ -171,12 +195,18 @@ def test_builds_inventory_and_intent_rows_for_live_paper_lanes(tmp_path: Path) -
 
     assert artifacts.classification == "IBKR_PAPER_STRATEGY_PORT_PARTIAL"
     assert artifacts.adapter_classification == "STRATEGY_INTENT_ADAPTER_READY"
-    assert len(artifacts.inventory_rows) == 3
+    assert len(artifacts.inventory_rows) == 4
     atp = next(row for row in artifacts.inventory_rows if row["strategy_id"] == "atp_companion_v1_asia_us")
     assert atp["current_position_state"] == "LONG"
     assert atp["current_order_destination"] == "ibkr_paper_bridge_adopted_position"
+    gc = next(row for row in artifacts.inventory_rows if row["strategy_id"] == "gc_1x_asia_london_participation__asia_london_long_v5")
+    assert gc["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+    assert gc["bridge_adapter_ready"] is True
     mgc = next(row for row in artifacts.intent_rows if row["strategy_id"] == "mgc_1x_asia_london_participation__asia_london_long_v5")
     assert mgc["action"] == "NO_ACTION"
+    gc_intent = next(row for row in artifacts.intent_rows if row["strategy_id"] == "gc_1x_asia_london_participation__asia_london_long_v5")
+    assert gc_intent["bridge_submit_capable"] is True
+    assert gc_intent["bridge_execution_target"]["symbol"] == "MGC"
     nq = next(row for row in artifacts.intent_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
     assert nq["can_route_to_ibkr_now"] is False
     assert "unsupported_instrument_scope" in nq["route_blockers"]

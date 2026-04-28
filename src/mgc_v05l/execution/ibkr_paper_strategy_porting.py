@@ -21,6 +21,7 @@ _SUPPORTED_EXECUTABLE_INSTRUMENTS = {"MGC", "GC"}
 _INITIAL_EXECUTABLE_INSTRUMENT = "MGC"
 _ATP_LANE_ID = "atp_companion_v1_asia_us"
 _ATP_STRATEGY_ID = "ATP_COMPANION_V1_ASIA_US"
+_FIRST_NON_ATP_SUBMIT_LANE_ID = "gc_1x_asia_london_participation__asia_london_long_v5"
 _ATP_CONTRACT = {
     "symbol": "MGC",
     "contract_month": "202606",
@@ -34,6 +35,22 @@ _ADAPTER_REPORT_MD = "ibkr_strategy_intent_adapter_report.md"
 _INVENTORY_CSV = "ibkr_live_paper_strategy_inventory.csv"
 _STATUS_CSV = "per_strategy_ibkr_paper_status.csv"
 _INTENT_JSONL = "per_strategy_order_intent_examples.jsonl"
+_SUBMIT_CAPABLE_LANE_ADAPTERS: dict[str, dict[str, Any]] = {
+    _FIRST_NON_ATP_SUBMIT_LANE_ID: {
+        "lane_id": _FIRST_NON_ATP_SUBMIT_LANE_ID,
+        "source_instrument": "GC",
+        "bridge_execution_target": {
+            "symbol": "MGC",
+            "contract_month": "202606",
+            "expiry": "20260626",
+            "con_id": 712565978,
+            "local_symbol": "MGCM6",
+            "friendly_label": "MGC 202606",
+        },
+        "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+    }
+}
 
 
 @dataclass(frozen=True)
@@ -55,6 +72,11 @@ class IbkrPaperStrategyPortingArtifacts:
     inventory_rows: list[dict[str, Any]]
     intent_rows: list[dict[str, Any]]
     audit_events: list[dict[str, Any]]
+
+
+def lane_submit_bridge_adapter(*, lane_id: str) -> dict[str, Any] | None:
+    adapter = _SUBMIT_CAPABLE_LANE_ADAPTERS.get(str(lane_id or "").strip())
+    return dict(adapter) if isinstance(adapter, dict) else None
 
 
 def run_ibkr_paper_strategy_porting(*, config: IbkrPaperStrategyPortingConfig) -> IbkrPaperStrategyPortingArtifacts:
@@ -178,6 +200,7 @@ def render_ibkr_paper_strategy_porting_markdown(report: dict[str, Any]) -> str:
         f"- executable instruments now: `{', '.join(summary.get('supported_instruments_now') or [])}`",
         f"- first selected lane: `{selected.get('strategy_id')}`",
         f"- selected lane action: `{selected.get('intent_action')}`",
+        f"- selected lane bridge submit capable: `{selected.get('bridge_submit_capable')}`",
         f"- selected lane dry-run result: `{selected.get('dry_run_result')}`",
         f"- selected lane blocker: `{selected.get('primary_blocker')}`",
         f"- note: `{summary.get('note')}`",
@@ -197,6 +220,7 @@ def render_ibkr_strategy_intent_adapter_markdown(report: dict[str, Any]) -> str:
         f"- first selected lane action: `{selected.get('intent_action')}`",
         f"- first selected lane reason: `{selected.get('intent_reason')}`",
         f"- first selected lane routing readiness: `{selected.get('can_route_to_ibkr_now')}`",
+        f"- first selected lane bridge submit capable: `{selected.get('bridge_submit_capable')}`",
     ]
     return "\n".join(lines)
 
@@ -221,9 +245,12 @@ def _build_inventory_row(
         current_position_state = str(performance_row.get("position_side") or "FLAT").upper()
         current_quantity = 1.0 if current_position_state == "LONG" else 0.0
     signal_state = _signal_state(signal_row)
+    bridge_adapter = lane_submit_bridge_adapter(lane_id=lane_id)
     destination = "legacy_app_paper_runtime"
     if lane_id == _ATP_LANE_ID or strategy_key == _ATP_STRATEGY_ID:
         destination = "ibkr_paper_bridge_adopted_position"
+    elif bridge_adapter is not None:
+        destination = str(bridge_adapter.get("current_order_destination") or "ibkr_paper_bridge_submit_capable")
     blocker_rows = _lane_blockers(
         lane_id=lane_id,
         instrument=instrument,
@@ -245,6 +272,9 @@ def _build_inventory_row(
         "current_signal_state": signal_state,
         "entry_exit_capability": _entry_exit_capability(current_position_state=current_position_state, instrument=instrument),
         "current_order_destination": destination,
+        "bridge_adapter_ready": bridge_adapter is not None,
+        "bridge_execution_target": dict(bridge_adapter.get("bridge_execution_target") or {}) if bridge_adapter is not None else {},
+        "bridge_proxy_mode": bridge_adapter.get("bridge_proxy_mode") if bridge_adapter is not None else None,
         "can_emit_standardized_order_intent_now": can_emit_now,
         "blockers_to_ibkr_paper_routing": blocker_rows,
         "entries_enabled": bool(signal_row.get("entries_enabled")),
@@ -305,6 +335,7 @@ def _build_intent_row(*, inventory_row: dict[str, Any], signal_row: dict[str, An
             "symbol": "GC",
             "contract_month": "202606",
         }
+    bridge_execution_target = dict(inventory_row.get("bridge_execution_target") or {})
     return {
         "strategy_id": strategy_id,
         "standalone_strategy_id": inventory_row.get("standalone_strategy_id"),
@@ -326,6 +357,8 @@ def _build_intent_row(*, inventory_row: dict[str, Any], signal_row: dict[str, An
         },
         "paper_only": True,
         "can_route_to_ibkr_now": _can_route_now(action=action, instrument=instrument, blockers=blockers),
+        "bridge_submit_capable": bool(inventory_row.get("bridge_adapter_ready")),
+        "bridge_execution_target": bridge_execution_target,
         "route_blockers": blockers,
     }
 
@@ -345,7 +378,7 @@ def _build_summary(
     elif not inventory_rows:
         overall = "IBKR_PAPER_STRATEGY_PORT_BLOCKED"
     adapter = "STRATEGY_INTENT_ADAPTER_READY" if inventory_rows else "STRATEGY_INTENT_ADAPTER_BLOCKED"
-    note = "Current live paper strategies are inventoried and standardized intents are emitted lane-by-lane. Submit-capable IBKR routing remains partial because only the ATP lane is already on the IBKR paper broker path and the currently selected non-ATP lane is dry-run only."
+    note = "Current live paper strategies are inventoried and standardized intents are emitted lane-by-lane. Submit-capable IBKR routing remains partial because only the ATP lane is already broker-proven, while the first non-ATP GC lane is now bridge-capable but still emits NO_ACTION in the live runtime."
     return {
         "classification": overall,
         "adapter_classification": adapter,
@@ -358,11 +391,13 @@ def _build_summary(
 
 
 def _select_first_lane(intent_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    preferred = [
-        row
-        for row in intent_rows
-        if str(dict(row.get("contract_target") or {}).get("symbol") or "") == _INITIAL_EXECUTABLE_INSTRUMENT
-    ]
+    preferred = [row for row in intent_rows if bool(row.get("bridge_submit_capable"))]
+    if not preferred:
+        preferred = [
+            row
+            for row in intent_rows
+            if str(dict(row.get("contract_target") or {}).get("symbol") or "") == _INITIAL_EXECUTABLE_INSTRUMENT
+        ]
     row = preferred[0] if preferred else (intent_rows[0] if intent_rows else {})
     return {
         "strategy_id": row.get("strategy_id"),
@@ -370,6 +405,8 @@ def _select_first_lane(intent_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "intent_action": row.get("action"),
         "intent_reason": row.get("reason"),
         "can_route_to_ibkr_now": row.get("can_route_to_ibkr_now"),
+        "bridge_submit_capable": row.get("bridge_submit_capable"),
+        "bridge_execution_target": row.get("bridge_execution_target"),
         "primary_blocker": (list(row.get("route_blockers") or []) or [None])[0],
         "dry_run_result": "NO_ORDER" if str(row.get("action") or "") in {"HOLD", "NO_ACTION", "BLOCKED_NEEDS_REVIEW"} else "SUBMIT_ELIGIBLE",
     }
@@ -397,6 +434,8 @@ def _entry_exit_capability(*, current_position_state: str, instrument: str) -> s
     if instrument in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
         if current_position_state == "LONG":
             return "EXIT_ONLY_WHILE_LONG"
+        if instrument == "GC":
+            return "ENTRY_SUBMIT_CAPABLE_PHASE1_PROXY"
         return "ENTRY_DRY_RUN_ONLY"
     return "UNSUPPORTED_INSTRUMENT"
 
@@ -426,9 +465,9 @@ def _lane_blockers(
         blockers.append("broker_ledger_mismatch")
     if instrument not in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
         blockers.append("unsupported_instrument_scope")
-    if destination != "ibkr_paper_bridge_adopted_position" and instrument == "MGC":
+    if destination not in {"ibkr_paper_bridge_adopted_position", "ibkr_paper_bridge_submit_capable"} and instrument == "MGC":
         blockers.append("lane_not_yet_submit_ported")
-    if lane_id != _ATP_LANE_ID and signal_state in {"ENTRY_BUY", "ENTRY_SELL", "EXIT_LONG"}:
+    if lane_id != _ATP_LANE_ID and signal_state in {"ENTRY_BUY", "ENTRY_SELL", "EXIT_LONG"} and destination != "ibkr_paper_bridge_submit_capable":
         blockers.append("strategy_lane_not_yet_submit_ported")
     return blockers
 

@@ -33,6 +33,21 @@ def _healthy_governance() -> dict[str, object]:
     }
 
 
+def _healthy_lane_governance() -> dict[str, object]:
+    return {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+        "submit_allowed": True,
+        "block_reasons": [],
+        "selected_strategy": {
+            "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "bridge_strategy_id": "asia_london_participation_core_v1__GC",
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": True,
+            "submit_block_reasons": [],
+        },
+    }
+
+
 def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfig:
     payload = {
         "repo_root": tmp_path,
@@ -88,6 +103,50 @@ def test_invalid_symbol_fails_before_connect(tmp_path: Path) -> None:
 
     assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
     assert "Phase 1 executable contract is MGC only" in json.dumps(artifacts.report)
+
+
+def test_ported_gc_lane_passes_static_submit_gate_with_mgc_execution_proxy(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+        symbol="MGC",
+        manual_frozen_preview_path=tmp_path / "preview.json",
+        approval_digest="digest",
+        approval_phrase="phrase",
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-28T00:00:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "manual cli"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+        },
+        governance_status=_healthy_lane_governance(),
+    )
+
+    assert next(row for row in checks if row["name"] == "strategy_allowlist")["passed"] is True
+    assert next(row for row in checks if row["name"] == "selected_lane_adapter_present")["passed"] is True
 
 
 def test_submit_requires_manual_harness_bundle(tmp_path: Path) -> None:

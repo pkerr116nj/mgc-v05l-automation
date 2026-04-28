@@ -38,6 +38,7 @@ from .ibkr_paper_order_preview import (
 )
 from .ibkr_paper_strategy_governance import load_paper_strategy_governance_status
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
+from .ibkr_paper_strategy_porting import lane_submit_bridge_adapter
 from .ibkr_position_reconciliation import (
     _collect_account_truth,
     _collect_exact_contract_context,
@@ -68,6 +69,7 @@ _SUPPORTED_STRATEGY_IDS = {
     "ATP_COMPANION_V1_ASIA_US",
     "ATP_COMPANION_V1_GC_ASIA_US",
     "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK",
+    "gc_1x_asia_london_participation__asia_london_long_v5",
 }
 _ALLOWED_LIMIT_PRICE_MODELS = {
     "DELAYED_ASK_PLUS_1T_MARKETABLE_BUY",
@@ -722,6 +724,7 @@ def _build_static_preflight_checks(
     monitor_health = str(monitor_status.get("health_classification") or monitor_status.get("monitor_health") or "").strip().upper()
     monitor_account_matches = str(monitor_status.get("account_id") or "").strip() == config.account_id
     governance_row = dict(governance_status.get("selected_strategy") or {})
+    lane_adapter = lane_submit_bridge_adapter(lane_id=intent.strategy_id)
     monitor_contract_matches = (
         str(monitor_exact_contract.get("symbol") or "").strip().upper() == config.symbol
         and str(monitor_exact_contract.get("expiry") or "").strip() == _EXPECTED_EXACT_EXPIRY
@@ -748,9 +751,15 @@ def _build_static_preflight_checks(
         _check("manual_cli_only", caller_gate["passed"], True, caller_gate["detail"]),
         _check("paper_environment_lock", environment_lock["passed"], True, str(environment_lock.get("port_policy") or environment_lock.get("detail") or "Environment lock failed.")),
         _check("paper_only_intent", bool(intent.paper_only), True, "Intent must remain explicitly paper-only."),
-        _check("strategy_allowlist", intent.strategy_id in _SUPPORTED_STRATEGY_IDS, True, "Only the ATP Companion baseline and GC Asia candidate strategy identities are allowed in the paper bridge."),
+        _check("strategy_allowlist", intent.strategy_id in _SUPPORTED_STRATEGY_IDS, True, "Only the ATP Companion baseline and explicitly ported paper strategy lane identities are allowed in the paper bridge."),
         _check("executable_contract_whitelist", intent.symbol == _EXPECTED_SYMBOL, True, "Phase 1 executable contract is MGC only, even when the source strategy lane is GC."),
         _check("contract_month_lock", intent.contract_month == _EXPECTED_CONTRACT_MONTH, True, "Only MGC 202606 is allowed in the paper bridge."),
+        _check(
+            "selected_lane_adapter_present",
+            (lane_adapter is not None) if intent.strategy_id not in {"ATP_COMPANION_V1_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"} else True,
+            True,
+            "Non-ATP paper strategy lanes require an explicit bridge adapter before submit-capable routing is allowed.",
+        ),
         _check("quantity_cap", float(intent.quantity) == _EXPECTED_QUANTITY, True, "Quantity must equal exactly one contract."),
         _check("order_type_lock", intent.order_type == _EXPECTED_ORDER_TYPE, True, "Only LMT orders are allowed in the phase-1 paper bridge."),
         _check("tif_lock", intent.time_in_force == _EXPECTED_TIF, True, "Only DAY time-in-force is allowed in the phase-1 paper bridge."),
