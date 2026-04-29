@@ -1,0 +1,514 @@
+{
+  "classification": "IBKR_MES_ES_QUOTES_DELAYED_ONLY",
+  "comparison": {
+    "es": {
+      "any_quote": true,
+      "best_mode": "delayed",
+      "best_response": "delayed_only",
+      "delayed_mode_quote": true,
+      "live_mode_quote": false,
+      "quote_source_label": "DELAYED",
+      "response_codes": [
+        10168
+      ]
+    },
+    "mes": {
+      "any_quote": true,
+      "best_mode": "frozen",
+      "best_response": "delayed_only",
+      "delayed_mode_quote": false,
+      "live_mode_quote": false,
+      "quote_source_label": "FROZEN",
+      "response_codes": [
+        354,
+        10167
+      ]
+    },
+    "mgc": {
+      "any_quote": true,
+      "best_mode": "delayed",
+      "best_response": "delayed_only",
+      "delayed_mode_quote": true,
+      "live_mode_quote": false,
+      "quote_source_label": "DELAYED",
+      "response_codes": [
+        10168
+      ]
+    }
+  },
+  "contracts": {
+    "ES": {
+      "contract": {
+        "broker_symbol": "ES",
+        "conId": 649180678,
+        "currency": "USD",
+        "exchange": "CME",
+        "internal_symbol": "ES",
+        "lastTradeDateOrContractMonth": "20260618",
+        "local_symbol": "ESM6",
+        "multiplier": "50",
+        "tradingClass": "ES"
+      },
+      "detail": "Contract details received from TWS.",
+      "ok": true
+    },
+    "MES": {
+      "contract": {
+        "broker_symbol": "MES",
+        "conId": 770561194,
+        "currency": "USD",
+        "exchange": "CME",
+        "internal_symbol": "MES",
+        "lastTradeDateOrContractMonth": "20260618",
+        "local_symbol": "MESM6",
+        "multiplier": "5",
+        "tradingClass": "MES"
+      },
+      "detail": "Contract details received from TWS.",
+      "ok": true
+    },
+    "MGC": {
+      "contract": {
+        "broker_symbol": "MGC",
+        "conId": 712565978,
+        "currency": "USD",
+        "exchange": "COMEX",
+        "internal_symbol": "MGC",
+        "lastTradeDateOrContractMonth": "20260626",
+        "local_symbol": "MGCM6",
+        "multiplier": "10",
+        "tradingClass": "MGC"
+      },
+      "detail": "Contract details received from TWS.",
+      "ok": true
+    }
+  },
+  "environment": {
+    "account_id": "DUM882026",
+    "client_id": 9492,
+    "host": "127.0.0.1",
+    "mode": "PAPER",
+    "port": 7497
+  },
+  "errors": [
+    {
+      "code": 2104,
+      "message": "Market data farm connection is OK:hfarm",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450152+00:00"
+    },
+    {
+      "code": 2104,
+      "message": "Market data farm connection is OK:eufarmnj",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450165+00:00"
+    },
+    {
+      "code": 2104,
+      "message": "Market data farm connection is OK:cashfarm",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450175+00:00"
+    },
+    {
+      "code": 2104,
+      "message": "Market data farm connection is OK:usfuture",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450184+00:00"
+    },
+    {
+      "code": 2104,
+      "message": "Market data farm connection is OK:usopt.nj",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450192+00:00"
+    },
+    {
+      "code": 2104,
+      "message": "Market data farm connection is OK:jfarm",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450226+00:00"
+    },
+    {
+      "code": 2104,
+      "message": "Market data farm connection is OK:usfarm.nj",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450255+00:00"
+    },
+    {
+      "code": 2104,
+      "message": "Market data farm connection is OK:usopt",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450268+00:00"
+    },
+    {
+      "code": 2104,
+      "message": "Market data farm connection is OK:usfarm",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450276+00:00"
+    },
+    {
+      "code": 2106,
+      "message": "HMDS data farm connection is OK:euhmds",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450304+00:00"
+    },
+    {
+      "code": 2106,
+      "message": "HMDS data farm connection is OK:fundfarm",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450311+00:00"
+    },
+    {
+      "code": 2106,
+      "message": "HMDS data farm connection is OK:ushmds",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450318+00:00"
+    },
+    {
+      "code": 2158,
+      "message": "Sec-def data farm connection is OK:secdefil",
+      "request_id": -1,
+      "updated_at": "2026-04-29T11:37:47.450329+00:00"
+    },
+    {
+      "code": 10168,
+      "message": "Requested market data is not subscribed. Delayed market data is not enabled.",
+      "request_id": 9811,
+      "updated_at": "2026-04-29T11:37:47.556546+00:00"
+    },
+    {
+      "code": 354,
+      "message": "Requested market data is not subscribed. Check API status by selecting the Account menu then under Management choose Market Data Subscription Manager and/or availability of delayed data.Delayed market data is available.MES JUN'26/TOP/ALL",
+      "request_id": 9821,
+      "updated_at": "2026-04-29T11:37:48.191810+00:00"
+    },
+    {
+      "code": 10167,
+      "message": "Requested market data is not subscribed. Displaying delayed market data.",
+      "request_id": 9823,
+      "updated_at": "2026-04-29T11:37:48.410031+00:00"
+    },
+    {
+      "code": 10167,
+      "message": "Requested market data is not subscribed. Displaying delayed market data.",
+      "request_id": 9824,
+      "updated_at": "2026-04-29T11:37:48.661216+00:00"
+    },
+    {
+      "code": 10168,
+      "message": "Requested market data is not subscribed. Delayed market data is not enabled.",
+      "request_id": 9831,
+      "updated_at": "2026-04-29T11:37:48.826461+00:00"
+    }
+  ],
+  "generated_at": "2026-04-29T11:37:49.163300+00:00",
+  "probe_rows": [
+    {
+      "ask_price": null,
+      "bid_price": null,
+      "close_price": null,
+      "con_id": 712565978,
+      "currency": "USD",
+      "exchange": "COMEX",
+      "expiry": "20260626",
+      "has_quote": false,
+      "last_price": null,
+      "local_symbol": "MGCM6",
+      "market_data_type_reported": null,
+      "market_data_type_requested": 1,
+      "mode_label": "live",
+      "multiplier": "10",
+      "raw_errors": [
+        {
+          "code": 10168,
+          "message": "Requested market data is not subscribed. Delayed market data is not enabled.",
+          "request_id": 9811,
+          "updated_at": "2026-04-29T11:37:47.556546+00:00"
+        }
+      ],
+      "response_code": 10168,
+      "response_indication": "no_permission",
+      "response_message": "Requested market data is not subscribed. Delayed market data is not enabled.",
+      "symbol": "MGC",
+      "trading_class": "MGC"
+    },
+    {
+      "ask_price": 4578.1,
+      "bid_price": 4577.9,
+      "close_price": 4608.4,
+      "con_id": 712565978,
+      "currency": "USD",
+      "exchange": "COMEX",
+      "expiry": "20260626",
+      "has_quote": true,
+      "last_price": 4577.8,
+      "local_symbol": "MGCM6",
+      "market_data_type_reported": 3,
+      "market_data_type_requested": 3,
+      "mode_label": "delayed",
+      "multiplier": "10",
+      "raw_errors": [],
+      "response_code": null,
+      "response_indication": "delayed_only",
+      "response_message": null,
+      "symbol": "MGC",
+      "trading_class": "MGC"
+    },
+    {
+      "ask_price": 4578.1,
+      "bid_price": 4577.9,
+      "close_price": 4608.4,
+      "con_id": 712565978,
+      "currency": "USD",
+      "exchange": "COMEX",
+      "expiry": "20260626",
+      "has_quote": true,
+      "last_price": 4577.8,
+      "local_symbol": "MGCM6",
+      "market_data_type_reported": 3,
+      "market_data_type_requested": 2,
+      "mode_label": "frozen",
+      "multiplier": "10",
+      "raw_errors": [],
+      "response_code": null,
+      "response_indication": "delayed_only",
+      "response_message": null,
+      "symbol": "MGC",
+      "trading_class": "MGC"
+    },
+    {
+      "ask_price": 4578.1,
+      "bid_price": 4577.9,
+      "close_price": 4608.4,
+      "con_id": 712565978,
+      "currency": "USD",
+      "exchange": "COMEX",
+      "expiry": "20260626",
+      "has_quote": true,
+      "last_price": 4577.8,
+      "local_symbol": "MGCM6",
+      "market_data_type_reported": 3,
+      "market_data_type_requested": 4,
+      "mode_label": "delayed-frozen",
+      "multiplier": "10",
+      "raw_errors": [],
+      "response_code": null,
+      "response_indication": "delayed_only",
+      "response_message": null,
+      "symbol": "MGC",
+      "trading_class": "MGC"
+    },
+    {
+      "ask_price": null,
+      "bid_price": null,
+      "close_price": null,
+      "con_id": 770561194,
+      "currency": "USD",
+      "exchange": "CME",
+      "expiry": "20260618",
+      "has_quote": false,
+      "last_price": null,
+      "local_symbol": "MESM6",
+      "market_data_type_reported": null,
+      "market_data_type_requested": 1,
+      "mode_label": "live",
+      "multiplier": "5",
+      "raw_errors": [
+        {
+          "code": 354,
+          "message": "Requested market data is not subscribed. Check API status by selecting the Account menu then under Management choose Market Data Subscription Manager and/or availability of delayed data.Delayed market data is available.MES JUN'26/TOP/ALL",
+          "request_id": 9821,
+          "updated_at": "2026-04-29T11:37:48.191810+00:00"
+        }
+      ],
+      "response_code": 354,
+      "response_indication": "no_permission",
+      "response_message": "Requested market data is not subscribed. Check API status by selecting the Account menu then under Management choose Market Data Subscription Manager and/or availability of delayed data.Delayed market data is available.MES JUN'26/TOP/ALL",
+      "symbol": "MES",
+      "trading_class": "MES"
+    },
+    {
+      "ask_price": null,
+      "bid_price": null,
+      "close_price": null,
+      "con_id": 770561194,
+      "currency": "USD",
+      "exchange": "CME",
+      "expiry": "20260618",
+      "has_quote": false,
+      "last_price": null,
+      "local_symbol": "MESM6",
+      "market_data_type_reported": 3,
+      "market_data_type_requested": 3,
+      "mode_label": "delayed",
+      "multiplier": "5",
+      "raw_errors": [
+        {
+          "code": 10167,
+          "message": "Requested market data is not subscribed. Displaying delayed market data.",
+          "request_id": 9823,
+          "updated_at": "2026-04-29T11:37:48.410031+00:00"
+        }
+      ],
+      "response_code": 10167,
+      "response_indication": "delayed_only",
+      "response_message": "Requested market data is not subscribed. Displaying delayed market data.",
+      "symbol": "MES",
+      "trading_class": "MES"
+    },
+    {
+      "ask_price": 7175.75,
+      "bid_price": 7175.5,
+      "close_price": 7171.0,
+      "con_id": 770561194,
+      "currency": "USD",
+      "exchange": "CME",
+      "expiry": "20260618",
+      "has_quote": true,
+      "last_price": 7175.5,
+      "local_symbol": "MESM6",
+      "market_data_type_reported": 3,
+      "market_data_type_requested": 2,
+      "mode_label": "frozen",
+      "multiplier": "5",
+      "raw_errors": [],
+      "response_code": null,
+      "response_indication": "delayed_only",
+      "response_message": null,
+      "symbol": "MES",
+      "trading_class": "MES"
+    },
+    {
+      "ask_price": null,
+      "bid_price": null,
+      "close_price": null,
+      "con_id": 770561194,
+      "currency": "USD",
+      "exchange": "CME",
+      "expiry": "20260618",
+      "has_quote": false,
+      "last_price": null,
+      "local_symbol": "MESM6",
+      "market_data_type_reported": 3,
+      "market_data_type_requested": 4,
+      "mode_label": "delayed-frozen",
+      "multiplier": "5",
+      "raw_errors": [
+        {
+          "code": 10167,
+          "message": "Requested market data is not subscribed. Displaying delayed market data.",
+          "request_id": 9824,
+          "updated_at": "2026-04-29T11:37:48.661216+00:00"
+        }
+      ],
+      "response_code": 10167,
+      "response_indication": "delayed_only",
+      "response_message": "Requested market data is not subscribed. Displaying delayed market data.",
+      "symbol": "MES",
+      "trading_class": "MES"
+    },
+    {
+      "ask_price": null,
+      "bid_price": null,
+      "close_price": null,
+      "con_id": 649180678,
+      "currency": "USD",
+      "exchange": "CME",
+      "expiry": "20260618",
+      "has_quote": false,
+      "last_price": null,
+      "local_symbol": "ESM6",
+      "market_data_type_reported": null,
+      "market_data_type_requested": 1,
+      "mode_label": "live",
+      "multiplier": "50",
+      "raw_errors": [
+        {
+          "code": 10168,
+          "message": "Requested market data is not subscribed. Delayed market data is not enabled.",
+          "request_id": 9831,
+          "updated_at": "2026-04-29T11:37:48.826461+00:00"
+        }
+      ],
+      "response_code": 10168,
+      "response_indication": "no_permission",
+      "response_message": "Requested market data is not subscribed. Delayed market data is not enabled.",
+      "symbol": "ES",
+      "trading_class": "ES"
+    },
+    {
+      "ask_price": 7175.75,
+      "bid_price": 7175.5,
+      "close_price": 7171.0,
+      "con_id": 649180678,
+      "currency": "USD",
+      "exchange": "CME",
+      "expiry": "20260618",
+      "has_quote": true,
+      "last_price": 7175.75,
+      "local_symbol": "ESM6",
+      "market_data_type_reported": 3,
+      "market_data_type_requested": 3,
+      "mode_label": "delayed",
+      "multiplier": "50",
+      "raw_errors": [],
+      "response_code": null,
+      "response_indication": "delayed_only",
+      "response_message": null,
+      "symbol": "ES",
+      "trading_class": "ES"
+    },
+    {
+      "ask_price": 7175.75,
+      "bid_price": 7175.5,
+      "close_price": 7171.0,
+      "con_id": 649180678,
+      "currency": "USD",
+      "exchange": "CME",
+      "expiry": "20260618",
+      "has_quote": true,
+      "last_price": 7175.75,
+      "local_symbol": "ESM6",
+      "market_data_type_reported": 3,
+      "market_data_type_requested": 2,
+      "mode_label": "frozen",
+      "multiplier": "50",
+      "raw_errors": [],
+      "response_code": null,
+      "response_indication": "delayed_only",
+      "response_message": null,
+      "symbol": "ES",
+      "trading_class": "ES"
+    },
+    {
+      "ask_price": 7175.75,
+      "bid_price": 7175.5,
+      "close_price": 7171.0,
+      "con_id": 649180678,
+      "currency": "USD",
+      "exchange": "CME",
+      "expiry": "20260618",
+      "has_quote": true,
+      "last_price": 7175.75,
+      "local_symbol": "ESM6",
+      "market_data_type_reported": 3,
+      "market_data_type_requested": 4,
+      "mode_label": "delayed-frozen",
+      "multiplier": "50",
+      "raw_errors": [],
+      "response_code": null,
+      "response_indication": "delayed_only",
+      "response_message": null,
+      "symbol": "ES",
+      "trading_class": "ES"
+    }
+  ],
+  "started_at": "2026-04-29T11:37:47.430911+00:00",
+  "summary": {
+    "classification": "IBKR_MES_ES_QUOTES_DELAYED_ONLY",
+    "es_any_quote": true,
+    "es_contract_ok": true,
+    "mes_any_quote": true,
+    "mes_contract_ok": true,
+    "mgc_any_quote": true
+  }
+}

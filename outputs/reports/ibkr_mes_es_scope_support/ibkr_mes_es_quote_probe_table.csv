@@ -1,0 +1,13 @@
+symbol,mode_label,market_data_type_requested,market_data_type_reported,has_quote,response_indication,response_code,response_message,bid_price,ask_price,last_price,close_price,exchange,currency,local_symbol,expiry,multiplier,trading_class,con_id
+MGC,live,1,,False,no_permission,10168,Requested market data is not subscribed. Delayed market data is not enabled.,,,,,COMEX,USD,MGCM6,20260626,10,MGC,712565978
+MGC,delayed,3,3,True,delayed_only,,,4577.9,4578.1,4577.8,4608.4,COMEX,USD,MGCM6,20260626,10,MGC,712565978
+MGC,frozen,2,3,True,delayed_only,,,4577.9,4578.1,4577.8,4608.4,COMEX,USD,MGCM6,20260626,10,MGC,712565978
+MGC,delayed-frozen,4,3,True,delayed_only,,,4577.9,4578.1,4577.8,4608.4,COMEX,USD,MGCM6,20260626,10,MGC,712565978
+MES,live,1,,False,no_permission,354,Requested market data is not subscribed. Check API status by selecting the Account menu then under Management choose Market Data Subscription Manager and/or availability of delayed data.Delayed market data is available.MES JUN'26/TOP/ALL,,,,,CME,USD,MESM6,20260618,5,MES,770561194
+MES,delayed,3,3,False,delayed_only,10167,Requested market data is not subscribed. Displaying delayed market data.,,,,,CME,USD,MESM6,20260618,5,MES,770561194
+MES,frozen,2,3,True,delayed_only,,,7175.5,7175.75,7175.5,7171.0,CME,USD,MESM6,20260618,5,MES,770561194
+MES,delayed-frozen,4,3,False,delayed_only,10167,Requested market data is not subscribed. Displaying delayed market data.,,,,,CME,USD,MESM6,20260618,5,MES,770561194
+ES,live,1,,False,no_permission,10168,Requested market data is not subscribed. Delayed market data is not enabled.,,,,,CME,USD,ESM6,20260618,50,ES,649180678
+ES,delayed,3,3,True,delayed_only,,,7175.5,7175.75,7175.75,7171.0,CME,USD,ESM6,20260618,50,ES,649180678
+ES,frozen,2,3,True,delayed_only,,,7175.5,7175.75,7175.75,7171.0,CME,USD,ESM6,20260618,50,ES,649180678
+ES,delayed-frozen,4,3,True,delayed_only,,,7175.5,7175.75,7175.75,7171.0,CME,USD,ESM6,20260618,50,ES,649180678

@@ -62,6 +62,25 @@ _MNQ_PHASE1_SUBMIT_LANE_IDS = (
     "mnq_1x_ny_early_core__us_midday_long",
     "mnq_1x_ny_early_core__us_midday_short_breakdown",
 )
+_ES_PHASE1_SUBMIT_LANE_IDS = (
+    "es_1x_asia_london_participation__asia_london_long_v6_vol_floor_125",
+    "es_1x_ny_early_core__us_early_long",
+    "es_1x_ny_early_core__us_early_short_breakdown",
+    "es_1x_ny_early_core__us_early_short_reclaim_fail",
+    "es_1x_ny_early_core__us_late_long",
+    "es_1x_ny_early_core__us_late_short_reclaim_fail",
+    "es_1x_ny_early_core__us_midday_long",
+    "es_1x_ny_early_core__us_midday_short_breakdown",
+)
+_MES_PHASE1_SUBMIT_LANE_IDS = (
+    "mes_1x_ny_early_core__us_early_long",
+    "mes_1x_ny_early_core__us_early_short_breakdown",
+    "mes_1x_ny_early_core__us_early_short_reclaim_fail",
+    "mes_1x_ny_early_core__us_late_long",
+    "mes_1x_ny_early_core__us_late_short_reclaim_fail",
+    "mes_1x_ny_early_core__us_midday_long",
+    "mes_1x_ny_early_core__us_midday_short_breakdown",
+)
 _NEXT_NON_ATP_SUBMIT_LANE_ID = "gc_1x_all_lanes__asia_early_long"
 _FIRST_NON_ATP_SUBMIT_LANE_ID = "gc_1x_asia_london_participation__asia_london_long_v5"
 _ATP_CONTRACT = {
@@ -116,6 +135,26 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
         "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
     }
     for lane_id in _MNQ_PHASE1_SUBMIT_LANE_IDS
+}
+_SUBMIT_CAPABLE_LANE_ADAPTERS |= {
+    lane_id: {
+        "lane_id": lane_id,
+        "source_instrument": "ES",
+        "bridge_execution_target": dict(phase1_execution_target_for_source("ES") or {}),
+        "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+    }
+    for lane_id in _ES_PHASE1_SUBMIT_LANE_IDS
+}
+_SUBMIT_CAPABLE_LANE_ADAPTERS |= {
+    lane_id: {
+        "lane_id": lane_id,
+        "source_instrument": "MES",
+        "bridge_execution_target": dict(phase1_execution_target_for_source("MES") or {}),
+        "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": "MES_SIGNAL_DIRECT_PHASE1",
+    }
+    for lane_id in _MES_PHASE1_SUBMIT_LANE_IDS
 }
 
 
@@ -410,6 +449,11 @@ def _build_intent_row(*, inventory_row: dict[str, Any], signal_row: dict[str, An
             "symbol": "GC",
             "contract_month": "202606",
         }
+    elif instrument in {"MNQ", "NQ", "MES", "ES"}:
+        contract_target |= {
+            "symbol": instrument,
+            "contract_month": dict(inventory_row.get("bridge_execution_target") or {}).get("contract_month"),
+        }
     bridge_execution_target = dict(inventory_row.get("bridge_execution_target") or {})
     return {
         "strategy_id": strategy_id,
@@ -537,7 +581,7 @@ def _entry_exit_capability(*, current_position_state: str, instrument: str) -> s
     if instrument in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
         if current_position_state == "LONG":
             return "EXIT_ONLY_WHILE_LONG"
-        if instrument in {"GC", "NQ"}:
+        if instrument in {"GC", "NQ", "ES"}:
             return "ENTRY_SUBMIT_CAPABLE_PHASE1_PROXY"
         return "ENTRY_SUBMIT_CAPABLE_PHASE1_DIRECT"
     return "UNSUPPORTED_INSTRUMENT"
@@ -568,7 +612,7 @@ def _lane_blockers(
         blockers.append("broker_ledger_mismatch")
     if instrument not in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
         blockers.append("unsupported_instrument_scope")
-    if destination not in {"ibkr_paper_bridge_adopted_position", "ibkr_paper_bridge_submit_capable"} and instrument in {"MGC", "MNQ"}:
+    if destination not in {"ibkr_paper_bridge_adopted_position", "ibkr_paper_bridge_submit_capable"} and instrument in {"MGC", "MNQ", "MES"}:
         blockers.append("lane_not_yet_submit_ported")
     if lane_id != _ATP_LANE_ID and signal_state in {"ENTRY_BUY", "ENTRY_SELL", "EXIT_LONG"} and destination != "ibkr_paper_bridge_submit_capable":
         blockers.append("strategy_lane_not_yet_submit_ported")

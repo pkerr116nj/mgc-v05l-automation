@@ -1,0 +1,14 @@
+{
+  "allow_direct_strategy_flip": false,
+  "allow_stacking": true,
+  "broker_minus_ledger_difference": 0.0,
+  "broker_net_mes": 0.0,
+  "executable_symbol": "MES",
+  "generated_at": "2026-04-29T11:38:03.243885+00:00",
+  "max_per_strategy_mes_contracts": 1.0,
+  "max_total_es_equivalent": 2.0,
+  "max_total_mes_contracts": 20.0,
+  "open_mes_orders": 0,
+  "orphan_exposure": 0.0,
+  "strategy_attributed_mes": 0
+}

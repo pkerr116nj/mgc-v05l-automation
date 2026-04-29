@@ -190,7 +190,7 @@ def _select_lane(*, report: dict[str, Any], repo_root: Path, strategy_id: str | 
         gov = governance_rows.get(preferred, {})
         if not gov:
             continue
-        if str(row.get("instrument") or "") not in {"GC", "MGC", "NQ", "MNQ"}:
+        if str(row.get("instrument") or "") not in {"GC", "MGC", "NQ", "MNQ", "ES", "MES"}:
             continue
         if str(gov.get("strategy_status") or "WATCHLIST") in {"PAUSED", "DISABLED"}:
             continue
@@ -235,7 +235,7 @@ def _build_checks(
     requires_live_submit_gate = action in {"BUY", "SELL", "EXIT"}
     return [
         _check("paper_environment_lock", True, True, "Lane-port pass remains hard-locked to PAPER / 127.0.0.1 / 7497 / DUM882026."),
-        _check("selected_lane_present", bool(inventory_row), True, "A selected non-ATP GC/MGC lane must be present in the live inventory."),
+        _check("selected_lane_present", bool(inventory_row), True, "A selected supported non-ATP futures lane must be present in the live inventory."),
         _check("bridge_adapter_present", adapter is not None, True, "Selected lane requires an explicit shared-bridge adapter."),
         _check("current_order_destination_submit_capable", str(inventory_row.get("current_order_destination") or "") == "ibkr_paper_bridge_submit_capable", True, "Selected lane must now point at the shared IBKR paper bridge path."),
         _check("monitor_fresh_and_healthy", bool(monitor_status.get("monitor_running")) and not bool(monitor_status.get("stale")) and str(monitor_status.get("health_classification") or "").upper() == "HEALTHY", True, "Monitor must be running, fresh, and HEALTHY."),

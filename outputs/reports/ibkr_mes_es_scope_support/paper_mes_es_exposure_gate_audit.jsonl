@@ -1,0 +1,2 @@
+{"contract_ok": true, "detail": "Contract details received from TWS.", "event_type": "contract_scope_probe", "observed_at": "2026-04-29T11:38:02.115896+00:00", "quote_source_label": "DELAYED", "symbol": "MES"}
+{"contract_ok": true, "detail": "Contract details received from TWS.", "event_type": "contract_scope_probe", "observed_at": "2026-04-29T11:38:02.167127+00:00", "quote_source_label": "DELAYED", "symbol": "ES"}

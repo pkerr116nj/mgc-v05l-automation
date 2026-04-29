@@ -5,12 +5,14 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-_SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ"}
+_SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ", "ES", "MES"}
 _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
     "GC": "MGC",
     "MGC": "MGC",
     "NQ": "MNQ",
     "MNQ": "MNQ",
+    "ES": "MES",
+    "MES": "MES",
 }
 _FIXED_GOLD_CONTRACT_MONTH = "202606"
 
@@ -67,6 +69,21 @@ def phase1_execution_target_for_symbol(
             "currency": "USD",
             "multiplier": "2",
             "trading_class": "MNQ",
+            "phase1_proxy_mode": "DIRECT",
+        }
+    if normalized == "MES":
+        resolved_month = contract_month or active_index_contract_month(now=now)
+        return {
+            "symbol": "MES",
+            "contract_month": resolved_month,
+            "expiry": None,
+            "con_id": None,
+            "local_symbol": None,
+            "friendly_label": f"MES {resolved_month}",
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": "5",
+            "trading_class": "MES",
             "phase1_proxy_mode": "DIRECT",
         }
     raise KeyError(f"Unsupported phase-1 execution symbol: {symbol}")
