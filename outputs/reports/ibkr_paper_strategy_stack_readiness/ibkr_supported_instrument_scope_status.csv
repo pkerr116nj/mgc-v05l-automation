@@ -1,0 +1,5 @@
+family,executable_proxy,submit_capable_lane_count,quote_mode,exposure_cap,current_actionable_lane_count,broker_net_position,strategy_attributed_position,broker_minus_ledger_difference,orphan_exposure,open_orders
+GC/MGC,MGC,9,DELAYED,max_total_mgc_contracts=20; max_total_gc_equivalent=2; max_per_strategy_mgc_contracts=1,0,0.0,0.0,0.0,0.0,0
+MNQ/NQ,MNQ,20,DELAYED_ONLY,max_total_mnq_contracts=20; max_total_nq_equivalent=2; max_per_strategy_mnq_contracts=1,0,0.0,0,0.0,0.0,0
+MES/ES,MES,15,DELAYED_ONLY,max_total_mes_contracts=20; max_total_es_equivalent=2; max_per_strategy_mes_contracts=1,0,0.0,0,0.0,0.0,0
+Rates,,0,,roadmap only,0,,,,,
