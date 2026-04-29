@@ -609,9 +609,12 @@ test("paper mode does not let live broker and operator auth gates block supervis
   });
 
   assert.equal(contract.operator_triage.paper_trade_authority, "Enabled");
+  assert.equal(contract.operator_triage.paper_trade_allowed, true);
+  assert.equal(contract.operator_triage.paper_trade_block_reason, null);
   assert.equal(contract.operator_triage.live_trade_authority, "Blocked");
   assert.equal(contract.operator_triage.paper_bridge_allowed, true);
   assert.equal(contract.operator_triage.live_bridge_allowed, false);
+  assert.equal(contract.operator_triage.paper_readiness_source, null);
   assert.equal(contract.operator_triage.verdict_sentence, "Paper stack healthy. Flat. Paper trade authority enabled.");
   assert.equal(contract.operator_triage.root_cause.code, "no_hard_gate_failure");
   assert.equal(contract.operator_triage.hard_gates.find((gate) => gate.key === "broker-authority")?.status, "pass");
@@ -692,6 +695,7 @@ test("paper mode keeps live authority blocked while allowing supervised paper au
   });
 
   assert.equal(contract.operator_triage.paper_trade_authority, "Enabled");
+  assert.equal(contract.operator_triage.paper_trade_allowed, true);
   assert.equal(contract.operator_triage.live_trade_authority, "Blocked");
   assert.equal(contract.operator_triage.paper_bridge_allowed, true);
   assert.equal(contract.operator_triage.live_bridge_allowed, false);
@@ -754,6 +758,8 @@ test("paper mode still hard-blocks on current runtime faults with paper-specific
   });
 
   assert.equal(contract.operator_triage.paper_trade_authority, "Blocked");
+  assert.equal(contract.operator_triage.paper_trade_allowed, false);
+  assert.equal(contract.operator_triage.paper_trade_block_reason, "Paper trade authority is unavailable.");
   assert.equal(contract.operator_triage.dominant_blocker.code, "paper_trade_authority_blocked");
   assert.equal(contract.operator_triage.verdict_sentence, "Flat but blocked. Paper trade authority is not currently available.");
 });
@@ -832,8 +838,108 @@ test("live mode still requires live trade authority", () => {
   });
 
   assert.equal(contract.operator_triage.live_trade_authority, "Blocked");
+  assert.equal(contract.operator_triage.live_trade_allowed, false);
   assert.equal(contract.operator_triage.dominant_blocker.code, "live_trade_authority_blocked");
   assert.equal(contract.operator_triage.verdict_sentence, "Flat but blocked. Live trade authority is not currently available.");
+});
+
+test("paper mode follows authoritative paper readiness contract instead of recomputing from live-style gate mixes", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "attached_snapshot_bridge",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "STALE",
+      market_data_label: "STALE",
+      reconciliation_status: "CLEAN",
+      stale: true,
+      runtime_health_label: "FAULTED",
+    },
+    operatorSurface: {
+      generated_at: new Date().toISOString(),
+    },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+      status_line: "runtime=RUNNING | paper=ENABLED",
+    },
+    runtimeValues: {
+      runtime_recovery_state: "RUNNING",
+      paper_trade_allowed: true,
+      paper_trade_block_reason: null,
+      paper_readiness_source: "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+      paper_readiness_timestamp: new Date().toISOString(),
+      session_eligible_count: 9,
+      waiting_for_bar_count: 9,
+      no_setup_count: 11,
+      actionable_now_count: 0,
+      true_blocked_count: 0,
+      advisory_fault_count: 9,
+      blocking_fault_count: 0,
+    },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+      paper_runtime_ready: true,
+      paper_trade_allowed: true,
+      paper_trade_block_reason: null,
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {
+      operator_status: {
+        local_operator_auth: {
+          available: true,
+          ready: false,
+          auth_session_active: false,
+          entry_allowed: false,
+          flatten_allowed: true,
+          replace_allowed: false,
+          blocker: "Local operator auth session expired.",
+        },
+      },
+      futures_pilot_status: {
+        preview_blockers: ["preview blocked"],
+        live_submit_blockers: ["live blocked"],
+      },
+    },
+    productionHealth: {
+      broker_reachable: { ok: false, detail: "down" },
+      auth_healthy: { ok: false, detail: "down" },
+      account_selected: { ok: false, detail: "down" },
+      positions_fresh: { ok: false, detail: "down" },
+      quotes_fresh: { ok: false, detail: "down" },
+    },
+    productionReconciliation: {
+      blocked: false,
+      mismatch_count: 0,
+      detail: "clear",
+    },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {
+      auth_session_active: false,
+      last_auth_detail: "expired",
+    },
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  assert.equal(contract.operator_triage.paper_trade_authority, "Enabled");
+  assert.equal(contract.operator_triage.paper_trade_allowed, true);
+  assert.equal(contract.operator_triage.live_trade_authority, "Blocked");
+  assert.equal(contract.operator_triage.paper_readiness_source, "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload");
+  assert.equal(contract.operator_triage.session_eligible_count, 9);
+  assert.equal(contract.operator_triage.waiting_for_bar_count, 9);
+  assert.equal(contract.operator_triage.advisory_fault_count, 9);
+  assert.equal(contract.operator_triage.blocking_fault_count, 0);
 });
 
 test("snapshot fallback with a stale backend endpoint starts automatic service recovery", async () => {

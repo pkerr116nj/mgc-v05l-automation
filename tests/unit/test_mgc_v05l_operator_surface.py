@@ -159,11 +159,17 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
     }
     assert surface["runtime_readiness"]["paper_enabled"] is True
     assert surface["runtime_readiness"]["entries_enabled"] is True
+    assert surface["runtime_readiness"]["paper_trade_allowed"] is True
+    assert surface["runtime_readiness"]["paper_trade_block_reason"] is None
+    assert surface["runtime_readiness"]["paper_readiness_source"] == "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload"
     assert surface["runtime_readiness"]["values"]["session_eligible_lanes_count"] == 13
+    assert surface["runtime_readiness"]["values"]["session_eligible_count"] == 13
     assert surface["runtime_readiness"]["values"]["waiting_for_completed_bar_count"] == 13
+    assert surface["runtime_readiness"]["values"]["waiting_for_bar_count"] == 13
     assert surface["runtime_readiness"]["values"]["no_setup_count"] == 11
     assert surface["runtime_readiness"]["values"]["actionable_now_count"] == 0
     assert surface["runtime_readiness"]["values"]["blocked_lanes_count"] == 0
+    assert surface["runtime_readiness"]["values"]["true_blocked_count"] == 0
     assert surface["runtime_readiness"]["values"]["current_broad_trading_session"] == "US_EARLY"
     assert surface["runtime_readiness"]["values"]["current_detected_phase_label"] == "UNCLASSIFIED"
     assert surface["operator_metrics_portfolio"]["daily_realized_pnl"] == "10.0"
@@ -276,6 +282,7 @@ def test_operator_surface_runtime_readiness_only_blocks_on_blocking_faults() -> 
     assert runtime_readiness["blocking_faults_active"] is False
     assert runtime_readiness["values"]["blocking_faults_count"] == 0
     assert runtime_readiness["values"]["advisory_faults_count"] == 1
+    assert runtime_readiness["paper_trade_allowed"] is True
 
     blocking_surface = build_operator_surface(
         generated_at="2026-04-29T16:00:00+00:00",
@@ -311,6 +318,46 @@ def test_operator_surface_runtime_readiness_only_blocks_on_blocking_faults() -> 
     assert runtime_readiness["blocking_faults_active"] is True
     assert runtime_readiness["values"]["blocking_faults_count"] == 1
     assert runtime_readiness["values"]["advisory_faults_count"] == 0
+
+
+def test_operator_surface_transports_authoritative_paper_block_reason_without_redeciding() -> None:
+    surface = build_operator_surface(
+        generated_at="2026-04-29T16:00:00+00:00",
+        global_payload={
+            "paper_label": "RUNNING",
+            "current_session_date": "2026-04-29",
+            "market_data_label": "LIVE",
+            "runtime_health_label": "HEALTHY",
+            "fault_state": "FAULTED",
+        },
+        auth_status={"runtime_ready": True},
+        paper={
+            "running": True,
+            "status": {"entries_enabled": True, "operator_halt": False},
+            "readiness": {
+                "runtime_phase": "RUNNING",
+                "entries_enabled": True,
+                "paper_trade_allowed": True,
+                "paper_trade_block_reason": None,
+                "paper_readiness_source": "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+                "paper_readiness_timestamp": "2026-04-29T16:00:00+00:00",
+                "lane_status_summary": {},
+            },
+            "exceptions": {"exceptions": []},
+        },
+        approved_quant_baselines={},
+        market_context={},
+        treasury_curve={},
+        supervised_paper_operability={
+            "app_usable_for_supervised_paper": True,
+            "state": "USABLE",
+        },
+    )
+
+    runtime_readiness = surface["runtime_readiness"]
+    assert runtime_readiness["paper_trade_allowed"] is True
+    assert runtime_readiness["paper_trade_block_reason"] is None
+    assert runtime_readiness["blocking_faults_active"] is False
 
 
 def test_operator_surface_hardens_context_semantics_for_thin_comparisons_and_invalid_prior() -> None:

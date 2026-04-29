@@ -1,0 +1,86 @@
+{
+  "classification": "PAPER_READINESS_SINGLE_SOURCE_FIXED",
+  "generated_at": "2026-04-29T17:58:40Z",
+  "orders_placed": false,
+  "live_trading_enabled": false,
+  "strategy_logic_changed": false,
+  "live_protections_weakened": false,
+  "authority_boundary": {
+    "paper_lane_readiness": "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+    "paper_top_level_usability": "src/mgc_v05l/app/operator_dashboard.py:_supervised_paper_operability_payload",
+    "transport_summary": "src/mgc_v05l/app/operator_surface.py:_build_runtime_readiness",
+    "desktop_authority_presentation": [
+      "desktop/src/main/shared/operatorTriage.ts",
+      "desktop/src/main/shared/operationalReadiness.ts"
+    ],
+    "final_order_preflight": "src/mgc_v05l/execution/ibkr_paper_strategy_bridge.py"
+  },
+  "files_changed": [
+    "src/mgc_v05l/app/operator_dashboard.py",
+    "src/mgc_v05l/app/operator_surface.py",
+    "desktop/src/main/shared/operatorTriage.ts",
+    "desktop/src/main/shared/operationalReadiness.ts",
+    "tests/unit/test_mgc_v05l_operator_surface.py",
+    "desktop/src/main/runtime.test.ts"
+  ],
+  "transport_contract_fields": [
+    "paper_trade_allowed",
+    "paper_trade_block_reason",
+    "live_trade_allowed",
+    "live_trade_block_reason",
+    "paper_readiness_source",
+    "paper_readiness_timestamp",
+    "session_eligible_count",
+    "waiting_for_bar_count",
+    "no_setup_count",
+    "actionable_now_count",
+    "true_blocked_count",
+    "advisory_fault_count",
+    "blocking_fault_count"
+  ],
+  "duplicate_blocking_removed": [
+    "live authority unavailable no longer re-blocks paper mode downstream",
+    "WATCH or advisory-only rows no longer count as blocking paper faults",
+    "stale global fault labels no longer override authoritative healthy paper readiness",
+    "older partial payloads infer healthy running paper runtime instead of false-blocking on missing paper_runtime_ready"
+  ],
+  "projected_snapshot": {
+    "source_mode": "persisted_headless_paper_artifacts",
+    "live_dashboard_endpoint_available": false,
+    "source_files": [
+      "outputs/operator_dashboard/runtime/headless_supervised_paper_dashboard.json",
+      "outputs/operator_dashboard/runtime/headless_supervised_paper_operability.json"
+    ],
+    "paper_trade_allowed": true,
+    "paper_trade_block_reason": null,
+    "paper_readiness_source": "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+    "paper_readiness_timestamp": "2026-04-29T17:31:46.573435+00:00",
+    "paper_runtime_ready": true,
+    "session_eligible_count": 9,
+    "waiting_for_bar_count": 9,
+    "no_setup_count": 11,
+    "actionable_now_count": 0,
+    "true_blocked_count": 0,
+    "advisory_fault_count": 9,
+    "blocking_fault_count": 0
+  },
+  "verification": {
+    "pytest_operator_surface": "5 passed",
+    "electron_main_typecheck": "passed",
+    "electron_main_build": "passed",
+    "compiled_runtime_targeted_paper_gate_tests": [
+      "paper mode does not let live broker and operator auth gates block supervised paper usability: passed",
+      "paper mode keeps live authority blocked while allowing supervised paper authority: passed"
+    ],
+    "compiled_runtime_full_suite": {
+      "passed": 27,
+      "failed": 3,
+      "remaining_failures": [
+        "snapshot-first startup returns persisted state without waiting for live dashboard attach",
+        "prepareDesktopForLaunch schedules service warmup without blocking the app",
+        "prepareDesktopForLaunch skips automatic warmup in sandboxed launch contexts"
+      ],
+      "remaining_failures_preexisting": true
+    }
+  }
+}

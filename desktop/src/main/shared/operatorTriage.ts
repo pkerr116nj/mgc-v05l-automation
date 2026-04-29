@@ -98,11 +98,24 @@ export interface OperatorTriageOperatorAuthority {
 export interface OperatorTriage {
   pilot_symbol: string;
   paper_trade_authority: TradeAuthorityState;
+  paper_trade_allowed: boolean;
+  paper_trade_block_reason: string | null;
   live_trade_authority: TradeAuthorityState;
+  live_trade_allowed: boolean;
+  live_trade_block_reason: string | null;
   paper_runtime_ready: boolean;
   live_runtime_ready: boolean;
   paper_bridge_allowed: boolean;
   live_bridge_allowed: boolean;
+  paper_readiness_source: string | null;
+  paper_readiness_timestamp: string | null;
+  session_eligible_count: number;
+  waiting_for_bar_count: number;
+  no_setup_count: number;
+  actionable_now_count: number;
+  true_blocked_count: number;
+  advisory_fault_count: number;
+  blocking_fault_count: number;
   position_posture: PositionPostureState;
   outage_posture: OutagePostureState;
   connection_posture: ConnectionPostureState;
@@ -691,6 +704,74 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
   const operatorSurfaceAsOf = timestampOrNull(operatorSurface.generated_at) ?? checkedAt;
   const operatingMode = String(global.mode ?? global.mode_label ?? "").trim().toUpperCase();
   const paperMode = operatingMode === "PAPER" || global.live_disabled === true;
+  const laneStatusSummary = asRecord(paperReadiness.lane_status_summary);
+  const paperReadinessSource = firstNonEmptyString(runtimeValues.paper_readiness_source, paperReadiness.paper_readiness_source);
+  const paperReadinessTimestamp = timestampOrNull(
+    runtimeValues.paper_readiness_timestamp ?? paperReadiness.paper_readiness_timestamp ?? paperReadiness.generated_at,
+  );
+  const paperRuntimePhase = String(
+    paperReadiness.runtime_phase
+    ?? paperReadiness.phase
+    ?? paperReadiness.status
+    ?? runtimeValues.runtime_recovery_state
+    ?? runtimeReadiness.runtime_status
+    ?? "",
+  ).trim().toUpperCase();
+  const paperRuntimeReadyRaw = runtimeValues.paper_runtime_ready ?? paperReadiness.paper_runtime_ready;
+  const paperRuntimeReadyKnown = typeof paperRuntimeReadyRaw === "boolean";
+  const sessionEligibleCount = numericOrNull(
+    runtimeValues.session_eligible_count
+    ?? runtimeValues.session_eligible_lanes_count
+    ?? paperReadiness.session_eligible_count
+    ?? laneStatusSummary.session_eligible_lanes_count,
+  ) ?? 0;
+  const waitingForBarCount = numericOrNull(
+    runtimeValues.waiting_for_bar_count
+    ?? runtimeValues.waiting_for_completed_bar_count
+    ?? paperReadiness.waiting_for_bar_count
+    ?? laneStatusSummary.waiting_for_completed_bar_count,
+  ) ?? 0;
+  const noSetupCount = numericOrNull(
+    runtimeValues.no_setup_count
+    ?? paperReadiness.no_setup_count
+    ?? laneStatusSummary.no_setup_count,
+  ) ?? 0;
+  const actionableNowCount = numericOrNull(
+    runtimeValues.actionable_now_count
+    ?? paperReadiness.actionable_now_count
+    ?? laneStatusSummary.actionable_now_count,
+  ) ?? 0;
+  const trueBlockedCount = numericOrNull(
+    runtimeValues.true_blocked_count
+    ?? runtimeValues.blocked_lanes_count
+    ?? paperReadiness.true_blocked_count
+    ?? laneStatusSummary.blocked_lanes_count,
+  ) ?? 0;
+  const advisoryFaultCount = numericOrNull(
+    runtimeValues.advisory_fault_count
+    ?? runtimeValues.advisory_faults_count
+    ?? paperReadiness.advisory_fault_count,
+  ) ?? 0;
+  const blockingFaultCount = numericOrNull(
+    runtimeValues.blocking_fault_count
+    ?? runtimeValues.blocking_faults_count
+    ?? paperReadiness.blocking_fault_count,
+  ) ?? 0;
+  const inferredPaperRuntimeReady =
+    !paperRuntimeReadyKnown
+    && blockingFaultCount === 0
+    && runtimeReadiness.blocking_faults_active !== true
+    && (paperReadiness.runtime_running === true || paperRuntimePhase === "RUNNING")
+    && paperReadiness.entries_enabled !== false
+    && runtimeReadiness.entries_enabled !== false;
+  const paperRuntimeReady = paperRuntimeReadyKnown ? paperRuntimeReadyRaw === true : inferredPaperRuntimeReady;
+  const authoritativePaperTradeAllowedRaw = runtimeValues.paper_trade_allowed ?? paperReadiness.paper_trade_allowed;
+  const authoritativePaperTradeAllowedKnown = typeof authoritativePaperTradeAllowedRaw === "boolean";
+  const authoritativePaperTradeAllowed = authoritativePaperTradeAllowedKnown ? authoritativePaperTradeAllowedRaw === true : false;
+  const authoritativePaperTradeBlockReason = firstNonEmptyString(
+    runtimeValues.paper_trade_block_reason,
+    paperReadiness.paper_trade_block_reason,
+  );
 
   const currentExposure = buildExposureSummary(input, pilotSymbol, productionReconciliation);
   const todayPnL = buildTodayPnLSummary(portfolio, operatorSurfaceAsOf);
@@ -723,15 +804,26 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     && productionReconciliation.blocked !== true
     && Number(productionReconciliation.mismatch_count ?? 0) === 0
     && String(global.reconciliation_status ?? "").trim().toUpperCase() === "CLEAN";
-  const runtimePosture: RuntimePostureState =
-    runtimeReadiness.blocking_faults_active === true
-    || String(global.runtime_health_label ?? global.runtime_health ?? "").trim().toUpperCase() === "FAULTED"
-      ? "Faulted"
-      : productionReconciliation.blocked === true || String(runtimeValues.runtime_recovery_state ?? "").trim().toUpperCase() === "RECONCILING"
-        ? "Reconciling"
-        : runtimeReadiness.paper_enabled === true && String(runtimeReadiness.runtime_status ?? "").trim().toUpperCase() === "RUNNING" && runtimeReadiness.entries_enabled === true
-          ? "Ready"
-          : "Degraded";
+  const runtimePosture: RuntimePostureState = paperMode
+    ? (
+        blockingFaultCount > 0
+          ? "Faulted"
+          : String(runtimeValues.runtime_recovery_state ?? "").trim().toUpperCase() === "RECONCILING"
+            ? "Reconciling"
+            : paperRuntimeReady
+              ? "Ready"
+              : "Degraded"
+      )
+    : (
+        runtimeReadiness.blocking_faults_active === true
+        || String(global.runtime_health_label ?? global.runtime_health ?? "").trim().toUpperCase() === "FAULTED"
+          ? "Faulted"
+          : productionReconciliation.blocked === true || String(runtimeValues.runtime_recovery_state ?? "").trim().toUpperCase() === "RECONCILING"
+            ? "Reconciling"
+            : runtimeReadiness.paper_enabled === true && String(runtimeReadiness.runtime_status ?? "").trim().toUpperCase() === "RUNNING" && runtimeReadiness.entries_enabled === true
+              ? "Ready"
+              : "Degraded"
+      );
   const runtimePass = runtimePosture === "Ready";
   const operatorSessionActive = productionOperatorLocalAuth.auth_session_active === true || localOperatorAuth.auth_session_active === true;
   const operatorSensitiveActionsAllowed =
@@ -929,9 +1021,11 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     },
   ];
 
-  const paperRuntimeReady = runtimePass;
   const liveRuntimeReady = runtimePass;
-  const paperTradeAuthority: TradeAuthorityState = hardGates.every((row) => row.status === "pass") ? "Enabled" : "Blocked";
+  const paperTradeAuthority: TradeAuthorityState =
+    authoritativePaperTradeAllowedKnown
+      ? (authoritativePaperTradeAllowed ? "Enabled" : "Blocked")
+      : (hardGates.every((row) => row.status === "pass") ? "Enabled" : "Blocked");
   const liveTradeAuthority: TradeAuthorityState = (
     marketDataPass
     && liveBrokerAuthorityPass
@@ -939,8 +1033,13 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     && liveRuntimeReady
     && liveOperatorAuthorityPass
   ) ? "Enabled" : "Blocked";
+  const paperTradeAllowed = paperTradeAuthority === "Enabled";
+  const liveTradeAllowed = liveTradeAuthority === "Enabled";
   const activeTradeAuthority = paperMode ? paperTradeAuthority : liveTradeAuthority;
   const firstFailingGate = hardGates.find((row) => row.status === "fail") ?? null;
+  const liveTradeBlockReason = liveTradeAllowed
+    ? null
+    : (firstFailingGate?.reason ?? "Live trade authority is unavailable.");
   const connectionPosture = connectionPostureLabel(input.desktopSourceMode ?? undefined);
   const outagePosture: OutagePostureState =
     activeTradeAuthority === "Blocked"
@@ -960,23 +1059,29 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
       : outagePosture === "Review"
         ? { code: "review_active_warnings", label: "Review active warnings" }
         : { code: "no_active_blocker", label: "No active blocker" };
-  const rootCause: OperatorTriageRootCause = firstFailingGate
+  const rootCause: OperatorTriageRootCause = paperMode && !paperTradeAllowed
     ? {
-        layer: hardGateLayerForKey(firstFailingGate.key),
-        code: hardGateCodeForKey(firstFailingGate.key),
-        detail: `${firstFailingGate.label}: ${firstFailingGate.reason}`,
+        layer: "runtime",
+        code: textOrFallback(authoritativePaperTradeBlockReason, "paper_trade_blocked"),
+        detail: textOrFallback(authoritativePaperTradeBlockReason, "Paper trade authority is unavailable."),
       }
-    : operatorActiveAlertRows[0]
+    : firstFailingGate
       ? {
-          layer: "alerts",
-          code: "active_alert_review",
-          detail: formatValue(operatorActiveAlertRows[0].message ?? operatorActiveAlertRows[0].title ?? "Review active alerts."),
+          layer: hardGateLayerForKey(firstFailingGate.key),
+          code: hardGateCodeForKey(firstFailingGate.key),
+          detail: `${firstFailingGate.label}: ${firstFailingGate.reason}`,
         }
-      : {
-          layer: "unknown",
-          code: "no_hard_gate_failure",
-          detail: "No hard-gate failure.",
-        };
+      : operatorActiveAlertRows[0]
+        ? {
+            layer: "alerts",
+            code: "active_alert_review",
+            detail: formatValue(operatorActiveAlertRows[0].message ?? operatorActiveAlertRows[0].title ?? "Review active alerts."),
+          }
+        : {
+            layer: "unknown",
+            code: "no_hard_gate_failure",
+            detail: "No hard-gate failure.",
+          };
   const verdictSentence =
     activeTradeAuthority === "Enabled"
       ? positionPosture === "In Position"
@@ -1002,11 +1107,24 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     operator_triage: {
       pilot_symbol: pilotSymbol,
       paper_trade_authority: paperTradeAuthority,
+      paper_trade_allowed: paperTradeAllowed,
+      paper_trade_block_reason: paperTradeAllowed ? null : authoritativePaperTradeBlockReason ?? "Paper trade authority is unavailable.",
       live_trade_authority: liveTradeAuthority,
+      live_trade_allowed: liveTradeAllowed,
+      live_trade_block_reason: liveTradeBlockReason,
       paper_runtime_ready: paperRuntimeReady,
       live_runtime_ready: liveRuntimeReady,
-      paper_bridge_allowed: paperTradeAuthority === "Enabled",
-      live_bridge_allowed: liveTradeAuthority === "Enabled",
+      paper_bridge_allowed: paperTradeAllowed,
+      live_bridge_allowed: liveTradeAllowed,
+      paper_readiness_source: paperReadinessSource,
+      paper_readiness_timestamp: paperReadinessTimestamp,
+      session_eligible_count: sessionEligibleCount,
+      waiting_for_bar_count: waitingForBarCount,
+      no_setup_count: noSetupCount,
+      actionable_now_count: actionableNowCount,
+      true_blocked_count: trueBlockedCount,
+      advisory_fault_count: advisoryFaultCount,
+      blocking_fault_count: blockingFaultCount,
       position_posture: positionPosture,
       outage_posture: outagePosture,
       connection_posture: connectionPosture,

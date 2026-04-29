@@ -1,0 +1,71 @@
+{
+  "generated_at": "2026-04-29T17:58:40Z",
+  "classification": "PAPER_READINESS_SINGLE_SOURCE_FIXED",
+  "snapshot_type": "projected_post_fix_readiness_view",
+  "live_dashboard_endpoint_available": false,
+  "source_mode": "persisted_headless_paper_artifacts",
+  "source_files": {
+    "paper_dashboard_snapshot": "outputs/operator_dashboard/runtime/headless_supervised_paper_dashboard.json",
+    "paper_operability_snapshot": "outputs/operator_dashboard/runtime/headless_supervised_paper_operability.json"
+  },
+  "authority": {
+    "paper_readiness_source": "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+    "paper_operability_source": "src/mgc_v05l/app/operator_dashboard.py:_supervised_paper_operability_payload",
+    "transport_source": "src/mgc_v05l/app/operator_surface.py:_build_runtime_readiness"
+  },
+  "paper_readiness_payload": {
+    "paper_runtime_ready": true,
+    "paper_trade_allowed": true,
+    "paper_trade_block_reason": null,
+    "paper_readiness_source": "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+    "paper_readiness_timestamp": "2026-04-29T17:31:46.573435+00:00",
+    "session_eligible_count": 9,
+    "waiting_for_bar_count": 9,
+    "no_setup_count": 11,
+    "actionable_now_count": 0,
+    "true_blocked_count": 0,
+    "advisory_fault_count": 9,
+    "blocking_fault_count": 0
+  },
+  "paper_operability_payload": {
+    "app_usable_for_supervised_paper": true,
+    "launch_allowed": true,
+    "state": "USABLE",
+    "unusable_reason": null,
+    "runtime_running": true,
+    "paper_runtime_phase": "RUNNING",
+    "paper_runtime_ready": true
+  },
+  "runtime_readiness_transport_projection": {
+    "runtime_status": "RUNNING",
+    "paper_enabled": true,
+    "entries_enabled": true,
+    "market_data_readiness": "STALE",
+    "blocking_faults_active": false,
+    "paper_trade_allowed": true,
+    "paper_trade_block_reason": null,
+    "paper_readiness_source": "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+    "paper_readiness_timestamp": "2026-04-29T17:31:46.573435+00:00",
+    "values": {
+      "runtime_lanes_loaded_count": 44,
+      "data_fresh_lanes_count": 44,
+      "governance_allowed_lanes_count": 44,
+      "route_ready_lanes_count": 44,
+      "session_eligible_count": 9,
+      "waiting_for_bar_count": 9,
+      "no_setup_count": 11,
+      "actionable_now_count": 0,
+      "true_blocked_count": 0,
+      "advisory_fault_count": 9,
+      "blocking_fault_count": 0,
+      "current_detected_phase_label": "US_MIDDAY",
+      "current_broad_trading_session": "US_LATE",
+      "next_expected_decision_bar_ts": "2026-04-29T13:32:00-04:00"
+    }
+  },
+  "notes": [
+    "This snapshot is projected from persisted headless paper artifacts because the live dashboard endpoint was unavailable during the cleanup pass.",
+    "Market data is labeled STALE in the persisted runtime snapshot, but the post-fix paper authority contract does not automatically collapse paper readiness to blocked when data-fresh lane counts remain healthy.",
+    "WATCH-only DECISION_WITHOUT_INTENT rows remain advisory and do not count as blocking paper faults."
+  ]
+}

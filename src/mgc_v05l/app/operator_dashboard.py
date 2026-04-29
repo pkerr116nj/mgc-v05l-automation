@@ -1014,6 +1014,17 @@ class OperatorDashboardService:
                     paper_approved_models=paper["approved_models"],
                     paper_non_approved_lanes=paper["non_approved_lanes"],
                 )
+                startup_control_plane = self._startup_control_plane_payload(
+                    generated_at=generated_at,
+                    auth_status=auth_status,
+                    market_context=market_context,
+                    paper=paper,
+                )
+                supervised_paper_operability = self._supervised_paper_operability_payload(
+                    generated_at=generated_at,
+                    startup_control_plane=startup_control_plane,
+                    paper=paper,
+                )
                 operator_surface = build_operator_surface(
                     generated_at=generated_at,
                     global_payload={
@@ -1033,20 +1044,10 @@ class OperatorDashboardService:
                     market_context=market_context,
                     treasury_curve=treasury_curve,
                     bootstrap_prerequisites=self._dashboard_bootstrap_prerequisites_payload(),
+                    supervised_paper_operability=supervised_paper_operability,
                 )
                 research_capture = self._research_daily_capture_payload(generated_at=generated_at)
                 research_runtime_bridge = self._research_runtime_bridge_payload(generated_at=generated_at)
-                startup_control_plane = self._startup_control_plane_payload(
-                    generated_at=generated_at,
-                    auth_status=auth_status,
-                    market_context=market_context,
-                    paper=paper,
-                )
-                supervised_paper_operability = self._supervised_paper_operability_payload(
-                    generated_at=generated_at,
-                    startup_control_plane=startup_control_plane,
-                    paper=paper,
-                )
                 paper_signal_audit = (
                     dict(paper.get("signal_intent_fill_audit") or {})
                     if isinstance(paper.get("signal_intent_fill_audit"), dict)
@@ -6445,6 +6446,17 @@ class OperatorDashboardService:
         position = paper.get("position", {})
         operator_state = paper.get("operator_state", {})
         paper_status = paper.get("status", {})
+        exception_rows = list((paper.get("exceptions") or {}).get("exceptions") or [])
+        blocking_exception_rows = [
+            dict(row)
+            for row in exception_rows
+            if str(row.get("severity") or "").strip().upper() == "BLOCKING"
+        ]
+        advisory_exception_rows = [
+            dict(row)
+            for row in exception_rows
+            if str(row.get("severity") or "").strip().upper() != "BLOCKING"
+        ]
         desk_risk = paper.get("desk_risk") or {}
         lane_risk = paper.get("lane_risk") or {}
         config_in_force = paper.get("config_in_force") or {}
@@ -6984,12 +6996,44 @@ class OperatorDashboardService:
         next_decision_candidates = [value for value in next_decision_candidates if value is not None]
         if next_decision_candidates:
             next_expected_decision_bar_ts = min(next_decision_candidates).isoformat()
+        runtime_entries_enabled = bool(paper.get("status", {}).get("entries_enabled"))
+        runtime_operator_halt = bool(paper.get("status", {}).get("operator_halt"))
+        blocking_fault_count = len(blocking_exception_rows)
+        advisory_fault_count = len(advisory_exception_rows)
+        paper_trade_block_reason = None
+        if not runtime_running:
+            paper_trade_block_reason = "paper_runtime_not_running"
+        elif runtime_phase in {"STOPPING", "BLOCKED", "RECONCILING", "HALTED"}:
+            paper_trade_block_reason = f"paper_runtime_{runtime_phase.lower()}"
+        elif not runtime_entries_enabled:
+            paper_trade_block_reason = "paper_entries_disabled"
+        elif runtime_operator_halt:
+            paper_trade_block_reason = "paper_operator_halt"
+        elif blocking_fault_count > 0:
+            paper_trade_block_reason = "paper_blocking_faults_active"
+        elif (
+            int(lane_status_summary["runtime_lanes_loaded_count"]) > 0
+            and int(lane_status_summary["session_eligible_lanes_count"]) > 0
+            and int(lane_status_summary["data_fresh_lanes_count"]) == 0
+        ):
+            paper_trade_block_reason = "paper_market_data_stale_or_unavailable"
+        elif (
+            int(lane_status_summary["runtime_lanes_loaded_count"]) > 0
+            and int(lane_status_summary["route_ready_lanes_count"]) == 0
+        ):
+            paper_trade_block_reason = "paper_no_route_ready_lanes"
+        paper_trade_allowed = paper_trade_block_reason is None
         return {
             "generated_at": generated_at,
             "runtime_running": runtime_running,
             "runtime_phase": runtime_phase,
-            "entries_enabled": bool(paper.get("status", {}).get("entries_enabled")),
-            "operator_halt": bool(paper.get("status", {}).get("operator_halt")),
+            "entries_enabled": runtime_entries_enabled,
+            "operator_halt": runtime_operator_halt,
+            "paper_runtime_ready": bool(runtime_running and runtime_phase == "RUNNING" and runtime_entries_enabled and not runtime_operator_halt),
+            "paper_trade_allowed": paper_trade_allowed,
+            "paper_trade_block_reason": paper_trade_block_reason,
+            "paper_readiness_source": "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+            "paper_readiness_timestamp": generated_at,
             "usable_lane_count": usable_lane_count,
             "halted_lane_count": halted_lane_count,
             "runtime_status_detail": runtime_status_detail,
@@ -6997,6 +7041,13 @@ class OperatorDashboardService:
             "current_detected_phase_label": current_detected_session,
             "current_broad_trading_session": current_broad_trading_session,
             "next_expected_decision_bar_ts": next_expected_decision_bar_ts,
+            "session_eligible_count": int(lane_status_summary["session_eligible_lanes_count"]),
+            "waiting_for_bar_count": int(lane_status_summary["waiting_for_completed_bar_count"]),
+            "no_setup_count": int(lane_status_summary["no_setup_count"]),
+            "actionable_now_count": int(lane_status_summary["actionable_now_count"]),
+            "true_blocked_count": int(lane_status_summary["blocked_lanes_count"]),
+            "blocking_fault_count": blocking_fault_count,
+            "advisory_fault_count": advisory_fault_count,
             "approved_models_active": len(active_models),
             "approved_models_total": len(approved_models.get("rows", [])),
             "approved_models_label": ", ".join(row["branch"] for row in active_models) if active_models else "None enabled",

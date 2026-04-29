@@ -224,6 +224,9 @@ function paperRuntimeState(input: OperationalReadinessInput, dashboardAttached: 
         : Boolean(mismatchStatus) && !["MATCHED", "CLEAR"].includes(mismatchStatus);
   const runtimePhase = upper(paperReadiness.runtime_phase || paperReadiness.phase || paperReadiness.status);
   const runtimeRunning = paperReadiness.runtime_running === true || runtimePhase === "RUNNING";
+  const explicitPaperRuntimeReady = typeof paperReadiness.paper_runtime_ready === "boolean" ? paperReadiness.paper_runtime_ready === true : null;
+  const explicitPaperTradeAllowed = typeof paperReadiness.paper_trade_allowed === "boolean" ? paperReadiness.paper_trade_allowed === true : null;
+  const explicitPaperTradeBlockReason = text(paperReadiness.paper_trade_block_reason) || null;
   const operatorHalt = paperReadiness.operator_halt === true;
   const entriesEnabled = paperReadiness.entries_enabled === true;
   const halted =
@@ -238,6 +241,7 @@ function paperRuntimeState(input: OperationalReadinessInput, dashboardAttached: 
     runtimePhase.includes("BACKOFF") ||
     runtimePhase.includes("PROGRESS") ||
     runtimePhase.includes("STARTING");
+  const paperRuntimeReady = explicitPaperRuntimeReady ?? (runtimeRunning && entriesEnabled && !operatorHalt);
 
   if (!dashboardAttached) {
     return {
@@ -286,6 +290,44 @@ function paperRuntimeState(input: OperationalReadinessInput, dashboardAttached: 
         label: "Auth Gate Check",
         description: "Verify the paper-runtime auth and broker readiness gates before starting or trusting paper execution.",
         kind: "auth-gate-check",
+      },
+    };
+  }
+
+  if (explicitPaperTradeAllowed === false) {
+    return {
+      ready: false,
+      state:
+        runtimePhase === "RECONCILING" || runtimePhase.includes("RECOVER") || runtimePhase.includes("BACKOFF") || runtimePhase.includes("PROGRESS") || runtimePhase.includes("STARTING")
+          ? "RECONCILING"
+          : runtimePhase === "HALTED" || runtimePhase === "BLOCKED" || runtimePhase.includes("HALT") || runtimePhase.includes("STOPPED") || runtimePhase.includes("SUPPRESSED")
+            ? "HALTED"
+            : "BLOCKED",
+      tempPaperBlocked: false,
+      reason: explicitPaperTradeBlockReason ?? fallback(
+        paperReadiness.runtime_status_detail || paperReadiness.state_note || paperReadiness.summary_line,
+        "Paper runtime is attached, but the authoritative paper-readiness contract is currently blocked.",
+      ),
+      primaryAction: {
+        label: operatorHalt || !entriesEnabled ? "Resume Entries" : "Refresh",
+        description: operatorHalt || !entriesEnabled
+          ? "Re-arm the supervised paper runtime only after the current hold is understood."
+          : "Refresh the paper-runtime contract after the current blocking condition changes.",
+        kind: operatorHalt || !entriesEnabled ? "paper-resume-entries" : "refresh",
+      },
+    };
+  }
+
+  if (explicitPaperTradeAllowed === true && paperRuntimeReady) {
+    return {
+      ready: true,
+      state: "READY",
+      tempPaperBlocked: false,
+      reason: fallback(paperReadiness.summary_line, "Paper runtime is attached and operational."),
+      primaryAction: {
+        label: "Refresh",
+        description: "Refresh the operator snapshot when you want the latest paper-runtime status.",
+        kind: "refresh",
       },
     };
   }

@@ -24,6 +24,7 @@ def build_operator_surface(
     market_context: dict[str, Any],
     treasury_curve: dict[str, Any],
     bootstrap_prerequisites: dict[str, Any] | None = None,
+    supervised_paper_operability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     bootstrap_prerequisites = dict(bootstrap_prerequisites or {})
     session_date = _safe_session_date(global_payload.get("current_session_date"))
@@ -50,6 +51,7 @@ def build_operator_surface(
         treasury_curve=treasury_curve,
         bootstrap_prerequisites=bootstrap_prerequisites,
         active_rows=active_rows,
+        supervised_paper_operability=supervised_paper_operability,
     )
     active_surface = _build_active_instrument_surface_block(active_rows=active_rows)
     current_active_positions = _build_current_active_positions(
@@ -102,8 +104,10 @@ def _build_runtime_readiness(
     treasury_curve: dict[str, Any],
     bootstrap_prerequisites: dict[str, Any] | None,
     active_rows: list[dict[str, Any]],
+    supervised_paper_operability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     bootstrap_prerequisites = dict(bootstrap_prerequisites or {})
+    supervised_paper_operability = dict(supervised_paper_operability or {})
     readiness = paper.get("readiness") or {}
     lane_status_summary = dict(readiness.get("lane_status_summary") or {})
     exceptions = paper.get("exceptions") or {}
@@ -112,7 +116,6 @@ def _build_runtime_readiness(
     entries_enabled = bool(readiness.get("entries_enabled"))
     auth_readiness = bool(auth_status.get("runtime_ready"))
     market_data_readiness = str(global_payload.get("market_data_label") or "-")
-    fault_state = str(global_payload.get("fault_state") or "CLEAR")
     runtime_recovery = paper.get("runtime_recovery") or {}
     runtime_recovery_state = str(runtime_recovery.get("status") or "NOT_APPLICABLE")
     runtime_recovery_message = str(runtime_recovery.get("operator_message") or runtime_recovery.get("detail") or "")
@@ -167,15 +170,37 @@ def _build_runtime_readiness(
     current_detected_phase_label = str(readiness.get("current_detected_phase_label") or readiness.get("current_detected_session") or "UNKNOWN")
     current_broad_trading_session = str(readiness.get("current_broad_trading_session") or "UNKNOWN")
     next_expected_decision_bar_ts = readiness.get("next_expected_decision_bar_ts")
+    raw_paper_trade_allowed = readiness.get("paper_trade_allowed")
+    paper_trade_allowed = (
+        bool(raw_paper_trade_allowed)
+        if isinstance(raw_paper_trade_allowed, bool)
+        else bool(paper_enabled and entries_enabled and not blocking_faults)
+    )
+    if supervised_paper_operability.get("app_usable_for_supervised_paper") is False:
+        paper_trade_allowed = False
+    paper_trade_block_reason = (
+        str(supervised_paper_operability.get("unusable_reason") or "").strip()
+        or str(readiness.get("paper_trade_block_reason") or "").strip()
+        or None
+    )
+    paper_readiness_source = str(
+        readiness.get("paper_readiness_source")
+        or "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload"
+    )
+    paper_readiness_timestamp = readiness.get("paper_readiness_timestamp") or readiness.get("generated_at")
     payload = {
         "runtime_status": runtime_status,
         "paper_enabled": paper_enabled,
         "entries_enabled": entries_enabled,
         "auth_readiness": auth_readiness,
         "market_data_readiness": market_data_readiness,
+        "paper_trade_allowed": paper_trade_allowed,
+        "paper_trade_block_reason": paper_trade_block_reason,
+        "paper_readiness_source": paper_readiness_source,
+        "paper_readiness_timestamp": paper_readiness_timestamp,
         "blocking_faults": blocking_faults,
         "advisory_faults": advisory_faults,
-        "blocking_faults_active": bool(blocking_faults) or fault_state.upper() == "FAULTED",
+        "blocking_faults_active": bool(blocking_faults),
         "degraded_informational_feeds": degraded_informational_feeds,
         "active_instruments_count": active_instruments_count,
         "active_lanes_count": active_lane_count,
@@ -199,6 +224,10 @@ def _build_runtime_readiness(
             "runtime_recovery_message": _source(_OD_FILE, "_paper_runtime_recovery_payload", "paper.runtime_recovery.operator_message"),
             "blocking_faults": _source(_OD_FILE, "_paper_exceptions_payload", "paper.exceptions.exceptions"),
             "advisory_faults": _source(_OD_FILE, "_paper_exceptions_payload", "paper.exceptions.exceptions"),
+            "paper_trade_allowed": _source(_OD_FILE, "_paper_readiness_payload", "paper.readiness.paper_trade_allowed"),
+            "paper_trade_block_reason": _source(_OD_FILE, "_paper_readiness_payload", "paper.readiness.paper_trade_block_reason"),
+            "paper_readiness_source": _source(_OD_FILE, "_paper_readiness_payload", "paper.readiness.paper_readiness_source"),
+            "paper_readiness_timestamp": _source(_OD_FILE, "_paper_readiness_payload", "paper.readiness.paper_readiness_timestamp"),
             "degraded_informational_feeds": _source(_OS_FILE, "_build_runtime_readiness", "secondary_context.*.available"),
             "bootstrap_prerequisites": _source(_OD_FILE, "_dashboard_bootstrap_prerequisites_payload", "bootstrap_prerequisites.items"),
             "lane_status_summary": _source(_OD_FILE, "_paper_readiness_payload", "paper.readiness.lane_status_summary"),
@@ -220,6 +249,10 @@ def _build_runtime_readiness(
         "blocking_faults_count": len(blocking_faults),
         "advisory_faults_count": len(advisory_faults),
         "blocking_faults_active": payload["blocking_faults_active"],
+        "paper_trade_allowed": paper_trade_allowed,
+        "paper_trade_block_reason": paper_trade_block_reason,
+        "paper_readiness_source": paper_readiness_source,
+        "paper_readiness_timestamp": paper_readiness_timestamp,
         "degraded_informational_feeds": degraded_informational_feeds,
         "bootstrap_prerequisite_issues": bootstrap_issues,
         "bootstrap_prerequisites_reduced_mode": bool(bootstrap_prerequisites.get("reduced_mode")),
@@ -230,10 +263,13 @@ def _build_runtime_readiness(
         "governance_allowed_lanes_count": governance_allowed_lanes_count,
         "route_ready_lanes_count": route_ready_lanes_count,
         "session_eligible_lanes_count": session_eligible_lanes_count,
+        "session_eligible_count": int(readiness.get("session_eligible_count") or session_eligible_lanes_count),
         "waiting_for_completed_bar_count": waiting_for_completed_bar_count,
+        "waiting_for_bar_count": int(readiness.get("waiting_for_bar_count") or waiting_for_completed_bar_count),
         "no_setup_count": no_setup_count,
         "actionable_now_count": actionable_now_count,
         "blocked_lanes_count": blocked_lanes_count,
+        "true_blocked_count": int(readiness.get("true_blocked_count") or blocked_lanes_count),
         "stale_runtime_blocked_count": stale_runtime_blocked_count,
         "ready_this_bar_count": ready_this_bar_count,
         "current_detected_phase_label": current_detected_phase_label,
