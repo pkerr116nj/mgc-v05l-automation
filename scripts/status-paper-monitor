@@ -7,104 +7,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common_env.sh"
 
 PID_FILE="${REPO_ROOT}/var/paper_strategy_monitor_service.pid"
-RUNTIME_STATUS_FILE="${REPO_ROOT}/var/paper_strategy_monitor_runtime_status.json"
-HEARTBEAT_FILE="${REPO_ROOT}/var/paper_strategy_monitor_heartbeat.json"
-REPORT_DIR="${REPO_ROOT}/outputs/reports/paper_strategy_monitor"
-REPORT_JSON="${REPORT_DIR}/paper_strategy_monitor_service_report.json"
-REPORT_MD="${REPORT_DIR}/paper_strategy_monitor_service_report.md"
-
-ensure_dir "${REPORT_DIR}"
-
-"${PYTHON_BIN}" - <<'PY' "${PID_FILE}" "${RUNTIME_STATUS_FILE}" "${HEARTBEAT_FILE}" "${REPORT_JSON}" "${REPORT_MD}"
+"${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}"
 import json
-import os
 import sys
 from pathlib import Path
 
-pid_path = Path(sys.argv[1])
-runtime_path = Path(sys.argv[2])
-heartbeat_path = Path(sys.argv[3])
-report_json_path = Path(sys.argv[4])
-report_md_path = Path(sys.argv[5])
+from mgc_v05l.execution.ibkr_paper_strategy_monitor import (
+    build_paper_strategy_monitor_service_status,
+    write_paper_strategy_monitor_service_status_artifacts,
+)
 
-def load_dict(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-runtime = load_dict(runtime_path)
-heartbeat = load_dict(heartbeat_path)
-pid = pid_path.read_text(encoding="utf-8").strip() if pid_path.exists() else ""
-running = False
-if pid:
-    try:
-        os.kill(int(pid), 0)
-        running = True
-    except Exception:
-        running = False
-
-report = {
-    "runtime_classification": runtime.get("classification") or "PAPER_STRATEGY_MONITOR_BLOCKED",
-    "service_pid": int(pid) if pid.isdigit() else None,
-    "service_process_running": running,
-    "runtime_status_path": str(runtime_path),
-    "heartbeat_path": str(heartbeat_path),
-    "monitor_running": runtime.get("monitor_running"),
-    "health": runtime.get("health_classification") or runtime.get("monitor_health"),
-    "stale": runtime.get("stale"),
-    "last_poll_time": runtime.get("last_poll_time"),
-    "last_successful_broker_refresh": runtime.get("last_successful_broker_refresh"),
-    "strategy_id": runtime.get("strategy_id"),
-    "account_id": runtime.get("account_id"),
-    "exact_contract": runtime.get("exact_contract"),
-    "position_quantity": runtime.get("broker_position_quantity"),
-    "average_entry_price": runtime.get("average_entry_price"),
-    "unrealized_pnl": runtime.get("unrealized_pnl"),
-    "realized_pnl": runtime.get("realized_pnl"),
-    "open_order_count": runtime.get("open_order_count"),
-    "broker_ledger_match": runtime.get("broker_ledger_match"),
-    "submit_allowed": runtime.get("submit_allowed"),
-    "block_reasons": runtime.get("block_reasons") or [],
-    "heartbeat": heartbeat,
-}
-if report["monitor_running"] and not report["stale"] and report["health"] == "HEALTHY":
-    report["classification"] = "PAPER_MONITOR_SERVICE_READY"
-elif report["service_process_running"] or report["runtime_classification"] in {
-    "PAPER_STRATEGY_MONITOR_ACTIVE",
-    "PAPER_STRATEGY_MONITOR_PARTIAL",
-    "PAPER_STRATEGY_POSITION_ADOPTED",
-}:
-    report["classification"] = "PAPER_MONITOR_SERVICE_PARTIAL"
-else:
-    report["classification"] = "PAPER_MONITOR_SERVICE_BLOCKED"
-report_json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-lines = [
-    "# IBKR Paper Strategy Monitor Service",
-    "",
-    f"- classification: `{report['classification']}`",
-    f"- service process running: `{report['service_process_running']}`",
-    f"- monitor running: `{report['monitor_running']}`",
-    f"- health: `{report['health']}`",
-    f"- stale: `{report['stale']}`",
-    f"- strategy: `{report['strategy_id']}`",
-    f"- account: `{report['account_id']}`",
-    f"- contract: `MGC {dict(report.get('exact_contract') or {}).get('expiry')}` / `conId={dict(report.get('exact_contract') or {}).get('con_id')}` / `localSymbol={dict(report.get('exact_contract') or {}).get('local_symbol')}`",
-    f"- position quantity: `{report['position_quantity']}`",
-    f"- average entry: `{report['average_entry_price']}`",
-    f"- unrealized P&L: `{report['unrealized_pnl']}`",
-    f"- realized P&L: `{report['realized_pnl']}`",
-    f"- open orders: `{report['open_order_count']}`",
-    f"- broker/ledger match: `{report['broker_ledger_match']}`",
-    f"- submit allowed: `{report['submit_allowed']}`",
-    f"- last poll time: `{report['last_poll_time']}`",
-    f"- last successful broker refresh: `{report['last_successful_broker_refresh']}`",
-]
-for reason in report["block_reasons"]:
-    lines.append(f"- block reason: `{reason}`")
-report_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+repo_root = Path(sys.argv[1])
+report = build_paper_strategy_monitor_service_status(repo_root=repo_root)
+write_paper_strategy_monitor_service_status_artifacts(repo_root=repo_root, report=report)
 print(json.dumps(report, indent=2, sort_keys=True))
 PY

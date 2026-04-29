@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from mgc_v05l.execution.ibkr_paper_strategy_monitor import (
     IbkrPaperStrategyMonitorDaemonConfig,
     IbkrPaperStrategyMonitorConfig,
+    build_paper_strategy_monitor_service_status,
     load_paper_strategy_monitor_status,
+    mark_paper_strategy_monitor_service_stopped,
     run_ibkr_paper_strategy_monitor_daemon,
     run_ibkr_paper_strategy_monitor,
+    write_paper_strategy_monitor_service_status_artifacts,
     write_ibkr_paper_strategy_monitor_daemon_artifacts,
     write_ibkr_paper_strategy_monitor_artifacts,
 )
@@ -369,6 +373,7 @@ def test_daemon_writes_runtime_status_and_loader_prefers_fresh_runtime_file(tmp_
     assert artifacts.classification == "PAPER_STRATEGY_MONITOR_ACTIVE"
     assert status["submit_allowed"] is False
     assert "paper_strategy_monitor_not_running" in status["block_reasons"]
+    assert status["health_classification"] == "STOPPED"
     assert status["freshness_window_seconds"] == 60.0
     assert (tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_strategy_monitor_runtime_status.json").exists()
     assert (tmp_path / "var" / "paper_strategy_monitor_runtime_status.json").exists()
@@ -427,7 +432,7 @@ def test_load_status_blocks_when_runtime_is_stale(tmp_path: Path) -> None:
     assert "paper_strategy_monitor_runtime_stale" in status["block_reasons"]
 
 
-def test_load_status_falls_back_to_snapshot_when_runtime_pid_is_dead(tmp_path: Path) -> None:
+def test_load_status_marks_runtime_stopped_when_runtime_pid_is_dead(tmp_path: Path) -> None:
     runtime_path = tmp_path / "var" / "paper_strategy_monitor_runtime_status.json"
     runtime_path.parent.mkdir(parents=True, exist_ok=True)
     runtime_path.write_text(
@@ -440,35 +445,89 @@ def test_load_status_falls_back_to_snapshot_when_runtime_pid_is_dead(tmp_path: P
                 "health_classification": "ORPHAN_BROKER_POSITION",
                 "last_successful_broker_refresh": "2999-01-01T00:00:00+00:00",
                 "freshness_window_seconds": 60.0,
+                "broker_position_quantity": 1.0,
+                "ledger_position_quantity": 0.0,
             }
         ),
         encoding="utf-8",
     )
     (tmp_path / "var" / "paper_strategy_monitor_service.pid").write_text("999999\n", encoding="utf-8")
-    snapshot_path = tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_strategy_monitor_status.json"
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_path.write_text(
+
+    status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+
+    assert status["classification"] == "PAPER_STRATEGY_MONITOR_BLOCKED"
+    assert status["monitor_running"] is False
+    assert "paper_strategy_monitor_not_running" in status["block_reasons"]
+    assert status["health_classification"] == "STOPPED"
+
+
+def test_service_status_reports_ready_when_runtime_is_live(tmp_path: Path) -> None:
+    runtime_path = tmp_path / "var" / "paper_strategy_monitor_runtime_status.json"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
         json.dumps(
             {
-                "classification": "PAPER_STRATEGY_POSITION_ADOPTED",
-                "strategy_id": "ATP_COMPANION_V1_ASIA_US",
-                "account_id": "DUM882026",
-                "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
-                "broker_position_quantity": 1.0,
-                "ledger_position_quantity": 1.0,
-                "ownership_proven": True,
-                "detail": "Restored lost strategy attribution for known bridge-created paper position using prior adopted ATP evidence.",
-                "block_reasons": ["paper_runtime_stale"],
+                "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+                "monitor_running": True,
+                "submit_allowed": True,
+                "block_reasons": [],
+                "health_classification": "HEALTHY",
+                "ibkr_connection_state": "CONNECTED",
+                "broker_position_quantity": 0.0,
+                "ledger_position_quantity": 0.0,
+                "open_order_count": 0,
+                "last_successful_broker_refresh": "2999-01-01T00:00:00+00:00",
+                "freshness_window_seconds": 60.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "var" / "paper_strategy_monitor_heartbeat.json").write_text(
+        json.dumps({"generated_at": "2999-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "var" / "paper_strategy_monitor_service.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    report = build_paper_strategy_monitor_service_status(repo_root=tmp_path)
+
+    assert report["classification"] == "PAPER_MONITOR_SERVICE_READY"
+    assert report["bridge_allowed"] is True
+    assert report["bridge_blocked"] is False
+    assert report["current_broker_mgc_position"] == 0.0
+    assert report["strategy_ledger_mgc_position"] == 0.0
+
+
+def test_mark_service_stopped_blocks_and_writes_report(tmp_path: Path) -> None:
+    runtime_path = tmp_path / "var" / "paper_strategy_monitor_runtime_status.json"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+                "monitor_running": True,
+                "submit_allowed": True,
+                "block_reasons": [],
+                "health_classification": "HEALTHY",
+                "monitor_health": "HEALTHY",
+                "broker_position_quantity": 0.0,
+                "ledger_position_quantity": 0.0,
+                "last_successful_broker_refresh": "2999-01-01T00:00:00+00:00",
+                "freshness_window_seconds": 60.0,
             }
         ),
         encoding="utf-8",
     )
 
-    status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+    mark_paper_strategy_monitor_service_stopped(repo_root=tmp_path, reason="paper_strategy_monitor_stop_requested")
+    report = build_paper_strategy_monitor_service_status(repo_root=tmp_path)
+    write_paper_strategy_monitor_service_status_artifacts(repo_root=tmp_path, report=report)
 
-    assert status["classification"] == "PAPER_STRATEGY_POSITION_ADOPTED"
-    assert status["monitor_running"] is False
-    assert "paper_strategy_monitor_not_running" in status["block_reasons"]
+    assert report["classification"] == "PAPER_MONITOR_SERVICE_BLOCKED"
+    assert report["bridge_allowed"] is False
+    assert report["monitor_running"] is False
+    assert report["stale"] is True
+    assert report["exact_block_reason"] in {"paper_strategy_monitor_not_running", "paper_strategy_monitor_stop_requested"}
+    assert (tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_monitor_service_status_report.json").exists()
 
 
 def test_daemon_reports_disconnected_cycle_without_crashing(tmp_path: Path) -> None:

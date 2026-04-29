@@ -10,14 +10,54 @@ PID_FILE="${REPO_ROOT}/var/paper_strategy_monitor_service.pid"
 
 if [[ ! -f "${PID_FILE}" ]]; then
   echo "IBKR paper strategy monitor service is not running."
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}"
+import sys
+from pathlib import Path
+
+from mgc_v05l.execution.ibkr_paper_strategy_monitor import (
+    build_paper_strategy_monitor_service_status,
+    mark_paper_strategy_monitor_service_stopped,
+    write_paper_strategy_monitor_service_status_artifacts,
+)
+
+repo_root = Path(sys.argv[1])
+mark_paper_strategy_monitor_service_stopped(repo_root=repo_root, reason="paper_strategy_monitor_stop_requested")
+report = build_paper_strategy_monitor_service_status(repo_root=repo_root)
+write_paper_strategy_monitor_service_status_artifacts(repo_root=repo_root, report=report)
+PY
   exit 0
 fi
 
 service_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
 if [[ -n "${service_pid}" ]] && kill -0 "${service_pid}" 2>/dev/null; then
   kill -TERM "${service_pid}" 2>/dev/null || true
-  echo "Sent TERM to IBKR paper strategy monitor service pid ${service_pid}."
+  for _ in {1..20}; do
+    if ! kill -0 "${service_pid}" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if kill -0 "${service_pid}" 2>/dev/null; then
+    echo "IBKR paper strategy monitor service pid ${service_pid} did not stop cleanly within 20s." >&2
+    exit 1
+  fi
+  echo "Stopped IBKR paper strategy monitor service pid ${service_pid}."
 else
   echo "IBKR paper strategy monitor pid file exists, but the process is not running."
 fi
 rm -f "${PID_FILE}"
+"${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}"
+import sys
+from pathlib import Path
+
+from mgc_v05l.execution.ibkr_paper_strategy_monitor import (
+    build_paper_strategy_monitor_service_status,
+    mark_paper_strategy_monitor_service_stopped,
+    write_paper_strategy_monitor_service_status_artifacts,
+)
+
+repo_root = Path(sys.argv[1])
+mark_paper_strategy_monitor_service_stopped(repo_root=repo_root, reason="paper_strategy_monitor_stop_requested")
+report = build_paper_strategy_monitor_service_status(repo_root=repo_root)
+write_paper_strategy_monitor_service_status_artifacts(repo_root=repo_root, report=report)
+PY

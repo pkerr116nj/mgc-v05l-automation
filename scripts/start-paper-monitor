@@ -19,15 +19,129 @@ if [[ -f "${PID_FILE}" ]]; then
   existing_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
   if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
     echo "IBKR paper strategy monitor service is already running with pid ${existing_pid}."
+    bash "${SCRIPT_DIR}/status-paper-monitor"
     exit 0
   fi
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}"
+import sys
+from pathlib import Path
+
+from mgc_v05l.execution.ibkr_paper_strategy_monitor import mark_paper_strategy_monitor_service_stopped
+
+repo_root = Path(sys.argv[1])
+mark_paper_strategy_monitor_service_stopped(repo_root=repo_root, reason="paper_strategy_monitor_not_running")
+PY
   rm -f "${PID_FILE}"
 fi
 
-daemon_command="PYTHONPATH=\"${REPO_ROOT}/src\${PYTHONPATH:+:\${PYTHONPATH}}\" \"${PYTHON_BIN}\" -m mgc_v05l.app.ibkr_paper_strategy_monitor --mode PAPER --host 127.0.0.1 --port 7497 --client-id \"${CLIENT_ID}\" --account-id DUM882026 --strategy-id ATP_COMPANION_V1_ASIA_US --symbol MGC --contract-month 202606 --exact-expiry 20260626 --con-id 712565978 --local-symbol MGCM6 --daemon --poll-interval-seconds \"${POLL_INTERVAL_SECONDS}\" --freshness-window-seconds \"${FRESHNESS_WINDOW_SECONDS}\" --max-cycles 0 --overwrite"
-nohup /bin/bash -lc "${daemon_command}" >> "${LOG_FILE}" 2>&1 &
+service_pid="$(
+"${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${PYTHON_BIN}" "${LOG_FILE}" "${CLIENT_ID}" "${POLL_INTERVAL_SECONDS}" "${FRESHNESS_WINDOW_SECONDS}"
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-service_pid=$!
+repo_root = Path(sys.argv[1])
+python_bin = sys.argv[2]
+log_file = Path(sys.argv[3])
+client_id = sys.argv[4]
+poll_interval_seconds = sys.argv[5]
+freshness_window_seconds = sys.argv[6]
+
+env = dict(os.environ)
+existing_pythonpath = env.get("PYTHONPATH", "")
+env["PYTHONPATH"] = f"{repo_root / 'src'}{':' + existing_pythonpath if existing_pythonpath else ''}"
+cmd = [
+    python_bin,
+    "-m",
+    "mgc_v05l.app.ibkr_paper_strategy_monitor",
+    "--mode", "PAPER",
+    "--host", "127.0.0.1",
+    "--port", "7497",
+    "--client-id", client_id,
+    "--account-id", "DUM882026",
+    "--strategy-id", "ATP_COMPANION_V1_ASIA_US",
+    "--symbol", "MGC",
+    "--contract-month", "202606",
+    "--exact-expiry", "20260626",
+    "--con-id", "712565978",
+    "--local-symbol", "MGCM6",
+    "--daemon",
+    "--poll-interval-seconds", poll_interval_seconds,
+    "--freshness-window-seconds", freshness_window_seconds,
+    "--max-cycles", "0",
+    "--overwrite",
+]
+log_file.parent.mkdir(parents=True, exist_ok=True)
+with log_file.open("ab") as log_handle, open(os.devnull, "rb") as devnull:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(repo_root),
+        env=env,
+        stdin=devnull,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+    )
+print(proc.pid)
+PY
+)"
 echo "${service_pid}" > "${PID_FILE}"
 echo "Started IBKR paper strategy monitor service with pid ${service_pid}."
 echo "Log file: ${LOG_FILE}"
+
+if ! "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${service_pid}" "20"
+import os
+import sys
+import time
+from pathlib import Path
+
+from mgc_v05l.execution.ibkr_paper_strategy_monitor import build_paper_strategy_monitor_service_status
+
+repo_root = Path(sys.argv[1])
+service_pid = int(sys.argv[2])
+deadline_seconds = float(sys.argv[3])
+deadline_at = time.time() + deadline_seconds
+while time.time() < deadline_at:
+    try:
+        os.kill(service_pid, 0)
+    except OSError:
+        print(f"Monitor process {service_pid} exited before producing a healthy broker refresh.", file=sys.stderr)
+        raise SystemExit(1)
+    report = build_paper_strategy_monitor_service_status(repo_root=repo_root)
+    if report.get("service_process_running") and report.get("monitor_running"):
+        if report.get("ibkr_connection_state") == "CONNECTED" and report.get("last_successful_broker_refresh"):
+            raise SystemExit(0)
+        if report.get("ibkr_connection_state") == "DISCONNECTED" and not report.get("last_successful_broker_refresh"):
+            print("Monitor failed initial broker connect: TWS/IBKR paper path appears unreachable.", file=sys.stderr)
+            raise SystemExit(2)
+    time.sleep(1.0)
+print("Monitor did not reach a healthy broker refresh within the startup grace window.", file=sys.stderr)
+raise SystemExit(3)
+PY
+then
+  echo "Monitor failed initial startup validation; stopping the spawned process." >&2
+  if kill -0 "${service_pid}" 2>/dev/null; then
+    kill -TERM "${service_pid}" 2>/dev/null || true
+  fi
+  rm -f "${PID_FILE}"
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}"
+import sys
+from pathlib import Path
+
+from mgc_v05l.execution.ibkr_paper_strategy_monitor import (
+    build_paper_strategy_monitor_service_status,
+    mark_paper_strategy_monitor_service_stopped,
+    write_paper_strategy_monitor_service_status_artifacts,
+)
+
+repo_root = Path(sys.argv[1])
+mark_paper_strategy_monitor_service_stopped(repo_root=repo_root, reason="paper_strategy_monitor_start_failed_initial_refresh")
+report = build_paper_strategy_monitor_service_status(repo_root=repo_root)
+write_paper_strategy_monitor_service_status_artifacts(repo_root=repo_root, report=report)
+PY
+  exit 1
+fi
+
+bash "${SCRIPT_DIR}/status-paper-monitor"

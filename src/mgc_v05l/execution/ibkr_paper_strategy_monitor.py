@@ -53,6 +53,9 @@ _DEFAULT_MONITOR_SERVICE_PID_PATH = Path("var") / "paper_strategy_monitor_servic
 _RUNTIME_STATUS_FILENAME = "paper_strategy_monitor_runtime_status.json"
 _DAEMON_REPORT_FILENAME = "paper_strategy_monitor_daemon_report.json"
 _RUNTIME_AUDIT_FILENAME = "paper_strategy_monitor_runtime_audit.jsonl"
+_SERVICE_STATUS_REPORT_FILENAME = "paper_monitor_service_status_report.json"
+_SERVICE_RELIABILITY_REPORT_FILENAME = "paper_monitor_service_reliability_report.md"
+_SERVICE_AUDIT_FILENAME = "paper_monitor_service_audit.jsonl"
 
 
 class IbkrPaperStrategyMonitorError(RuntimeError):
@@ -527,7 +530,6 @@ def load_paper_strategy_monitor_status(*, repo_root: Path) -> dict[str, Any]:
     runtime_path = repo_root / _DEFAULT_VAR_RUNTIME_STATUS_PATH
     if not runtime_path.exists():
         runtime_path = repo_root / _DEFAULT_OUTPUT_DIR / _RUNTIME_STATUS_FILENAME
-    runtime_status_fallback_reason: str | None = None
     if runtime_path.exists():
         try:
             runtime_status = dict(json.loads(runtime_path.read_text(encoding="utf-8")))
@@ -538,48 +540,7 @@ def load_paper_strategy_monitor_status(*, repo_root: Path) -> dict[str, Any]:
                 "block_reasons": ["paper_strategy_monitor_runtime_status_invalid"],
                 "detail": "Paper strategy monitor runtime status could not be decoded.",
             }
-        service_running = _monitor_service_process_running(repo_root)
-        if bool(runtime_status.get("monitor_running")) and service_running is False:
-            runtime_status_fallback_reason = "paper_strategy_monitor_not_running"
-        else:
-            reasons = list(runtime_status.get("block_reasons") or [])
-            runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed"))
-            if not bool(runtime_status.get("monitor_running")):
-                runtime_status["submit_allowed"] = False
-                if "paper_strategy_monitor_not_running" not in reasons:
-                    reasons.append("paper_strategy_monitor_not_running")
-            freshness_window = float(runtime_status.get("freshness_window_seconds") or 0.0)
-            refreshed_at = _parse_datetime(
-                runtime_status.get("last_successful_broker_refresh") or runtime_status.get("last_broker_refresh_timestamp")
-            )
-            stale = True
-            if freshness_window > 0.0 and refreshed_at is not None:
-                age_seconds = max(0.0, (datetime.now(timezone.utc) - refreshed_at).total_seconds())
-                runtime_status["age_seconds"] = age_seconds
-                stale = age_seconds > freshness_window
-                runtime_status["stale"] = stale
-                if stale:
-                    runtime_status["submit_allowed"] = False
-                    if "paper_strategy_monitor_runtime_stale" not in reasons:
-                        reasons.append("paper_strategy_monitor_runtime_stale")
-            elif freshness_window > 0.0:
-                stale = True
-                runtime_status["stale"] = True
-                runtime_status["submit_allowed"] = False
-                if "paper_strategy_monitor_runtime_refresh_missing" not in reasons:
-                    reasons.append("paper_strategy_monitor_runtime_refresh_missing")
-            else:
-                stale = bool(runtime_status.get("stale"))
-                runtime_status["stale"] = stale
-            health = str(runtime_status.get("health_classification") or runtime_status.get("monitor_health") or "").strip().upper()
-            if health and health != "HEALTHY":
-                runtime_status["submit_allowed"] = False
-                normalized = f"paper_strategy_monitor_health_{health.lower()}"
-                if normalized not in reasons:
-                    reasons.append(normalized)
-            runtime_status["block_reasons"] = reasons
-            runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed")) and bool(runtime_status.get("monitor_running")) and not stale and health == "HEALTHY"
-            return runtime_status
+        return _normalize_loaded_runtime_status(repo_root=repo_root, runtime_status=runtime_status)
 
     path = repo_root / _DEFAULT_OUTPUT_DIR / "paper_strategy_monitor_status.json"
     if not path.exists():
@@ -601,8 +562,6 @@ def load_paper_strategy_monitor_status(*, repo_root: Path) -> dict[str, Any]:
     snapshot_payload = dict(payload)
     snapshot_status = dict(snapshot_payload.get("snapshot_status") or snapshot_payload)
     reasons = list(snapshot_status.get("block_reasons") or [])
-    if runtime_status_fallback_reason and runtime_status_fallback_reason not in reasons:
-        reasons.append(runtime_status_fallback_reason)
     return {
         "classification": snapshot_status.get("classification") or "PAPER_STRATEGY_MONITOR_BLOCKED",
         "submit_allowed": False,
@@ -620,21 +579,227 @@ def load_paper_strategy_monitor_status(*, repo_root: Path) -> dict[str, Any]:
     }
 
 
+def build_paper_strategy_monitor_service_status(*, repo_root: Path) -> dict[str, Any]:
+    runtime_status = load_paper_strategy_monitor_status(repo_root=repo_root)
+    heartbeat = _load_json(repo_root / _DEFAULT_VAR_HEARTBEAT_PATH)
+    ledger = _load_json(repo_root / _DEFAULT_LEDGER_PATH)
+    service_pid = _read_monitor_service_pid(repo_root)
+    service_running = _monitor_service_process_running(repo_root)
+    active_position = dict((ledger.get("positions") or [None])[0] or {})
+    orphan_positions = list(ledger.get("orphan_positions") or [])
+    broker_qty = float(runtime_status.get("broker_position_quantity") or 0.0)
+    ledger_qty = float(runtime_status.get("ledger_position_quantity") or active_position.get("quantity") or 0.0)
+    difference = broker_qty - ledger_qty
+    block_reasons = list(runtime_status.get("block_reasons") or [])
+    bridge_allowed = bool(runtime_status.get("submit_allowed"))
+    classification = "PAPER_MONITOR_SERVICE_BLOCKED"
+    if service_running and bool(runtime_status.get("monitor_running")) and not bool(runtime_status.get("stale")) and str(runtime_status.get("health_classification") or runtime_status.get("monitor_health") or "").upper() == "HEALTHY":
+        classification = "PAPER_MONITOR_SERVICE_READY"
+    elif service_running is True or (service_pid is not None and bool(runtime_status.get("monitor_running"))):
+        classification = "PAPER_MONITOR_SERVICE_PARTIAL"
+    return {
+        "classification": classification,
+        "generated_at": _utc_now(),
+        "service_pid": service_pid,
+        "service_process_running": service_running is True,
+        "monitor_running": bool(runtime_status.get("monitor_running")),
+        "last_heartbeat_time": heartbeat.get("generated_at") or heartbeat.get("last_poll_time"),
+        "heartbeat_age_seconds": _age_seconds_from_iso(heartbeat.get("generated_at") or heartbeat.get("last_poll_time")),
+        "stale": bool(runtime_status.get("stale")),
+        "ibkr_connection_state": runtime_status.get("ibkr_connection_state"),
+        "current_broker_mgc_position": broker_qty,
+        "strategy_ledger_mgc_position": ledger_qty,
+        "broker_minus_ledger_difference": difference,
+        "open_mgc_orders": int(runtime_status.get("open_order_count") or 0),
+        "bridge_allowed": bridge_allowed,
+        "bridge_blocked": not bridge_allowed,
+        "block_reasons": block_reasons,
+        "exact_block_reason": block_reasons[0] if block_reasons else None,
+        "health_classification": runtime_status.get("health_classification"),
+        "monitor_health": runtime_status.get("monitor_health"),
+        "runtime_classification": runtime_status.get("classification"),
+        "strategy_id": runtime_status.get("strategy_id") or active_position.get("strategy_id"),
+        "account_id": runtime_status.get("account_id") or active_position.get("account_id"),
+        "exact_contract": runtime_status.get("exact_contract") or {
+            "symbol": active_position.get("symbol"),
+            "expiry": active_position.get("expiry"),
+            "con_id": active_position.get("con_id"),
+            "local_symbol": active_position.get("local_symbol"),
+        },
+        "last_poll_time": runtime_status.get("last_poll_time"),
+        "last_successful_broker_refresh": runtime_status.get("last_successful_broker_refresh"),
+        "orphan_position_count": len(orphan_positions),
+        "orphan_positions": orphan_positions,
+        "runtime_status_path": str((repo_root / _DEFAULT_VAR_RUNTIME_STATUS_PATH).resolve()),
+        "heartbeat_path": str((repo_root / _DEFAULT_VAR_HEARTBEAT_PATH).resolve()),
+        "ledger_path": str((repo_root / _DEFAULT_LEDGER_PATH).resolve()),
+    }
+
+
+def write_paper_strategy_monitor_service_status_artifacts(*, repo_root: Path, report: dict[str, Any]) -> None:
+    output_dir = repo_root / _DEFAULT_OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / _SERVICE_STATUS_REPORT_FILENAME).write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    lines = [
+        "# IBKR Paper Monitor Service Reliability",
+        "",
+        f"- classification: `{report.get('classification')}`",
+        f"- service running: `{report.get('service_process_running')}`",
+        f"- monitor running: `{report.get('monitor_running')}`",
+        f"- pid: `{report.get('service_pid')}`",
+        f"- last heartbeat time: `{report.get('last_heartbeat_time')}`",
+        f"- stale: `{report.get('stale')}`",
+        f"- ibkr connection state: `{report.get('ibkr_connection_state')}`",
+        f"- current broker MGC position: `{report.get('current_broker_mgc_position')}`",
+        f"- strategy ledger MGC position: `{report.get('strategy_ledger_mgc_position')}`",
+        f"- broker minus ledger difference: `{report.get('broker_minus_ledger_difference')}`",
+        f"- open MGC orders: `{report.get('open_mgc_orders')}`",
+        f"- bridge allowed: `{report.get('bridge_allowed')}`",
+        f"- exact block reason: `{report.get('exact_block_reason')}`",
+    ]
+    for reason in list(report.get("block_reasons") or []):
+        lines.append(f"- block reason: `{reason}`")
+    (output_dir / _SERVICE_RELIABILITY_REPORT_FILENAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with (output_dir / _SERVICE_AUDIT_FILENAME).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(report, sort_keys=True))
+        handle.write("\n")
+
+
+def mark_paper_strategy_monitor_service_stopped(*, repo_root: Path, reason: str) -> dict[str, Any]:
+    runtime_path = repo_root / _DEFAULT_VAR_RUNTIME_STATUS_PATH
+    runtime_status = _load_json(runtime_path)
+    now = _utc_now()
+    reasons = list(runtime_status.get("block_reasons") or [])
+    for normalized in ("paper_strategy_monitor_not_running", reason):
+        if normalized and normalized not in reasons:
+            reasons.append(normalized)
+    runtime_status.update(
+        {
+            "classification": "PAPER_STRATEGY_MONITOR_BLOCKED",
+            "generated_at": now,
+            "runtime_finished_at": now,
+            "monitor_running": False,
+            "monitor_health": "STOPPED",
+            "health_classification": "STOPPED",
+            "stale": True,
+            "submit_allowed": False,
+            "block_reasons": reasons,
+            "last_error": reason,
+        }
+    )
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(json.dumps(runtime_status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    heartbeat_payload = {
+        "generated_at": now,
+        "monitor_running": False,
+        "last_poll_time": runtime_status.get("last_poll_time"),
+        "last_successful_broker_refresh": runtime_status.get("last_successful_broker_refresh"),
+        "health_classification": "STOPPED",
+        "monitor_health": "STOPPED",
+        "stale": True,
+        "error_count": runtime_status.get("error_count"),
+        "last_error": reason,
+    }
+    heartbeat_path = repo_root / _DEFAULT_VAR_HEARTBEAT_PATH
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_path.write_text(json.dumps(heartbeat_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    audit_row = {"recorded_at": now, "event_type": "service_stopped", "reason": reason}
+    audit_path = repo_root / _DEFAULT_VAR_AUDIT_PATH
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(audit_row, sort_keys=True))
+        handle.write("\n")
+    return runtime_status
+
+
 def _monitor_service_process_running(repo_root: Path) -> bool | None:
+    pid = _read_monitor_service_pid(repo_root)
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _read_monitor_service_pid(repo_root: Path) -> int | None:
     pid_path = repo_root / _DEFAULT_MONITOR_SERVICE_PID_PATH
     if not pid_path.exists():
         return None
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip() or "0")
     except ValueError:
-        return False
+        return None
     if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+        return None
+    return pid
+
+
+def _normalize_loaded_runtime_status(*, repo_root: Path, runtime_status: dict[str, Any]) -> dict[str, Any]:
+    reasons = list(runtime_status.get("block_reasons") or [])
+    service_running = _monitor_service_process_running(repo_root)
+    runtime_status["service_process_running"] = service_running
+    runtime_status["service_pid"] = _read_monitor_service_pid(repo_root)
+    runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed"))
+    if service_running is False:
+        runtime_status["monitor_running"] = False
+        runtime_status["submit_allowed"] = False
+        if "paper_strategy_monitor_not_running" not in reasons:
+            reasons.append("paper_strategy_monitor_not_running")
+    elif not bool(runtime_status.get("monitor_running")):
+        runtime_status["submit_allowed"] = False
+        if "paper_strategy_monitor_not_running" not in reasons:
+            reasons.append("paper_strategy_monitor_not_running")
+    freshness_window = float(runtime_status.get("freshness_window_seconds") or 0.0)
+    refreshed_at = _parse_datetime(
+        runtime_status.get("last_successful_broker_refresh") or runtime_status.get("last_broker_refresh_timestamp")
+    )
+    stale = True
+    if freshness_window > 0.0 and refreshed_at is not None:
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - refreshed_at).total_seconds())
+        runtime_status["age_seconds"] = age_seconds
+        stale = age_seconds > freshness_window
+        runtime_status["stale"] = stale
+        if stale:
+            runtime_status["submit_allowed"] = False
+            if "paper_strategy_monitor_runtime_stale" not in reasons:
+                reasons.append("paper_strategy_monitor_runtime_stale")
+    elif freshness_window > 0.0:
+        stale = True
+        runtime_status["stale"] = True
+        runtime_status["submit_allowed"] = False
+        if "paper_strategy_monitor_runtime_refresh_missing" not in reasons:
+            reasons.append("paper_strategy_monitor_runtime_refresh_missing")
+    else:
+        stale = bool(runtime_status.get("stale"))
+        runtime_status["stale"] = stale
+    health = str(runtime_status.get("health_classification") or runtime_status.get("monitor_health") or "").strip().upper()
+    if health and health != "HEALTHY":
+        runtime_status["submit_allowed"] = False
+        normalized = f"paper_strategy_monitor_health_{health.lower()}"
+        if normalized not in reasons:
+            reasons.append(normalized)
+    if not bool(runtime_status.get("monitor_running")):
+        runtime_status["classification"] = "PAPER_STRATEGY_MONITOR_BLOCKED"
+        runtime_status["health_classification"] = "STOPPED"
+        runtime_status["monitor_health"] = "STOPPED"
+        runtime_status["stale"] = True
+        stale = True
+        health = "STOPPED"
+    runtime_status["block_reasons"] = reasons
+    runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed")) and bool(runtime_status.get("monitor_running")) and not stale and health == "HEALTHY"
+    return runtime_status
+
+
+def _age_seconds_from_iso(value: Any) -> float | None:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
 
 
 def render_ibkr_paper_strategy_monitor_markdown(
