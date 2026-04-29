@@ -1,0 +1,3 @@
+lane_id,signal_ts_et,strategy_family,root_cause_before_fix,root_cause_after_fix,remaining_blocker_after_fix,status
+gc_1x_all_lanes__asia_early_long,2026-04-29T19:06:00-04:00,gold_forced_session_baseline_v2,forbidden_strategy_engine_frame,caller_frame_gate_cleared,,FIXED_TO_PREFLIGHT
+gc_1x_all_lanes__asia_early_short,2026-04-29T19:05:00-04:00,gold_forced_session_baseline_v2,forbidden_strategy_engine_frame,caller_frame_gate_cleared,,FIXED_TO_PREFLIGHT

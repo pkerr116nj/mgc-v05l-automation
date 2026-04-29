@@ -1,0 +1,3 @@
+lane_id,signal_ts_et,signal_family,action,prior_blocker,post_fix_result,post_fix_remaining_blocker,post_fix_remaining_detail,historical_replay_only
+gc_1x_all_lanes__asia_early_long,2026-04-29T19:06:00-04:00,asiaEarlyLongV5,BUY,BLOCKED_NOT_SENT_TO_BROKER: Paper strategy bridge detected forbidden caller frames: mgc_v05l.strategy.strategy_engine,reaches_bridge_preflight,,,True
+gc_1x_all_lanes__asia_early_short,2026-04-29T19:05:00-04:00,asiaEarlyShortV2,SELL,BLOCKED_NOT_SENT_TO_BROKER: Paper strategy bridge detected forbidden caller frames: mgc_v05l.strategy.strategy_engine,reaches_bridge_preflight,,,True

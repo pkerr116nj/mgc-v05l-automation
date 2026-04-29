@@ -93,6 +93,9 @@ _APPROVED_RUNTIME_CALLER_MODULE_PREFIXES = (
     "mgc_v05l.app.probationary_runtime",
     "mgc_v05l.app.headless_supervised_paper",
 )
+_APPROVED_RUNTIME_STRATEGY_ENGINE_MODULE_PREFIXES = (
+    "mgc_v05l.strategy.strategy_engine",
+)
 _BRIDGE_ADDITIONAL_FORBIDDEN_CALLER_PREFIXES = (
     "mgc_v05l.live",
     "mgc_v05l.execution.live_strategy_broker",
@@ -245,7 +248,11 @@ def run_ibkr_paper_strategy_bridge(
     audit_events: list[dict[str, Any]] = []
     intent = _build_intent(config)
     environment_lock = evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port)
-    caller_gate = evaluate_strategy_bridge_caller(caller_path=config.caller_path, stack_provider=stack_provider)
+    caller_gate = evaluate_strategy_bridge_caller(
+        caller_path=config.caller_path,
+        caller_metadata=dict(config.caller_metadata or {}),
+        stack_provider=stack_provider,
+    )
     monitor_status = load_paper_strategy_monitor_status(repo_root=config.repo_root)
     governance_status = load_paper_strategy_governance_status(repo_root=config.repo_root, strategy_id=config.strategy_id)
     governance_row = dict(governance_status.get("selected_strategy") or {})
@@ -612,10 +619,14 @@ def write_strategy_order_intent_schema_file(*, repo_root: Path) -> Path:
 def evaluate_strategy_bridge_caller(
     *,
     caller_path: str,
+    caller_metadata: dict[str, Any] | None = None,
     stack_provider: Callable[[], list[Any]] = inspect.stack,
 ) -> dict[str, Any]:
     normalized_caller = str(caller_path or "").strip()
     runtime_caller = normalized_caller in _APPROVED_RUNTIME_CALLER_PATHS
+    runtime_metadata_authorized = runtime_caller and _runtime_caller_metadata_is_authorized(
+        caller_metadata=dict(caller_metadata or {}),
+    )
     stack_modules: list[str] = []
     for frame in stack_provider():
         module_name = str(getattr(getattr(frame, "frame", None), "f_globals", {}).get("__name__", "") or "").strip()
@@ -624,6 +635,8 @@ def evaluate_strategy_bridge_caller(
     forbidden: list[str] = []
     for module_name in stack_modules:
         if runtime_caller and module_name.startswith(_APPROVED_RUNTIME_CALLER_MODULE_PREFIXES):
+            continue
+        if runtime_metadata_authorized and module_name.startswith(_APPROVED_RUNTIME_STRATEGY_ENGINE_MODULE_PREFIXES):
             continue
         if (
             module_name.startswith(_BRIDGE_ADDITIONAL_FORBIDDEN_CALLER_PREFIXES)
@@ -651,6 +664,41 @@ def evaluate_strategy_bridge_caller(
     }
 
 
+def _runtime_caller_metadata_is_authorized(
+    *,
+    caller_metadata: dict[str, Any],
+    expected_strategy_id: str | None = None,
+    expected_lane_id: str | None = None,
+    expected_executable_proxy: str | None = None,
+    expected_action: str | None = None,
+) -> bool:
+    metadata = dict(caller_metadata or {})
+    strategy_id = str(metadata.get("strategy_id") or "").strip()
+    lane_id = str(metadata.get("lane_id") or "").strip()
+    executable_proxy = str(metadata.get("executable_proxy") or "").strip().upper()
+    intent_action = str(metadata.get("intent_action") or "").strip().upper()
+    return (
+        str(metadata.get("caller_type") or "").strip() in _APPROVED_RUNTIME_CALLER_TYPES
+        and metadata.get("paper_only") is True
+        and str(metadata.get("mode") or "").strip().upper() == _EXPECTED_MODE
+        and str(metadata.get("host") or "").strip() == _EXPECTED_HOST
+        and int(metadata.get("port") or 0) == _EXPECTED_PORT
+        and str(metadata.get("account_id") or "").strip() == _EXPECTED_ACCOUNT_ID
+        and strategy_id != ""
+        and lane_id != ""
+        and str(metadata.get("source_instrument") or "").strip().upper() != ""
+        and executable_proxy != ""
+        and str(metadata.get("route_destination") or "").strip() == "ibkr_paper_bridge_submit_capable"
+        and str(metadata.get("bridge_proxy_mode") or "").strip() != ""
+        and intent_action != ""
+        and str(metadata.get("intent_type") or "").strip().upper() != ""
+        and (expected_strategy_id is None or strategy_id == expected_strategy_id)
+        and (expected_lane_id is None or lane_id == expected_lane_id)
+        and (expected_executable_proxy is None or executable_proxy == expected_executable_proxy)
+        and (expected_action is None or intent_action == expected_action)
+    )
+
+
 def _runtime_caller_metadata_check(
     *,
     config: IbkrPaperStrategyBridgeConfig,
@@ -672,21 +720,12 @@ def _runtime_caller_metadata_check(
             True,
             "Approved supervised paper runtime callers must provide explicit caller metadata.",
         )
-    passed = (
-        str(metadata.get("caller_type") or "").strip() in _APPROVED_RUNTIME_CALLER_TYPES
-        and metadata.get("paper_only") is True
-        and str(metadata.get("mode") or "").strip().upper() == _EXPECTED_MODE
-        and str(metadata.get("host") or "").strip() == _EXPECTED_HOST
-        and int(metadata.get("port") or 0) == _EXPECTED_PORT
-        and str(metadata.get("account_id") or "").strip() == _EXPECTED_ACCOUNT_ID
-        and str(metadata.get("strategy_id") or "").strip() == config.strategy_id
-        and str(metadata.get("lane_id") or "").strip() == config.strategy_id
-        and str(metadata.get("source_instrument") or "").strip().upper() != ""
-        and str(metadata.get("executable_proxy") or "").strip().upper() == config.symbol
-        and str(metadata.get("route_destination") or "").strip() == "ibkr_paper_bridge_submit_capable"
-        and str(metadata.get("bridge_proxy_mode") or "").strip() != ""
-        and str(metadata.get("intent_action") or "").strip().upper() == config.action
-        and str(metadata.get("intent_type") or "").strip().upper() != ""
+    passed = _runtime_caller_metadata_is_authorized(
+        caller_metadata=metadata,
+        expected_strategy_id=config.strategy_id,
+        expected_lane_id=config.strategy_id,
+        expected_executable_proxy=config.symbol,
+        expected_action=config.action,
     )
     return _check(
         "approved_runtime_caller_metadata",

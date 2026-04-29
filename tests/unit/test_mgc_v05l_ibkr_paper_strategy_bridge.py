@@ -134,6 +134,34 @@ def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfi
     return IbkrPaperStrategyBridgeConfig(**payload)
 
 
+def _approved_runtime_metadata(
+    *,
+    strategy_id: str,
+    source_instrument: str = "GC",
+    executable_proxy: str = "MGC",
+    action: str = "BUY",
+    intent_type: str = "BUY_TO_OPEN",
+    route_destination: str = "ibkr_paper_bridge_submit_capable",
+    mode: str = "PAPER",
+) -> dict[str, object]:
+    return {
+        "caller_type": "supervised_paper_runtime",
+        "strategy_id": strategy_id,
+        "lane_id": strategy_id,
+        "source_instrument": source_instrument,
+        "executable_proxy": executable_proxy,
+        "paper_only": True,
+        "mode": mode,
+        "host": "127.0.0.1",
+        "port": 7497,
+        "account_id": "DUM882026",
+        "route_destination": route_destination,
+        "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+        "intent_action": action,
+        "intent_type": intent_type,
+    }
+
+
 def test_schema_contains_required_fields() -> None:
     schema = strategy_order_intent_schema()
 
@@ -200,6 +228,51 @@ def test_live_style_caller_fails_closed_even_with_runtime_caller_path() -> None:
 def test_scheduler_style_caller_fails_closed() -> None:
     result = evaluate_strategy_bridge_caller(
         caller_path="probationary_paper_runtime_lane",
+        stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.app.paper_scheduler"}))],
+    )
+
+    assert result["passed"] is False
+    assert "forbidden caller frames" in result["detail"]
+
+
+def test_supervised_runtime_strategy_engine_frame_is_allowed_with_valid_metadata() -> None:
+    result = evaluate_strategy_bridge_caller(
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(strategy_id="gc_1x_all_lanes__asia_early_long"),
+        stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.strategy.strategy_engine"}))],
+    )
+
+    assert result["passed"] is True
+
+
+def test_strategy_engine_frame_without_runtime_metadata_fails_closed() -> None:
+    result = evaluate_strategy_bridge_caller(
+        caller_path="probationary_paper_runtime_lane",
+        stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.strategy.strategy_engine"}))],
+    )
+
+    assert result["passed"] is False
+    assert "forbidden caller frames" in result["detail"]
+
+
+def test_live_mode_strategy_engine_frame_fails_closed_even_with_metadata() -> None:
+    result = evaluate_strategy_bridge_caller(
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="gc_1x_all_lanes__asia_early_long",
+            mode="LIVE",
+        ),
+        stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.strategy.strategy_engine"}))],
+    )
+
+    assert result["passed"] is False
+    assert "forbidden caller frames" in result["detail"]
+
+
+def test_scheduler_style_runtime_with_valid_metadata_still_fails_closed() -> None:
+    result = evaluate_strategy_bridge_caller(
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(strategy_id="gc_1x_all_lanes__asia_early_long"),
         stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.app.paper_scheduler"}))],
     )
 
@@ -592,22 +665,11 @@ def test_supervised_runtime_caller_metadata_passes_for_midday_gold_lane(tmp_path
         strategy_id="gc_1x_all_lanes__us_midday_short",
         action="SELL",
         caller_path="probationary_paper_runtime_lane",
-        caller_metadata={
-            "caller_type": "supervised_paper_runtime",
-            "strategy_id": "gc_1x_all_lanes__us_midday_short",
-            "lane_id": "gc_1x_all_lanes__us_midday_short",
-            "source_instrument": "GC",
-            "executable_proxy": "MGC",
-            "paper_only": True,
-            "mode": "PAPER",
-            "host": "127.0.0.1",
-            "port": 7497,
-            "account_id": "DUM882026",
-            "route_destination": "ibkr_paper_bridge_submit_capable",
-            "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
-            "intent_action": "SELL",
-            "intent_type": "SELL_TO_OPEN",
-        },
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="gc_1x_all_lanes__us_midday_short",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+        ),
         manual_frozen_preview_path=None,
         approval_digest=None,
         approval_phrase=None,
@@ -659,28 +721,130 @@ def test_supervised_runtime_caller_metadata_passes_for_midday_gold_lane(tmp_path
     assert next(row for row in checks if row["name"] == "manual_harness_bundle_present_for_submit")["passed"] is True
 
 
+def test_supervised_runtime_caller_metadata_passes_for_gc_asia_early_long_lane(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="gc_1x_all_lanes__asia_early_long",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(strategy_id="gc_1x_all_lanes__asia_early_long"),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-29T23:06:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "gc_1x_all_lanes__asia_early_long",
+                "bridge_strategy_id": "gc_1x_all_lanes__asia_early_long",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")["passed"] is True
+
+
+def test_supervised_runtime_caller_metadata_passes_for_gc_asia_early_short_lane(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="gc_1x_all_lanes__asia_early_short",
+        action="SELL",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="gc_1x_all_lanes__asia_early_short",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-29T23:05:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "gc_1x_all_lanes__asia_early_short",
+                "bridge_strategy_id": "gc_1x_all_lanes__asia_early_short",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")["passed"] is True
+
+
 def test_runtime_caller_still_blocks_when_monitor_health_fails(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
         submit=True,
         strategy_id="gc_1x_all_lanes__us_midday_short",
         caller_path="probationary_paper_runtime_lane",
-        caller_metadata={
-            "caller_type": "supervised_paper_runtime",
-            "strategy_id": "gc_1x_all_lanes__us_midday_short",
-            "lane_id": "gc_1x_all_lanes__us_midday_short",
-            "source_instrument": "GC",
-            "executable_proxy": "MGC",
-            "paper_only": True,
-            "mode": "PAPER",
-            "host": "127.0.0.1",
-            "port": 7497,
-            "account_id": "DUM882026",
-            "route_destination": "ibkr_paper_bridge_submit_capable",
-            "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
-            "intent_action": "BUY",
-            "intent_type": "BUY_TO_OPEN",
-        },
+        caller_metadata=_approved_runtime_metadata(strategy_id="gc_1x_all_lanes__us_midday_short"),
         manual_frozen_preview_path=None,
         approval_digest=None,
         approval_phrase=None,

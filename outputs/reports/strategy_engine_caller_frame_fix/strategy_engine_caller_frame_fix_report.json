@@ -1,0 +1,65 @@
+{
+  "classification": "STRATEGY_ENGINE_CALLER_FRAME_FIXED",
+  "guard_location": {
+    "file": "src/mgc_v05l/execution/ibkr_paper_strategy_bridge.py",
+    "function": "evaluate_strategy_bridge_caller",
+    "original_purpose": "Fail closed when preview/manual-only or suspicious automation caller frames reach the paper bridge submit path.",
+    "why_it_triggered": "The bridge inherited preview-harness forbidden caller prefixes that treated mgc_v05l.strategy.* as suspicious even when supervised PAPER runtime metadata was already valid.",
+    "duplicates_caller_type_policy": true,
+    "belongs_to_manual_preview_protection": true
+  },
+  "fix_summary": {
+    "authorization_model": "Explicit supervised PAPER route metadata now authorizes strategy_engine frames narrowly for approved runtime caller paths.",
+    "still_blocked": [
+      "unknown caller path",
+      "missing caller metadata",
+      "live-mode caller metadata",
+      "scheduler-style frames",
+      "wrong PAPER environment lock",
+      "wrong account/host/port",
+      "missing route destination",
+      "unapproved downstream monitor/governance/exposure gates"
+    ]
+  },
+  "historical_signal_replay": [
+    {
+      "lane_id": "gc_1x_all_lanes__asia_early_long",
+      "timestamp_et": "2026-04-29T19:06:00-04:00",
+      "action": "BUY",
+      "source_instrument": "GC",
+      "executable_proxy": "MGC",
+      "caller_path": "probationary_paper_runtime_lane",
+      "caller_type": "supervised_paper_runtime",
+      "route_destination": "ibkr_paper_bridge_submit_capable",
+      "prior_blocker": "BLOCKED_NOT_SENT_TO_BROKER: Paper strategy bridge detected forbidden caller frames: mgc_v05l.strategy.strategy_engine",
+      "post_fix_caller_gate_passed": true,
+      "post_fix_caller_gate_detail": "Paper strategy bridge caller path is approved for supervised paper routing.",
+      "bridge_preflight_reached": true,
+      "post_fix_blocking_failure_count": 0,
+      "post_fix_first_blocking_failure": "",
+      "post_fix_first_blocking_detail": "",
+      "classification": "REACHES_BRIDGE_PREFLIGHT"
+    },
+    {
+      "lane_id": "gc_1x_all_lanes__asia_early_short",
+      "timestamp_et": "2026-04-29T19:05:00-04:00",
+      "action": "SELL",
+      "source_instrument": "GC",
+      "executable_proxy": "MGC",
+      "caller_path": "probationary_paper_runtime_lane",
+      "caller_type": "supervised_paper_runtime",
+      "route_destination": "ibkr_paper_bridge_submit_capable",
+      "prior_blocker": "BLOCKED_NOT_SENT_TO_BROKER: Paper strategy bridge detected forbidden caller frames: mgc_v05l.strategy.strategy_engine",
+      "post_fix_caller_gate_passed": true,
+      "post_fix_caller_gate_detail": "Paper strategy bridge caller path is approved for supervised paper routing.",
+      "bridge_preflight_reached": true,
+      "post_fix_blocking_failure_count": 0,
+      "post_fix_first_blocking_failure": "",
+      "post_fix_first_blocking_detail": "",
+      "classification": "REACHES_BRIDGE_PREFLIGHT"
+    }
+  ],
+  "tests": {
+    "bridge_policy_suite": "28 passed"
+  }
+}
