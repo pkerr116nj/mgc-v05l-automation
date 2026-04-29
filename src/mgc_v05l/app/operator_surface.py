@@ -105,6 +105,7 @@ def _build_runtime_readiness(
 ) -> dict[str, Any]:
     bootstrap_prerequisites = dict(bootstrap_prerequisites or {})
     readiness = paper.get("readiness") or {}
+    lane_status_summary = dict(readiness.get("lane_status_summary") or {})
     exceptions = paper.get("exceptions") or {}
     runtime_status = str(readiness.get("runtime_phase") or global_payload.get("paper_label") or "UNKNOWN")
     paper_enabled = bool(paper.get("running"))
@@ -118,6 +119,7 @@ def _build_runtime_readiness(
     runtime_recovery_attempts = int(runtime_recovery.get("restart_attempts_in_window") or 0)
     runtime_recovery_attempt_budget = int(runtime_recovery.get("max_auto_restarts_per_window") or 0)
     runtime_recovery_suppressed = bool(runtime_recovery.get("restart_suppressed"))
+    exception_rows = list(exceptions.get("exceptions") or [])
     blocking_faults = [
         {
             "code": row.get("code"),
@@ -125,7 +127,18 @@ def _build_runtime_readiness(
             "summary": row.get("summary"),
             "owner": row.get("owning_model"),
         }
-        for row in list(exceptions.get("exceptions") or [])
+        for row in exception_rows
+        if str(row.get("severity") or "").upper() == "BLOCKING"
+    ]
+    advisory_faults = [
+        {
+            "code": row.get("code"),
+            "severity": row.get("severity"),
+            "summary": row.get("summary"),
+            "owner": row.get("owning_model"),
+        }
+        for row in exception_rows
+        if str(row.get("severity") or "").upper() != "BLOCKING"
     ]
     degraded_informational_feeds = [
         label
@@ -140,6 +153,20 @@ def _build_runtime_readiness(
     bootstrap_issues = [str(item.get("label") or item.get("key") or "") for item in bootstrap_items if str(item.get("status") or "") != "ready"]
     active_lane_count = len(_unique_lane_ids(active_rows, enabled_only=True))
     active_instruments_count = len({str(row.get("instrument") or "") for row in active_rows if row.get("instrument")})
+    runtime_lanes_loaded_count = int(lane_status_summary.get("runtime_lanes_loaded_count") or lane_status_summary.get("loaded_in_runtime_count") or 0)
+    data_fresh_lanes_count = int(lane_status_summary.get("data_fresh_lanes_count") or 0)
+    governance_allowed_lanes_count = int(lane_status_summary.get("governance_allowed_lanes_count") or 0)
+    route_ready_lanes_count = int(lane_status_summary.get("route_ready_lanes_count") or 0)
+    session_eligible_lanes_count = int(lane_status_summary.get("session_eligible_lanes_count") or 0)
+    waiting_for_completed_bar_count = int(lane_status_summary.get("waiting_for_completed_bar_count") or 0)
+    no_setup_count = int(lane_status_summary.get("no_setup_count") or 0)
+    actionable_now_count = int(lane_status_summary.get("actionable_now_count") or 0)
+    blocked_lanes_count = int(lane_status_summary.get("blocked_lanes_count") or 0)
+    stale_runtime_blocked_count = int(lane_status_summary.get("stale_runtime_blocked_count") or 0)
+    ready_this_bar_count = int(lane_status_summary.get("eligible_to_trade_count") or 0)
+    current_detected_phase_label = str(readiness.get("current_detected_phase_label") or readiness.get("current_detected_session") or "UNKNOWN")
+    current_broad_trading_session = str(readiness.get("current_broad_trading_session") or "UNKNOWN")
+    next_expected_decision_bar_ts = readiness.get("next_expected_decision_bar_ts")
     payload = {
         "runtime_status": runtime_status,
         "paper_enabled": paper_enabled,
@@ -147,6 +174,7 @@ def _build_runtime_readiness(
         "auth_readiness": auth_readiness,
         "market_data_readiness": market_data_readiness,
         "blocking_faults": blocking_faults,
+        "advisory_faults": advisory_faults,
         "blocking_faults_active": bool(blocking_faults) or fault_state.upper() == "FAULTED",
         "degraded_informational_feeds": degraded_informational_feeds,
         "active_instruments_count": active_instruments_count,
@@ -155,8 +183,10 @@ def _build_runtime_readiness(
             f"runtime={runtime_status} | paper={'ENABLED' if paper_enabled else 'DISABLED'} | "
             f"entries={'ENABLED' if entries_enabled else 'HALTED'} | "
             f"auth={'READY' if auth_readiness else 'NOT_READY'} | "
-            f"market_data={market_data_readiness} | faults={len(blocking_faults)} | "
+            f"market_data={market_data_readiness} | faults={len(blocking_faults)} | advisory={len(advisory_faults)} | "
             f"runtime_recovery={runtime_recovery_state} | restart_budget={runtime_recovery_attempts}/{runtime_recovery_attempt_budget or '?'} | "
+            f"session_eligible={session_eligible_lanes_count} | waiting_bar={waiting_for_completed_bar_count} | "
+            f"no_setup={no_setup_count} | actionable={actionable_now_count} | blocked={blocked_lanes_count} | "
             f"bootstrap_issues={len(bootstrap_issues)}"
         ),
         "field_sources": {
@@ -168,8 +198,10 @@ def _build_runtime_readiness(
             "runtime_recovery_state": _source(_OD_FILE, "_paper_runtime_recovery_payload", "paper.runtime_recovery.status"),
             "runtime_recovery_message": _source(_OD_FILE, "_paper_runtime_recovery_payload", "paper.runtime_recovery.operator_message"),
             "blocking_faults": _source(_OD_FILE, "_paper_exceptions_payload", "paper.exceptions.exceptions"),
+            "advisory_faults": _source(_OD_FILE, "_paper_exceptions_payload", "paper.exceptions.exceptions"),
             "degraded_informational_feeds": _source(_OS_FILE, "_build_runtime_readiness", "secondary_context.*.available"),
             "bootstrap_prerequisites": _source(_OD_FILE, "_dashboard_bootstrap_prerequisites_payload", "bootstrap_prerequisites.items"),
+            "lane_status_summary": _source(_OD_FILE, "_paper_readiness_payload", "paper.readiness.lane_status_summary"),
         },
     }
     payload["values"] = {
@@ -186,12 +218,27 @@ def _build_runtime_readiness(
         "runtime_recovery_suppressed": runtime_recovery_suppressed,
         "runtime_recovery_last_result": runtime_recovery.get("last_restart_result"),
         "blocking_faults_count": len(blocking_faults),
+        "advisory_faults_count": len(advisory_faults),
         "blocking_faults_active": payload["blocking_faults_active"],
         "degraded_informational_feeds": degraded_informational_feeds,
         "bootstrap_prerequisite_issues": bootstrap_issues,
         "bootstrap_prerequisites_reduced_mode": bool(bootstrap_prerequisites.get("reduced_mode")),
         "active_lanes_count": active_lane_count,
         "active_instruments_count": active_instruments_count,
+        "runtime_lanes_loaded_count": runtime_lanes_loaded_count,
+        "data_fresh_lanes_count": data_fresh_lanes_count,
+        "governance_allowed_lanes_count": governance_allowed_lanes_count,
+        "route_ready_lanes_count": route_ready_lanes_count,
+        "session_eligible_lanes_count": session_eligible_lanes_count,
+        "waiting_for_completed_bar_count": waiting_for_completed_bar_count,
+        "no_setup_count": no_setup_count,
+        "actionable_now_count": actionable_now_count,
+        "blocked_lanes_count": blocked_lanes_count,
+        "stale_runtime_blocked_count": stale_runtime_blocked_count,
+        "ready_this_bar_count": ready_this_bar_count,
+        "current_detected_phase_label": current_detected_phase_label,
+        "current_broad_trading_session": current_broad_trading_session,
+        "next_expected_decision_bar_ts": next_expected_decision_bar_ts,
     }
     payload["bootstrap_prerequisites"] = bootstrap_prerequisites
     return payload
@@ -813,13 +860,20 @@ def _legacy_readiness_alias(payload: dict[str, Any]) -> dict[str, Any]:
             {"label": "Paper Runtime", "value": "RUNNING" if values.get("paper_enabled") else "STOPPED", "level": "ok" if values.get("paper_enabled") else "warning"},
             {"label": "Entries", "value": "ENABLED" if values.get("entries_enabled") else "HALTED", "level": "ok" if values.get("entries_enabled") else "warning"},
             {"label": "Market Data", "value": values.get("market_data_readiness") or "-", "level": "info"},
-            {"label": "Faults", "value": str(values.get("blocking_faults_count") or 0), "level": "danger" if values.get("blocking_faults_count") else "ok"},
-            {"label": "Active Lanes", "value": str(values.get("active_lanes_count") or 0), "level": "info"},
-            {"label": "Active Instruments", "value": str(values.get("active_instruments_count") or 0), "level": "info"},
+            {"label": "Session Eligible", "value": str(values.get("session_eligible_lanes_count") or 0), "level": "ok" if values.get("session_eligible_lanes_count") else "muted"},
+            {"label": "Waiting For 3m Bar", "value": str(values.get("waiting_for_completed_bar_count") or 0), "level": "warning" if values.get("waiting_for_completed_bar_count") else "muted"},
+            {"label": "No Setup", "value": str(values.get("no_setup_count") or 0), "level": "warning" if values.get("no_setup_count") else "muted"},
+            {"label": "Actionable Now", "value": str(values.get("actionable_now_count") or 0), "level": "ok" if values.get("actionable_now_count") else "muted"},
+            {"label": "Blocked Lanes", "value": str(values.get("blocked_lanes_count") or 0), "level": "danger" if values.get("blocked_lanes_count") else "ok"},
+            {"label": "Ready This Bar", "value": str(values.get("ready_this_bar_count") or 0), "level": "ok" if values.get("ready_this_bar_count") else "muted"},
         ],
         "notes": [
             f"Auth readiness: {'READY' if values.get('auth_readiness') else 'NOT_READY'}",
             f"Degraded informational feeds: {', '.join(values.get('degraded_informational_feeds') or []) or 'None'}",
+            f"Broad session: {values.get('current_broad_trading_session') or '-'}",
+            f"Phase label: {values.get('current_detected_phase_label') or '-'}",
+            f"Next decision bar: {values.get('next_expected_decision_bar_ts') or '-'}",
+            f"Stale-runtime effective blocks: {values.get('stale_runtime_blocked_count') or 0}",
         ],
     }
 

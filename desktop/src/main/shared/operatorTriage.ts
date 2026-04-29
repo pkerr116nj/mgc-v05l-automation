@@ -97,7 +97,12 @@ export interface OperatorTriageOperatorAuthority {
 
 export interface OperatorTriage {
   pilot_symbol: string;
+  paper_trade_authority: TradeAuthorityState;
   live_trade_authority: TradeAuthorityState;
+  paper_runtime_ready: boolean;
+  live_runtime_ready: boolean;
+  paper_bridge_allowed: boolean;
+  live_bridge_allowed: boolean;
   position_posture: PositionPostureState;
   outage_posture: OutagePostureState;
   connection_posture: ConnectionPostureState;
@@ -704,17 +709,15 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     ...asArray<string>(productionFuturesPilotStatus.preview_blockers),
     ...asArray<string>(productionFuturesPilotStatus.live_submit_blockers),
   ].filter((value) => !/local operator auth/i.test(String(value)));
-  const brokerAuthorityPass =
-    paperMode
-    || (
-      input.productionLinkEnabled
-      && brokerReachable
-      && brokerAuthHealthy
-      && brokerAccountSelected
-      && brokerPositionsFresh
-      && brokerQuotesFresh
-      && brokerRouteBlockers.length === 0
-    );
+  const liveBrokerAuthorityPass =
+    input.productionLinkEnabled
+    && brokerReachable
+    && brokerAuthHealthy
+    && brokerAccountSelected
+    && brokerPositionsFresh
+    && brokerQuotesFresh
+    && brokerRouteBlockers.length === 0;
+  const brokerAuthorityPass = paperMode || liveBrokerAuthorityPass;
   const reconciliationPass =
     input.productionLinkEnabled
     && productionReconciliation.blocked !== true
@@ -735,13 +738,11 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     productionOperatorLocalAuth.entry_allowed !== false
     && productionOperatorLocalAuth.flatten_allowed !== false
     && productionOperatorLocalAuth.replace_allowed !== false;
-  const operatorAuthorityPass =
-    paperMode
-    || (
-      productionOperatorLocalAuth.available !== false
-      && (productionOperatorLocalAuth.ready === true || operatorSessionActive)
-      && operatorSensitiveActionsAllowed
-    );
+  const liveOperatorAuthorityPass =
+    productionOperatorLocalAuth.available !== false
+    && (productionOperatorLocalAuth.ready === true || operatorSessionActive)
+    && operatorSensitiveActionsAllowed;
+  const operatorAuthorityPass = paperMode || liveOperatorAuthorityPass;
 
   const hardGates: OperatorTriageHardGate[] = [
     {
@@ -928,11 +929,21 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     },
   ];
 
+  const paperRuntimeReady = runtimePass;
+  const liveRuntimeReady = runtimePass;
+  const paperTradeAuthority: TradeAuthorityState = hardGates.every((row) => row.status === "pass") ? "Enabled" : "Blocked";
+  const liveTradeAuthority: TradeAuthorityState = (
+    marketDataPass
+    && liveBrokerAuthorityPass
+    && reconciliationPass
+    && liveRuntimeReady
+    && liveOperatorAuthorityPass
+  ) ? "Enabled" : "Blocked";
+  const activeTradeAuthority = paperMode ? paperTradeAuthority : liveTradeAuthority;
   const firstFailingGate = hardGates.find((row) => row.status === "fail") ?? null;
-  const tradeAuthority: TradeAuthorityState = hardGates.every((row) => row.status === "pass") ? "Enabled" : "Blocked";
   const connectionPosture = connectionPostureLabel(input.desktopSourceMode ?? undefined);
   const outagePosture: OutagePostureState =
-    tradeAuthority === "Blocked"
+    activeTradeAuthority === "Blocked"
       ? positionPosture === "In Position"
         ? "Critical"
         : "Review"
@@ -940,10 +951,12 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
         ? "Review"
         : "None";
   const dominantBlocker: OperatorTriageDominantBlocker =
-    tradeAuthority === "Blocked"
+    activeTradeAuthority === "Blocked"
       ? positionPosture === "In Position"
         ? { code: "critical_outage_with_open_exposure", label: "Critical outage with open exposure" }
-        : { code: "live_trade_authority_blocked", label: "Live trade authority blocked" }
+        : paperMode
+          ? { code: "paper_trade_authority_blocked", label: "Paper trade authority blocked" }
+          : { code: "live_trade_authority_blocked", label: "Live trade authority blocked" }
       : outagePosture === "Review"
         ? { code: "review_active_warnings", label: "Review active warnings" }
         : { code: "no_active_blocker", label: "No active blocker" };
@@ -965,13 +978,21 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
           detail: "No hard-gate failure.",
         };
   const verdictSentence =
-    tradeAuthority === "Enabled"
+    activeTradeAuthority === "Enabled"
       ? positionPosture === "In Position"
-        ? "System healthy. In position. Live trade authority enabled."
-        : "System healthy. Flat. Live trade authority enabled."
+        ? paperMode
+          ? "Paper stack healthy. In position. Paper trade authority enabled."
+          : "System healthy. In position. Live trade authority enabled."
+        : paperMode
+          ? "Paper stack healthy. Flat. Paper trade authority enabled."
+          : "System healthy. Flat. Live trade authority enabled."
       : positionPosture === "In Position"
-        ? "Critical outage. Position open, but live trade authority is blocked. Use fallback procedure now."
-        : "Flat but blocked. Live trade authority is not currently available.";
+        ? paperMode
+          ? "Critical outage. Position open, but paper trade authority is blocked. Use paper fallback procedure now."
+          : "Critical outage. Position open, but live trade authority is blocked. Use fallback procedure now."
+        : paperMode
+          ? "Flat but blocked. Paper trade authority is not currently available."
+          : "Flat but blocked. Live trade authority is not currently available.";
 
   const fallbackRunbookPath = typeof asRecord(productionFuturesPilotStatus.outside_sandbox_live_validation).runbook_path === "string"
     ? (asRecord(productionFuturesPilotStatus.outside_sandbox_live_validation).runbook_path as string)
@@ -980,7 +1001,12 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
   return {
     operator_triage: {
       pilot_symbol: pilotSymbol,
-      live_trade_authority: tradeAuthority,
+      paper_trade_authority: paperTradeAuthority,
+      live_trade_authority: liveTradeAuthority,
+      paper_runtime_ready: paperRuntimeReady,
+      live_runtime_ready: liveRuntimeReady,
+      paper_bridge_allowed: paperTradeAuthority === "Enabled",
+      live_bridge_allowed: liveTradeAuthority === "Enabled",
       position_posture: positionPosture,
       outage_posture: outagePosture,
       connection_posture: connectionPosture,

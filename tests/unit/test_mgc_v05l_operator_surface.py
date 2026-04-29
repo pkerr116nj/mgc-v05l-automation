@@ -32,6 +32,22 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
                 "runtime_phase": "RUNNING",
                 "operator_halt": False,
                 "entries_enabled": True,
+                "current_detected_phase_label": "UNCLASSIFIED",
+                "current_broad_trading_session": "US_EARLY",
+                "next_expected_decision_bar_ts": "2026-03-21T10:06:00-04:00",
+                "lane_status_summary": {
+                    "runtime_lanes_loaded_count": 44,
+                    "data_fresh_lanes_count": 44,
+                    "governance_allowed_lanes_count": 44,
+                    "route_ready_lanes_count": 44,
+                    "session_eligible_lanes_count": 13,
+                    "waiting_for_completed_bar_count": 13,
+                    "no_setup_count": 11,
+                    "actionable_now_count": 0,
+                    "blocked_lanes_count": 0,
+                    "stale_runtime_blocked_count": 0,
+                    "eligible_to_trade_count": 0,
+                },
             },
             "exceptions": {"exceptions": []},
             "performance": {
@@ -143,6 +159,13 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
     }
     assert surface["runtime_readiness"]["paper_enabled"] is True
     assert surface["runtime_readiness"]["entries_enabled"] is True
+    assert surface["runtime_readiness"]["values"]["session_eligible_lanes_count"] == 13
+    assert surface["runtime_readiness"]["values"]["waiting_for_completed_bar_count"] == 13
+    assert surface["runtime_readiness"]["values"]["no_setup_count"] == 11
+    assert surface["runtime_readiness"]["values"]["actionable_now_count"] == 0
+    assert surface["runtime_readiness"]["values"]["blocked_lanes_count"] == 0
+    assert surface["runtime_readiness"]["values"]["current_broad_trading_session"] == "US_EARLY"
+    assert surface["runtime_readiness"]["values"]["current_detected_phase_label"] == "UNCLASSIFIED"
     assert surface["operator_metrics_portfolio"]["daily_realized_pnl"] == "10.0"
     assert surface["operator_metrics_portfolio"]["daily_unrealized_pnl"] == "2.0"
     assert surface["operator_metrics_portfolio"]["daily_net_pnl"] == "12.0"
@@ -187,6 +210,13 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
     assert summary["Approved Quant"] == "1"
     assert summary["Admitted Paper"] == "1"
     assert summary["Canary"] == "1"
+    readiness_cards = {row["label"]: row["value"] for row in surface["readiness"]["cards"]}
+    assert readiness_cards["Session Eligible"] == "13"
+    assert readiness_cards["Waiting For 3m Bar"] == "13"
+    assert readiness_cards["No Setup"] == "11"
+    assert readiness_cards["Actionable Now"] == "0"
+    assert readiness_cards["Blocked Lanes"] == "0"
+    assert readiness_cards["Ready This Bar"] == "0"
 
     secondary_context = surface["secondary_context"]
     assert secondary_context["status_counts"]["stale"] >= 1
@@ -200,6 +230,87 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
     assert secondary_context["items"][1]["label"] == "Major Equity Indices"
     assert secondary_context["items"][3]["label"] == "Treasury Curve Current"
     assert secondary_context["items"][4]["label"] == "Treasury Curve Prior"
+
+
+def test_operator_surface_runtime_readiness_only_blocks_on_blocking_faults() -> None:
+    watch_surface = build_operator_surface(
+        generated_at="2026-04-29T16:00:00+00:00",
+        global_payload={
+            "paper_label": "RUNNING",
+            "current_session_date": "2026-04-29",
+            "market_data_label": "LIVE",
+            "runtime_health_label": "HEALTHY",
+            "fault_state": "CLEAR",
+        },
+        auth_status={"runtime_ready": True},
+        paper={
+            "running": True,
+            "status": {"entries_enabled": True, "operator_halt": False},
+            "readiness": {"runtime_phase": "RUNNING", "entries_enabled": True},
+            "exceptions": {
+                "exceptions": [
+                    {
+                        "code": "DECISION_WITHOUT_INTENT",
+                        "severity": "WATCH",
+                        "summary": "Review midday intent generation.",
+                        "owning_model": "MNQ / US_MIDDAY_LONG / x1",
+                    }
+                ]
+            },
+        },
+        approved_quant_baselines={},
+        market_context={},
+        treasury_curve={},
+    )
+
+    runtime_readiness = watch_surface["runtime_readiness"]
+    assert runtime_readiness["blocking_faults"] == []
+    assert runtime_readiness["advisory_faults"] == [
+        {
+            "code": "DECISION_WITHOUT_INTENT",
+            "severity": "WATCH",
+            "summary": "Review midday intent generation.",
+            "owner": "MNQ / US_MIDDAY_LONG / x1",
+        }
+    ]
+    assert runtime_readiness["blocking_faults_active"] is False
+    assert runtime_readiness["values"]["blocking_faults_count"] == 0
+    assert runtime_readiness["values"]["advisory_faults_count"] == 1
+
+    blocking_surface = build_operator_surface(
+        generated_at="2026-04-29T16:00:00+00:00",
+        global_payload={
+            "paper_label": "RUNNING",
+            "current_session_date": "2026-04-29",
+            "market_data_label": "LIVE",
+            "runtime_health_label": "HEALTHY",
+            "fault_state": "CLEAR",
+        },
+        auth_status={"runtime_ready": True},
+        paper={
+            "running": True,
+            "status": {"entries_enabled": True, "operator_halt": False},
+            "readiness": {"runtime_phase": "RUNNING", "entries_enabled": True},
+            "exceptions": {
+                "exceptions": [
+                    {
+                        "code": "BROKER_LEDGER_MISMATCH",
+                        "severity": "BLOCKING",
+                        "summary": "Broker truth does not reconcile.",
+                        "owning_model": "MGC / US_EARLY_LONG / x1",
+                    }
+                ]
+            },
+        },
+        approved_quant_baselines={},
+        market_context={},
+        treasury_curve={},
+    )
+
+    runtime_readiness = blocking_surface["runtime_readiness"]
+    assert runtime_readiness["blocking_faults_active"] is True
+    assert runtime_readiness["values"]["blocking_faults_count"] == 1
+    assert runtime_readiness["values"]["advisory_faults_count"] == 0
 
 
 def test_operator_surface_hardens_context_semantics_for_thin_comparisons_and_invalid_prior() -> None:

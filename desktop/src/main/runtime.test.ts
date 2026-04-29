@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 
 import { __testing, getDesktopState, prepareDesktopForLaunch, runDashboardAction, runProductionLinkAction, startDashboard, type DesktopState } from "./runtime";
 import { buildOperatorTriageContract } from "./shared/operatorTriage";
@@ -248,6 +250,18 @@ test("desktop dashboard recovery restores live API access and unlocks paper rest
   assert.match(actionResult.detail ?? "", /Restarted paper runtime/);
 
   __testing.resetRuntimeState();
+});
+
+test("electron renderer readiness cards map corrected fireability fields", () => {
+  const appTsx = fs.readFileSync(path.resolve(__dirname, "../../src/renderer/App.tsx"), "utf8");
+
+  assert.match(appTsx, /label:\s*"Session Eligible"[\s\S]*session_eligible_lanes_count/);
+  assert.match(appTsx, /label:\s*"Waiting For 3m Bar"[\s\S]*waiting_for_completed_bar_count/);
+  assert.match(appTsx, /label:\s*"Evaluated \/ No Setup"[\s\S]*no_setup_count/);
+  assert.match(appTsx, /label:\s*"Actionable Now"[\s\S]*actionable_now_count/);
+  assert.match(appTsx, /label:\s*"Blocked Lanes"[\s\S]*blocked_lanes_count/);
+  assert.match(appTsx, /label:\s*"Ready This Bar"[\s\S]*eligible_to_trade_count/);
+  assert.doesNotMatch(appTsx, /title:\s*"Tradable Now"/);
 });
 
 test("desktop state promotes to live when Node localhost transport is denied but curl fallback succeeds", async () => {
@@ -594,10 +608,232 @@ test("paper mode does not let live broker and operator auth gates block supervis
     sameUnderlyingConflictSummary: {},
   });
 
-  assert.equal(contract.operator_triage.live_trade_authority, "Enabled");
+  assert.equal(contract.operator_triage.paper_trade_authority, "Enabled");
+  assert.equal(contract.operator_triage.live_trade_authority, "Blocked");
+  assert.equal(contract.operator_triage.paper_bridge_allowed, true);
+  assert.equal(contract.operator_triage.live_bridge_allowed, false);
+  assert.equal(contract.operator_triage.verdict_sentence, "Paper stack healthy. Flat. Paper trade authority enabled.");
   assert.equal(contract.operator_triage.root_cause.code, "no_hard_gate_failure");
   assert.equal(contract.operator_triage.hard_gates.find((gate) => gate.key === "broker-authority")?.status, "pass");
   assert.equal(contract.operator_triage.hard_gates.find((gate) => gate.key === "operator-authority")?.status, "pass");
+});
+
+test("paper mode keeps live authority blocked while allowing supervised paper authority", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "attached_snapshot_bridge",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "LIVE",
+      market_data_label: "LIVE",
+      reconciliation_status: "CLEAN",
+      stale: false,
+    },
+    operatorSurface: {
+      generated_at: new Date().toISOString(),
+    },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+    },
+    runtimeValues: {
+      runtime_recovery_state: "RUNNING",
+    },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {
+      operator_status: {
+        local_operator_auth: {
+          available: true,
+          ready: false,
+          auth_session_active: false,
+          entry_allowed: false,
+          flatten_allowed: true,
+          replace_allowed: false,
+          blocker: "Local operator auth session expired.",
+        },
+      },
+      futures_pilot_status: {
+        preview_blockers: ["Futures pilot preview is disabled because MGC_PRODUCTION_FUTURES_PILOT_ENABLED is false."],
+        live_submit_blockers: ["Futures pilot live submit remains preview-only until FUTURE:MARKET is explicitly live-verified."],
+      },
+    },
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: {
+      blocked: false,
+      mismatch_count: 0,
+      detail: "clear",
+    },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {
+      auth_session_active: false,
+      last_auth_detail: "expired",
+    },
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  assert.equal(contract.operator_triage.paper_trade_authority, "Enabled");
+  assert.equal(contract.operator_triage.live_trade_authority, "Blocked");
+  assert.equal(contract.operator_triage.paper_bridge_allowed, true);
+  assert.equal(contract.operator_triage.live_bridge_allowed, false);
+});
+
+test("paper mode still hard-blocks on current runtime faults with paper-specific wording", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "attached_snapshot_bridge",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "LIVE",
+      market_data_label: "LIVE",
+      reconciliation_status: "CLEAN",
+      stale: false,
+      runtime_health_label: "FAULTED",
+    },
+    operatorSurface: {
+      generated_at: new Date().toISOString(),
+    },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: true,
+      status_line: "runtime=RUNNING | faults=1 | advisory=0",
+    },
+    runtimeValues: {
+      runtime_recovery_state: "RUNNING",
+    },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {},
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: {
+      blocked: false,
+      mismatch_count: 0,
+      detail: "clear",
+    },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {},
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  assert.equal(contract.operator_triage.paper_trade_authority, "Blocked");
+  assert.equal(contract.operator_triage.dominant_blocker.code, "paper_trade_authority_blocked");
+  assert.equal(contract.operator_triage.verdict_sentence, "Flat but blocked. Paper trade authority is not currently available.");
+});
+
+test("live mode still requires live trade authority", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "live_api",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "LIVE",
+      mode_label: "LIVE",
+      live_disabled: false,
+      market_data_status: "LIVE",
+      market_data_label: "LIVE",
+      reconciliation_status: "CLEAN",
+      stale: false,
+    },
+    operatorSurface: {
+      generated_at: new Date().toISOString(),
+    },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+    },
+    runtimeValues: {
+      runtime_recovery_state: "RUNNING",
+    },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {
+      operator_status: {
+        local_operator_auth: {
+          available: true,
+          ready: false,
+          auth_session_active: false,
+          entry_allowed: false,
+          flatten_allowed: true,
+          replace_allowed: false,
+          blocker: "Local operator auth session expired.",
+        },
+      },
+      futures_pilot_status: {
+        preview_blockers: [],
+        live_submit_blockers: [],
+      },
+    },
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: {
+      blocked: false,
+      mismatch_count: 0,
+      detail: "clear",
+    },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {
+      auth_session_active: false,
+      last_auth_detail: "expired",
+    },
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  assert.equal(contract.operator_triage.live_trade_authority, "Blocked");
+  assert.equal(contract.operator_triage.dominant_blocker.code, "live_trade_authority_blocked");
+  assert.equal(contract.operator_triage.verdict_sentence, "Flat but blocked. Live trade authority is not currently available.");
 });
 
 test("snapshot fallback with a stale backend endpoint starts automatic service recovery", async () => {

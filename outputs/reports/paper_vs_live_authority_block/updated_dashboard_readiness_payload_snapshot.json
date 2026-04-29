@@ -1,0 +1,40 @@
+{
+  "classification": "PAPER_BLOCK_REMOVED_LIVE_AUTHORITY_SEPARATION_FIXED",
+  "generated_at": "2026-04-29T17:31:53.661924+00:00",
+  "paper_trade_authority_context": {
+    "startup_control_plane_launch_allowed": true,
+    "startup_control_plane_overall_state": "READY",
+    "app_usable_for_supervised_paper": true,
+    "paper_runtime_ready": true,
+    "paper_runtime_phase": "RUNNING",
+    "usable_lane_count": 9
+  },
+  "runtime_readiness": {
+    "runtime_status": "RUNNING",
+    "paper_enabled": true,
+    "entries_enabled": true,
+    "auth_readiness": true,
+    "market_data_readiness": "STALE",
+    "blocking_faults_count": 0,
+    "advisory_faults_count": 9,
+    "blocking_faults_active": false,
+    "runtime_recovery_state": "RUNNING",
+    "runtime_recovery_attempts": 0,
+    "runtime_recovery_attempt_budget": 3,
+    "session_eligible_lanes_count": 9,
+    "waiting_for_completed_bar_count": 9,
+    "no_setup_count": 11,
+    "actionable_now_count": 0,
+    "blocked_lanes_count": 0,
+    "status_line": "runtime=RUNNING | paper=ENABLED | entries=ENABLED | auth=READY | market_data=STALE | faults=0 | advisory=9 | runtime_recovery=RUNNING | restart_budget=0/3 | session_eligible=9 | waiting_bar=9 | no_setup=11 | actionable=0 | blocked=0 | bootstrap_issues=0"
+  },
+  "authority_contract": {
+    "paper_trade_authority": "Enabled when paper-specific hard gates pass",
+    "live_trade_authority": "Independent live-only authority",
+    "paper_runtime_ready": true,
+    "live_runtime_ready": true,
+    "paper_bridge_allowed": true,
+    "live_bridge_allowed": false
+  },
+  "note": "The bogus live-authority/runtime-fault paper block is removed. If the app still blocks paper after refresh, the currently published reason is the separate market_data=STALE paper-side gate."
+}

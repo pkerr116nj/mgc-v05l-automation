@@ -3348,10 +3348,10 @@ function blockerClassInfo(
     return { label: "Actionable", tone: "good", reason: String(readinessRow?.tradability_reason ?? "The lane has a broker-routable action on the current completed bar.") };
   }
   if (tradabilityStatus === "WAITING_FOR_NEXT_DECISION_BAR") {
-    return { label: "Waiting For Bar", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and healthy, but it is waiting for the next completed decision bar.") };
+    return { label: "Waiting For 3m Bar", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and healthy, but it is waiting for the next completed decision bar.") };
   }
   if (tradabilityStatus === "SESSION_ELIGIBLE_NO_SETUP") {
-    return { label: "No Setup", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and evaluated, but no setup is currently present.") };
+    return { label: "Evaluated / No Setup", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and evaluated, but no setup is currently present.") };
   }
   if (tradabilityStatus === "HALTED_BY_RISK" || haltReason || String(row?.risk_state ?? "").toUpperCase() !== "OK") {
     return { label: "Risk", tone: "danger", reason: String((readinessRow?.tradability_reason ?? haltReason) || "Risk gating is blocking new entries.") };
@@ -10644,7 +10644,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       : row,
   );
   const triageFirstFailingGate = operatorTriage.hard_gates.find((row) => row.status === "fail") ?? null;
-  const triageTradeAuthority = operatorTriage.live_trade_authority;
+  const triagePaperMode = String(global.mode ?? global.mode_label ?? "").trim().toUpperCase() === "PAPER" || global.live_disabled === true;
+  const triageTradeAuthority = triagePaperMode ? operatorTriage.paper_trade_authority : operatorTriage.live_trade_authority;
   const triageConnectionPosture = operatorTriage.connection_posture;
   const triageOutagePosture = operatorTriage.outage_posture;
   const triageRuntimePosture = operatorTriage.runtime_posture;
@@ -10854,13 +10855,19 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       ? [
           {
             key: "trade-authority",
-            title: triagePositionPosture === "In Position" ? "Critical outage with open exposure" : "Live trade authority blocked",
+            title: triagePositionPosture === "In Position"
+              ? "Critical outage with open exposure"
+              : triagePaperMode
+                ? "Paper trade authority blocked"
+                : "Live trade authority blocked",
             statusLabel: triageOutagePosture === "Critical" ? "Critical" : "Blocked",
             tone: triageOutagePosture === "Critical" ? "danger" : "warn",
             impact:
               triagePositionPosture === "In Position"
                 ? `Manual fallback is required for ${formatValue(triageExposure.symbol ?? "the current position")}.`
-                : "No live entries, exits, or risk changes are allowed in-app.",
+                : triagePaperMode
+                  ? "Paper entries and exits remain blocked until the failed paper gate recovers."
+                  : "No live entries, exits, or risk changes are allowed in-app.",
             summary: `${triageDominantBlocker}. ${triageRootCause}`,
             actions: [
               { label: triagePrimaryAction.label, onClick: triagePrimaryAction.onClick, disabled: triagePrimaryAction.disabled },
@@ -11502,6 +11509,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
 
   const readinessCards: Array<{ label: string; value: unknown; tone?: Tone }> = [
     { label: "Runtime Status", value: runtimeReadiness.values?.runtime_status ?? global.runtime_health_label ?? "Unknown", tone: statusTone(runtimeReadiness.values?.runtime_status ?? global.runtime_health_label) },
+    { label: "Source Mode", value: desktopState?.source.label ?? "Unknown", tone: statusTone(desktopState?.source.label) },
     { label: "Entries Enabled", value: global.entries_enabled ?? runtimeValues.entries_enabled ?? paperReadiness.entries_enabled, tone: statusTone(global.entries_enabled ?? runtimeValues.entries_enabled ?? paperReadiness.entries_enabled) },
     { label: "Operator Halt", value: inferOperatorHalt(global, paperReadiness), tone: statusTone(inferOperatorHalt(global, paperReadiness)) },
     { label: "Broker / Auth", value: global.auth_label ?? runtimeValues.auth_readiness, tone: statusTone(global.auth_label ?? runtimeValues.auth_readiness) },
@@ -11514,8 +11522,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     { label: "Governance Allowed", value: String(readinessLaneStatusSummary.governance_allowed_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.governance_allowed_lanes_count ?? 0) > 0 ? "good" : "warn" },
     { label: "Route Ready Lanes", value: String(readinessLaneStatusSummary.route_ready_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.route_ready_lanes_count ?? 0) > 0 ? "good" : "warn" },
     { label: "Session Eligible", value: String(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0) > 0 ? "good" : "warn" },
-    { label: "Waiting For Bar", value: String(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0), tone: Number(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0) > 0 ? "warn" : "muted" },
-    { label: "No Setup", value: String(readinessLaneStatusSummary.no_setup_count ?? 0), tone: Number(readinessLaneStatusSummary.no_setup_count ?? 0) > 0 ? "warn" : "muted" },
+    { label: "Waiting For 3m Bar", value: String(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0), tone: Number(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0) > 0 ? "warn" : "muted" },
+    { label: "Evaluated / No Setup", value: String(readinessLaneStatusSummary.no_setup_count ?? 0), tone: Number(readinessLaneStatusSummary.no_setup_count ?? 0) > 0 ? "warn" : "muted" },
     { label: "Actionable Now", value: String(readinessLaneStatusSummary.actionable_now_count ?? 0), tone: Number(readinessLaneStatusSummary.actionable_now_count ?? 0) > 0 ? "good" : "warn" },
     { label: "Blocked Lanes", value: String(readinessLaneStatusSummary.blocked_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.blocked_lanes_count ?? 0) > 0 ? "warn" : "good" },
     { label: "Ready This Bar", value: String(readinessLaneStatusSummary.eligible_to_trade_count ?? 0), tone: Number(readinessLaneStatusSummary.eligible_to_trade_count ?? 0) > 0 ? "good" : "muted" },
@@ -11852,6 +11860,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
 
                 {triageTradeAuthority === "Blocked" ? (
                   <OutagePanel
+                    paperMode={triagePaperMode}
                     positionPosture={triagePositionPosture}
                     rootCause={triageRootCause}
                     recoverySummary={triageGateRows.filter((row) => row.status === "fail").map((row) => row.label).join(" + ") || "Recover all failed hard gates."}
@@ -18356,7 +18365,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                   <MetricCard label="Runtime Freshness" value={formatValue(global.stale ? "STALE" : formatRelativeAge(global.last_update_timestamp ?? desktopState?.refreshedAt))} tone={statusTone(global.stale ? "stale" : "fresh")} />
                   <MetricCard label="Ready This Bar" value={`${laneEligibilityRows.filter((row) => row.eligible_now === true).length}/${laneEligibilityRows.length || 0}`} />
                   <MetricCard label="Session Eligible" value={formatValue(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0)} />
-                  <MetricCard label="Waiting For Bar" value={formatValue(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0)} />
+                  <MetricCard label="Waiting For 3m Bar" value={formatValue(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0)} />
                   <MetricCard label="Actionable Now" value={formatValue(readinessLaneStatusSummary.actionable_now_count ?? 0)} />
                   <MetricCard label="Lane Risk Rows" value={`${laneRiskRows.length}`} />
                 </div>
@@ -18947,6 +18956,7 @@ function HardGatesPanel(props: { rows: TriageGateRowModel[]; runtimePosture: Run
 }
 
 function OutagePanel(props: {
+  paperMode: boolean;
   positionPosture: PositionPostureState;
   rootCause: string;
   recoverySummary: string;
@@ -18962,14 +18972,20 @@ function OutagePanel(props: {
       <div className="triage-outage-header">
         <div>
           <div className="section-subtitle">Outage / Fallback</div>
-          <div className="triage-outage-title">{critical ? "Critical Outage" : "Live Trading Blocked"}</div>
+          <div className="triage-outage-title">
+            {critical ? "Critical Outage" : props.paperMode ? "Paper Trading Blocked" : "Live Trading Blocked"}
+          </div>
         </div>
         <Badge label={critical ? "Critical" : "Review"} tone={critical ? "danger" : "warn"} />
       </div>
       <div className="triage-outage-lead">
         {critical
-          ? "Manual fallback is required while live exposure remains open."
-          : "Live trading stays blocked until all failed hard gates recover."}
+          ? props.paperMode
+            ? "Manual fallback is required while paper exposure remains open."
+            : "Manual fallback is required while live exposure remains open."
+          : props.paperMode
+            ? "Paper trading stays blocked until all failed paper hard gates recover."
+            : "Live trading stays blocked until all failed hard gates recover."}
       </div>
       <div className="triage-outage-grid">
         <div className="triage-detail-card">
@@ -18984,7 +19000,9 @@ function OutagePanel(props: {
               ? props.runbookPath
                 ? `Runbook: ${props.runbookPath}`
                 : "Use the external broker-native fallback procedure; in-app exits stay fail-closed."
-              : "Live trade authority stays blocked until every failed hard gate recovers."}
+              : props.paperMode
+                ? "Paper trade authority stays blocked until every failed paper hard gate recovers."
+                : "Live trade authority stays blocked until every failed hard gate recovers."}
           </div>
         </div>
         {critical ? (
