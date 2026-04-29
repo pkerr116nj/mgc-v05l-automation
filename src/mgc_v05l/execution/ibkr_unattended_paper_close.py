@@ -590,8 +590,8 @@ def _derive_marketable_sell_limit(
     delayed_quote_max_age_seconds: float,
     offset_ticks: float,
 ) -> float:
-    if str(quote_context.get("quote_source_label") or "").strip().upper() != "DELAYED":
-        raise IbkrUnattendedPaperCloseError("Unattended paper close requires a delayed quote.")
+    if str(quote_context.get("quote_source_label") or "").strip().upper() not in {"DELAYED", "DELAYED_FROZEN"}:
+        raise IbkrUnattendedPaperCloseError("Unattended paper close requires delayed or delayed-frozen quote context.")
     updated_at = _parse_iso_timestamp(quote_context.get("updated_at"))
     if updated_at is None:
         raise IbkrUnattendedPaperCloseError("Unattended paper close requires a timestamped delayed quote.")
@@ -614,8 +614,8 @@ def _validate_pricing_context(
     config: IbkrUnattendedPaperCloseConfig,
 ) -> None:
     quote_snapshot = dict(pricing_context.get("quote_snapshot") or {})
-    if str(quote_snapshot.get("source_label") or "").strip().upper() != "DELAYED":
-        raise IbkrUnattendedPaperCloseError("Unattended paper close requires delayed quote context.")
+    if str(quote_snapshot.get("source_label") or "").strip().upper() not in {"DELAYED", "DELAYED_FROZEN"}:
+        raise IbkrUnattendedPaperCloseError("Unattended paper close requires delayed or delayed-frozen quote context.")
     if pricing_context.get("reference_price") is None:
         raise IbkrUnattendedPaperCloseError("Unattended paper close could not derive a delayed reference price.")
     if pricing_context.get("distance_from_reference_price") is None or float(pricing_context.get("distance_from_reference_price") or 0.0) <= 0.0:

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import mgc_v05l.execution.ibkr_manual_paper_submit as manual_submit_module
 from mgc_v05l.brokers.ibkr import IbkrQualifiedContract
 from mgc_v05l.execution.ibkr_manual_paper_submit import (
     _CLOSE_TEST_MODE,
@@ -16,6 +17,7 @@ from mgc_v05l.execution.ibkr_manual_paper_submit import (
     _derive_marketable_limit_price,
     _exact_contract_position_quantity,
     _execute_submit_cancel_lifecycle,
+    _probe_delayed_quote_context,
     _qualified_contract_with_api_details,
     _submit_input_guardrails,
     artifact_stem_for_test_mode,
@@ -1283,3 +1285,60 @@ def _merge_context_override(base: dict[str, object], override: dict[str, object]
     for key, value in override.items():
         merged[key] = value
     return merged
+
+
+def test_probe_delayed_quote_context_accepts_delayed_frozen_fallback(monkeypatch) -> None:
+    responses = {
+        1: {
+            "any_tick_returned": False,
+            "response_indication": "no_permission",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        3: {
+            "any_tick_returned": False,
+            "response_indication": "delayed_only",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        2: {
+            "any_tick_returned": False,
+            "response_indication": "delayed_only",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        4: {
+            "any_tick_returned": True,
+            "response_indication": "delayed_only",
+            "bid_price": 27236.25,
+            "ask_price": 27236.75,
+            "last_price": 27237.0,
+            "close_price": 27168.75,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+    def _fake_request_market_data_snapshot(**kwargs):
+        return dict(responses[int(kwargs["market_data_type"])])
+
+    monkeypatch.setattr(manual_submit_module, "_request_market_data_snapshot", _fake_request_market_data_snapshot)
+
+    result = _probe_delayed_quote_context(
+        transport=SimpleNamespace(),
+        collector=SimpleNamespace(),
+        contract=IbkrQualifiedContract(
+            internal_symbol="MNQ",
+            broker_symbol="MNQ",
+            local_symbol="MNQM6",
+            security_type="FUT",
+            exchange="CME",
+            currency="USD",
+            expiry="20260618",
+            multiplier="2",
+            trading_class="MNQ",
+            con_id=770561201,
+        ),
+        timeout_seconds=5.0,
+        sleep_fn=lambda _: None,
+    )
+
+    assert result["has_quote"] is True
+    assert result["quote_source_label"] == "DELAYED_FROZEN"
+    assert "delayed-frozen" in str(result["live_market_data_warning"]).lower()

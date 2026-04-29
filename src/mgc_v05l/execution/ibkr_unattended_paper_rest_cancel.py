@@ -632,8 +632,8 @@ def _derive_non_marketable_buy_limit(
     delayed_quote_max_age_seconds: float,
     offset_ticks: float,
 ) -> float:
-    if str(quote_context.get("quote_source_label") or "").strip().upper() != "DELAYED":
-        raise IbkrUnattendedPaperRestCancelError("Unattended paper rest/cancel requires a delayed quote. Fail closed if delayed quote is unavailable.")
+    if str(quote_context.get("quote_source_label") or "").strip().upper() not in {"DELAYED", "DELAYED_FROZEN"}:
+        raise IbkrUnattendedPaperRestCancelError("Unattended paper rest/cancel requires delayed or delayed-frozen quote context. Fail closed if delayed-style quote context is unavailable.")
     updated_at = _parse_iso_timestamp(quote_context.get("updated_at"))
     if updated_at is None:
         raise IbkrUnattendedPaperRestCancelError("Unattended paper rest/cancel requires a timestamped delayed quote.")
@@ -656,8 +656,8 @@ def _validate_pricing_context(
     config: IbkrUnattendedPaperRestCancelConfig,
 ) -> None:
     quote_snapshot = dict(pricing_context.get("quote_snapshot") or {})
-    if str(quote_snapshot.get("source_label") or "").strip().upper() != "DELAYED":
-        raise IbkrUnattendedPaperRestCancelError("Unattended paper rest/cancel requires delayed quote context.")
+    if str(quote_snapshot.get("source_label") or "").strip().upper() not in {"DELAYED", "DELAYED_FROZEN"}:
+        raise IbkrUnattendedPaperRestCancelError("Unattended paper rest/cancel requires delayed or delayed-frozen quote context.")
     if pricing_context.get("reference_price") is None:
         raise IbkrUnattendedPaperRestCancelError("Unattended paper rest/cancel could not derive a delayed reference price.")
     if pricing_context.get("distance_from_reference_price") is None or float(pricing_context.get("distance_from_reference_price") or 0.0) <= 0.0:

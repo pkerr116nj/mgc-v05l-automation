@@ -810,27 +810,56 @@ def _probe_preview_quote_context(
         timeout_seconds=timeout_seconds,
         sleep_fn=sleep_fn,
     )
-    active_probe = delayed_probe if delayed_probe.get("any_tick_returned") else live_probe
+    frozen_probe = _request_market_data_snapshot(
+        transport=transport,
+        collector=collector,
+        contract=contract,
+        request_id=6203,
+        market_data_type=2,
+        timeout_seconds=timeout_seconds,
+        sleep_fn=sleep_fn,
+    )
+    delayed_frozen_probe = _request_market_data_snapshot(
+        transport=transport,
+        collector=collector,
+        contract=contract,
+        request_id=6204,
+        market_data_type=4,
+        timeout_seconds=timeout_seconds,
+        sleep_fn=sleep_fn,
+    )
+    active_probe = live_probe
+    active_label = "LIVE"
+    if delayed_probe.get("any_tick_returned"):
+        active_probe = delayed_probe
+        active_label = "DELAYED"
+    elif delayed_frozen_probe.get("any_tick_returned"):
+        active_probe = delayed_frozen_probe
+        active_label = "DELAYED_FROZEN"
+    elif frozen_probe.get("any_tick_returned"):
+        active_probe = frozen_probe
+        active_label = "FROZEN"
     live_market_data_available = bool(
         live_probe.get("any_tick_returned") and live_probe.get("response_indication") == "data_returned"
     )
-    delayed_warning = (
-        "Live market data is unavailable in this paper session. The preview uses delayed data only."
-        if not live_market_data_available
-        else None
-    )
+    delayed_warning = None
+    if not live_market_data_available:
+        if active_label == "DELAYED_FROZEN":
+            delayed_warning = "Live market data is unavailable in this paper session. The preview uses delayed-frozen data only."
+        elif active_label == "FROZEN":
+            delayed_warning = "Live market data is unavailable in this paper session. The preview uses frozen quote data only."
+        else:
+            delayed_warning = "Live market data is unavailable in this paper session. The preview uses delayed data only."
     return {
         "live_probe": live_probe,
         "delayed_probe": delayed_probe,
+        "frozen_probe": frozen_probe,
+        "delayed_frozen_probe": delayed_frozen_probe,
         "has_quote": bool(active_probe.get("any_tick_returned")),
-        "quote_source_label": (
-            "DELAYED"
-            if active_probe is delayed_probe and delayed_probe.get("any_tick_returned")
-            else ("LIVE" if live_market_data_available else "UNAVAILABLE")
-        ),
+        "quote_source_label": active_label if active_probe.get("any_tick_returned") else "UNAVAILABLE",
         "live_market_data_available": live_market_data_available,
         "live_market_data_warning": delayed_warning,
-        "delayed_data_warning_present": bool(delayed_warning) or bool(delayed_probe.get("any_tick_returned")),
+        "delayed_data_warning_present": bool(delayed_warning) or bool(delayed_probe.get("any_tick_returned")) or bool(delayed_frozen_probe.get("any_tick_returned")),
         "bid_price": active_probe.get("bid_price"),
         "ask_price": active_probe.get("ask_price"),
         "last_price": active_probe.get("last_price"),

@@ -217,7 +217,7 @@ def test_builds_inventory_and_intent_rows_for_live_paper_lanes(tmp_path: Path) -
 
     artifacts = run_ibkr_paper_strategy_porting(config=_config(tmp_path))
 
-    assert artifacts.classification == "IBKR_PAPER_STRATEGY_PORT_PARTIAL"
+    assert artifacts.classification == "IBKR_PAPER_STRATEGY_PORT_READY"
     assert artifacts.adapter_classification == "STRATEGY_INTENT_ADAPTER_READY"
     assert len(artifacts.inventory_rows) == 5
     atp = next(row for row in artifacts.inventory_rows if row["strategy_id"] == "atp_companion_v1_asia_us")
@@ -237,8 +237,10 @@ def test_builds_inventory_and_intent_rows_for_live_paper_lanes(tmp_path: Path) -
     assert gc_intent["bridge_submit_capable"] is True
     assert gc_intent["bridge_execution_target"]["symbol"] == "MGC"
     nq = next(row for row in artifacts.intent_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
-    assert nq["can_route_to_ibkr_now"] is False
-    assert "unsupported_instrument_scope" in nq["route_blockers"]
+    assert nq["bridge_submit_capable"] is True
+    assert nq["bridge_execution_target"]["symbol"] == "MNQ"
+    assert nq["action"] == "BUY"
+    assert nq["can_route_to_ibkr_now"] is True
 
 
 def test_write_porting_artifacts(tmp_path: Path) -> None:

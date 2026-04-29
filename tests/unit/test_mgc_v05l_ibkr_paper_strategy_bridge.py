@@ -8,6 +8,7 @@ from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
     IbkrPaperStrategyBridgeConfig,
     IbkrPaperStrategyOrderIntent,
     _build_static_preflight_checks,
+    _quote_is_fresh,
     evaluate_strategy_bridge_caller,
     render_ibkr_paper_strategy_bridge_markdown,
     run_ibkr_paper_strategy_bridge,
@@ -141,6 +142,15 @@ def test_schema_contains_required_fields() -> None:
     assert "paper_only" in schema["required"]
     assert "current_strategy_state" in schema["properties"]
     assert "contract_target" in schema["properties"]
+
+
+def test_quote_is_fresh_accepts_delayed_frozen_label() -> None:
+    assert _quote_is_fresh(
+        {
+            "updated_at": "2999-01-01T00:00:00+00:00",
+            "quote_source_label": "DELAYED_FROZEN",
+        }
+    )
 
 
 def test_write_schema_file(tmp_path: Path) -> None:

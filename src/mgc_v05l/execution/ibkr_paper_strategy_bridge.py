@@ -1133,7 +1133,11 @@ def _quote_is_fresh(quote_context: dict[str, Any]) -> bool:
     if updated_at is None:
         return False
     age_seconds = max(0.0, (datetime.now(timezone.utc) - updated_at).total_seconds())
-    return age_seconds <= 30.0 and str(quote_context.get("quote_source_label") or "").strip().upper() in {"DELAYED", "LIVE"}
+    return age_seconds <= 30.0 and str(quote_context.get("quote_source_label") or "").strip().upper() in {
+        "DELAYED",
+        "DELAYED_FROZEN",
+        "LIVE",
+    }
 
 
 def _qualified_contract_is_exact(qualified_contract_report: dict[str, Any]) -> bool:

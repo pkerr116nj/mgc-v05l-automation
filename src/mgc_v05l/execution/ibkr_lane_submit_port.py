@@ -33,6 +33,18 @@ _PREFERRED_LANES = (
     "gc_1x_asia_london_participation__asia_london_short_v2",
     "mgc_1x_asia_london_participation__asia_london_long_v5",
     "mgc_1x_asia_london_participation__asia_london_short_v2",
+    "mnq_1x_ny_early_core__us_late_long",
+    "mnq_1x_ny_early_core__us_midday_long",
+    "mnq_1x_ny_early_core__us_early_long",
+    "mnq_1x_asia_london_participation__asia_london_long_v5",
+    "mnq_1x_asia_london_participation__asia_london_long_v6",
+    "mnq_1x_asia_london_participation__asia_london_short_v2",
+    "nq_1x_ny_early_core__us_late_long",
+    "nq_1x_ny_early_core__us_midday_long",
+    "nq_1x_ny_early_core__us_early_long",
+    "nq_1x_asia_london_participation__asia_london_long_v5",
+    "nq_1x_asia_london_participation__asia_london_long_v6",
+    "nq_1x_asia_london_participation__asia_london_short_v2",
 )
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
@@ -69,7 +81,7 @@ def run_ibkr_lane_submit_port(*, config: IbkrLaneSubmitPortConfig) -> IbkrLaneSu
         report = {
             "classification": "PAPER_LANE_PREFLIGHT_BLOCKED",
             "generated_at": _utc_now(),
-            "detail": "No eligible non-ATP GC/MGC lane could be selected for submit-capable porting.",
+            "detail": "No eligible supported lane could be selected for submit-capable porting.",
             "paper_strategy_monitor_status": monitor_status,
             "selected_lane": {},
         }
@@ -178,7 +190,7 @@ def _select_lane(*, report: dict[str, Any], repo_root: Path, strategy_id: str | 
         gov = governance_rows.get(preferred, {})
         if not gov:
             continue
-        if str(row.get("instrument") or "") not in {"GC", "MGC"}:
+        if str(row.get("instrument") or "") not in {"GC", "MGC", "NQ", "MNQ"}:
             continue
         if str(gov.get("strategy_status") or "WATCHLIST") in {"PAUSED", "DISABLED"}:
             continue

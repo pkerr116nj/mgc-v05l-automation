@@ -2137,9 +2137,28 @@ def _qualify_mgc_contract(
     timeout_seconds: float,
     sleep_fn: Callable[[float], None],
 ) -> dict[str, Any]:
+    return _qualify_futures_contract(
+        transport=transport,
+        collector=collector,
+        symbol=_EXPECTED_SYMBOL,
+        expiry=_EXPECTED_EXPIRY,
+        timeout_seconds=timeout_seconds,
+        sleep_fn=sleep_fn,
+    )
+
+
+def _qualify_futures_contract(
+    *,
+    transport: IbkrManualPaperSubmitTransport,
+    collector: IbkrManualPaperSubmitCollector,
+    symbol: str,
+    expiry: str,
+    timeout_seconds: float,
+    sleep_fn: Callable[[float], None],
+) -> dict[str, Any]:
     resolver = IbkrContractResolver()
-    qualified = resolver.qualify_futures(symbol=_EXPECTED_SYMBOL, expiry=_EXPECTED_EXPIRY)
-    request_id = 9501
+    qualified = resolver.qualify_futures(symbol=symbol, expiry=expiry)
+    request_id = 9501 + (abs(hash((str(symbol).upper(), str(expiry)))) % 200)
     event = collector.contract_details_event(request_id)
     transport.req_contract_details(request_id=request_id, contract=qualified)
     event_ok = _wait_for_event(
@@ -2232,20 +2251,53 @@ def _probe_delayed_quote_context(
         timeout_seconds=timeout_seconds,
         sleep_fn=sleep_fn,
     )
-    active_probe = delayed_probe if delayed_probe.get("any_tick_returned") else live_probe
+    frozen_probe = _request_market_data_snapshot(
+        transport=transport,
+        collector=collector,
+        contract=contract,
+        request_id=9603,
+        market_data_type=2,
+        timeout_seconds=timeout_seconds,
+        sleep_fn=sleep_fn,
+    )
+    delayed_frozen_probe = _request_market_data_snapshot(
+        transport=transport,
+        collector=collector,
+        contract=contract,
+        request_id=9604,
+        market_data_type=4,
+        timeout_seconds=timeout_seconds,
+        sleep_fn=sleep_fn,
+    )
     live_market_data_available = bool(
         live_probe.get("any_tick_returned") and live_probe.get("response_indication") == "data_returned"
     )
-    warning = (
-        "Live market data is unavailable in this paper session. The preview uses delayed data only."
-        if not live_market_data_available
-        else None
-    )
+    active_label = "LIVE"
+    active_probe = live_probe
+    if delayed_probe.get("any_tick_returned"):
+        active_label = "DELAYED"
+        active_probe = delayed_probe
+    elif delayed_frozen_probe.get("any_tick_returned"):
+        active_label = "DELAYED_FROZEN"
+        active_probe = delayed_frozen_probe
+    elif frozen_probe.get("any_tick_returned"):
+        active_label = "FROZEN"
+        active_probe = frozen_probe
+    warning = None
+    if not live_market_data_available:
+        if active_label == "DELAYED_FROZEN":
+            warning = "Live market data is unavailable in this paper session. The preview uses delayed-frozen data only."
+        elif active_label == "FROZEN":
+            warning = "Live market data is unavailable in this paper session. The preview uses frozen quote data only."
+        else:
+            warning = "Live market data is unavailable in this paper session. The preview uses delayed data only."
     return {
         "live_probe": live_probe,
         "delayed_probe": delayed_probe,
+        "frozen_probe": frozen_probe,
+        "delayed_frozen_probe": delayed_frozen_probe,
         "has_quote": bool(active_probe.get("any_tick_returned")),
-        "quote_source_label": "DELAYED" if delayed_probe.get("any_tick_returned") else ("LIVE" if live_market_data_available else "UNAVAILABLE"),
+        "quote_source_label": active_label if active_probe.get("any_tick_returned") else "UNAVAILABLE",
         "live_market_data_available": live_market_data_available,
         "live_market_data_warning": warning,
         "bid_price": active_probe.get("bid_price"),
@@ -2254,7 +2306,7 @@ def _probe_delayed_quote_context(
         "close_price": active_probe.get("close_price"),
         "updated_at": active_probe.get("updated_at"),
         "response_indication": active_probe.get("response_indication"),
-        "delayed_data_warning_present": bool(warning) or bool(delayed_probe.get("any_tick_returned")),
+        "delayed_data_warning_present": bool(warning) or bool(delayed_probe.get("any_tick_returned")) or bool(delayed_frozen_probe.get("any_tick_returned")),
     }
 
 
