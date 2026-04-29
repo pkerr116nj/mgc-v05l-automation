@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,11 +42,20 @@ def test_strategy_style_caller_fails_closed() -> None:
     assert result["passed"] is False
 
 
+def test_supervised_executor_caller_is_allowed() -> None:
+    result = evaluate_unattended_paper_close_caller(
+        caller_path="ibkr_paper_strategy_executor",
+        stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.execution.ibkr_paper_strategy_executor"}))],
+    )
+
+    assert result["passed"] is True
+
+
 def test_derive_marketable_sell_limit_uses_delayed_bid(tmp_path: Path) -> None:
     limit_price = _derive_marketable_sell_limit(
         quote_context={
             "quote_source_label": "DELAYED",
-            "updated_at": "2026-04-28T14:00:00+00:00",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "bid_price": 4590.9,
             "last_price": 4591.0,
         },

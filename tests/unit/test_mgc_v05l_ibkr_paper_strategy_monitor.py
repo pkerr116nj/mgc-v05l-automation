@@ -285,6 +285,46 @@ def test_ledger_broker_mismatch_is_classified(tmp_path: Path) -> None:
     assert "ledger_broker_mismatch" in artifacts.status["block_reasons"]
 
 
+def test_flat_after_adopted_position_preserves_strategy_ownership(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "var" / "paper_strategy_position_ledger.json"
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(
+        json.dumps(
+            {
+                "positions": [
+                    {
+                        "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+                        "quantity": 1.0,
+                        "side": "LONG",
+                        "perm_id": 490708968,
+                        "execution_id": "0000e1a7.69f1fa35.01.01",
+                        "source_intent_id": "intent-1",
+                        "adopted_from_broker_truth": True,
+                        "average_entry_price": 4586.7,
+                        "order_id": 1,
+                        "entry_timestamp": "2026-04-28T19:31:29.243706+00:00",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_ownership_evidence(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_monitor(
+        config=_config(tmp_path),
+        reconciliation_runner=lambda **_: _Artifacts(_reconciliation_report(quantity=0.0)),
+        dashboard_fetcher=lambda _: _dashboard_payload(stale=False),
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_MONITOR_ACTIVE"
+    assert artifacts.status["broker_position_quantity"] == 0.0
+    assert artifacts.status["ledger_position_quantity"] == 0.0
+    assert "ledger_broker_mismatch" not in artifacts.status["block_reasons"]
+    assert artifacts.ledger["positions"][0]["strategy_id"] == "ATP_COMPANION_V1_ASIA_US"
+    assert artifacts.ledger["positions"][0]["state"] == "FLAT"
+
+
 def test_write_artifacts_and_load_status(tmp_path: Path) -> None:
     _write_ownership_evidence(tmp_path)
     config = _config(tmp_path)

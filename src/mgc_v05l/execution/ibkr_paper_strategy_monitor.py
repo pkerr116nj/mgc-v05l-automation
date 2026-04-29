@@ -843,6 +843,28 @@ def _determine_strategy_ownership(
             "order_id": prior_adopted.get("order_id"),
             "entry_timestamp": prior_adopted.get("entry_timestamp"),
         }
+    if broker_quantity == 0.0 and prior_contract_matches:
+        return {
+            "classification": "adopted",
+            "ownership_proven": True,
+            "strategy_id": config.strategy_id,
+            "detail": "Preserved ATP ownership on the reconciled flat paper position using prior adopted evidence from the opened broker lot.",
+            "source_intent_id": prior_adopted.get("source_intent_id") or bridge_intent.get("intent_id"),
+            "perm_id": prior_perm_id,
+            "execution_id": prior_adopted.get("execution_id"),
+            "client_id": prior_adopted.get("client_id"),
+            "sources": [
+                str((config.repo_root / config.strategy_tracking_snapshot_path).resolve()),
+                str((config.repo_root / config.bridge_report_path).resolve()),
+                str((config.repo_root / config.prepared_bundle_path).resolve()),
+                *list(prior_adopted.get("sources") or []),
+            ],
+            "restored_from_prior_evidence": True,
+            "restoration_source": "paper_orphan_reconciliation_adoption",
+            "average_entry_price": prior_adopted.get("average_entry_price"),
+            "order_id": prior_adopted.get("order_id"),
+            "entry_timestamp": prior_adopted.get("entry_timestamp"),
+        }
     return {
         "classification": "orphan",
         "ownership_proven": False,
@@ -890,8 +912,38 @@ def _build_updated_ledger(
         side = "SHORT"
         state = "NEEDS_REVIEW"
 
+    preserved_strategy_id = ownership.get("strategy_id") or (
+        existing_positions[0].get("strategy_id")
+        if broker_quantity == 0.0 and previously_adopted and existing_positions
+        else None
+    )
+    preserved_source_intent_id = ownership.get("source_intent_id") or (
+        existing_positions[0].get("source_intent_id")
+        if broker_quantity == 0.0 and previously_adopted and existing_positions
+        else None
+    )
+    preserved_perm_id = ownership.get("perm_id") or (
+        existing_positions[0].get("perm_id")
+        if broker_quantity == 0.0 and previously_adopted and existing_positions
+        else None
+    )
+    preserved_execution_id = ownership.get("execution_id") or (
+        existing_positions[0].get("execution_id")
+        if broker_quantity == 0.0 and previously_adopted and existing_positions
+        else None
+    )
+    preserved_order_id = ownership.get("order_id") if latest_exec is None else latest_exec.get("broker_order_id")
+    if preserved_order_id is None and broker_quantity == 0.0 and previously_adopted and existing_positions:
+        preserved_order_id = existing_positions[0].get("order_id")
+    preserved_entry_timestamp = ownership.get("entry_timestamp") if latest_exec is None else latest_exec.get("executed_at")
+    if preserved_entry_timestamp is None and broker_quantity == 0.0 and previously_adopted and existing_positions:
+        preserved_entry_timestamp = existing_positions[0].get("entry_timestamp")
+    preserved_average_entry_price = ownership.get("average_entry_price") if latest_exec is None else latest_exec.get("price")
+    if preserved_average_entry_price is None and broker_quantity == 0.0 and previously_adopted and existing_positions:
+        preserved_average_entry_price = existing_positions[0].get("average_entry_price")
+
     position_row = {
-        "strategy_id": ownership.get("strategy_id"),
+        "strategy_id": preserved_strategy_id,
         "account_id": config.account_id,
         "environment": {
             "mode": config.mode,
@@ -905,20 +957,20 @@ def _build_updated_ledger(
         "local_symbol": config.local_symbol,
         "side": side,
         "quantity": broker_quantity,
-        "average_entry_price": ownership.get("average_entry_price") if latest_exec is None else latest_exec.get("price"),
+        "average_entry_price": preserved_average_entry_price,
         "average_cost_basis": None if portfolio_row is None else portfolio_row.get("average_cost"),
-        "order_id": ownership.get("order_id") if latest_exec is None else latest_exec.get("broker_order_id"),
-        "perm_id": ownership.get("perm_id"),
-        "execution_id": ownership.get("execution_id"),
-        "entry_timestamp": ownership.get("entry_timestamp") if latest_exec is None else latest_exec.get("executed_at"),
-        "source_intent_id": ownership.get("source_intent_id"),
-        "state": state if ownership.get("ownership_proven") else ("FLAT" if broker_quantity == 0.0 else "NEEDS_REVIEW"),
+        "order_id": preserved_order_id,
+        "perm_id": preserved_perm_id,
+        "execution_id": preserved_execution_id,
+        "entry_timestamp": preserved_entry_timestamp,
+        "source_intent_id": preserved_source_intent_id,
+        "state": state if (ownership.get("ownership_proven") or (broker_quantity == 0.0 and previously_adopted)) else ("FLAT" if broker_quantity == 0.0 else "NEEDS_REVIEW"),
         "realized_pnl": None if portfolio_row is None else portfolio_row.get("realized_pnl"),
         "unrealized_pnl": None if portfolio_row is None else portfolio_row.get("unrealized_pnl"),
         "last_reconciliation_timestamp": now,
         "pnl_source": "ibkr_updatePortfolio" if portfolio_row is not None else "ibkr_account_snapshot",
         "ownership_detail": ownership.get("detail"),
-        "adopted_from_broker_truth": bool(ownership.get("ownership_proven")),
+        "adopted_from_broker_truth": bool(ownership.get("ownership_proven")) or (broker_quantity == 0.0 and previously_adopted),
         "previously_adopted": previously_adopted,
     }
 
@@ -1000,7 +1052,9 @@ def _build_monitor_status(
     previous_active = dict((previous_positions or [None])[0] or {})
     previous_quantity_raw = previous_active.get("quantity")
     previous_quantity = broker_quantity if previous_quantity_raw is None else float(previous_quantity_raw)
-    mismatch = bool(previous_positions) and previous_quantity != broker_quantity
+    mismatch = bool(previous_positions) and previous_quantity != broker_quantity and not (
+        broker_quantity == 0.0 and bool(previous_active.get("adopted_from_broker_truth"))
+    )
     orphan = broker_quantity > 0.0 and not ownership.get("ownership_proven")
     newly_adopted = bool(active_position) and bool(active_position.get("adopted_from_broker_truth")) and not bool(
         previous_positions and (previous_positions[0] or {}).get("adopted_from_broker_truth")

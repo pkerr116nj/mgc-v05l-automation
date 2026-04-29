@@ -11,6 +11,21 @@ from typing import Any, Callable
 import time
 
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
+from .ibkr_paper_strategy_monitor import (
+    IbkrPaperStrategyMonitorConfig,
+    run_ibkr_paper_strategy_monitor,
+    write_ibkr_paper_strategy_monitor_artifacts,
+)
+from .ibkr_paper_strategy_exposure import (
+    IbkrPaperStrategyExposureConfig,
+    run_ibkr_paper_strategy_exposure,
+    write_ibkr_paper_strategy_exposure_artifacts,
+)
+from .ibkr_paper_strategy_governance import (
+    IbkrPaperStrategyGovernanceConfig,
+    run_ibkr_paper_strategy_governance,
+    write_ibkr_paper_strategy_governance_artifacts,
+)
 from .ibkr_unattended_paper_close import (
     IbkrUnattendedPaperCloseConfig,
     run_ibkr_unattended_paper_close,
@@ -69,6 +84,8 @@ class IbkrPaperStrategyExecutorConfig:
     dashboard_freshness_seconds: float = _DEFAULT_DASHBOARD_FRESHNESS_SECONDS
     monitor_freshness_seconds: float = _DEFAULT_MONITOR_FRESHNESS_SECONDS
     supervised_submit_enabled: bool = True
+    force_exit_long: bool = False
+    allow_direct_reconciliation_close: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,6 +129,7 @@ def run_ibkr_paper_strategy_executor(
     *,
     config: IbkrPaperStrategyExecutorConfig,
     close_runner: Callable[..., Any] = run_ibkr_unattended_paper_close,
+    monitor_refresh_runner: Callable[..., Any] = run_ibkr_paper_strategy_monitor,
 ) -> IbkrPaperStrategyExecutorArtifacts:
     _validate_environment_lock(config)
     audit_events: list[dict[str, Any]] = []
@@ -128,6 +146,57 @@ def run_ibkr_paper_strategy_executor(
     dashboard_snapshot = _load_json(config.repo_root / config.dashboard_snapshot_path)
     dashboard_gate = _extract_dashboard_gate(dashboard_snapshot)
     strategy_position = _load_strategy_position(ledger, config.strategy_id)
+    runtime_wrapper_stale = _runtime_wrapper_stale(monitor_status)
+    direct_monitor_status: dict[str, Any] | None = None
+    preflight_note: str | None = None
+
+    if (
+        bool(config.force_exit_long)
+        and bool(config.allow_direct_reconciliation_close)
+        and _strategy_position_is_long(strategy_position)
+        and runtime_wrapper_stale
+    ):
+        refreshed_monitor = monitor_refresh_runner(
+            config=IbkrPaperStrategyMonitorConfig(
+                repo_root=config.repo_root,
+                mode=config.mode,
+                host=config.host,
+                port=config.port,
+                client_id=int(config.client_id),
+                account_id=config.account_id,
+                strategy_id=config.strategy_id,
+                symbol=config.symbol,
+                contract_month=config.contract_month,
+                exact_expiry=config.exact_expiry,
+                con_id=int(config.con_id),
+                local_symbol=config.local_symbol,
+            )
+        )
+        write_ibkr_paper_strategy_monitor_artifacts(
+            config=IbkrPaperStrategyMonitorConfig(
+                repo_root=config.repo_root,
+                mode=config.mode,
+                host=config.host,
+                port=config.port,
+                client_id=int(config.client_id),
+                account_id=config.account_id,
+                strategy_id=config.strategy_id,
+                symbol=config.symbol,
+                contract_month=config.contract_month,
+                exact_expiry=config.exact_expiry,
+                con_id=int(config.con_id),
+                local_symbol=config.local_symbol,
+            ),
+            artifacts=refreshed_monitor,
+        )
+        direct_monitor_status = dict(refreshed_monitor.status)
+        monitor_status = _runtime_like_status_from_direct_monitor(direct_monitor_status)
+        ledger = dict(refreshed_monitor.ledger)
+        strategy_position = _load_strategy_position(ledger, config.strategy_id)
+        dashboard_gate = _dashboard_gate_from_direct_monitor_status(direct_monitor_status, fallback=dashboard_gate)
+        preflight_note = (
+            "Monitor runtime wrapper was stale/disconnected, so this supervised close used a fresh direct broker/ledger reconciliation snapshot."
+        )
 
     preflight_checks = _build_preflight_checks(
         config=config,
@@ -159,12 +228,14 @@ def run_ibkr_paper_strategy_executor(
             classification=classification,
             decision=decision,
             decision_reason=detail,
-            monitor_status=monitor_status,
-            dashboard_gate=dashboard_gate,
-            strategy_position=strategy_position,
-            preflight_checks=preflight_checks,
-            delegated_result=None,
-        )
+        monitor_status=monitor_status,
+        dashboard_gate=dashboard_gate,
+        strategy_position=strategy_position,
+        preflight_checks=preflight_checks,
+        delegated_result=None,
+        preflight_note=preflight_note,
+        direct_monitor_status=direct_monitor_status,
+    )
         return IbkrPaperStrategyExecutorArtifacts(classification=classification, report=report, audit_events=audit_events)
 
     decision, decision_reason = _derive_strategy_decision(
@@ -220,6 +291,66 @@ def run_ibkr_paper_strategy_executor(
                 "report": delegated_artifacts.report,
             }
             if delegated_artifacts.classification == "PAPER_CLOSE_FILLED_FLAT":
+                post_close_monitor = monitor_refresh_runner(
+                    config=IbkrPaperStrategyMonitorConfig(
+                        repo_root=config.repo_root,
+                        mode=config.mode,
+                        host=config.host,
+                        port=config.port,
+                        client_id=int(config.client_id),
+                        account_id=config.account_id,
+                        strategy_id=config.strategy_id,
+                        symbol=config.symbol,
+                        contract_month=config.contract_month,
+                        exact_expiry=config.exact_expiry,
+                        con_id=int(config.con_id),
+                        local_symbol=config.local_symbol,
+                    )
+                )
+                write_ibkr_paper_strategy_monitor_artifacts(
+                    config=IbkrPaperStrategyMonitorConfig(
+                        repo_root=config.repo_root,
+                        mode=config.mode,
+                        host=config.host,
+                        port=config.port,
+                        client_id=int(config.client_id),
+                        account_id=config.account_id,
+                        strategy_id=config.strategy_id,
+                        symbol=config.symbol,
+                        contract_month=config.contract_month,
+                        exact_expiry=config.exact_expiry,
+                        con_id=int(config.con_id),
+                        local_symbol=config.local_symbol,
+                    ),
+                    artifacts=post_close_monitor,
+                )
+                monitor_status = _runtime_like_status_from_direct_monitor(dict(post_close_monitor.status))
+                direct_monitor_status = dict(post_close_monitor.status)
+                ledger = dict(post_close_monitor.ledger)
+                strategy_position = _load_strategy_position(ledger, config.strategy_id)
+                dashboard_gate = _dashboard_gate_from_direct_monitor_status(dict(post_close_monitor.status), fallback=dashboard_gate)
+                exposure_artifacts = run_ibkr_paper_strategy_exposure(
+                    config=IbkrPaperStrategyExposureConfig(
+                        repo_root=config.repo_root,
+                        strategy_id=config.strategy_id,
+                        bridge_strategy_id=config.strategy_id,
+                    )
+                )
+                write_ibkr_paper_strategy_exposure_artifacts(
+                    config=IbkrPaperStrategyExposureConfig(
+                        repo_root=config.repo_root,
+                        strategy_id=config.strategy_id,
+                        bridge_strategy_id=config.strategy_id,
+                    ),
+                    artifacts=exposure_artifacts,
+                )
+                governance_artifacts = run_ibkr_paper_strategy_governance(
+                    config=IbkrPaperStrategyGovernanceConfig(repo_root=config.repo_root)
+                )
+                write_ibkr_paper_strategy_governance_artifacts(
+                    config=IbkrPaperStrategyGovernanceConfig(repo_root=config.repo_root),
+                    artifacts=governance_artifacts,
+                )
                 classification = "PAPER_STRATEGY_EXECUTOR_EXIT_FILLED_FLAT"
                 decision_reason = "Strategy exit intent was submitted through the supervised paper close path and reconciled flat."
             else:
@@ -254,6 +385,8 @@ def run_ibkr_paper_strategy_executor(
         strategy_position=strategy_position,
         preflight_checks=preflight_checks,
         delegated_result=delegated_result,
+        preflight_note=preflight_note,
+        direct_monitor_status=direct_monitor_status,
     )
     return IbkrPaperStrategyExecutorArtifacts(classification=classification, report=report, audit_events=audit_events)
 
@@ -578,6 +711,11 @@ def _derive_strategy_decision(
     quantity = 0.0 if strategy_position is None else float(strategy_position.get("quantity") or 0.0)
     side = "" if strategy_position is None else str(strategy_position.get("side") or "").strip().upper()
     if quantity >= 1.0 and side == "LONG":
+        if bool(config.force_exit_long):
+            return (
+                "EXIT_LONG",
+                "Operator forced one supervised ATP sell-to-close from the reconciled ledger state.",
+            )
         session = dashboard_gate.get("session_classification")
         return (
             "HOLD_LONG",
@@ -600,6 +738,62 @@ def _resolved_exit_quantity(*, strategy_position: dict[str, Any] | None, max_qua
             f"EXIT_LONG requires reconciled strategy quantity <= configured max quantity ({max_quantity})."
         )
     return quantity
+
+
+def _strategy_position_is_long(strategy_position: dict[str, Any] | None) -> bool:
+    if strategy_position is None:
+        return False
+    return float(strategy_position.get("quantity") or 0.0) > 0.0 and str(strategy_position.get("side") or "").strip().upper() == "LONG"
+
+
+def _runtime_wrapper_stale(monitor_status: dict[str, Any]) -> bool:
+    return (
+        not bool(monitor_status.get("monitor_running"))
+        or str(monitor_status.get("health_classification") or monitor_status.get("monitor_health") or "").strip().upper() == "DISCONNECTED"
+        or "monitor_disconnected" in list(monitor_status.get("block_reasons") or [])
+    )
+
+
+def _runtime_like_status_from_direct_monitor(status: dict[str, Any]) -> dict[str, Any]:
+    backend_gate = dict(status.get("backend_gate") or {})
+    block_reasons = list(status.get("block_reasons") or [])
+    synthetic_block_reasons = [reason for reason in block_reasons if reason != "paper_strategy_monitor_not_running"]
+    return {
+        "classification": "PAPER_STRATEGY_MONITOR_ACTIVE" if status.get("ownership_proven") else status.get("classification"),
+        "monitor_running": True,
+        "health_classification": "HEALTHY" if status.get("ownership_proven") and not synthetic_block_reasons else "DEGRADED",
+        "stale": False,
+        "submit_allowed": bool(status.get("ownership_proven")) and not synthetic_block_reasons,
+        "strategy_id": status.get("strategy_id"),
+        "account_id": status.get("account_id"),
+        "exact_contract": status.get("exact_contract"),
+        "broker_position_quantity": status.get("broker_position_quantity"),
+        "ledger_position_quantity": status.get("ledger_position_quantity"),
+        "average_entry_price": status.get("average_entry_price"),
+        "unrealized_pnl": status.get("unrealized_pnl"),
+        "realized_pnl": status.get("realized_pnl"),
+        "open_order_count": status.get("open_order_count"),
+        "age_seconds": 0.0,
+        "block_reasons": synthetic_block_reasons,
+        "backend_gate": backend_gate,
+        "detail": status.get("detail"),
+    }
+
+
+def _dashboard_gate_from_direct_monitor_status(status: dict[str, Any], *, fallback: dict[str, Any]) -> dict[str, Any]:
+    backend_gate = dict(status.get("backend_gate") or {})
+    if not backend_gate:
+        return fallback
+    return {
+        "backend_healthy": bool(backend_gate.get("backend_healthy")),
+        "live_source_ready": bool(backend_gate.get("live_source_ready")),
+        "launch_allowed": bool(backend_gate.get("launch_allowed")),
+        "source_mode": "LIVE_API" if bool(backend_gate.get("live_source_ready")) else "SNAPSHOT_FALLBACK",
+        "session_classification": backend_gate.get("session_classification"),
+        "paper_runtime_stale": bool(backend_gate.get("paper_runtime_stale")),
+        "generated_at": status.get("generated_at"),
+        "age_seconds": 0.0,
+    }
 
 
 def _extract_strategy_decision_hint(*, dashboard_snapshot: dict[str, Any], strategy_id: str) -> str | None:
@@ -667,6 +861,8 @@ def _build_report(
     strategy_position: dict[str, Any] | None,
     preflight_checks: list[dict[str, Any]],
     delegated_result: dict[str, Any] | None,
+    preflight_note: str | None,
+    direct_monitor_status: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "generated_at": _utc_now(),
@@ -695,10 +891,12 @@ def _build_report(
             "generalized_from_ledger_broker_state": True,
         },
         "paper_strategy_monitor_status": monitor_status,
+        "direct_monitor_reconciliation_status": direct_monitor_status,
         "dashboard_gate": dashboard_gate,
         "strategy_position": strategy_position,
         "preflight_checks": preflight_checks,
         "delegated_result": delegated_result,
+        "preflight_note": preflight_note,
     }
 
 

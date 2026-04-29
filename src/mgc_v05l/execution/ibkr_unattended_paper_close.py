@@ -473,7 +473,10 @@ def evaluate_unattended_paper_close_caller(
         if module_name.startswith(_FORBIDDEN_CALLER_PREFIXES)
         or any(fragment in module_name for fragment in _FORBIDDEN_CALLER_SUBSTRINGS)
     ]
-    caller_allowed = normalized_caller == "unattended_paper_cli"
+    caller_allowed = normalized_caller in {
+        "unattended_paper_cli",
+        "ibkr_paper_strategy_executor",
+    }
     passed = caller_allowed and not forbidden
     return {
         "caller_path": normalized_caller,

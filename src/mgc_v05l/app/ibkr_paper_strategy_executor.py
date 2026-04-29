@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval-seconds", type=float, default=45.0, help="Polling interval for loop mode.")
     parser.add_argument("--max-cycles", type=int, default=0, help="Maximum loop cycles to run. Use 0 to run until stopped.")
     parser.add_argument("--stop-on-blocked", action="store_true", help="Stop loop mode immediately if a cycle returns a blocked classification.")
+    parser.add_argument("--force-exit-long", action="store_true", help="Force a single supervised EXIT_LONG for the reconciled ATP-owned position.")
+    parser.add_argument(
+        "--allow-direct-reconciliation-close",
+        action="store_true",
+        help="Allow a one-off direct broker/ledger reconciliation fallback when the monitor runtime wrapper is stale or disconnected.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Allow writing into a non-empty output directory.")
     return parser
 
@@ -73,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=output_dir,
         dashboard_freshness_seconds=float(args.dashboard_freshness_seconds),
         monitor_freshness_seconds=float(args.monitor_freshness_seconds),
+        force_exit_long=bool(args.force_exit_long),
+        allow_direct_reconciliation_close=bool(args.allow_direct_reconciliation_close),
     )
     if bool(args.loop):
         stop_event = threading.Event()

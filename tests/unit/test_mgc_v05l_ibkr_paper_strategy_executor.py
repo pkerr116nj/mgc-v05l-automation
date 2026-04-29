@@ -35,6 +35,8 @@ def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyExecutorCon
         "dashboard_freshness_seconds": 120.0,
         "monitor_freshness_seconds": 45.0,
         "supervised_submit_enabled": True,
+        "force_exit_long": False,
+        "allow_direct_reconciliation_close": False,
     }
     payload.update(overrides)
     return IbkrPaperStrategyExecutorConfig(**payload)
@@ -172,6 +174,105 @@ def test_exit_long_delegates_to_unattended_close_path(tmp_path: Path) -> None:
     assert artifacts.classification == "PAPER_STRATEGY_EXECUTOR_EXIT_FILLED_FLAT"
     assert artifacts.report["decision"] == "EXIT_LONG"
     assert artifacts.report["delegated_result"]["classification"] == "PAPER_CLOSE_FILLED_FLAT"
+
+
+def test_force_exit_long_uses_direct_reconciliation_when_runtime_wrapper_is_stale(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        classification="PAPER_STRATEGY_MONITOR_DISCONNECTED",
+        monitor_running=False,
+        health_classification="DISCONNECTED",
+        stale=False,
+        block_reasons=["monitor_disconnected", "paper_strategy_monitor_not_running"],
+    )
+    _write_ledger(tmp_path, quantity=1.0, side="LONG")
+    _write_dashboard_snapshot(tmp_path)
+
+    class _CloseArtifacts:
+        classification = "PAPER_CLOSE_FILLED_FLAT"
+        report = {"summary": "filled flat"}
+
+    observed: dict[str, object] = {}
+
+    class _MonitorArtifacts:
+        classification = "PAPER_STRATEGY_POSITION_ADOPTED"
+        ledger = {
+            "positions": [
+                {
+                    "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+                    "account_id": "DUM882026",
+                    "symbol": "MGC",
+                    "expiry": "20260626",
+                    "con_id": 712565978,
+                    "local_symbol": "MGCM6",
+                    "quantity": 1.0,
+                    "side": "LONG",
+                    "average_entry_price": 4586.7,
+                }
+            ]
+        }
+        pnl_snapshot = {}
+        status = {
+            "classification": "PAPER_STRATEGY_POSITION_ADOPTED",
+            "ownership_proven": True,
+            "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+            "account_id": "DUM882026",
+            "exact_contract": {
+                "symbol": "MGC",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "local_symbol": "MGCM6",
+            },
+            "broker_position_quantity": 1.0,
+            "ledger_position_quantity": 1.0,
+            "open_order_count": 0,
+            "block_reasons": ["paper_strategy_monitor_not_running"],
+            "backend_gate": {
+                "backend_healthy": True,
+                "live_source_ready": True,
+                "launch_allowed": True,
+                "paper_runtime_stale": False,
+                "temp_paper_blocked": False,
+                "session_classification": "US_LATE",
+            },
+            "generated_at": "2026-04-29T10:00:00+00:00",
+        }
+        audit_events = []
+        broker_report = {}
+
+    def _close_runner(*, config):
+        observed["caller_path"] = config.caller_path
+        return _CloseArtifacts()
+
+    refresh_calls = {"count": 0}
+
+    def _monitor_refresh_runner(*, config):
+        refresh_calls["count"] += 1
+        if refresh_calls["count"] == 1:
+            return _MonitorArtifacts()
+        flat = _MonitorArtifacts()
+        flat.ledger = {"positions": [{"strategy_id": "ATP_COMPANION_V1_ASIA_US", "quantity": 0.0, "side": "FLAT"}]}
+        flat.status = {
+            **flat.status,
+            "broker_position_quantity": 0.0,
+            "ledger_position_quantity": 0.0,
+        }
+        return flat
+
+    artifacts = run_ibkr_paper_strategy_executor(
+        config=_config(
+            tmp_path,
+            force_exit_long=True,
+            allow_direct_reconciliation_close=True,
+        ),
+        close_runner=_close_runner,
+        monitor_refresh_runner=_monitor_refresh_runner,
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_EXECUTOR_EXIT_FILLED_FLAT"
+    assert artifacts.report["decision"] == "EXIT_LONG"
+    assert "direct broker/ledger reconciliation snapshot" in artifacts.report["preflight_note"]
+    assert observed["caller_path"] == "ibkr_paper_strategy_executor"
 
 
 def test_reconciliation_failure_when_exit_delegate_does_not_flatten_cleanly(tmp_path: Path) -> None:
