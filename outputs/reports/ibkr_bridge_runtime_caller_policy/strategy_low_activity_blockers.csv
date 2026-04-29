@@ -1,0 +1,4 @@
+family_bucket,lane_count,historical_actionable_entry_bars,historical_routed_intents,historical_fill_count,historical_blocker,current_policy_status,current_expected_next_step
+index_ny_early_core_us_midday,8,8,0,0,BLOCKED_NOT_SENT_TO_BROKER: Paper strategy bridge rejected a non-manual caller path.,FIXED,Next fresh midday signal should reach real bridge preflight gates instead of failing at caller-path validation.
+gc_all_lanes_us_midday,1,1,0,0,BLOCKED_NOT_SENT_TO_BROKER: Paper strategy bridge rejected a non-manual caller path.,FIXED,Next fresh midday signal should reach real bridge preflight gates instead of failing at caller-path validation.
+asia_london_participation,11,0,0,0,No setup candidates observed in inspected window.,UNCHANGED,Separate setup-frequency review remains needed; caller policy was not the suppressor.

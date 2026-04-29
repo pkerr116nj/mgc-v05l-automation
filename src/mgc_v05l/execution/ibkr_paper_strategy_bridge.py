@@ -79,6 +79,24 @@ _ALLOWED_LIMIT_PRICE_MODELS = {
 }
 _SCHEMA_ACTIONS = {"BUY", "SELL", "HOLD", "EXIT", "NO_ACTION"}
 _ARTIFACT_STEM = "ibkr_paper_strategy_bridge"
+_APPROVED_RUNTIME_CALLER_PATHS = {
+    "probationary_paper_runtime_lane",
+    "supervised_paper_runtime_bridge",
+    "ibkr_paper_strategy_executor",
+}
+_APPROVED_CALLER_PATHS = {"manual_strategy_bridge_cli", *_APPROVED_RUNTIME_CALLER_PATHS}
+_APPROVED_RUNTIME_CALLER_TYPES = {
+    "supervised_paper_runtime",
+    "supervised_paper_executor",
+}
+_APPROVED_RUNTIME_CALLER_MODULE_PREFIXES = (
+    "mgc_v05l.app.probationary_runtime",
+    "mgc_v05l.app.headless_supervised_paper",
+)
+_BRIDGE_ADDITIONAL_FORBIDDEN_CALLER_PREFIXES = (
+    "mgc_v05l.live",
+    "mgc_v05l.execution.live_strategy_broker",
+)
 
 
 class IbkrPaperStrategyBridgeError(RuntimeError):
@@ -152,6 +170,7 @@ class IbkrPaperStrategyBridgeConfig:
     approval_digest: str | None = None
     approval_phrase: str | None = None
     manual_frozen_preview_path: Path | None = None
+    caller_metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -242,9 +261,9 @@ def run_ibkr_paper_strategy_bridge(
     _record_bridge_audit(
         audit_events,
         event_type="intent_received",
-        detail="Strategy bridge received one manual paper intent.",
+        detail="Strategy bridge received one paper strategy intent.",
         config=config,
-        extra={"intent": intent.to_dict()},
+        extra={"intent": intent.to_dict(), "caller_metadata": dict(config.caller_metadata or {})},
     )
     static_checks = _build_static_preflight_checks(
         config=config,
@@ -279,6 +298,7 @@ def run_ibkr_paper_strategy_bridge(
                 },
                 "intent": intent.to_dict(),
                 "caller_gate": caller_gate,
+                "caller_metadata": dict(config.caller_metadata or {}),
                 "environment_lock_check": environment_lock,
                 "paper_strategy_monitor_status": monitor_status,
                 "paper_strategy_governance_status": governance_status,
@@ -595,19 +615,24 @@ def evaluate_strategy_bridge_caller(
     stack_provider: Callable[[], list[Any]] = inspect.stack,
 ) -> dict[str, Any]:
     normalized_caller = str(caller_path or "").strip()
+    runtime_caller = normalized_caller in _APPROVED_RUNTIME_CALLER_PATHS
     stack_modules: list[str] = []
     for frame in stack_provider():
         module_name = str(getattr(getattr(frame, "frame", None), "f_globals", {}).get("__name__", "") or "").strip()
         if module_name:
             stack_modules.append(module_name)
-    forbidden = [
-        module_name
-        for module_name in stack_modules
-        if module_name.startswith(_FORBIDDEN_CALLER_PREFIXES)
-        or any(fragment in module_name for fragment in _FORBIDDEN_CALLER_SUBSTRINGS)
-        or "scheduler" in module_name
-    ]
-    caller_allowed = normalized_caller == "manual_strategy_bridge_cli"
+    forbidden: list[str] = []
+    for module_name in stack_modules:
+        if runtime_caller and module_name.startswith(_APPROVED_RUNTIME_CALLER_MODULE_PREFIXES):
+            continue
+        if (
+            module_name.startswith(_BRIDGE_ADDITIONAL_FORBIDDEN_CALLER_PREFIXES)
+            or module_name.startswith(_FORBIDDEN_CALLER_PREFIXES)
+            or any(fragment in module_name for fragment in _FORBIDDEN_CALLER_SUBSTRINGS)
+            or "scheduler" in module_name
+        ):
+            forbidden.append(module_name)
+    caller_allowed = normalized_caller in _APPROVED_CALLER_PATHS
     passed = caller_allowed and not forbidden
     return {
         "caller_path": normalized_caller,
@@ -615,7 +640,7 @@ def evaluate_strategy_bridge_caller(
         "fail_closed": not passed,
         "forbidden_callers_detected": forbidden,
         "detail": (
-            "Paper strategy bridge is restricted to the dedicated manual CLI path."
+            "Paper strategy bridge caller path is approved for supervised paper routing."
             if passed
             else (
                 "Paper strategy bridge rejected a non-manual caller path."
@@ -624,6 +649,55 @@ def evaluate_strategy_bridge_caller(
             )
         ),
     }
+
+
+def _runtime_caller_metadata_check(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> dict[str, Any]:
+    caller_path = str(config.caller_path or "").strip()
+    if caller_path not in _APPROVED_RUNTIME_CALLER_PATHS:
+        return _check(
+            "approved_runtime_caller_metadata",
+            True,
+            True,
+            "Runtime caller metadata is only required for approved non-manual supervised paper callers.",
+        )
+    metadata = dict(config.caller_metadata or {})
+    if not metadata:
+        return _check(
+            "approved_runtime_caller_metadata",
+            False,
+            True,
+            "Approved supervised paper runtime callers must provide explicit caller metadata.",
+        )
+    passed = (
+        str(metadata.get("caller_type") or "").strip() in _APPROVED_RUNTIME_CALLER_TYPES
+        and metadata.get("paper_only") is True
+        and str(metadata.get("mode") or "").strip().upper() == _EXPECTED_MODE
+        and str(metadata.get("host") or "").strip() == _EXPECTED_HOST
+        and int(metadata.get("port") or 0) == _EXPECTED_PORT
+        and str(metadata.get("account_id") or "").strip() == _EXPECTED_ACCOUNT_ID
+        and str(metadata.get("strategy_id") or "").strip() == config.strategy_id
+        and str(metadata.get("lane_id") or "").strip() == config.strategy_id
+        and str(metadata.get("source_instrument") or "").strip().upper() != ""
+        and str(metadata.get("executable_proxy") or "").strip().upper() == config.symbol
+        and str(metadata.get("route_destination") or "").strip() == "ibkr_paper_bridge_submit_capable"
+        and str(metadata.get("bridge_proxy_mode") or "").strip() != ""
+        and str(metadata.get("intent_action") or "").strip().upper() == config.action
+        and str(metadata.get("intent_type") or "").strip().upper() != ""
+    )
+    return _check(
+        "approved_runtime_caller_metadata",
+        passed,
+        True,
+        (
+            "Approved supervised paper runtime caller metadata is present and matches the paper bridge environment lock."
+            if passed
+            else "Approved supervised paper runtime caller metadata is missing or does not match the required PAPER / 127.0.0.1 / 7497 / DUM882026 route context."
+        ),
+    )
 
 
 def _build_runtime(
@@ -773,8 +847,10 @@ def _build_static_preflight_checks(
             else f"Paper strategy exposure attribution blocked submit: {', '.join(list(exposure_status.get('block_reasons') or [])) or 'unknown_reason'}"
         )
     )
+    caller_path = str(config.caller_path or "").strip()
     return [
-        _check("manual_cli_only", caller_gate["passed"], True, caller_gate["detail"]),
+        _check("approved_paper_caller_path", caller_gate["passed"], True, caller_gate["detail"]),
+        _runtime_caller_metadata_check(config=config, intent=intent),
         _check("paper_environment_lock", environment_lock["passed"], True, str(environment_lock.get("port_policy") or environment_lock.get("detail") or "Environment lock failed.")),
         _check("paper_only_intent", bool(intent.paper_only), True, "Intent must remain explicitly paper-only."),
         _check("strategy_allowlist", intent.strategy_id in _SUPPORTED_STRATEGY_IDS or lane_adapter is not None, True, "Only the ATP Companion baseline and explicitly ported paper strategy lane identities are allowed in the paper bridge."),
@@ -823,13 +899,17 @@ def _build_static_preflight_checks(
         ),
         _check(
             "manual_harness_bundle_present_for_submit",
-            (not config.submit) or (
+            (not config.submit) or caller_path in _APPROVED_RUNTIME_CALLER_PATHS or (
                 config.manual_frozen_preview_path is not None
                 and config.approval_digest is not None
                 and config.approval_phrase is not None
             ),
             True,
-            "Bridge submit requires a manual-harness frozen preview path plus the exact approval digest and approval phrase.",
+            (
+                "Approved supervised paper runtime callers may submit through the bridge without a manual frozen preview bundle."
+                if caller_path in _APPROVED_RUNTIME_CALLER_PATHS
+                else "Bridge submit requires a manual-harness frozen preview path plus the exact approval digest and approval phrase."
+            ),
         ),
         _check(
             "paper_strategy_submit_gate",
@@ -990,6 +1070,7 @@ def _build_report(
         "strategy_identity": strategy_identity,
         "selected_account_id": selected_account_id,
         "caller_gate": caller_gate,
+        "caller_metadata": dict(config.caller_metadata or {}),
         "environment_lock_check": environment_lock,
         "paper_strategy_monitor_status": paper_strategy_monitor_status,
         "paper_strategy_governance_status": paper_strategy_governance_status,

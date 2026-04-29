@@ -168,6 +168,45 @@ def test_strategy_style_caller_fails_closed() -> None:
     assert result["passed"] is False
 
 
+def test_probationary_runtime_caller_is_allowed() -> None:
+    result = evaluate_strategy_bridge_caller(
+        caller_path="probationary_paper_runtime_lane",
+        stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.app.probationary_runtime"}))],
+    )
+
+    assert result["passed"] is True
+
+
+def test_unknown_caller_fails_closed() -> None:
+    result = evaluate_strategy_bridge_caller(
+        caller_path="unknown_runtime_submitter",
+        stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.app.probationary_runtime"}))],
+    )
+
+    assert result["passed"] is False
+    assert "non-manual caller path" in result["detail"]
+
+
+def test_live_style_caller_fails_closed_even_with_runtime_caller_path() -> None:
+    result = evaluate_strategy_bridge_caller(
+        caller_path="probationary_paper_runtime_lane",
+        stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.live.runtime"}))],
+    )
+
+    assert result["passed"] is False
+    assert "forbidden caller frames" in result["detail"]
+
+
+def test_scheduler_style_caller_fails_closed() -> None:
+    result = evaluate_strategy_bridge_caller(
+        caller_path="probationary_paper_runtime_lane",
+        stack_provider=lambda: [SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.app.paper_scheduler"}))],
+    )
+
+    assert result["passed"] is False
+    assert "forbidden caller frames" in result["detail"]
+
+
 def test_invalid_symbol_fails_before_connect(tmp_path: Path) -> None:
     artifacts = run_ibkr_paper_strategy_bridge(config=_config(tmp_path, symbol="GC"))
 
@@ -488,6 +527,208 @@ def test_preflight_blocks_when_governance_status_is_paused(tmp_path: Path) -> No
 
     failure = next(row for row in checks if row["name"] == "paper_strategy_governance_status_allowed")
     assert failure["passed"] is False
+
+
+def test_supervised_runtime_caller_requires_metadata(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="gc_1x_all_lanes__us_midday_short",
+        caller_path="probationary_paper_runtime_lane",
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-29T16:00:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "gc_1x_all_lanes__us_midday_short",
+                "bridge_strategy_id": "gc_1x_all_lanes__us_midday_short",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    metadata_failure = next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")
+    assert metadata_failure["passed"] is False
+
+
+def test_supervised_runtime_caller_metadata_passes_for_midday_gold_lane(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="gc_1x_all_lanes__us_midday_short",
+        action="SELL",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata={
+            "caller_type": "supervised_paper_runtime",
+            "strategy_id": "gc_1x_all_lanes__us_midday_short",
+            "lane_id": "gc_1x_all_lanes__us_midday_short",
+            "source_instrument": "GC",
+            "executable_proxy": "MGC",
+            "paper_only": True,
+            "mode": "PAPER",
+            "host": "127.0.0.1",
+            "port": 7497,
+            "account_id": "DUM882026",
+            "route_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+            "intent_action": "SELL",
+            "intent_type": "SELL_TO_OPEN",
+        },
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-29T16:00:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "gc_1x_all_lanes__us_midday_short",
+                "bridge_strategy_id": "gc_1x_all_lanes__us_midday_short",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert next(row for row in checks if row["name"] == "approved_paper_caller_path")["passed"] is True
+    assert next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")["passed"] is True
+    assert next(row for row in checks if row["name"] == "manual_harness_bundle_present_for_submit")["passed"] is True
+
+
+def test_runtime_caller_still_blocks_when_monitor_health_fails(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="gc_1x_all_lanes__us_midday_short",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata={
+            "caller_type": "supervised_paper_runtime",
+            "strategy_id": "gc_1x_all_lanes__us_midday_short",
+            "lane_id": "gc_1x_all_lanes__us_midday_short",
+            "source_instrument": "GC",
+            "executable_proxy": "MGC",
+            "paper_only": True,
+            "mode": "PAPER",
+            "host": "127.0.0.1",
+            "port": 7497,
+            "account_id": "DUM882026",
+            "route_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+            "intent_action": "BUY",
+            "intent_type": "BUY_TO_OPEN",
+        },
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-29T16:00:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": False,
+            "health_classification": "STALE",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": ["paper_runtime_stale"],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "gc_1x_all_lanes__us_midday_short",
+                "bridge_strategy_id": "gc_1x_all_lanes__us_midday_short",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")["passed"] is True
+    assert next(row for row in checks if row["name"] == "paper_strategy_monitor_health")["passed"] is False
 
 
 def test_write_artifacts_and_markdown(tmp_path: Path) -> None:

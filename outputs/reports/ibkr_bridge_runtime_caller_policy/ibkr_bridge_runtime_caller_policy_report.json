@@ -1,0 +1,99 @@
+{
+  "affected_family_updates": [
+    {
+      "current_status": "Approved supervised paper runtime caller policy fixed.",
+      "family_bucket": "index_ny_early_core_us_midday",
+      "historical_actionable_entry_bars": 8,
+      "historical_blocker": "Paper strategy bridge rejected a non-manual caller path.",
+      "historical_fills": 0,
+      "historical_routed_intents": 0,
+      "next_expected_behavior": "A fresh midday signal should reach real downstream bridge preflight instead of failing at caller validation.",
+      "updated_trade_logic_row": {
+        "actionable_entry_bars": "8",
+        "broker_path_fill_count_estimate": "0",
+        "collapse_detail": "Historical actionable entry signals were blocked by the old manual-only bridge caller policy. Approved supervised paper runtime callers now pass caller-path validation and carry explicit PAPER-only route metadata.",
+        "collapse_stage": "ACTIONABLE_INTENT -> ROUTED",
+        "completed_decision_bars_in_window": "6122",
+        "family_bucket": "index_ny_early_core_us_midday",
+        "fill_count": "0",
+        "lane_count": "8",
+        "local_fill_count_estimate": "0",
+        "no_setup_now_count": "0",
+        "routed_intent_count": "0",
+        "runtime_bug_blocked_count": "8",
+        "session_eligible_now_count": "8",
+        "setup_present_bars": "8",
+        "strategy_family": "index_futures_ny_intraday_forced_core_v2",
+        "trade_logic_classification": "TRADE_LOGIC_SUPPRESSED_BY_RUNTIME_BUG",
+        "waiting_for_next_bar_now_count": "8"
+      }
+    },
+    {
+      "current_status": "Approved supervised paper runtime caller policy fixed.",
+      "family_bucket": "gc_all_lanes_us_midday",
+      "historical_actionable_entry_bars": 1,
+      "historical_blocker": "Paper strategy bridge rejected a non-manual caller path.",
+      "historical_fills": 0,
+      "historical_routed_intents": 0,
+      "next_expected_behavior": "A fresh midday signal should reach real downstream bridge preflight instead of failing at caller validation.",
+      "updated_trade_logic_row": {
+        "actionable_entry_bars": "1",
+        "broker_path_fill_count_estimate": "0",
+        "collapse_detail": "Historical actionable entry signals were blocked by the old manual-only bridge caller policy. Approved supervised paper runtime callers now pass caller-path validation and carry explicit PAPER-only route metadata.",
+        "collapse_stage": "ACTIONABLE_INTENT -> ROUTED",
+        "completed_decision_bars_in_window": "765",
+        "family_bucket": "gc_all_lanes_us_midday",
+        "fill_count": "0",
+        "lane_count": "1",
+        "local_fill_count_estimate": "0",
+        "no_setup_now_count": "0",
+        "routed_intent_count": "0",
+        "runtime_bug_blocked_count": "1",
+        "session_eligible_now_count": "1",
+        "setup_present_bars": "1",
+        "strategy_family": "gold_forced_session_baseline_v2",
+        "trade_logic_classification": "TRADE_LOGIC_SUPPRESSED_BY_RUNTIME_BUG",
+        "waiting_for_next_bar_now_count": "1"
+      }
+    }
+  ],
+  "approved_paper_runtime_callers": [
+    "manual_strategy_bridge_cli",
+    "probationary_paper_runtime_lane",
+    "supervised_paper_runtime_bridge",
+    "ibkr_paper_strategy_executor"
+  ],
+  "blocked_caller_classes": [
+    "unknown callers",
+    "live-money callers",
+    "scheduler/unattended live-like callers",
+    "runtime callers without explicit PAPER / 127.0.0.1 / 7497 / DUM882026 metadata lock"
+  ],
+  "classification": "IBKR_RUNTIME_CALLER_POLICY_FIXED",
+  "generated_at": "2026-04-29T17:01:28.967397+00:00",
+  "root_cause": "Paper strategy bridge was still enforcing a manual-only caller path and inherited preview-harness forbidden-frame rules that also blacklisted probationary_runtime.",
+  "safety_gates_preserved": [
+    "PAPER-only lock",
+    "account lock",
+    "TWS host/port lock",
+    "monitor health gate",
+    "backend/source readiness gate",
+    "governance gate",
+    "exposure gate",
+    "quote gate",
+    "broker/ledger reconciliation",
+    "one active order per strategy",
+    "per-strategy cap",
+    "aggregate cap"
+  ],
+  "test_proof": {
+    "bridge_policy_slice": "22 passed",
+    "no_order_submitted": true,
+    "probationary_runtime_slice": "7 passed"
+  },
+  "trade_logic_context": {
+    "classification_before_fix": "TRADE_LOGIC_ACTIVITY_SUPPRESSED_BY_RUNTIME",
+    "runtime_bug_code_reference": "/Users/patrick/Documents/MGC-v05l-automation/src/mgc_v05l/execution/ibkr_paper_strategy_bridge.py:610",
+    "runtime_bug_signature": "BLOCKED_NOT_SENT_TO_BROKER: Paper strategy bridge rejected a non-manual caller path."
+  }
+}

@@ -4497,6 +4497,84 @@ def test_submit_capable_us_early_long_lanes_use_runtime_ibkr_route_broker(
     assert broker.route_destination == "ibkr_paper_bridge_submit_capable"
 
 
+@pytest.mark.parametrize(
+    ("lane_id", "source_symbol", "bridge_adapter", "intent_type", "expected_action", "expected_proxy"),
+    [
+        (
+            "es_1x_ny_early_core__us_midday_long",
+            "ES",
+            {
+                "current_order_destination": "ibkr_paper_bridge_submit_capable",
+                "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+                "bridge_execution_target": {"symbol": "MES", "contract_month": "202606"},
+            },
+            OrderIntentType.BUY_TO_OPEN,
+            "BUY",
+            "MES",
+        ),
+        (
+            "gc_1x_all_lanes__us_midday_short",
+            "GC",
+            {
+                "current_order_destination": "ibkr_paper_bridge_submit_capable",
+                "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+                "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+            },
+            OrderIntentType.SELL_TO_OPEN,
+            "SELL",
+            "MGC",
+        ),
+    ],
+)
+def test_midday_runtime_bridge_config_carries_approved_supervised_paper_caller_metadata(
+    lane_id: str,
+    source_symbol: str,
+    bridge_adapter: dict[str, object],
+    intent_type: OrderIntentType,
+    expected_action: str,
+    expected_proxy: str,
+) -> None:
+    order_intent = OrderIntent(
+        order_intent_id=f"{lane_id}|{intent_type.value}",
+        bar_id="test-bar",
+        symbol=source_symbol,
+        intent_type=intent_type,
+        quantity=1,
+        created_at=datetime(2026, 4, 29, 16, 0, tzinfo=timezone.utc),
+        reason_code="midday_runtime_route_policy_test",
+    )
+
+    config = probationary_runtime_module._runtime_bridge_config_for_lane(  # noqa: SLF001
+        repo_root=Path(__file__).resolve().parents[2],
+        lane_id=lane_id,
+        source_symbol=source_symbol,
+        order_intent=order_intent,
+        bridge_adapter=bridge_adapter,
+    )
+
+    assert config.caller_path == "probationary_paper_runtime_lane"
+    assert config.paper_only is True
+    assert config.submit is True
+    assert config.symbol == expected_proxy
+    assert config.action == expected_action
+    assert config.caller_metadata == {
+        "caller_type": "supervised_paper_runtime",
+        "strategy_id": lane_id,
+        "lane_id": lane_id,
+        "source_instrument": source_symbol,
+        "executable_proxy": expected_proxy,
+        "paper_only": True,
+        "mode": "PAPER",
+        "host": "127.0.0.1",
+        "port": 7497,
+        "account_id": "DUM882026",
+        "route_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": str(bridge_adapter["bridge_proxy_mode"]),
+        "intent_action": expected_action,
+        "intent_type": intent_type.value,
+    }
+
+
 def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path)
     repositories = RepositorySet(build_engine(settings.database_url))
@@ -4631,6 +4709,111 @@ def test_submit_capable_lane_exit_invokes_ibkr_bridge_without_local_fill(tmp_pat
     assert len(intent_rows) == 1
     assert intent_rows[0]["broker_order_id"] == "ibkr-runtime-exit-1"
     assert execution_engine.last_submit_attempt()["route_destination"] == "ibkr_paper_bridge_submit_capable"
+
+
+@pytest.mark.parametrize(
+    ("lane_id", "source_symbol", "bridge_adapter", "intent_type", "expected_action", "expected_proxy"),
+    [
+        (
+            "es_1x_ny_early_core__us_midday_long",
+            "ES",
+            {
+                "current_order_destination": "ibkr_paper_bridge_submit_capable",
+                "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+                "bridge_execution_target": {"symbol": "MES", "contract_month": "202606"},
+            },
+            OrderIntentType.BUY_TO_OPEN,
+            "BUY",
+            "MES",
+        ),
+        (
+            "gc_1x_all_lanes__us_midday_short",
+            "GC",
+            {
+                "current_order_destination": "ibkr_paper_bridge_submit_capable",
+                "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+                "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+            },
+            OrderIntentType.SELL_TO_CLOSE,
+            "SELL",
+            "MGC",
+        ),
+    ],
+)
+def test_midday_runtime_bridge_runner_receives_supervised_paper_caller_context(
+    lane_id: str,
+    source_symbol: str,
+    bridge_adapter: dict[str, object],
+    intent_type: OrderIntentType,
+    expected_action: str,
+    expected_proxy: str,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def fake_bridge_runner(*, config):
+        captured.append(
+            {
+                "caller_path": config.caller_path,
+                "caller_metadata": dict(config.caller_metadata or {}),
+                "strategy_id": config.strategy_id,
+                "symbol": config.symbol,
+                "action": config.action,
+            }
+        )
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            report={"detail": "downstream_gate_failed"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol=source_symbol,
+        bridge_adapter=bridge_adapter,
+        repo_root=Path(__file__).resolve().parents[2],
+        bridge_runner=fake_bridge_runner,
+    )
+    broker.connect()
+    order_intent = OrderIntent(
+        order_intent_id=f"{lane_id}|{intent_type.value}",
+        bar_id="test-bar",
+        symbol=source_symbol,
+        intent_type=intent_type,
+        quantity=1,
+        created_at=datetime(2026, 4, 29, 16, 0, tzinfo=timezone.utc),
+        reason_code="midday_runtime_route_policy_test",
+    )
+
+    with pytest.raises(RuntimeError, match="BLOCKED_NOT_SENT_TO_BROKER: downstream_gate_failed"):
+        broker.submit_order(order_intent)
+
+    assert captured == [
+        {
+            "caller_path": "probationary_paper_runtime_lane",
+            "caller_metadata": {
+                "caller_type": "supervised_paper_runtime",
+                "strategy_id": lane_id,
+                "lane_id": lane_id,
+                "source_instrument": source_symbol,
+                "executable_proxy": expected_proxy,
+                "paper_only": True,
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "account_id": "DUM882026",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "bridge_proxy_mode": str(bridge_adapter["bridge_proxy_mode"]),
+                "intent_action": expected_action,
+                "intent_type": intent_type.value,
+            },
+            "strategy_id": lane_id,
+            "symbol": expected_proxy,
+            "action": expected_action,
+        }
+    ]
+    assert broker.last_submit_context()["caller_path"] == "probationary_paper_runtime_lane"
+    assert broker.last_submit_context()["caller_metadata"]["caller_type"] == "supervised_paper_runtime"
+    assert broker.last_submit_context()["bridge_detail"] == "downstream_gate_failed"
 
 
 def test_submit_capable_lane_bridge_block_does_not_create_local_fill(tmp_path: Path) -> None:

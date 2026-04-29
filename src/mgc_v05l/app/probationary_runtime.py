@@ -10147,6 +10147,8 @@ class _IbkrPaperBridgeRuntimeBroker:
             "intent_type": order_intent.intent_type.value,
             "order_intent_id": order_intent.order_intent_id,
             "submit_mode": "ibkr_paper_bridge",
+            "caller_path": bridge_config.caller_path,
+            "caller_metadata": dict(bridge_config.caller_metadata or {}),
         }
         artifacts: IbkrPaperStrategyBridgeArtifacts = self._bridge_runner(config=bridge_config)
         report = dict(artifacts.report or {})
@@ -10155,6 +10157,7 @@ class _IbkrPaperBridgeRuntimeBroker:
             **self._last_submit_context,
             "bridge_classification": artifacts.classification,
             "bridge_detail": report.get("detail"),
+            "bridge_gate_trace": list(report.get("preflight_checks") or []),
         }
         if artifacts.classification not in {"PAPER_STRATEGY_ORDER_FILLED", "PAPER_STRATEGY_ORDER_WORKING"}:
             detail = str(report.get("detail") or artifacts.classification or "bridge_blocked")
@@ -10300,6 +10303,22 @@ def _runtime_bridge_config_for_lane(
         paper_only=True,
         submit=True,
         caller_path="probationary_paper_runtime_lane",
+        caller_metadata={
+            "caller_type": "supervised_paper_runtime",
+            "strategy_id": str(lane_id),
+            "lane_id": str(lane_id),
+            "source_instrument": str(source_symbol).upper(),
+            "executable_proxy": str(bridge_target.get("symbol") or source_symbol).upper(),
+            "paper_only": True,
+            "mode": "PAPER",
+            "host": "127.0.0.1",
+            "port": 7497,
+            "account_id": "DUM882026",
+            "route_destination": str(bridge_adapter.get("current_order_destination") or "legacy_app_paper_runtime"),
+            "bridge_proxy_mode": str(bridge_adapter.get("bridge_proxy_mode") or ""),
+            "intent_action": action,
+            "intent_type": order_intent.intent_type.value,
+        },
         output_dir=repo_root / "outputs" / "reports" / "ibkr_runtime_route_dispatch" / str(lane_id),
     )
 
