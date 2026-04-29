@@ -1,0 +1,41 @@
+{
+  "before_fix": {
+    "artifact": "/Users/patrick/Library/Application Support/mgc-operator-desktop/runtime/desktop_dashboard_startup_status.json",
+    "refreshed_at": "2026-04-29T18:33:12.924Z",
+    "source_mode": "attached_snapshot_bridge",
+    "api_reachable": false,
+    "detail": "Service is attached through the local synchronized operator snapshot."
+  },
+  "transport_selection": {
+    "candidate_urls_function": "/Users/patrick/Documents/MGC-v05l-automation/desktop/src/main/runtime.ts:1650",
+    "packaged_bridge_loader": "/Users/patrick/Documents/MGC-v05l-automation/desktop/src/main/runtime.ts:2299",
+    "live_expectation_rule": "/Users/patrick/Documents/MGC-v05l-automation/desktop/src/main/runtime.ts:2211",
+    "readiness_bridge_confirmation_rule": "/Users/patrick/Documents/MGC-v05l-automation/desktop/src/main/runtime.ts:2229",
+    "probe_function": "/Users/patrick/Documents/MGC-v05l-automation/desktop/src/main/runtime.ts:3066",
+    "renderer_attached_event": "/Users/patrick/Documents/MGC-v05l-automation/desktop/src/renderer/App.tsx:5320"
+  },
+  "after_fix_live_renderer_state": {
+    "artifact": "/Users/patrick/Library/Application Support/mgc-operator-desktop/runtime/desktop_renderer_bootstrap.json",
+    "recorded_at": "2026-04-29T18:42:33.008Z",
+    "stage": "renderer:service-attached-usable",
+    "source_mode": "live_api",
+    "dashboard_attached": true,
+    "live_actions_allowed": true,
+    "paper_runtime_ready": true,
+    "backend_url": "http://127.0.0.1:8790/"
+  },
+  "after_fix_live_payload_cache": {
+    "artifact": "/Users/patrick/Library/Application Support/mgc-operator-desktop/runtime/desktop_cache/dashboard_api_snapshot.cache.json",
+    "generated_at": "2026-04-29T18:41:37.103190+00:00",
+    "mode": "PAPER",
+    "paper_trade_allowed": true,
+    "paper_trade_block_reason": null
+  },
+  "after_fix_residual_artifact_lag": {
+    "artifact": "/Users/patrick/Library/Application Support/mgc-operator-desktop/runtime/desktop_dashboard_startup_status.json",
+    "refreshed_at": "2026-04-29T18:42:35.108Z",
+    "source_mode": "attached_snapshot_bridge",
+    "api_reachable": false,
+    "reason": "legacy startup-status writer still keys off a stricter localhost health probe that intermittently times out in the Electron main process"
+  }
+}

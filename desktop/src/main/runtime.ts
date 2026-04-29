@@ -2201,10 +2201,46 @@ async function loadSnapshotBundle(
 }
 
 interface AttachedSnapshotBridge {
+  transportKind: "synthesized_snapshot" | "readiness_bridge";
   readiness: JsonRecord;
   health: JsonRecord | null;
   backendUrl: string | null;
   detail: string;
+}
+
+function attachedSnapshotBridgeExpectsLiveApi(bridge: AttachedSnapshotBridge | null): boolean {
+  if (!bridge) {
+    return false;
+  }
+  const readiness = asJsonRecord(bridge.readiness);
+  const payload = asJsonRecord(readiness.payload);
+  const listener = asJsonRecord(readiness.listener);
+  const controlPlane = asJsonRecord(readiness.control_plane);
+  const readinessState = String(readiness.readiness_state ?? "").toUpperCase();
+  return (
+    payload.reachable === true
+    || listener.reachable === true
+    || controlPlane.dashboard_attached === true
+    || controlPlane.launch_allowed === true
+    || readinessState === "READY"
+  );
+}
+
+function attachedSnapshotBridgeConfirmsLiveApi(bridge: AttachedSnapshotBridge | null): boolean {
+  if (!bridge || bridge.transportKind !== "readiness_bridge") {
+    return false;
+  }
+  const readiness = asJsonRecord(bridge.readiness);
+  const payload = asJsonRecord(readiness.payload);
+  const listener = asJsonRecord(readiness.listener);
+  const controlPlane = asJsonRecord(readiness.control_plane);
+  return (
+    payload.reachable === true
+    && payload.ready === true
+    && listener.reachable === true
+    && controlPlane.dashboard_attached === true
+    && controlPlane.launch_allowed === true
+  );
 }
 
 function synthesizeAttachedSnapshotBridgeFromSnapshot(snapshot: JsonRecord | null): AttachedSnapshotBridge | null {
@@ -2233,6 +2269,7 @@ function synthesizeAttachedSnapshotBridgeFromSnapshot(snapshot: JsonRecord | nul
     return null;
   }
   return {
+    transportKind: "synthesized_snapshot",
     readiness: {
       generated_at: snapshot.generated_at ?? null,
       readiness_state: launchAllowed ? "READY" : "USABLE",
@@ -2272,15 +2309,15 @@ async function loadPackagedAttachedSnapshotBridge(
   if (!snapshot) {
     return null;
   }
-  const synthesizedBridge = synthesizeAttachedSnapshotBridgeFromSnapshot(snapshot);
-  if (synthesizedBridge) {
-    return { snapshot, bridge: synthesizedBridge };
-  }
   const bridge = await loadAttachedSnapshotBridge(snapshot);
-  if (!bridge) {
+  if (bridge) {
+    return { snapshot, bridge };
+  }
+  const synthesizedBridge = synthesizeAttachedSnapshotBridgeFromSnapshot(snapshot);
+  if (!synthesizedBridge) {
     return null;
   }
-  return { snapshot, bridge };
+  return { snapshot, bridge: synthesizedBridge };
 }
 
 async function loadAttachedSnapshotBridge(snapshot: JsonRecord | null): Promise<AttachedSnapshotBridge | null> {
@@ -2336,6 +2373,7 @@ async function loadAttachedSnapshotBridge(snapshot: JsonRecord | null): Promise<
     ? "Service is attached through the local readiness bridge and synchronized operator snapshot."
     : "Service is attached and current, but supervised paper remains blocked and requires operator attention.";
   return {
+    transportKind: "readiness_bridge",
     readiness,
     health: Object.keys(health).length ? health : null,
     backendUrl,
@@ -2761,6 +2799,33 @@ function buildRuntimeStates({
     };
   }
 
+  if (attachedSnapshotBridgeConfirmsLiveApi(attachedSnapshotBridge) && snapshotAvailable) {
+    return {
+      connection: "live",
+      source: {
+        mode: "live_api",
+        label: "LIVE API",
+        detail: "Using the current local dashboard cache confirmed by the live readiness bridge while direct localhost probing refreshes in the background.",
+        canRunLiveActions: true,
+        healthReachable: true,
+        apiReachable: true,
+      },
+      backend: {
+        ...backendPayload(
+          "healthy",
+          "HEALTHY",
+          "Live dashboard readiness is confirmed by the current local readiness bridge and synchronized API cache.",
+          null,
+        ),
+        startupFailureKind: "none",
+        actionHint: null,
+        staleListenerDetected: false,
+        dashboardApiTimedOut: false,
+        portConflictDetected: false,
+      },
+    };
+  }
+
   if (live?.mode === "health-only") {
     if (attachedSnapshotBridge && snapshotAvailable) {
       return {
@@ -2974,6 +3039,14 @@ export async function prepareDesktopForLaunch(): Promise<void> {
     return;
   }
   const packagedBridge = await loadPackagedAttachedSnapshotBridge({ includeHeavyPayload: false });
+  const { urls } = await candidateUrls();
+  const live = await loadLiveDashboard(urls, {
+    healthTimeoutMs: STARTUP_HEALTH_TIMEOUT_MS,
+    dashboardTimeoutMs: STARTUP_DASHBOARD_TIMEOUT_MS,
+  });
+  if (live?.mode === "live") {
+    return;
+  }
   if (packagedBridge) {
     return;
   }
@@ -2982,14 +3055,6 @@ export async function prepareDesktopForLaunch(): Promise<void> {
       return;
     }
     requestServiceHostBootstrap();
-    return;
-  }
-  const { urls } = await candidateUrls();
-  const live = await loadLiveDashboard(urls, {
-    healthTimeoutMs: STARTUP_HEALTH_TIMEOUT_MS,
-    dashboardTimeoutMs: STARTUP_DASHBOARD_TIMEOUT_MS,
-  });
-  if (live?.mode === "live") {
     return;
   }
   if (autoBootstrapBlockedBySandbox()) {
@@ -3010,9 +3075,9 @@ async function probeDesktopState(
   const packagedBridge = await loadPackagedAttachedSnapshotBridge({ includeHeavyPayload });
   let snapshot = packagedBridge?.snapshot ?? null;
   let attachedSnapshotBridge = packagedBridge?.bridge ?? null;
-  const packagedBridgeAttached = Boolean(packagedBridge);
   let live: LoadLiveDashboardResult | null = null;
-  if (!packagedBridgeAttached && !packagedLocalLaunch) {
+  const shouldProbeLiveDashboard = !packagedLocalLaunch || Boolean(packagedBridge) || Boolean(urls.length);
+  if (shouldProbeLiveDashboard) {
     const livePromise = loadLiveDashboard(urls, {
       healthTimeoutMs: STARTUP_HEALTH_TIMEOUT_MS,
       dashboardTimeoutMs: STARTUP_DASHBOARD_TIMEOUT_MS,
@@ -3023,9 +3088,10 @@ async function probeDesktopState(
         preferDesktopCache: !includeHeavyPayload || packagedLocalLaunch,
       });
     }
-    live = snapshot
-      ? await promiseWithTimeout(livePromise, SNAPSHOT_PROMOTION_GRACE_MS, null)
-      : await livePromise;
+    const requireConfirmedLiveAttach = packagedLocalLaunch && attachedSnapshotBridgeExpectsLiveApi(attachedSnapshotBridge);
+    live = !snapshot || requireConfirmedLiveAttach
+      ? await livePromise
+      : await promiseWithTimeout(livePromise, SNAPSHOT_PROMOTION_GRACE_MS, null);
   } else if (!snapshot) {
     snapshot = await loadSnapshotBundle({
       includeHeavyPayload,

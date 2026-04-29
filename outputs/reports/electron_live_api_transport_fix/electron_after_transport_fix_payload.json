@@ -1,0 +1,49 @@
+{
+  "classification": "ELECTRON_LIVE_API_TRANSPORT_FIXED",
+  "mode": "PAPER",
+  "electron_renderer_state": {
+    "stage": "renderer:service-attached-usable",
+    "source_mode": "live_api",
+    "dashboard_attached": true,
+    "live_actions_allowed": true,
+    "paper_runtime_ready": true,
+    "backend_url": "http://127.0.0.1:8790/"
+  },
+  "paper_readiness": {
+    "paper_trade_allowed": true,
+    "paper_trade_block_reason": null,
+    "paper_readiness_source": "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+    "session_eligible_count": 8,
+    "waiting_for_bar_count": 8,
+    "no_setup_count": 11,
+    "actionable_now_count": 0,
+    "true_blocked_count": 0,
+    "blocking_fault_count": 0,
+    "advisory_fault_count": 0
+  },
+  "bridge_allowed_consistency": {
+    "paper_trade_allowed": true,
+    "renderer_live_actions_allowed": true,
+    "notes": "Electron renderer and synchronized desktop cache agree that paper is attached and usable; no paper-specific blocker is active."
+  },
+  "broker_truth": {
+    "mgc_position": 0.0,
+    "mnq_position": 0.0,
+    "mes_position": 0.0,
+    "mgc_open_orders": 0,
+    "mnq_open_orders": 0,
+    "mes_open_orders": 0,
+    "broker_minus_ledger_mgc": 0.0,
+    "broker_minus_ledger_mnq": 0.0,
+    "broker_minus_ledger_mes": 0.0,
+    "orphan_exposure_mgc": 0.0,
+    "orphan_exposure_mnq": 0.0,
+    "orphan_exposure_mes": 0.0
+  },
+  "residual_artifact_mismatch": {
+    "artifact": "/Users/patrick/Library/Application Support/mgc-operator-desktop/runtime/desktop_dashboard_startup_status.json",
+    "source_mode": "attached_snapshot_bridge",
+    "api_reachable": false,
+    "interpretation": "auxiliary startup-status writer still lags when its health probe times out; it is not the renderer's authoritative consumed transport state"
+  }
+}

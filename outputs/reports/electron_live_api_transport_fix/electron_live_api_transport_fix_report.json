@@ -1,0 +1,77 @@
+{
+  "classification": "ELECTRON_LIVE_API_TRANSPORT_FIXED",
+  "generated_at": "2026-04-29T18:43:00-04:00",
+  "objective": "Prove the running Electron app is consuming the single-source paper readiness payload through the live local service path.",
+  "transport_fix": {
+    "packaged_live_probe_preferred": true,
+    "packaged_readiness_bridge_preferred_over_synthesized_snapshot": true,
+    "sticky_live_attach_when_readiness_bridge_confirms_payload": true
+  },
+  "electron_renderer_proof": {
+    "artifact": "/Users/patrick/Library/Application Support/mgc-operator-desktop/runtime/desktop_renderer_bootstrap.json",
+    "recorded_at": "2026-04-29T18:42:33.008Z",
+    "stage": "renderer:service-attached-usable",
+    "source_mode": "live_api",
+    "dashboard_attached": true,
+    "live_actions_allowed": true,
+    "paper_runtime_ready": true,
+    "backend_url": "http://127.0.0.1:8790/"
+  },
+  "electron_live_payload_cache": {
+    "artifact": "/Users/patrick/Library/Application Support/mgc-operator-desktop/runtime/desktop_cache/dashboard_api_snapshot.cache.json",
+    "generated_at": "2026-04-29T18:41:37.103190+00:00",
+    "mode": "PAPER",
+    "paper_trade_allowed": true,
+    "paper_trade_block_reason": null,
+    "session_eligible_count": 8,
+    "waiting_for_bar_count": 8,
+    "no_setup_count": 11,
+    "actionable_now_count": 0,
+    "true_blocked_count": 0,
+    "blocking_fault_count": 0,
+    "advisory_fault_count": 0,
+    "paper_readiness_source": "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload"
+  },
+  "electron_readiness_bridge": {
+    "artifact": "/Users/patrick/Library/Application Support/mgc-operator-desktop/runtime/desktop_cache/operator_dashboard_readiness.json",
+    "generated_at": "2026-04-29T18:39:51.156Z",
+    "readiness_state": "AMBIGUOUS",
+    "configured_url": "http://127.0.0.1:8790/",
+    "payload_reachable": true,
+    "payload_ready": true,
+    "dashboard_attached": true,
+    "paper_runtime_ready": true
+  },
+  "backend_contract": {
+    "mode": "PAPER",
+    "paper_trade_allowed": true,
+    "paper_trade_block_reason": null,
+    "live_authority_blocks_paper": false
+  },
+  "broker_truth": {
+    "mgc_position": 0.0,
+    "mnq_position": 0.0,
+    "mes_position": 0.0,
+    "mgc_open_orders": 0,
+    "mnq_open_orders": 0,
+    "mes_open_orders": 0,
+    "broker_minus_ledger_mgc": 0.0,
+    "broker_minus_ledger_mnq": 0.0,
+    "broker_minus_ledger_mes": 0.0,
+    "orphan_exposure_mgc": 0.0,
+    "orphan_exposure_mnq": 0.0,
+    "orphan_exposure_mes": 0.0
+  },
+  "residuals": [
+    {
+      "artifact": "/Users/patrick/Library/Application Support/mgc-operator-desktop/runtime/desktop_dashboard_startup_status.json",
+      "issue": "legacy startup status file can still regress to attached_snapshot_bridge when the stricter main-process localhost health probe times out",
+      "impact": "diagnostic artifact lag only; renderer-attached live_api state and synchronized payload cache remain current"
+    }
+  ],
+  "safety": {
+    "orders_placed": false,
+    "strategy_logic_changed": false,
+    "live_trading_enabled": false
+  }
+}

@@ -364,6 +364,7 @@ test("desktop state reports attached snapshot bridge when localhost transport is
   }));
   __testing.setLoadLiveDashboardHook(async () => null);
   __testing.setLoadAttachedSnapshotBridgeHook(async () => ({
+    transportKind: "readiness_bridge",
     readiness: {},
     health: { status: "ok", ready: true },
     backendUrl: "http://127.0.0.1:8790/",
@@ -425,6 +426,161 @@ test("packaged launch trusts a fresh synchronized local snapshot long enough to 
   assert.equal(state.source.mode, "attached_snapshot_bridge");
   assert.equal(state.source.label, "SERVICE ATTACHED");
   assert.deepEqual(state.errors, []);
+  __testing.resetRuntimeState();
+});
+
+test("packaged launch promotes to live API when the local dashboard endpoint is reachable", async () => {
+  __testing.resetRuntimeState();
+  __testing.setPackagedLocalBundleLaunchContextHook(() => true);
+  __testing.setBuildLocalOperatorAuthStateHook(async () => makeDesktopState().localAuth);
+  __testing.setLoadSnapshotBundleHook(async () => ({
+    generated_at: new Date().toISOString(),
+    dashboard_meta: {
+      server_instance_id: "instance-current",
+      server_pid: 42732,
+      server_url: "http://127.0.0.1:8790/",
+    },
+    global: { mode: "PAPER", mode_label: "PAPER", auth_ready: true, runtime_status: "RUNNING" },
+    operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
+    paper: { readiness: { runtime_running: true, entries_enabled: true }, running: true },
+    startup_control_plane: {
+      overall_state: "READY",
+      launch_allowed: true,
+      convergence: {
+        stable_ready: true,
+        dashboard_attached: true,
+        paper_runtime_ready: true,
+      },
+    },
+    supervised_paper_operability: {
+      app_usable_for_supervised_paper: true,
+      state: "USABLE",
+      summary_line: "Paper runtime is operational.",
+      primary_next_action: { label: "Refresh" },
+    },
+  }));
+  __testing.setLoadLiveDashboardHook(async () => ({
+    mode: "live",
+    url: "http://127.0.0.1:8790/",
+    health: { status: "ok", ready: true, pid: 98165 },
+    dashboard: {
+      generated_at: new Date().toISOString(),
+      dashboard_meta: {
+        source: "service_live_api",
+        server_instance_id: "instance-current",
+        server_pid: 98165,
+        server_url: "http://127.0.0.1:8790/",
+      },
+      global: { mode: "PAPER", mode_label: "PAPER", auth_ready: true, runtime_status: "RUNNING" },
+      operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
+      paper: { readiness: { runtime_running: true, entries_enabled: true }, running: true },
+      startup_control_plane: {
+        overall_state: "READY",
+        launch_allowed: true,
+        convergence: {
+          stable_ready: true,
+          dashboard_attached: true,
+          paper_runtime_ready: true,
+        },
+      },
+      supervised_paper_operability: {
+        app_usable_for_supervised_paper: true,
+        state: "USABLE",
+        summary_line: "Paper runtime is operational.",
+      },
+    },
+  }));
+
+  const state = await getDesktopState();
+
+  assert.equal(state.connection, "live");
+  assert.equal(state.source.mode, "live_api");
+  assert.equal(state.source.apiReachable, true);
+  assert.equal(state.source.canRunLiveActions, true);
+  assert.equal(state.backend.apiStatus, "responding");
+  assert.equal(state.backend.pid, 98165);
+  __testing.resetRuntimeState();
+});
+
+test("packaged launch does not stay in attached snapshot bridge once a ready live API responds after the snapshot grace window", async () => {
+  __testing.resetRuntimeState();
+  __testing.setPackagedLocalBundleLaunchContextHook(() => true);
+  __testing.setBuildLocalOperatorAuthStateHook(async () => makeDesktopState().localAuth);
+  __testing.setLoadSnapshotBundleHook(async () => ({
+    generated_at: new Date().toISOString(),
+    dashboard_meta: {
+      server_instance_id: "instance-current",
+      server_pid: 42732,
+      server_url: "http://127.0.0.1:8790/",
+    },
+    global: { mode: "PAPER", mode_label: "PAPER", auth_ready: true, runtime_status: "RUNNING" },
+    operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
+    paper: { readiness: { runtime_running: true, entries_enabled: true }, running: true },
+    startup_control_plane: {
+      overall_state: "READY",
+      launch_allowed: true,
+      convergence: {
+        stable_ready: true,
+        dashboard_attached: true,
+        paper_runtime_ready: true,
+      },
+    },
+    supervised_paper_operability: {
+      app_usable_for_supervised_paper: true,
+      state: "USABLE",
+      summary_line: "Paper runtime is operational.",
+      primary_next_action: { label: "Refresh" },
+    },
+  }));
+  __testing.setLoadLiveDashboardHook(
+    async () =>
+      await new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              mode: "live",
+              url: "http://127.0.0.1:8790/",
+              health: { status: "ok", ready: true, pid: 98165 },
+              dashboard: {
+                generated_at: new Date().toISOString(),
+                dashboard_meta: {
+                  source: "service_live_api",
+                  server_instance_id: "instance-current",
+                  server_pid: 98165,
+                  server_url: "http://127.0.0.1:8790/",
+                },
+                global: { mode: "PAPER", mode_label: "PAPER", auth_ready: true, runtime_status: "RUNNING" },
+                operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
+                paper: { readiness: { runtime_running: true, entries_enabled: true }, running: true },
+                startup_control_plane: {
+                  overall_state: "READY",
+                  launch_allowed: true,
+                  convergence: {
+                    stable_ready: true,
+                    dashboard_attached: true,
+                    paper_runtime_ready: true,
+                  },
+                },
+                supervised_paper_operability: {
+                  app_usable_for_supervised_paper: true,
+                  state: "USABLE",
+                  summary_line: "Paper runtime is operational.",
+                },
+              },
+            }),
+          2000,
+        ),
+      ),
+  );
+
+  const startedAt = Date.now();
+  const state = await getDesktopState();
+
+  assert.equal(state.connection, "live");
+  assert.equal(state.source.mode, "live_api");
+  assert.equal(state.source.apiReachable, true);
+  assert.equal(state.backend.apiStatus, "responding");
+  assert.ok(Date.now() - startedAt >= 1900);
   __testing.resetRuntimeState();
 });
 
@@ -518,6 +674,7 @@ test("health-only backend prefers attached degraded bridge over snapshot fallbac
     production_link: {},
   }));
   __testing.setLoadAttachedSnapshotBridgeHook(async () => ({
+    transportKind: "readiness_bridge",
     readiness: { readiness_state: "NOT_READY", control_plane: { launch_allowed: false, dashboard_attached: true } },
     health: { status: "degraded", ready: false },
     backendUrl: "http://127.0.0.1:8790/",
@@ -532,6 +689,71 @@ test("health-only backend prefers attached degraded bridge over snapshot fallbac
   assert.equal(state.backend.state, "degraded");
   assert.deepEqual(state.errors, []);
 
+  __testing.resetRuntimeState();
+});
+
+test("packaged launch keeps live API attachment when the readiness bridge confirms the current payload even if a direct probe misses", async () => {
+  __testing.resetRuntimeState();
+  __testing.setPackagedLocalBundleLaunchContextHook(() => true);
+  __testing.setBuildLocalOperatorAuthStateHook(async () => makeDesktopState().localAuth);
+  __testing.setLoadSnapshotBundleHook(async () => ({
+    generated_at: new Date().toISOString(),
+    dashboard_meta: {
+      server_instance_id: "instance-current",
+      server_pid: 98165,
+      server_url: "http://127.0.0.1:8790/",
+    },
+    global: { mode: "PAPER", mode_label: "PAPER", auth_ready: true, runtime_status: "RUNNING" },
+    operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
+    paper: { readiness: { runtime_running: true, entries_enabled: true }, running: true },
+    startup_control_plane: {
+      overall_state: "READY",
+      launch_allowed: true,
+      convergence: {
+        stable_ready: true,
+        dashboard_attached: true,
+        paper_runtime_ready: true,
+      },
+    },
+    supervised_paper_operability: {
+      app_usable_for_supervised_paper: true,
+      state: "USABLE",
+      summary_line: "Paper runtime is operational.",
+    },
+  }));
+  __testing.setLoadAttachedSnapshotBridgeHook(async () => ({
+    transportKind: "readiness_bridge",
+    readiness: {
+      readiness_state: "READY",
+      payload: {
+        reachable: true,
+        ready: true,
+        instance_id: "instance-current",
+        pid: 98165,
+      },
+      listener: {
+        reachable: true,
+      },
+      control_plane: {
+        launch_allowed: true,
+        dashboard_attached: true,
+        paper_runtime_ready: true,
+      },
+      configured_url: "http://127.0.0.1:8790/",
+    },
+    health: { status: "ok", ready: true, pid: 98165 },
+    backendUrl: "http://127.0.0.1:8790/",
+    detail: "Service is attached through the local readiness bridge and synchronized operator snapshot.",
+  }));
+  __testing.setLoadLiveDashboardHook(async () => null);
+
+  const state = await getDesktopState();
+
+  assert.equal(state.connection, "live");
+  assert.equal(state.source.mode, "live_api");
+  assert.equal(state.source.apiReachable, true);
+  assert.equal(state.source.canRunLiveActions, true);
+  assert.equal(state.backend.apiStatus, "responding");
   __testing.resetRuntimeState();
 });
 
