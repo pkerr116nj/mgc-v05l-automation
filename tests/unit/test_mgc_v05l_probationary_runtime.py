@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import select
 
 import mgc_v05l.app.probationary_runtime as probationary_runtime_module
+import mgc_v05l.execution.ibkr_paper_strategy_governance as governance_module
 from mgc_v05l.app.strategy_study import build_strategy_study_v3
 from mgc_v05l.app.probationary_runtime import (
     ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
@@ -4444,6 +4445,280 @@ def test_live_strategy_pilot_runner_applies_confirmed_fill_from_broker_truth(tmp
     assert intent_rows[0]["order_status"] == OrderStatus.FILLED.value
     assert summary["broker_fill_at"] == "2026-03-27T14:25:00+00:00"
     assert summary["pending_stage"] == "FILLED_CONFIRMED"
+
+
+@pytest.mark.parametrize(
+    ("lane_id", "symbol"),
+    [
+        ("es_1x_ny_early_core__us_early_long", "ES"),
+        ("mes_1x_ny_early_core__us_early_long", "MES"),
+        ("nq_1x_ny_early_core__us_early_long", "NQ"),
+        ("mnq_1x_ny_early_core__us_early_long", "MNQ"),
+    ],
+)
+def test_submit_capable_us_early_long_lanes_use_runtime_ibkr_route_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lane_id: str,
+    symbol: str,
+) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    spec = probationary_runtime_module.ProbationaryPaperLaneSpec(
+        lane_id=lane_id,
+        display_name=lane_id,
+        symbol=symbol,
+        long_sources=("bullSnap",),
+        short_sources=(),
+        session_restriction=None,
+        point_value=Decimal("1"),
+    )
+    root_logger = StructuredLogger(tmp_path / "root")
+
+    class FakePollingService:
+        def poll_bars(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_build_live_polling_service",
+        lambda *args, **kwargs: FakePollingService(),
+    )
+
+    lanes = probationary_runtime_module._build_probationary_paper_lanes(  # noqa: SLF001
+        settings=settings,
+        lane_specs=[spec],
+        root_logger=root_logger,
+        schwab_config_path=None,
+    )
+
+    assert len(lanes) == 1
+    broker = lanes[0].execution_engine.broker
+    assert not isinstance(broker, PaperBroker)
+    assert broker.route_destination == "ibkr_paper_bridge_submit_capable"
+
+
+def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+    bridge_calls: list[dict[str, object]] = []
+
+    def fake_bridge_runner(*, config):
+        bridge_calls.append(
+            {
+                "strategy_id": config.strategy_id,
+                "symbol": config.symbol,
+                "action": config.action,
+                "contract_month": config.contract_month,
+            }
+        )
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_ORDER_WORKING",
+            report={"detail": "bridge working", "broker_order_id": "ibkr-runtime-entry-1"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="es_1x_ny_early_core__us_early_long",
+        source_symbol="ES",
+        bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1", "bridge_execution_target": {"symbol": "MES", "contract_month": "202606"}},
+        repo_root=Path(__file__).resolve().parents[2],
+        bridge_runner=fake_bridge_runner,
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings.model_copy(update={"symbol": "ES"}),
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    finalized_bar = _build_bar(datetime(2026, 4, 29, 8, 29, tzinfo=ZoneInfo("America/New_York")))
+    _seed_strategy_warmup(strategy_engine, finalized_bar)
+    forced_intent = OrderIntent(
+        order_intent_id=f"{finalized_bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
+        bar_id=finalized_bar.bar_id,
+        symbol="ES",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=finalized_bar.end_ts,
+        reason_code="route_fix_entry_test",
+    )
+    strategy_engine._maybe_create_order_intent = lambda *args, **kwargs: forced_intent  # type: ignore[method-assign]
+
+    strategy_engine.process_bar(finalized_bar)
+
+    assert bridge_calls == [
+        {
+            "strategy_id": "es_1x_ny_early_core__us_early_long",
+            "symbol": "MES",
+            "action": "BUY",
+            "contract_month": "202606",
+        }
+    ]
+    assert repositories.fills.list_all() == []
+    intent_rows = repositories.order_intents.list_all()
+    assert len(intent_rows) == 1
+    assert intent_rows[0]["broker_order_id"] == "ibkr-runtime-entry-1"
+    assert not str(intent_rows[0]["broker_order_id"]).startswith("paper-")
+    assert execution_engine.last_submit_attempt()["route_destination"] == "ibkr_paper_bridge_submit_capable"
+
+
+def test_submit_capable_lane_exit_invokes_ibkr_bridge_without_local_fill(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+    bridge_calls: list[dict[str, object]] = []
+
+    def fake_bridge_runner(*, config):
+        bridge_calls.append(
+            {
+                "strategy_id": config.strategy_id,
+                "symbol": config.symbol,
+                "action": config.action,
+                "contract_month": config.contract_month,
+            }
+        )
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_ORDER_WORKING",
+            report={"detail": "bridge working", "broker_order_id": "ibkr-runtime-exit-1"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="nq_1x_ny_early_core__us_early_long",
+        source_symbol="NQ",
+        bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "NQ_SIGNAL_ROUTED_TO_MNQ_PHASE1", "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"}},
+        repo_root=Path(__file__).resolve().parents[2],
+        bridge_runner=fake_bridge_runner,
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings.model_copy(update={"symbol": "NQ"}),
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("21000"),
+        entry_timestamp=datetime(2026, 4, 29, 8, 26, tzinfo=ZoneInfo("America/New_York")),
+        strategy_status=StrategyStatus.IN_LONG_K,
+    )
+    occurred_at = datetime(2026, 4, 29, 8, 29, tzinfo=ZoneInfo("America/New_York"))
+    strategy_engine.submit_runtime_exit_intent(
+        occurred_at,
+        quantity=1,
+        reason_code="route_fix_exit_test",
+    )
+
+    assert bridge_calls == [
+        {
+            "strategy_id": "nq_1x_ny_early_core__us_early_long",
+            "symbol": "MNQ",
+            "action": "SELL",
+            "contract_month": "202606",
+        }
+    ]
+    assert repositories.fills.list_all() == []
+    intent_rows = repositories.order_intents.list_all()
+    assert len(intent_rows) == 1
+    assert intent_rows[0]["broker_order_id"] == "ibkr-runtime-exit-1"
+    assert execution_engine.last_submit_attempt()["route_destination"] == "ibkr_paper_bridge_submit_capable"
+
+
+def test_submit_capable_lane_bridge_block_does_not_create_local_fill(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            report={"detail": "monitor_gate_failed"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mnq_1x_ny_early_core__us_early_long",
+        source_symbol="MNQ",
+        bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1", "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"}},
+        repo_root=Path(__file__).resolve().parents[2],
+        bridge_runner=fake_bridge_runner,
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings.model_copy(update={"symbol": "MNQ"}),
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    finalized_bar = _build_bar(datetime(2026, 4, 29, 8, 29, tzinfo=ZoneInfo("America/New_York")))
+    _seed_strategy_warmup(strategy_engine, finalized_bar)
+    forced_intent = OrderIntent(
+        order_intent_id=f"{finalized_bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
+        bar_id=finalized_bar.bar_id,
+        symbol="MNQ",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=finalized_bar.end_ts,
+        reason_code="route_fix_blocked_test",
+    )
+    strategy_engine._maybe_create_order_intent = lambda *args, **kwargs: forced_intent  # type: ignore[method-assign]
+
+    strategy_engine.process_bar(finalized_bar)
+
+    assert repositories.fills.list_all() == []
+    assert repositories.order_intents.list_all() == []
+    failure = execution_engine.last_submit_failure()
+    assert failure is not None
+    assert probationary_runtime_module.IBKR_RUNTIME_ROUTE_MISS_BLOCKED_PREFIX in failure.error
+
+
+def test_internal_only_lane_still_creates_explicit_internal_only_fill_label(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": "GC"})
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+    execution_engine = ExecutionEngine(broker=PaperBroker())
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    first_bar = _build_bar(datetime(2026, 4, 29, 8, 29, tzinfo=ZoneInfo("America/New_York")))
+    second_bar = _build_bar(datetime(2026, 4, 29, 8, 30, tzinfo=ZoneInfo("America/New_York")))
+    _seed_strategy_warmup(strategy_engine, first_bar)
+    strategy_engine.submit_runtime_entry_intent(
+        first_bar,
+        side="LONG",
+        signal_source="internalOnlyTest",
+        reason_code="internal_only_fill_test",
+        long_entry_family=LongEntryFamily.K,
+    )
+    strategy_engine.process_bar(second_bar)
+
+    fill_rows = repositories.fills.list_all()
+    assert len(fill_rows) == 1
+    assert str(fill_rows[0]["broker_order_id"]).startswith("paper-")
+    routing_mode, local_trading_allowed = governance_module._routing_mode_and_local_policy(  # noqa: SLF001
+        strategy_status="RUNNING",
+        current_order_destination="legacy_app_paper_runtime",
+        explicit_internal_only_diagnostic=False,
+        instrument="GC",
+    )
+    assert routing_mode == "INTERNAL_ONLY_DIAGNOSTIC"
+    assert local_trading_allowed is True
 
 
 def test_live_strategy_pilot_single_cycle_auto_stops_after_completed_entry_exit_cycle(tmp_path: Path) -> None:

@@ -44,6 +44,12 @@ from ..domain.enums import (
 from ..domain.exceptions import DeterminismError
 from ..domain.models import Bar, HealthSnapshot
 from ..execution.execution_engine import ExecutionEngine, PendingExecution
+from ..execution.ibkr_paper_strategy_bridge import (
+    IbkrPaperStrategyBridgeConfig,
+    IbkrPaperStrategyBridgeArtifacts,
+    run_ibkr_paper_strategy_bridge,
+)
+from ..execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
 from ..execution.live_strategy_broker import LiveStrategyPilotBroker
 from ..execution.order_models import FillEvent, OrderIntent
 from ..execution.paper_broker import PaperBroker, PaperPosition
@@ -333,6 +339,8 @@ LIVE_SIGNAL_OBSERVABILITY_FAMILY_FIELDS = {
         ("firstBearSnapTurn", "first_bear_snap_turn"),
     ),
 }
+
+IBKR_RUNTIME_ROUTE_MISS_BLOCKED_PREFIX = "BLOCKED_NOT_SENT_TO_BROKER"
 
 APPROVED_SHORT_SOURCE_FIELDS = {
     "asiaEarlyPauseResumeShortTurn": "enable_asia_early_pause_resume_shorts",
@@ -3498,6 +3506,13 @@ class ProbationaryPaperLaneRuntime:
         for bar in bars:
             self.strategy_engine.process_bar(bar)
             self._apply_canary_lifecycle(bar)
+            if not isinstance(self.execution_engine.broker, PaperBroker):
+                _run_live_strategy_fill_sync(
+                    repositories=self.repositories,
+                    strategy_engine=self.strategy_engine,
+                    execution_engine=self.execution_engine,
+                    observed_at=bar.end_ts,
+                )
         cadence = _runtime_cadence_payload(self.settings, self.strategy_engine)
         heartbeat_reconciliation, reconciliation, _ = _run_reconciliation_heartbeat(
             settings=self.settings,
@@ -7297,7 +7312,18 @@ def _build_probationary_paper_lanes(
             lane_logger=StructuredLogger(lane_settings.probationary_artifacts_path),
         )
         alert_dispatcher = AlertDispatcher(lane_logger, repositories.alerts, source_subsystem="probationary_paper_lane")
-        execution_engine = ExecutionEngine(broker=PaperBroker())
+        bridge_adapter = lane_submit_bridge_adapter(lane_id=spec.lane_id)
+        broker = (
+            _IbkrPaperBridgeRuntimeBroker(
+                lane_id=spec.lane_id,
+                source_symbol=spec.symbol,
+                bridge_adapter=bridge_adapter,
+                repo_root=Path(__file__).resolve().parents[3],
+            )
+            if bridge_adapter is not None
+            else PaperBroker()
+        )
+        execution_engine = ExecutionEngine(broker=broker)
         strategy_engine = _build_probationary_strategy_engine(
             spec=spec,
             settings=lane_settings,
@@ -10049,6 +10075,287 @@ class _PaperSoakValidationPollingService:
                 continue
             return [bar]
         return []
+
+
+class _IbkrPaperBridgeRuntimeBroker:
+    """Route-aware broker wrapper for submit-capable paper lanes.
+
+    This broker never synthesizes local fills. It delegates actionable intents to
+    the shared IBKR paper bridge path and fails closed if broker routing is
+    blocked, preventing silent fallback to local-only `paper-*` fills.
+    """
+
+    def __init__(
+        self,
+        *,
+        lane_id: str,
+        source_symbol: str,
+        bridge_adapter: dict[str, Any],
+        repo_root: Path,
+        bridge_runner: Any = run_ibkr_paper_strategy_bridge,
+    ) -> None:
+        self._lane_id = str(lane_id)
+        self._source_symbol = str(source_symbol).upper()
+        self._bridge_adapter = dict(bridge_adapter or {})
+        self._repo_root = Path(repo_root)
+        self._bridge_runner = bridge_runner
+        self._connected = False
+        self._position = PaperPosition()
+        self._open_order_ids: list[str] = []
+        self._order_status: dict[str, OrderStatus] = {}
+        self._last_fill_timestamp: datetime | None = None
+        self._last_submit_context: dict[str, Any] = {
+            "lane_id": self._lane_id,
+            "source_symbol": self._source_symbol,
+            "route_destination": self.route_destination,
+            "bridge_proxy_mode": self._bridge_adapter.get("bridge_proxy_mode"),
+        }
+        self._last_bridge_report: dict[str, Any] = {}
+
+    @property
+    def route_destination(self) -> str:
+        return str(self._bridge_adapter.get("current_order_destination") or "legacy_app_paper_runtime")
+
+    def connect(self) -> None:
+        self._connected = True
+
+    def disconnect(self) -> None:
+        self._connected = False
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def submit_order(self, order_intent: OrderIntent) -> str:
+        if not self._connected:
+            raise RuntimeError("IBKR runtime route broker is not connected.")
+        bridge_config = _runtime_bridge_config_for_lane(
+            repo_root=self._repo_root,
+            lane_id=self._lane_id,
+            source_symbol=self._source_symbol,
+            order_intent=order_intent,
+            bridge_adapter=self._bridge_adapter,
+        )
+        self._last_submit_context = {
+            "lane_id": self._lane_id,
+            "source_symbol": self._source_symbol,
+            "route_destination": self.route_destination,
+            "bridge_proxy_mode": self._bridge_adapter.get("bridge_proxy_mode"),
+            "strategy_id": bridge_config.strategy_id,
+            "bridge_symbol": bridge_config.symbol,
+            "bridge_contract_month": bridge_config.contract_month,
+            "bridge_action": bridge_config.action,
+            "intent_type": order_intent.intent_type.value,
+            "order_intent_id": order_intent.order_intent_id,
+            "submit_mode": "ibkr_paper_bridge",
+        }
+        artifacts: IbkrPaperStrategyBridgeArtifacts = self._bridge_runner(config=bridge_config)
+        report = dict(artifacts.report or {})
+        self._last_bridge_report = report
+        self._last_submit_context = {
+            **self._last_submit_context,
+            "bridge_classification": artifacts.classification,
+            "bridge_detail": report.get("detail"),
+        }
+        if artifacts.classification not in {"PAPER_STRATEGY_ORDER_FILLED", "PAPER_STRATEGY_ORDER_WORKING"}:
+            detail = str(report.get("detail") or artifacts.classification or "bridge_blocked")
+            raise RuntimeError(f"{IBKR_RUNTIME_ROUTE_MISS_BLOCKED_PREFIX}: {detail}")
+        broker_order_id = _extract_bridge_broker_order_id(report)
+        if not broker_order_id:
+            raise RuntimeError("IBKR paper bridge returned a successful classification without a broker_order_id.")
+        status = (
+            OrderStatus.FILLED
+            if artifacts.classification == "PAPER_STRATEGY_ORDER_FILLED"
+            else OrderStatus.ACKNOWLEDGED
+        )
+        self._order_status[broker_order_id] = status
+        if status is OrderStatus.ACKNOWLEDGED:
+            self._open_order_ids = [broker_order_id]
+        else:
+            self._open_order_ids = []
+            fill_price = _extract_bridge_fill_price(report)
+            self._apply_filled_position(order_intent=order_intent, fill_price=fill_price)
+            fill_timestamp = _extract_bridge_fill_timestamp(report)
+            self._last_fill_timestamp = fill_timestamp or order_intent.created_at
+        self._last_submit_context = {
+            **self._last_submit_context,
+            "broker_order_id": broker_order_id,
+            "bridge_order_status": status.value,
+        }
+        return broker_order_id
+
+    def cancel_order(self, broker_order_id: str) -> None:
+        normalized = str(broker_order_id or "").strip()
+        if normalized in self._open_order_ids:
+            self._open_order_ids.remove(normalized)
+        if normalized:
+            self._order_status[normalized] = OrderStatus.CANCELLED
+
+    def get_order_status(self, broker_order_id: str) -> dict[str, Any]:
+        normalized = str(broker_order_id or "").strip()
+        status = self._order_status.get(normalized, OrderStatus.REJECTED)
+        fill_timestamp = None
+        fill_price = None
+        if status is OrderStatus.FILLED:
+            fill_timestamp = self._last_fill_timestamp.isoformat() if self._last_fill_timestamp is not None else None
+            fill_price = str(self._position.average_price) if self._position.average_price is not None else None
+        return {
+            "broker_order_id": normalized,
+            "status": status.value,
+            "fill_timestamp": fill_timestamp,
+            "fill_price": fill_price,
+            "route_destination": self.route_destination,
+        }
+
+    def get_open_orders(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "broker_order_id": broker_order_id,
+                "status": self._order_status.get(broker_order_id, OrderStatus.ACKNOWLEDGED).value,
+                "route_destination": self.route_destination,
+            }
+            for broker_order_id in list(self._open_order_ids)
+        ]
+
+    def get_position(self) -> dict[str, Any]:
+        return {
+            "quantity": self._position.quantity,
+            "average_price": str(self._position.average_price) if self._position.average_price is not None else None,
+            "route_destination": self.route_destination,
+        }
+
+    def get_account_health(self) -> dict[str, Any]:
+        return {
+            "status": "HEALTHY" if self._connected else "DISCONNECTED",
+            "route_destination": self.route_destination,
+            "bridge_proxy_mode": self._bridge_adapter.get("bridge_proxy_mode"),
+        }
+
+    def snapshot_state(self) -> dict[str, Any]:
+        return {
+            "connected": self._connected,
+            "position_quantity": self._position.quantity,
+            "average_price": str(self._position.average_price) if self._position.average_price is not None else None,
+            "open_order_ids": list(self._open_order_ids),
+            "order_status": {key: status.value for key, status in self._order_status.items()},
+            "last_fill_timestamp": self._last_fill_timestamp.isoformat() if self._last_fill_timestamp is not None else None,
+            "route_destination": self.route_destination,
+            "last_submit_context": dict(self._last_submit_context),
+        }
+
+    def fill_order(self, order_intent: OrderIntent, fill_price: Decimal, fill_timestamp: datetime) -> FillEvent:
+        del order_intent, fill_price, fill_timestamp
+        raise RuntimeError("Submit-capable IBKR paper lanes must not synthesize local replay fills.")
+
+    def last_submit_context(self) -> dict[str, Any]:
+        return dict(self._last_submit_context)
+
+    def last_bridge_report(self) -> dict[str, Any]:
+        return dict(self._last_bridge_report)
+
+    def _apply_filled_position(self, *, order_intent: OrderIntent, fill_price: Decimal | None) -> None:
+        current_quantity = int(self._position.quantity or 0)
+        if order_intent.intent_type is OrderIntentType.BUY_TO_OPEN:
+            next_quantity = current_quantity + int(order_intent.quantity)
+        elif order_intent.intent_type is OrderIntentType.SELL_TO_OPEN:
+            next_quantity = current_quantity - int(order_intent.quantity)
+        elif order_intent.intent_type is OrderIntentType.SELL_TO_CLOSE:
+            next_quantity = current_quantity - int(order_intent.quantity)
+        else:
+            next_quantity = current_quantity + int(order_intent.quantity)
+        average_price = self._position.average_price
+        if next_quantity == 0:
+            average_price = None
+        elif fill_price is not None and current_quantity == 0:
+            average_price = fill_price
+        self._position = PaperPosition(quantity=next_quantity, average_price=average_price)
+
+
+def _runtime_bridge_config_for_lane(
+    *,
+    repo_root: Path,
+    lane_id: str,
+    source_symbol: str,
+    order_intent: OrderIntent,
+    bridge_adapter: dict[str, Any],
+) -> IbkrPaperStrategyBridgeConfig:
+    bridge_target = dict(bridge_adapter.get("bridge_execution_target") or {})
+    action, limit_price_model = _runtime_bridge_action_and_limit_model(order_intent.intent_type)
+    return IbkrPaperStrategyBridgeConfig(
+        repo_root=repo_root,
+        mode="PAPER",
+        host="127.0.0.1",
+        port=7497,
+        client_id=9800 + (abs(hash(lane_id)) % 400),
+        account_id="DUM882026",
+        strategy_id=str(lane_id),
+        symbol=str(bridge_target.get("symbol") or source_symbol).upper(),
+        contract_month=str(bridge_target.get("contract_month") or ""),
+        action=action,
+        quantity=float(order_intent.quantity),
+        order_type="LMT",
+        limit_price_model=limit_price_model,
+        time_in_force="DAY",
+        reason=str(order_intent.reason_code or "runtime_broker_path_signal"),
+        risk_tags=("PROBATIONARY_RUNTIME_BROKER_PATH", str(bridge_adapter.get("bridge_proxy_mode") or "")),
+        paper_only=True,
+        submit=True,
+        caller_path="probationary_paper_runtime_lane",
+        output_dir=repo_root / "outputs" / "reports" / "ibkr_runtime_route_dispatch" / str(lane_id),
+    )
+
+
+def _runtime_bridge_action_and_limit_model(intent_type: OrderIntentType) -> tuple[str, str]:
+    if intent_type is OrderIntentType.BUY_TO_OPEN:
+        return "BUY", "DELAYED_ASK_PLUS_1T_MARKETABLE_BUY"
+    if intent_type is OrderIntentType.BUY_TO_CLOSE:
+        return "BUY", "DELAYED_ASK_PLUS_1T_MARKETABLE_BUY"
+    return "SELL", "DELAYED_BID_MINUS_1T_MARKETABLE_SELL"
+
+
+def _extract_bridge_broker_order_id(report: dict[str, Any]) -> str | None:
+    candidates = [
+        report.get("broker_order_id"),
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "broker_order_id"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "broker_order_id"),
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "order_id"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "order_id"),
+    ]
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _extract_bridge_fill_price(report: dict[str, Any]) -> Decimal | None:
+    candidates = [
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "average_fill_price"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "average_fill_price"),
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "fill_price"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "fill_price"),
+    ]
+    for candidate in candidates:
+        if candidate in (None, ""):
+            continue
+        try:
+            return Decimal(str(candidate))
+        except Exception:
+            continue
+    return None
+
+
+def _extract_bridge_fill_timestamp(report: dict[str, Any]) -> datetime | None:
+    candidates = [
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "fill_timestamp"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "fill_timestamp"),
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "filled_at"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "filled_at"),
+    ]
+    for candidate in candidates:
+        parsed = _parse_iso_datetime_or_none(candidate)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 class _LiveTimingValidationBroker(PaperBroker):

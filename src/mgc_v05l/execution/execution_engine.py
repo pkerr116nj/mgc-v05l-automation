@@ -90,6 +90,7 @@ class ExecutionEngine:
         try:
             broker_order_id = self._broker.submit_order(intent)
         except Exception as exc:
+            broker_submit_context = _optional_broker_submit_context(self._broker)
             self._clear_registration(intent.order_intent_id, intent.intent_type)
             self._last_submit_failure = SubmitFailure(
                 order_intent_id=intent.order_intent_id,
@@ -100,10 +101,16 @@ class ExecutionEngine:
                 failure_stage="broker_submit",
                 error=str(exc),
             )
+            if broker_submit_context:
+                self._last_submit_attempt = {
+                    **dict(self._last_submit_attempt or {}),
+                    **broker_submit_context,
+                }
             return None
         try:
             initial_status_payload = self._broker.get_order_status(broker_order_id)
         except Exception as exc:
+            broker_submit_context = _optional_broker_submit_context(self._broker)
             self._clear_registration(intent.order_intent_id, intent.intent_type)
             self._last_submit_failure = SubmitFailure(
                 order_intent_id=intent.order_intent_id,
@@ -114,11 +121,17 @@ class ExecutionEngine:
                 failure_stage="broker_status",
                 error=str(exc),
             )
+            if broker_submit_context:
+                self._last_submit_attempt = {
+                    **dict(self._last_submit_attempt or {}),
+                    **broker_submit_context,
+                }
             return None
         initial_status = str((initial_status_payload or {}).get("status") or "").strip().upper() or None
         acknowledged_at = intent.created_at if _status_confirms_acknowledgement(initial_status) else None
         self._last_submit_attempt = {
             **dict(self._last_submit_attempt or {}),
+            **_optional_broker_submit_context(self._broker),
             "broker_order_id": broker_order_id,
             "initial_broker_order_status": initial_status,
             "broker_ack_at": acknowledged_at.isoformat() if acknowledged_at is not None else None,
@@ -261,3 +274,13 @@ def _status_confirms_acknowledgement(status: str | None) -> bool:
         "PENDING_ACTIVATION",
         "PARTIALLY_FILLED",
     }
+
+
+def _optional_broker_submit_context(broker: BrokerInterface) -> dict[str, object]:
+    if not hasattr(broker, "last_submit_context"):
+        return {}
+    try:
+        payload = broker.last_submit_context()  # type: ignore[attr-defined]
+    except Exception:
+        return {}
+    return dict(payload or {}) if isinstance(payload, dict) else {}

@@ -1,0 +1,110 @@
+{
+  "classification": "IBKR_ROUTE_MISSING_BUG_FIXED",
+  "detail": "The 08:29 ET us_early_long route-miss bug is fixed for future signals: submit-capable routed lanes no longer create legacy local paper fills first. They now invoke the IBKR bridge runtime path for both entry and exit, and if broker routing blocks they fail closed as BLOCKED_NOT_SENT_TO_BROKER.",
+  "fix": {
+    "blocked_behavior": "bridge-blocked submits now fail closed with BLOCKED_NOT_SENT_TO_BROKER and do not create local paper fills",
+    "entry_behavior": "submit-capable entry signals now invoke the IBKR bridge runtime broker path instead of PaperBroker",
+    "exit_behavior": "submit-capable exit signals now invoke the IBKR bridge runtime broker path instead of PaperBroker",
+    "fill_sync": "ProbationaryPaperLaneRuntime now runs broker-path fill sync for non-PaperBroker lanes after bar processing",
+    "internal_only_behavior": "legacy/internal-only lanes still use PaperBroker and remain labeled INTERNAL_ONLY_DIAGNOSTIC",
+    "submit_capable_lane_broker": "_IbkrPaperBridgeRuntimeBroker"
+  },
+  "focus_window": {
+    "end": "2026-04-29T08:30:00-04:00",
+    "start": "2026-04-29T08:25:00-04:00"
+  },
+  "generated_at": "2026-04-29T13:25:05.226631+00:00",
+  "historical_route_miss_rows": [
+    {
+      "classification": "LOCAL_ONLY_EXPECTED_NOT_PORTED",
+      "historical_bridge_invoked": "False",
+      "historical_broker_order_id": "paper-MES|1m|2026-04-29T12:26:00Z|BUY_TO_OPEN",
+      "historical_reason": "unsupported_instrument_scope",
+      "lane_id": "mes_1x_ny_early_core__us_early_long",
+      "timestamp": "2026-04-29T08:26:00-04:00"
+    },
+    {
+      "classification": "IBKR_ROUTE_MISSING_BUG",
+      "historical_bridge_invoked": "False",
+      "historical_broker_order_id": "paper-MES|1m|2026-04-29T12:29:00Z|SELL_TO_CLOSE",
+      "historical_reason": "lane was already in the family submit-port window, but the fill still carried a local paper-* broker_order_id and no IBKR bridge attempt/broker truth was found",
+      "lane_id": "mes_1x_ny_early_core__us_early_long",
+      "timestamp": "2026-04-29T08:29:00-04:00"
+    },
+    {
+      "classification": "LOCAL_ONLY_EXPECTED_NOT_PORTED",
+      "historical_bridge_invoked": "False",
+      "historical_broker_order_id": "paper-MNQ|1m|2026-04-29T12:26:00Z|BUY_TO_OPEN",
+      "historical_reason": "unsupported_instrument_scope",
+      "lane_id": "mnq_1x_ny_early_core__us_early_long",
+      "timestamp": "2026-04-29T08:26:00-04:00"
+    },
+    {
+      "classification": "IBKR_ROUTE_MISSING_BUG",
+      "historical_bridge_invoked": "False",
+      "historical_broker_order_id": "paper-MNQ|1m|2026-04-29T12:29:00Z|SELL_TO_CLOSE",
+      "historical_reason": "lane was already in the family submit-port window, but the fill still carried a local paper-* broker_order_id and no IBKR bridge attempt/broker truth was found",
+      "lane_id": "mnq_1x_ny_early_core__us_early_long",
+      "timestamp": "2026-04-29T08:29:00-04:00"
+    },
+    {
+      "classification": "LOCAL_ONLY_EXPECTED_NOT_PORTED",
+      "historical_bridge_invoked": "False",
+      "historical_broker_order_id": "paper-NQ|1m|2026-04-29T12:26:00Z|BUY_TO_OPEN",
+      "historical_reason": "unsupported_instrument_scope",
+      "lane_id": "nq_1x_ny_early_core__us_early_long",
+      "timestamp": "2026-04-29T08:26:00-04:00"
+    },
+    {
+      "classification": "IBKR_ROUTE_MISSING_BUG",
+      "historical_bridge_invoked": "False",
+      "historical_broker_order_id": "paper-NQ|1m|2026-04-29T12:29:00Z|SELL_TO_CLOSE",
+      "historical_reason": "lane was already in the family submit-port window, but the fill still carried a local paper-* broker_order_id and no IBKR bridge attempt/broker truth was found",
+      "lane_id": "nq_1x_ny_early_core__us_early_long",
+      "timestamp": "2026-04-29T08:29:00-04:00"
+    },
+    {
+      "classification": "LOCAL_ONLY_EXPECTED_NOT_PORTED",
+      "historical_bridge_invoked": "False",
+      "historical_broker_order_id": "paper-ES|1m|2026-04-29T12:26:00Z|BUY_TO_OPEN",
+      "historical_reason": "unsupported_instrument_scope",
+      "lane_id": "es_1x_ny_early_core__us_early_long",
+      "timestamp": "2026-04-29T08:26:00-04:00"
+    },
+    {
+      "classification": "IBKR_ROUTE_MISSING_BUG",
+      "historical_bridge_invoked": "False",
+      "historical_broker_order_id": "paper-ES|1m|2026-04-29T12:29:00Z|SELL_TO_CLOSE",
+      "historical_reason": "lane was already in the family submit-port window, but the fill still carried a local paper-* broker_order_id and no IBKR bridge attempt/broker truth was found",
+      "lane_id": "es_1x_ny_early_core__us_early_long",
+      "timestamp": "2026-04-29T08:29:00-04:00"
+    }
+  ],
+  "proof": {
+    "builder_wiring_lanes": [
+      "es_1x_ny_early_core__us_early_long",
+      "mes_1x_ny_early_core__us_early_long",
+      "nq_1x_ny_early_core__us_early_long",
+      "mnq_1x_ny_early_core__us_early_long"
+    ],
+    "focused_test_summary": "8 passed",
+    "tests": {
+      "internal_only_lane_still_creates_explicit_internal_only_fill_label": "passed",
+      "submit_capable_lane_bridge_block_does_not_create_local_fill": "passed",
+      "submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill": "passed",
+      "submit_capable_lane_exit_invokes_ibkr_bridge_without_local_fill": "passed",
+      "submit_capable_us_early_long_lanes_use_runtime_ibkr_route_broker": "passed"
+    }
+  },
+  "root_cause": {
+    "builder_function": "_build_probationary_paper_lanes",
+    "historical_path": "submit-capable lanes were still constructed with ExecutionEngine(broker=PaperBroker())",
+    "local_fill_materializer": "StrategyEngine._apply_due_replay_fills() only runs for PaperBroker lanes, which created the paper-* fills",
+    "module": "src/mgc_v05l/app/probationary_runtime.py",
+    "runtime_gap": "inventory/adapter status had been ported, but the live probationary paper runtime dispatcher had not been switched to an IBKR bridge-aware broker"
+  },
+  "state_reconciliation": {
+    "counted_as_ibkr_paper_performance": false,
+    "historical_0829_rows_remain_not_broker_path": true
+  }
+}
