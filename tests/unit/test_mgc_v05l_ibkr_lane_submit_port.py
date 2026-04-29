@@ -106,6 +106,22 @@ def _write_signal_audit(tmp_path: Path) -> None:
                         "last_recent_short_setup": False,
                         "last_intent_type": None,
                         "last_fill_timestamp": None,
+                    },
+                    {
+                        "id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+                        "lane_id": "gc_1x_all_lanes__london_early_long",
+                        "instrument": "GC",
+                        "family": "gold_forced_session_baseline_v2",
+                        "current_strategy_status": "READY",
+                        "entries_enabled": True,
+                        "eligible_now": False,
+                        "audit_verdict": "EXIT_RECENTLY_FILLED",
+                        "last_actionable_signal_family": "londonEarlyLongV5",
+                        "last_actionable_signal_timestamp": "2026-04-29T03:04:00-04:00",
+                        "last_recent_long_setup": False,
+                        "last_recent_short_setup": False,
+                        "last_intent_type": "SELL_TO_CLOSE",
+                        "last_fill_timestamp": "2026-04-29T03:08:00-04:00",
                     }
                 ]
             }
@@ -134,6 +150,14 @@ def _write_strategy_performance(tmp_path: Path) -> None:
                         "instrument": "MGC",
                         "strategy_family": "asia_london_participation_core_v1",
                         "standalone_strategy_id": "asia_london_participation_core_v1__MGC",
+                        "position_side": "FLAT",
+                        "status": "READY",
+                    },
+                    {
+                        "lane_id": "gc_1x_all_lanes__london_early_long",
+                        "instrument": "GC",
+                        "strategy_family": "gold_forced_session_baseline_v2",
+                        "standalone_strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
                         "position_side": "FLAT",
                         "status": "READY",
                     }
@@ -167,6 +191,14 @@ def _write_governance_status(tmp_path: Path) -> None:
                         "strategy_status": "WATCHLIST",
                         "submit_allowed": True,
                         "submit_block_reasons": [],
+                    },
+                    {
+                        "strategy_id": "gc_1x_all_lanes__london_early_long",
+                        "bridge_strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+                        "standalone_strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+                        "strategy_status": "KILL_CANDIDATE",
+                        "submit_allowed": True,
+                        "submit_block_reasons": [],
                     }
                 ],
             }
@@ -186,7 +218,7 @@ def test_lane_submit_port_reports_ready_no_action(tmp_path: Path) -> None:
     artifacts = run_ibkr_lane_submit_port(config=_config(tmp_path))
 
     assert artifacts.classification == "PAPER_LANE_SUBMIT_READY_NO_ACTION"
-    assert artifacts.report["selected_lane"]["strategy_id"] == "gc_1x_asia_london_participation__asia_london_long_v5"
+    assert artifacts.report["selected_lane"]["strategy_id"] == "gc_1x_all_lanes__london_early_long"
     assert artifacts.report["selected_inventory_row"]["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
     assert artifacts.report["selected_intent_row"]["action"] == "NO_ACTION"
 
@@ -211,6 +243,30 @@ def test_lane_submit_port_can_target_submit_capable_mgc_lane(tmp_path: Path) -> 
     assert artifacts.classification == "PAPER_LANE_SUBMIT_READY_NO_ACTION"
     assert artifacts.report["selected_lane"]["strategy_id"] == "mgc_1x_asia_london_participation__asia_london_long_v5"
     assert artifacts.report["selected_inventory_row"]["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+
+
+def test_lane_submit_port_allows_kill_candidate_when_ported_and_requested(tmp_path: Path) -> None:
+    _write_monitor(tmp_path)
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+    _write_governance_status(tmp_path)
+
+    config = IbkrLaneSubmitPortConfig(
+        repo_root=tmp_path,
+        output_dir=Path("outputs") / "reports" / "ibkr_lane_submit_port",
+        porting_output_dir=Path("outputs") / "reports" / "ibkr_strategy_porting",
+        submit=False,
+        strategy_id="gc_1x_all_lanes__london_early_long",
+    )
+    artifacts = run_ibkr_lane_submit_port(config=config)
+
+    assert artifacts.classification == "PAPER_LANE_SUBMIT_READY_NO_ACTION"
+    assert artifacts.report["selected_lane"]["strategy_id"] == "gc_1x_all_lanes__london_early_long"
+    assert artifacts.report["selected_lane_governance_status"]["selected_strategy"]["strategy_status"] == "KILL_CANDIDATE"
+    check = next(row for row in artifacts.report["preflight_checks"] if row["name"] == "governance_status_allowed")
+    assert check["passed"] is True
 
 
 def test_lane_submit_port_writes_artifacts(tmp_path: Path) -> None:

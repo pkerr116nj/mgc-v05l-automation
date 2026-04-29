@@ -106,6 +106,22 @@ def _write_signal_audit(tmp_path: Path) -> None:
                 "last_fill_timestamp": None,
             },
             {
+                "id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+                "lane_id": "gc_1x_all_lanes__london_early_long",
+                "instrument": "GC",
+                "family": "gold_forced_session_baseline_v2",
+                "current_strategy_status": "READY",
+                "entries_enabled": True,
+                "eligible_now": False,
+                "audit_verdict": "EXIT_RECENTLY_FILLED",
+                "last_actionable_signal_family": "londonEarlyLongV5",
+                "last_actionable_signal_timestamp": "2026-04-29T03:04:00-04:00",
+                "last_recent_long_setup": False,
+                "last_recent_short_setup": False,
+                "last_intent_type": "SELL_TO_CLOSE",
+                "last_fill_timestamp": "2026-04-29T03:08:00-04:00",
+            },
+            {
                 "id": "ATP_COMPANION_V1_ASIA_US",
                 "lane_id": "atp_companion_v1_asia_us",
                 "instrument": "MGC",
@@ -164,6 +180,14 @@ def _write_strategy_performance(tmp_path: Path) -> None:
                 "status": "READY",
             },
             {
+                "lane_id": "gc_1x_all_lanes__london_early_long",
+                "instrument": "GC",
+                "strategy_family": "gold_forced_session_baseline_v2",
+                "standalone_strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+                "position_side": "FLAT",
+                "status": "READY",
+            },
+            {
                 "lane_id": "atp_companion_v1_asia_us",
                 "instrument": "MGC",
                 "strategy_family": "active_trend_participation_engine",
@@ -195,13 +219,16 @@ def test_builds_inventory_and_intent_rows_for_live_paper_lanes(tmp_path: Path) -
 
     assert artifacts.classification == "IBKR_PAPER_STRATEGY_PORT_PARTIAL"
     assert artifacts.adapter_classification == "STRATEGY_INTENT_ADAPTER_READY"
-    assert len(artifacts.inventory_rows) == 4
+    assert len(artifacts.inventory_rows) == 5
     atp = next(row for row in artifacts.inventory_rows if row["strategy_id"] == "atp_companion_v1_asia_us")
     assert atp["current_position_state"] == "LONG"
     assert atp["current_order_destination"] == "ibkr_paper_bridge_adopted_position"
     gc = next(row for row in artifacts.inventory_rows if row["strategy_id"] == "gc_1x_asia_london_participation__asia_london_long_v5")
     assert gc["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
     assert gc["bridge_adapter_ready"] is True
+    london = next(row for row in artifacts.inventory_rows if row["strategy_id"] == "gc_1x_all_lanes__london_early_long")
+    assert london["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+    assert london["bridge_adapter_ready"] is True
     mgc = next(row for row in artifacts.intent_rows if row["strategy_id"] == "mgc_1x_asia_london_participation__asia_london_long_v5")
     assert mgc["action"] == "NO_ACTION"
     assert mgc["bridge_submit_capable"] is True

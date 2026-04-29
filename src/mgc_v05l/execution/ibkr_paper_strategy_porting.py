@@ -24,6 +24,7 @@ _ATP_STRATEGY_ID = "ATP_COMPANION_V1_ASIA_US"
 _GC_PHASE1_SUBMIT_LANE_IDS = (
     "gc_1x_all_lanes__asia_early_long",
     "gc_1x_all_lanes__asia_early_short",
+    "gc_1x_all_lanes__london_early_long",
     "gc_1x_all_lanes__us_early_short",
     "gc_1x_all_lanes__us_midday_short",
     "gc_1x_asia_london_participation__asia_london_long_v5",

@@ -26,6 +26,7 @@ _AUDIT_JSONL = "ibkr_lane_submit_port_audit.jsonl"
 _PREFERRED_LANES = (
     "gc_1x_all_lanes__asia_early_long",
     "gc_1x_all_lanes__asia_early_short",
+    "gc_1x_all_lanes__london_early_long",
     "gc_1x_all_lanes__us_early_short",
     "gc_1x_all_lanes__us_midday_short",
     "gc_1x_asia_london_participation__asia_london_long_v5",
@@ -179,7 +180,7 @@ def _select_lane(*, report: dict[str, Any], repo_root: Path, strategy_id: str | 
             continue
         if str(row.get("instrument") or "") not in {"GC", "MGC"}:
             continue
-        if str(gov.get("strategy_status") or "WATCHLIST") in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
+        if str(gov.get("strategy_status") or "WATCHLIST") in {"PAUSED", "DISABLED"}:
             continue
         return {
             "strategy_id": row.get("strategy_id"),
@@ -227,7 +228,7 @@ def _build_checks(
         _check("current_order_destination_submit_capable", str(inventory_row.get("current_order_destination") or "") == "ibkr_paper_bridge_submit_capable", True, "Selected lane must now point at the shared IBKR paper bridge path."),
         _check("monitor_fresh_and_healthy", bool(monitor_status.get("monitor_running")) and not bool(monitor_status.get("stale")) and str(monitor_status.get("health_classification") or "").upper() == "HEALTHY", True, "Monitor must be running, fresh, and HEALTHY."),
         _check("governance_row_present", bool(governance_row), True, "Selected lane requires a governance row."),
-        _check("governance_status_allowed", str(governance_row.get("strategy_status") or "").upper() not in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}, True, "Governance status must remain submit-eligible."),
+        _check("governance_status_allowed", str(governance_row.get("strategy_status") or "").upper() not in {"PAUSED", "DISABLED"}, True, "Governance status must remain submit-eligible."),
         _check(
             "governance_submit_allowed",
             (not requires_live_submit_gate) or bool(governance_status.get("submit_allowed")),
