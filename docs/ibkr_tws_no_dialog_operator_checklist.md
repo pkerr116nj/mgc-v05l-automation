@@ -48,5 +48,8 @@ Even if every setting above looks correct, unattended paper is still not proven 
 
 - no manual TWS dialog appears
 - broker `openOrder` / `orderStatus` truth flows without human intervention
+- for a deliberately non-marketable resting order, the working order is visibly present in TWS Orders / Activity before cancel
+- operator confirmation is recorded as `visible_in_tws=true/false`
 - no second order is needed
 - cleanup and cancel verification work cleanly
+- operator can confirm the order disappeared or showed canceled in TWS after cancel
