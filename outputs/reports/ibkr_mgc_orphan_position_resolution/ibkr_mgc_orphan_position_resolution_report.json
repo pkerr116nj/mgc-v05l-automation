@@ -1,0 +1,47 @@
+{
+  "classification": "PAPER_ORPHAN_POSITION_RESTORED_TO_ATP",
+  "generated_at": "2026-04-29T06:24:56.412265+00:00",
+  "account_id": "DUM882026",
+  "contract": {
+    "symbol": "MGC",
+    "expiry": "20260626",
+    "con_id": 712565978,
+    "local_symbol": "MGCM6"
+  },
+  "resolution": {
+    "adopted": true,
+    "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+    "source": "paper_orphan_reconciliation_adoption",
+    "reason": "restoring lost strategy attribution for known bridge-created paper position"
+  },
+  "position": {
+    "quantity": 1.0,
+    "side": "LONG",
+    "average_entry_price": 4586.7,
+    "realized_pnl": 0.0,
+    "unrealized_pnl": 101.03,
+    "perm_id": 490708968,
+    "order_id": 1,
+    "execution_id": "0000e1a7.69f1fa35.01.01",
+    "source_intent_id": "acb55729-ca64-4ef5-b9d4-8892edcdb94f"
+  },
+  "broker_vs_ledger": {
+    "broker_net_mgc": 1.0,
+    "strategy_attributed_mgc": 1.0,
+    "broker_minus_ledger_difference": 0.0,
+    "orphan_exposure": 0.0,
+    "open_orders": 0
+  },
+  "evidence": {
+    "position_snapshot": "outputs/reports/ibkr_paper_strategy_tracking_snapshot/strategy_position_snapshot.json",
+    "monitor_audit": "outputs/reports/paper_strategy_monitor/paper_strategy_monitor_audit.jsonl",
+    "executor_report": "outputs/reports/ibkr_paper_strategy_executor/ibkr_paper_strategy_executor_report.json",
+    "executor_loop_status": "var/paper_strategy_executor_loop_status.json"
+  },
+  "service_wrapper_note": {
+    "continuous_monitor_service_healthy": false,
+    "summary": "The orphan attribution is resolved in the persistent ledger and exposure ledger, but the long-running monitor service wrapper can still leave stale/disconnected runtime gate state and needs separate repair."
+  },
+  "orders_submitted": 0,
+  "flatten_performed": false
+}

@@ -142,6 +142,58 @@ def _write_ownership_evidence(tmp_path: Path, *, perm_id: int = 490708968, clien
     )
 
 
+def _write_prior_adopted_position_evidence(tmp_path: Path, *, perm_id: int = 490708968, client_id: int = 10221) -> None:
+    output_dir = tmp_path / "outputs" / "reports" / "paper_strategy_monitor"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "paper_strategy_monitor_audit.jsonl").write_text(
+        json.dumps(
+            {
+                "event_type": "strategy_ownership_resolved",
+                "ownership": {
+                    "classification": "adopted",
+                    "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+                    "perm_id": perm_id,
+                    "execution_id": "0000e1a7.69f1fa35.01.01",
+                    "client_id": client_id,
+                    "source_intent_id": "intent-1",
+                    "detail": "Bridge intent, prepared frozen preview clientId, prior strategy snapshot, and current broker execution permId all align to ATP_COMPANION_V1_ASIA_US.",
+                    "sources": [],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    executor_dir = tmp_path / "outputs" / "reports" / "ibkr_paper_strategy_executor"
+    executor_dir.mkdir(parents=True, exist_ok=True)
+    executor_payload = {
+        "strategy_position": {
+            "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+            "adopted_from_broker_truth": True,
+            "average_entry_price": 4586.7,
+            "con_id": 712565978,
+            "entry_timestamp": "2026-04-28T19:17:07.088381+00:00",
+            "execution_id": "0000e1a7.69f1fa35.01.01",
+            "local_symbol": "MGCM6",
+            "order_id": 1,
+            "perm_id": perm_id,
+            "quantity": 1.0,
+            "side": "LONG",
+            "source_intent_id": "intent-1",
+        }
+    }
+    (executor_dir / "ibkr_paper_strategy_executor_report.json").write_text(
+        json.dumps(executor_payload),
+        encoding="utf-8",
+    )
+    var_dir = tmp_path / "var"
+    var_dir.mkdir(parents=True, exist_ok=True)
+    (var_dir / "paper_strategy_executor_loop_status.json").write_text(
+        json.dumps(executor_payload),
+        encoding="utf-8",
+    )
+
+
 def test_adopts_current_broker_position_and_blocks_submit_when_runtime_is_stale(tmp_path: Path) -> None:
     _write_ownership_evidence(tmp_path)
 
@@ -170,6 +222,38 @@ def test_orphan_position_is_classified_when_ownership_cannot_be_proven(tmp_path:
     assert "orphan_broker_position" in artifacts.status["block_reasons"]
     assert artifacts.ledger["positions"] == []
     assert len(artifacts.ledger["orphan_positions"]) == 1
+
+
+def test_restores_lost_strategy_attribution_from_prior_adopted_evidence(tmp_path: Path) -> None:
+    _write_ownership_evidence(tmp_path)
+    _write_prior_adopted_position_evidence(tmp_path)
+    bridge_report_path = tmp_path / "outputs" / "reports" / "ibkr_paper_strategy_bridge" / "ibkr_paper_strategy_bridge_report.json"
+    bridge_report_path.write_text(
+        json.dumps({"intent": {"intent_id": "newer-intent", "strategy_id": "gc_1x_all_lanes__asia_early_long", "action": "NO_ACTION", "quantity": 0.0}}),
+        encoding="utf-8",
+    )
+    prepared_bundle_path = tmp_path / "outputs" / "reports" / "ibkr_paper_strategy_bridge" / "prepared_manual_harness" / "ibkr_manual_paper_fill_test_frozen_preview.json"
+    prepared_bundle_path.write_text(
+        json.dumps({"preview_payload": {"environment": {"client_id": 19999}}}),
+        encoding="utf-8",
+    )
+
+    report = _reconciliation_report(perm_id=None)
+    report["diagnosis"]["latest_matching_perm_id"] = None
+    report["execution_truth"] = {"recent_matching_execution_rows": [], "matching_execution_rows": []}
+
+    artifacts = run_ibkr_paper_strategy_monitor(
+        config=_config(tmp_path),
+        reconciliation_runner=lambda **_: _Artifacts(report),
+        dashboard_fetcher=lambda _: _dashboard_payload(stale=False),
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_POSITION_ADOPTED"
+    assert artifacts.ledger["positions"][0]["strategy_id"] == "ATP_COMPANION_V1_ASIA_US"
+    assert artifacts.ledger["positions"][0]["perm_id"] == 490708968
+    assert artifacts.ledger["positions"][0]["average_entry_price"] == 4586.7
+    assert artifacts.ledger["positions"][0]["previously_adopted"] is True
+    assert any(event["event_type"] == "paper_orphan_reconciliation_adoption" for event in artifacts.audit_events)
 
 
 def test_ledger_broker_mismatch_is_classified(tmp_path: Path) -> None:
@@ -213,7 +297,8 @@ def test_write_artifacts_and_load_status(tmp_path: Path) -> None:
     write_ibkr_paper_strategy_monitor_artifacts(config=config, artifacts=artifacts)
 
     status = load_paper_strategy_monitor_status(repo_root=tmp_path)
-    assert status["classification"] == "PAPER_STRATEGY_MONITOR_BLOCKED"
+    assert status["classification"] == "PAPER_STRATEGY_POSITION_ADOPTED"
+    assert status["submit_allowed"] is False
     assert "paper_strategy_monitor_snapshot_only" in status["block_reasons"]
     assert (tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_strategy_position_ledger.json").exists()
     assert (tmp_path / "var" / "paper_strategy_position_ledger.json").exists()
@@ -300,6 +385,50 @@ def test_load_status_blocks_when_runtime_is_stale(tmp_path: Path) -> None:
     assert status["submit_allowed"] is False
     assert status["stale"] is True
     assert "paper_strategy_monitor_runtime_stale" in status["block_reasons"]
+
+
+def test_load_status_falls_back_to_snapshot_when_runtime_pid_is_dead(tmp_path: Path) -> None:
+    runtime_path = tmp_path / "var" / "paper_strategy_monitor_runtime_status.json"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "classification": "PAPER_STRATEGY_MONITOR_PARTIAL",
+                "monitor_running": True,
+                "submit_allowed": False,
+                "block_reasons": ["orphan_broker_position"],
+                "health_classification": "ORPHAN_BROKER_POSITION",
+                "last_successful_broker_refresh": "2999-01-01T00:00:00+00:00",
+                "freshness_window_seconds": 60.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "var" / "paper_strategy_monitor_service.pid").write_text("999999\n", encoding="utf-8")
+    snapshot_path = tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_strategy_monitor_status.json"
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "classification": "PAPER_STRATEGY_POSITION_ADOPTED",
+                "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+                "account_id": "DUM882026",
+                "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+                "broker_position_quantity": 1.0,
+                "ledger_position_quantity": 1.0,
+                "ownership_proven": True,
+                "detail": "Restored lost strategy attribution for known bridge-created paper position using prior adopted ATP evidence.",
+                "block_reasons": ["paper_runtime_stale"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+
+    assert status["classification"] == "PAPER_STRATEGY_POSITION_ADOPTED"
+    assert status["monitor_running"] is False
+    assert "paper_strategy_monitor_not_running" in status["block_reasons"]
 
 
 def test_daemon_reports_disconnected_cycle_without_crashing(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -44,6 +45,11 @@ _DEFAULT_PREPARED_BUNDLE_PATH = (
 _DEFAULT_STRATEGY_TRACKING_SNAPSHOT_PATH = (
     Path("outputs") / "reports" / "ibkr_paper_strategy_tracking_snapshot" / "strategy_position_snapshot.json"
 )
+_DEFAULT_EXECUTOR_REPORT_PATH = (
+    Path("outputs") / "reports" / "ibkr_paper_strategy_executor" / "ibkr_paper_strategy_executor_report.json"
+)
+_DEFAULT_EXECUTOR_LOOP_STATUS_PATH = Path("var") / "paper_strategy_executor_loop_status.json"
+_DEFAULT_MONITOR_SERVICE_PID_PATH = Path("var") / "paper_strategy_monitor_service.pid"
 _RUNTIME_STATUS_FILENAME = "paper_strategy_monitor_runtime_status.json"
 _DAEMON_REPORT_FILENAME = "paper_strategy_monitor_daemon_report.json"
 _RUNTIME_AUDIT_FILENAME = "paper_strategy_monitor_runtime_audit.jsonl"
@@ -209,6 +215,24 @@ def run_ibkr_paper_strategy_monitor(
         config=config,
         extra={"ownership": ownership},
     )
+    if ownership.get("restored_from_prior_evidence"):
+        _record_audit(
+            audit_events,
+            "paper_orphan_reconciliation_adoption",
+            "Restored lost strategy attribution for known bridge-created paper position.",
+            config=config,
+            extra={
+                "strategy_id": ownership.get("strategy_id"),
+                "quantity": broker_quantity,
+                "side": "LONG" if broker_quantity > 0 else ("SHORT" if broker_quantity < 0 else "FLAT"),
+                "average_entry_price": ownership.get("average_entry_price"),
+                "perm_id": ownership.get("perm_id"),
+                "execution_id": ownership.get("execution_id"),
+                "source": "paper_orphan_reconciliation_adoption",
+                "reason": "restoring lost strategy attribution for known bridge-created paper position",
+                "source_intent_id": ownership.get("source_intent_id"),
+            },
+        )
     ledger = _build_updated_ledger(
         config=config,
         now=now,
@@ -503,6 +527,7 @@ def load_paper_strategy_monitor_status(*, repo_root: Path) -> dict[str, Any]:
     runtime_path = repo_root / _DEFAULT_VAR_RUNTIME_STATUS_PATH
     if not runtime_path.exists():
         runtime_path = repo_root / _DEFAULT_OUTPUT_DIR / _RUNTIME_STATUS_FILENAME
+    runtime_status_fallback_reason: str | None = None
     if runtime_path.exists():
         try:
             runtime_status = dict(json.loads(runtime_path.read_text(encoding="utf-8")))
@@ -513,44 +538,48 @@ def load_paper_strategy_monitor_status(*, repo_root: Path) -> dict[str, Any]:
                 "block_reasons": ["paper_strategy_monitor_runtime_status_invalid"],
                 "detail": "Paper strategy monitor runtime status could not be decoded.",
             }
-        reasons = list(runtime_status.get("block_reasons") or [])
-        runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed"))
-        if not bool(runtime_status.get("monitor_running")):
-            runtime_status["submit_allowed"] = False
-            if "paper_strategy_monitor_not_running" not in reasons:
-                reasons.append("paper_strategy_monitor_not_running")
-        freshness_window = float(runtime_status.get("freshness_window_seconds") or 0.0)
-        refreshed_at = _parse_datetime(
-            runtime_status.get("last_successful_broker_refresh") or runtime_status.get("last_broker_refresh_timestamp")
-        )
-        stale = True
-        if freshness_window > 0.0 and refreshed_at is not None:
-            age_seconds = max(0.0, (datetime.now(timezone.utc) - refreshed_at).total_seconds())
-            runtime_status["age_seconds"] = age_seconds
-            stale = age_seconds > freshness_window
-            runtime_status["stale"] = stale
-            if stale:
-                runtime_status["submit_allowed"] = False
-                if "paper_strategy_monitor_runtime_stale" not in reasons:
-                    reasons.append("paper_strategy_monitor_runtime_stale")
-        elif freshness_window > 0.0:
-            stale = True
-            runtime_status["stale"] = True
-            runtime_status["submit_allowed"] = False
-            if "paper_strategy_monitor_runtime_refresh_missing" not in reasons:
-                reasons.append("paper_strategy_monitor_runtime_refresh_missing")
+        service_running = _monitor_service_process_running(repo_root)
+        if bool(runtime_status.get("monitor_running")) and service_running is False:
+            runtime_status_fallback_reason = "paper_strategy_monitor_not_running"
         else:
-            stale = bool(runtime_status.get("stale"))
-            runtime_status["stale"] = stale
-        health = str(runtime_status.get("health_classification") or runtime_status.get("monitor_health") or "").strip().upper()
-        if health and health != "HEALTHY":
-            runtime_status["submit_allowed"] = False
-            normalized = f"paper_strategy_monitor_health_{health.lower()}"
-            if normalized not in reasons:
-                reasons.append(normalized)
-        runtime_status["block_reasons"] = reasons
-        runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed")) and bool(runtime_status.get("monitor_running")) and not stale and health == "HEALTHY"
-        return runtime_status
+            reasons = list(runtime_status.get("block_reasons") or [])
+            runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed"))
+            if not bool(runtime_status.get("monitor_running")):
+                runtime_status["submit_allowed"] = False
+                if "paper_strategy_monitor_not_running" not in reasons:
+                    reasons.append("paper_strategy_monitor_not_running")
+            freshness_window = float(runtime_status.get("freshness_window_seconds") or 0.0)
+            refreshed_at = _parse_datetime(
+                runtime_status.get("last_successful_broker_refresh") or runtime_status.get("last_broker_refresh_timestamp")
+            )
+            stale = True
+            if freshness_window > 0.0 and refreshed_at is not None:
+                age_seconds = max(0.0, (datetime.now(timezone.utc) - refreshed_at).total_seconds())
+                runtime_status["age_seconds"] = age_seconds
+                stale = age_seconds > freshness_window
+                runtime_status["stale"] = stale
+                if stale:
+                    runtime_status["submit_allowed"] = False
+                    if "paper_strategy_monitor_runtime_stale" not in reasons:
+                        reasons.append("paper_strategy_monitor_runtime_stale")
+            elif freshness_window > 0.0:
+                stale = True
+                runtime_status["stale"] = True
+                runtime_status["submit_allowed"] = False
+                if "paper_strategy_monitor_runtime_refresh_missing" not in reasons:
+                    reasons.append("paper_strategy_monitor_runtime_refresh_missing")
+            else:
+                stale = bool(runtime_status.get("stale"))
+                runtime_status["stale"] = stale
+            health = str(runtime_status.get("health_classification") or runtime_status.get("monitor_health") or "").strip().upper()
+            if health and health != "HEALTHY":
+                runtime_status["submit_allowed"] = False
+                normalized = f"paper_strategy_monitor_health_{health.lower()}"
+                if normalized not in reasons:
+                    reasons.append(normalized)
+            runtime_status["block_reasons"] = reasons
+            runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed")) and bool(runtime_status.get("monitor_running")) and not stale and health == "HEALTHY"
+            return runtime_status
 
     path = repo_root / _DEFAULT_OUTPUT_DIR / "paper_strategy_monitor_status.json"
     if not path.exists():
@@ -570,13 +599,42 @@ def load_paper_strategy_monitor_status(*, repo_root: Path) -> dict[str, Any]:
             "detail": "Paper strategy monitor status could not be decoded.",
         }
     snapshot_payload = dict(payload)
+    snapshot_status = dict(snapshot_payload.get("snapshot_status") or snapshot_payload)
+    reasons = list(snapshot_status.get("block_reasons") or [])
+    if runtime_status_fallback_reason and runtime_status_fallback_reason not in reasons:
+        reasons.append(runtime_status_fallback_reason)
     return {
-        "classification": "PAPER_STRATEGY_MONITOR_BLOCKED",
+        "classification": snapshot_status.get("classification") or "PAPER_STRATEGY_MONITOR_BLOCKED",
         "submit_allowed": False,
-        "block_reasons": ["paper_strategy_monitor_runtime_status_missing", "paper_strategy_monitor_snapshot_only"],
-        "detail": "Paper strategy monitor daemon runtime status is missing; snapshot-only monitor output cannot authorize new paper orders.",
+        "block_reasons": reasons or ["paper_strategy_monitor_runtime_status_missing", "paper_strategy_monitor_snapshot_only"],
+        "detail": snapshot_status.get("detail")
+        or "Paper strategy monitor daemon runtime status is missing; snapshot-only monitor output cannot authorize new paper orders.",
         "snapshot_status": snapshot_payload,
+        "strategy_id": snapshot_status.get("strategy_id"),
+        "account_id": snapshot_status.get("account_id"),
+        "exact_contract": snapshot_status.get("exact_contract"),
+        "broker_position_quantity": snapshot_status.get("broker_position_quantity"),
+        "ledger_position_quantity": snapshot_status.get("ledger_position_quantity"),
+        "ownership_proven": snapshot_status.get("ownership_proven"),
+        "monitor_running": False,
     }
+
+
+def _monitor_service_process_running(repo_root: Path) -> bool | None:
+    pid_path = repo_root / _DEFAULT_MONITOR_SERVICE_PID_PATH
+    if not pid_path.exists():
+        return None
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip() or "0")
+    except ValueError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def render_ibkr_paper_strategy_monitor_markdown(
@@ -698,12 +756,17 @@ def _determine_strategy_ownership(
     bridge_intent = dict(bridge_report.get("intent") or {})
     preview_payload = dict(prepared_bundle.get("preview_payload") or {})
     preview_environment = dict(preview_payload.get("environment") or {})
+    prior_adopted = _load_prior_adopted_position_evidence(config)
     bridge_strategy_matches = bridge_intent.get("strategy_id") == config.strategy_id
     bridge_buy_one_matches = bridge_intent.get("action") == "BUY" and float(bridge_intent.get("quantity") or 0.0) == 1.0
-    snapshot_matches = (
+    snapshot_quantity_matches = (
         strategy_snapshot.get("strategy_id") == config.strategy_id
-        and strategy_snapshot.get("latest_matching_perm_id") == latest_perm_id
         and float(strategy_snapshot.get("current_reconciled_quantity") or 0.0) == broker_quantity
+    )
+    snapshot_matches = (
+        snapshot_quantity_matches
+        and latest_perm_id is not None
+        and strategy_snapshot.get("latest_matching_perm_id") == latest_perm_id
     )
     exec_matches = (
         latest_exec is not None
@@ -730,6 +793,55 @@ def _determine_strategy_ownership(
                 str((config.repo_root / config.bridge_report_path).resolve()),
                 str((config.repo_root / config.prepared_bundle_path).resolve()),
             ],
+            "restored_from_prior_evidence": False,
+            "restoration_source": None,
+            "average_entry_price": latest_exec.get("price"),
+            "order_id": latest_exec.get("broker_order_id"),
+            "entry_timestamp": latest_exec.get("executed_at"),
+        }
+
+    prior_perm_id = prior_adopted.get("perm_id")
+    prior_contract_matches = (
+        prior_adopted.get("strategy_id") == config.strategy_id
+        and int(prior_adopted.get("con_id") or config.con_id) == int(config.con_id)
+        and str(prior_adopted.get("local_symbol") or config.local_symbol).strip().upper() == config.local_symbol
+        and str(prior_adopted.get("side") or "LONG").strip().upper() == "LONG"
+    )
+    prior_quantity_matches = float(prior_adopted.get("quantity") or 0.0) == broker_quantity == 1.0
+    prior_perm_matches = latest_perm_id is None or prior_perm_id is None or int(prior_perm_id) == int(latest_perm_id)
+    snapshot_perm_matches_prior = (
+        strategy_snapshot.get("latest_matching_perm_id") is None
+        or prior_perm_id is None
+        or int(strategy_snapshot.get("latest_matching_perm_id") or 0) == int(prior_perm_id)
+    )
+    restoration_proven = (
+        snapshot_quantity_matches
+        and prior_contract_matches
+        and prior_quantity_matches
+        and prior_perm_matches
+        and snapshot_perm_matches_prior
+    )
+    if restoration_proven:
+        return {
+            "classification": "adopted",
+            "ownership_proven": True,
+            "strategy_id": config.strategy_id,
+            "detail": "Restored lost strategy attribution for known bridge-created paper position using prior adopted ATP evidence.",
+            "source_intent_id": prior_adopted.get("source_intent_id") or bridge_intent.get("intent_id"),
+            "perm_id": prior_perm_id,
+            "execution_id": prior_adopted.get("execution_id"),
+            "client_id": prior_adopted.get("client_id"),
+            "sources": [
+                str((config.repo_root / config.strategy_tracking_snapshot_path).resolve()),
+                str((config.repo_root / config.bridge_report_path).resolve()),
+                str((config.repo_root / config.prepared_bundle_path).resolve()),
+                *list(prior_adopted.get("sources") or []),
+            ],
+            "restored_from_prior_evidence": True,
+            "restoration_source": "paper_orphan_reconciliation_adoption",
+            "average_entry_price": prior_adopted.get("average_entry_price"),
+            "order_id": prior_adopted.get("order_id"),
+            "entry_timestamp": prior_adopted.get("entry_timestamp"),
         }
     return {
         "classification": "orphan",
@@ -745,6 +857,11 @@ def _determine_strategy_ownership(
             str((config.repo_root / config.bridge_report_path).resolve()),
             str((config.repo_root / config.prepared_bundle_path).resolve()),
         ],
+        "restored_from_prior_evidence": False,
+        "restoration_source": None,
+        "average_entry_price": None,
+        "order_id": None,
+        "entry_timestamp": None,
     }
 
 
@@ -760,7 +877,9 @@ def _build_updated_ledger(
     portfolio_row = _latest_portfolio_row(reconciliation_report)
     broker_quantity = float((reconciliation_report.get("diagnosis") or {}).get("latest_exact_position_quantity") or 0.0)
     existing_positions = list(existing_ledger.get("positions") or [])
-    previously_adopted = bool(existing_positions) and bool((existing_positions[0] or {}).get("strategy_id"))
+    previously_adopted = (bool(existing_positions) and bool((existing_positions[0] or {}).get("strategy_id"))) or bool(
+        ownership.get("restored_from_prior_evidence")
+    )
 
     side = "FLAT"
     state = "FLAT"
@@ -786,12 +905,12 @@ def _build_updated_ledger(
         "local_symbol": config.local_symbol,
         "side": side,
         "quantity": broker_quantity,
-        "average_entry_price": None if latest_exec is None else latest_exec.get("price"),
+        "average_entry_price": ownership.get("average_entry_price") if latest_exec is None else latest_exec.get("price"),
         "average_cost_basis": None if portfolio_row is None else portfolio_row.get("average_cost"),
-        "order_id": None if latest_exec is None else latest_exec.get("broker_order_id"),
+        "order_id": ownership.get("order_id") if latest_exec is None else latest_exec.get("broker_order_id"),
         "perm_id": ownership.get("perm_id"),
         "execution_id": ownership.get("execution_id"),
-        "entry_timestamp": None if latest_exec is None else latest_exec.get("executed_at"),
+        "entry_timestamp": ownership.get("entry_timestamp") if latest_exec is None else latest_exec.get("executed_at"),
         "source_intent_id": ownership.get("source_intent_id"),
         "state": state if ownership.get("ownership_proven") else ("FLAT" if broker_quantity == 0.0 else "NEEDS_REVIEW"),
         "realized_pnl": None if portfolio_row is None else portfolio_row.get("realized_pnl"),
@@ -939,6 +1058,70 @@ def _build_monitor_status(
         "detail": ownership.get("detail") if dashboard_error is None else dashboard_error,
         "monitoring_scope": "snapshot_reconciliation_only",
     }
+
+
+def _load_prior_adopted_position_evidence(config: IbkrPaperStrategyMonitorConfig) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    audit_path = config.repo_root / config.output_dir / "paper_strategy_monitor_audit.jsonl"
+    if audit_path.exists():
+        try:
+            for line in audit_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    continue
+                if row.get("event_type") != "strategy_ownership_resolved":
+                    continue
+                ownership = dict(row.get("ownership") or {})
+                if (
+                    ownership.get("classification") == "adopted"
+                    and ownership.get("strategy_id") == config.strategy_id
+                ):
+                    evidence.update(
+                        {
+                            "strategy_id": ownership.get("strategy_id"),
+                            "perm_id": ownership.get("perm_id"),
+                            "execution_id": ownership.get("execution_id"),
+                            "client_id": ownership.get("client_id"),
+                            "source_intent_id": ownership.get("source_intent_id"),
+                            "ownership_detail": ownership.get("detail"),
+                            "sources": [str(audit_path.resolve()), *list(ownership.get("sources") or [])],
+                        }
+                    )
+        except Exception:
+            pass
+
+    for candidate_path in (
+        config.repo_root / _DEFAULT_EXECUTOR_LOOP_STATUS_PATH,
+        config.repo_root / _DEFAULT_EXECUTOR_REPORT_PATH,
+    ):
+        payload = _load_json(candidate_path)
+        position = dict(payload.get("strategy_position") or {})
+        if (
+            position.get("strategy_id") == config.strategy_id
+            and bool(position.get("adopted_from_broker_truth"))
+            and int(position.get("con_id") or 0) == int(config.con_id)
+            and str(position.get("local_symbol") or "").strip().upper() == config.local_symbol
+        ):
+            evidence.update(
+                {
+                    "strategy_id": position.get("strategy_id"),
+                    "con_id": position.get("con_id"),
+                    "local_symbol": position.get("local_symbol"),
+                    "quantity": position.get("quantity"),
+                    "side": position.get("side"),
+                    "average_entry_price": position.get("average_entry_price"),
+                    "order_id": position.get("order_id"),
+                    "entry_timestamp": position.get("entry_timestamp"),
+                    "source_intent_id": position.get("source_intent_id") or evidence.get("source_intent_id"),
+                    "perm_id": position.get("perm_id") or evidence.get("perm_id"),
+                    "execution_id": position.get("execution_id") or evidence.get("execution_id"),
+                    "sources": [str(candidate_path.resolve()), *list(evidence.get("sources") or [])],
+                }
+            )
+            break
+    return evidence
 
 
 def _build_runtime_status(
