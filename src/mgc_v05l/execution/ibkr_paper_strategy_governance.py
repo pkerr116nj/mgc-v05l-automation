@@ -26,14 +26,20 @@ _DEFAULT_SIGNAL_AUDIT_PATH = Path("outputs") / "operator_dashboard" / "paper_sig
 _DEFAULT_DASHBOARD_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "dashboard_api_snapshot.json"
 _DEFAULT_LEDGER_PATH = Path("var") / "paper_strategy_position_ledger.json"
 _DEFAULT_PORTING_OUTPUT_DIR = Path("outputs") / "reports" / "ibkr_strategy_porting"
+_DEFAULT_PAPER_SESSION_LANES_DIR = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "lanes"
 _PERFORMANCE_CSV = "per_strategy_paper_performance.csv"
 _STATUS_JSON = "per_strategy_paper_status.json"
 _PROBATION_DASHBOARD_JSON = "strategy_probation_dashboard.json"
 _PAUSE_REASONS_CSV = "strategy_pause_reasons.csv"
 _REPORT_MD = "strategy_performance_governance_report.md"
 _AUDIT_JSONL = "ibkr_paper_strategy_governance_audit.jsonl"
+_ROUTING_POLICY_REPORT_MD = "paper_lane_routing_policy_report.md"
+_ROUTING_POLICY_REPORT_CSV = "paper_lane_routing_policy_report.csv"
+_LOCAL_ONLY_AUDIT_CSV = "local_only_lane_audit.csv"
+_TRADE_SEPARATION_REPORT_MD = "ibkr_vs_internal_paper_trade_separation_report.md"
 
 _SUPPORTED_EXECUTABLE_INSTRUMENTS = {"MGC", "GC"}
+_EXPLICIT_INTERNAL_ONLY_DIAGNOSTIC_LANE_IDS: set[str] = set()
 _STATUS_PRECEDENCE = {
     "DISABLED": 6,
     "KILL_CANDIDATE": 5,
@@ -57,6 +63,7 @@ class IbkrPaperStrategyGovernanceConfig:
     dashboard_snapshot_path: Path = _DEFAULT_DASHBOARD_SNAPSHOT_PATH
     ledger_path: Path = _DEFAULT_LEDGER_PATH
     porting_output_dir: Path = _DEFAULT_PORTING_OUTPUT_DIR
+    paper_session_lanes_dir: Path = _DEFAULT_PAPER_SESSION_LANES_DIR
     freshness_window_seconds: float = 120.0
     daily_order_limit: int = 2
     weekly_order_limit: int = 5
@@ -195,6 +202,7 @@ def run_ibkr_paper_strategy_governance(
     report = {
         "generated_at": now,
         "classification": overall_classification,
+        "routing_policy_classification": _routing_policy_classification(strategy_rows),
         "monitor_status": {
             key: monitor_status.get(key)
             for key in [
@@ -212,8 +220,10 @@ def run_ibkr_paper_strategy_governance(
         },
         "strategy_count": len(strategy_rows),
         "status_counts": _count_by_key(strategy_rows, "strategy_status"),
+        "routing_mode_counts": _count_by_key(strategy_rows, "current_routing_mode"),
         "supported_instrument_counts": _count_supported(strategy_rows),
         "submit_capable_count": len([row for row in strategy_rows if row.get("submit_allowed")]),
+        "trade_separation_summary": _trade_separation_summary(strategy_rows),
         "strategy_rows": strategy_rows,
     }
     _record_audit(
@@ -245,10 +255,14 @@ def write_ibkr_paper_strategy_governance_artifacts(
     output_dir = config.repo_root / config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_csv(output_dir / _PERFORMANCE_CSV, artifacts.performance_rows)
+    _write_csv(output_dir / _ROUTING_POLICY_REPORT_CSV, [_routing_policy_row(row) for row in artifacts.performance_rows])
+    _write_csv(output_dir / _LOCAL_ONLY_AUDIT_CSV, [_local_only_audit_row(row) for row in artifacts.performance_rows if row.get("current_routing_mode") != "IBKR_ROUTED"])
     (output_dir / _STATUS_JSON).write_text(json.dumps(artifacts.status_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (output_dir / _PROBATION_DASHBOARD_JSON).write_text(json.dumps(artifacts.probation_dashboard, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _write_csv(output_dir / _PAUSE_REASONS_CSV, artifacts.pause_rows)
     (output_dir / _REPORT_MD).write_text(render_ibkr_paper_strategy_governance_markdown(artifacts.report) + "\n", encoding="utf-8")
+    (output_dir / _ROUTING_POLICY_REPORT_MD).write_text(render_paper_lane_routing_policy_markdown(artifacts.report) + "\n", encoding="utf-8")
+    (output_dir / _TRADE_SEPARATION_REPORT_MD).write_text(render_ibkr_vs_internal_trade_separation_markdown(artifacts.report) + "\n", encoding="utf-8")
     with (output_dir / _AUDIT_JSONL).open("w", encoding="utf-8") as handle:
         for row in artifacts.audit_events:
             handle.write(json.dumps(row, sort_keys=True))
@@ -326,10 +340,56 @@ def render_ibkr_paper_strategy_governance_markdown(report: dict[str, Any]) -> st
             "## Summary",
             "",
             "- this governance layer tracks per-strategy paper P&L, position state, broker/ledger safety, and submit eligibility before any new IBKR paper order is allowed.",
-            "- supported lanes can remain active while still being marked degraded or watchlist; only paused/disabled/kill-candidate rows are hard blocked by governance status itself.",
+            "- supported lanes can remain active while still being marked degraded, watchlist, or kill-candidate; only paused/disabled rows are hard blocked by governance status itself.",
             "- unsupported or not-yet-submit-ported lanes remain inventory and dry-run only until their broker path is proven lane-by-lane.",
         ]
     )
+    return "\n".join(lines)
+
+
+def render_paper_lane_routing_policy_markdown(report: dict[str, Any]) -> str:
+    rows = list(report.get("strategy_rows") or [])
+    mode_counts = _count_by_key(rows, "current_routing_mode")
+    lines = [
+        "# Paper Lane Routing Policy",
+        "",
+        f"- classification: `{report.get('routing_policy_classification')}`",
+        f"- audited lanes: `{len(rows)}`",
+        "",
+        "## Routing Modes",
+        "",
+    ]
+    for key in sorted(mode_counts):
+        lines.append(f"- `{key}`: `{mode_counts.get(key)}`")
+    lines.extend(
+        [
+            "",
+            "## Policy",
+            "",
+            "- `IBKR_ROUTED` lanes may use the shared IBKR paper bridge when monitor, governance, exposure, and readiness gates all pass.",
+            "- `INTERNAL_ONLY_DIAGNOSTIC` lanes are explicit local simulation only and must not contaminate IBKR broker-path performance.",
+            "- `PAUSED` lanes must not continue local paper trading, even if a legacy paper runtime still has entries enabled.",
+            "- `DISABLED` lanes are fail-closed and should not route locally or through IBKR.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_ibkr_vs_internal_trade_separation_markdown(report: dict[str, Any]) -> str:
+    summary = dict(report.get("trade_separation_summary") or {})
+    lines = [
+        "# IBKR vs Internal Paper Trade Separation",
+        "",
+        f"- broker-path pnl: `{summary.get('broker_path_pnl')}`",
+        f"- internal-sim pnl: `{summary.get('internal_sim_pnl')}`",
+        f"- diagnostic-only pnl: `{summary.get('diagnostic_only_pnl')}`",
+        f"- broker-path lanes: `{summary.get('broker_path_lane_count')}`",
+        f"- internal-only lanes: `{summary.get('internal_only_lane_count')}`",
+        f"- paused/disabled lanes with recent local trades: `{summary.get('policy_violation_local_trade_count')}`",
+        "",
+        "- broker-path P&L is reserved for lanes with real IBKR bridge ownership / broker-path truth.",
+        "- local legacy paper-runtime trades remain separated as internal simulation unless a lane is explicitly diagnostic-only.",
+    ]
     return "\n".join(lines)
 
 
@@ -389,6 +449,11 @@ def _build_governance_row(
     rejection_count = 0
     reconciliation_error_count = 0
     open_order_ambiguity_count = 0
+    runtime_activity = _load_lane_runtime_activity(
+        repo_root=config.repo_root,
+        paper_session_lanes_dir=config.paper_session_lanes_dir,
+        lane_id=lane_id,
+    )
 
     pause_reasons: list[str] = []
     submit_block_reasons: list[str] = []
@@ -432,11 +497,34 @@ def _build_governance_row(
         max_drawdown=max_drawdown,
         pause_reasons=pause_reasons,
     )
-    if strategy_status in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
+    if strategy_status in {"PAUSED", "DISABLED"}:
         submit_block_reasons = list(dict.fromkeys(submit_block_reasons + [strategy_status.lower()]))
-    submit_allowed = not submit_block_reasons and strategy_status not in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}
+    submit_allowed = not submit_block_reasons and strategy_status not in {"PAUSED", "DISABLED"}
+    routing_mode, local_trading_allowed = _routing_mode_and_local_policy(
+        strategy_status=strategy_status,
+        current_order_destination=str(inventory_row.get("current_order_destination") or ""),
+        explicit_internal_only_diagnostic=lane_id in _EXPLICIT_INTERNAL_ONLY_DIAGNOSTIC_LANE_IDS,
+        instrument=instrument,
+    )
+    local_paper_trading_enabled = str(inventory_row.get("current_order_destination") or "") == "legacy_app_paper_runtime" and bool(inventory_row.get("entries_enabled"))
+    recent_trade_route_kind = _recent_trade_route_kind(
+        runtime_activity=runtime_activity,
+        current_order_destination=str(inventory_row.get("current_order_destination") or ""),
+        bridge_strategy_id=bridge_strategy_id,
+        ownership_source="ledger" if ledger_position is not None else "runtime_snapshot",
+    )
+    broker_path_pnl, internal_sim_pnl, diagnostic_only_pnl = _split_pnl_buckets(
+        total_net_pnl=total_net_pnl,
+        current_order_destination=str(inventory_row.get("current_order_destination") or ""),
+        routing_mode=routing_mode,
+        recent_trade_route_kind=recent_trade_route_kind,
+    )
 
     last_trade_time = (
+        runtime_activity.get("last_trade_time")
+        or runtime_activity.get("last_fill_timestamp")
+        or runtime_activity.get("last_event_time")
+        or
         tracked_detail.get("latest_trade_timestamp")
         or performance_row.get("latest_fill_timestamp")
         or signal_row.get("last_fill_timestamp")
@@ -485,15 +573,27 @@ def _build_governance_row(
         "runtime_status": inventory_row.get("current_app_runtime_status"),
         "entries_enabled": inventory_row.get("entries_enabled"),
         "eligible_now": inventory_row.get("eligible_now"),
+        "local_paper_trading_enabled": local_paper_trading_enabled,
+        "ibkr_bridge_submit_capable": bool(inventory_row.get("bridge_adapter_ready")),
+        "current_order_destination": inventory_row.get("current_order_destination"),
+        "current_routing_mode": routing_mode,
+        "recent_local_trades_occurred": bool(runtime_activity.get("recent_local_trades_occurred")),
+        "recent_trade_route_kind": recent_trade_route_kind,
+        "recent_trade_origin_label": runtime_activity.get("recent_trade_origin_label"),
+        "local_trading_allowed": local_trading_allowed,
         "intent_action": intent_row.get("action"),
         "intent_reason": intent_row.get("reason"),
         "route_blockers": inventory_blockers,
         "pause_reasons": list(dict.fromkeys(pause_reasons)),
         "submit_block_reasons": list(dict.fromkeys(submit_block_reasons)),
         "submit_allowed": submit_allowed,
+        "bridge_invocation_allowed": submit_allowed and bool(inventory_row.get("bridge_adapter_ready")),
         "monitor_health": monitor_status.get("health_classification"),
         "monitor_stale": monitor_status.get("stale"),
         "monitor_open_orders": monitor_status.get("open_order_count"),
+        "broker_path_pnl": _format_decimal(broker_path_pnl),
+        "internal_sim_pnl": _format_decimal(internal_sim_pnl),
+        "diagnostic_only_pnl": _format_decimal(diagnostic_only_pnl),
         "current_average_entry_price": _format_decimal(_decimal_or_none((ledger_position or {}).get("average_entry_price"))),
         "ownership_source": "ledger" if ledger_position is not None else "runtime_snapshot",
         "governance_generated_at": now,
@@ -683,6 +783,7 @@ def _build_status_payload(
     payload = {
         "generated_at": now,
         "classification": classification,
+        "routing_policy_classification": _routing_policy_classification(strategy_rows),
         "freshness_window_seconds": float(config.freshness_window_seconds),
         "monitor_health": monitor_status.get("health_classification"),
         "monitor_stale": monitor_status.get("stale"),
@@ -692,6 +793,7 @@ def _build_status_payload(
         "summary": {
             "strategy_count": len(strategy_rows),
             "status_counts": _count_by_key(strategy_rows, "strategy_status"),
+            "routing_mode_counts": _count_by_key(strategy_rows, "current_routing_mode"),
             "submit_capable_count": len([row for row in strategy_rows if row.get("submit_allowed")]),
         },
     }
@@ -708,14 +810,183 @@ def _build_probation_dashboard(
     return {
         "generated_at": now,
         "classification": classification,
+        "routing_policy_classification": _routing_policy_classification(strategy_rows),
         "paper_monitor_health": monitor_status.get("health_classification"),
         "paper_monitor_stale": monitor_status.get("stale"),
         "active_rows": [row for row in strategy_rows if row.get("strategy_status") in {"PROBATION_ACTIVE", "PROMISING", "DEGRADED"}],
         "blocked_rows": [row for row in strategy_rows if not row.get("submit_allowed")],
+        "ibkr_routed_rows": [row for row in strategy_rows if row.get("current_routing_mode") == "IBKR_ROUTED"],
+        "internal_only_rows": [row for row in strategy_rows if row.get("current_routing_mode") == "INTERNAL_ONLY_DIAGNOSTIC"],
+        "paused_or_disabled_rows": [row for row in strategy_rows if row.get("current_routing_mode") in {"PAUSED", "DISABLED"}],
         "summary": {
             "status_counts": _count_by_key(strategy_rows, "strategy_status"),
             "instrument_counts": _count_by_key(strategy_rows, "instrument"),
+            "routing_mode_counts": _count_by_key(strategy_rows, "current_routing_mode"),
         },
+    }
+
+
+def _routing_policy_classification(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "PAPER_LANE_ROUTING_POLICY_BLOCKED"
+    if any(str(row.get("current_routing_mode") or "UNKNOWN") == "UNKNOWN" for row in rows):
+        return "PAPER_LANE_ROUTING_POLICY_PARTIAL"
+    return "PAPER_LANE_ROUTING_POLICY_READY"
+
+
+def _routing_mode_and_local_policy(
+    *,
+    strategy_status: str,
+    current_order_destination: str,
+    explicit_internal_only_diagnostic: bool,
+    instrument: str,
+) -> tuple[str, bool]:
+    if strategy_status == "DISABLED":
+        return "DISABLED", False
+    if strategy_status == "PAUSED" and not explicit_internal_only_diagnostic:
+        return "PAUSED", False
+    if current_order_destination in {"ibkr_paper_bridge_submit_capable", "ibkr_paper_bridge_adopted_position"} and instrument in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
+        return "IBKR_ROUTED", False
+    if current_order_destination == "legacy_app_paper_runtime":
+        return "INTERNAL_ONLY_DIAGNOSTIC", True
+    return "UNKNOWN", False
+
+
+def _load_lane_runtime_activity(*, repo_root: Path, paper_session_lanes_dir: Path, lane_id: str) -> dict[str, Any]:
+    lane_dir = repo_root / paper_session_lanes_dir / lane_id
+    operator_status_path = lane_dir / "operator_status.json"
+    alerts_path = lane_dir / "alerts.jsonl"
+    operator_status = _load_json(operator_status_path)
+    latest_order = dict((((operator_status.get("exit_parity_summary") or {}).get("latest_order_intent")) or {}))
+    latest_fill = dict((((operator_status.get("exit_parity_summary") or {}).get("latest_fill")) or {}))
+    broker_order_id = str(latest_order.get("broker_order_id") or latest_fill.get("fill_broker_order_id") or latest_fill.get("broker_order_id") or "").strip()
+    recent_local_trade = broker_order_id.startswith("paper-")
+    last_event_time = latest_order.get("submitted_at") or latest_fill.get("fill_timestamp")
+    origin = None
+    if recent_local_trade:
+        origin = "internal_simulation_legacy_app_paper_runtime"
+    elif broker_order_id:
+        origin = "broker_path_or_unknown_external_order_id"
+    if not operator_status and alerts_path.exists():
+        last_event_time = None
+        for line in reversed(alerts_path.read_text(encoding="utf-8").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            detail = dict(row.get("detail") or {})
+            broker_order_id = str(detail.get("broker_order_id") or "").strip()
+            if broker_order_id.startswith("paper-"):
+                recent_local_trade = True
+                origin = "internal_simulation_legacy_app_paper_runtime"
+            elif broker_order_id and origin is None:
+                origin = "broker_path_or_unknown_external_order_id"
+            last_event_time = row.get("occurred_at") or row.get("logged_at")
+            break
+    return {
+        "recent_local_trades_occurred": recent_local_trade,
+        "last_trade_time": last_event_time,
+        "last_fill_timestamp": latest_fill.get("fill_timestamp"),
+        "last_event_time": last_event_time,
+        "recent_trade_origin_label": origin,
+    }
+
+
+def _recent_trade_route_kind(
+    *,
+    runtime_activity: dict[str, Any],
+    current_order_destination: str,
+    bridge_strategy_id: str,
+    ownership_source: str,
+) -> str:
+    if bool(runtime_activity.get("recent_local_trades_occurred")):
+        return "INTERNAL_ONLY"
+    if current_order_destination == "ibkr_paper_bridge_adopted_position" or ownership_source == "ledger" or bridge_strategy_id == "ATP_COMPANION_V1_ASIA_US":
+        return "BROKER_PATH"
+    return "NONE"
+
+
+def _split_pnl_buckets(
+    *,
+    total_net_pnl: Decimal,
+    current_order_destination: str,
+    routing_mode: str,
+    recent_trade_route_kind: str,
+) -> tuple[Decimal, Decimal, Decimal]:
+    zero = Decimal("0")
+    if current_order_destination == "ibkr_paper_bridge_adopted_position":
+        return total_net_pnl, zero, zero
+    if routing_mode == "INTERNAL_ONLY_DIAGNOSTIC":
+        return zero, zero, total_net_pnl
+    if recent_trade_route_kind == "INTERNAL_ONLY" or current_order_destination == "legacy_app_paper_runtime":
+        return zero, total_net_pnl, zero
+    return zero, total_net_pnl, zero
+
+
+def _trade_separation_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    broker_path_pnl = Decimal("0")
+    internal_sim_pnl = Decimal("0")
+    diagnostic_only_pnl = Decimal("0")
+    policy_violation_local_trade_count = 0
+    broker_path_lane_count = 0
+    internal_only_lane_count = 0
+    for row in rows:
+        broker_path_pnl += _decimal_or_none(row.get("broker_path_pnl")) or Decimal("0")
+        internal_sim_pnl += _decimal_or_none(row.get("internal_sim_pnl")) or Decimal("0")
+        diagnostic_only_pnl += _decimal_or_none(row.get("diagnostic_only_pnl")) or Decimal("0")
+        if row.get("current_routing_mode") == "IBKR_ROUTED":
+            broker_path_lane_count += 1
+        if row.get("current_routing_mode") == "INTERNAL_ONLY_DIAGNOSTIC":
+            internal_only_lane_count += 1
+        if bool(row.get("recent_local_trades_occurred")) and not bool(row.get("local_trading_allowed")):
+            policy_violation_local_trade_count += 1
+    return {
+        "broker_path_pnl": _format_decimal(broker_path_pnl),
+        "internal_sim_pnl": _format_decimal(internal_sim_pnl),
+        "diagnostic_only_pnl": _format_decimal(diagnostic_only_pnl),
+        "broker_path_lane_count": broker_path_lane_count,
+        "internal_only_lane_count": internal_only_lane_count,
+        "policy_violation_local_trade_count": policy_violation_local_trade_count,
+    }
+
+
+def _routing_policy_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "lane_id": row.get("strategy_id"),
+        "source_instrument": row.get("instrument"),
+        "governance_status": row.get("strategy_status"),
+        "current_runtime_status": row.get("runtime_status"),
+        "local_paper_trading_enabled": row.get("local_paper_trading_enabled"),
+        "ibkr_bridge_submit_capable": row.get("ibkr_bridge_submit_capable"),
+        "current_routing_mode": row.get("current_routing_mode"),
+        "recent_local_trades_occurred": row.get("recent_local_trades_occurred"),
+        "recent_trade_route_kind": row.get("recent_trade_route_kind"),
+        "current_order_destination": row.get("current_order_destination"),
+        "local_trading_allowed": row.get("local_trading_allowed"),
+        "submit_allowed": row.get("submit_allowed"),
+        "submit_block_reasons": ";".join(list(row.get("submit_block_reasons") or [])),
+        "broker_path_pnl": row.get("broker_path_pnl"),
+        "internal_sim_pnl": row.get("internal_sim_pnl"),
+        "diagnostic_only_pnl": row.get("diagnostic_only_pnl"),
+    }
+
+
+def _local_only_audit_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "lane_id": row.get("strategy_id"),
+        "source_instrument": row.get("instrument"),
+        "governance_status": row.get("strategy_status"),
+        "current_routing_mode": row.get("current_routing_mode"),
+        "recent_local_trades_occurred": row.get("recent_local_trades_occurred"),
+        "recent_trade_route_kind": row.get("recent_trade_route_kind"),
+        "local_paper_trading_enabled": row.get("local_paper_trading_enabled"),
+        "local_trading_allowed": row.get("local_trading_allowed"),
+        "recent_trade_origin_label": row.get("recent_trade_origin_label"),
+        "internal_sim_pnl": row.get("internal_sim_pnl"),
+        "diagnostic_only_pnl": row.get("diagnostic_only_pnl"),
     }
 
 
