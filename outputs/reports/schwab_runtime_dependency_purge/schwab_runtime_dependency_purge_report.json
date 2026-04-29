@@ -1,0 +1,192 @@
+{
+  "classification": "SCHWAB_RUNTIME_DEPENDENCY_PURGE_READY",
+  "generated_at": "2026-04-29T09:27:26.606385+00:00",
+  "provider_roles": {
+    "market_data_primary": "databento",
+    "market_data_fallback": "schwab",
+    "broker_truth_provider": "ibkr",
+    "execution_provider": "ibkr"
+  },
+  "provider_readiness": {
+    "broker_truth": {
+      "provider": "ibkr",
+      "status": "ready",
+      "detail": "Broker/account/order/execution truth is anchored to the IBKR paper monitor runtime."
+    },
+    "ibkr_paper_monitor": {
+      "provider": "ibkr",
+      "status": "ready",
+      "monitor_running": true,
+      "health_classification": "HEALTHY",
+      "stale": false,
+      "last_heartbeat": "2026-04-29T09:27:18.900418+00:00"
+    },
+    "market_data_primary": {
+      "provider": "databento",
+      "status": "configured",
+      "detail": "Primary market-data role is now explicitly Databento for migration planning and runtime decoupling."
+    },
+    "market_data_fallback": {
+      "provider": "schwab",
+      "status": "optional",
+      "allow_fallback": true,
+      "require_auth_for_runtime": false,
+      "config_present": true,
+      "auth_env_script_present": true,
+      "detail": "Schwab is retained as a labeled fallback/legacy provider and is no longer a hard prerequisite for IBKR paper runtime startup."
+    },
+    "local_cache": {
+      "provider": "sqlite/local cache",
+      "status": "ready",
+      "path": "/Users/patrick/Documents/MGC-v05l-automation/mgc_v05l.replay.sqlite3",
+      "detail": "Replay/research cache remains a separate readiness concern from broker and market-data providers."
+    },
+    "dashboard_bootstrap": {
+      "provider": "operator dashboard",
+      "status": "ready",
+      "reduced_mode": false,
+      "issue_count": 0,
+      "detail": "Dashboard bootstrap prerequisites are satisfied."
+    }
+  },
+  "fixed_runtime_paths": [
+    "scripts/common_env.sh",
+    "scripts/run_operator_dashboard.sh",
+    "scripts/run_supervised_paper_host.sh",
+    "scripts/run_headless_supervised_paper_service.sh",
+    "scripts/run_probationary_operator_control.sh",
+    "scripts/run_probationary_shadow.sh",
+    "scripts/run_probationary_paper_soak.sh",
+    "src/mgc_v05l/app/operator_dashboard.py",
+    "src/mgc_v05l/execution/live_strategy_broker.py"
+  ],
+  "remaining_dependency_count": 10,
+  "remaining_dependencies": [
+    {
+      "file_module": "scripts/run_schwab_auth_gate.sh",
+      "function_class": "require_schwab_auth_env",
+      "dependency_type": "auth bootstrap",
+      "subsystem": "operator utility",
+      "data_type": "Schwab auth env and token bootstrap",
+      "frequency_latency": "operator initiated",
+      "runtime_role": "provider specific",
+      "natural_replacement": "n/a",
+      "current_status": "intentional",
+      "note": "Explicit Schwab auth helper remains by design and is no longer part of IBKR paper startup."
+    },
+    {
+      "file_module": "scripts/run_schwab_token_web.sh",
+      "function_class": "require_schwab_auth_env",
+      "dependency_type": "token refresh workflow",
+      "subsystem": "operator utility",
+      "data_type": "Schwab token web flow",
+      "frequency_latency": "operator initiated",
+      "runtime_role": "provider specific",
+      "natural_replacement": "n/a",
+      "current_status": "intentional",
+      "note": "Explicit Schwab auth/token workflow remains available as a legacy fallback path."
+    },
+    {
+      "file_module": "scripts/show_probationary_status.sh",
+      "function_class": "require_schwab_auth_env",
+      "dependency_type": "legacy runtime inspection",
+      "subsystem": "legacy probationary runtime",
+      "data_type": "status snapshot",
+      "frequency_latency": "operator initiated",
+      "runtime_role": "legacy",
+      "natural_replacement": "IBKR paper monitor artifacts",
+      "current_status": "remaining",
+      "note": "Still assumes Schwab-backed probationary flow and should be migrated or retired later."
+    },
+    {
+      "file_module": "scripts/show_probationary_paper_status.sh",
+      "function_class": "require_schwab_auth_env",
+      "dependency_type": "legacy runtime inspection",
+      "subsystem": "legacy probationary runtime",
+      "data_type": "paper status snapshot",
+      "frequency_latency": "operator initiated",
+      "runtime_role": "legacy",
+      "natural_replacement": "IBKR paper monitor artifacts",
+      "current_status": "remaining",
+      "note": "Still tied to the older Schwab-centered paper summary flow."
+    },
+    {
+      "file_module": "scripts/run_probationary_paper_summary.sh",
+      "function_class": "require_schwab_auth_env",
+      "dependency_type": "legacy summary generation",
+      "subsystem": "legacy probationary runtime",
+      "data_type": "daily paper summary",
+      "frequency_latency": "operator initiated",
+      "runtime_role": "legacy",
+      "natural_replacement": "IBKR governance and monitor reports",
+      "current_status": "remaining",
+      "note": "Still requires Schwab auth even though core IBKR paper runtime no longer does."
+    },
+    {
+      "file_module": "scripts/run_probationary_daily_summary.sh",
+      "function_class": "require_schwab_auth_env",
+      "dependency_type": "legacy summary generation",
+      "subsystem": "legacy probationary runtime",
+      "data_type": "daily runtime summary",
+      "frequency_latency": "operator initiated",
+      "runtime_role": "legacy",
+      "natural_replacement": "IBKR governance and dashboard reports",
+      "current_status": "remaining",
+      "note": "Legacy summary path remains Schwab-centric and is outside the critical IBKR paper startup path."
+    },
+    {
+      "file_module": "scripts/run_probationary_live_strategy_pilot.sh",
+      "function_class": "require_schwab_auth_env",
+      "dependency_type": "live pilot launcher",
+      "subsystem": "live pilot",
+      "data_type": "pilot startup and account linkage",
+      "frequency_latency": "operator initiated",
+      "runtime_role": "execution critical for Schwab pilot only",
+      "natural_replacement": "IBKR live pilot stack when approved",
+      "current_status": "intentional",
+      "note": "Still Schwab-specific because the legacy live pilot is not part of the IBKR paper runtime."
+    },
+    {
+      "file_module": "src/mgc_v05l/execution/live_strategy_broker.py",
+      "function_class": "_ConfiguredLiveMarketDataProvider",
+      "dependency_type": "quote fallback support",
+      "subsystem": "execution-adjacent quotes",
+      "data_type": "latest quote snapshot / live quote subscription",
+      "frequency_latency": "sub-second to seconds",
+      "runtime_role": "execution adjacent",
+      "natural_replacement": "Databento primary with explicit fallback controls",
+      "current_status": "purged_to_optional",
+      "note": "Fallback remains supported but is now explicit and disabled by default unless the config and environment both allow it."
+    },
+    {
+      "file_module": "src/mgc_v05l/market_data/schwab_provider.py",
+      "function_class": "SchwabMarketDataProvider",
+      "dependency_type": "legacy provider implementation",
+      "subsystem": "market data",
+      "data_type": "historical and quote retrieval",
+      "frequency_latency": "research and runtime dependent",
+      "runtime_role": "fallback only",
+      "natural_replacement": "Databento primary / local cache",
+      "current_status": "intentional",
+      "note": "Provider stays in-tree for fallback and parity work until later migration phases are complete."
+    },
+    {
+      "file_module": "scripts/backfill_schwab_1m_history.sh",
+      "function_class": "require_schwab_auth_env",
+      "dependency_type": "research backfill",
+      "subsystem": "historical data",
+      "data_type": "1m bar backfill",
+      "frequency_latency": "batch",
+      "runtime_role": "research only",
+      "natural_replacement": "Databento backfill pipeline",
+      "current_status": "remaining",
+      "note": "Research backfill scripts remain Schwab-specific until Databento parity and cache migration are complete."
+    }
+  ],
+  "test_summary": {
+    "tests/unit/test_mgc_v05l_common_env.py": "4 passed",
+    "tests/unit/test_mgc_v05l_operator_dashboard_bootstrap_prereqs.py": "18 passed",
+    "tests/unit/test_mgc_v05l_broker_foundation.py": "9 passed",
+    "tests/unit/test_mgc_v05l_ibkr_paper_strategy_bridge.py": "15 passed"
+  }
+}

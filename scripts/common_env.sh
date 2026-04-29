@@ -27,6 +27,23 @@ prepend_path_if_dir() {
   fi
 }
 
+normalize_bool_env() {
+  local raw="${1:-}"
+  raw="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')"
+  case "${raw}" in
+    1|true|yes|on)
+      printf 'true'
+      ;;
+    *)
+      printf 'false'
+      ;;
+  esac
+}
+
+normalize_provider_name() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
 missing_schwab_auth_env_names() {
   local missing=()
   for name in SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL; do
@@ -137,6 +154,12 @@ export REPLAY_DIR="${OUTPUT_ROOT}/replays"
 export REPLAY_POINT_VALUE="${REPLAY_POINT_VALUE:-10}"
 export REPLAY_FEE_PER_FILL="${REPLAY_FEE_PER_FILL:-0}"
 export REPLAY_SLIPPAGE_PER_FILL="${REPLAY_SLIPPAGE_PER_FILL:-0}"
+export MARKET_DATA_PRIMARY="${MARKET_DATA_PRIMARY:-databento}"
+export MARKET_DATA_FALLBACK="${MARKET_DATA_FALLBACK:-schwab}"
+export BROKER_TRUTH_PROVIDER="${BROKER_TRUTH_PROVIDER:-ibkr}"
+export EXECUTION_PROVIDER="${EXECUTION_PROVIDER:-ibkr}"
+export ALLOW_SCHWAB_FALLBACK="${ALLOW_SCHWAB_FALLBACK:-true}"
+export REQUIRE_SCHWAB_AUTH="${REQUIRE_SCHWAB_AUTH:-false}"
 
 ensure_file() {
   local path="$1"
@@ -153,7 +176,6 @@ ensure_dir() {
 
 ensure_file "${CONFIG_BASE}"
 ensure_file "${CONFIG_REPLAY}"
-ensure_file "${SCHWAB_CONFIG}"
 ensure_file "${PYTHON_BIN}"
 
 ensure_dir "${REPORT_DIR}"
@@ -165,6 +187,52 @@ export MGC_V05L_SETTINGS_TIMEFRAME="${MGC_V05L_SETTINGS_TIMEFRAME:-5m}"
 
 schwab_auth_env_loaded() {
   [[ -z "$(missing_schwab_auth_env_names)" ]]
+}
+
+schwab_config_available() {
+  [[ -f "${SCHWAB_CONFIG}" ]]
+}
+
+schwab_runtime_dependency_required() {
+  if [[ "$(normalize_bool_env "${REQUIRE_SCHWAB_AUTH:-false}")" == "true" ]]; then
+    return 0
+  fi
+  if [[ "$(normalize_provider_name "${MARKET_DATA_PRIMARY:-databento}")" == "schwab" ]]; then
+    return 0
+  fi
+  if [[ "$(normalize_provider_name "${BROKER_TRUTH_PROVIDER:-ibkr}")" == "schwab" ]]; then
+    return 0
+  fi
+  if [[ "$(normalize_provider_name "${EXECUTION_PROVIDER:-ibkr}")" == "schwab" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+schwab_auth_status() {
+  if schwab_auth_env_loaded && schwab_config_available; then
+    printf 'ready'
+    return 0
+  fi
+  if schwab_runtime_dependency_required; then
+    printf 'missing'
+    return 0
+  fi
+  printf 'fallback_unavailable'
+}
+
+schwab_auth_status_reason() {
+  local status
+  status="$(schwab_auth_status)"
+  if [[ "${status}" == "ready" ]]; then
+    printf 'Schwab fallback inputs are available.'
+    return 0
+  fi
+  if [[ "${status}" == "missing" ]]; then
+    printf 'Schwab is an active required provider path for this runtime and its auth/config inputs are missing.'
+    return 0
+  fi
+  printf 'Schwab fallback inputs are unavailable, but the active IBKR/Databento runtime path does not require Schwab auth.'
 }
 
 replay_db_missing() {
@@ -183,8 +251,11 @@ export MGC_BOOTSTRAP_REPLAY_DB_STATUS="$([[ -f "${DB_PATH}" ]] && echo "ready" |
 export MGC_BOOTSTRAP_REPLAY_DB_PATH="${DB_PATH}"
 export MGC_BOOTSTRAP_REPLAY_DB_NEXT_ACTION="$(replay_db_bootstrap_next_action)"
 export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES="$(missing_schwab_auth_env_names)"
-export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS="$([[ -z "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES}" ]] && echo "ready" || echo "missing")"
+export MGC_BOOTSTRAP_SCHWAB_CONFIG_STATUS="$([[ -f "${SCHWAB_CONFIG}" ]] && echo "ready" || echo "missing")"
+export MGC_BOOTSTRAP_SCHWAB_RUNTIME_REQUIRED="$(schwab_runtime_dependency_required && echo "true" || echo "false")"
+export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS="$(schwab_auth_status)"
 export MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION="$(schwab_auth_env_next_action "${MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_PATH:-${APP_SUPPORT_SCHWAB_ENV}}")"
+export MGC_BOOTSTRAP_SCHWAB_STATUS_REASON="$(schwab_auth_status_reason)"
 export MGC_OPERATOR_DASHBOARD_REDUCED_MODE="$([[ "${MGC_BOOTSTRAP_REPLAY_DB_STATUS}" == "missing" || "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS}" == "missing" ]] && echo "1" || echo "0")"
 
 ensure_signal_evaluations_structure_columns() {
@@ -227,6 +298,16 @@ require_schwab_auth_env() {
     echo "Schwab auth bootstrap incomplete: missing ${missing}. Checked shell env, ${LOCAL_SCHWAB_ENV}, and ${LOCAL_DOTENV}." >&2
     exit 1
   fi
+  if [[ ! -f "${SCHWAB_CONFIG}" ]]; then
+    echo "Schwab config bootstrap incomplete: missing ${SCHWAB_CONFIG}." >&2
+    exit 1
+  fi
+}
+
+require_schwab_auth_env_if_required() {
+  if schwab_runtime_dependency_required; then
+    require_schwab_auth_env
+  fi
 }
 
 require_replay_db_available() {
@@ -237,6 +318,9 @@ require_replay_db_available() {
 }
 
 active_schwab_symbols() {
+  if [[ ! -f "${SCHWAB_CONFIG}" ]]; then
+    return 0
+  fi
   "${PYTHON_BIN}" - <<'PY'
 import json
 import os

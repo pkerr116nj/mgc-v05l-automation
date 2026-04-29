@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -232,9 +233,18 @@ def _health_ok(health: dict[str, Any], key: str) -> bool:
 class _ConfiguredLiveMarketDataProvider:
     def __init__(self, *, settings: StrategySettings, repo_root: Path) -> None:
         configured_provider = settings.market_data_provider
+        allow_schwab_fallback = str(os.environ.get("ALLOW_SCHWAB_FALLBACK", "true")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         if configured_provider == MarketDataProviderSetting.DATABENTO:
             self._primary = DatabentoMarketDataProvider(settings, repo_root=repo_root)
-            self._quote_fallback = SchwabMarketDataProvider(settings, repo_root=repo_root)
+            if settings.broker_quote_fallback_enabled and allow_schwab_fallback:
+                self._quote_fallback = SchwabMarketDataProvider(settings, repo_root=repo_root)
+            else:
+                self._quote_fallback = None
         else:
             self._primary = SchwabMarketDataProvider(settings, repo_root=repo_root)
             self._quote_fallback = None
@@ -246,9 +256,12 @@ class _ConfiguredLiveMarketDataProvider:
     def fetch_quotes(self, internal_symbols):
         try:
             return self._primary.fetch_quotes(internal_symbols)
-        except NotImplementedError:
+        except NotImplementedError as exc:
             if self._quote_fallback is None:
-                raise
+                provider_id = getattr(self._primary, "provider_id", self.provider_id)
+                raise RuntimeError(
+                    f"{provider_id} does not provide quote snapshots for {', '.join(internal_symbols)} and Schwab fallback is disabled."
+                ) from exc
             return self._quote_fallback.fetch_quotes(internal_symbols)
 
     def describe_symbol(self, internal_symbol: str) -> dict[str, Any]:
@@ -263,9 +276,12 @@ class _ConfiguredLiveMarketDataProvider:
     def subscribe_live_quotes(self, internal_symbols):
         try:
             return self._primary.subscribe_live_quotes(internal_symbols)
-        except NotImplementedError:
+        except NotImplementedError as exc:
             if self._quote_fallback is None:
-                raise
+                provider_id = getattr(self._primary, "provider_id", self.provider_id)
+                raise RuntimeError(
+                    f"{provider_id} does not provide live quote subscriptions for {', '.join(internal_symbols)} and Schwab fallback is disabled."
+                ) from exc
             return self._quote_fallback.subscribe_live_quotes(internal_symbols)
 
 

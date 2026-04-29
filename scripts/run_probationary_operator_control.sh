@@ -6,8 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common_env.sh"
 
-require_schwab_auth_env
-
 DEFAULT_CONFIGS=(
   "${REPO_ROOT}/config/base.yaml"
   "${REPO_ROOT}/config/live.yaml"

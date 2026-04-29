@@ -1709,6 +1709,13 @@ class OperatorDashboardService:
         )
         auth_env_source_path = str(os.environ.get("MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_PATH") or "").strip()
         auth_env_source_kind = str(os.environ.get("MGC_BOOTSTRAP_SCHWAB_ENV_SOURCE_KIND") or "none").strip()
+        schwab_required = str(os.environ.get("MGC_BOOTSTRAP_SCHWAB_RUNTIME_REQUIRED") or "false").strip().lower() == "true"
+        schwab_status = str(os.environ.get("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS") or "").strip().lower() or "ready"
+        schwab_reason = str(os.environ.get("MGC_BOOTSTRAP_SCHWAB_STATUS_REASON") or "").strip()
+        market_data_primary = str(os.environ.get("MARKET_DATA_PRIMARY") or "databento").strip().lower() or "databento"
+        market_data_fallback = str(os.environ.get("MARKET_DATA_FALLBACK") or "schwab").strip().lower() or "schwab"
+        broker_truth_provider = str(os.environ.get("BROKER_TRUTH_PROVIDER") or "ibkr").strip().lower() or "ibkr"
+        execution_provider = str(os.environ.get("EXECUTION_PROVIDER") or "ibkr").strip().lower() or "ibkr"
         replay_db_missing = (
             str(os.environ.get("MGC_BOOTSTRAP_REPLAY_DB_STATUS") or "").strip().lower() == "missing"
             or not replay_db_path.exists()
@@ -1722,7 +1729,12 @@ class OperatorDashboardService:
             for name in ("SCHWAB_APP_KEY", "SCHWAB_APP_SECRET", "SCHWAB_CALLBACK_URL"):
                 if not os.environ.get(name):
                     auth_missing_names.append(name)
-        auth_missing = bool(auth_missing_names)
+        auth_missing = schwab_status == "missing"
+        reduced_mode = replay_db_missing or auth_missing
+        schwab_next_action = str(
+            os.environ.get("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION")
+            or "Export SCHWAB_APP_KEY, SCHWAB_APP_SECRET, and SCHWAB_CALLBACK_URL or source .local/schwab_env.sh."
+        )
         items = [
             {
                 "key": "replay_database",
@@ -1742,13 +1754,21 @@ class OperatorDashboardService:
             },
             {
                 "key": "schwab_auth_env",
-                "label": "Schwab auth bootstrap env",
-                "status": "missing" if auth_missing else "ready",
+                "label": "Schwab provider readiness",
+                "status": schwab_status,
                 "reduced_mode": auth_missing,
+                "required": schwab_required,
                 "missing_names": auth_missing_names,
                 "source_path": auth_env_source_path or None,
                 "source_kind": auth_env_source_kind,
-                "reason": (
+                "provider_roles": {
+                    "market_data_primary": market_data_primary,
+                    "market_data_fallback": market_data_fallback,
+                    "broker_truth_provider": broker_truth_provider,
+                    "execution_provider": execution_provider,
+                },
+                "reason": schwab_reason
+                or (
                     f"Schwab auth env is missing: {', '.join(auth_missing_names)}. Schwab-backed bootstrap paths stay unavailable until the env is restored."
                     if auth_missing
                     else (
@@ -1757,25 +1777,27 @@ class OperatorDashboardService:
                         else "Schwab auth env is loaded for dashboard bootstrap paths."
                     )
                 ),
-                "next_action": str(
-                    os.environ.get("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION")
-                    or "Export SCHWAB_APP_KEY, SCHWAB_APP_SECRET, and SCHWAB_CALLBACK_URL or source .local/schwab_env.sh."
-                ),
+                "next_action": schwab_next_action,
             },
         ]
-        missing_items = [item for item in items if item["status"] != "ready"]
+        blocking_items = [item for item in items if item.get("reduced_mode")]
+        attention_items = [item for item in items if item["status"] != "ready"]
         return {
-            "status": "reduced_mode" if missing_items else "ready",
-            "reduced_mode": bool(missing_items),
-            "issue_count": len(missing_items),
+            "status": "reduced_mode" if reduced_mode else ("attention_required" if attention_items else "ready"),
+            "reduced_mode": reduced_mode,
+            "issue_count": len(attention_items),
             "items": items,
             "status_line": (
                 "Dashboard is running in reduced mode: "
-                + "; ".join(f"{item['label']} missing" for item in missing_items)
-                if missing_items
-                else "Dashboard bootstrap prerequisites are satisfied."
+                + "; ".join(f"{item['label']} missing" for item in blocking_items)
+                if blocking_items
+                else (
+                    "Dashboard bootstrap prerequisites are satisfied. Schwab fallback is unavailable, but the active IBKR/Databento paper runtime remains healthy."
+                    if attention_items
+                    else "Dashboard bootstrap prerequisites are satisfied."
+                )
             ),
-            "primary_next_action": missing_items[0]["next_action"] if missing_items else None,
+            "primary_next_action": attention_items[0]["next_action"] if attention_items else None,
             "artifact_path": str(self._bootstrap_prerequisites_path),
         }
 

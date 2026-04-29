@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common_env.sh"
 
-require_schwab_auth_env
+require_schwab_auth_env_if_required
 
 DEFAULT_SCHWAB_CONFIG="${SCHWAB_CONFIG:-${REPO_ROOT}/config/schwab.local.json}"
 DEFAULT_CONFIGS=(
@@ -148,7 +148,7 @@ if [[ ${CONFIG_SET} -eq 0 ]]; then
     FINAL_ARGS+=(--config "${GC_MGC_ACCEPTANCE_CONFIG}")
   fi
 fi
-if [[ ${SCHWAB_CONFIG_SET} -eq 0 ]]; then
+if [[ ${SCHWAB_CONFIG_SET} -eq 0 && -f "${DEFAULT_SCHWAB_CONFIG}" ]]; then
   FINAL_ARGS+=(--schwab-config "${DEFAULT_SCHWAB_CONFIG}")
 fi
 if [[ ${#ARGS[@]} -gt 0 ]]; then
@@ -181,7 +181,11 @@ persist_runtime_config_paths() {
 }
 
 echo "Launching probationary paper soak with repo bootstrap."
-echo "Schwab config: ${DEFAULT_SCHWAB_CONFIG}"
+if [[ -f "${DEFAULT_SCHWAB_CONFIG}" ]]; then
+  echo "Schwab config: ${DEFAULT_SCHWAB_CONFIG}"
+else
+  echo "Schwab config: optional fallback unavailable"
+fi
 echo "Paper configs:"
 if [[ ${CONFIG_SET} -eq 0 ]]; then
   for config_path in "${CONFIG_PATHS[@]}"; do
@@ -197,7 +201,9 @@ else
   echo "  - custom --config args supplied"
 fi
 
-runtime_network_resolution_preflight "${DEFAULT_SCHWAB_CONFIG}" "probationary-paper-soak-launch"
+if schwab_runtime_dependency_required && [[ -f "${DEFAULT_SCHWAB_CONFIG}" ]]; then
+  runtime_network_resolution_preflight "${DEFAULT_SCHWAB_CONFIG}" "probationary-paper-soak-launch"
+fi
 persist_runtime_config_paths
 
 if [[ ${NETWORK_PREFLIGHT_ONLY} -eq 1 ]]; then

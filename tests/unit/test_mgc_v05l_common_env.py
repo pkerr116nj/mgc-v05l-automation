@@ -58,6 +58,57 @@ def test_common_env_loads_app_support_schwab_env_when_repo_local_file_is_missing
     assert auth_status == "ready"
 
 
+def test_common_env_defaults_make_schwab_optional_for_ibkr_paper_runtime(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env.pop("SCHWAB_APP_KEY", None)
+    env.pop("SCHWAB_APP_SECRET", None)
+    env.pop("SCHWAB_CALLBACK_URL", None)
+    env.pop("SCHWAB_TOKEN_FILE", None)
+    env.pop("MARKET_DATA_PRIMARY", None)
+    env.pop("MARKET_DATA_FALLBACK", None)
+    env.pop("BROKER_TRUTH_PROVIDER", None)
+    env.pop("EXECUTION_PROVIDER", None)
+    env.pop("ALLOW_SCHWAB_FALLBACK", None)
+    env.pop("REQUIRE_SCHWAB_AUTH", None)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            "source scripts/common_env.sh >/dev/null; "
+            "printf '%s\\n' \"$MARKET_DATA_PRIMARY|$MARKET_DATA_FALLBACK|$BROKER_TRUTH_PROVIDER|$EXECUTION_PROVIDER|$ALLOW_SCHWAB_FALLBACK|$REQUIRE_SCHWAB_AUTH|$MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS|$MGC_OPERATOR_DASHBOARD_REDUCED_MODE\"",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    (
+        market_data_primary,
+        market_data_fallback,
+        broker_truth_provider,
+        execution_provider,
+        allow_schwab_fallback,
+        require_schwab_auth,
+        auth_status,
+        reduced_mode,
+    ) = completed.stdout.strip().split("|")
+    assert market_data_primary == "databento"
+    assert market_data_fallback == "schwab"
+    assert broker_truth_provider == "ibkr"
+    assert execution_provider == "ibkr"
+    assert allow_schwab_fallback == "true"
+    assert require_schwab_auth == "false"
+    assert auth_status == "fallback_unavailable"
+    assert reduced_mode == "0"
+
+
 def test_research_market_data_integrity_runner_sources_project_dotenv(tmp_path: Path) -> None:
     dotenv_path = REPO_ROOT / ".env"
     original_env = dotenv_path.read_text(encoding="utf-8") if dotenv_path.exists() else None

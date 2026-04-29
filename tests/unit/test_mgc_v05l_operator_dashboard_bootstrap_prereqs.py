@@ -51,6 +51,34 @@ def test_dashboard_bootstrap_prerequisites_report_missing_replay_db_and_auth_env
     assert auth_item["missing_names"] == ["SCHWAB_APP_KEY", "SCHWAB_APP_SECRET", "SCHWAB_CALLBACK_URL"]
 
 
+def test_dashboard_bootstrap_prerequisites_treats_optional_schwab_as_non_blocking(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    replay_db = tmp_path / "mgc_v05l.replay.sqlite3"
+    replay_db.write_text("", encoding="utf-8")
+    monkeypatch.setenv("MGC_BOOTSTRAP_REPLAY_DB_STATUS", "ready")
+    monkeypatch.setenv("MGC_BOOTSTRAP_REPLAY_DB_PATH", str(replay_db))
+    monkeypatch.setenv("MGC_BOOTSTRAP_SCHWAB_RUNTIME_REQUIRED", "false")
+    monkeypatch.setenv("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS", "fallback_unavailable")
+    monkeypatch.setenv(
+        "MGC_BOOTSTRAP_SCHWAB_STATUS_REASON",
+        "Schwab fallback inputs are unavailable, but the active IBKR/Databento runtime path does not require Schwab auth.",
+    )
+    monkeypatch.setenv("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES", "SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL")
+
+    payload = OperatorDashboardService(tmp_path)._dashboard_bootstrap_prerequisites_payload()  # noqa: SLF001
+
+    assert payload["status"] == "attention_required"
+    assert payload["reduced_mode"] is False
+    assert payload["issue_count"] == 1
+    schwab_item = next(item for item in payload["items"] if item["key"] == "schwab_auth_env")
+    assert schwab_item["status"] == "fallback_unavailable"
+    assert schwab_item["reduced_mode"] is False
+    assert schwab_item["required"] is False
+    assert "inputs are unavailable" in schwab_item["reason"]
+
+
 def test_dashboard_snapshot_surfaces_bootstrap_prerequisites_without_replay_db(
     tmp_path: Path,
     monkeypatch,
@@ -95,6 +123,27 @@ def test_dashboard_bootstrap_prerequisites_report_ready_when_inputs_exist(
     assert payload["status"] == "ready"
     assert payload["reduced_mode"] is False
     assert payload["issue_count"] == 0
+
+
+def test_dashboard_bootstrap_prerequisites_blocks_when_schwab_is_explicitly_required(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    replay_db = tmp_path / "mgc_v05l.replay.sqlite3"
+    replay_db.write_text("", encoding="utf-8")
+    monkeypatch.setenv("MGC_BOOTSTRAP_REPLAY_DB_STATUS", "ready")
+    monkeypatch.setenv("MGC_BOOTSTRAP_REPLAY_DB_PATH", str(replay_db))
+    monkeypatch.setenv("MGC_BOOTSTRAP_SCHWAB_RUNTIME_REQUIRED", "true")
+    monkeypatch.setenv("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS", "missing")
+    monkeypatch.setenv("MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES", "SCHWAB_APP_KEY")
+
+    payload = OperatorDashboardService(tmp_path)._dashboard_bootstrap_prerequisites_payload()  # noqa: SLF001
+
+    assert payload["status"] == "reduced_mode"
+    assert payload["reduced_mode"] is True
+    schwab_item = next(item for item in payload["items"] if item["key"] == "schwab_auth_env")
+    assert schwab_item["status"] == "missing"
+    assert schwab_item["required"] is True
 
 
 def test_startup_control_plane_blocks_launch_when_dependencies_are_missing(tmp_path: Path) -> None:

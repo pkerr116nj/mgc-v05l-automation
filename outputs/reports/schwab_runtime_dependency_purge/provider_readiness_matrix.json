@@ -1,0 +1,51 @@
+{
+  "generated_at": "2026-04-29T09:27:26.606385+00:00",
+  "provider_roles": {
+    "market_data_primary": "databento",
+    "market_data_fallback": "schwab",
+    "broker_truth_provider": "ibkr",
+    "execution_provider": "ibkr"
+  },
+  "readiness": {
+    "broker_truth": {
+      "provider": "ibkr",
+      "status": "ready",
+      "detail": "Broker/account/order/execution truth is anchored to the IBKR paper monitor runtime."
+    },
+    "ibkr_paper_monitor": {
+      "provider": "ibkr",
+      "status": "ready",
+      "monitor_running": true,
+      "health_classification": "HEALTHY",
+      "stale": false,
+      "last_heartbeat": "2026-04-29T09:27:18.900418+00:00"
+    },
+    "market_data_primary": {
+      "provider": "databento",
+      "status": "configured",
+      "detail": "Primary market-data role is now explicitly Databento for migration planning and runtime decoupling."
+    },
+    "market_data_fallback": {
+      "provider": "schwab",
+      "status": "optional",
+      "allow_fallback": true,
+      "require_auth_for_runtime": false,
+      "config_present": true,
+      "auth_env_script_present": true,
+      "detail": "Schwab is retained as a labeled fallback/legacy provider and is no longer a hard prerequisite for IBKR paper runtime startup."
+    },
+    "local_cache": {
+      "provider": "sqlite/local cache",
+      "status": "ready",
+      "path": "/Users/patrick/Documents/MGC-v05l-automation/mgc_v05l.replay.sqlite3",
+      "detail": "Replay/research cache remains a separate readiness concern from broker and market-data providers."
+    },
+    "dashboard_bootstrap": {
+      "provider": "operator dashboard",
+      "status": "ready",
+      "reduced_mode": false,
+      "issue_count": 0,
+      "detail": "Dashboard bootstrap prerequisites are satisfied."
+    }
+  }
+}

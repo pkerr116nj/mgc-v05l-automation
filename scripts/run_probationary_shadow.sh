@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common_env.sh"
 
-require_schwab_auth_env
+require_schwab_auth_env_if_required
 
 DEFAULT_SCHWAB_CONFIG="${SCHWAB_CONFIG:-${REPO_ROOT}/config/schwab.local.json}"
 DEFAULT_CONFIGS=(
@@ -80,7 +80,7 @@ if [[ ${CONFIG_SET} -eq 0 ]]; then
     FINAL_ARGS+=(--config "${config_path}")
   done
 fi
-if [[ ${SCHWAB_CONFIG_SET} -eq 0 ]]; then
+if [[ ${SCHWAB_CONFIG_SET} -eq 0 && -f "${DEFAULT_SCHWAB_CONFIG}" ]]; then
   FINAL_ARGS+=(--schwab-config "${DEFAULT_SCHWAB_CONFIG}")
 fi
 if [[ ${#ARGS[@]} -gt 0 ]]; then
@@ -88,7 +88,11 @@ if [[ ${#ARGS[@]} -gt 0 ]]; then
 fi
 
 echo "Launching probationary shadow with repo bootstrap."
-echo "Schwab config: ${DEFAULT_SCHWAB_CONFIG}"
+if [[ -f "${DEFAULT_SCHWAB_CONFIG}" ]]; then
+  echo "Schwab config: ${DEFAULT_SCHWAB_CONFIG}"
+else
+  echo "Schwab config: optional fallback unavailable"
+fi
 echo "Probationary configs:"
 if [[ ${CONFIG_SET} -eq 0 ]]; then
   for config_path in "${DEFAULT_CONFIGS[@]}"; do

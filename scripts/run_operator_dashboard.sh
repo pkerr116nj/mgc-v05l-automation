@@ -155,6 +155,12 @@ if [[ "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS:-ready}" == "missing" ]]; then
     "Schwab auth env is missing (${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_MISSING_NAMES:-SCHWAB_APP_KEY SCHWAB_APP_SECRET SCHWAB_CALLBACK_URL}). Dashboard will start in reduced mode; Schwab-backed bootstrap paths will be unavailable. ${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION:-Export SCHWAB_APP_KEY, SCHWAB_APP_SECRET, and SCHWAB_CALLBACK_URL.}"
 fi
 
+if [[ "${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_STATUS:-ready}" == "fallback_unavailable" ]]; then
+  emit_bootstrap_warning \
+    "schwab_fallback_unavailable" \
+    "Schwab fallback is unavailable, but the active runtime does not require it. IBKR broker truth and Databento/local-cache paths may still operate normally. ${MGC_BOOTSTRAP_SCHWAB_AUTH_ENV_NEXT_ACTION:-Export SCHWAB_APP_KEY, SCHWAB_APP_SECRET, and SCHWAB_CALLBACK_URL if you want Schwab fallback restored.}"
+fi
+
 cleanup() {
   if [[ -n "${HEARTBEAT_PID}" ]] && ps -p "${HEARTBEAT_PID}" >/dev/null 2>&1; then
     kill -TERM "${HEARTBEAT_PID}" 2>/dev/null || true

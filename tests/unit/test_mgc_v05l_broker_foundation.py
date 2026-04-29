@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from mgc_v05l.config_models import (
     BrokerProvider,
     ExecutionPricingPolicy,
@@ -13,7 +15,7 @@ from mgc_v05l.config_models import (
 )
 from mgc_v05l.domain.enums import OrderIntentType
 from mgc_v05l.execution.broker_requests import BrokerContractRequest, BrokerOrderRequest
-from mgc_v05l.execution.live_strategy_broker import LiveStrategyPilotBroker
+from mgc_v05l.execution.live_strategy_broker import LiveStrategyPilotBroker, _ConfiguredLiveMarketDataProvider
 from mgc_v05l.execution.order_models import OrderIntent
 from mgc_v05l.market_data.provider_models import QuoteSnapshot
 from mgc_v05l.production_link.models import BrokerAccountIdentity
@@ -203,3 +205,171 @@ def test_production_link_store_surfaces_account_id_aliases(tmp_path: Path) -> No
 
     assert snapshot["accounts"]["selected_account_id"] == "hash-123"
     assert snapshot["accounts"]["rows"][0]["account_id"] == "hash-123"
+
+
+def test_configured_market_data_provider_does_not_silently_fallback_to_schwab(monkeypatch, tmp_path: Path) -> None:
+    override_path = tmp_path / "provider_overrides.yaml"
+    override_path.write_text(
+        "\n".join(
+            [
+                f'database_url: "sqlite:///{tmp_path / "provider.sqlite3"}"',
+                f'probationary_artifacts_dir: "{tmp_path / "artifacts"}"',
+                "market_data_provider: databento",
+                "broker_quote_fallback_enabled: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings = load_settings_from_files([Path("config/base.yaml"), override_path])
+
+    class StubDatabentoProvider:
+        provider_id = "databento"
+
+        def __init__(self, settings, repo_root):  # noqa: ANN001
+            pass
+
+        def fetch_quotes(self, internal_symbols):  # noqa: ANN001
+            raise NotImplementedError
+
+    class StubSchwabProvider:
+        provider_id = "schwab_market_data"
+
+        def __init__(self, settings, repo_root):  # noqa: ANN001
+            raise AssertionError("Schwab fallback should not be constructed when disabled.")
+
+    monkeypatch.setattr("mgc_v05l.execution.live_strategy_broker.DatabentoMarketDataProvider", StubDatabentoProvider)
+    monkeypatch.setattr("mgc_v05l.execution.live_strategy_broker.SchwabMarketDataProvider", StubSchwabProvider)
+    monkeypatch.setenv("ALLOW_SCHWAB_FALLBACK", "true")
+
+    provider = _ConfiguredLiveMarketDataProvider(settings=settings, repo_root=Path.cwd())
+
+    with pytest.raises(RuntimeError, match="Schwab fallback is disabled"):
+        provider.fetch_quotes(("MNQ",))
+
+
+def test_configured_market_data_provider_uses_explicit_schwab_fallback(monkeypatch, tmp_path: Path) -> None:
+    override_path = tmp_path / "provider_overrides.yaml"
+    override_path.write_text(
+        "\n".join(
+            [
+                f'database_url: "sqlite:///{tmp_path / "provider.sqlite3"}"',
+                f'probationary_artifacts_dir: "{tmp_path / "artifacts"}"',
+                "market_data_provider: databento",
+                "broker_quote_fallback_enabled: true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings = load_settings_from_files([Path("config/base.yaml"), override_path])
+
+    class StubDatabentoProvider:
+        provider_id = "databento"
+
+        def __init__(self, settings, repo_root):  # noqa: ANN001
+            pass
+
+        def fetch_quotes(self, internal_symbols):  # noqa: ANN001
+            raise NotImplementedError
+
+    class StubSchwabProvider:
+        provider_id = "schwab_market_data"
+
+        def __init__(self, settings, repo_root):  # noqa: ANN001
+            pass
+
+        def fetch_quotes(self, internal_symbols):  # noqa: ANN001
+            return [
+                QuoteSnapshot(
+                    internal_symbol="MNQ",
+                    external_symbol="/MNQ",
+                    ask_price=Decimal("18400.25"),
+                    bid_price=Decimal("18400.00"),
+                    last_price=Decimal("18400.00"),
+                    provider="schwab",
+                )
+            ]
+
+    monkeypatch.setattr("mgc_v05l.execution.live_strategy_broker.DatabentoMarketDataProvider", StubDatabentoProvider)
+    monkeypatch.setattr("mgc_v05l.execution.live_strategy_broker.SchwabMarketDataProvider", StubSchwabProvider)
+    monkeypatch.setenv("ALLOW_SCHWAB_FALLBACK", "true")
+
+    provider = _ConfiguredLiveMarketDataProvider(settings=settings, repo_root=Path.cwd())
+    quotes = provider.fetch_quotes(("MNQ",))
+
+    assert len(quotes) == 1
+    assert quotes[0].provider == "schwab"
+
+
+def test_configured_market_data_provider_respects_env_disable_even_when_config_requests_fallback(monkeypatch, tmp_path: Path) -> None:
+    override_path = tmp_path / "provider_overrides.yaml"
+    override_path.write_text(
+        "\n".join(
+            [
+                f'database_url: "sqlite:///{tmp_path / "provider.sqlite3"}"',
+                f'probationary_artifacts_dir: "{tmp_path / "artifacts"}"',
+                "market_data_provider: databento",
+                "broker_quote_fallback_enabled: true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings = load_settings_from_files([Path("config/base.yaml"), override_path])
+
+    class StubDatabentoProvider:
+        provider_id = "databento"
+
+        def __init__(self, settings, repo_root):  # noqa: ANN001
+            pass
+
+        def fetch_quotes(self, internal_symbols):  # noqa: ANN001
+            raise NotImplementedError
+
+    class StubSchwabProvider:
+        provider_id = "schwab_market_data"
+
+        def __init__(self, settings, repo_root):  # noqa: ANN001
+            raise AssertionError("Schwab fallback should be disabled by environment policy.")
+
+    monkeypatch.setattr("mgc_v05l.execution.live_strategy_broker.DatabentoMarketDataProvider", StubDatabentoProvider)
+    monkeypatch.setattr("mgc_v05l.execution.live_strategy_broker.SchwabMarketDataProvider", StubSchwabProvider)
+    monkeypatch.setenv("ALLOW_SCHWAB_FALLBACK", "false")
+
+    provider = _ConfiguredLiveMarketDataProvider(settings=settings, repo_root=Path.cwd())
+
+    with pytest.raises(RuntimeError, match="Schwab fallback is disabled"):
+        provider.fetch_quotes(("MNQ",))
+
+
+def test_configured_market_data_provider_reports_provider_specific_schwab_failure(monkeypatch, tmp_path: Path) -> None:
+    override_path = tmp_path / "provider_overrides.yaml"
+    override_path.write_text(
+        "\n".join(
+            [
+                f'database_url: "sqlite:///{tmp_path / "provider.sqlite3"}"',
+                f'probationary_artifacts_dir: "{tmp_path / "artifacts"}"',
+                "market_data_provider: schwab",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings = load_settings_from_files([Path("config/base.yaml"), override_path])
+
+    class StubSchwabProvider:
+        provider_id = "schwab_market_data"
+
+        def __init__(self, settings, repo_root):  # noqa: ANN001
+            pass
+
+        def fetch_quotes(self, internal_symbols):  # noqa: ANN001
+            raise RuntimeError("schwab_market_data unavailable: auth missing")
+
+    monkeypatch.setattr("mgc_v05l.execution.live_strategy_broker.SchwabMarketDataProvider", StubSchwabProvider)
+
+    provider = _ConfiguredLiveMarketDataProvider(settings=settings, repo_root=Path.cwd())
+
+    with pytest.raises(RuntimeError, match="schwab_market_data unavailable: auth missing"):
+        provider.fetch_quotes(("MNQ",))
