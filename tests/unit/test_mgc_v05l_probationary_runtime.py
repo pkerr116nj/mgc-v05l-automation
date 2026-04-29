@@ -4816,6 +4816,114 @@ def test_midday_runtime_bridge_runner_receives_supervised_paper_caller_context(
     assert broker.last_submit_context()["bridge_detail"] == "downstream_gate_failed"
 
 
+def test_midday_runtime_bridge_block_writes_route_proof_traces(tmp_path: Path) -> None:
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            report={
+                "detail": "governance_gate_failed",
+                "preflight_checks": [
+                    {"gate": "monitor_gate", "passed": True, "status": "PASS"},
+                    {"gate": "governance_gate", "passed": False, "status": "FAIL", "detail": "governance_gate_failed"},
+                ],
+            },
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="gc_1x_all_lanes__us_midday_short",
+        source_symbol="GC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+            "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    broker.connect()
+    order_intent = OrderIntent(
+        order_intent_id="gc_1x_all_lanes__us_midday_short|SELL_TO_OPEN",
+        bar_id="gc-midday-test-bar",
+        symbol="GC",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=datetime(2026, 4, 29, 16, 0, tzinfo=timezone.utc),
+        reason_code="midday_route_trace_blocked_test",
+    )
+
+    with pytest.raises(RuntimeError, match="BLOCKED_NOT_SENT_TO_BROKER: governance_gate_failed"):
+        broker.submit_order(order_intent)
+
+    trace_root = tmp_path / "outputs" / "reports" / "strategy_activity_instrumentation"
+    route_rows = [json.loads(line) for line in (trace_root / "midday_post_fix_route_trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert route_rows[-1]["classification"] == "MIDDAY_ROUTE_PROOF_BLOCKED_BY_REAL_GATE"
+    assert route_rows[-1]["gate_blocker"] == "governance_gate_failed"
+    preflight_rows = list(csv.DictReader((trace_root / "midday_post_fix_bridge_preflight_trace.csv").open(encoding="utf-8")))
+    assert any(row["gate_name"] == "governance_gate" and row["passed"] == "False" for row in preflight_rows)
+    broker_truth_rows = [json.loads(line) for line in (trace_root / "midday_post_fix_broker_truth_trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert broker_truth_rows[-1]["classification"] == "MIDDAY_ROUTE_PROOF_BLOCKED_BY_REAL_GATE"
+
+
+def test_midday_runtime_bridge_success_writes_route_proof_traces(tmp_path: Path) -> None:
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_ORDER_WORKING",
+            report={
+                "detail": "bridge working",
+                "broker_order_id": "midday-proof-1",
+                "preflight_checks": [
+                    {"gate": "monitor_gate", "passed": True, "status": "PASS"},
+                    {"gate": "governance_gate", "passed": True, "status": "PASS"},
+                ],
+                "delegated_result": {
+                    "report": {
+                        "submit_cancel_lifecycle": {
+                            "broker_order_id": "midday-proof-1",
+                            "perm_id": 123456789,
+                            "open_order_snapshots": [{"order_id": "midday-proof-1", "status": "Submitted"}],
+                            "position_reconciliation": {"status": "CLEAN"},
+                        }
+                    }
+                },
+            },
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="es_1x_ny_early_core__us_midday_long",
+        source_symbol="ES",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+            "bridge_execution_target": {"symbol": "MES", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    broker.connect()
+    order_intent = OrderIntent(
+        order_intent_id="es_1x_ny_early_core__us_midday_long|BUY_TO_OPEN",
+        bar_id="es-midday-test-bar",
+        symbol="ES",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=datetime(2026, 4, 29, 16, 3, tzinfo=timezone.utc),
+        reason_code="midday_route_trace_working_test",
+    )
+
+    broker_order_id = broker.submit_order(order_intent)
+
+    assert broker_order_id == "midday-proof-1"
+    trace_root = tmp_path / "outputs" / "reports" / "strategy_activity_instrumentation"
+    route_rows = [json.loads(line) for line in (trace_root / "midday_post_fix_route_trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert route_rows[-1]["classification"] == "MIDDAY_ROUTE_PROOF_BRIDGE_INVOKED"
+    assert route_rows[-1]["ibkr_bridge_invoked"] is True
+    broker_truth_rows = [json.loads(line) for line in (trace_root / "midday_post_fix_broker_truth_trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert broker_truth_rows[-1]["perm_id"] == 123456789
+    assert broker_truth_rows[-1]["open_order_snapshots"] == [{"order_id": "midday-proof-1", "status": "Submitted"}]
+
+
 def test_submit_capable_lane_bridge_block_does_not_create_local_fill(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path)
     repositories = RepositorySet(build_engine(settings.database_url))

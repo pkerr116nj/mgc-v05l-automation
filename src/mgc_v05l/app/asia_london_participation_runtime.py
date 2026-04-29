@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import csv
+import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from ..domain.enums import LongEntryFamily, OrderIntentType, PositionSide, ShortEntryFamily
@@ -39,6 +43,10 @@ ES_ASIA_LONDON_LONG_V6_VOL_FLOOR_125_SOURCE = "esAsiaLondonLongV6VolFloor125"
 
 ENTRY_SEGMENT = "ASIA_EARLY"
 HOLD_SEGMENTS: tuple[str, ...] = ("ASIA_EARLY", "ASIA_LATE", "LONDON_EARLY", "LONDON_LATE")
+ASIA_LONDON_INSTRUMENTATION_DIRNAME = "strategy_activity_instrumentation"
+ASIA_LONDON_LIVE_PREDICATE_TRACE = "asia_london_live_predicate_trace.jsonl"
+ASIA_LONDON_LIVE_NEAR_MISS_TRACE = "asia_london_live_near_miss_trace.csv"
+ASIA_LONDON_SCORE_BUCKET_TRACE = "asia_london_score_bucket_live_observation.csv"
 
 
 @dataclass(frozen=True)
@@ -127,6 +135,7 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
         super().__init__(**kwargs)
 
     def _evaluate_signals(self, feature_packet: FeaturePacket, feature_history: list[FeaturePacket]) -> SignalPacket:
+        del feature_history
         payload = _empty_signal_packet_payload(feature_packet.bar_id)
         definition = self._runtime_definition
         if definition is None or not self._bar_history:
@@ -135,20 +144,70 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
         current_bar = self._bar_history[-1]
         if not _symbol_matches_definition(symbol=str(current_bar.symbol or ""), definition=definition):
             return SignalPacket(**payload)
-        if _label_segment_for_symbol(symbol=str(current_bar.symbol or ""), timestamp=current_bar.end_ts) != ENTRY_SEGMENT:
+        lane_id = str(getattr(self._lane_spec, "lane_id", "") or definition.lane_id)
+        session_label = _label_segment_for_symbol(symbol=str(current_bar.symbol or ""), timestamp=current_bar.end_ts)
+        if session_label != ENTRY_SEGMENT:
+            _record_asia_london_live_observation(
+                _build_asia_london_live_observation(
+                    lane_id=lane_id,
+                    definition=definition,
+                    current_bar=current_bar,
+                    session_label=session_label,
+                    segment_bars=[],
+                    strict_gate_pass=False,
+                    strict_gate_fail_reason="outside_entry_segment",
+                    entry_index=None,
+                    entry_reason="outside_entry_segment",
+                    floor_reason=None,
+                )
+            )
             return SignalPacket(**payload)
 
         segment_bars = self._entry_segment_bars_for_timestamp(current_bar.end_ts)
         if len(segment_bars) <= definition.fallback_entry_bar:
+            _record_asia_london_live_observation(
+                _build_asia_london_live_observation(
+                    lane_id=lane_id,
+                    definition=definition,
+                    current_bar=current_bar,
+                    session_label=session_label,
+                    segment_bars=segment_bars,
+                    strict_gate_pass=False,
+                    strict_gate_fail_reason="insufficient_setup_bars",
+                    entry_index=None,
+                    entry_reason="insufficient_setup_bars",
+                    floor_reason=None,
+                )
+            )
             return SignalPacket(**payload)
 
         entry_index, entry_reason = _entry_selection(
             definition=definition,
             segment_bars=segment_bars,
         )
+        floor_reason = _volatility_floor_reason(definition=definition, segment_bars=segment_bars)
+        strict_gate_pass = entry_index == len(segment_bars) - 1 and floor_reason is None
+        strict_gate_fail_reason = None
+        if entry_index != len(segment_bars) - 1:
+            strict_gate_fail_reason = "entry_not_latest_bar"
+        elif floor_reason is not None:
+            strict_gate_fail_reason = floor_reason
+        _record_asia_london_live_observation(
+            _build_asia_london_live_observation(
+                lane_id=lane_id,
+                definition=definition,
+                current_bar=current_bar,
+                session_label=session_label,
+                segment_bars=segment_bars,
+                strict_gate_pass=strict_gate_pass,
+                strict_gate_fail_reason=strict_gate_fail_reason,
+                entry_index=entry_index,
+                entry_reason=entry_reason,
+                floor_reason=floor_reason,
+            )
+        )
         if entry_index != len(segment_bars) - 1:
             return SignalPacket(**payload)
-        floor_reason = _volatility_floor_reason(definition=definition, segment_bars=segment_bars)
         if floor_reason is not None:
             return SignalPacket(**payload)
 
@@ -444,3 +503,251 @@ def _setup_range_atr_ratio(*, segment_bars: list[Bar], setup_bar_count: int) -> 
     setup_low = min(float(bar.low) for bar in setup_bars)
     setup_range = max(setup_high - setup_low, 0.0)
     return setup_range / atr_value
+
+
+def _asia_london_instrumentation_root() -> Path:
+    override_raw = str(os.environ.get("MGC_ASIA_LONDON_INSTRUMENTATION_DIR") or "").strip()
+    if override_raw:
+        return Path(override_raw).expanduser().resolve()
+    return (Path.cwd() / "outputs" / "reports" / ASIA_LONDON_INSTRUMENTATION_DIRNAME).resolve()
+
+
+def _append_jsonl_record(path: Path, row: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True))
+        handle.write("\n")
+    return path
+
+
+def _append_csv_record(path: Path, *, fieldnames: list[str], row: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists() or path.stat().st_size == 0
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({name: row.get(name) for name in fieldnames})
+    return path
+
+
+def _score_bucket_for_ratio(score_ratio: float, *, strict_gate_pass: bool) -> str:
+    if strict_gate_pass:
+        return "A+"
+    if score_ratio >= 0.8:
+        return "A"
+    if score_ratio >= 0.6:
+        return "B+"
+    if score_ratio >= 0.4:
+        return "B"
+    return "rejected"
+
+
+def _rounded_or_none(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), 6)
+
+
+def _build_asia_london_live_observation(
+    *,
+    lane_id: str,
+    definition: AsiaLondonParticipationRuntimeDefinition,
+    current_bar: Bar,
+    session_label: str,
+    segment_bars: list[Bar],
+    strict_gate_pass: bool,
+    strict_gate_fail_reason: str | None,
+    entry_index: int | None,
+    entry_reason: str,
+    floor_reason: str | None,
+) -> dict[str, Any]:
+    setup_ready = len(segment_bars) > definition.fallback_entry_bar
+    latest_index = len(segment_bars) - 1 if segment_bars else None
+    setup_high = None
+    setup_low = None
+    setup_range = None
+    setup_return = None
+    setup_close_location = None
+    setup_vwap_displacement = None
+    midpoint = None
+    current_close = None
+    previous_high = None
+    previous_low = None
+    breakout_confirmed = False
+    breakdown_confirmed = False
+    dip_reclaim_confirmed = False
+    reclaim_fail_confirmed = False
+    contextual_tight_close = False
+    contextual_wide_range = False
+    contextual_positive_setup = False
+    contextual_weak_reclaim = False
+    floor_ratio = None
+    if setup_ready:
+        setup_bars = segment_bars[: definition.setup_bar_count]
+        setup_high = max(float(bar.high) for bar in setup_bars)
+        setup_low = min(float(bar.low) for bar in setup_bars)
+        setup_range = max(setup_high - setup_low, 1e-9)
+        setup_return = float(setup_bars[-1].close) - float(setup_bars[0].open)
+        setup_close_location = (float(setup_bars[-1].close) - setup_low) / setup_range
+        setup_vwap = _bars_vwap(setup_bars)
+        setup_vwap_displacement = (float(setup_bars[-1].close) - setup_vwap) / setup_range
+        midpoint = setup_low + (setup_range / 2.0)
+        current_close = float(segment_bars[-1].close)
+        if len(segment_bars) >= 2:
+            previous_bar = segment_bars[-2]
+            previous_high = float(previous_bar.high)
+            previous_low = float(previous_bar.low)
+            dip_reclaim_confirmed = previous_low <= midpoint and current_close > previous_high
+            reclaim_fail_confirmed = previous_high >= midpoint and current_close < previous_low
+        breakout_confirmed = current_close >= setup_high + definition.tick_size
+        breakdown_confirmed = current_close <= setup_low - definition.tick_size
+        contextual_tight_close = (
+            setup_close_location is not None
+            and setup_vwap_displacement is not None
+            and setup_close_location <= 0.72
+            and setup_vwap_displacement <= 0.15
+        )
+        contextual_wide_range = setup_range >= 3.0
+        contextual_positive_setup = (
+            setup_vwap_displacement is not None
+            and setup_return is not None
+            and setup_vwap_displacement <= 0.15
+            and setup_return >= 1.0
+        )
+        contextual_weak_reclaim = (
+            setup_close_location is not None
+            and setup_range is not None
+            and setup_close_location <= 0.35
+            and setup_range >= 4.0
+        )
+        floor_ratio = _setup_range_atr_ratio(segment_bars=segment_bars, setup_bar_count=definition.setup_bar_count)
+
+    predicate_results: dict[str, bool] = {
+        "in_entry_segment": session_label == ENTRY_SEGMENT,
+        "setup_bars_ready": setup_ready,
+        "selected_entry_matches_latest_bar": entry_index == latest_index if latest_index is not None and entry_index is not None else False,
+        "volatility_floor_pass": floor_reason is None,
+        "breakout_confirmed": breakout_confirmed,
+        "breakdown_confirmed": breakdown_confirmed,
+        "dip_reclaim_confirmed": dip_reclaim_confirmed,
+        "reclaim_fail_confirmed": reclaim_fail_confirmed,
+        "contextual_tight_close": contextual_tight_close,
+        "contextual_wide_range": contextual_wide_range,
+        "contextual_positive_setup": contextual_positive_setup,
+        "contextual_weak_reclaim": contextual_weak_reclaim,
+    }
+    predicate_values = {
+        "entry_reason": entry_reason,
+        "strict_gate_fail_reason": strict_gate_fail_reason,
+        "setup_high": _rounded_or_none(setup_high),
+        "setup_low": _rounded_or_none(setup_low),
+        "setup_range": _rounded_or_none(setup_range),
+        "setup_return": _rounded_or_none(setup_return),
+        "setup_close_location": _rounded_or_none(setup_close_location),
+        "setup_vwap_displacement": _rounded_or_none(setup_vwap_displacement),
+        "setup_midpoint": _rounded_or_none(midpoint),
+        "current_close": _rounded_or_none(current_close),
+        "previous_high": _rounded_or_none(previous_high),
+        "previous_low": _rounded_or_none(previous_low),
+        "entry_index": entry_index,
+        "latest_segment_index": latest_index,
+        "fallback_entry_bar": definition.fallback_entry_bar,
+        "volatility_floor_ratio": _rounded_or_none(floor_ratio),
+        "volatility_floor_min_ratio": definition.min_setup_range_atr_ratio,
+    }
+    passed_predicates = sum(1 for value in predicate_results.values() if value)
+    total_predicates = len(predicate_results)
+    score_ratio = passed_predicates / max(total_predicates, 1)
+    bucket = _score_bucket_for_ratio(score_ratio, strict_gate_pass=strict_gate_pass)
+    research_candidate = bucket in {"A+", "A", "B+"}
+    return {
+        "observed_at": current_bar.end_ts.isoformat(),
+        "timestamp": current_bar.end_ts.isoformat(),
+        "lane_id": lane_id,
+        "instrument": str(current_bar.symbol or "").upper(),
+        "session_label": session_label,
+        "strict_gate_pass": strict_gate_pass,
+        "strict_gate_fail_reason": strict_gate_fail_reason,
+        "near_miss_score": _rounded_or_none(score_ratio),
+        "predicates_passed": passed_predicates,
+        "predicate_count": total_predicates,
+        "candidate_score_bucket": bucket,
+        "current_strict_candidate": strict_gate_pass,
+        "research_score_candidate": research_candidate,
+        "entry_reason": entry_reason,
+        "floor_reason": floor_reason,
+        "predicate_results": predicate_results,
+        "predicate_values": predicate_values,
+        "forward_return_label_available": False,
+    }
+
+
+def _record_asia_london_live_observation(row: dict[str, Any]) -> None:
+    root = _asia_london_instrumentation_root()
+    _append_jsonl_record(root / ASIA_LONDON_LIVE_PREDICATE_TRACE, row)
+    failed_predicates = [
+        name for name, passed in dict(row.get("predicate_results") or {}).items() if not bool(passed)
+    ]
+    _append_csv_record(
+        root / ASIA_LONDON_LIVE_NEAR_MISS_TRACE,
+        fieldnames=[
+            "timestamp",
+            "lane_id",
+            "instrument",
+            "session_label",
+            "strict_gate_pass",
+            "strict_gate_fail_reason",
+            "predicates_passed",
+            "predicate_count",
+            "near_miss_score",
+            "candidate_score_bucket",
+            "current_strict_candidate",
+            "research_score_candidate",
+            "entry_reason",
+            "floor_reason",
+            "failed_predicates",
+        ],
+        row={
+            "timestamp": row.get("timestamp"),
+            "lane_id": row.get("lane_id"),
+            "instrument": row.get("instrument"),
+            "session_label": row.get("session_label"),
+            "strict_gate_pass": row.get("strict_gate_pass"),
+            "strict_gate_fail_reason": row.get("strict_gate_fail_reason"),
+            "predicates_passed": row.get("predicates_passed"),
+            "predicate_count": row.get("predicate_count"),
+            "near_miss_score": row.get("near_miss_score"),
+            "candidate_score_bucket": row.get("candidate_score_bucket"),
+            "current_strict_candidate": row.get("current_strict_candidate"),
+            "research_score_candidate": row.get("research_score_candidate"),
+            "entry_reason": row.get("entry_reason"),
+            "floor_reason": row.get("floor_reason"),
+            "failed_predicates": "|".join(failed_predicates),
+        },
+    )
+    _append_csv_record(
+        root / ASIA_LONDON_SCORE_BUCKET_TRACE,
+        fieldnames=[
+            "timestamp",
+            "lane_id",
+            "instrument",
+            "candidate_score_bucket",
+            "near_miss_score",
+            "predicates_passed",
+            "predicate_count",
+            "current_strict_candidate",
+            "research_score_candidate",
+        ],
+        row={
+            "timestamp": row.get("timestamp"),
+            "lane_id": row.get("lane_id"),
+            "instrument": row.get("instrument"),
+            "candidate_score_bucket": row.get("candidate_score_bucket"),
+            "near_miss_score": row.get("near_miss_score"),
+            "predicates_passed": row.get("predicates_passed"),
+            "predicate_count": row.get("predicate_count"),
+            "current_strict_candidate": row.get("current_strict_candidate"),
+            "research_score_candidate": row.get("research_score_candidate"),
+        },
+    )

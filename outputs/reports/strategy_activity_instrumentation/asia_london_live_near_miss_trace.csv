@@ -1,0 +1,1 @@
+timestamp,lane_id,instrument,session_label,strict_gate_pass,strict_gate_fail_reason,predicates_passed,predicate_count,near_miss_score,candidate_score_bucket,current_strict_candidate,research_score_candidate,entry_reason,floor_reason,failed_predicates

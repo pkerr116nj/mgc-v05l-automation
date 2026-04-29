@@ -11,6 +11,7 @@ import socket
 import sys
 import tempfile
 import time as time_module
+import csv
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time as dt_time, timedelta, timezone
@@ -10150,41 +10151,70 @@ class _IbkrPaperBridgeRuntimeBroker:
             "caller_path": bridge_config.caller_path,
             "caller_metadata": dict(bridge_config.caller_metadata or {}),
         }
-        artifacts: IbkrPaperStrategyBridgeArtifacts = self._bridge_runner(config=bridge_config)
-        report = dict(artifacts.report or {})
-        self._last_bridge_report = report
-        self._last_submit_context = {
-            **self._last_submit_context,
-            "bridge_classification": artifacts.classification,
-            "bridge_detail": report.get("detail"),
-            "bridge_gate_trace": list(report.get("preflight_checks") or []),
-        }
-        if artifacts.classification not in {"PAPER_STRATEGY_ORDER_FILLED", "PAPER_STRATEGY_ORDER_WORKING"}:
-            detail = str(report.get("detail") or artifacts.classification or "bridge_blocked")
-            raise RuntimeError(f"{IBKR_RUNTIME_ROUTE_MISS_BLOCKED_PREFIX}: {detail}")
-        broker_order_id = _extract_bridge_broker_order_id(report)
-        if not broker_order_id:
-            raise RuntimeError("IBKR paper bridge returned a successful classification without a broker_order_id.")
-        status = (
-            OrderStatus.FILLED
-            if artifacts.classification == "PAPER_STRATEGY_ORDER_FILLED"
-            else OrderStatus.ACKNOWLEDGED
-        )
-        self._order_status[broker_order_id] = status
-        if status is OrderStatus.ACKNOWLEDGED:
-            self._open_order_ids = [broker_order_id]
-        else:
-            self._open_order_ids = []
-            fill_price = _extract_bridge_fill_price(report)
-            self._apply_filled_position(order_intent=order_intent, fill_price=fill_price)
-            fill_timestamp = _extract_bridge_fill_timestamp(report)
-            self._last_fill_timestamp = fill_timestamp or order_intent.created_at
-        self._last_submit_context = {
-            **self._last_submit_context,
-            "broker_order_id": broker_order_id,
-            "bridge_order_status": status.value,
-        }
-        return broker_order_id
+        broker_order_id: str | None = None
+        status: OrderStatus | None = None
+        try:
+            artifacts = self._bridge_runner(config=bridge_config)
+            report = dict(artifacts.report or {})
+            self._last_bridge_report = report
+            self._last_submit_context = {
+                **self._last_submit_context,
+                "bridge_classification": artifacts.classification,
+                "bridge_detail": report.get("detail"),
+                "bridge_gate_trace": list(report.get("preflight_checks") or []),
+            }
+            if artifacts.classification not in {"PAPER_STRATEGY_ORDER_FILLED", "PAPER_STRATEGY_ORDER_WORKING"}:
+                detail = str(report.get("detail") or artifacts.classification or "bridge_blocked")
+                raise RuntimeError(f"{IBKR_RUNTIME_ROUTE_MISS_BLOCKED_PREFIX}: {detail}")
+            broker_order_id = _extract_bridge_broker_order_id(report)
+            if not broker_order_id:
+                raise RuntimeError("IBKR paper bridge returned a successful classification without a broker_order_id.")
+            status = (
+                OrderStatus.FILLED
+                if artifacts.classification == "PAPER_STRATEGY_ORDER_FILLED"
+                else OrderStatus.ACKNOWLEDGED
+            )
+            self._order_status[broker_order_id] = status
+            if status is OrderStatus.ACKNOWLEDGED:
+                self._open_order_ids = [broker_order_id]
+            else:
+                self._open_order_ids = []
+                fill_price = _extract_bridge_fill_price(report)
+                self._apply_filled_position(order_intent=order_intent, fill_price=fill_price)
+                fill_timestamp = _extract_bridge_fill_timestamp(report)
+                self._last_fill_timestamp = fill_timestamp or order_intent.created_at
+            self._last_submit_context = {
+                **self._last_submit_context,
+                "broker_order_id": broker_order_id,
+                "bridge_order_status": status.value,
+            }
+            return broker_order_id
+        except Exception as exc:
+            if "artifacts" in locals():
+                raise
+            if broker_order_id is not None and status is not None:
+                raise
+            self._record_midday_route_proof(
+                order_intent=order_intent,
+                bridge_config=bridge_config,
+                classification="MIDDAY_ROUTE_PROOF_FAILED",
+                error_message=str(exc),
+            )
+            raise
+        finally:
+            if "artifacts" in locals():
+                classification = _midday_route_proof_classification(
+                    bridge_classification=str(artifacts.classification),
+                    broker_order_id=broker_order_id,
+                )
+                self._record_midday_route_proof(
+                    order_intent=order_intent,
+                    bridge_config=bridge_config,
+                    classification=classification,
+                    bridge_artifacts=artifacts,
+                    broker_order_id=broker_order_id,
+                    bridge_order_status=status.value if status is not None else None,
+                )
 
     def cancel_order(self, broker_order_id: str) -> None:
         normalized = str(broker_order_id or "").strip()
@@ -10254,6 +10284,72 @@ class _IbkrPaperBridgeRuntimeBroker:
 
     def last_bridge_report(self) -> dict[str, Any]:
         return dict(self._last_bridge_report)
+
+    def _record_midday_route_proof(
+        self,
+        *,
+        order_intent: OrderIntent,
+        bridge_config: IbkrPaperStrategyBridgeConfig,
+        classification: str,
+        bridge_artifacts: IbkrPaperStrategyBridgeArtifacts | None = None,
+        broker_order_id: str | None = None,
+        bridge_order_status: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if not _is_midday_route_proof_lane(self._lane_id):
+            return
+        report = dict((bridge_artifacts.report if bridge_artifacts is not None else {}) or {})
+        root = _strategy_activity_instrumentation_root(self._repo_root)
+        route_row = {
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "timestamp": order_intent.created_at.isoformat(),
+            "lane_id": self._lane_id,
+            "action": bridge_config.action,
+            "source_instrument": self._source_symbol,
+            "executable_proxy": bridge_config.symbol,
+            "caller_metadata": dict(bridge_config.caller_metadata or {}),
+            "caller_path": bridge_config.caller_path,
+            "route_destination": self.route_destination,
+            "ibkr_bridge_invoked": bridge_artifacts is not None,
+            "classification": classification,
+            "bridge_classification": None if bridge_artifacts is None else bridge_artifacts.classification,
+            "bridge_detail": report.get("detail"),
+            "bridge_preflight_result": list(report.get("preflight_checks") or []),
+            "gate_blocker": _midday_route_gate_blocker(report, error_message=error_message),
+            "order_intent_id": order_intent.order_intent_id,
+            "intent_type": order_intent.intent_type.value,
+            "broker_order_id": broker_order_id,
+            "bridge_order_status": bridge_order_status,
+            "error_message": error_message,
+        }
+        _append_jsonl_record(root / "midday_post_fix_route_trace.jsonl", route_row)
+        _append_midday_preflight_rows(
+            root / "midday_post_fix_bridge_preflight_trace.csv",
+            lane_id=self._lane_id,
+            order_intent=order_intent,
+            route_destination=self.route_destination,
+            classification=classification,
+            report=report,
+        )
+        broker_truth_row = {
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "timestamp": order_intent.created_at.isoformat(),
+            "lane_id": self._lane_id,
+            "classification": classification,
+            "source_instrument": self._source_symbol,
+            "executable_proxy": bridge_config.symbol,
+            "route_destination": self.route_destination,
+            "broker_order_id": broker_order_id,
+            "perm_id": _midday_report_value(report, "perm_id"),
+            "order_status": bridge_order_status,
+            "exec_details": _midday_report_value(report, "exec_details"),
+            "completed_order": _midday_report_value(report, "completed_order"),
+            "open_order_snapshots": _midday_report_value(report, "open_order_snapshots"),
+            "position_reconciliation": _midday_report_value(report, "position_reconciliation"),
+            "delegated_result": report.get("delegated_result"),
+            "error_message": error_message,
+        }
+        _append_jsonl_record(root / "midday_post_fix_broker_truth_trace.jsonl", broker_truth_row)
 
     def _apply_filled_position(self, *, order_intent: OrderIntent, fill_price: Decimal | None) -> None:
         current_quantity = int(self._position.quantity or 0)
@@ -10375,6 +10471,143 @@ def _extract_bridge_fill_timestamp(report: dict[str, Any]) -> datetime | None:
         if parsed is not None:
             return parsed
     return None
+
+
+def _strategy_activity_instrumentation_root(repo_root: Path) -> Path:
+    return (Path(repo_root) / "outputs" / "reports" / "strategy_activity_instrumentation").resolve()
+
+
+def _append_jsonl_record(path: Path, row: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True))
+        handle.write("\n")
+    return path
+
+
+def _append_csv_record(path: Path, *, fieldnames: Sequence[str], row: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists() or path.stat().st_size == 0
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
+        if write_header:
+            writer.writeheader()
+        writer.writerow({name: row.get(name) for name in fieldnames})
+    return path
+
+
+def _is_midday_route_proof_lane(lane_id: str) -> bool:
+    normalized = str(lane_id or "").lower()
+    return "__us_midday_" in normalized
+
+
+def _midday_route_proof_classification(*, bridge_classification: str, broker_order_id: str | None) -> str:
+    if bridge_classification == "PAPER_STRATEGY_ORDER_FILLED":
+        return "MIDDAY_ROUTE_PROOF_ORDER_FILLED"
+    if bridge_classification == "PAPER_STRATEGY_ORDER_WORKING":
+        return "MIDDAY_ROUTE_PROOF_BRIDGE_INVOKED"
+    if bridge_classification == "PAPER_STRATEGY_INTENT_BLOCKED":
+        return "MIDDAY_ROUTE_PROOF_BLOCKED_BY_REAL_GATE"
+    if broker_order_id:
+        return "MIDDAY_ROUTE_PROOF_BRIDGE_INVOKED"
+    return "MIDDAY_ROUTE_PROOF_FAILED"
+
+
+def _midday_route_gate_blocker(report: dict[str, Any], *, error_message: str | None) -> str | None:
+    detail = str(report.get("detail") or "").strip()
+    if detail:
+        return detail
+    if error_message:
+        return str(error_message)
+    return None
+
+
+def _midday_report_value(report: dict[str, Any], key: str) -> Any:
+    return (
+        report.get(key)
+        or _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", key)
+        or _nested_get(report, "delegated_result", "report", "lifecycle", key)
+    )
+
+
+def _append_midday_preflight_rows(
+    path: Path,
+    *,
+    lane_id: str,
+    order_intent: OrderIntent,
+    route_destination: str,
+    classification: str,
+    report: dict[str, Any],
+) -> None:
+    checks = list(report.get("preflight_checks") or [])
+    if not checks:
+        _append_csv_record(
+            path,
+            fieldnames=[
+                "timestamp",
+                "lane_id",
+                "order_intent_id",
+                "route_destination",
+                "classification",
+                "gate_index",
+                "gate_name",
+                "passed",
+                "status",
+                "detail",
+            ],
+            row={
+                "timestamp": order_intent.created_at.isoformat(),
+                "lane_id": lane_id,
+                "order_intent_id": order_intent.order_intent_id,
+                "route_destination": route_destination,
+                "classification": classification,
+                "gate_index": 0,
+                "gate_name": "preflight_unavailable",
+                "passed": None,
+                "status": None,
+                "detail": report.get("detail"),
+            },
+        )
+        return
+    for index, check in enumerate(checks, start=1):
+        gate_name = str(
+            check.get("gate")
+            or check.get("name")
+            or check.get("label")
+            or check.get("check")
+            or f"gate_{index}"
+        )
+        status = check.get("status")
+        passed = check.get("passed")
+        if passed is None and isinstance(status, str):
+            passed = status.upper() in {"PASS", "READY", "OK", "ALLOWED"}
+        _append_csv_record(
+            path,
+            fieldnames=[
+                "timestamp",
+                "lane_id",
+                "order_intent_id",
+                "route_destination",
+                "classification",
+                "gate_index",
+                "gate_name",
+                "passed",
+                "status",
+                "detail",
+            ],
+            row={
+                "timestamp": order_intent.created_at.isoformat(),
+                "lane_id": lane_id,
+                "order_intent_id": order_intent.order_intent_id,
+                "route_destination": route_destination,
+                "classification": classification,
+                "gate_index": index,
+                "gate_name": gate_name,
+                "passed": passed,
+                "status": status,
+                "detail": check.get("detail") or check.get("reason"),
+            },
+        )
 
 
 class _LiveTimingValidationBroker(PaperBroker):
