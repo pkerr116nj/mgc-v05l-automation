@@ -229,7 +229,7 @@ def test_governance_builds_strategy_rows_and_status_payload(tmp_path: Path) -> N
     assert atp["submit_allowed"] is True
     mgc = next(row for row in artifacts.performance_rows if row["strategy_id"] == "mgc_1x_asia_london_participation__asia_london_long_v5")
     assert "conflicting_owned_position_under_other_strategy" not in mgc["submit_block_reasons"]
-    assert mgc["strategy_status"] == "WATCHLIST"
+    assert mgc["strategy_status"] == "PROBATION_ACTIVE"
     nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
     assert nq["strategy_status"] == "WATCHLIST"
 

@@ -175,6 +175,9 @@ interface CalendarSourceEntry {
   pnl: number;
   tradeCount: number;
   provisional?: boolean;
+  entryRole?: "trade" | "session_adjustment";
+  adjustmentLabel?: string;
+  adjustmentDetail?: string;
 }
 
 interface CalendarStrategyContribution {
@@ -187,12 +190,22 @@ interface CalendarStrategyContribution {
   provisional?: boolean;
 }
 
+interface CalendarDayAdjustment {
+  source: Exclude<PnlCalendarSource, "all">;
+  strategyId: string;
+  label: string;
+  detail: string;
+  pnl: number;
+  provisional?: boolean;
+}
+
 interface CalendarDayPoint {
   date: string;
   pnl: number;
   tradeCount: number;
   cumulative: number;
   contributions: CalendarStrategyContribution[];
+  adjustments: CalendarDayAdjustment[];
   coveredSources: Array<Exclude<PnlCalendarSource, "all" | "live" | "paper">>;
   hasIntradayPartial: boolean;
   intradaySources: Array<Exclude<PnlCalendarSource, "all">>;
@@ -9509,10 +9522,13 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
           date: currentPaperCalendarDateKey,
           laneId: null,
           strategyId: "__paper_intraday_partial__",
-          strategyName: "Paper Intraday Partial",
+          strategyName: "Paper Session Reconciliation",
           pnl: intradayDelta,
           tradeCount: 0,
           provisional: true,
+          entryRole: "session_adjustment",
+          adjustmentLabel: "Paper session reconciliation",
+          adjustmentDetail: "Balances the current paper day/session snapshot against closed paper trades. This may reflect carry or unrealized mark-to-market on an open position and is not a separate trade.",
         });
       }
       return entries;
@@ -9550,10 +9566,13 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
           date: currentWallClockDateKey,
           laneId: null,
           strategyId: "__live_intraday_partial__",
-          strategyName: "Live Intraday Partial",
+          strategyName: "Live Session Reconciliation",
           pnl: intradayDelta,
           tradeCount: 0,
           provisional: true,
+          entryRole: "session_adjustment",
+          adjustmentLabel: "Live session reconciliation",
+          adjustmentDetail: "Balances the current live day/session snapshot against realized live fills. This may reflect carry or unrealized mark-to-market on an open position and is not a separate trade.",
         });
       }
       return entries;
@@ -9597,6 +9616,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       }
       return paperCalendarEntries
         .filter((entry) => entry.date > historicalBackcastLatestCoverageDate)
+        .filter((entry) => entry.entryRole !== "session_adjustment")
         .map((entry) => ({
           ...entry,
           source: "historical_backcast" as const,
@@ -9822,7 +9842,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
           ? `${
               effectiveCalendarSource === "historical_backcast"
                 ? historicalBackcastContinuationEntries.length > 0
-                  ? `Loaded historical playback studies through ${formatLongDate(historicalBackcastLatestCoverageDate ?? "")}, with subsequent paper-ledger continuation. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
+                  ? `Loaded historical playback studies through ${formatLongDate(historicalBackcastLatestCoverageDate ?? "")}, with subsequent closed-paper-trade continuation. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
                   : `Loaded historical playback studies. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
                 : effectiveCalendarSource === "paper"
                   ? "Persisted paper/runtime trade ledger."
@@ -9937,10 +9957,20 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     return `${calendarSourceSelection.selectedSourceLabel} coverage in the current workstation is ${coverageLabel}.`;
   }, [calendarRange.end, calendarRange.start, calendarSourceAvailableRange, calendarSourceSelection.selectedSourceLabel]);
   const calendarDayPoints = useMemo<CalendarDayPoint[]>(() => {
+    type CalendarDayAccumulator = {
+      pnl: number;
+      tradeCount: number;
+      contributions: Map<string, CalendarStrategyContribution>;
+      adjustments: CalendarDayAdjustment[];
+      coveredSources: Set<Exclude<PnlCalendarSource, "all" | "live" | "paper">>;
+      hasIntradayPartial: boolean;
+      intradaySources: Set<Exclude<PnlCalendarSource, "all">>;
+    };
     const grouped = new Map<string, {
       pnl: number;
       tradeCount: number;
       contributions: Map<string, CalendarStrategyContribution>;
+      adjustments: CalendarDayAdjustment[];
       coveredSources: Set<Exclude<PnlCalendarSource, "all" | "live" | "paper">>;
       hasIntradayPartial: boolean;
       intradaySources: Set<Exclude<PnlCalendarSource, "all">>;
@@ -9955,6 +9985,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
               pnl: 0,
               tradeCount: 0,
               contributions: new Map(),
+              adjustments: [],
               coveredSources: new Set(),
               hasIntradayPartial: false,
               intradaySources: new Set(),
@@ -9969,30 +10000,44 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       .filter((entry) => entry.date >= calendarRange.start && entry.date <= calendarRange.end)
       .sort((left, right) => left.date.localeCompare(right.date));
     for (const entry of filteredEntries) {
-      const day = grouped.get(entry.date) ?? {
+      const day: CalendarDayAccumulator = grouped.get(entry.date) ?? {
         pnl: 0,
         tradeCount: 0,
         contributions: new Map(),
+        adjustments: [],
         coveredSources: new Set(),
         hasIntradayPartial: false,
         intradaySources: new Set(),
       };
       day.pnl += entry.pnl;
       day.tradeCount += entry.tradeCount;
-      const contributionKey = `${entry.source}:${entry.strategyId}:${entry.laneId ?? ""}`;
-      const existing = day.contributions.get(contributionKey) ?? {
-        source: entry.source,
-        laneId: entry.laneId,
-        strategyId: entry.strategyId,
-        strategyName: entry.strategyName,
-        pnl: 0,
-        tradeCount: 0,
-        provisional: entry.provisional === true,
-      };
-      existing.pnl += entry.pnl;
-      existing.tradeCount += entry.tradeCount;
-      existing.provisional = existing.provisional === true || entry.provisional === true;
-      day.contributions.set(contributionKey, existing);
+      if (entry.entryRole === "session_adjustment") {
+        day.adjustments.push({
+          source: entry.source,
+          strategyId: entry.strategyId,
+          label: entry.adjustmentLabel ?? entry.strategyName,
+          detail:
+            entry.adjustmentDetail
+            ?? "Balances the current day/session P&L snapshot against closed-trade rows. This is not a separate trade.",
+          pnl: entry.pnl,
+          provisional: entry.provisional === true,
+        });
+      } else {
+        const contributionKey = `${entry.source}:${entry.strategyId}:${entry.laneId ?? ""}`;
+        const existing = day.contributions.get(contributionKey) ?? {
+          source: entry.source,
+          laneId: entry.laneId,
+          strategyId: entry.strategyId,
+          strategyName: entry.strategyName,
+          pnl: 0,
+          tradeCount: 0,
+          provisional: entry.provisional === true,
+        };
+        existing.pnl += entry.pnl;
+        existing.tradeCount += entry.tradeCount;
+        existing.provisional = existing.provisional === true || entry.provisional === true;
+        day.contributions.set(contributionKey, existing);
+      }
       if (entry.provisional === true) {
         day.hasIntradayPartial = true;
         day.intradaySources.add(entry.source);
@@ -10005,6 +10050,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
           pnl: 0,
           tradeCount: 0,
           contributions: new Map(),
+          adjustments: [],
           coveredSources: new Set(),
           hasIntradayPartial: false,
           intradaySources: new Set(),
@@ -10022,6 +10068,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
           tradeCount: payload.tradeCount,
           cumulative: running,
           contributions: [...payload.contributions.values()].sort((left, right) => Math.abs(right.pnl) - Math.abs(left.pnl)),
+          adjustments: [...payload.adjustments].sort((left, right) => Math.abs(right.pnl) - Math.abs(left.pnl)),
           coveredSources: [...payload.coveredSources.values()].sort(),
           hasIntradayPartial: payload.hasIntradayPartial,
           intradaySources: [...payload.intradaySources.values()].sort(),
@@ -19420,8 +19467,8 @@ function CalendarDayDetailPanel(props: {
       </div>
       {props.day.hasIntradayPartial ? (
         <div className="notice-strip compact">
-          <div><strong>Intraday Partial</strong> {props.day.intradaySources.map((source) => source.replace(/_/g, " ")).join(" + ")}</div>
-          <div>Today includes provisional day-P&amp;L from the active intraday source and may change until the session closes.</div>
+          <div><strong>Session Reconciliation</strong> {props.day.intradaySources.map((source) => source.replace(/_/g, " ")).join(" + ")}</div>
+          <div>Today includes provisional day/session P&amp;L from the active intraday source. This may reflect carry or unrealized mark-to-market on an open position and is not a separate trade.</div>
         </div>
       ) : null}
       {props.day.tradeCount === 0 && props.day.coveredSources.length ? (
@@ -19461,6 +19508,16 @@ function CalendarDayDetailPanel(props: {
           </tbody>
         </table>
       </div>
+      {props.day.adjustments.length ? (
+        <div className="notice-strip compact">
+          <div><strong>Session / Carry Adjustments</strong></div>
+          {props.day.adjustments.map((adjustment) => (
+            <div key={`${adjustment.source}:${adjustment.strategyId}`}>
+              {adjustment.label}: {formatCompactCurrency(adjustment.pnl)}. {adjustment.detail}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -21559,20 +21616,24 @@ function UnifiedStrategyAnalysis({
     () => {
       let prior = 0;
       return selectedAnalyticsEquityRows
-        .map((row) => {
+        .map((row): CalendarDayPoint | null => {
           const cumulative = Number(row.equity_pnl_cash ?? 0) || 0;
+          const date = dateKeyFromTimestamp(row.timestamp);
           const point = {
-            date: dateKeyFromTimestamp(row.timestamp),
+            date,
             pnl: cumulative - prior,
             tradeCount: 1,
             cumulative,
             contributions: [],
+            adjustments: [],
             coveredSources: [] as Array<Exclude<PnlCalendarSource, "all" | "live" | "paper">>,
+            hasIntradayPartial: false,
+            intradaySources: [] as Array<Exclude<PnlCalendarSource, "all">>,
           };
           prior = cumulative;
-          return point;
+          return date ? point : null;
         })
-        .filter((row) => row.date);
+        .filter((row): row is CalendarDayPoint => row !== null);
     },
     [selectedAnalyticsEquityRows],
   );
@@ -24277,20 +24338,24 @@ function StrategyHistoryReviewPage({
     () => {
       let prior = 0;
       return selectedAnalyticsEquityRows
-        .map((row) => {
+        .map((row): CalendarDayPoint | null => {
           const cumulative = Number(row.equity_pnl_cash ?? 0) || 0;
+          const date = dateKeyFromTimestamp(row.timestamp);
           const point = {
-            date: dateKeyFromTimestamp(row.timestamp),
+            date,
             pnl: cumulative - prior,
             tradeCount: 1,
             cumulative,
             contributions: [],
+            adjustments: [],
             coveredSources: [] as Array<Exclude<PnlCalendarSource, "all" | "live" | "paper">>,
+            hasIntradayPartial: false,
+            intradaySources: [] as Array<Exclude<PnlCalendarSource, "all">>,
           };
           prior = cumulative;
-          return point;
+          return date ? point : null;
         })
-        .filter((row) => row.date);
+        .filter((row): row is CalendarDayPoint => row !== null);
     },
     [selectedAnalyticsEquityRows],
   );

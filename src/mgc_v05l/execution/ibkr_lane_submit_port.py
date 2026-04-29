@@ -30,6 +30,8 @@ _PREFERRED_LANES = (
     "gc_1x_all_lanes__us_midday_short",
     "gc_1x_asia_london_participation__asia_london_long_v5",
     "gc_1x_asia_london_participation__asia_london_short_v2",
+    "mgc_1x_asia_london_participation__asia_london_long_v5",
+    "mgc_1x_asia_london_participation__asia_london_short_v2",
 )
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"

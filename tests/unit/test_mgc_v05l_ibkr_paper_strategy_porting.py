@@ -204,6 +204,8 @@ def test_builds_inventory_and_intent_rows_for_live_paper_lanes(tmp_path: Path) -
     assert gc["bridge_adapter_ready"] is True
     mgc = next(row for row in artifacts.intent_rows if row["strategy_id"] == "mgc_1x_asia_london_participation__asia_london_long_v5")
     assert mgc["action"] == "NO_ACTION"
+    assert mgc["bridge_submit_capable"] is True
+    assert mgc["bridge_execution_target"]["symbol"] == "MGC"
     gc_intent = next(row for row in artifacts.intent_rows if row["strategy_id"] == "gc_1x_asia_london_participation__asia_london_long_v5")
     assert gc_intent["bridge_submit_capable"] is True
     assert gc_intent["bridge_execution_target"]["symbol"] == "MGC"

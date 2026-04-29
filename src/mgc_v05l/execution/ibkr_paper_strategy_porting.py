@@ -29,6 +29,10 @@ _GC_PHASE1_SUBMIT_LANE_IDS = (
     "gc_1x_asia_london_participation__asia_london_long_v5",
     "gc_1x_asia_london_participation__asia_london_short_v2",
 )
+_MGC_PHASE1_SUBMIT_LANE_IDS = (
+    "mgc_1x_asia_london_participation__asia_london_long_v5",
+    "mgc_1x_asia_london_participation__asia_london_short_v2",
+)
 _NEXT_NON_ATP_SUBMIT_LANE_ID = "gc_1x_all_lanes__asia_early_long"
 _FIRST_NON_ATP_SUBMIT_LANE_ID = "gc_1x_asia_london_participation__asia_london_long_v5"
 _ATP_CONTRACT = {
@@ -61,6 +65,16 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS: dict[str, dict[str, Any]] = {
         "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
     }
     for lane_id in _GC_PHASE1_SUBMIT_LANE_IDS
+}
+_SUBMIT_CAPABLE_LANE_ADAPTERS |= {
+    lane_id: {
+        "lane_id": lane_id,
+        "source_instrument": "MGC",
+        "bridge_execution_target": dict(_ATP_CONTRACT),
+        "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": "MGC_SIGNAL_DIRECT_PHASE1",
+    }
+    for lane_id in _MGC_PHASE1_SUBMIT_LANE_IDS
 }
 
 
@@ -197,6 +211,7 @@ def render_ibkr_paper_strategy_porting_markdown(report: dict[str, Any]) -> str:
     summary = dict(report.get("summary") or {})
     selected = dict(report.get("selected_first_lane") or {})
     monitor = dict(report.get("monitor_status") or {})
+    remaining = list(summary.get("remaining_supported_unported") or [])
     lines = [
         "# IBKR Paper Strategy Porting",
         "",
@@ -209,6 +224,8 @@ def render_ibkr_paper_strategy_porting_markdown(report: dict[str, Any]) -> str:
         f"- current MGC broker quantity: `{monitor.get('broker_position_quantity')}`",
         f"- current MGC open orders: `{monitor.get('open_order_count')}`",
         f"- executable instruments now: `{', '.join(summary.get('supported_instruments_now') or [])}`",
+        f"- submit-capable supported lanes: `{summary.get('submit_capable_supported_lane_count')}`",
+        f"- remaining supported unported lanes: `{summary.get('remaining_supported_unported_count')}`",
         f"- first selected lane: `{selected.get('strategy_id')}`",
         f"- selected lane action: `{selected.get('intent_action')}`",
         f"- selected lane bridge submit capable: `{selected.get('bridge_submit_capable')}`",
@@ -216,6 +233,12 @@ def render_ibkr_paper_strategy_porting_markdown(report: dict[str, Any]) -> str:
         f"- selected lane blocker: `{selected.get('primary_blocker')}`",
         f"- note: `{summary.get('note')}`",
     ]
+    if remaining:
+        lines.extend(["", "## Remaining Supported Unported Lanes", ""])
+        for row in remaining:
+            lines.append(
+                f"- `{row.get('strategy_id')}` / `{row.get('instrument')}`: governance=`{row.get('governance_status')}` blockers=`{', '.join(list(row.get('blockers') or [])) or 'none'}`"
+            )
     return "\n".join(lines)
 
 
@@ -382,6 +405,31 @@ def _build_summary(
     selected_lane: dict[str, Any],
 ) -> dict[str, Any]:
     supported_now = sorted({str(row.get("instrument") or "") for row in inventory_rows if str(row.get("instrument") or "") in _SUPPORTED_EXECUTABLE_INSTRUMENTS})
+    governance_rows = {str(row.get("strategy_id") or ""): dict(row) for row in _load_governance_rows()}
+    submit_capable_supported = [
+        row for row in inventory_rows
+        if str(row.get("instrument") or "") in _SUPPORTED_EXECUTABLE_INSTRUMENTS
+        and bool(row.get("bridge_adapter_ready"))
+    ]
+    remaining_supported_unported = []
+    for row in inventory_rows:
+        instrument = str(row.get("instrument") or "")
+        if instrument not in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
+            continue
+        strategy_id = str(row.get("strategy_id") or "")
+        governance_row = governance_rows.get(strategy_id, {})
+        governance_status = str(governance_row.get("strategy_status") or "")
+        destination = str(row.get("current_order_destination") or "")
+        if destination in {"ibkr_paper_bridge_submit_capable", "ibkr_paper_bridge_adopted_position"}:
+            continue
+        remaining_supported_unported.append(
+            {
+                "strategy_id": strategy_id,
+                "instrument": instrument,
+                "governance_status": governance_status or None,
+                "blockers": list(row.get("blockers_to_ibkr_paper_routing") or []),
+            }
+        )
     route_ready = [row for row in intent_rows if row.get("can_route_to_ibkr_now")]
     overall = "IBKR_PAPER_STRATEGY_PORT_PARTIAL"
     if route_ready and bool(monitor_status.get("submit_allowed")):
@@ -395,6 +443,9 @@ def _build_summary(
         "adapter_classification": adapter,
         "supported_instruments_now": supported_now,
         "route_ready_count": len(route_ready),
+        "submit_capable_supported_lane_count": len(submit_capable_supported),
+        "remaining_supported_unported_count": len(remaining_supported_unported),
+        "remaining_supported_unported": remaining_supported_unported,
         "selected_lane_id": selected_lane.get("strategy_id"),
         "selected_lane_action": selected_lane.get("intent_action"),
         "note": note,
@@ -499,6 +550,7 @@ def _status_row(row: dict[str, Any]) -> dict[str, Any]:
         "position_state": row.get("current_position_state"),
         "signal_state": row.get("current_signal_state"),
         "order_destination": row.get("current_order_destination"),
+        "bridge_submit_capable": row.get("bridge_adapter_ready"),
         "intent_adapter_ready": row.get("can_emit_standardized_order_intent_now"),
         "blockers": ";".join(list(row.get("blockers_to_ibkr_paper_routing") or [])),
     }
@@ -526,6 +578,11 @@ def _load_json(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def _load_governance_rows() -> list[dict[str, Any]]:
+    payload = _load_json(Path("var") / "per_strategy_paper_status.json")
+    return list(payload.get("strategies") or [])
 
 
 def _utc_now() -> str:

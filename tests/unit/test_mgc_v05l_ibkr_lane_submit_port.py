@@ -90,6 +90,22 @@ def _write_signal_audit(tmp_path: Path) -> None:
                         "last_recent_short_setup": False,
                         "last_intent_type": None,
                         "last_fill_timestamp": None,
+                    },
+                    {
+                        "id": "asia_london_participation_core_v1__MGC",
+                        "lane_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+                        "instrument": "MGC",
+                        "family": "asia_london_participation_core_v1",
+                        "current_strategy_status": "READY",
+                        "entries_enabled": True,
+                        "eligible_now": False,
+                        "audit_verdict": "INSUFFICIENT_HISTORY",
+                        "last_actionable_signal_family": None,
+                        "last_actionable_signal_timestamp": None,
+                        "last_recent_long_setup": False,
+                        "last_recent_short_setup": False,
+                        "last_intent_type": None,
+                        "last_fill_timestamp": None,
                     }
                 ]
             }
@@ -110,6 +126,14 @@ def _write_strategy_performance(tmp_path: Path) -> None:
                         "instrument": "GC",
                         "strategy_family": "asia_london_participation_core_v1",
                         "standalone_strategy_id": "asia_london_participation_core_v1__GC",
+                        "position_side": "FLAT",
+                        "status": "READY",
+                    },
+                    {
+                        "lane_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+                        "instrument": "MGC",
+                        "strategy_family": "asia_london_participation_core_v1",
+                        "standalone_strategy_id": "asia_london_participation_core_v1__MGC",
                         "position_side": "FLAT",
                         "status": "READY",
                     }
@@ -135,6 +159,14 @@ def _write_governance_status(tmp_path: Path) -> None:
                         "strategy_status": "PROBATION_ACTIVE",
                         "submit_allowed": True,
                         "submit_block_reasons": [],
+                    },
+                    {
+                        "strategy_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+                        "bridge_strategy_id": "asia_london_participation_core_v1__MGC",
+                        "standalone_strategy_id": "asia_london_participation_core_v1__MGC",
+                        "strategy_status": "WATCHLIST",
+                        "submit_allowed": True,
+                        "submit_block_reasons": [],
                     }
                 ],
             }
@@ -157,6 +189,28 @@ def test_lane_submit_port_reports_ready_no_action(tmp_path: Path) -> None:
     assert artifacts.report["selected_lane"]["strategy_id"] == "gc_1x_asia_london_participation__asia_london_long_v5"
     assert artifacts.report["selected_inventory_row"]["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
     assert artifacts.report["selected_intent_row"]["action"] == "NO_ACTION"
+
+
+def test_lane_submit_port_can_target_submit_capable_mgc_lane(tmp_path: Path) -> None:
+    _write_monitor(tmp_path)
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+    _write_governance_status(tmp_path)
+
+    config = IbkrLaneSubmitPortConfig(
+        repo_root=tmp_path,
+        output_dir=Path("outputs") / "reports" / "ibkr_lane_submit_port",
+        porting_output_dir=Path("outputs") / "reports" / "ibkr_strategy_porting",
+        submit=False,
+        strategy_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+    )
+    artifacts = run_ibkr_lane_submit_port(config=config)
+
+    assert artifacts.classification == "PAPER_LANE_SUBMIT_READY_NO_ACTION"
+    assert artifacts.report["selected_lane"]["strategy_id"] == "mgc_1x_asia_london_participation__asia_london_long_v5"
+    assert artifacts.report["selected_inventory_row"]["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
 
 
 def test_lane_submit_port_writes_artifacts(tmp_path: Path) -> None:
