@@ -38,7 +38,7 @@ _ROUTING_POLICY_REPORT_CSV = "paper_lane_routing_policy_report.csv"
 _LOCAL_ONLY_AUDIT_CSV = "local_only_lane_audit.csv"
 _TRADE_SEPARATION_REPORT_MD = "ibkr_vs_internal_paper_trade_separation_report.md"
 
-_SUPPORTED_EXECUTABLE_INSTRUMENTS = {"MGC", "GC"}
+_SUPPORTED_EXECUTABLE_INSTRUMENTS = {"MGC", "GC", "MNQ", "NQ"}
 _EXPLICIT_INTERNAL_ONLY_DIAGNOSTIC_LANE_IDS: set[str] = set()
 _STATUS_PRECEDENCE = {
     "DISABLED": 6,

@@ -231,7 +231,9 @@ def test_governance_builds_strategy_rows_and_status_payload(tmp_path: Path) -> N
     assert "conflicting_owned_position_under_other_strategy" not in mgc["submit_block_reasons"]
     assert mgc["strategy_status"] == "PROBATION_ACTIVE"
     nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
-    assert nq["strategy_status"] == "WATCHLIST"
+    assert nq["strategy_status"] == "PROMISING"
+    assert nq["submit_allowed"] is True
+    assert nq["current_routing_mode"] == "IBKR_ROUTED"
 
 
 def test_write_artifacts_and_load_by_bridge_strategy_id(tmp_path: Path) -> None:
