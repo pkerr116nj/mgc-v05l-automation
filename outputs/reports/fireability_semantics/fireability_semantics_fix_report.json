@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-04-29T10:42:39.078047-04:00",
+  "classification": "FIREABILITY_SEMANTICS_FIXED",
+  "current_detected_phase_label": "UNCLASSIFIED",
+  "current_broad_trading_session": "US_EARLY",
+  "next_expected_decision_bar_ts": "2026-04-29T10:44:00-04:00",
+  "lane_status_summary": {
+    "loaded_in_runtime_count": 44,
+    "runtime_lanes_loaded_count": 44,
+    "data_fresh_lanes_count": 44,
+    "governance_allowed_lanes_count": 44,
+    "route_ready_lanes_count": 44,
+    "session_eligible_lanes_count": 13,
+    "waiting_for_completed_bar_count": 13,
+    "setup_evaluated_count": 25,
+    "no_setup_count": 11,
+    "actionable_now_count": 0,
+    "blocked_lanes_count": 0,
+    "out_of_session_count": 31,
+    "stale_runtime_blocked_count": 0,
+    "session_label_gap_count": 44,
+    "session_label_gap_blocked_count": 0,
+    "eligible_to_trade_count": 0,
+    "halted_by_risk_count": 0,
+    "reconciling_count": 0,
+    "faulted_count": 0,
+    "informational_only_count": 0,
+    "runtime_presence_counts": {
+      "ACTIVE_RUNTIME": 44
+    }
+  },
+  "fireability_counts": {
+    "FIREABLE_OUT_OF_SESSION": 31,
+    "FIREABLE_WAITING_FOR_BAR": 13
+  },
+  "route_mode_counts": {
+    "IBKR_ROUTED": 44
+  },
+  "blocked_reason_counts": {},
+  "notes": [
+    "Tradable Now has been split conceptually into Session Eligible, Waiting For Completed Bar, No Setup, Actionable Now, and Blocked.",
+    "For 3m lanes, no_new_completed_bar is now treated as waiting_for_next_decision_bar rather than a scary failure state.",
+    "Fine-grained UNCLASSIFIED phase labels are surfaced separately from broad session eligibility.",
+    "Effective stale-runtime blocking is softened when the runtime is healthy and still within decision-bar cadence."
+  ]
+}

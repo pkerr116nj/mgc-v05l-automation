@@ -1,0 +1,12 @@
+metric,definition,current_count
+Runtime Lanes Loaded,Lane is present in the active runtime and can process bars.,44
+Data Fresh Lanes,Lane has runtime presence plus a usable completed-bar timestamp and is not effectively stale.,44
+Governance Allowed Lanes,"Lane is loaded and not halted, faulted, reconciling, or entry-disabled.",44
+Route Ready Lanes,"Lane has an allowed runtime route, either broker-path or explicitly local/internal.",44
+Session Eligible Lanes,"Lane is loaded, governed, route-ready, and inside its allowed session.",13
+Waiting For Completed Bar,Lane is session-eligible but between completed decision bars.,13
+Setup Evaluated,Lane has an audit verdict other than insufficient history.,25
+No Setup,Lane was evaluated on the latest decision bar and no setup was present.,11
+Actionable Now,Lane currently has BUY/SELL/EXIT intent on a completed decision bar and all gates pass.,0
+Blocked Lanes,"Lane is blocked by a real operational fault, stale-runtime effective block, data block, route block, or similar hard blocker.",0
+Ready This Bar,Lane is eligible on the exact current completed decision bar.,0

@@ -2996,6 +2996,11 @@ function sameUnderlyingModeLabel(row: JsonRecord): string {
 
 function laneTradabilityTone(status: unknown): Tone {
   switch (String(status ?? "").trim().toUpperCase()) {
+    case "ACTIONABLE_NOW":
+      return "good";
+    case "WAITING_FOR_NEXT_DECISION_BAR":
+    case "SESSION_ELIGIBLE_NO_SETUP":
+      return "warn";
     case "ELIGIBLE_TO_TRADE":
       return "good";
     case "INFORMATIONAL_ONLY":
@@ -3014,8 +3019,14 @@ function laneTradabilityTone(status: unknown): Tone {
 
 function laneTradabilityLabel(status: unknown): string {
   switch (String(status ?? "").trim().toUpperCase()) {
+    case "ACTIONABLE_NOW":
+      return "Actionable Now";
+    case "WAITING_FOR_NEXT_DECISION_BAR":
+      return "Waiting For Next Decision Bar";
+    case "SESSION_ELIGIBLE_NO_SETUP":
+      return "Session Eligible / No Setup";
     case "ELIGIBLE_TO_TRADE":
-      return "Eligible To Trade";
+      return "Ready This Bar";
     case "INFORMATIONAL_ONLY":
       return "Informational Only";
     case "LOADED_NOT_ELIGIBLE":
@@ -3332,6 +3343,15 @@ function blockerClassInfo(
   }
   if (tradabilityStatus === "RECONCILING") {
     return { label: "Reconciliation", tone: "danger", reason: String(readinessRow?.tradability_reason ?? "Reconciliation is unresolved.") };
+  }
+  if (tradabilityStatus === "ACTIONABLE_NOW") {
+    return { label: "Actionable", tone: "good", reason: String(readinessRow?.tradability_reason ?? "The lane has a broker-routable action on the current completed bar.") };
+  }
+  if (tradabilityStatus === "WAITING_FOR_NEXT_DECISION_BAR") {
+    return { label: "Waiting For Bar", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and healthy, but it is waiting for the next completed decision bar.") };
+  }
+  if (tradabilityStatus === "SESSION_ELIGIBLE_NO_SETUP") {
+    return { label: "No Setup", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and evaluated, but no setup is currently present.") };
   }
   if (tradabilityStatus === "HALTED_BY_RISK" || haltReason || String(row?.risk_state ?? "").toUpperCase() !== "OK") {
     return { label: "Risk", tone: "danger", reason: String((readinessRow?.tradability_reason ?? haltReason) || "Risk gating is blocking new entries.") };
@@ -9165,11 +9185,53 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     const tradabilityStatus = String(readinessRow?.tradability_status ?? "").toUpperCase();
     const latestEligible = formatTimestamp(row.latest_eligible_timestamp ?? readinessRow?.latest_eligible_timestamp);
     const latestBlocked = formatTimestamp(row.latest_blocked_timestamp ?? readinessRow?.latest_blocked_timestamp);
+    if (tradabilityStatus === "ACTIONABLE_NOW") {
+      return {
+        title: "Actionable Now",
+        summary: "The selected lane has an actionable BUY/SELL/EXIT signal on the current completed decision bar.",
+        nextUnlock: "Route through the configured broker path if all gates still pass.",
+        blockerLabel: "None",
+        blockerMix: "No blocker mix recorded",
+        tone: "good" as Tone,
+        latestEligible,
+        latestBlocked,
+        freshness: formatTimestamp(paperReadiness.generated_at ?? desktopState?.refreshedAt),
+        provenance: runtimePresence.summary,
+      };
+    }
+    if (tradabilityStatus === "WAITING_FOR_NEXT_DECISION_BAR") {
+      return {
+        title: "Waiting For Next Decision Bar",
+        summary: "The selected lane is loaded, session-eligible, and healthy, but it is between completed decision bars.",
+        nextUnlock: String(readinessRow?.next_expected_decision_bar_ts ? `Next completed bar expected around ${formatTimestamp(readinessRow.next_expected_decision_bar_ts)}.` : "Wait for the next completed decision bar."),
+        blockerLabel: "Waiting",
+        blockerMix: "No failure; waiting for next completed bar",
+        tone: "warn" as Tone,
+        latestEligible,
+        latestBlocked,
+        freshness: formatTimestamp(paperReadiness.generated_at ?? desktopState?.refreshedAt),
+        provenance: runtimePresence.summary,
+      };
+    }
+    if (tradabilityStatus === "SESSION_ELIGIBLE_NO_SETUP") {
+      return {
+        title: "Session Eligible / No Setup",
+        summary: "The selected lane is session-eligible and evaluated, but no setup is currently present.",
+        nextUnlock: "No action needed; wait for a qualifying setup.",
+        blockerLabel: "No Setup",
+        blockerMix: "No setup observed on the current completed bar",
+        tone: "warn" as Tone,
+        latestEligible,
+        latestBlocked,
+        freshness: formatTimestamp(paperReadiness.generated_at ?? desktopState?.refreshedAt),
+        provenance: runtimePresence.summary,
+      };
+    }
     if (selectedWorkspaceBlockerClass.label === "Ready" || tradabilityStatus === "ELIGIBLE_TO_TRADE") {
       return {
-        title: "Tradable Now",
-        summary: "The selected lane is active in the runtime and currently eligible to participate.",
-        nextUnlock: "No action needed; already tradable.",
+        title: "Ready This Bar",
+        summary: "The selected lane is active in the runtime and ready on the current completed decision bar.",
+        nextUnlock: "No action needed; already ready this bar.",
         blockerLabel: "None",
         blockerMix: "No blocker mix recorded",
         tone: "good" as Tone,
@@ -11447,9 +11509,17 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     { label: "Runtime Recovery", value: runtimeValues.runtime_recovery_state ?? paperRuntimeRecoveryState ?? "Unknown", tone: statusTone(runtimeValues.runtime_recovery_state ?? paperRuntimeRecoveryState) },
     { label: "Restart Budget", value: `${paperRuntimeRestartAttemptsInWindow}/${paperRuntimeRestartBudget || "?"}`, tone: paperRuntimeRestartSuppressed ? "danger" : paperRuntimeRestartAttemptsInWindow > 0 ? "warn" : "good" },
     { label: "Auto-Restart", value: paperRuntimeRestartSuppressed ? "SUPPRESSED" : paperAutoRestartAllowed ? "ALLOWED" : paperRuntimeRecovery.manual_action_required === true ? "MANUAL ONLY" : "IDLE", tone: paperRuntimeRestartSuppressed ? "danger" : paperAutoRestartAllowed ? "good" : paperRuntimeRecovery.manual_action_required === true ? "warn" : "muted" },
-    { label: "Loaded In Runtime", value: String(readinessLaneStatusSummary.loaded_in_runtime_count ?? 0), tone: Number(readinessLaneStatusSummary.loaded_in_runtime_count ?? 0) > 0 ? "good" : "warn" },
-    { label: "Tradable Now", value: String(readinessLaneStatusSummary.eligible_to_trade_count ?? 0), tone: Number(readinessLaneStatusSummary.eligible_to_trade_count ?? 0) > 0 ? "good" : "warn" },
-    { label: "Loaded, Not Eligible", value: String(loadedNotEligibleRows.length), tone: loadedNotEligibleRows.length ? "warn" : "good" },
+    { label: "Runtime Lanes Loaded", value: String(readinessLaneStatusSummary.runtime_lanes_loaded_count ?? readinessLaneStatusSummary.loaded_in_runtime_count ?? 0), tone: Number(readinessLaneStatusSummary.runtime_lanes_loaded_count ?? readinessLaneStatusSummary.loaded_in_runtime_count ?? 0) > 0 ? "good" : "warn" },
+    { label: "Data Fresh Lanes", value: String(readinessLaneStatusSummary.data_fresh_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.data_fresh_lanes_count ?? 0) > 0 ? "good" : "warn" },
+    { label: "Governance Allowed", value: String(readinessLaneStatusSummary.governance_allowed_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.governance_allowed_lanes_count ?? 0) > 0 ? "good" : "warn" },
+    { label: "Route Ready Lanes", value: String(readinessLaneStatusSummary.route_ready_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.route_ready_lanes_count ?? 0) > 0 ? "good" : "warn" },
+    { label: "Session Eligible", value: String(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0) > 0 ? "good" : "warn" },
+    { label: "Waiting For Bar", value: String(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0), tone: Number(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0) > 0 ? "warn" : "muted" },
+    { label: "No Setup", value: String(readinessLaneStatusSummary.no_setup_count ?? 0), tone: Number(readinessLaneStatusSummary.no_setup_count ?? 0) > 0 ? "warn" : "muted" },
+    { label: "Actionable Now", value: String(readinessLaneStatusSummary.actionable_now_count ?? 0), tone: Number(readinessLaneStatusSummary.actionable_now_count ?? 0) > 0 ? "good" : "warn" },
+    { label: "Blocked Lanes", value: String(readinessLaneStatusSummary.blocked_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.blocked_lanes_count ?? 0) > 0 ? "warn" : "good" },
+    { label: "Ready This Bar", value: String(readinessLaneStatusSummary.eligible_to_trade_count ?? 0), tone: Number(readinessLaneStatusSummary.eligible_to_trade_count ?? 0) > 0 ? "good" : "muted" },
+    { label: "Loaded, Not Ready This Bar", value: String(loadedNotEligibleRows.length), tone: loadedNotEligibleRows.length ? "warn" : "good" },
     { label: "True Faults", value: String(runtimeBlockingFaultRows.length), tone: runtimeBlockingFaultRows.length ? "danger" : "good" },
     { label: "Info Feed Degradation", value: String(readinessDegradedFeeds.length), tone: readinessDegradedFeeds.length ? "warn" : "good" },
     { label: "Lane Risk Halts", value: String(haltedDegradationRows.length), tone: haltedDegradationRows.length ? "warn" : "good" },
@@ -11458,7 +11528,9 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     { label: "Pending Order Health", value: formatValue(orderTimeoutLastStatus), tone: orderTimeoutWatchdogTone(orderTimeoutLastStatus) },
     { label: "Informational Only", value: String(informationalOnlyLaneRows.length), tone: informationalOnlyLaneRows.length ? "muted" : "good" },
     { label: "Backend / API", value: desktopState?.backend.label ?? global.runtime_health_label ?? runtimeValues.runtime_status, tone: statusTone(desktopState?.backend.label ?? global.runtime_health_label ?? runtimeValues.runtime_status) },
-    { label: "Current Session", value: paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date ?? "Unknown", tone: statusTone(paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date) },
+    { label: "Broad Session", value: paperReadiness.current_broad_trading_session ?? paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date ?? "Unknown", tone: statusTone(paperReadiness.current_broad_trading_session ?? paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date) },
+    { label: "Phase Label", value: paperReadiness.current_detected_phase_label ?? paperReadiness.current_detected_session ?? "Unknown", tone: statusTone(paperReadiness.current_detected_phase_label ?? paperReadiness.current_detected_session) },
+    { label: "Next Decision Bar", value: formatValue(paperReadiness.next_expected_decision_bar_ts ? formatTimestamp(paperReadiness.next_expected_decision_bar_ts) : "None waiting"), tone: Number(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0) > 0 ? "warn" : "muted" },
     { label: "Last Refresh", value: formatRelativeAge(desktopState?.refreshedAt), tone: "muted" as const },
   ];
   const healthyAttachedBridge =
@@ -18280,9 +18352,12 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                 <div className="metric-grid">
                   <MetricCard label="Source Mode" value={desktopState?.source.label ?? "Unknown"} tone={statusTone(desktopState?.source.label)} />
                   <MetricCard label="Backend State" value={desktopState?.backend.label ?? "Unknown"} tone={statusTone(desktopState?.backend.label)} />
-                  <MetricCard label="Current Session" value={formatValue(paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date)} />
+                  <MetricCard label="Broad Session" value={formatValue(paperReadiness.current_broad_trading_session ?? paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date)} />
                   <MetricCard label="Runtime Freshness" value={formatValue(global.stale ? "STALE" : formatRelativeAge(global.last_update_timestamp ?? desktopState?.refreshedAt))} tone={statusTone(global.stale ? "stale" : "fresh")} />
-                  <MetricCard label="Eligible Lanes" value={`${laneEligibilityRows.filter((row) => row.eligible_now === true).length}/${laneEligibilityRows.length || 0}`} />
+                  <MetricCard label="Ready This Bar" value={`${laneEligibilityRows.filter((row) => row.eligible_now === true).length}/${laneEligibilityRows.length || 0}`} />
+                  <MetricCard label="Session Eligible" value={formatValue(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0)} />
+                  <MetricCard label="Waiting For Bar" value={formatValue(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0)} />
+                  <MetricCard label="Actionable Now" value={formatValue(readinessLaneStatusSummary.actionable_now_count ?? 0)} />
                   <MetricCard label="Lane Risk Rows" value={`${laneRiskRows.length}`} />
                 </div>
               </Section>
