@@ -125,3 +125,43 @@ def test_strategy_engine_evaluates_each_1m_bar_and_advances_trailing_5m_context_
     resampled_context = repositories.bars.list_recent(symbol="MGC", timeframe="5m", limit=10)
     assert len(resampled_context) == 2
     assert resampled_context[-1].end_ts == sixth_bar.end_ts
+
+
+def test_strategy_engine_evaluates_each_1m_bar_with_trailing_3m_context(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path,
+        structural_signal_timeframe="3m",
+        artifact_timeframe="3m",
+        context_timeframes=("3m",),
+    )
+    repositories = RepositorySet(build_engine(settings.database_url))
+    engine = StrategyEngine(settings=settings, repositories=repositories)
+
+    first_two = [_bar(index) for index in range(1, 3)]
+    for bar in first_two:
+        engine.process_bar(bar)
+
+    cadence_before_context = engine.runtime_cadence_snapshot()
+    assert cadence_before_context["execution_timeframe"] == "1m"
+    assert cadence_before_context["context_timeframes"] == ["3m"]
+    assert cadence_before_context["last_execution_bar_id"] == first_two[-1].bar_id
+    assert cadence_before_context["last_execution_bar_evaluated_at"] == first_two[-1].end_ts.isoformat()
+    assert cadence_before_context["last_completed_context_bars_at"] == {"3m": None}
+
+    third_bar = _bar(3)
+    engine.process_bar(third_bar)
+
+    cadence_at_first_context_close = engine.runtime_cadence_snapshot()
+    assert cadence_at_first_context_close["last_execution_bar_id"] == third_bar.bar_id
+    assert cadence_at_first_context_close["last_execution_bar_evaluated_at"] == third_bar.end_ts.isoformat()
+    assert cadence_at_first_context_close["last_completed_context_bars_at"] == {"3m": third_bar.end_ts.isoformat()}
+
+    fourth_bar = _bar(4)
+    engine.process_bar(fourth_bar)
+
+    cadence_after_next_execution = engine.runtime_cadence_snapshot()
+    assert cadence_after_next_execution["last_execution_bar_id"] == fourth_bar.bar_id
+    assert cadence_after_next_execution["last_execution_bar_evaluated_at"] == fourth_bar.end_ts.isoformat()
+    assert cadence_after_next_execution["last_completed_context_bars_at"] == {"3m": fourth_bar.end_ts.isoformat()}
+    assert repositories.processed_bars.count() == 4
+    assert repositories.processed_bars.latest_end_ts() == fourth_bar.end_ts

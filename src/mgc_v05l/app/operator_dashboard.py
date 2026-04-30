@@ -47,13 +47,14 @@ from .strategy_study import (
     normalize_strategy_study_payload,
 )
 from .replay_reporting import build_summary_metrics, build_trade_ledger
-from .session_phase_labels import label_session_phase
+from .session_phase_labels import label_session_phase, session_restriction_matches_timestamp
 from .approved_quant_lanes.dashboard_payloads import load_approved_quant_baselines_snapshot
 from .dashboard_registry import build_dashboard_lane_registry
 from .experimental_canaries_dashboard_payloads import load_experimental_canaries_snapshot
 from .gc_mgc_forced_session_runtime import GC_MGC_FORCED_SESSION_RUNTIME_KIND
 from .index_futures_forced_session_runtime import INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND
 from .operator_surface import build_operator_surface
+from . import probationary_runtime
 from .probationary_runtime import REALIZED_LOSER_SESSION_OVERRIDE_ACTION, submit_probationary_operator_control
 from .research_runtime_bridge import (
     BRIDGE_MODE_PROSPECTIVE,
@@ -101,6 +102,7 @@ DEFAULT_DASHBOARD_API_CACHE_SOURCE_LAG_GRACE_SECONDS = 30.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_FRESHNESS_SECONDS = 30.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_MAX_STALE_SECONDS = 300.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_RUNTIME_UPDATE_GRACE_SECONDS = 60.0
+DEFAULT_COMPLETED_BAR_CLOSE_GRACE_SECONDS = 10.0
 DEFAULT_AUTH_GATE_READY_REFRESH_SECONDS = 300
 DEFAULT_AUTH_GATE_RECOVERY_RETRY_SECONDS = 30
 PAPER_RUNTIME_AUTO_RECOVERY_BACKOFF_SECONDS = 30
@@ -6439,7 +6441,12 @@ class OperatorDashboardService:
             },
         }
 
-    def _paper_readiness_payload(self, paper: dict[str, Any]) -> dict[str, Any]:
+    def _paper_readiness_payload(
+        self,
+        paper: dict[str, Any],
+        *,
+        evaluation_timestamp: datetime | None = None,
+    ) -> dict[str, Any]:
         generated_at = datetime.now(timezone.utc).isoformat()
         approved_models = paper.get("approved_models") or {}
         active_models = [row for row in approved_models.get("rows", []) if row.get("enabled")]
@@ -6476,13 +6483,22 @@ class OperatorDashboardService:
         for row in lane_rows:
             lane_id = str(row.get("lane_id") or "")
             if lane_id:
-                lane_universe[lane_id] = {**lane_universe.get(lane_id, {}), **dict(row)}
+                merged_row = dict(lane_universe.get(lane_id, {}))
+                for key, value in dict(row).items():
+                    if key not in merged_row or _is_meaningful_lane_overlay_value(value):
+                        merged_row[key] = value
+                lane_universe[lane_id] = merged_row
         current_detected_session = (
             (paper.get("raw_operator_status") or {}).get("current_detected_session")
             or paper_status.get("session_phase")
             or "UNKNOWN"
         )
-        current_broad_trading_session = _broad_trading_session_for_timestamp(datetime.now(NEW_YORK_TZ))
+        current_timestamp = evaluation_timestamp or datetime.now(NEW_YORK_TZ)
+        if current_timestamp.tzinfo is None:
+            current_timestamp = current_timestamp.replace(tzinfo=NEW_YORK_TZ)
+        else:
+            current_timestamp = current_timestamp.astimezone(NEW_YORK_TZ)
+        current_broad_trading_session = _broad_trading_session_for_timestamp(current_timestamp)
         runtime_lane_ids = {
             str(row.get("lane_id") or "")
             for row in ((paper.get("raw_operator_status") or {}).get("lanes") or [])
@@ -6501,6 +6517,7 @@ class OperatorDashboardService:
         )
         lane_eligibility_rows = []
         lane_status_rows = []
+        lane_bar_authority_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         for row in sorted(
             lane_universe.values(),
             key=lambda entry: (str(entry.get("symbol") or ""), str(entry.get("display_name") or entry.get("lane_id") or "")),
@@ -6519,7 +6536,33 @@ class OperatorDashboardService:
             risk_state_upper = risk_state.upper()
             eligible_now = bool(row.get("eligible_now"))
             eligibility_reason = row.get("eligibility_reason")
-            decision_bar_seconds = _decision_bar_seconds_for_row(row)
+            execution_timeframe = _execution_timeframe_for_row(row)
+            primary_context_timeframe = _primary_context_timeframe_for_row(row)
+            context_timeframes = list(
+                row.get("context_timeframes")
+                or row.get("resolved_context_timeframes")
+                or ([primary_context_timeframe] if primary_context_timeframe else [])
+            )
+            structural_signal_timeframe = str(
+                row.get("structural_signal_timeframe")
+                or row.get("resolved_structural_signal_timeframe")
+                or primary_context_timeframe
+                or execution_timeframe
+            ).strip()
+            artifact_timeframe = str(
+                row.get("artifact_timeframe")
+                or row.get("resolved_artifact_timeframe")
+                or structural_signal_timeframe
+                or execution_timeframe
+            ).strip()
+            decision_bar_seconds = _decision_bar_seconds_for_row(
+                {
+                    **row,
+                    "execution_timeframe": execution_timeframe,
+                    "context_timeframes": context_timeframes,
+                    "primary_context_timeframe": primary_context_timeframe,
+                }
+            )
             runtime_stale_suppressed = _runtime_stale_should_be_softened(
                 runtime_stale=runtime_stale,
                 runtime_running=runtime_running,
@@ -6565,32 +6608,114 @@ class OperatorDashboardService:
             if not configured_allowed_sessions:
                 session_restriction = str(row.get("session_restriction") or "").strip()
                 configured_allowed_sessions = [session_restriction] if session_restriction else []
-            configured_allowed_sessions_normalized = [
-                str(value or "").strip().upper()
-                for value in configured_allowed_sessions
-                if str(value or "").strip()
-            ]
+            timestamp_session_match = _lane_allowed_session_match_at_timestamp(row, current_timestamp)
             broad_session_matches_lane = bool(
-                not configured_allowed_sessions_normalized
-                or "ANY" in configured_allowed_sessions_normalized
-                or broad_trading_session in configured_allowed_sessions_normalized
+                timestamp_session_match
+                if timestamp_session_match is not None
+                else not configured_allowed_sessions
             )
-            latest_completed_bar_end_ts = row.get("latest_completed_bar_end_ts")
+            runtime_allowed_session_match = row.get("allowed_session_match")
+            if timestamp_session_match is True and str(eligibility_reason or "") != "outside_branch_window":
+                effective_allowed_session_match = True
+            elif timestamp_session_match is False:
+                effective_allowed_session_match = False
+            else:
+                effective_allowed_session_match = (
+                    bool(runtime_allowed_session_match)
+                    if runtime_allowed_session_match is not None
+                    else str(eligibility_reason or "") != "wrong_session"
+                )
+            effective_eligibility_reason = str(eligibility_reason or "")
+            if effective_allowed_session_match and effective_eligibility_reason == "wrong_session":
+                effective_eligibility_reason = ""
+            bar_authority = _lane_bar_authority_from_database(
+                database_url=row.get("database_url"),
+                symbol=row.get("symbol"),
+                execution_timeframe=execution_timeframe,
+                primary_context_timeframe=primary_context_timeframe,
+                evaluation_timestamp=current_timestamp,
+                cache=lane_bar_authority_cache,
+            )
+            expected_completed_bar_end_ts = (
+                bar_authority.get("expected_completed_bar_end_ts")
+                or row.get("latest_completed_bar_end_ts")
+            )
+            observed_completed_bar_end_ts = bar_authority.get("observed_completed_bar_end_ts")
+            feature_bar_ts = bar_authority.get("feature_bar_ts")
+            last_strategy_evaluated_bar_ts = bar_authority.get("last_strategy_evaluated_bar_ts")
+            last_processed_bar_end_ts = (
+                bar_authority.get("last_processed_bar_end_ts")
+                or row.get("last_processed_bar_end_ts")
+            )
+            processing_lag_seconds = bar_authority.get("processing_lag_seconds")
+            market_data_lag_seconds = bar_authority.get("market_data_lag_seconds")
+            raw_bar_state = str(bar_authority.get("bar_state") or "")
+            raw_bar_state_reason = str(bar_authority.get("bar_state_reason") or "")
+            if effective_eligibility_reason == "no_new_completed_bar":
+                if raw_bar_state == "WAITING_FOR_BAR_CLOSE":
+                    effective_eligibility_reason = "waiting_for_bar_close"
+                elif raw_bar_state == "BAR_RECEIVED_NOT_PROCESSED_YET":
+                    effective_eligibility_reason = "bar_received_not_processed_yet"
+                elif raw_bar_state == "MARKET_DATA_STALE":
+                    effective_eligibility_reason = "market_data_stale"
+                elif raw_bar_state == "BAR_PROCESSED_CURRENT":
+                    effective_eligibility_reason = ""
             next_expected_decision_bar_ts = _next_expected_decision_bar_timestamp(
-                latest_completed_bar_end_ts,
+                expected_completed_bar_end_ts,
                 decision_bar_seconds=decision_bar_seconds,
             )
             session_eligible = bool(
                 loaded_in_runtime
                 and governance_allowed
                 and route_ready
-                and bool(row.get("allowed_session_match", str(eligibility_reason or "") != "wrong_session"))
+                and effective_allowed_session_match
             )
-            waiting_for_completed_bar = bool(session_eligible and str(eligibility_reason or "") == "no_new_completed_bar")
             setup_evaluated = str(audit_row.get("audit_verdict") or "") not in {"", "INSUFFICIENT_HISTORY"}
             no_setup_present = str(audit_row.get("audit_verdict") or "") == "NO_SETUP_OBSERVED"
             intent_action = str(route_row.get("intent_action") or route_row.get("current_signal_state") or "NO_ACTION").upper()
-            data_fresh = bool(loaded_in_runtime and latest_completed_bar_end_ts and not (runtime_stale and not runtime_stale_suppressed))
+            if loaded_in_runtime and not effective_allowed_session_match and raw_bar_state == "MARKET_DATA_STALE":
+                bar_progress_state = "OUT_OF_SESSION_DORMANT"
+            elif session_eligible and raw_bar_state in {
+                "WAITING_FOR_BAR_CLOSE",
+                "BAR_RECEIVED_NOT_PROCESSED_YET",
+                "MARKET_DATA_STALE",
+            }:
+                bar_progress_state = raw_bar_state
+            elif session_eligible and intent_action in {"BUY", "SELL", "EXIT"} and eligible_now:
+                bar_progress_state = "ACTIONABLE"
+            elif session_eligible and setup_evaluated and no_setup_present:
+                bar_progress_state = "READY_NO_SETUP"
+            elif raw_bar_state:
+                bar_progress_state = raw_bar_state
+            else:
+                bar_progress_state = "BAR_AUTHORITY_UNAVAILABLE"
+            if bar_progress_state == "OUT_OF_SESSION_DORMANT":
+                bar_state_reason = (
+                    "Lane is outside its allowed session; older observed bars are treated as dormant history, not a live market-data stall."
+                )
+            elif not raw_bar_state_reason:
+                if bar_progress_state == "READY_NO_SETUP":
+                    bar_state_reason = "The latest processed completed bar evaluated cleanly and produced no setup."
+                elif bar_progress_state == "ACTIONABLE":
+                    bar_state_reason = "The latest processed completed bar produced an actionable signal."
+                else:
+                    bar_state_reason = None
+            else:
+                bar_state_reason = raw_bar_state_reason
+            waiting_for_completed_bar = bool(session_eligible and bar_progress_state == "WAITING_FOR_BAR_CLOSE")
+            bar_received_not_processed_yet = bool(
+                session_eligible and bar_progress_state == "BAR_RECEIVED_NOT_PROCESSED_YET"
+            )
+            market_data_stale = bool(
+                loaded_in_runtime and bar_progress_state == "MARKET_DATA_STALE"
+            )
+            latest_completed_bar_end_ts = observed_completed_bar_end_ts or expected_completed_bar_end_ts
+            data_fresh = bool(
+                loaded_in_runtime
+                and observed_completed_bar_end_ts
+                and not market_data_stale
+                and not (runtime_stale and not runtime_stale_suppressed)
+            )
             actionable_now = bool(
                 intent_action in {"BUY", "SELL", "EXIT"}
                 and session_eligible
@@ -6606,7 +6731,7 @@ class OperatorDashboardService:
             session_label_gap_blocking = bool(
                 session_label_gap_active
                 and broad_session_matches_lane
-                and str(eligibility_reason or "") == "wrong_session"
+                and effective_eligibility_reason == "wrong_session"
             )
             same_underlying_info_only = (
                 bool(row.get("same_underlying_ambiguity"))
@@ -6629,6 +6754,26 @@ class OperatorDashboardService:
                 and session_eligible
                 and not (runtime_stale and not runtime_stale_suppressed)
             )
+            first_true_blocker = _first_true_lane_blocker(
+                loaded_in_runtime=loaded_in_runtime,
+                runtime_stale=bool(runtime_stale and not runtime_stale_suppressed),
+                faulted=faulted,
+                latest_fault_or_blocker=str(row.get("fault_code") or row.get("eligibility_detail") or row.get("eligibility_reason") or "").strip() or None,
+                reconciling=reconciling,
+                halted_by_risk=halted_by_risk,
+                halt_reason=str(row.get("halt_reason") or "").strip() or None,
+                entries_enabled=bool(row.get("entries_enabled", True)),
+                operator_halt=bool(row.get("operator_halt")),
+                route_ready=route_ready,
+                session_eligible=session_eligible,
+                waiting_for_completed_bar=waiting_for_completed_bar,
+                bar_received_not_processed_yet=bar_received_not_processed_yet,
+                market_data_stale=market_data_stale,
+                setup_evaluated=setup_evaluated,
+                no_setup_present=no_setup_present,
+                actionable_now=actionable_now,
+                effective_eligibility_reason=effective_eligibility_reason,
+            )
             fireability_classification = _fireability_classification(
                 loaded_in_runtime=loaded_in_runtime,
                 data_fresh=data_fresh,
@@ -6636,12 +6781,14 @@ class OperatorDashboardService:
                 route_ready=route_ready,
                 session_eligible=session_eligible,
                 waiting_for_completed_bar=waiting_for_completed_bar,
+                bar_received_not_processed_yet=bar_received_not_processed_yet,
+                market_data_stale=market_data_stale,
                 setup_evaluated=setup_evaluated,
                 no_setup_present=no_setup_present,
                 actionable_now=actionable_now,
                 runtime_stale=bool(runtime_stale and not runtime_stale_suppressed),
                 session_label_gap_blocking=session_label_gap_blocking,
-                eligibility_reason=str(eligibility_reason or ""),
+                eligibility_reason=effective_eligibility_reason,
             )
             blocked_lane = fireability_classification.startswith("FIREABLE_BLOCKED")
 
@@ -6655,6 +6802,16 @@ class OperatorDashboardService:
                 tradability_reason = "Loaded in runtime and session-eligible; waiting for the next completed decision bar."
                 next_action = "Wait for the next completed bar."
                 manual_action_required = False
+            elif bar_received_not_processed_yet:
+                tradability_status = "BAR_RECEIVED_NOT_PROCESSED_YET"
+                tradability_reason = "A completed observed market-data bar exists, but the strategy/runtime loop has not processed it yet."
+                next_action = "Inspect runtime cadence if this persists for more than one bar."
+                manual_action_required = False
+            elif market_data_stale:
+                tradability_status = "MARKET_DATA_STALE"
+                tradability_reason = "Wall clock expects a completed market-data bar, but none has been observed beyond the grace window."
+                next_action = "Inspect market data feed health and lane bar ingestion."
+                manual_action_required = True
             elif actionable_now:
                 tradability_status = "ACTIONABLE_NOW"
                 tradability_reason = "Lane has an actionable BUY/SELL/EXIT signal on the current decision bar."
@@ -6700,26 +6857,40 @@ class OperatorDashboardService:
                 reason_map = {
                     "wrong_session": "Loaded in runtime, but outside the lane's allowed session.",
                     "warmup_incomplete": "Loaded in runtime, but warmup is still incomplete.",
-                    "no_new_completed_bar": "Loaded in runtime, but waiting for the next completed bar.",
+                    "waiting_for_bar_close": "Loaded in runtime, but the current execution bar is still inside the bar-close grace window.",
+                    "bar_received_not_processed_yet": "Loaded in runtime, and a completed bar exists, but the strategy loop has not processed it yet.",
+                    "market_data_stale": "Loaded in runtime, but observed market data is stale beyond the bar-close grace window.",
                     "entries_disabled": "Loaded in runtime, but entries are currently disabled.",
                     "operator_halt": "Loaded in runtime, but operator halt is active.",
                     "strategy_not_ready": "Loaded in runtime, but strategy state is not yet tradable.",
                     "stale_runtime": "Loaded in runtime, but runtime status is stale.",
                     "stopped_runtime": "Runtime is stopped, so this lane is not tradable.",
                 }
-                tradability_reason = reason_map.get(str(eligibility_reason or ""), "Loaded in runtime, but not currently eligible to trade.")
+                tradability_reason = reason_map.get(
+                    effective_eligibility_reason,
+                    "Loaded in runtime, but not currently eligible to trade.",
+                )
                 next_action_map = {
                     "wrong_session": "Wait for the lane's allowed session.",
                     "warmup_incomplete": "Wait for warmup to complete.",
-                    "no_new_completed_bar": "Wait for the next completed bar.",
+                    "waiting_for_bar_close": "Wait for the current execution bar to close.",
+                    "bar_received_not_processed_yet": "Inspect runtime cadence if the processing lag persists.",
+                    "market_data_stale": "Inspect feed health and recent bar ingestion for this lane.",
                     "entries_disabled": "Resume Entries if trading should be re-enabled.",
                     "operator_halt": "Resume Entries when you want this runtime trading again.",
                     "strategy_not_ready": "Wait for strategy state to return to READY/flat.",
                     "stale_runtime": "Refresh runtime health before treating this lane as tradable.",
                     "stopped_runtime": "Start runtime.",
                 }
-                next_action = next_action_map.get(str(eligibility_reason or ""), "No manual action needed unless this state is unexpected.")
-                manual_action_required = str(eligibility_reason or "") in {"entries_disabled", "operator_halt", "stopped_runtime"}
+                next_action = next_action_map.get(
+                    effective_eligibility_reason,
+                    "No manual action needed unless this state is unexpected.",
+                )
+                manual_action_required = effective_eligibility_reason in {
+                    "entries_disabled",
+                    "operator_halt",
+                    "stopped_runtime",
+                }
             runtime_presence_payload = _runtime_presence_payload(
                 runtime_instance_present=loaded_in_runtime,
                 runtime_state_loaded=loaded_in_runtime,
@@ -6732,17 +6903,31 @@ class OperatorDashboardService:
                     "lane_id": lane_id,
                     "display_name": row.get("display_name") or lane_id,
                     "symbol": row.get("symbol"),
+                    "execution_timeframe": execution_timeframe,
+                    "resolved_execution_timeframe": execution_timeframe,
+                    "structural_signal_timeframe": structural_signal_timeframe,
+                    "artifact_timeframe": artifact_timeframe,
+                    "context_timeframes": list(context_timeframes),
+                    "resolved_context_timeframes": list(context_timeframes),
+                    "primary_context_timeframe": primary_context_timeframe,
+                    "allowed_sessions": list(configured_allowed_sessions),
+                    "session_restriction": row.get("session_restriction"),
                     "configured_allowed_sessions": row.get("session_restriction") or "ANY",
                     "current_detected_session": row.get("current_detected_session") or current_detected_session,
                     "detected_phase_label": fine_grained_phase_label,
                     "broad_trading_session": broad_trading_session,
                     "broad_session_matches_lane": broad_session_matches_lane,
                     "eligible_now": eligible_now,
+                    "entries_enabled": bool(row.get("entries_enabled", True)),
+                    "operator_halt": bool(row.get("operator_halt")),
                     "loaded_in_runtime": loaded_in_runtime,
                     "eligible_to_trade": eligible_to_trade,
+                    "can_fire_now": eligible_to_trade,
                     "actionable_now": actionable_now,
                     "session_eligible": session_eligible,
                     "waiting_for_completed_bar": waiting_for_completed_bar,
+                    "bar_received_not_processed_yet": bar_received_not_processed_yet,
+                    "market_data_stale": market_data_stale,
                     "data_fresh": data_fresh,
                     "governance_allowed": governance_allowed,
                     "route_ready": route_ready,
@@ -6760,7 +6945,11 @@ class OperatorDashboardService:
                     "manual_action_required": manual_action_required,
                     **runtime_presence_payload,
                     "current_strategy_status": current_strategy_status,
-                    "eligibility_reason": eligibility_reason,
+                    "eligibility_reason": effective_eligibility_reason,
+                    "runtime_eligibility_reason": eligibility_reason,
+                    "effective_readiness_eligibility_reason": effective_eligibility_reason or None,
+                    "latest_fault_or_blocker": first_true_blocker,
+                    "first_true_blocker": first_true_blocker,
                     "eligibility_detail": row.get("eligibility_detail"),
                     "risk_state": risk_state,
                     "halt_reason": row.get("halt_reason"),
@@ -6769,8 +6958,22 @@ class OperatorDashboardService:
                     "session_reset_auto_cleared": bool(row.get("session_reset_auto_cleared")),
                     "session_reset_auto_cleared_at": row.get("session_reset_auto_cleared_at"),
                     "same_underlying_ambiguity": bool(row.get("same_underlying_ambiguity")),
-                    "last_processed_bar_end_ts": row.get("last_processed_bar_end_ts"),
+                    "expected_completed_bar_end_ts": expected_completed_bar_end_ts,
+                    "observed_completed_bar_end_ts": observed_completed_bar_end_ts,
+                    "observed_completed_bar_source": bar_authority.get("observed_completed_bar_source"),
+                    "observed_completed_bar_recorded_at": bar_authority.get("observed_completed_bar_recorded_at"),
+                    "feature_bar_ts": feature_bar_ts,
+                    "last_strategy_evaluated_bar_ts": last_strategy_evaluated_bar_ts,
+                    "last_processed_bar_end_ts": last_processed_bar_end_ts,
                     "latest_completed_bar_end_ts": latest_completed_bar_end_ts,
+                    "processing_lag_seconds": processing_lag_seconds,
+                    "market_data_lag_seconds": market_data_lag_seconds,
+                    "observed_bar_arrival_age_seconds": bar_authority.get("observed_bar_arrival_age_seconds"),
+                    "bar_state": bar_progress_state,
+                    "bar_state_reason": bar_state_reason,
+                    "bar_close_grace_seconds": bar_authority.get("bar_close_grace_seconds"),
+                    "within_bar_close_grace": bar_authority.get("within_bar_close_grace"),
+                    "readiness_snapshot_ts": bar_authority.get("readiness_snapshot_ts"),
                     "decision_bar_seconds": decision_bar_seconds,
                     "next_expected_decision_bar_ts": next_expected_decision_bar_ts,
                     "runtime_stale_observed": runtime_stale,
@@ -6778,6 +6981,9 @@ class OperatorDashboardService:
                     "runtime_stale_effective": bool(runtime_stale and not runtime_stale_suppressed),
                     "session_label_gap_active": session_label_gap_active,
                     "session_label_gap_blocking": session_label_gap_blocking,
+                    "allowed_session_match": effective_allowed_session_match,
+                    "runtime_allowed_session_match": runtime_allowed_session_match,
+                    "timestamp_session_match": timestamp_session_match,
                     "routing_mode": current_routing_mode,
                     "ibkr_bridge_submit_capable": ibkr_bridge_submit_capable,
                     "local_paper_trading_enabled": local_paper_trading_enabled,
@@ -6813,14 +7019,28 @@ class OperatorDashboardService:
                     "lane_id": lane_id,
                     "display_name": row.get("display_name") or lane_id,
                     "symbol": row.get("symbol"),
+                    "execution_timeframe": execution_timeframe,
+                    "resolved_execution_timeframe": execution_timeframe,
+                    "structural_signal_timeframe": structural_signal_timeframe,
+                    "artifact_timeframe": artifact_timeframe,
+                    "context_timeframes": list(context_timeframes),
+                    "resolved_context_timeframes": list(context_timeframes),
+                    "primary_context_timeframe": primary_context_timeframe,
+                    "allowed_sessions": list(configured_allowed_sessions),
+                    "session_restriction": row.get("session_restriction"),
                     "loaded_in_runtime": loaded_in_runtime,
                     "eligible_to_trade": eligible_to_trade,
+                    "can_fire_now": eligible_to_trade,
                     "actionable_now": actionable_now,
                     "session_eligible": session_eligible,
                     "waiting_for_completed_bar": waiting_for_completed_bar,
+                    "bar_received_not_processed_yet": bar_received_not_processed_yet,
+                    "market_data_stale": market_data_stale,
                     "data_fresh": data_fresh,
                     "governance_allowed": governance_allowed,
                     "route_ready": route_ready,
+                    "entries_enabled": bool(row.get("entries_enabled", True)),
+                    "operator_halt": bool(row.get("operator_halt")),
                     "setup_evaluated": setup_evaluated,
                     "no_setup_present": no_setup_present,
                     "blocked_lane": blocked_lane,
@@ -6836,9 +7056,30 @@ class OperatorDashboardService:
                     **runtime_presence_payload,
                     "risk_state": risk_state,
                     "halt_reason": row.get("halt_reason"),
+                    "eligibility_reason": effective_eligibility_reason,
+                    "runtime_eligibility_reason": eligibility_reason,
+                    "effective_readiness_eligibility_reason": effective_eligibility_reason or None,
+                    "latest_fault_or_blocker": first_true_blocker,
+                    "first_true_blocker": first_true_blocker,
                     "detected_phase_label": fine_grained_phase_label,
                     "broad_trading_session": broad_trading_session,
                     "broad_session_matches_lane": broad_session_matches_lane,
+                    "expected_completed_bar_end_ts": expected_completed_bar_end_ts,
+                    "observed_completed_bar_end_ts": observed_completed_bar_end_ts,
+                    "observed_completed_bar_source": bar_authority.get("observed_completed_bar_source"),
+                    "observed_completed_bar_recorded_at": bar_authority.get("observed_completed_bar_recorded_at"),
+                    "feature_bar_ts": feature_bar_ts,
+                    "last_strategy_evaluated_bar_ts": last_strategy_evaluated_bar_ts,
+                    "last_processed_bar_end_ts": last_processed_bar_end_ts,
+                    "latest_completed_bar_end_ts": latest_completed_bar_end_ts,
+                    "processing_lag_seconds": processing_lag_seconds,
+                    "market_data_lag_seconds": market_data_lag_seconds,
+                    "observed_bar_arrival_age_seconds": bar_authority.get("observed_bar_arrival_age_seconds"),
+                    "bar_state": bar_progress_state,
+                    "bar_state_reason": bar_state_reason,
+                    "bar_close_grace_seconds": bar_authority.get("bar_close_grace_seconds"),
+                    "within_bar_close_grace": bar_authority.get("within_bar_close_grace"),
+                    "readiness_snapshot_ts": bar_authority.get("readiness_snapshot_ts"),
                     "decision_bar_seconds": decision_bar_seconds,
                     "next_expected_decision_bar_ts": next_expected_decision_bar_ts,
                     "runtime_stale_observed": runtime_stale,
@@ -6890,7 +7131,23 @@ class OperatorDashboardService:
             "governance_allowed_lanes_count": sum(1 for row in lane_status_rows if row.get("governance_allowed")),
             "route_ready_lanes_count": sum(1 for row in lane_status_rows if row.get("route_ready")),
             "session_eligible_lanes_count": sum(1 for row in lane_status_rows if row.get("session_eligible")),
+            "live_capable_count": sum(
+                1
+                for row in lane_status_rows
+                if row.get("session_eligible")
+                and row.get("governance_allowed")
+                and row.get("route_ready")
+                and not row.get("halted_by_risk")
+                and not row.get("reconciling")
+                and not row.get("faulted")
+                and not row.get("market_data_stale")
+                and not row.get("blocked_lane")
+            ),
             "waiting_for_completed_bar_count": sum(1 for row in lane_status_rows if row.get("waiting_for_completed_bar")),
+            "bar_received_not_processed_yet_count": sum(
+                1 for row in lane_status_rows if row.get("bar_received_not_processed_yet")
+            ),
+            "market_data_stale_count": sum(1 for row in lane_status_rows if row.get("market_data_stale")),
             "setup_evaluated_count": sum(1 for row in lane_status_rows if row.get("setup_evaluated")),
             "no_setup_count": sum(1 for row in lane_status_rows if row.get("no_setup_present")),
             "actionable_now_count": sum(1 for row in lane_status_rows if row.get("actionable_now")),
@@ -7042,7 +7299,10 @@ class OperatorDashboardService:
             "current_broad_trading_session": current_broad_trading_session,
             "next_expected_decision_bar_ts": next_expected_decision_bar_ts,
             "session_eligible_count": int(lane_status_summary["session_eligible_lanes_count"]),
+            "live_capable_count": int(lane_status_summary["live_capable_count"]),
             "waiting_for_bar_count": int(lane_status_summary["waiting_for_completed_bar_count"]),
+            "bar_received_not_processed_yet_count": int(lane_status_summary["bar_received_not_processed_yet_count"]),
+            "market_data_stale_count": int(lane_status_summary["market_data_stale_count"]),
             "no_setup_count": int(lane_status_summary["no_setup_count"]),
             "actionable_now_count": int(lane_status_summary["actionable_now_count"]),
             "true_blocked_count": int(lane_status_summary["blocked_lanes_count"]),
@@ -8753,6 +9013,25 @@ class OperatorDashboardService:
             for row in self._configured_paper_lanes(paper.get("config_in_force") or {})
             if row.get("lane_id")
         }
+        approved_model_rows = [
+            {
+                "lane_id": row.get("lane_id"),
+                "display_name": row.get("branch") or row.get("display_name"),
+                "symbol": row.get("instrument") or row.get("symbol"),
+                "execution_timeframe": row.get("execution_timeframe"),
+                "structural_signal_timeframe": row.get("structural_signal_timeframe"),
+                "artifact_timeframe": row.get("artifact_timeframe"),
+                "context_timeframes": list(row.get("context_timeframes") or []),
+                "session_restriction": row.get("session_restriction"),
+                "allowed_sessions": row.get("allowed_sessions"),
+                "current_strategy_status": row.get("strategy_status"),
+                "runtime_instance_present": str(row.get("runtime_presence") or "").upper() == "ACTIVE_RUNTIME",
+                "paper_strategy_class": row.get("paper_strategy_class"),
+                "strategy_family": row.get("source_family"),
+            }
+            for row in list((paper.get("approved_models") or {}).get("rows") or [])
+            if row.get("lane_id")
+        ]
         runtime_rows = [dict(row) for row in ((paper.get("raw_operator_status") or {}).get("lanes") or []) if row.get("lane_id")]
         runtime_lane_ids = {
             str(value or "").strip()
@@ -8772,11 +9051,24 @@ class OperatorDashboardService:
             }
         else:
             merged = {lane_id: dict(row) for lane_id, row in config_lanes.items()}
+        for row in approved_model_rows:
+            lane_id = str(row.get("lane_id") or "")
+            if not lane_id:
+                continue
+            merged_row = dict(merged.get(lane_id, {}))
+            for key, value in dict(row).items():
+                if key not in merged_row or _is_meaningful_lane_overlay_value(value):
+                    merged_row[key] = value
+            merged[lane_id] = merged_row
         for row in runtime_rows:
             lane_id = str(row.get("lane_id") or "")
             if not lane_id:
                 continue
-            merged[lane_id] = {**merged.get(lane_id, {}), **dict(row)}
+            merged_row = dict(merged.get(lane_id, {}))
+            for key, value in dict(row).items():
+                if key not in merged_row or _is_meaningful_lane_overlay_value(value):
+                    merged_row[key] = value
+            merged[lane_id] = merged_row
         return list(merged.values())
 
     def _paper_lane_activity_payload(self, paper: dict[str, Any]) -> dict[str, Any]:
@@ -11769,6 +12061,7 @@ class OperatorDashboardService:
                 strategy_key = str(key or "")
                 if strategy_key:
                     trade_log_counts_by_strategy[strategy_key] = trade_log_counts_by_strategy.get(strategy_key, 0) + 1
+        historical_order_rejections = _historical_order_rejection_lookup(self._repo_root, session_date=session_date)
 
         rows: list[dict[str, Any]] = []
         verdict_counts: Counter[str] = Counter()
@@ -11896,6 +12189,20 @@ class OperatorDashboardService:
             total_fill_count = len(window_fills)
             latest_intent_timestamp = _row_timestamp(latest_intent, "created_at")
             latest_fill_timestamp = _row_timestamp(latest_fill, "fill_timestamp")
+            signal_time_reference_ts = _parse_iso_datetime(
+                str(
+                    last_actionable_signal_timestamp
+                    or last_signal_timestamp
+                    or (window_processed_bars[-1].get("end_ts") if window_processed_bars else "")
+                    or ""
+                )
+            )
+            signal_time_session_label = label_session_phase(signal_time_reference_ts) if signal_time_reference_ts is not None else None
+            signal_time_allowed_session_match = _lane_allowed_session_match_at_timestamp(lane_row, signal_time_reference_ts)
+            historical_order_rejection = historical_order_rejections.get(
+                (lane_id, _normalize_iso_timestamp_key(last_actionable_signal_timestamp))
+            )
+            historical_order_rejection_reason = _historical_order_rejection_reason(historical_order_rejection)
 
             gating_state = {
                 "current_strategy_status": str(lane_row.get("strategy_status") or "UNKNOWN"),
@@ -11911,6 +12218,9 @@ class OperatorDashboardService:
                 "eligibility_detail": lane_row.get("eligibility_detail"),
                 "risk_state": lane_row.get("risk_state") or "OK",
                 "halt_reason": lane_row.get("halt_reason"),
+                "signal_time_allowed_session_match": signal_time_allowed_session_match,
+                "signal_time_session_label": signal_time_session_label,
+                "historical_order_rejection_reason": historical_order_rejection_reason,
             }
             performance_row = strategy_rows.get(strategy_key)
             surfaced_trade_log_count = trade_log_counts_by_strategy.get(strategy_key, 0)
@@ -11960,6 +12270,10 @@ class OperatorDashboardService:
                     "last_signal_family": last_signal_family,
                     "last_actionable_signal_timestamp": last_actionable_signal_timestamp,
                     "last_actionable_signal_family": last_actionable_signal_family,
+                    "signal_time_session_label": signal_time_session_label,
+                    "signal_time_allowed_session_match": signal_time_allowed_session_match,
+                    "historical_order_rejection_reason": historical_order_rejection_reason,
+                    "historical_order_rejection_summary": historical_order_rejection,
                     "last_long_entry_raw": latest_signal.get("long_entry_raw") if latest_signal else None,
                     "last_short_entry_raw": latest_signal.get("short_entry_raw") if latest_signal else None,
                     "last_long_entry": latest_signal.get("long_entry") if latest_signal else None,
@@ -17216,6 +17530,60 @@ def _audit_open_broker_order_id(
     return None
 
 
+def _normalize_iso_timestamp_key(value: Any) -> str:
+    parsed = _parse_iso_datetime(str(value or ""))
+    return parsed.isoformat() if parsed is not None else str(value or "").strip()
+
+
+def _historical_order_rejection_lookup(
+    repo_root: Path,
+    *,
+    session_date: str | None,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    alerts_path = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "alerts.jsonl"
+    rows = _rows_for_session_date(_tail_jsonl(alerts_path, DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT * 4), session_date, "logged_at", "occurred_at")
+    lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        if str(row.get("category") or "").strip().lower() != "order_rejection":
+            continue
+        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        lane_id = str(row.get("lane_id") or detail.get("lane_id") or "").strip()
+        bar_end_ts = _normalize_iso_timestamp_key(detail.get("bar_end_ts"))
+        if lane_id and bar_end_ts:
+            lookup[(lane_id, bar_end_ts)] = row
+    return lookup
+
+
+def _lane_allowed_session_match_at_timestamp(lane_row: dict[str, Any], timestamp: datetime | None) -> bool | None:
+    if timestamp is None:
+        return None
+    allowed_sessions = [
+        str(value or "").strip()
+        for value in list(lane_row.get("allowed_sessions") or [])
+        if str(value or "").strip()
+    ]
+    restriction = str(lane_row.get("session_restriction") or "").strip()
+    if not allowed_sessions and restriction:
+        allowed_sessions = [restriction]
+    if not allowed_sessions:
+        return True
+    return any(session_restriction_matches_timestamp(timestamp, value) for value in allowed_sessions)
+
+
+def _historical_order_rejection_reason(alert_row: dict[str, Any] | None) -> str | None:
+    if not alert_row:
+        return None
+    detail = alert_row.get("detail") if isinstance(alert_row.get("detail"), dict) else {}
+    block_reason = str(detail.get("block_reason") or "").strip()
+    broker_stage = str(detail.get("broker_stage_message") or detail.get("broker_stage") or "").strip()
+    message = str(alert_row.get("message") or "").strip()
+    detail_text = str(detail.get("detail") or "").strip()
+    for value in (broker_stage, block_reason, detail_text, message):
+        if value:
+            return value
+    return None
+
+
 def _audit_latest_fault_or_blocker(lane_row: dict[str, Any]) -> str | None:
     for value in (
         lane_row.get("fault_code"),
@@ -17277,6 +17645,12 @@ def _signal_intent_fill_audit_verdict(
 
 
 def _audit_gate_reason(gating_state: dict[str, Any]) -> str | None:
+    historical_rejection_reason = str(gating_state.get("historical_order_rejection_reason") or "").strip()
+    if historical_rejection_reason:
+        return (
+            "A setup was observed, but the supervised paper route was rejected before broker submission: "
+            f"{historical_rejection_reason}."
+        )
     fault_code = str(gating_state.get("latest_fault_or_blocker") or "").strip()
     if fault_code and str(gating_state.get("current_strategy_status") or "").upper().startswith("FAULT"):
         return f"A setup was observed, but no intent was created because the lane is faulted: {fault_code}."
@@ -17298,6 +17672,8 @@ def _audit_gate_reason(gating_state: dict[str, Any]) -> str | None:
     if str(gating_state.get("current_strategy_status") or "UNKNOWN").upper() not in {"READY"}:
         return f"A setup was observed, but the strategy status was {gating_state.get('current_strategy_status')}, so the lane was not entry-ready."
     eligibility_reason = str(gating_state.get("eligibility_reason") or "").strip()
+    if eligibility_reason == "wrong_session" and gating_state.get("signal_time_allowed_session_match") is True:
+        eligibility_reason = ""
     if eligibility_reason and eligibility_reason != "no_new_completed_bar":
         detail = str(gating_state.get("eligibility_detail") or "").strip()
         if detail:
@@ -20837,7 +21213,24 @@ def _broad_trading_session_for_timestamp(timestamp: datetime) -> str:
 
 
 def _decision_bar_seconds_for_row(row: dict[str, Any]) -> int:
+    execution_timeframe = str(
+        row.get("execution_timeframe")
+        or row.get("resolved_execution_timeframe")
+        or row.get("execution_resolution")
+        or ""
+    ).strip()
+    if execution_timeframe:
+        return _timeframe_seconds(execution_timeframe)
     timeframes = list(row.get("context_timeframes") or [])
+    if not timeframes:
+        timeframes = list(row.get("resolved_context_timeframes") or [])
+    primary_context_timeframe = str(
+        row.get("primary_context_timeframe")
+        or row.get("resolved_primary_context_timeframe")
+        or ""
+    ).strip()
+    if primary_context_timeframe:
+        timeframes = [primary_context_timeframe, *timeframes]
     for timeframe in timeframes:
         value = str(timeframe or "").strip().lower()
         match = re.fullmatch(r"(\d+)([mh])", value)
@@ -20855,6 +21248,262 @@ def _next_expected_decision_bar_timestamp(latest_completed_bar_end_ts: str | Non
     if latest_completed is None:
         return None
     return (latest_completed + timedelta(seconds=max(decision_bar_seconds, 60))).isoformat()
+
+
+def _timeframe_seconds(value: str | None, *, default: int = 60) -> int:
+    match = re.fullmatch(r"(\d+)([mh])", str(value or "").strip().lower())
+    if not match:
+        return default
+    magnitude = int(match.group(1))
+    return magnitude * 3600 if match.group(2) == "h" else magnitude * 60
+
+
+def _execution_timeframe_for_row(row: dict[str, Any]) -> str:
+    value = str(row.get("execution_timeframe") or "").strip()
+    return value or "1m"
+
+
+def _primary_context_timeframe_for_row(row: dict[str, Any]) -> str:
+    value = str(row.get("primary_context_timeframe") or "").strip()
+    if value:
+        return value
+    context_timeframes = list(row.get("context_timeframes") or [])
+    if context_timeframes:
+        normalized = str(context_timeframes[0] or "").strip()
+        if normalized:
+            return normalized
+    return _execution_timeframe_for_row(row)
+
+
+def _sqlite_path_from_database_url(database_url: str | None) -> Path | None:
+    normalized = str(database_url or "").strip()
+    if not normalized.startswith("sqlite:///"):
+        return None
+    raw_path = normalized.removeprefix("sqlite:///").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = (REPO_ROOT / path).resolve()
+    return path
+
+
+def _latest_sqlite_timestamp(connection: sqlite3.Connection, statement: str, parameters: Sequence[Any]) -> datetime | None:
+    row = connection.execute(statement, tuple(parameters)).fetchone()
+    if row is None:
+        return None
+    raw_value = row[0]
+    return _parse_iso_datetime(str(raw_value)) if raw_value else None
+
+
+def _is_meaningful_lane_overlay_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) > 0
+    return True
+
+
+def _latest_observed_bar_snapshot(
+    connection: sqlite3.Connection,
+    *,
+    symbol: str,
+    timeframe: str,
+    evaluation_iso: str,
+) -> tuple[datetime | None, datetime | None, str | None]:
+    row = connection.execute(
+        """
+        select end_ts, created_at, 'schwab_live_poll'
+        from bars
+        where symbol = ?
+          and timeframe = ?
+          and data_source = 'schwab_live_poll'
+          and coalesce(is_final, 1) = 1
+          and end_ts <= ?
+        order by end_ts desc, created_at desc
+        limit 1
+        """,
+        (symbol, timeframe, evaluation_iso),
+    ).fetchone()
+    if row is None:
+        row = connection.execute(
+            """
+            select end_ts, created_at, data_source
+            from bars
+            where symbol = ?
+              and timeframe = ?
+              and coalesce(is_final, 1) = 1
+              and end_ts <= ?
+            order by end_ts desc, created_at desc
+            limit 1
+            """,
+            (symbol, timeframe, evaluation_iso),
+        ).fetchone()
+    if row is None:
+        return None, None, None
+    end_ts_raw, created_at_raw, source = row
+    return (
+        _parse_iso_datetime(str(end_ts_raw)) if end_ts_raw else None,
+        _parse_iso_datetime(str(created_at_raw)) if created_at_raw else None,
+        str(source) if source else None,
+    )
+
+
+def _lane_bar_authority_from_database(
+    *,
+    database_url: str | None,
+    symbol: str | None,
+    execution_timeframe: str,
+    primary_context_timeframe: str,
+    evaluation_timestamp: datetime,
+    cache: dict[tuple[str, str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    cache_key = (str(database_url or "").strip(), normalized_symbol, execution_timeframe)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    database_path = _sqlite_path_from_database_url(database_url)
+    if database_path is None or not database_path.exists() or not normalized_symbol:
+        cache[cache_key] = {}
+        return {}
+
+    expected_completed_bar_end = probationary_runtime._latest_completed_probationary_bar_end(  # noqa: SLF001
+        evaluation_timestamp,
+        execution_timeframe,
+    )
+    timeframe_seconds = max(_timeframe_seconds(execution_timeframe), 60)
+    grace_seconds = DEFAULT_COMPLETED_BAR_CLOSE_GRACE_SECONDS
+    within_grace_window = evaluation_timestamp <= (
+        expected_completed_bar_end + timedelta(seconds=grace_seconds)
+    )
+    try:
+        evaluation_iso = evaluation_timestamp.isoformat()
+        with sqlite3.connect(database_path) as connection:
+            (
+                observed_completed_bar_end,
+                observed_completed_bar_recorded_at,
+                observed_completed_bar_source,
+            ) = _latest_observed_bar_snapshot(
+                connection,
+                symbol=normalized_symbol,
+                timeframe=execution_timeframe,
+                evaluation_iso=evaluation_iso,
+            )
+            feature_bar_ts = _latest_sqlite_timestamp(
+                connection,
+                """
+                select max(f.created_at)
+                from features f
+                join bars b on b.bar_id = f.bar_id
+                where b.symbol = ?
+                  and b.timeframe = ?
+                  and b.end_ts <= ?
+                """,
+                (normalized_symbol, primary_context_timeframe, evaluation_iso),
+            )
+            last_strategy_evaluated_bar_ts = _latest_sqlite_timestamp(
+                connection,
+                "select max(created_at) from signals where created_at <= ?",
+                (evaluation_iso,),
+            )
+            last_processed_bar_end_ts = _latest_sqlite_timestamp(
+                connection,
+                "select max(end_ts) from processed_bars where end_ts <= ?",
+                (evaluation_iso,),
+            )
+    except sqlite3.Error as exc:
+        snapshot = {"bar_state": "BAR_AUTHORITY_UNAVAILABLE", "bar_state_reason": f"sqlite_error:{exc}"}
+        cache[cache_key] = snapshot
+        return dict(snapshot)
+
+    processing_anchor = last_processed_bar_end_ts
+    if last_strategy_evaluated_bar_ts is not None and (
+        processing_anchor is None or last_strategy_evaluated_bar_ts < processing_anchor
+    ):
+        processing_anchor = last_strategy_evaluated_bar_ts
+    processing_lag_seconds = None
+    if observed_completed_bar_end is not None and processing_anchor is not None:
+        processing_lag_seconds = max(
+            (observed_completed_bar_end.astimezone(timezone.utc) - processing_anchor.astimezone(timezone.utc)).total_seconds(),
+            0.0,
+        )
+    market_data_lag_seconds = None
+    if observed_completed_bar_end is not None:
+        market_data_lag_seconds = max(
+            (expected_completed_bar_end.astimezone(timezone.utc) - observed_completed_bar_end.astimezone(timezone.utc)).total_seconds(),
+            0.0,
+        )
+    else:
+        market_data_lag_seconds = max(
+            (evaluation_timestamp.astimezone(timezone.utc) - expected_completed_bar_end.astimezone(timezone.utc)).total_seconds(),
+            0.0,
+        )
+
+    observed_bar_arrival_age_seconds = None
+    if observed_completed_bar_recorded_at is not None:
+        observed_bar_arrival_age_seconds = max(
+            (evaluation_timestamp.astimezone(timezone.utc) - observed_completed_bar_recorded_at.astimezone(timezone.utc)).total_seconds(),
+            0.0,
+        )
+
+    if observed_completed_bar_end is None or observed_completed_bar_end < expected_completed_bar_end:
+        waiting_for_source_publication = bool(
+            observed_completed_bar_end is not None
+            and observed_bar_arrival_age_seconds is not None
+            and observed_bar_arrival_age_seconds <= float(timeframe_seconds + grace_seconds)
+        )
+        if within_grace_window:
+            bar_state = "WAITING_FOR_BAR_CLOSE"
+            bar_state_reason = "The current execution bar is still inside the bar-close grace window."
+        elif waiting_for_source_publication:
+            bar_state = "WAITING_FOR_BAR_CLOSE"
+            bar_state_reason = (
+                "The latest observed completed bar was ingested recently enough that the next source bar is still within the source publication grace window."
+            )
+        else:
+            bar_state = "MARKET_DATA_STALE"
+            bar_state_reason = "Wall clock expects a completed execution bar, but no observed completed market-data bar exists beyond grace."
+    elif processing_anchor is None or processing_anchor < observed_completed_bar_end:
+        bar_state = "BAR_RECEIVED_NOT_PROCESSED_YET"
+        bar_state_reason = "A completed observed market-data bar exists, but runtime processing has not yet advanced through it."
+    else:
+        bar_state = "BAR_PROCESSED_CURRENT"
+        bar_state_reason = "The latest observed completed market-data bar has already been processed."
+
+    snapshot = {
+        "expected_completed_bar_end_ts": expected_completed_bar_end.isoformat(),
+        "observed_completed_bar_end_ts": observed_completed_bar_end.isoformat() if observed_completed_bar_end is not None else None,
+        "observed_completed_bar_source": observed_completed_bar_source,
+        "observed_completed_bar_recorded_at": (
+            observed_completed_bar_recorded_at.isoformat()
+            if observed_completed_bar_recorded_at is not None
+            else None
+        ),
+        "feature_bar_ts": feature_bar_ts.isoformat() if feature_bar_ts is not None else None,
+        "last_strategy_evaluated_bar_ts": (
+            last_strategy_evaluated_bar_ts.isoformat()
+            if last_strategy_evaluated_bar_ts is not None
+            else None
+        ),
+        "last_processed_bar_end_ts": (
+            last_processed_bar_end_ts.isoformat()
+            if last_processed_bar_end_ts is not None
+            else None
+        ),
+        "processing_lag_seconds": processing_lag_seconds,
+        "market_data_lag_seconds": market_data_lag_seconds,
+        "observed_bar_arrival_age_seconds": observed_bar_arrival_age_seconds,
+        "bar_state": bar_state,
+        "bar_state_reason": bar_state_reason,
+        "bar_close_grace_seconds": grace_seconds,
+        "within_bar_close_grace": within_grace_window,
+        "readiness_snapshot_ts": evaluation_timestamp.isoformat(),
+    }
+    cache[cache_key] = dict(snapshot)
+    return snapshot
 
 
 def _runtime_stale_should_be_softened(
@@ -20876,6 +21525,60 @@ def _runtime_stale_should_be_softened(
     return age_seconds <= allowed_age_seconds
 
 
+def _first_true_lane_blocker(
+    *,
+    loaded_in_runtime: bool,
+    runtime_stale: bool,
+    faulted: bool,
+    latest_fault_or_blocker: str | None,
+    reconciling: bool,
+    halted_by_risk: bool,
+    halt_reason: str | None,
+    entries_enabled: bool,
+    operator_halt: bool,
+    route_ready: bool,
+    session_eligible: bool,
+    waiting_for_completed_bar: bool,
+    bar_received_not_processed_yet: bool,
+    market_data_stale: bool,
+    setup_evaluated: bool,
+    no_setup_present: bool,
+    actionable_now: bool,
+    effective_eligibility_reason: str,
+) -> str | None:
+    if not loaded_in_runtime:
+        return "not_loaded_in_runtime"
+    if runtime_stale:
+        return "stale_runtime"
+    if faulted:
+        return latest_fault_or_blocker or "faulted"
+    if reconciling:
+        return "reconciling"
+    if halted_by_risk:
+        return halt_reason or "risk_halt"
+    if not entries_enabled:
+        return "entries_disabled"
+    if operator_halt:
+        return "operator_halt"
+    if not route_ready:
+        return "route_unready"
+    if not session_eligible:
+        return effective_eligibility_reason or "wrong_session"
+    if market_data_stale:
+        return "market_data_stale"
+    if bar_received_not_processed_yet:
+        return "bar_received_not_processed_yet"
+    if waiting_for_completed_bar:
+        return "waiting_for_bar_close"
+    if actionable_now:
+        return None
+    if setup_evaluated and no_setup_present:
+        return "no_setup_observed"
+    if effective_eligibility_reason:
+        return effective_eligibility_reason
+    return None
+
+
 def _fireability_classification(
     *,
     loaded_in_runtime: bool,
@@ -20884,6 +21587,8 @@ def _fireability_classification(
     route_ready: bool,
     session_eligible: bool,
     waiting_for_completed_bar: bool,
+    bar_received_not_processed_yet: bool,
+    market_data_stale: bool,
     setup_evaluated: bool,
     no_setup_present: bool,
     actionable_now: bool,
@@ -20895,6 +21600,8 @@ def _fireability_classification(
         return "FIREABLE_UNKNOWN"
     if runtime_stale:
         return "FIREABLE_BLOCKED_STALE_RUNTIME"
+    if market_data_stale:
+        return "FIREABLE_BLOCKED_MARKET_DATA"
     if not data_fresh:
         return "FIREABLE_BLOCKED_DATA"
     if not route_ready:
@@ -20905,6 +21612,8 @@ def _fireability_classification(
         return "FIREABLE_BLOCKED_SESSION_LABEL_GAP"
     if not session_eligible or eligibility_reason == "wrong_session":
         return "FIREABLE_OUT_OF_SESSION"
+    if bar_received_not_processed_yet:
+        return "FIREABLE_BLOCKED_PROCESSING_LAG"
     if waiting_for_completed_bar:
         return "FIREABLE_WAITING_FOR_BAR"
     if actionable_now:

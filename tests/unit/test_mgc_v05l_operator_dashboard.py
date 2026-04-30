@@ -11,6 +11,7 @@ from decimal import Decimal
 from enum import Enum
 from http import HTTPStatus
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -154,6 +155,101 @@ def _init_empty_dashboard_db(path: Path) -> None:
     connection = sqlite3.connect(path)
     try:
         connection.executescript(_DASHBOARD_DB_SCHEMA)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _write_lane_bar_authority_db(
+    path: Path,
+    *,
+    symbol: str,
+    execution_timeframe: str = "1m",
+    context_timeframe: str = "3m",
+    observed_completed_bar_end_ts: str | None = None,
+    observed_bar_created_at: str | None = None,
+    processed_bar_end_ts: str | None = None,
+    feature_bar_ts: str | None = None,
+    signal_bar_ts: str | None = None,
+) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(_DASHBOARD_DB_SCHEMA)
+        if observed_completed_bar_end_ts is not None:
+            connection.execute(
+                "insert into bars values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"{symbol}-exec-bar",
+                    "schwab_live_poll",
+                    symbol,
+                    symbol,
+                    execution_timeframe,
+                    observed_completed_bar_end_ts,
+                    observed_completed_bar_end_ts,
+                    observed_completed_bar_end_ts,
+                    "100.0",
+                    "101.0",
+                    "99.0",
+                    "100.5",
+                    100,
+                    1,
+                    0,
+                    0,
+                    1,
+                    1,
+                    observed_bar_created_at or observed_completed_bar_end_ts,
+                ),
+            )
+        if feature_bar_ts is not None:
+            connection.execute(
+                "insert into bars values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"{symbol}-context-bar",
+                    "internal",
+                    symbol,
+                    symbol,
+                    context_timeframe,
+                    feature_bar_ts,
+                    feature_bar_ts,
+                    feature_bar_ts,
+                    "100.0",
+                    "101.0",
+                    "99.0",
+                    "100.5",
+                    100,
+                    1,
+                    0,
+                    0,
+                    1,
+                    1,
+                    feature_bar_ts,
+                ),
+            )
+            connection.execute(
+                "insert into features values (?, ?, ?)",
+                (
+                    f"{symbol}-context-bar",
+                    json.dumps({"feature": "value"}),
+                    feature_bar_ts,
+                ),
+            )
+        if signal_bar_ts is not None:
+            connection.execute(
+                "insert into signals values (?, ?, ?)",
+                (
+                    f"{symbol}-signal-bar",
+                    json.dumps({"signal": "BUY"}),
+                    signal_bar_ts,
+                ),
+            )
+        if processed_bar_end_ts is not None:
+            connection.execute(
+                "insert into processed_bars values (?, ?)",
+                (
+                    f"{symbol}-processed-bar",
+                    processed_bar_end_ts,
+                ),
+            )
         connection.commit()
     finally:
         connection.close()
@@ -2614,6 +2710,14 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert "function renderOperatorInstrumentRollup(payload)" in js
     assert "function renderOperatorActivePositions(payload)" in js
     assert "function renderOperatorContext(payload)" in js
+    assert '"Runtime Lanes Loaded"' in js
+    assert '"Route Ready Lanes"' in js
+    assert '"Session Eligible Now"' in js
+    assert '"Waiting For Decision Bar"' in js
+    assert '"Actionable Now"' in js
+    assert '"True Blocked"' in js
+    assert '"Blocking Faults"' in js
+    assert '"Ready This Bar"' in js
     assert "function contextStatusLevel(status)" in js
     assert "function horizonAvailable(horizon)" in js
     assert "operator-context-value" in js
@@ -4241,8 +4345,122 @@ def test_dashboard_paper_readiness_surfaces_lane_eligibility_rows_and_stale_over
     assert stale_status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["tradability_status"] == "LOADED_NOT_ELIGIBLE"
 
 
+def test_decision_bar_seconds_prefers_execution_timeframe_over_context() -> None:
+    row = {
+        "execution_timeframe": "1m",
+        "context_timeframes": ["3m"],
+        "primary_context_timeframe": "3m",
+    }
+
+    assert operator_dashboard_module._decision_bar_seconds_for_row(row) == 60  # noqa: SLF001
+
+
+def test_dashboard_paper_readiness_preserves_execution_cadence_metadata_from_approved_models(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    db_path = tmp_path / "gc_execution_cadence.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="GC",
+        observed_completed_bar_end_ts="2026-04-30T03:33:00-04:00",
+        processed_bar_end_ts="2026-04-30T03:33:00-04:00",
+        feature_bar_ts="2026-04-30T03:33:00-04:00",
+    )
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "gc_1x_all_lanes__london_early_long",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {
+            "rows": [
+                {
+                    "lane_id": "gc_1x_all_lanes__london_early_long",
+                    "branch": "GC / LONDON_EARLY_LONG / x1",
+                    "enabled": True,
+                    "instrument": "GC",
+                    "execution_timeframe": "1m",
+                    "context_timeframes": ["3m"],
+                    "session_restriction": "LONDON_EARLY",
+                    "runtime_presence": "ACTIVE_RUNTIME",
+                    "strategy_status": "READY",
+                }
+            ]
+        },
+        "position": {"side": "FLAT", "instrument": "GC", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "gc_1x_all_lanes__london_early_long", "risk_state": "OK"}]},
+        "config_in_force": {
+            "lanes": [
+                {
+                    "lane_id": "gc_1x_all_lanes__london_early_long",
+                    "display_name": "GC / LONDON_EARLY_LONG / x1",
+                    "symbol": "GC",
+                    "session_restriction": "LONDON_EARLY",
+                    "database_url": f"sqlite:///{db_path}",
+                }
+            ]
+        },
+        "raw_operator_status": {
+            "current_detected_session": "LONDON_EARLY",
+            "lanes": [
+                {
+                    "lane_id": "gc_1x_all_lanes__london_early_long",
+                    "display_name": "GC / LONDON_EARLY_LONG / x1",
+                    "symbol": "GC",
+                    "current_detected_session": "LONDON_EARLY",
+                    "eligible_now": False,
+                    "eligibility_reason": "waiting_for_bar_close",
+                    "execution_timeframe": None,
+                    "context_timeframes": None,
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 30, 3, 34, 5, tzinfo=operator_dashboard_module.NEW_YORK_TZ),
+    )
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["execution_timeframe"] == "1m"
+    assert row["resolved_execution_timeframe"] == "1m"
+    assert row["context_timeframes"] == ["3m"]
+    assert row["resolved_context_timeframes"] == ["3m"]
+    assert row["primary_context_timeframe"] == "3m"
+    assert row["decision_bar_seconds"] == 60
+    assert row["next_expected_decision_bar_ts"] == "2026-04-30T03:35:00-04:00"
+    assert row["waiting_for_completed_bar"] is True
+    assert row["bar_state"] == "WAITING_FOR_BAR_CLOSE"
+
+
 def test_dashboard_paper_readiness_classifies_waiting_for_completed_bar_without_marking_lane_blocked(tmp_path: Path) -> None:
     service = OperatorDashboardService(tmp_path)
+    db_path = tmp_path / "mes_waiting.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="MES",
+        observed_completed_bar_end_ts="2026-04-29T10:33:00-04:00",
+        processed_bar_end_ts="2026-04-29T10:33:00-04:00",
+        feature_bar_ts="2026-04-29T10:33:00-04:00",
+    )
     (tmp_path / "var").mkdir(parents=True, exist_ok=True)
     (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
         json.dumps(
@@ -4285,6 +4503,9 @@ def test_dashboard_paper_readiness_classifies_waiting_for_completed_bar_without_
                     "latest_completed_bar_end_ts": "2026-04-29T10:33:00-04:00",
                     "entries_enabled": True,
                     "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
                     "context_timeframes": ["3m"],
                 }
             ],
@@ -4294,22 +4515,45 @@ def test_dashboard_paper_readiness_classifies_waiting_for_completed_bar_without_
         "latest_fills": [],
     }
 
-    payload = service._paper_readiness_payload(paper)
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 29, 10, 34, 5, tzinfo=ZoneInfo("America/New_York")),
+    )
     row = payload["lane_eligibility_rows"][0]
 
     assert row["session_eligible"] is True
     assert row["waiting_for_completed_bar"] is True
+    assert row["bar_received_not_processed_yet"] is False
+    assert row["market_data_stale"] is False
+    assert row["bar_state"] == "WAITING_FOR_BAR_CLOSE"
+    assert row["eligibility_reason"] == "waiting_for_bar_close"
+    assert row["expected_completed_bar_end_ts"] == "2026-04-29T10:34:00-04:00"
+    assert row["observed_completed_bar_end_ts"] == "2026-04-29T10:33:00-04:00"
     assert row["blocked_lane"] is False
     assert row["fireability_classification"] == "FIREABLE_WAITING_FOR_BAR"
     assert row["tradability_status"] == "WAITING_FOR_NEXT_DECISION_BAR"
     assert payload["lane_status_summary"]["session_eligible_lanes_count"] == 1
     assert payload["lane_status_summary"]["waiting_for_completed_bar_count"] == 1
+    assert payload["bar_received_not_processed_yet_count"] == 0
+    assert payload["market_data_stale_count"] == 0
     assert payload["lane_status_summary"]["blocked_lanes_count"] == 0
     assert payload["next_expected_decision_bar_ts"] is not None
 
 
-def test_dashboard_paper_readiness_softens_stale_runtime_when_runtime_is_healthy_and_on_cadence(tmp_path: Path) -> None:
+def test_dashboard_paper_readiness_softens_stale_runtime_when_runtime_is_healthy_and_on_cadence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = OperatorDashboardService(tmp_path)
+    monkeypatch.setattr(operator_dashboard_module, "_lane_allowed_session_match_at_timestamp", lambda *_args, **_kwargs: True)
+    db_path = tmp_path / "mnq_waiting.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="MNQ",
+        observed_completed_bar_end_ts="2026-04-29T10:33:00-04:00",
+        processed_bar_end_ts="2026-04-29T10:33:00-04:00",
+        feature_bar_ts="2026-04-29T10:33:00-04:00",
+    )
     (tmp_path / "var").mkdir(parents=True, exist_ok=True)
     (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
         json.dumps(
@@ -4352,6 +4596,9 @@ def test_dashboard_paper_readiness_softens_stale_runtime_when_runtime_is_healthy
                     "latest_completed_bar_end_ts": "2026-04-29T10:33:00-04:00",
                     "entries_enabled": True,
                     "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
                     "context_timeframes": ["3m"],
                 }
             ],
@@ -4361,15 +4608,560 @@ def test_dashboard_paper_readiness_softens_stale_runtime_when_runtime_is_healthy
         "latest_fills": [],
     }
 
-    payload = service._paper_readiness_payload(paper)
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 29, 10, 34, 5, tzinfo=ZoneInfo("America/New_York")),
+    )
     row = payload["lane_eligibility_rows"][0]
 
     assert row["runtime_stale_observed"] is True
     assert row["runtime_stale_suppressed"] is True
     assert row["runtime_stale_effective"] is False
-    assert row["eligibility_reason"] == "no_new_completed_bar"
+    assert row["eligibility_reason"] == "waiting_for_bar_close"
+    assert row["bar_state"] == "WAITING_FOR_BAR_CLOSE"
     assert row["fireability_classification"] == "FIREABLE_WAITING_FOR_BAR"
     assert payload["lane_status_summary"]["stale_runtime_blocked_count"] == 0
+
+
+def test_dashboard_paper_readiness_classifies_bar_received_not_processed_yet(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    db_path = tmp_path / "gc_processing_lag.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="GC",
+        observed_completed_bar_end_ts="2026-04-29T10:34:00-04:00",
+        processed_bar_end_ts="2026-04-29T10:33:00-04:00",
+        feature_bar_ts="2026-04-29T10:34:00-04:00",
+    )
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "gc_processing_lag",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "GC", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "gc_processing_lag", "risk_state": "OK"}]},
+        "raw_operator_status": {
+            "current_detected_session": "US_EARLY",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "gc_processing_lag",
+                    "display_name": "GC / processingLag",
+                    "symbol": "GC",
+                    "session_restriction": "US_EARLY",
+                    "allowed_sessions": ["US_EARLY"],
+                    "current_detected_session": "US_EARLY",
+                    "allowed_session_match": True,
+                    "eligible_now": False,
+                    "eligibility_reason": "no_new_completed_bar",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 29, 10, 34, 20, tzinfo=ZoneInfo("America/New_York")),
+    )
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["bar_state"] == "BAR_RECEIVED_NOT_PROCESSED_YET"
+    assert row["eligibility_reason"] == "bar_received_not_processed_yet"
+    assert row["waiting_for_completed_bar"] is False
+    assert row["bar_received_not_processed_yet"] is True
+    assert row["market_data_stale"] is False
+    assert row["processing_lag_seconds"] == 60.0
+    assert row["fireability_classification"] == "FIREABLE_BLOCKED_PROCESSING_LAG"
+    assert row["tradability_status"] == "BAR_RECEIVED_NOT_PROCESSED_YET"
+    assert payload["bar_received_not_processed_yet_count"] == 1
+
+
+def test_dashboard_paper_readiness_classifies_market_data_stale_beyond_grace(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    db_path = tmp_path / "gc_market_data_stale.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="GC",
+        observed_completed_bar_end_ts="2026-04-29T10:32:00-04:00",
+        processed_bar_end_ts="2026-04-29T10:32:00-04:00",
+        feature_bar_ts="2026-04-29T10:32:00-04:00",
+    )
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "gc_market_data_stale",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "GC", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "gc_market_data_stale", "risk_state": "OK"}]},
+        "raw_operator_status": {
+            "current_detected_session": "US_EARLY",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "gc_market_data_stale",
+                    "display_name": "GC / marketDataStale",
+                    "symbol": "GC",
+                    "session_restriction": "US_EARLY",
+                    "allowed_sessions": ["US_EARLY"],
+                    "current_detected_session": "US_EARLY",
+                    "allowed_session_match": True,
+                    "eligible_now": False,
+                    "eligibility_reason": "no_new_completed_bar",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 29, 10, 34, 20, tzinfo=ZoneInfo("America/New_York")),
+    )
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["bar_state"] == "MARKET_DATA_STALE"
+    assert row["eligibility_reason"] == "market_data_stale"
+    assert row["waiting_for_completed_bar"] is False
+    assert row["bar_received_not_processed_yet"] is False
+    assert row["market_data_stale"] is True
+    assert row["market_data_lag_seconds"] == 120.0
+    assert row["fireability_classification"] == "FIREABLE_BLOCKED_MARKET_DATA"
+    assert row["tradability_status"] == "MARKET_DATA_STALE"
+    assert payload["market_data_stale_count"] == 1
+
+
+def test_dashboard_paper_readiness_treats_recently_published_one_bar_behind_feed_as_waiting(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    db_path = tmp_path / "gc_recent_publication.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="GC",
+        observed_completed_bar_end_ts="2026-04-29T10:52:00-04:00",
+        observed_bar_created_at="2026-04-29T10:52:59-04:00",
+        processed_bar_end_ts="2026-04-29T10:52:00-04:00",
+        feature_bar_ts="2026-04-29T10:52:00-04:00",
+    )
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "gc_recent_publication",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "GC", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "gc_recent_publication", "risk_state": "OK"}]},
+        "raw_operator_status": {
+            "current_detected_session": "US_EARLY",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "gc_recent_publication",
+                    "display_name": "GC / recentPublication",
+                    "symbol": "GC",
+                    "session_restriction": "US_EARLY",
+                    "allowed_sessions": ["US_EARLY"],
+                    "current_detected_session": "US_EARLY",
+                    "allowed_session_match": True,
+                    "eligible_now": False,
+                    "eligibility_reason": "no_new_completed_bar",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 29, 10, 53, 51, tzinfo=ZoneInfo("America/New_York")),
+    )
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["bar_state"] == "WAITING_FOR_BAR_CLOSE"
+    assert row["eligibility_reason"] == "waiting_for_bar_close"
+    assert row["market_data_stale"] is False
+    assert row["waiting_for_completed_bar"] is True
+    assert row["observed_completed_bar_recorded_at"] == "2026-04-29T10:52:59-04:00"
+
+
+def test_dashboard_paper_readiness_classifies_ready_no_setup_when_latest_observed_bar_is_processed(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    db_path = tmp_path / "gc_ready_no_setup.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="GC",
+        observed_completed_bar_end_ts="2026-04-29T10:34:00-04:00",
+        processed_bar_end_ts="2026-04-29T10:34:00-04:00",
+        feature_bar_ts="2026-04-29T10:34:00-04:00",
+    )
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "gc_ready_no_setup",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "GC", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "gc_ready_no_setup", "risk_state": "OK"}]},
+        "signal_intent_fill_audit": {
+            "rows": [{"lane_id": "gc_ready_no_setup", "audit_verdict": "NO_SETUP_OBSERVED"}]
+        },
+        "raw_operator_status": {
+            "current_detected_session": "US_EARLY",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "gc_ready_no_setup",
+                    "display_name": "GC / readyNoSetup",
+                    "symbol": "GC",
+                    "session_restriction": "US_EARLY",
+                    "allowed_sessions": ["US_EARLY"],
+                    "current_detected_session": "US_EARLY",
+                    "allowed_session_match": True,
+                    "eligible_now": True,
+                    "eligibility_reason": "no_new_completed_bar",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 29, 10, 34, 20, tzinfo=ZoneInfo("America/New_York")),
+    )
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["bar_state"] == "READY_NO_SETUP"
+    assert row["eligibility_reason"] == ""
+    assert row["no_setup_present"] is True
+    assert row["waiting_for_completed_bar"] is False
+    assert row["bar_received_not_processed_yet"] is False
+    assert row["market_data_stale"] is False
+    assert row["fireability_classification"] == "FIREABLE_SESSION_ELIGIBLE_NO_SETUP"
+    assert row["tradability_status"] == "SESSION_ELIGIBLE_NO_SETUP"
+    assert row["latest_fault_or_blocker"] == "no_setup_observed"
+
+
+def test_dashboard_paper_readiness_classifies_actionable_when_latest_observed_bar_is_processed_with_signal(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    db_path = tmp_path / "gc_actionable.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="GC",
+        observed_completed_bar_end_ts="2026-04-29T10:34:00-04:00",
+        processed_bar_end_ts="2026-04-29T10:34:00-04:00",
+        feature_bar_ts="2026-04-29T10:34:00-04:00",
+        signal_bar_ts="2026-04-29T10:34:00-04:00",
+    )
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "gc_actionable",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "BUY",
+                        "intent_action": "BUY",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "GC", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "gc_actionable", "risk_state": "OK"}]},
+        "signal_intent_fill_audit": {
+            "rows": [{"lane_id": "gc_actionable", "audit_verdict": "ENTRY_READY"}]
+        },
+        "raw_operator_status": {
+            "current_detected_session": "US_EARLY",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "gc_actionable",
+                    "display_name": "GC / actionable",
+                    "symbol": "GC",
+                    "session_restriction": "US_EARLY",
+                    "allowed_sessions": ["US_EARLY"],
+                    "current_detected_session": "US_EARLY",
+                    "allowed_session_match": True,
+                    "eligible_now": True,
+                    "eligibility_reason": "no_new_completed_bar",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 29, 10, 34, 20, tzinfo=ZoneInfo("America/New_York")),
+    )
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["bar_state"] == "ACTIONABLE"
+    assert row["eligibility_reason"] == ""
+    assert row["actionable_now"] is True
+    assert row["waiting_for_completed_bar"] is False
+    assert row["bar_received_not_processed_yet"] is False
+    assert row["market_data_stale"] is False
+    assert row["fireability_classification"] == "FIREABLE_ACTIONABLE"
+    assert row["tradability_status"] == "ACTIONABLE_NOW"
+
+
+def test_dashboard_paper_readiness_ignores_future_bars_when_replaying_snapshot_time(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    db_path = tmp_path / "gc_replay_bound.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="GC",
+        observed_completed_bar_end_ts="2026-04-29T10:40:00-04:00",
+        processed_bar_end_ts="2026-04-29T10:40:00-04:00",
+        feature_bar_ts="2026-04-29T10:40:00-04:00",
+        signal_bar_ts="2026-04-29T10:40:00-04:00",
+    )
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "insert into bars values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "GC-exec-bar-earlier",
+                "schwab_live_poll",
+                "GC",
+                "GC",
+                "1m",
+                "2026-04-29T10:34:00-04:00",
+                "2026-04-29T10:34:00-04:00",
+                "2026-04-29T10:34:00-04:00",
+                "100.0",
+                "101.0",
+                "99.0",
+                "100.5",
+                100,
+                1,
+                0,
+                0,
+                1,
+                1,
+                "2026-04-29T10:34:00-04:00",
+            ),
+        )
+        connection.execute(
+            "insert into processed_bars values (?, ?)",
+            ("GC-processed-bar-earlier", "2026-04-29T10:34:00-04:00"),
+        )
+        connection.execute(
+            "insert into bars values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "GC-context-bar-earlier",
+                "internal",
+                "GC",
+                "GC",
+                "3m",
+                "2026-04-29T10:34:00-04:00",
+                "2026-04-29T10:34:00-04:00",
+                "2026-04-29T10:34:00-04:00",
+                "100.0",
+                "101.0",
+                "99.0",
+                "100.5",
+                100,
+                1,
+                0,
+                0,
+                1,
+                1,
+                "2026-04-29T10:34:00-04:00",
+            ),
+        )
+        connection.execute(
+            "insert into features values (?, ?, ?)",
+            ("GC-context-bar-earlier", json.dumps({"feature": "value"}), "2026-04-29T10:34:00-04:00"),
+        )
+        connection.execute(
+            "insert into signals values (?, ?, ?)",
+            ("GC-signal-bar-earlier", json.dumps({"signal": "BUY"}), "2026-04-29T10:34:00-04:00"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "gc_replay_bound",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "BUY",
+                        "intent_action": "BUY",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "GC", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "gc_replay_bound", "risk_state": "OK"}]},
+        "signal_intent_fill_audit": {
+            "rows": [{"lane_id": "gc_replay_bound", "audit_verdict": "ENTRY_READY"}]
+        },
+        "raw_operator_status": {
+            "current_detected_session": "US_EARLY",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "gc_replay_bound",
+                    "display_name": "GC / replayBound",
+                    "symbol": "GC",
+                    "session_restriction": "US_EARLY",
+                    "allowed_sessions": ["US_EARLY"],
+                    "current_detected_session": "US_EARLY",
+                    "allowed_session_match": True,
+                    "eligible_now": True,
+                    "eligibility_reason": "no_new_completed_bar",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 29, 10, 34, 20, tzinfo=ZoneInfo("America/New_York")),
+    )
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["observed_completed_bar_end_ts"] == "2026-04-29T10:34:00-04:00"
+    assert row["last_processed_bar_end_ts"] == "2026-04-29T10:34:00-04:00"
+    assert row["last_strategy_evaluated_bar_ts"] == "2026-04-29T10:34:00-04:00"
+    assert row["bar_state"] == "ACTIONABLE"
 
 
 def test_dashboard_paper_readiness_keeps_unclassified_phase_gap_from_blocking_broad_session_match(
@@ -4378,6 +5170,15 @@ def test_dashboard_paper_readiness_keeps_unclassified_phase_gap_from_blocking_br
 ) -> None:
     service = OperatorDashboardService(tmp_path)
     monkeypatch.setattr(operator_dashboard_module, "_broad_trading_session_for_timestamp", lambda _: "US_EARLY")
+    monkeypatch.setattr(operator_dashboard_module, "_lane_allowed_session_match_at_timestamp", lambda *_args, **_kwargs: True)
+    db_path = tmp_path / "es_phase_gap.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="ES",
+        observed_completed_bar_end_ts="2026-04-29T10:33:00-04:00",
+        processed_bar_end_ts="2026-04-29T10:33:00-04:00",
+        feature_bar_ts="2026-04-29T10:33:00-04:00",
+    )
     (tmp_path / "var").mkdir(parents=True, exist_ok=True)
     (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
         json.dumps(
@@ -4420,6 +5221,167 @@ def test_dashboard_paper_readiness_keeps_unclassified_phase_gap_from_blocking_br
                     "latest_completed_bar_end_ts": "2026-04-29T10:33:00-04:00",
                     "entries_enabled": True,
                     "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
+                    "context_timeframes": ["3m"],
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 29, 10, 34, 5, tzinfo=ZoneInfo("America/New_York")),
+    )
+    row = payload["lane_eligibility_rows"][0]
+
+    assert payload["current_broad_trading_session"] == "US_EARLY"
+    assert row["detected_phase_label"] == "UNCLASSIFIED"
+    assert row["broad_trading_session"] == "US_EARLY"
+    assert row["session_label_gap_active"] is True
+    assert row["session_label_gap_blocking"] is False
+    assert row["session_eligible"] is True
+    assert row["fireability_classification"] == "FIREABLE_WAITING_FOR_BAR"
+
+
+def test_dashboard_paper_readiness_does_not_mark_out_of_session_dormant_lane_as_market_data_stale(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    db_path = tmp_path / "es_out_of_session.sqlite3"
+    _write_lane_bar_authority_db(
+        db_path,
+        symbol="ES",
+        observed_completed_bar_end_ts="2026-04-29T10:59:00-04:00",
+        processed_bar_end_ts="2026-04-29T10:59:00-04:00",
+        feature_bar_ts="2026-04-29T10:59:00-04:00",
+    )
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "es_out_of_session",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "ES", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "es_out_of_session", "risk_state": "OK"}]},
+        "raw_operator_status": {
+            "current_detected_session": "LONDON_OPEN",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "es_out_of_session",
+                    "display_name": "ES / outOfSession",
+                    "symbol": "ES",
+                    "session_restriction": "US_EARLY",
+                    "allowed_sessions": ["US_EARLY"],
+                    "current_detected_session": "LONDON_OPEN",
+                    "allowed_session_match": False,
+                    "eligible_now": False,
+                    "eligibility_reason": "wrong_session",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "database_url": f"sqlite:///{db_path}",
+                    "execution_timeframe": "1m",
+                    "primary_context_timeframe": "3m",
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(
+        paper,
+        evaluation_timestamp=datetime(2026, 4, 30, 4, 50, 20, tzinfo=ZoneInfo("America/New_York")),
+    )
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["session_eligible"] is False
+    assert row["eligibility_reason"] == "wrong_session"
+    assert row["market_data_stale"] is False
+    assert row["bar_state"] == "OUT_OF_SESSION_DORMANT"
+    assert row["latest_fault_or_blocker"] == "wrong_session"
+    assert payload["market_data_stale_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("broad_session", "session_restriction"),
+    [
+        ("US_MIDDAY", "US_MIDDAY"),
+        ("US_LATE", "US_LATE"),
+    ],
+)
+def test_dashboard_paper_readiness_recovers_midday_and_late_from_stale_wrong_session_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    broad_session: str,
+    session_restriction: str,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    monkeypatch.setattr(operator_dashboard_module, "_broad_trading_session_for_timestamp", lambda _: broad_session)
+    monkeypatch.setattr(operator_dashboard_module, "_lane_allowed_session_match_at_timestamp", lambda *_args, **_kwargs: True)
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": f"lane_{session_restriction.lower()}",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "ES", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": f"lane_{session_restriction.lower()}", "risk_state": "OK"}]},
+        "raw_operator_status": {
+            "current_detected_session": "UNCLASSIFIED",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": f"lane_{session_restriction.lower()}",
+                    "display_name": f"ES / {session_restriction}",
+                    "symbol": "ES",
+                    "session_restriction": session_restriction,
+                    "allowed_sessions": ["US"],
+                    "current_detected_session": "UNCLASSIFIED",
+                    "allowed_session_match": False,
+                    "eligible_now": False,
+                    "eligibility_reason": "wrong_session",
+                    "latest_completed_bar_end_ts": "2026-04-29T11:03:00-04:00",
+                    "entries_enabled": True,
+                    "operator_halt": False,
                     "context_timeframes": ["3m"],
                 }
             ],
@@ -4432,13 +5394,365 @@ def test_dashboard_paper_readiness_keeps_unclassified_phase_gap_from_blocking_br
     payload = service._paper_readiness_payload(paper)
     row = payload["lane_eligibility_rows"][0]
 
-    assert payload["current_broad_trading_session"] == "US_EARLY"
-    assert row["detected_phase_label"] == "UNCLASSIFIED"
-    assert row["broad_trading_session"] == "US_EARLY"
-    assert row["session_label_gap_active"] is True
+    assert row["broad_trading_session"] == broad_session
+    assert row["timestamp_session_match"] is True
+    assert row["runtime_allowed_session_match"] is False
+    assert row["allowed_session_match"] is True
+    assert row["runtime_eligibility_reason"] == "wrong_session"
+    assert row["eligibility_reason"] == ""
+    assert row["broad_session_matches_lane"] is True
     assert row["session_label_gap_blocking"] is False
     assert row["session_eligible"] is True
-    assert row["fireability_classification"] == "FIREABLE_WAITING_FOR_BAR"
+    assert row["fireability_classification"] != "FIREABLE_OUT_OF_SESSION"
+    assert "outside the lane's allowed session" not in str(row["tradability_reason"])
+
+
+def test_dashboard_paper_readiness_keeps_out_of_window_lanes_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    monkeypatch.setattr(operator_dashboard_module, "_broad_trading_session_for_timestamp", lambda _: "UNCLASSIFIED")
+    monkeypatch.setattr(operator_dashboard_module, "_lane_allowed_session_match_at_timestamp", lambda *_args, **_kwargs: False)
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "midday_lane",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "ES", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "midday_lane", "risk_state": "OK"}]},
+        "raw_operator_status": {
+            "current_detected_session": "UNCLASSIFIED",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "midday_lane",
+                    "display_name": "ES / US_MIDDAY",
+                    "symbol": "ES",
+                    "session_restriction": "US_MIDDAY",
+                    "allowed_sessions": ["US"],
+                    "current_detected_session": "UNCLASSIFIED",
+                    "allowed_session_match": False,
+                    "eligible_now": False,
+                    "eligibility_reason": "wrong_session",
+                    "latest_completed_bar_end_ts": "2026-04-29T14:03:00-04:00",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "context_timeframes": ["3m"],
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(paper)
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["timestamp_session_match"] is False
+    assert row["allowed_session_match"] is False
+    assert row["session_eligible"] is False
+    assert row["eligibility_reason"] == "wrong_session"
+    assert row["fireability_classification"] == "FIREABLE_OUT_OF_SESSION"
+
+
+def test_dashboard_paper_readiness_keeps_entries_disabled_lanes_blocked_even_when_session_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    monkeypatch.setattr(operator_dashboard_module, "_broad_trading_session_for_timestamp", lambda _: "US_MIDDAY")
+    monkeypatch.setattr(operator_dashboard_module, "_lane_allowed_session_match_at_timestamp", lambda *_args, **_kwargs: True)
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "disabled_midday_lane",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "ES", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "disabled_midday_lane", "risk_state": "OK"}]},
+        "raw_operator_status": {
+            "current_detected_session": "US_MIDDAY",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "disabled_midday_lane",
+                    "display_name": "ES / disabledMidday",
+                    "symbol": "ES",
+                    "session_restriction": "US_MIDDAY",
+                    "allowed_sessions": ["US"],
+                    "current_detected_session": "US_MIDDAY",
+                    "allowed_session_match": False,
+                    "eligible_now": False,
+                    "eligibility_reason": "entries_disabled",
+                    "entries_enabled": False,
+                    "operator_halt": False,
+                    "latest_completed_bar_end_ts": "2026-04-29T11:03:00-04:00",
+                    "context_timeframes": ["3m"],
+                }
+            ],
+        },
+        "status": {"entries_enabled": False, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(paper)
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["timestamp_session_match"] is True
+    assert row["allowed_session_match"] is True
+    assert row["governance_allowed"] is False
+    assert row["session_eligible"] is False
+    assert row["eligibility_reason"] == "entries_disabled"
+    assert row["tradability_reason"] == "Loaded in runtime, but entries are currently disabled."
+
+
+def test_dashboard_paper_readiness_keeps_route_unready_lanes_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    monkeypatch.setattr(operator_dashboard_module, "_broad_trading_session_for_timestamp", lambda _: "US_MIDDAY")
+    monkeypatch.setattr(operator_dashboard_module, "_lane_allowed_session_match_at_timestamp", lambda *_args, **_kwargs: True)
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps({"active_rows": []}),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "ES", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "unsupported_midday_lane", "risk_state": "OK"}]},
+        "raw_operator_status": {
+            "current_detected_session": "US_MIDDAY",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "unsupported_midday_lane",
+                    "display_name": "ES / unsupportedMidday",
+                    "symbol": "ES",
+                    "session_restriction": "US_MIDDAY",
+                    "allowed_sessions": ["US"],
+                    "current_detected_session": "US_MIDDAY",
+                    "allowed_session_match": False,
+                    "eligible_now": False,
+                    "eligibility_reason": "wrong_session",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "latest_completed_bar_end_ts": "2026-04-29T11:03:00-04:00",
+                    "context_timeframes": ["3m"],
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(paper)
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["timestamp_session_match"] is True
+    assert row["allowed_session_match"] is True
+    assert row["route_ready"] is False
+    assert row["session_eligible"] is False
+    assert row["fireability_classification"] == "FIREABLE_BLOCKED_ROUTE"
+
+
+@pytest.mark.parametrize(
+    ("evaluation_timestamp", "expected_broad_session"),
+    [
+        (datetime(2026, 4, 29, 11, 30, tzinfo=ZoneInfo("America/New_York")), "US_MIDDAY"),
+        (datetime(2026, 4, 29, 14, 0, tzinfo=ZoneInfo("America/New_York")), "US_LATE"),
+    ],
+)
+def test_dashboard_paper_readiness_uses_evaluation_timestamp_to_recover_generic_us_scope_from_stale_wrong_session(
+    tmp_path: Path,
+    evaluation_timestamp: datetime,
+    expected_broad_session: str,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "generic_us_lane",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "ES", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "generic_us_lane", "risk_state": "OK"}]},
+        "raw_operator_status": {
+            "current_detected_session": "UNCLASSIFIED",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "generic_us_lane",
+                    "display_name": "ES / genericUS",
+                    "symbol": "ES",
+                    "session_restriction": expected_broad_session,
+                    "allowed_sessions": ["US"],
+                    "current_detected_session": "UNCLASSIFIED",
+                    "allowed_session_match": False,
+                    "eligible_now": False,
+                    "eligibility_reason": "wrong_session",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "latest_completed_bar_end_ts": evaluation_timestamp.isoformat(),
+                    "context_timeframes": ["3m"],
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(paper, evaluation_timestamp=evaluation_timestamp)
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["broad_trading_session"] == expected_broad_session
+    assert row["allowed_sessions"] == ["US"]
+    assert row["session_restriction"] == expected_broad_session
+    assert row["timestamp_session_match"] is True
+    assert row["runtime_eligibility_reason"] == "wrong_session"
+    assert row["effective_readiness_eligibility_reason"] in {"", None}
+    assert row["session_eligible"] is True
+    assert row["latest_fault_or_blocker"] != "wrong_session"
+    assert row["first_true_blocker"] != "wrong_session"
+    assert payload["lane_status_summary"]["session_eligible_lanes_count"] == 1
+
+
+def test_dashboard_paper_readiness_does_not_surface_wrong_session_as_latest_blocker_when_in_session_no_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    monkeypatch.setattr(operator_dashboard_module, "_broad_trading_session_for_timestamp", lambda _: "ASIA_EARLY")
+    monkeypatch.setattr(operator_dashboard_module, "_lane_allowed_session_match_at_timestamp", lambda *_args, **_kwargs: True)
+    (tmp_path / "var").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "var" / "strategy_probation_dashboard.json").write_text(
+        json.dumps(
+            {
+                "active_rows": [
+                    {
+                        "strategy_id": "asia_lane",
+                        "current_routing_mode": "IBKR_ROUTED",
+                        "ibkr_bridge_submit_capable": True,
+                        "current_signal_state": "NO_ACTION",
+                        "intent_action": "NO_ACTION",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    paper = {
+        "running": True,
+        "approved_models": {"rows": []},
+        "position": {"side": "FLAT", "instrument": "MGC", "quantity": 0},
+        "operator_state": {},
+        "desk_risk": {},
+        "lane_risk": {"lanes": [{"lane_id": "asia_lane", "risk_state": "OK"}]},
+        "signal_intent_fill_audit": {
+            "rows": [
+                {
+                    "lane_id": "asia_lane",
+                    "audit_verdict": "NO_SETUP_OBSERVED",
+                }
+            ]
+        },
+        "raw_operator_status": {
+            "current_detected_session": "UNCLASSIFIED",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "health": {"health_status": "HEALTHY"},
+            "lanes": [
+                {
+                    "lane_id": "asia_lane",
+                    "display_name": "MGC / asia",
+                    "symbol": "MGC",
+                    "session_restriction": "ASIA_EARLY",
+                    "allowed_sessions": ["ASIA_EARLY"],
+                    "current_detected_session": "UNCLASSIFIED",
+                    "allowed_session_match": False,
+                    "eligible_now": False,
+                    "eligibility_reason": "wrong_session",
+                    "latest_completed_bar_end_ts": "2026-04-29T19:12:00-04:00",
+                    "entries_enabled": True,
+                    "operator_halt": False,
+                    "context_timeframes": ["3m"],
+                }
+            ],
+        },
+        "status": {"entries_enabled": True, "operator_halt": False, "stale": False},
+        "events": {},
+        "latest_fills": [],
+    }
+
+    payload = service._paper_readiness_payload(paper)
+    row = payload["lane_eligibility_rows"][0]
+
+    assert row["session_eligible"] is True
+    assert row["effective_readiness_eligibility_reason"] in {"", None}
+    assert row["latest_fault_or_blocker"] == "no_setup_observed"
+    assert row["first_true_blocker"] == "no_setup_observed"
+    assert row["latest_fault_or_blocker"] != "wrong_session"
 
 
 def test_dashboard_paper_readiness_treats_harmless_same_underlying_coexistence_as_informational_only(tmp_path: Path) -> None:
@@ -7792,6 +9106,107 @@ def test_dashboard_snapshot_builds_signal_intent_fill_audit_verdicts(tmp_path: P
     audit_path = repo_root / "outputs" / "operator_dashboard" / "paper_signal_intent_fill_audit_snapshot.json"
     assert audit_path.exists()
     assert service.operator_artifact_file("paper-signal-intent-fill-audit")[0] == audit_path
+
+
+def test_signal_intent_audit_uses_signal_time_session_and_historical_rejection(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    paper_artifacts = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session"
+    paper_artifacts.mkdir(parents=True)
+
+    lane_db = repo_root / "paper__midday.sqlite3"
+    _init_empty_dashboard_db(lane_db)
+    _append_dashboard_bar(
+        lane_db,
+        bar_id="midday-bar-1",
+        symbol="NQ",
+        start_ts="2026-04-29T11:00:00-04:00",
+        end_ts="2026-04-29T11:05:00-04:00",
+    )
+    _append_dashboard_signal(
+        lane_db,
+        bar_id="midday-bar-1",
+        created_at="2026-04-29T11:05:00-04:00",
+        payload={
+            "long_entry_raw": True,
+            "short_entry_raw": False,
+            "recent_long_setup": True,
+            "recent_short_setup": False,
+            "long_entry": True,
+            "short_entry": False,
+            "long_entry_source": "nyEarlyBreakout",
+            "short_entry_source": None,
+        },
+    )
+    (paper_artifacts / "alerts.jsonl").write_text(
+        json.dumps(
+            {
+                "category": "order_rejection",
+                "lane_id": "midday_lane",
+                "message": "Order intent for NQ was rejected before broker submission.",
+                "logged_at": "2026-04-29T11:05:01-04:00",
+                "occurred_at": "2026-04-29T11:05:01-04:00",
+                "detail": {
+                    "lane_id": "midday_lane",
+                    "bar_end_ts": "2026-04-29T11:05:00-04:00",
+                    "broker_stage_message": "BLOCKED_NOT_SENT_TO_BROKER: Paper strategy bridge rejected a non-manual caller path.",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    service = OperatorDashboardService(repo_root)
+    payload = service._paper_signal_intent_fill_audit_payload(
+        paper={
+            "status": {"session_date": "2026-04-29"},
+            "raw_operator_status": {
+                "current_detected_session": "UNCLASSIFIED",
+                "lanes": [
+                    {
+                        "lane_id": "midday_lane",
+                        "display_name": "NQ Midday",
+                        "symbol": "NQ",
+                        "approved_long_entry_sources": ["nyEarlyBreakout"],
+                        "position_side": "FLAT",
+                        "strategy_status": "READY",
+                        "entries_enabled": True,
+                        "operator_halt": False,
+                        "warmup_complete": True,
+                        "risk_state": "OK",
+                        "eligibility_reason": "wrong_session",
+                        "current_detected_session": "UNCLASSIFIED",
+                        "session_restriction": "US_MIDDAY",
+                        "allowed_sessions": ["US"],
+                        "database_url": f"sqlite:///{lane_db}",
+                    }
+                ],
+            },
+            "config_in_force": {
+                "lanes": [
+                    {
+                        "lane_id": "midday_lane",
+                        "display_name": "NQ Midday",
+                        "symbol": "NQ",
+                        "session_restriction": "US_MIDDAY",
+                        "allowed_sessions": ["US"],
+                        "long_sources": ["nyEarlyBreakout"],
+                    }
+                ]
+            },
+            "strategy_performance": {"rows": [], "trade_log": []},
+        },
+        session_date="2026-04-29",
+        root_db_path=None,
+    )
+
+    row = payload["rows"][0]
+    assert row["audit_verdict"] == "SETUP_GATED"
+    assert "supervised paper route was rejected before broker submission" in row["audit_reason"]
+    assert "wrong_session" not in row["audit_reason"]
+    assert row["signal_time_session_label"] == "US_MIDDAY"
+    assert row["signal_time_allowed_session_match"] is True
+    assert "non-manual caller path" in str(row["historical_order_rejection_reason"])
 
 
 def test_dashboard_snapshot_builds_recent_paper_history(tmp_path: Path) -> None:
