@@ -67,6 +67,16 @@ export interface DesktopCommandResult {
   payload?: JsonRecord;
 }
 
+export interface DesktopPaperTradeLogVisibleRange {
+  startDate: string;
+  endDate: string;
+}
+
+export interface DesktopStateRequestOptions {
+  includeHeavyPayload?: boolean;
+  paperTradeLogVisibleRange?: DesktopPaperTradeLogVisibleRange | null;
+}
+
 export interface DesktopState {
   connection: "live" | "snapshot" | "unavailable";
   dashboard: JsonRecord | null;
@@ -278,6 +288,8 @@ const EXPLICIT_DASHBOARD_URLS = String(process.env.MGC_OPERATOR_DASHBOARD_URLS |
 const DESKTOP_STATE_FIXTURE_PATH = String(process.env.MGC_DESKTOP_STATE_FIXTURE_PATH || "").trim();
 const ATTACHED_SNAPSHOT_BRIDGE_MAX_AGE_MS = 60_000;
 const PACKAGED_SYNCHRONIZED_SNAPSHOT_MAX_AGE_MS = 10 * 60_000;
+const PACKAGED_OPERATOR_SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
+const SNAPSHOT_AUTHORITY_SKEW_MS = 5_000;
 const SNAPSHOT_FILES = {
   dashboardApi: path.join(OUTPUT_ROOT, "dashboard_api_snapshot.json"),
   historicalPlayback: path.join(OUTPUT_ROOT, "historical_playback_snapshot.json"),
@@ -457,6 +469,51 @@ function parseIsoDate(value: unknown): Date | null {
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function maxDate(...values: Array<Date | null>): Date | null {
+  const timestamps = values
+    .map((value) => value?.getTime() ?? null)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (!timestamps.length) {
+    return null;
+  }
+  return new Date(Math.max(...timestamps));
+}
+
+function snapshotAuthorityMetadata(snapshot: JsonRecord | null | undefined): SnapshotAuthorityMetadata {
+  const dashboard = asJsonRecord(snapshot);
+  const paper = asJsonRecord(dashboard.paper);
+  const readiness = asJsonRecord(paper.readiness);
+  const operatorSurface = asJsonRecord(dashboard.operator_surface);
+  const dashboardMeta = asJsonRecord(dashboard.dashboard_meta);
+  const generatedAt = parseIsoDate(dashboard.generated_at);
+  const readinessGeneratedAt = parseIsoDate(readiness.generated_at);
+  const operatorSurfaceGeneratedAt = parseIsoDate(operatorSurface.generated_at);
+  const freshnessAt = maxDate(readinessGeneratedAt, operatorSurfaceGeneratedAt, generatedAt);
+  const broadSession = typeof readiness.current_broad_trading_session === "string" && readiness.current_broad_trading_session.trim()
+    ? readiness.current_broad_trading_session.trim()
+    : null;
+  const hasPaperReadiness = Boolean(
+    readinessGeneratedAt
+    && broadSession
+    && Array.isArray(readiness.lane_eligibility_rows),
+  );
+  const global = asJsonRecord(dashboard.global);
+  const modeLabel = String(global.mode_label ?? global.mode ?? "").trim().toUpperCase();
+  const paperRunning = paper.running === true || readiness.paper_runtime_ready === true || readiness.runtime_running === true;
+  return {
+    generatedAt,
+    readinessGeneratedAt,
+    operatorSurfaceGeneratedAt,
+    freshnessAt,
+    broadSession,
+    hasPaperReadiness,
+    modeCompatible: paperRunning || modeLabel === "PAPER",
+    sourceTag: typeof dashboardMeta.source === "string" && dashboardMeta.source.trim()
+      ? dashboardMeta.source.trim()
+      : null,
+  };
 }
 
 function normalizeLocalOperatorIdentity(value: unknown): string | null {
@@ -1484,18 +1541,79 @@ function compactPaperAlertsState(alertsState: JsonRecord): JsonRecord {
   };
 }
 
-function compactPaperStrategyPerformance(strategyPerformance: JsonRecord): JsonRecord {
+function normalizePaperTradeLogVisibleRange(
+  requestedRange: DesktopPaperTradeLogVisibleRange | null | undefined,
+): DesktopPaperTradeLogVisibleRange | null {
+  if (!requestedRange) {
+    return null;
+  }
+  const startDate = String(requestedRange.startDate ?? "").slice(0, 10);
+  const endDate = String(requestedRange.endDate ?? "").slice(0, 10);
+  const validDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+  if (!validDatePattern.test(startDate) || !validDatePattern.test(endDate)) {
+    return null;
+  }
+  return startDate <= endDate
+    ? { startDate, endDate }
+    : { startDate: endDate, endDate: startDate };
+}
+
+function paperTradeLogRowTimestamp(row: JsonRecord): string {
+  return String(row.exit_timestamp ?? row.fill_timestamp ?? row.timestamp ?? row.entry_timestamp ?? row.session_date ?? "");
+}
+
+function paperTradeLogRowDateKey(row: JsonRecord): string {
+  return paperTradeLogRowTimestamp(row).slice(0, 10);
+}
+
+function paperTradeLogRowCacheKey(row: JsonRecord, index: number): string {
+  return [
+    String(row.trade_id ?? row.fill_id ?? row.order_id ?? `idx:${index}`),
+    String(row.lane_id ?? row.strategy_key ?? ""),
+    String(row.instrument ?? row.symbol ?? ""),
+    paperTradeLogRowTimestamp(row),
+    String(row.entry_timestamp ?? ""),
+    String(row.exit_timestamp ?? ""),
+  ].join("|");
+}
+
+function dateKeyRange(dateKeys: string[]): JsonRecord | null {
+  const ordered = dateKeys.filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)).sort();
+  if (!ordered.length) {
+    return null;
+  }
+  return {
+    start: ordered[0],
+    end: ordered[ordered.length - 1],
+  };
+}
+
+function compactPaperStrategyPerformance(
+  strategyPerformance: JsonRecord,
+  options: { paperTradeLogVisibleRange?: DesktopPaperTradeLogVisibleRange | null } = {},
+): JsonRecord {
   const tradeLog = Array.isArray(strategyPerformance.trade_log)
     ? strategyPerformance.trade_log.filter((entry): entry is JsonRecord => Boolean(entry) && typeof entry === "object")
     : [];
-  const compactTradeLog = [...tradeLog]
+  const orderedTradeLog = [...tradeLog]
     .sort((left, right) => {
-      const leftTimestamp = String(left.exit_timestamp ?? left.fill_timestamp ?? left.timestamp ?? left.entry_timestamp ?? "");
-      const rightTimestamp = String(right.exit_timestamp ?? right.fill_timestamp ?? right.timestamp ?? right.entry_timestamp ?? "");
+      const leftTimestamp = paperTradeLogRowTimestamp(left);
+      const rightTimestamp = paperTradeLogRowTimestamp(right);
       return rightTimestamp.localeCompare(leftTimestamp);
-    })
-    .slice(0, DESKTOP_RENDERER_TRADE_LOG_LIMIT);
+    });
+  const latestTradeLog = orderedTradeLog.slice(0, DESKTOP_RENDERER_TRADE_LOG_LIMIT);
+  const normalizedVisibleRange = normalizePaperTradeLogVisibleRange(options.paperTradeLogVisibleRange);
+  const visibleRangeTradeLog = normalizedVisibleRange
+    ? orderedTradeLog.filter((row) => {
+        const dateKey = paperTradeLogRowDateKey(row);
+        return Boolean(dateKey) && dateKey >= normalizedVisibleRange.startDate && dateKey <= normalizedVisibleRange.endDate;
+      })
+    : [];
+  const compactTradeLog = [...new Map(
+    [...latestTradeLog, ...visibleRangeTradeLog].map((row, index) => [paperTradeLogRowCacheKey(row, index), row]),
+  ).values()].sort((left, right) => paperTradeLogRowTimestamp(right).localeCompare(paperTradeLogRowTimestamp(left)));
   const publishedTradeLogCount = Number(strategyPerformance.trade_log_count);
+  const totalTradeLogCount = Number.isFinite(publishedTradeLogCount) ? Math.max(publishedTradeLogCount, tradeLog.length) : tradeLog.length;
   return {
     generated_at: strategyPerformance.generated_at ?? null,
     session_date: strategyPerformance.session_date ?? null,
@@ -1512,7 +1630,25 @@ function compactPaperStrategyPerformance(strategyPerformance: JsonRecord): JsonR
     },
     rows: Array.isArray(strategyPerformance.rows) ? strategyPerformance.rows : [],
     trade_log: compactTradeLog,
-    trade_log_count: Number.isFinite(publishedTradeLogCount) ? Math.max(publishedTradeLogCount, tradeLog.length) : tradeLog.length,
+    trade_log_count: totalTradeLogCount,
+    trade_log_window: {
+      requested_range: normalizedVisibleRange,
+      available_range: dateKeyRange(orderedTradeLog.map((row) => paperTradeLogRowDateKey(row))),
+      returned_range: dateKeyRange(compactTradeLog.map((row) => paperTradeLogRowDateKey(row))),
+      visible_range_returned: dateKeyRange(visibleRangeTradeLog.map((row) => paperTradeLogRowDateKey(row))),
+      latest_trade_range: dateKeyRange(latestTradeLog.map((row) => paperTradeLogRowDateKey(row))),
+      total_trade_count: totalTradeLogCount,
+      returned_trade_count: compactTradeLog.length,
+      latest_trade_count: latestTradeLog.length,
+      visible_range_trade_count: visibleRangeTradeLog.length,
+      visible_range_complete: normalizedVisibleRange
+        ? visibleRangeTradeLog.every((row) => {
+            const dateKey = paperTradeLogRowDateKey(row);
+            return dateKey >= normalizedVisibleRange.startDate && dateKey <= normalizedVisibleRange.endDate;
+          })
+        : null,
+      compacted_for_startup: true,
+    },
     compacted_for_startup: true,
   };
 }
@@ -1584,7 +1720,10 @@ function compactPaperEvents(eventsState: JsonRecord): JsonRecord {
   return compacted;
 }
 
-function compactDashboardForDesktopTransfer(dashboard: JsonRecord | null | undefined): JsonRecord | null {
+function compactDashboardForDesktopTransfer(
+  dashboard: JsonRecord | null | undefined,
+  options: { paperTradeLogVisibleRange?: DesktopPaperTradeLogVisibleRange | null } = {},
+): JsonRecord | null {
   if (!looksLikeDashboardSnapshot(dashboard)) {
     return null;
   }
@@ -1630,7 +1769,10 @@ function compactDashboardForDesktopTransfer(dashboard: JsonRecord | null | undef
     ? {
         ...paper,
         alerts_state: compactPaperAlertsState(alertsState),
-        strategy_performance: compactPaperStrategyPerformance(asJsonRecord(paper.strategy_performance)),
+        strategy_performance: compactPaperStrategyPerformance(
+          asJsonRecord(paper.strategy_performance),
+          { paperTradeLogVisibleRange: options.paperTradeLogVisibleRange },
+        ),
         raw_operator_status: compactPaperRawOperatorStatus(asJsonRecord(paper.raw_operator_status)),
         signal_intent_fill_audit: compactPaperSignalIntentFillAudit(asJsonRecord(paper.signal_intent_fill_audit)),
         events: compactPaperEvents(asJsonRecord(paper.events)),
@@ -1654,8 +1796,14 @@ function compactDashboardForDesktopTransfer(dashboard: JsonRecord | null | undef
   };
 }
 
-export function compactDesktopStateForRenderer(state: DesktopState): DesktopState {
-  const compactedDashboard = compactDashboardForDesktopTransfer(asJsonRecord(state.dashboard));
+export function compactDesktopStateForRenderer(
+  state: DesktopState,
+  options: { paperTradeLogVisibleRange?: DesktopPaperTradeLogVisibleRange | null } = {},
+): DesktopState {
+  const compactedDashboard = compactDashboardForDesktopTransfer(
+    asJsonRecord(state.dashboard),
+    { paperTradeLogVisibleRange: options.paperTradeLogVisibleRange },
+  );
   if (!compactedDashboard) {
     return state;
   }
@@ -2198,26 +2346,102 @@ async function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, fal
   }
 }
 
+function annotateSnapshotAuthority(
+  snapshot: JsonRecord,
+  payload: {
+    selectedSource: SnapshotCandidate["name"];
+    selectedFreshnessAt: string | null;
+    selectedGeneratedAt: string | null;
+    referenceFreshnessAt: string | null;
+    referenceBroadSession: string | null;
+    staleDesktopCacheRejected: boolean;
+  },
+): JsonRecord {
+  const dashboardMeta = asJsonRecord(snapshot.dashboard_meta);
+  return {
+    ...snapshot,
+    dashboard_meta: {
+      ...dashboardMeta,
+      desktop_snapshot_authority: payload,
+    },
+  };
+}
+
+function selectPackagedSnapshotCandidate(
+  candidates: SnapshotCandidate[],
+): SnapshotCandidate | null {
+  const nowMs = Date.now();
+  const freshnessSorted = [...candidates]
+    .map((candidate) => ({ candidate, meta: snapshotAuthorityMetadata(candidate.snapshot) }))
+    .sort((left, right) => {
+      const rightTime = right.meta.freshnessAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+      const leftTime = left.meta.freshnessAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+      return rightTime - leftTime;
+    });
+  const freshestReference = freshnessSorted.find(
+    ({ meta, candidate }) => candidate.name === "fresh_operator_artifacts" && meta.hasPaperReadiness,
+  ) ?? freshnessSorted.find(({ meta }) => meta.hasPaperReadiness);
+  for (const { candidate, meta } of freshnessSorted) {
+    if (!meta.hasPaperReadiness || !meta.modeCompatible || !meta.freshnessAt) {
+      continue;
+    }
+    if (nowMs - meta.freshnessAt.getTime() > PACKAGED_OPERATOR_SNAPSHOT_MAX_AGE_MS) {
+      continue;
+    }
+    if (
+      freshestReference
+      && candidate.name !== freshestReference.candidate.name
+      && freshestReference.meta.freshnessAt
+      && freshestReference.meta.freshnessAt.getTime() - meta.freshnessAt.getTime() > SNAPSHOT_AUTHORITY_SKEW_MS
+    ) {
+      continue;
+    }
+    if (
+      freshestReference
+      && candidate.name !== freshestReference.candidate.name
+      && freshestReference.meta.broadSession
+      && meta.broadSession
+      && freshestReference.meta.broadSession !== meta.broadSession
+      && freshestReference.meta.freshnessAt
+      && freshestReference.meta.freshnessAt.getTime() >= (meta.freshnessAt.getTime() + SNAPSHOT_AUTHORITY_SKEW_MS)
+    ) {
+      continue;
+    }
+    return candidate;
+  }
+  return null;
+}
+
 async function loadSnapshotBundle(
-  options: { includeHeavyPayload?: boolean; preferDesktopCache?: boolean } = {},
+  options: {
+    includeHeavyPayload?: boolean;
+    preferDesktopCache?: boolean;
+    paperTradeLogVisibleRange?: DesktopPaperTradeLogVisibleRange | null;
+  } = {},
 ): Promise<JsonRecord | null> {
   if (testLoadSnapshotBundleHook) {
     return testLoadSnapshotBundleHook();
   }
   const includeHeavyPayload = options.includeHeavyPayload !== false;
   const packagedLocalLaunch = packagedLocalBundleLaunchContext();
-  const candidatePaths = packagedLocalLaunch
-    ? [DESKTOP_LOCAL_DASHBOARD_CACHE_FILE]
-    : options.preferDesktopCache
-      ? [DESKTOP_LOCAL_DASHBOARD_CACHE_FILE, SNAPSHOT_FILES.dashboardApi]
-      : [SNAPSHOT_FILES.dashboardApi, DESKTOP_LOCAL_DASHBOARD_CACHE_FILE];
-  for (const candidatePath of candidatePaths) {
-    const dashboardApiSnapshot = await readJsonFile<JsonRecord>(candidatePath);
-    if (looksLikeDashboardSnapshot(dashboardApiSnapshot)) {
-      if (candidatePath !== DESKTOP_LOCAL_DASHBOARD_CACHE_FILE) {
-        void persistDesktopDashboardCache(dashboardApiSnapshot);
+  const desktopCacheSnapshot = await readJsonFile<JsonRecord>(DESKTOP_LOCAL_DASHBOARD_CACHE_FILE);
+  const workspaceDashboardSnapshot = await readJsonFile<JsonRecord>(SNAPSHOT_FILES.dashboardApi);
+  if (!packagedLocalLaunch) {
+    const orderedCandidates = options.preferDesktopCache
+      ? [desktopCacheSnapshot, workspaceDashboardSnapshot]
+      : [workspaceDashboardSnapshot, desktopCacheSnapshot];
+    for (const candidate of orderedCandidates) {
+      if (looksLikeDashboardSnapshot(candidate)) {
+        if (candidate !== desktopCacheSnapshot) {
+          void persistDesktopDashboardCache(candidate);
+        }
+        return includeHeavyPayload
+          ? candidate
+          : compactDashboardForDesktopTransfer(
+              candidate,
+              { paperTradeLogVisibleRange: options.paperTradeLogVisibleRange },
+            );
       }
-      return includeHeavyPayload ? dashboardApiSnapshot : compactDashboardForDesktopTransfer(dashboardApiSnapshot);
     }
   }
   const [
@@ -2241,25 +2465,25 @@ async function loadSnapshotBundle(
     productionLink,
     actionLog,
   ] = await Promise.all([
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.historicalPlayback),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.researchRuntimeBridge),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.strategyAnalysis),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.marketIndexStrip),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.operatorSurface),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperApprovedModels),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperBlotter),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperCarryForward),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperFills),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperIntents),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperLaneActivity),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperNonApprovedLanes),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperPerformance),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperPosition),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.paperReadiness),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.startupControlPlane),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.treasuryCurve),
-    packagedLocalLaunch ? Promise.resolve(null) : readJsonFile(SNAPSHOT_FILES.productionLink),
-    packagedLocalLaunch ? Promise.resolve([]) : readActionLog(),
+    readJsonFile(SNAPSHOT_FILES.historicalPlayback),
+    readJsonFile(SNAPSHOT_FILES.researchRuntimeBridge),
+    readJsonFile(SNAPSHOT_FILES.strategyAnalysis),
+    readJsonFile(SNAPSHOT_FILES.marketIndexStrip),
+    readJsonFile(SNAPSHOT_FILES.operatorSurface),
+    readJsonFile(SNAPSHOT_FILES.paperApprovedModels),
+    readJsonFile(SNAPSHOT_FILES.paperBlotter),
+    readJsonFile(SNAPSHOT_FILES.paperCarryForward),
+    readJsonFile(SNAPSHOT_FILES.paperFills),
+    readJsonFile(SNAPSHOT_FILES.paperIntents),
+    readJsonFile(SNAPSHOT_FILES.paperLaneActivity),
+    readJsonFile(SNAPSHOT_FILES.paperNonApprovedLanes),
+    readJsonFile(SNAPSHOT_FILES.paperPerformance),
+    readJsonFile(SNAPSHOT_FILES.paperPosition),
+    readJsonFile(SNAPSHOT_FILES.paperReadiness),
+    readJsonFile(SNAPSHOT_FILES.startupControlPlane),
+    readJsonFile(SNAPSHOT_FILES.treasuryCurve),
+    readJsonFile(SNAPSHOT_FILES.productionLink),
+    readActionLog(),
   ]);
 
   if (!operatorSurface) {
@@ -2355,8 +2579,50 @@ async function loadSnapshotBundle(
     strategy_analysis: strategyAnalysis,
     production_link: productionLink,
   };
-  void persistDesktopDashboardCache(bundledSnapshot);
-  return includeHeavyPayload ? bundledSnapshot : compactDashboardForDesktopTransfer(bundledSnapshot);
+  const synthesizedSnapshot = bundledSnapshot;
+  if (packagedLocalLaunch) {
+    const selectedCandidate = selectPackagedSnapshotCandidate(
+      [
+        looksLikeDashboardSnapshot(synthesizedSnapshot)
+          ? { name: "fresh_operator_artifacts", snapshot: synthesizedSnapshot }
+          : null,
+        looksLikeDashboardSnapshot(workspaceDashboardSnapshot)
+          ? { name: "workspace_dashboard", snapshot: workspaceDashboardSnapshot }
+          : null,
+        looksLikeDashboardSnapshot(desktopCacheSnapshot)
+          ? { name: "desktop_cache", snapshot: desktopCacheSnapshot }
+          : null,
+      ].filter((candidate): candidate is SnapshotCandidate => candidate !== null),
+    );
+    if (!selectedCandidate) {
+      appendDesktopLog("[electron] loadSnapshotBundle:packaged-no-fresh-authoritative-snapshot");
+      return null;
+    }
+    const referenceMeta = snapshotAuthorityMetadata(synthesizedSnapshot);
+    const selectedMeta = snapshotAuthorityMetadata(selectedCandidate.snapshot);
+    const selectedSnapshot = annotateSnapshotAuthority(selectedCandidate.snapshot, {
+      selectedSource: selectedCandidate.name,
+      selectedFreshnessAt: selectedMeta.freshnessAt?.toISOString() ?? null,
+      selectedGeneratedAt: selectedMeta.generatedAt?.toISOString() ?? null,
+      referenceFreshnessAt: referenceMeta.freshnessAt?.toISOString() ?? null,
+      referenceBroadSession: referenceMeta.broadSession,
+      staleDesktopCacheRejected: selectedCandidate.name !== "desktop_cache" && looksLikeDashboardSnapshot(desktopCacheSnapshot),
+    });
+    void persistDesktopDashboardCache(selectedSnapshot);
+    return includeHeavyPayload
+      ? selectedSnapshot
+      : compactDashboardForDesktopTransfer(
+          selectedSnapshot,
+          { paperTradeLogVisibleRange: options.paperTradeLogVisibleRange },
+        );
+  }
+  void persistDesktopDashboardCache(synthesizedSnapshot);
+  return includeHeavyPayload
+    ? synthesizedSnapshot
+    : compactDashboardForDesktopTransfer(
+        synthesizedSnapshot,
+        { paperTradeLogVisibleRange: options.paperTradeLogVisibleRange },
+      );
 }
 
 interface AttachedSnapshotBridge {
@@ -2365,6 +2631,36 @@ interface AttachedSnapshotBridge {
   health: JsonRecord | null;
   backendUrl: string | null;
   detail: string;
+}
+
+interface SnapshotAuthorityMetadata {
+  generatedAt: Date | null;
+  readinessGeneratedAt: Date | null;
+  operatorSurfaceGeneratedAt: Date | null;
+  freshnessAt: Date | null;
+  broadSession: string | null;
+  hasPaperReadiness: boolean;
+  modeCompatible: boolean;
+  sourceTag: string | null;
+}
+
+interface SnapshotCandidate {
+  name: "workspace_dashboard" | "desktop_cache" | "fresh_operator_artifacts";
+  snapshot: JsonRecord;
+}
+
+interface ReadinessAuthorityMetadata {
+  generatedAt: Date | null;
+  freshnessAt: Date | null;
+  broadSession: string | null;
+  usable: boolean;
+  modeCompatible: boolean;
+  instanceId: string | null;
+}
+
+interface ReadinessCandidate {
+  name: "desktop_local_readiness" | "workspace_readiness";
+  readiness: JsonRecord;
 }
 
 function attachedSnapshotBridgeExpectsLiveApi(bridge: AttachedSnapshotBridge | null): boolean {
@@ -2400,6 +2696,84 @@ function attachedSnapshotBridgeConfirmsLiveApi(bridge: AttachedSnapshotBridge | 
     && controlPlane.dashboard_attached === true
     && controlPlane.launch_allowed === true
   );
+}
+
+function readinessAuthorityMetadata(readinessPayload: JsonRecord | null | undefined): ReadinessAuthorityMetadata {
+  const readiness = asJsonRecord(readinessPayload);
+  const payload = asJsonRecord(readiness.payload);
+  const listener = asJsonRecord(readiness.listener);
+  const controlPlane = asJsonRecord(readiness.control_plane);
+  const generatedAt = parseIsoDate(readiness.generated_at);
+  const broadSession = typeof readiness.current_broad_trading_session === "string" && readiness.current_broad_trading_session.trim()
+    ? readiness.current_broad_trading_session.trim()
+    : null;
+  const readinessState = String(readiness.readiness_state ?? "").toUpperCase();
+  const payloadReachable = payload.reachable === true;
+  const payloadReady = payload.ready === true;
+  const listenerReachable = listener.reachable === true;
+  const dashboardAttached = controlPlane.dashboard_attached === true;
+  const launchAllowed = controlPlane.launch_allowed === true;
+  const paperRuntimeReady = controlPlane.paper_runtime_ready === true;
+  const usable = readinessState === "READY" || (payloadReachable && payloadReady && listenerReachable && dashboardAttached);
+  const instanceId = String(
+    asJsonRecord(readiness.health).instance_id
+      ?? payload.instance_id
+      ?? asJsonRecord(readiness.publisher).manager_instance_id
+      ?? "",
+  ).trim() || null;
+  return {
+    generatedAt,
+    freshnessAt: generatedAt,
+    broadSession,
+    usable,
+    modeCompatible: launchAllowed || paperRuntimeReady || payloadReady,
+    instanceId,
+  };
+}
+
+function selectAttachedReadinessCandidate(
+  candidates: ReadinessCandidate[],
+  snapshot: JsonRecord | null,
+): ReadinessCandidate | null {
+  const nowMs = Date.now();
+  const snapshotMeta = snapshotAuthorityMetadata(snapshot);
+  const snapshotInstanceId = String(asJsonRecord(snapshot?.dashboard_meta).server_instance_id ?? "").trim() || null;
+  const freshnessSorted = candidates
+    .map((candidate) => ({ candidate, meta: readinessAuthorityMetadata(candidate.readiness) }))
+    .sort((left, right) => {
+      const rightTime = right.meta.freshnessAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+      const leftTime = left.meta.freshnessAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+      return rightTime - leftTime;
+    });
+  for (const { candidate, meta } of freshnessSorted) {
+    if (!meta.usable || !meta.modeCompatible || !meta.freshnessAt) {
+      continue;
+    }
+    if (nowMs - meta.freshnessAt.getTime() > ATTACHED_SNAPSHOT_BRIDGE_MAX_AGE_MS) {
+      continue;
+    }
+    if (snapshotInstanceId && meta.instanceId && snapshotInstanceId !== meta.instanceId) {
+      continue;
+    }
+    if (
+      snapshotMeta.freshnessAt
+      && snapshotMeta.freshnessAt.getTime() - meta.freshnessAt.getTime() > SNAPSHOT_AUTHORITY_SKEW_MS
+      && snapshotMeta.hasPaperReadiness
+    ) {
+      continue;
+    }
+    if (
+      snapshotMeta.broadSession
+      && meta.broadSession
+      && snapshotMeta.broadSession !== meta.broadSession
+      && snapshotMeta.freshnessAt
+      && snapshotMeta.freshnessAt.getTime() >= meta.freshnessAt.getTime() + SNAPSHOT_AUTHORITY_SKEW_MS
+    ) {
+      continue;
+    }
+    return candidate;
+  }
+  return null;
 }
 
 function synthesizeAttachedSnapshotBridgeFromSnapshot(snapshot: JsonRecord | null): AttachedSnapshotBridge | null {
@@ -2486,20 +2860,23 @@ async function loadAttachedSnapshotBridge(snapshot: JsonRecord | null): Promise<
   if (!snapshot) {
     return null;
   }
-  const readinessCandidatePaths = packagedLocalBundleLaunchContext()
-    ? [DESKTOP_LOCAL_READINESS_FILE]
-    : [DESKTOP_LOCAL_READINESS_FILE, DASHBOARD_READINESS_FILE];
-  let readiness: JsonRecord = {};
-  for (const candidatePath of readinessCandidatePaths) {
-    readiness = asJsonRecord(await readJsonFile<JsonRecord>(candidatePath));
-    if (Object.keys(readiness).length > 0) {
-      break;
-    }
-  }
-  const generatedAt = parseIsoDate(readiness.generated_at);
-  if (!generatedAt || Date.now() - generatedAt.getTime() > ATTACHED_SNAPSHOT_BRIDGE_MAX_AGE_MS) {
+  const readinessCandidates = (
+    await Promise.all([
+      readJsonFile<JsonRecord>(DESKTOP_LOCAL_READINESS_FILE),
+      readJsonFile<JsonRecord>(DASHBOARD_READINESS_FILE),
+    ])
+  )
+    .map((payload, index) => ({
+      name: (index === 0 ? "desktop_local_readiness" : "workspace_readiness") as ReadinessCandidate["name"],
+      readiness: asJsonRecord(payload),
+    }))
+    .filter((candidate) => Object.keys(candidate.readiness).length > 0);
+  const selectedReadinessCandidate = selectAttachedReadinessCandidate(readinessCandidates, snapshot);
+  if (!selectedReadinessCandidate) {
     return null;
   }
+  const readiness = selectedReadinessCandidate.readiness;
+  const generatedAt = parseIsoDate(readiness.generated_at);
   const payload = asJsonRecord(readiness.payload);
   const controlPlane = asJsonRecord(readiness.control_plane);
   const listener = asJsonRecord(readiness.listener);
@@ -2529,7 +2906,11 @@ async function loadAttachedSnapshotBridge(snapshot: JsonRecord | null): Promise<
     ? readiness.configured_url.trim()
     : null;
   const detail = launchAllowed
-    ? "Service is attached through the local readiness bridge and synchronized operator snapshot."
+    ? (
+        selectedReadinessCandidate.name === "workspace_readiness"
+          ? "Service is attached through the fresh workspace readiness bridge while the desktop transport converges."
+          : "Service is attached through the local readiness bridge and synchronized operator snapshot."
+      )
     : "Service is attached and current, but supervised paper remains blocked and requires operator attention.";
   return {
     transportKind: "readiness_bridge",
@@ -3223,7 +3604,11 @@ export async function prepareDesktopForLaunch(): Promise<void> {
 }
 
 async function probeDesktopState(
-  options: { allowServiceBootstrap?: boolean; includeHeavyPayload?: boolean } = {},
+  options: {
+    allowServiceBootstrap?: boolean;
+    includeHeavyPayload?: boolean;
+    paperTradeLogVisibleRange?: DesktopPaperTradeLogVisibleRange | null;
+  } = {},
 ): Promise<DesktopState> {
   const allowServiceBootstrap = options.allowServiceBootstrap !== false;
   const includeHeavyPayload = options.includeHeavyPayload !== false;
@@ -3245,6 +3630,7 @@ async function probeDesktopState(
       snapshot = await loadSnapshotBundle({
         includeHeavyPayload,
         preferDesktopCache: !includeHeavyPayload || packagedLocalLaunch,
+        paperTradeLogVisibleRange: options.paperTradeLogVisibleRange,
       });
     }
     const requireConfirmedLiveAttach = packagedLocalLaunch && attachedSnapshotBridgeExpectsLiveApi(attachedSnapshotBridge);
@@ -3255,6 +3641,7 @@ async function probeDesktopState(
     snapshot = await loadSnapshotBundle({
       includeHeavyPayload,
       preferDesktopCache: !includeHeavyPayload || packagedLocalLaunch,
+      paperTradeLogVisibleRange: options.paperTradeLogVisibleRange,
     });
   }
   if (live?.mode === "live") {
@@ -3282,7 +3669,12 @@ async function probeDesktopState(
   }
   const liveHealth = live?.mode === "live" ? live.health : live?.mode === "health-only" ? live.health : attachedSnapshotBridge?.health ?? null;
   const dashboard = liveDashboard ?? effectiveSnapshot;
-  const returnedDashboard = includeHeavyPayload ? dashboard : compactDashboardForDesktopTransfer(dashboard);
+  const returnedDashboard = includeHeavyPayload
+    ? dashboard
+    : compactDashboardForDesktopTransfer(
+        dashboard,
+        { paperTradeLogVisibleRange: options.paperTradeLogVisibleRange },
+      );
   const historicalPlaybackSync = await buildHistoricalPlaybackSyncStatus(dashboard);
   attachHistoricalPlaybackSync(returnedDashboard, historicalPlaybackSync);
   const runtimeStates = buildRuntimeStates({
@@ -3414,7 +3806,7 @@ async function probeDesktopState(
   return state;
 }
 
-export async function getDesktopState(options: { includeHeavyPayload?: boolean } = {}): Promise<DesktopState> {
+export async function getDesktopState(options: DesktopStateRequestOptions = {}): Promise<DesktopState> {
   if (testGetDesktopStateHook) {
     return testGetDesktopStateHook();
   }
@@ -3425,7 +3817,10 @@ export async function getDesktopState(options: { includeHeavyPayload?: boolean }
   const requestPromise = (
     DESKTOP_STATE_FIXTURE_PATH
       ? loadDesktopStateFixtureState()
-      : probeDesktopState({ includeHeavyPayload }).then(applyDesktopStateFixtureOverride)
+      : probeDesktopState({
+          includeHeavyPayload,
+          paperTradeLogVisibleRange: options.paperTradeLogVisibleRange,
+        }).then(applyDesktopStateFixtureOverride)
   );
   if (includeHeavyPayload) {
     desktopStateRequestPromise = requestPromise.finally(() => {
@@ -3733,6 +4128,12 @@ export const __testing = {
   },
   setPackagedLocalBundleLaunchContextHook(hook: (() => boolean) | null): void {
     testPackagedLocalBundleLaunchContextHook = hook;
+  },
+  selectPackagedSnapshotCandidate(candidates: SnapshotCandidate[]): SnapshotCandidate | null {
+    return selectPackagedSnapshotCandidate(candidates);
+  },
+  selectAttachedReadinessCandidate(candidates: ReadinessCandidate[], snapshot: JsonRecord | null): ReadinessCandidate | null {
+    return selectAttachedReadinessCandidate(candidates, snapshot);
   },
   shouldContinueWaitingForRecovery(state: DesktopState): boolean {
     return shouldContinueWaitingForRecovery(state);

@@ -120,10 +120,20 @@ function makeDesktopState(overrides: Partial<DesktopState> = {}): DesktopState {
 }
 
 function makeOversizedDashboardFixture(): Record<string, unknown> {
-  const heavyTradeLog = Array.from({ length: 500 }, (_value, index) => ({
-    trade_id: `trade-${index}`,
-    note: "X".repeat(8_000),
-  }));
+  const heavyTradeLog = Array.from({ length: 500 }, (_value, index) => {
+    const exitTime = new Date(Date.UTC(2026, 3, 29, 15, 0, 0) - index * 60 * 60 * 1000).toISOString();
+    const entryTime = new Date(Date.parse(exitTime) - 20 * 60 * 1000).toISOString();
+    return {
+      trade_id: `trade-${index}`,
+      lane_id: `lane-${index % 8}`,
+      instrument: index % 2 === 0 ? "MGC" : "MNQ",
+      status: "CLOSED",
+      entry_timestamp: entryTime,
+      exit_timestamp: exitTime,
+      realized_pnl: index % 2 === 0 ? 12.5 : -7.25,
+      note: "X".repeat(8_000),
+    };
+  });
   const heavyAlertMap = Object.fromEntries(
     Array.from({ length: 3_500 }, (_value, index) => [
       `alert-${index}`,
@@ -600,6 +610,215 @@ test("packaged launch trusts a fresh synchronized local snapshot long enough to 
   assert.equal(state.source.label, "SERVICE ATTACHED");
   assert.deepEqual(state.errors, []);
   __testing.resetRuntimeState();
+});
+
+test("packaged snapshot authority rejects stale desktop cache when fresher readiness-backed artifacts exist", () => {
+  const freshArtifacts = {
+    generated_at: "2026-04-30T07:01:13.562Z",
+    operator_surface: {
+      generated_at: "2026-04-30T07:01:13.562Z",
+    },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: "2026-04-30T07:01:13.562Z",
+        current_broad_trading_session: "LONDON_EARLY",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+    },
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+    },
+    dashboard_meta: {
+      source: "artifact_snapshot",
+    },
+  };
+  const staleDesktopCache = {
+    generated_at: "2026-04-18T07:01:13.562Z",
+    operator_surface: {
+      generated_at: "2026-04-18T07:01:13.562Z",
+    },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: "2026-04-18T07:01:13.562Z",
+        current_broad_trading_session: "UNCLASSIFIED",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+    },
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+    },
+    dashboard_meta: {
+      source: "desktop_cache",
+    },
+  };
+
+  const selected = __testing.selectPackagedSnapshotCandidate([
+    { name: "desktop_cache", snapshot: staleDesktopCache },
+    { name: "fresh_operator_artifacts", snapshot: freshArtifacts },
+  ]);
+
+  assert.equal(selected?.name, "fresh_operator_artifacts");
+});
+
+test("packaged snapshot authority returns no candidate instead of silently promoting stale cache as current paper state", () => {
+  const staleDesktopCache = {
+    generated_at: "2026-04-18T07:01:13.562Z",
+    operator_surface: {
+      generated_at: "2026-04-18T07:01:13.562Z",
+    },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: "2026-04-18T07:01:13.562Z",
+        current_broad_trading_session: "UNCLASSIFIED",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+    },
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+    },
+    dashboard_meta: {
+      source: "desktop_cache",
+    },
+  };
+
+  const selected = __testing.selectPackagedSnapshotCandidate([
+    { name: "desktop_cache", snapshot: staleDesktopCache },
+  ]);
+
+  assert.equal(selected, null);
+});
+
+test("attached readiness authority prefers fresher workspace readiness over stale local cache when session truth diverges", () => {
+  const snapshot = {
+    generated_at: "2026-04-30T07:01:13.562Z",
+    operator_surface: {
+      generated_at: "2026-04-30T07:01:13.562Z",
+    },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: "2026-04-30T07:01:13.562Z",
+        current_broad_trading_session: "LONDON_EARLY",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+    },
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+    },
+    dashboard_meta: {
+      server_instance_id: "instance-current",
+      source: "artifact_snapshot",
+    },
+  };
+  const staleLocalReadiness = {
+    generated_at: "2026-04-30T06:58:00.000Z",
+    current_broad_trading_session: "UNCLASSIFIED",
+    readiness_state: "READY",
+    payload: {
+      reachable: true,
+      ready: true,
+      instance_id: "instance-current",
+    },
+    listener: {
+      reachable: true,
+    },
+    control_plane: {
+      dashboard_attached: true,
+      launch_allowed: true,
+      paper_runtime_ready: true,
+    },
+  };
+  const freshWorkspaceReadiness = {
+    generated_at: "2026-04-30T07:01:13.562Z",
+    current_broad_trading_session: "LONDON_EARLY",
+    readiness_state: "READY",
+    payload: {
+      reachable: true,
+      ready: true,
+      instance_id: "instance-current",
+    },
+    listener: {
+      reachable: true,
+    },
+    control_plane: {
+      dashboard_attached: true,
+      launch_allowed: true,
+      paper_runtime_ready: true,
+    },
+  };
+
+  const selected = __testing.selectAttachedReadinessCandidate([
+    { name: "desktop_local_readiness", readiness: staleLocalReadiness },
+    { name: "workspace_readiness", readiness: freshWorkspaceReadiness },
+  ], snapshot);
+
+  assert.equal(selected?.name, "workspace_readiness");
+});
+
+test("attached readiness authority rejects stale wrong-session cache when fresher snapshot proves the current session", () => {
+  const snapshot = {
+    generated_at: "2026-04-30T07:01:13.562Z",
+    operator_surface: {
+      generated_at: "2026-04-30T07:01:13.562Z",
+    },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: "2026-04-30T07:01:13.562Z",
+        current_broad_trading_session: "LONDON_EARLY",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+    },
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+    },
+    dashboard_meta: {
+      server_instance_id: "instance-current",
+      source: "artifact_snapshot",
+    },
+  };
+  const staleLocalReadiness = {
+    generated_at: "2026-04-30T06:58:00.000Z",
+    current_broad_trading_session: "UNCLASSIFIED",
+    readiness_state: "READY",
+    payload: {
+      reachable: true,
+      ready: true,
+      instance_id: "instance-current",
+    },
+    listener: {
+      reachable: true,
+    },
+    control_plane: {
+      dashboard_attached: true,
+      launch_allowed: true,
+      paper_runtime_ready: true,
+    },
+  };
+
+  const selected = __testing.selectAttachedReadinessCandidate([
+    { name: "desktop_local_readiness", readiness: staleLocalReadiness },
+  ], snapshot);
+
+  assert.equal(selected, null);
 });
 
 test("packaged launch promotes to live API when the local dashboard endpoint is reachable", async () => {
@@ -1672,6 +1891,7 @@ test("renderer-bound desktop state stays under budget while preserving operator-
   const unifiedMonitor = (strategyAnalysis.unified_monitor ?? {}) as Record<string, unknown>;
   const alertsState = (paper.alerts_state ?? {}) as Record<string, unknown>;
   const strategyPerformance = (paper.strategy_performance ?? {}) as Record<string, unknown>;
+  const tradeLogWindow = (strategyPerformance.trade_log_window ?? {}) as Record<string, unknown>;
   const rawOperatorStatus = (paper.raw_operator_status ?? {}) as Record<string, unknown>;
   const signalIntentFillAudit = (paper.signal_intent_fill_audit ?? {}) as Record<string, unknown>;
   const productionLink = (compactedDashboard.production_link ?? {}) as Record<string, unknown>;
@@ -1707,13 +1927,77 @@ test("renderer-bound desktop state stays under budget while preserving operator-
   const compactTradeLog = strategyPerformance.trade_log as Array<Record<string, unknown>>;
   assert.equal(compactTradeLog.length, 200);
   assert.equal(strategyPerformance.trade_log_count, 500);
+  assert.deepEqual(tradeLogWindow.requested_range, null);
+  assert.equal(tradeLogWindow.total_trade_count, 500);
+  assert.equal(tradeLogWindow.returned_trade_count, 200);
+  assert.equal(tradeLogWindow.latest_trade_count, 200);
   assert.equal(String(compactTradeLog[0]?.exit_timestamp ?? ""), "2026-04-29T15:00:00.000Z");
-  assert.equal(String(compactTradeLog[199]?.exit_timestamp ?? ""), "2026-04-21T08:03:00.000Z");
+  assert.equal(String(compactTradeLog[199]?.exit_timestamp ?? ""), "2026-04-21T08:00:00.000Z");
   assert.equal((rawOperatorStatus.lanes as Array<unknown>).length, 44);
   assert.equal((signalIntentFillAudit.rows as Array<unknown>).length, 44);
   assert.equal(transferMeta.compacted_for_startup, true);
   assert.equal(transferMeta.budget_bytes, DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES);
   assert.equal(typeof (transferMeta.detail_artifacts as Record<string, unknown>).full_dashboard_snapshot_path, "string");
+});
+
+test("renderer paper trade-log contract unions the visible calendar window with latest live rows", () => {
+  const dashboard = makeOversizedDashboardFixture();
+  const state = makeDesktopState({
+    connection: "live",
+    source: {
+      mode: "live_api",
+      label: "Live API",
+      detail: "attached",
+      canRunLiveActions: true,
+      healthReachable: true,
+      apiReachable: true,
+    },
+    backend: {
+      state: "healthy",
+      label: "Healthy",
+      detail: "attached",
+      lastError: null,
+      nextRetryAt: null,
+      retryCount: 0,
+      pid: 123,
+      apiStatus: "responding",
+      healthStatus: "ok",
+      managerOwned: false,
+      startupFailureKind: "none",
+      actionHint: null,
+      staleListenerDetected: false,
+      healthReachable: true,
+      dashboardApiTimedOut: false,
+      portConflictDetected: false,
+    },
+    dashboard,
+  });
+
+  const compactedState = compactDesktopStateForRenderer(state, {
+    paperTradeLogVisibleRange: {
+      startDate: "2026-04-16",
+      endDate: "2026-04-20",
+    },
+  });
+  const compactedDashboard = (compactedState.dashboard ?? {}) as Record<string, unknown>;
+  const paper = (compactedDashboard.paper ?? {}) as Record<string, unknown>;
+  const strategyPerformance = (paper.strategy_performance ?? {}) as Record<string, unknown>;
+  const compactTradeLog = strategyPerformance.trade_log as Array<Record<string, unknown>>;
+  const tradeLogWindow = (strategyPerformance.trade_log_window ?? {}) as Record<string, unknown>;
+  const returnedDays = [...new Set(compactTradeLog.map((row) => String(row.exit_timestamp ?? row.entry_timestamp ?? "").slice(0, 10)).filter(Boolean))].sort();
+
+  assert.deepEqual(tradeLogWindow.requested_range, {
+    startDate: "2026-04-16",
+    endDate: "2026-04-20",
+  });
+  assert.equal(tradeLogWindow.total_trade_count, 500);
+  assert.equal(tradeLogWindow.visible_range_complete, true);
+  assert.ok(returnedDays.includes("2026-04-16"));
+  assert.ok(returnedDays.includes("2026-04-17"));
+  assert.ok(returnedDays.includes("2026-04-18"));
+  assert.ok(returnedDays.includes("2026-04-19"));
+  assert.ok(returnedDays.includes("2026-04-20"));
+  assert.ok(returnedDays.includes("2026-04-29"));
 });
 
 test("startup with no live dashboard and no snapshots returns quickly while background bootstrap starts", async () => {
