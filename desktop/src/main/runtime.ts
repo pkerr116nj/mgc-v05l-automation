@@ -258,6 +258,8 @@ const DESKTOP_LOCAL_DASHBOARD_CACHE_FILE = path.join(DESKTOP_LOCAL_STATE_ROOT, "
 const DESKTOP_LOCAL_READINESS_FILE = path.join(DESKTOP_LOCAL_STATE_ROOT, "operator_dashboard_readiness.json");
 const LOCAL_OPERATOR_AUTH_ROOT = path.join(DESKTOP_APP_STATE_ROOT, "local_operator_auth");
 const DASHBOARD_READINESS_FILE = path.join(RUNTIME_ROOT, "operator_dashboard_readiness.json");
+export const DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES = 8_000_000;
+const DESKTOP_RENDERER_TRADE_LOG_LIMIT = 200;
 const LOCAL_OPERATOR_AUTH_STATE_FILE = path.join(LOCAL_OPERATOR_AUTH_ROOT, "local_operator_auth_state.json");
 const LOCAL_OPERATOR_AUTH_EVENTS_FILE = path.join(LOCAL_OPERATOR_AUTH_ROOT, "local_operator_auth_events.jsonl");
 const LOCAL_SECRET_WRAPPER_FILE = path.join(LOCAL_OPERATOR_AUTH_ROOT, "local_secret_wrapper.json");
@@ -1443,6 +1445,145 @@ function compactPlaybackStudyCatalogItem(item: JsonRecord): JsonRecord {
   };
 }
 
+function desktopTransferArtifactLinks(): JsonRecord {
+  return {
+    full_dashboard_snapshot_path: SNAPSHOT_FILES.dashboardApi,
+    paper_readiness_snapshot_path: SNAPSHOT_FILES.paperReadiness,
+    strategy_analysis_snapshot_path: SNAPSHOT_FILES.strategyAnalysis,
+    historical_playback_snapshot_path: SNAPSHOT_FILES.historicalPlayback,
+    operator_surface_snapshot_path: SNAPSHOT_FILES.operatorSurface,
+    production_link_snapshot_path: SNAPSHOT_FILES.productionLink,
+  };
+}
+
+function compactStrategyUnifiedMonitor(unifiedMonitor: JsonRecord): JsonRecord {
+  return {
+    available: unifiedMonitor.available ?? false,
+    generated_at: unifiedMonitor.generated_at ?? null,
+    selection_summary: asJsonRecord(unifiedMonitor.selection_summary),
+    aggregate_rules: asJsonRecord(unifiedMonitor.aggregate_rules),
+    view_modes: asJsonRecord(unifiedMonitor.view_modes),
+    sort_contract: asJsonRecord(unifiedMonitor.sort_contract),
+    strategy_catalog: asJsonRecord(unifiedMonitor.strategy_catalog),
+    provenance_notes: Array.isArray(unifiedMonitor.provenance_notes) ? unifiedMonitor.provenance_notes : [],
+    compacted_for_startup: true,
+  };
+}
+
+function compactPaperAlertsState(alertsState: JsonRecord): JsonRecord {
+  const byKey = asJsonRecord(alertsState.by_key);
+  const alertCount = Number(alertsState.alert_count);
+  return {
+    updated_at: alertsState.updated_at ?? null,
+    active_alerts: Array.isArray(alertsState.active_alerts) ? alertsState.active_alerts : [],
+    rows: Array.isArray(alertsState.rows) ? alertsState.rows : [],
+    recent_events: Array.isArray(alertsState.recent_events) ? alertsState.recent_events : [],
+    by_key: {},
+    alert_count: Number.isFinite(alertCount) ? Math.max(alertCount, Object.keys(byKey).length) : Object.keys(byKey).length,
+    compacted_for_startup: true,
+  };
+}
+
+function compactPaperStrategyPerformance(strategyPerformance: JsonRecord): JsonRecord {
+  const tradeLog = Array.isArray(strategyPerformance.trade_log)
+    ? strategyPerformance.trade_log.filter((entry): entry is JsonRecord => Boolean(entry) && typeof entry === "object")
+    : [];
+  const compactTradeLog = [...tradeLog]
+    .sort((left, right) => {
+      const leftTimestamp = String(left.exit_timestamp ?? left.fill_timestamp ?? left.timestamp ?? left.entry_timestamp ?? "");
+      const rightTimestamp = String(right.exit_timestamp ?? right.fill_timestamp ?? right.timestamp ?? right.entry_timestamp ?? "");
+      return rightTimestamp.localeCompare(leftTimestamp);
+    })
+    .slice(0, DESKTOP_RENDERER_TRADE_LOG_LIMIT);
+  const publishedTradeLogCount = Number(strategyPerformance.trade_log_count);
+  return {
+    generated_at: strategyPerformance.generated_at ?? null,
+    session_date: strategyPerformance.session_date ?? null,
+    payload_version: strategyPerformance.payload_version ?? null,
+    provenance: asJsonRecord(strategyPerformance.provenance),
+    notes: Array.isArray(strategyPerformance.notes) ? strategyPerformance.notes : [],
+    trade_log_notes: Array.isArray(strategyPerformance.trade_log_notes) ? strategyPerformance.trade_log_notes : [],
+    warnings: asJsonRecord(strategyPerformance.warnings),
+    metrics_buckets: asJsonRecord(strategyPerformance.metrics_buckets),
+    portfolio_snapshot: asJsonRecord(strategyPerformance.portfolio_snapshot),
+    attribution: asJsonRecord(strategyPerformance.attribution),
+    execution_likelihood: {
+      compacted_for_startup: true,
+    },
+    rows: Array.isArray(strategyPerformance.rows) ? strategyPerformance.rows : [],
+    trade_log: compactTradeLog,
+    trade_log_count: Number.isFinite(publishedTradeLogCount) ? Math.max(publishedTradeLogCount, tradeLog.length) : tradeLog.length,
+    compacted_for_startup: true,
+  };
+}
+
+function compactPaperRawOperatorStatus(rawOperatorStatus: JsonRecord): JsonRecord {
+  const lanes = Array.isArray(rawOperatorStatus.lanes)
+    ? rawOperatorStatus.lanes.filter((entry): entry is JsonRecord => Boolean(entry) && typeof entry === "object")
+    : [];
+  const publishedLaneCount = Number(rawOperatorStatus.lane_count);
+  return {
+    generated_at: rawOperatorStatus.generated_at ?? null,
+    updated_at: rawOperatorStatus.updated_at ?? null,
+    current_detected_session: rawOperatorStatus.current_detected_session ?? null,
+    strategy_status: rawOperatorStatus.strategy_status ?? null,
+    desk_risk_state: rawOperatorStatus.desk_risk_state ?? null,
+    desk_risk_reason: rawOperatorStatus.desk_risk_reason ?? null,
+    desk_session_total_pnl: rawOperatorStatus.desk_session_total_pnl ?? null,
+    desk_session_realized_pnl: rawOperatorStatus.desk_session_realized_pnl ?? null,
+    desk_halt_new_entries_loss: rawOperatorStatus.desk_halt_new_entries_loss ?? null,
+    desk_flatten_and_halt_loss: rawOperatorStatus.desk_flatten_and_halt_loss ?? null,
+    last_processed_bar_end_ts: rawOperatorStatus.last_processed_bar_end_ts ?? null,
+    processed_bars: rawOperatorStatus.processed_bars ?? null,
+    latest_operator_control: asJsonRecord(rawOperatorStatus.latest_operator_control),
+    health: asJsonRecord(rawOperatorStatus.health),
+    active_lane_ids: Array.isArray(rawOperatorStatus.active_lane_ids) ? rawOperatorStatus.active_lane_ids : [],
+    approved_long_entry_sources: Array.isArray(rawOperatorStatus.approved_long_entry_sources) ? rawOperatorStatus.approved_long_entry_sources : [],
+    approved_short_entry_sources: Array.isArray(rawOperatorStatus.approved_short_entry_sources) ? rawOperatorStatus.approved_short_entry_sources : [],
+    startup_restore_validation_summary: asJsonRecord(rawOperatorStatus.startup_restore_validation_summary),
+    lanes,
+    lane_count: Number.isFinite(publishedLaneCount) ? Math.max(publishedLaneCount, lanes.length) : lanes.length,
+    compacted_for_startup: true,
+  };
+}
+
+function compactPaperSignalIntentFillAudit(signalIntentFillAudit: JsonRecord): JsonRecord {
+  const rows = Array.isArray(signalIntentFillAudit.rows)
+    ? signalIntentFillAudit.rows.filter((entry): entry is JsonRecord => Boolean(entry) && typeof entry === "object")
+    : [];
+  const publishedRowCount = Number(signalIntentFillAudit.row_count ?? asJsonRecord(signalIntentFillAudit.summary).row_count);
+  return {
+    generated_at: signalIntentFillAudit.generated_at ?? null,
+    session_date: signalIntentFillAudit.session_date ?? null,
+    inspection_scope: signalIntentFillAudit.inspection_scope ?? null,
+    inspection_start_ts: signalIntentFillAudit.inspection_start_ts ?? null,
+    inspection_end_ts: signalIntentFillAudit.inspection_end_ts ?? null,
+    bar_count_in_window: signalIntentFillAudit.bar_count_in_window ?? null,
+    payload_version: signalIntentFillAudit.payload_version ?? null,
+    summary: asJsonRecord(signalIntentFillAudit.summary),
+    artifacts: asJsonRecord(signalIntentFillAudit.artifacts),
+    notes: Array.isArray(signalIntentFillAudit.notes) ? signalIntentFillAudit.notes : [],
+    rows,
+    row_count: Number.isFinite(publishedRowCount) ? Math.max(publishedRowCount, rows.length) : rows.length,
+    compacted_for_startup: true,
+  };
+}
+
+function compactPaperEvents(eventsState: JsonRecord): JsonRecord {
+  const compacted: JsonRecord = {
+    compacted_for_startup: true,
+  };
+  for (const [key, value] of Object.entries(eventsState)) {
+    if (Array.isArray(value)) {
+      compacted[key] = value.slice(0, 5);
+      compacted[`${key}_count`] = value.length;
+    } else {
+      compacted[key] = value;
+    }
+  }
+  return compacted;
+}
+
 function compactDashboardForDesktopTransfer(dashboard: JsonRecord | null | undefined): JsonRecord | null {
   if (!looksLikeDashboardSnapshot(dashboard)) {
     return null;
@@ -1462,6 +1603,7 @@ function compactDashboardForDesktopTransfer(dashboard: JsonRecord | null | undef
           rows: [],
         },
         details_by_strategy_key: {},
+        unified_monitor: compactStrategyUnifiedMonitor(asJsonRecord(strategyAnalysis.unified_monitor)),
         research_analytics: researchAnalytics,
       }
     : strategyAnalysis;
@@ -1487,22 +1629,39 @@ function compactDashboardForDesktopTransfer(dashboard: JsonRecord | null | undef
   const compactPaper = Object.keys(paper).length
     ? {
         ...paper,
-        alerts_state: {
-          ...alertsState,
-          compacted_for_startup: true,
-          active_alerts: [],
-          rows: [],
-          recent_events: [],
-        },
+        alerts_state: compactPaperAlertsState(alertsState),
+        strategy_performance: compactPaperStrategyPerformance(asJsonRecord(paper.strategy_performance)),
+        raw_operator_status: compactPaperRawOperatorStatus(asJsonRecord(paper.raw_operator_status)),
+        signal_intent_fill_audit: compactPaperSignalIntentFillAudit(asJsonRecord(paper.signal_intent_fill_audit)),
+        events: compactPaperEvents(asJsonRecord(paper.events)),
       }
     : paper;
 
   return {
     ...dashboard,
+    dashboard_meta: {
+      ...asJsonRecord(dashboard.dashboard_meta),
+      desktop_transfer: {
+        compacted_for_startup: true,
+        budget_bytes: DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES,
+        detail_artifacts: desktopTransferArtifactLinks(),
+      },
+    },
     strategy_analysis: compactStrategyAnalysis,
     historical_playback: compactHistoricalPlayback,
     paper: compactPaper,
     desktop_compacted_for_startup: true,
+  };
+}
+
+export function compactDesktopStateForRenderer(state: DesktopState): DesktopState {
+  const compactedDashboard = compactDashboardForDesktopTransfer(asJsonRecord(state.dashboard));
+  if (!compactedDashboard) {
+    return state;
+  }
+  return {
+    ...state,
+    dashboard: compactedDashboard,
   };
 }
 

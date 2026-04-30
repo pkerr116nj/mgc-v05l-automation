@@ -3,7 +3,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { __testing, getDesktopState, prepareDesktopForLaunch, runDashboardAction, runProductionLinkAction, startDashboard, type DesktopState } from "./runtime";
+import {
+  __testing,
+  compactDesktopStateForRenderer,
+  DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES,
+  getDesktopState,
+  prepareDesktopForLaunch,
+  runDashboardAction,
+  runProductionLinkAction,
+  startDashboard,
+  type DesktopState,
+} from "./runtime";
 import { buildOperatorTriageContract } from "./shared/operatorTriage";
 
 function makeDesktopState(overrides: Partial<DesktopState> = {}): DesktopState {
@@ -106,6 +116,169 @@ function makeDesktopState(overrides: Partial<DesktopState> = {}): DesktopState {
     },
     refreshedAt: new Date().toISOString(),
     ...overrides,
+  };
+}
+
+function makeOversizedDashboardFixture(): Record<string, unknown> {
+  const heavyTradeLog = Array.from({ length: 500 }, (_value, index) => ({
+    trade_id: `trade-${index}`,
+    note: "X".repeat(8_000),
+  }));
+  const heavyAlertMap = Object.fromEntries(
+    Array.from({ length: 3_500 }, (_value, index) => [
+      `alert-${index}`,
+      {
+        severity: "warn",
+        detail: "Y".repeat(1_400),
+      },
+    ]),
+  );
+  const heavyStrategyDetails = Object.fromEntries(
+    Array.from({ length: 160 }, (_value, index) => [
+      `strategy-${index}`,
+      {
+        note: "Z".repeat(30_000),
+      },
+    ]),
+  );
+  const heavyResultsRows = Array.from({ length: 2_000 }, (_value, index) => ({
+    strategy_key: `strategy-${index}`,
+    summary: "R".repeat(2_000),
+  }));
+  const heavyUnifiedDetailViews = {
+    giant: {
+      rows: Array.from({ length: 1_500 }, (_value, index) => ({
+        strategy_key: `strategy-${index}`,
+        detail: "U".repeat(2_000),
+      })),
+    },
+  };
+  return {
+    generated_at: "2026-04-29T21:59:00Z",
+    dashboard_meta: {
+      server_instance_id: "desktop-budget-fixture",
+    },
+    operator_surface: {
+      generated_at: "2026-04-29T21:59:00Z",
+      runtime_readiness: {
+        values: {
+          blocking_fault_count: 0,
+          advisory_fault_count: 1,
+        },
+      },
+    },
+    paper: {
+      readiness: {
+        paper_trade_allowed: true,
+        paper_trade_block_reason: null,
+        live_trade_allowed: false,
+        live_trade_block_reason: "LIVE_AUTHORITY_REQUIRED",
+        paper_runtime_ready: true,
+        paper_readiness_source: "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
+        session_eligible_count: 8,
+        waiting_for_bar_count: 4,
+        no_setup_count: 11,
+        actionable_now_count: 1,
+        true_blocked_count: 0,
+        blocking_fault_count: 0,
+        advisory_fault_count: 1,
+        lane_eligibility_rows: [
+          {
+            lane_id: "gc_1x_all_lanes__asia_early_long",
+            route_ready: true,
+            route_destination: "ibkr_paper_bridge_submit_capable",
+            bridge_allowed: true,
+            bridge_block_reason: null,
+          },
+        ],
+      },
+      alerts_state: {
+        active_alerts: [{ id: "active-1" }],
+        recent_events: [{ id: "recent-1" }],
+        rows: [{ id: "row-1" }],
+        by_key: heavyAlertMap,
+      },
+      strategy_performance: {
+        generated_at: "2026-04-29T21:59:00Z",
+        trade_log: heavyTradeLog,
+        rows: [{ lane_id: "gc_1x_all_lanes__asia_early_long" }],
+      },
+      raw_operator_status: {
+        lanes: Array.from({ length: 44 }, (_value, index) => ({
+          lane_id: `lane-${index}`,
+          explanation: "O".repeat(8_000),
+        })),
+        active_lane_ids: ["gc_1x_all_lanes__asia_early_long"],
+      },
+      signal_intent_fill_audit: {
+        rows: Array.from({ length: 44 }, (_value, index) => ({
+          lane_id: `lane-${index}`,
+          explanation: "A".repeat(8_000),
+        })),
+        summary: { row_count: 44 },
+        artifacts: {
+          report_path: "/tmp/paper_signal_audit.md",
+        },
+      },
+      events: {
+        alerts: Array.from({ length: 10 }, (_value, index) => ({ id: index, detail: "E".repeat(2_000) })),
+      },
+    },
+    strategy_analysis: {
+      generated_at: "2026-04-29T21:59:00Z",
+      results_board: {
+        row_count: heavyResultsRows.length,
+        rows: heavyResultsRows,
+      },
+      details_by_strategy_key: heavyStrategyDetails,
+      unified_monitor: {
+        available: true,
+        detail_views: heavyUnifiedDetailViews,
+        selection_summary: {
+          selected_strategy_key: "gc_family",
+        },
+      },
+      research_analytics: {
+        available: true,
+      },
+    },
+    historical_playback: {
+      study_catalog: {
+        items: Array.from({ length: 300 }, (_value, index) => ({
+          study_key: `study-${index}`,
+          label: `Study ${index}`,
+          summary: {
+            calendar_breakdown: [{ date: "2026-04-29", realized_pnl: "0", trade_count: 1 }],
+          },
+        })),
+      },
+    },
+    production_link: {
+      diagnostics: {
+        open_orders_total: 0,
+      },
+      reconciliation: {
+        broker_minus_ledger: {
+          MGC: 0,
+          MNQ: 0,
+          MES: 0,
+        },
+      },
+      broker_state_snapshot: {
+        positions: {
+          MGC: 0,
+          MNQ: 0,
+          MES: 0,
+        },
+      },
+      portfolio: {
+        ledger_positions: {
+          MGC: 0,
+          MNQ: 0,
+          MES: 0,
+        },
+      },
+    },
   };
 }
 
@@ -1324,9 +1497,8 @@ test("sandboxed startup uses persisted snapshots without attempting automatic ba
 });
 
 test("compact startup state strips heavyweight analytics payloads from persisted snapshots", async () => {
-  __testing.resetRuntimeState();
-  __testing.setBuildLocalOperatorAuthStateHook(async () => makeDesktopState().localAuth);
-  __testing.setLoadSnapshotBundleHook(async () => ({
+  const state = compactDesktopStateForRenderer(makeDesktopState({
+    dashboard: {
     generated_at: new Date().toISOString(),
     operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
     paper: {
@@ -1336,6 +1508,23 @@ test("compact startup state strips heavyweight analytics payloads from persisted
         active_alerts: [{ id: "alert-1" }],
         recent_events: [{ id: "event-1" }],
         rows: [{ id: "row-1" }],
+        by_key: { "alert-1": { severity: "warn" } },
+      },
+      strategy_performance: {
+        generated_at: "2026-04-18T09:00:00Z",
+        trade_log: [{ trade_id: "t-1" }, { trade_id: "t-2" }],
+        rows: [{ lane_id: "lane-1" }],
+      },
+      raw_operator_status: {
+        lanes: [{ lane_id: "lane-1" }],
+        active_lane_ids: ["lane-1"],
+      },
+      signal_intent_fill_audit: {
+        rows: [{ lane_id: "lane-1", audit_verdict: "SETUP_GATED" }],
+        summary: { row_count: 1 },
+      },
+      events: {
+        alerts: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }],
       },
     },
     historical_playback: {
@@ -1366,14 +1555,16 @@ test("compact startup state strips heavyweight analytics payloads from persisted
       details_by_strategy_key: {
         alpha: { note: "heavy" },
       },
+      unified_monitor: {
+        detail_views: { giant: { rows: [{ strategy_key: "alpha" }] } },
+        selection_summary: { selected_strategy_key: "alpha" },
+      },
       research_analytics: {
         available: true,
       },
     },
+  },
   }));
-  __testing.setLoadLiveDashboardHook(async () => null);
-
-  const state = await getDesktopState({ includeHeavyPayload: false });
   const dashboard = (state.dashboard ?? {}) as Record<string, unknown>;
   const paper = (dashboard.paper ?? {}) as Record<string, unknown>;
   const alertsState = (paper.alerts_state ?? {}) as Record<string, unknown>;
@@ -1382,11 +1573,19 @@ test("compact startup state strips heavyweight analytics payloads from persisted
   const compactedItems = Array.isArray(studyCatalog.items) ? studyCatalog.items as Array<Record<string, unknown>> : [];
   const strategyAnalysis = (dashboard.strategy_analysis ?? {}) as Record<string, unknown>;
   const resultsBoard = (strategyAnalysis.results_board ?? {}) as Record<string, unknown>;
+  const unifiedMonitor = (strategyAnalysis.unified_monitor ?? {}) as Record<string, unknown>;
+  const strategyPerformance = (paper.strategy_performance ?? {}) as Record<string, unknown>;
+  const rawOperatorStatus = (paper.raw_operator_status ?? {}) as Record<string, unknown>;
+  const signalIntentFillAudit = (paper.signal_intent_fill_audit ?? {}) as Record<string, unknown>;
+  const events = (paper.events ?? {}) as Record<string, unknown>;
+  const transferMeta = ((dashboard.dashboard_meta ?? {}) as Record<string, unknown>).desktop_transfer as Record<string, unknown>;
 
   assert.equal(state.connection, "snapshot");
   assert.equal(dashboard.desktop_compacted_for_startup, true);
-  assert.deepEqual(alertsState.active_alerts, []);
-  assert.deepEqual(alertsState.recent_events, []);
+  assert.deepEqual(alertsState.active_alerts, [{ id: "alert-1" }]);
+  assert.deepEqual(alertsState.recent_events, [{ id: "event-1" }]);
+  assert.deepEqual(alertsState.by_key, {});
+  assert.equal(alertsState.alert_count, 1);
   assert.equal(compactedItems.length, 1);
   assert.deepEqual((compactedItems[0]?.summary as Record<string, unknown>)?.calendar_breakdown, [
     { date: "2026-04-17", realized_pnl: "-4156", trade_count: 18 },
@@ -1394,8 +1593,127 @@ test("compact startup state strips heavyweight analytics payloads from persisted
   assert.equal((compactedItems[0] as Record<string, unknown>)?.study_preview, undefined);
   assert.deepEqual(resultsBoard.rows, []);
   assert.deepEqual(strategyAnalysis.details_by_strategy_key, {});
+  assert.equal((unifiedMonitor.detail_views as Record<string, unknown> | undefined), undefined);
+  assert.equal(unifiedMonitor.compacted_for_startup, true);
   assert.deepEqual(strategyAnalysis.research_analytics, { available: true });
-  __testing.resetRuntimeState();
+  assert.equal(Array.isArray(strategyPerformance.trade_log), true);
+  assert.equal((strategyPerformance.trade_log as Array<unknown>).length, 2);
+  assert.equal(strategyPerformance.trade_log_count, 2);
+  assert.deepEqual(rawOperatorStatus.lanes, [{ lane_id: "lane-1" }]);
+  assert.equal(rawOperatorStatus.lane_count, 1);
+  assert.deepEqual(signalIntentFillAudit.rows, [{ lane_id: "lane-1", audit_verdict: "SETUP_GATED" }]);
+  assert.equal(signalIntentFillAudit.row_count, 1);
+  assert.equal(Array.isArray(events.alerts), true);
+  assert.equal((events.alerts as Array<unknown>).length, 5);
+  assert.equal(events.alerts_count, 6);
+  assert.equal(transferMeta.compacted_for_startup, true);
+  assert.equal(transferMeta.budget_bytes, DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES);
+  assert.equal(typeof (transferMeta.detail_artifacts as Record<string, unknown>).full_dashboard_snapshot_path, "string");
+});
+
+test("renderer-bound desktop state stays under budget while preserving operator-critical fields", () => {
+  const dashboard = makeOversizedDashboardFixture();
+  const rawBytes = Buffer.byteLength(JSON.stringify(dashboard));
+  assert.ok(rawBytes > DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES);
+
+  const baseState = makeDesktopState();
+  const state = makeDesktopState({
+    connection: "live",
+    backendUrl: "http://127.0.0.1:8790/",
+    source: {
+      mode: "live_api",
+      label: "Live API",
+      detail: "attached",
+      canRunLiveActions: true,
+      healthReachable: true,
+      apiReachable: true,
+    },
+    backend: {
+      state: "healthy",
+      label: "Healthy",
+      detail: "attached",
+      lastError: null,
+      nextRetryAt: null,
+      retryCount: 0,
+      pid: 123,
+      apiStatus: "responding",
+      healthStatus: "ok",
+      managerOwned: false,
+      startupFailureKind: "none",
+      actionHint: null,
+      staleListenerDetected: false,
+      healthReachable: true,
+      dashboardApiTimedOut: false,
+      portConflictDetected: false,
+    },
+    startup: {
+      ...baseState.startup,
+      mode: "SERVICE_ATTACHED",
+      ownership: "attached_existing",
+      chosenHost: "127.0.0.1",
+      chosenPort: 8790,
+      chosenUrl: "http://127.0.0.1:8790/",
+      failureKind: "none",
+      recommendedAction: null,
+      staleListenerDetected: false,
+      healthReachable: true,
+      dashboardApiTimedOut: false,
+    },
+    dashboard,
+  });
+
+  const compactedState = compactDesktopStateForRenderer(state);
+  const compactedDashboard = (compactedState.dashboard ?? {}) as Record<string, unknown>;
+  const compactedBytes = Buffer.byteLength(JSON.stringify(compactedDashboard));
+  const paper = (compactedDashboard.paper ?? {}) as Record<string, unknown>;
+  const readiness = (paper.readiness ?? {}) as Record<string, unknown>;
+  const strategyAnalysis = (compactedDashboard.strategy_analysis ?? {}) as Record<string, unknown>;
+  const resultsBoard = (strategyAnalysis.results_board ?? {}) as Record<string, unknown>;
+  const unifiedMonitor = (strategyAnalysis.unified_monitor ?? {}) as Record<string, unknown>;
+  const alertsState = (paper.alerts_state ?? {}) as Record<string, unknown>;
+  const strategyPerformance = (paper.strategy_performance ?? {}) as Record<string, unknown>;
+  const rawOperatorStatus = (paper.raw_operator_status ?? {}) as Record<string, unknown>;
+  const signalIntentFillAudit = (paper.signal_intent_fill_audit ?? {}) as Record<string, unknown>;
+  const productionLink = (compactedDashboard.production_link ?? {}) as Record<string, unknown>;
+  const diagnostics = (productionLink.diagnostics ?? {}) as Record<string, unknown>;
+  const reconciliation = (productionLink.reconciliation ?? {}) as Record<string, unknown>;
+  const brokerStateSnapshot = (productionLink.broker_state_snapshot ?? {}) as Record<string, unknown>;
+  const portfolio = (productionLink.portfolio ?? {}) as Record<string, unknown>;
+  const transferMeta = ((compactedDashboard.dashboard_meta ?? {}) as Record<string, unknown>).desktop_transfer as Record<string, unknown>;
+
+  assert.ok(compactedBytes < DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES);
+  assert.equal(compactedState.source.mode, "live_api");
+  assert.equal(readiness.paper_trade_allowed, true);
+  assert.equal(readiness.paper_trade_block_reason, null);
+  assert.equal(readiness.paper_runtime_ready, true);
+  assert.equal(readiness.actionable_now_count, 1);
+  assert.equal(readiness.true_blocked_count, 0);
+  assert.equal(readiness.blocking_fault_count, 0);
+  assert.equal(readiness.session_eligible_count, 8);
+  assert.equal(readiness.waiting_for_bar_count, 4);
+  assert.equal(readiness.no_setup_count, 11);
+  assert.equal((readiness.lane_eligibility_rows as Array<Record<string, unknown>>)[0]?.route_destination, "ibkr_paper_bridge_submit_capable");
+  assert.equal((readiness.lane_eligibility_rows as Array<Record<string, unknown>>)[0]?.bridge_allowed, true);
+  assert.equal(diagnostics.open_orders_total, 0);
+  assert.deepEqual((brokerStateSnapshot.positions ?? {}) as Record<string, unknown>, { MGC: 0, MNQ: 0, MES: 0 });
+  assert.deepEqual((portfolio.ledger_positions ?? {}) as Record<string, unknown>, { MGC: 0, MNQ: 0, MES: 0 });
+  assert.deepEqual((reconciliation.broker_minus_ledger ?? {}) as Record<string, unknown>, { MGC: 0, MNQ: 0, MES: 0 });
+  assert.deepEqual(resultsBoard.rows, []);
+  assert.deepEqual(strategyAnalysis.details_by_strategy_key, {});
+  assert.equal((unifiedMonitor.detail_views as Record<string, unknown> | undefined), undefined);
+  assert.deepEqual(alertsState.by_key, {});
+  assert.equal(Array.isArray(alertsState.active_alerts), true);
+  assert.equal(Array.isArray(alertsState.recent_events), true);
+  const compactTradeLog = strategyPerformance.trade_log as Array<Record<string, unknown>>;
+  assert.equal(compactTradeLog.length, 200);
+  assert.equal(strategyPerformance.trade_log_count, 500);
+  assert.equal(String(compactTradeLog[0]?.exit_timestamp ?? ""), "2026-04-29T15:00:00.000Z");
+  assert.equal(String(compactTradeLog[199]?.exit_timestamp ?? ""), "2026-04-21T08:03:00.000Z");
+  assert.equal((rawOperatorStatus.lanes as Array<unknown>).length, 44);
+  assert.equal((signalIntentFillAudit.rows as Array<unknown>).length, 44);
+  assert.equal(transferMeta.compacted_for_startup, true);
+  assert.equal(transferMeta.budget_bytes, DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES);
+  assert.equal(typeof (transferMeta.detail_artifacts as Record<string, unknown>).full_dashboard_snapshot_path, "string");
 });
 
 test("startup with no live dashboard and no snapshots returns quickly while background bootstrap starts", async () => {
