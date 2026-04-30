@@ -432,6 +432,56 @@ def test_load_status_blocks_when_runtime_is_stale(tmp_path: Path) -> None:
     assert "paper_strategy_monitor_runtime_stale" in status["block_reasons"]
 
 
+def test_load_status_prefers_fresher_runtime_over_older_service_report(tmp_path: Path) -> None:
+    runtime_path = tmp_path / "var" / "paper_strategy_monitor_runtime_status.json"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+                "monitor_running": True,
+                "submit_allowed": True,
+                "block_reasons": [],
+                "detail": "Preserved ATP ownership on the reconciled flat paper position using prior adopted evidence from the opened broker lot.",
+                "health_classification": "HEALTHY",
+                "account_id": "DUM882026",
+                "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+                "last_successful_broker_refresh": "2999-01-01T00:00:00+00:00",
+                "freshness_window_seconds": 60.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    service_status_path = tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_monitor_service_status_report.json"
+    service_status_path.parent.mkdir(parents=True, exist_ok=True)
+    service_status_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2000-01-01T00:00:00+00:00",
+                "classification": "PAPER_MONITOR_SERVICE_READY",
+                "service_process_running": True,
+                "monitor_running": True,
+                "bridge_allowed": False,
+                "block_reasons": [],
+                "health_classification": "HEALTHY",
+                "stale": False,
+                "runtime_classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+                "last_successful_broker_refresh": "2000-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "var" / "paper_strategy_monitor_service.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+
+    assert status["submit_allowed"] is True
+    assert status["stale"] is False
+    assert status["detail"] == "Preserved ATP ownership on the reconciled flat paper position using prior adopted evidence from the opened broker lot."
+    assert status["last_successful_broker_refresh"] == "2999-01-01T00:00:00+00:00"
+
+
 def test_load_status_marks_runtime_stopped_when_runtime_pid_is_dead(tmp_path: Path) -> None:
     runtime_path = tmp_path / "var" / "paper_strategy_monitor_runtime_status.json"
     runtime_path.parent.mkdir(parents=True, exist_ok=True)

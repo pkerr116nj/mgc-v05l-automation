@@ -742,6 +742,30 @@ def _read_monitor_service_pid(repo_root: Path) -> int | None:
 def _normalize_loaded_runtime_status(*, repo_root: Path, runtime_status: dict[str, Any]) -> dict[str, Any]:
     reasons = list(runtime_status.get("block_reasons") or [])
     service_running = _monitor_service_process_running(repo_root)
+    service_status_path = repo_root / _DEFAULT_OUTPUT_DIR / _SERVICE_STATUS_REPORT_FILENAME
+    service_status = _load_json(service_status_path)
+    service_status_authoritative = _service_status_is_authoritative(
+        runtime_status=runtime_status,
+        service_status=service_status,
+    )
+    if service_running is not True and bool(service_status.get("service_process_running")):
+        service_running = True
+    if service_status_authoritative and bool(service_status.get("monitor_running")):
+        runtime_status["monitor_running"] = True
+    if service_status_authoritative and service_status.get("last_successful_broker_refresh"):
+        runtime_status["last_successful_broker_refresh"] = service_status.get("last_successful_broker_refresh")
+    if service_status_authoritative and service_status.get("last_poll_time"):
+        runtime_status["last_poll_time"] = service_status.get("last_poll_time")
+    if service_status_authoritative and service_status.get("ibkr_connection_state"):
+        runtime_status["ibkr_connection_state"] = service_status.get("ibkr_connection_state")
+    if service_status_authoritative and service_status.get("health_classification"):
+        runtime_status["health_classification"] = service_status.get("health_classification")
+    if service_status_authoritative and service_status.get("monitor_health"):
+        runtime_status["monitor_health"] = service_status.get("monitor_health")
+    if service_status_authoritative and bool(service_status.get("monitor_running")) and not bool(service_status.get("stale")):
+        runtime_status["stale"] = False
+    if service_status_authoritative and "bridge_allowed" in service_status:
+        runtime_status["submit_allowed"] = bool(service_status.get("bridge_allowed"))
     runtime_status["service_process_running"] = service_running
     runtime_status["service_pid"] = _read_monitor_service_pid(repo_root)
     runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed"))
@@ -790,9 +814,48 @@ def _normalize_loaded_runtime_status(*, repo_root: Path, runtime_status: dict[st
         runtime_status["stale"] = True
         stale = True
         health = "STOPPED"
+    if (
+        service_status_authoritative
+        and bool(service_status.get("monitor_running"))
+        and not bool(service_status.get("stale"))
+        and str(service_status.get("health_classification") or "").upper() == "HEALTHY"
+    ):
+        runtime_status["classification"] = service_status.get("runtime_classification") or runtime_status.get("classification") or "PAPER_STRATEGY_MONITOR_ACTIVE"
+        runtime_status["monitor_running"] = True
+        runtime_status["health_classification"] = "HEALTHY"
+        runtime_status["monitor_health"] = "HEALTHY"
+        runtime_status["stale"] = False
+        stale = False
+        health = "HEALTHY"
+        reasons = [
+            reason
+            for reason in reasons
+            if reason
+            not in {
+                "paper_strategy_monitor_not_running",
+                "paper_strategy_monitor_runtime_stale",
+                "paper_strategy_monitor_health_stopped",
+            }
+        ]
     runtime_status["block_reasons"] = reasons
     runtime_status["submit_allowed"] = bool(runtime_status.get("submit_allowed")) and bool(runtime_status.get("monitor_running")) and not stale and health == "HEALTHY"
     return runtime_status
+
+
+def _service_status_is_authoritative(
+    *,
+    runtime_status: dict[str, Any],
+    service_status: dict[str, Any],
+) -> bool:
+    if not service_status:
+        return False
+    service_generated_at = _parse_datetime(service_status.get("generated_at"))
+    if service_generated_at is None:
+        return False
+    runtime_generated_at = _parse_datetime(runtime_status.get("generated_at"))
+    if runtime_generated_at is None:
+        return True
+    return service_generated_at >= runtime_generated_at
 
 
 def _age_seconds_from_iso(value: Any) -> float | None:

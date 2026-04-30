@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
     write_ibkr_paper_strategy_bridge_artifacts,
     write_strategy_order_intent_schema_file,
 )
+from mgc_v05l.execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from mgc_v05l.execution.ibkr_paper_order_preview import evaluate_paper_preview_environment_lock
 
 
@@ -503,6 +505,82 @@ def test_preflight_passes_healthy_monitor_gate(tmp_path: Path) -> None:
         for row in checks
         if row["name"].startswith("paper_strategy_monitor_") or row["name"].startswith("paper_strategy_governance_")
     )
+
+
+def test_preflight_ignores_stale_service_overlay_for_flat_paper_submit_gate(tmp_path: Path) -> None:
+    _write_runtime_files(
+        tmp_path,
+        monitor_status={
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+            "detail": "Preserved ATP ownership on the reconciled flat paper position using prior adopted evidence from the opened broker lot.",
+            "last_successful_broker_refresh": "2999-01-01T00:00:00+00:00",
+            "freshness_window_seconds": 60.0,
+        },
+        governance_status=_healthy_governance(),
+    )
+    service_status_path = tmp_path / "outputs" / "reports" / "paper_strategy_monitor" / "paper_monitor_service_status_report.json"
+    service_status_path.parent.mkdir(parents=True, exist_ok=True)
+    service_status_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2000-01-01T00:00:00+00:00",
+                "classification": "PAPER_MONITOR_SERVICE_READY",
+                "service_process_running": True,
+                "monitor_running": True,
+                "bridge_allowed": False,
+                "block_reasons": [],
+                "health_classification": "HEALTHY",
+                "stale": False,
+                "runtime_classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+                "last_successful_broker_refresh": "2000-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "var" / "paper_strategy_monitor_service.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    config = _config(
+        tmp_path,
+        submit=True,
+        manual_frozen_preview_path=tmp_path / "preview.json",
+        approval_digest="digest",
+        approval_phrase="phrase",
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-30T07:06:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    monitor_status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "manual cli"},
+        monitor_status=monitor_status,
+        governance_status=_healthy_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    monitor_gate = next(row for row in checks if row["name"] == "paper_strategy_submit_gate")
+    assert monitor_status["submit_allowed"] is True
+    assert monitor_gate["passed"] is True
 
 
 def test_preflight_blocks_when_monitor_contract_mismatches(tmp_path: Path) -> None:

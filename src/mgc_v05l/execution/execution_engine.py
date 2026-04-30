@@ -27,10 +27,12 @@ class PendingExecution:
     long_entry_family: LongEntryFamily
     short_entry_family: ShortEntryFamily
     short_entry_source: Optional[str]
+    submit_attempt_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class SubmitFailure:
+    submit_attempt_id: Optional[str]
     order_intent_id: str
     bar_id: str
     symbol: str
@@ -78,9 +80,12 @@ class ExecutionEngine:
         """Submit an accepted intent to the broker and track it as pending."""
         if not self.register_intent(intent):
             return None
+        submit_attempt_id = _submit_attempt_id(intent)
         self._last_submit_failure = None
         self._last_submit_attempt = {
+            "submit_attempt_id": submit_attempt_id,
             "order_intent_id": intent.order_intent_id,
+            "signal_id": intent.signal_id,
             "bar_id": intent.bar_id,
             "symbol": intent.symbol,
             "intent_type": intent.intent_type.value,
@@ -93,6 +98,7 @@ class ExecutionEngine:
             broker_submit_context = _optional_broker_submit_context(self._broker)
             self._clear_registration(intent.order_intent_id, intent.intent_type)
             self._last_submit_failure = SubmitFailure(
+                submit_attempt_id=submit_attempt_id,
                 order_intent_id=intent.order_intent_id,
                 bar_id=intent.bar_id,
                 symbol=intent.symbol,
@@ -113,6 +119,7 @@ class ExecutionEngine:
             broker_submit_context = _optional_broker_submit_context(self._broker)
             self._clear_registration(intent.order_intent_id, intent.intent_type)
             self._last_submit_failure = SubmitFailure(
+                submit_attempt_id=submit_attempt_id,
                 order_intent_id=intent.order_intent_id,
                 bar_id=intent.bar_id,
                 symbol=intent.symbol,
@@ -148,6 +155,7 @@ class ExecutionEngine:
             long_entry_family=long_entry_family,
             short_entry_family=short_entry_family,
             short_entry_source=short_entry_source,
+            submit_attempt_id=submit_attempt_id,
         )
         self._pending_executions[intent.order_intent_id] = pending
         return pending
@@ -284,3 +292,7 @@ def _optional_broker_submit_context(broker: BrokerInterface) -> dict[str, object
     except Exception:
         return {}
     return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def _submit_attempt_id(intent: OrderIntent) -> str:
+    return f"{intent.order_intent_id}|submit|{intent.created_at.isoformat()}"

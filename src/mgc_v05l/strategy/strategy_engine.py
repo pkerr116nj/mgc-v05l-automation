@@ -45,6 +45,7 @@ from ..signals.asia_vwap_reclaim import evaluate_asia_vwap_reclaim
 from ..signals.bear_snap import evaluate_bear_snap
 from ..signals.bull_snap import evaluate_bull_snap
 from ..signals.entry_resolver import resolve_entries
+from ..app.session_phase_labels import phase_coarse_session_group, session_restriction_matches_timestamp
 from .exit_engine import ExitDecision, evaluate_exits
 from .invariants import validate_state
 from .risk_engine import compute_risk_context
@@ -295,6 +296,7 @@ class StrategyEngine:
                     if submit_blocker is not None:
                         self._latest_live_intent_summary = {
                             **live_intent_summary,
+                            "submit_attempt_id": self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
                             "submit_gate_blocker": submit_blocker,
                             "submit_attempted": False,
                             "submit_suppressed": True,
@@ -307,7 +309,12 @@ class StrategyEngine:
                             "submit_suppressed": False,
                         }
                     if submit_blocker is not None:
-                        self._emit_order_rejection_alert(maybe_intent, execution_bar.end_ts, reason=submit_blocker)
+                        self._emit_order_rejection_alert(
+                            maybe_intent,
+                            execution_bar.end_ts,
+                            reason=submit_blocker,
+                            submit_attempt_id=self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
+                        )
                     else:
                         pending = self._execution_engine.submit_intent(
                             maybe_intent,
@@ -325,6 +332,7 @@ class StrategyEngine:
                             )
                             self._latest_live_intent_summary = {
                                 **self._latest_live_intent_summary,
+                                "submit_attempt_id": pending.submit_attempt_id,
                                 "submit_attempted_at": pending.submitted_at.isoformat(),
                                 "broker_order_id": pending.broker_order_id,
                                 "broker_ack_at": pending.acknowledged_at.isoformat() if pending.acknowledged_at is not None else None,
@@ -359,13 +367,26 @@ class StrategyEngine:
                                     "intent_created_at": maybe_intent.created_at.isoformat(),
                                     "latest_order_status": pending.broker_order_status,
                                 }
-                            self._emit_order_lifecycle_alert("created", maybe_intent, execution_bar.end_ts, pending_broker_order_id=pending.broker_order_id)
-                            self._emit_order_lifecycle_alert("submitted", maybe_intent, execution_bar.end_ts, pending_broker_order_id=pending.broker_order_id)
+                            self._emit_order_lifecycle_alert(
+                                "created",
+                                maybe_intent,
+                                execution_bar.end_ts,
+                                pending_broker_order_id=pending.broker_order_id,
+                                submit_attempt_id=pending.submit_attempt_id,
+                            )
+                            self._emit_order_lifecycle_alert(
+                                "submitted",
+                                maybe_intent,
+                                execution_bar.end_ts,
+                                pending_broker_order_id=pending.broker_order_id,
+                                submit_attempt_id=pending.submit_attempt_id,
+                            )
                         else:
                             failure = self._execution_engine.last_submit_failure()
                             self._latest_live_intent_summary = {
                                 **self._latest_live_intent_summary,
                                 "submit_failure": {
+                                    "submit_attempt_id": failure.submit_attempt_id,
                                     "failure_stage": failure.failure_stage,
                                     "error": failure.error,
                                     "submit_attempted_at": failure.submit_attempted_at.isoformat(),
@@ -618,6 +639,7 @@ class StrategyEngine:
             quantity=resolved_quantity,
             created_at=occurred_at,
             reason_code=reason_code,
+            signal_id=f"{bar_id}|signal|RUNTIME_EXIT|{reason_code}",
         )
         pending = self._execution_engine.submit_intent(intent)
         if pending is None:
@@ -646,7 +668,9 @@ class StrategyEngine:
         )
         self._persist_state(self._state, transition_label="runtime_exit_intent")
         self._latest_live_intent_summary = {
+            "signal_id": intent.signal_id,
             "order_intent_id": intent.order_intent_id,
+            "strategy_trade_id": intent.order_intent_id,
             "intent_type": intent.intent_type.value,
             "quantity": intent.quantity,
             "reason_code": intent.reason_code,
@@ -655,11 +679,24 @@ class StrategyEngine:
             "submit_attempted": True,
             "submit_suppressed": False,
             "submit_gate_blocker": None,
+            "submit_attempt_id": pending.submit_attempt_id,
             "resulting_position_side": self._state.position_side.value,
             "resulting_internal_qty": self._state.internal_position_qty,
         }
-        self._emit_order_lifecycle_alert("created", intent, occurred_at, pending_broker_order_id=pending.broker_order_id)
-        self._emit_order_lifecycle_alert("submitted", intent, occurred_at, pending_broker_order_id=pending.broker_order_id)
+        self._emit_order_lifecycle_alert(
+            "created",
+            intent,
+            occurred_at,
+            pending_broker_order_id=pending.broker_order_id,
+            submit_attempt_id=pending.submit_attempt_id,
+        )
+        self._emit_order_lifecycle_alert(
+            "submitted",
+            intent,
+            occurred_at,
+            pending_broker_order_id=pending.broker_order_id,
+            submit_attempt_id=pending.submit_attempt_id,
+        )
         return intent
 
     def submit_paper_canary_entry_intent(
@@ -757,6 +794,7 @@ class StrategyEngine:
             quantity=self._runtime_entry_quantity(),
             created_at=bar.end_ts,
             reason_code=reason_code,
+            signal_id=self._signal_id_for_actionable_signal(bar, normalized_side, signal_source),
         )
         pending = self._execution_engine.submit_intent(
             intent,
@@ -796,8 +834,20 @@ class StrategyEngine:
             self._state,
             transition_label="runtime_entry_intent_long" if normalized_side == "LONG" else "runtime_entry_intent_short",
         )
-        self._emit_order_lifecycle_alert("created", intent, bar.end_ts, pending_broker_order_id=pending.broker_order_id)
-        self._emit_order_lifecycle_alert("submitted", intent, bar.end_ts, pending_broker_order_id=pending.broker_order_id)
+        self._emit_order_lifecycle_alert(
+            "created",
+            intent,
+            bar.end_ts,
+            pending_broker_order_id=pending.broker_order_id,
+            submit_attempt_id=pending.submit_attempt_id,
+        )
+        self._emit_order_lifecycle_alert(
+            "submitted",
+            intent,
+            bar.end_ts,
+            pending_broker_order_id=pending.broker_order_id,
+            submit_attempt_id=pending.submit_attempt_id,
+        )
         return intent
 
     def _load_initial_state(self, initial_state: Optional[StrategyState]) -> StrategyState:
@@ -1383,6 +1433,7 @@ class StrategyEngine:
                         quantity=self._runtime_entry_quantity(),
                         created_at=bar.end_ts,
                         reason_code=signal_packet.long_entry_source or "longEntry",
+                        signal_id=self._signal_id_for_actionable_signal(bar, "LONG", signal_packet.long_entry_source),
                     )
                 if signal_packet.short_entry and self._entry_side_is_currently_allowed("SHORT", state):
                     return OrderIntent(
@@ -1393,6 +1444,7 @@ class StrategyEngine:
                         quantity=self._runtime_entry_quantity(),
                         created_at=bar.end_ts,
                         reason_code=signal_packet.short_entry_source or "shortEntry",
+                        signal_id=self._signal_id_for_actionable_signal(bar, "SHORT", signal_packet.short_entry_source),
                     )
             return None
 
@@ -1405,6 +1457,11 @@ class StrategyEngine:
                 quantity=state.internal_position_qty,
                 created_at=bar.end_ts,
                 reason_code=exit_decision.primary_reason.value if exit_decision.primary_reason else "longExit",
+                signal_id=self._signal_id_for_actionable_signal(
+                    bar,
+                    "EXIT_LONG",
+                    exit_decision.primary_reason.value if exit_decision.primary_reason else "longExit",
+                ),
             )
 
         if state.position_side == PositionSide.SHORT and state.exits_enabled and exit_decision.short_exit:
@@ -1416,8 +1473,20 @@ class StrategyEngine:
                 quantity=state.internal_position_qty,
                 created_at=bar.end_ts,
                 reason_code=exit_decision.primary_reason.value if exit_decision.primary_reason else "shortExit",
+                signal_id=self._signal_id_for_actionable_signal(
+                    bar,
+                    "EXIT_SHORT",
+                    exit_decision.primary_reason.value if exit_decision.primary_reason else "shortExit",
+                ),
             )
         return None
+
+    def _signal_id_for_actionable_signal(self, bar: Bar, side: str, source: str | None) -> str:
+        normalized_source = str(source or "unknown").strip() or "unknown"
+        return f"{bar.bar_id}|signal|{side}|{normalized_source}"
+
+    def _pre_submit_attempt_id(self, intent: OrderIntent, occurred_at: datetime) -> str:
+        return f"{intent.order_intent_id}|pre_submit|{occurred_at.isoformat()}"
 
     def _resolve_long_entry_family(self, signal_packet: SignalPacket) -> LongEntryFamily:
         if signal_packet.long_entry_source == "asiaVWAPLongSignal":
@@ -1528,6 +1597,7 @@ class StrategyEngine:
                 **self._runtime_identity,
                 "instrument": self._settings.symbol,
                 "order_intent_id": fill_event.order_intent_id,
+                "strategy_trade_id": fill_event.order_intent_id,
                 "intent_type": fill_event.intent_type.value,
                 "broker_order_id": fill_event.broker_order_id,
                 "fill_timestamp": fill_event.fill_timestamp.isoformat(),
@@ -1547,6 +1617,7 @@ class StrategyEngine:
         occurred_at: datetime,
         *,
         pending_broker_order_id: str | None = None,
+        submit_attempt_id: str | None = None,
     ) -> None:
         if self._alert_dispatcher is None:
             return
@@ -1560,10 +1631,13 @@ class StrategyEngine:
             payload={
                 **self._runtime_identity,
                 "instrument": intent.symbol,
+                "signal_id": intent.signal_id,
                 "order_intent_id": intent.order_intent_id,
+                "strategy_trade_id": intent.order_intent_id,
                 "intent_type": intent.intent_type.value,
                 "quantity": intent.quantity,
                 "reason_code": intent.reason_code,
+                "submit_attempt_id": submit_attempt_id,
                 "broker_order_id": pending_broker_order_id,
                 "occurred_at": occurred_at.isoformat(),
             },
@@ -1575,7 +1649,14 @@ class StrategyEngine:
             occurred_at=occurred_at,
         )
 
-    def _emit_order_rejection_alert(self, intent: OrderIntent, occurred_at: datetime, *, reason: str) -> None:
+    def _emit_order_rejection_alert(
+        self,
+        intent: OrderIntent,
+        occurred_at: datetime,
+        *,
+        reason: str,
+        submit_attempt_id: str | None = None,
+    ) -> None:
         if self._alert_dispatcher is None:
             return
         self._alert_dispatcher.emit(
@@ -1585,7 +1666,10 @@ class StrategyEngine:
             payload={
                 **self._runtime_identity,
                 "instrument": intent.symbol,
+                "signal_id": intent.signal_id,
                 "order_intent_id": intent.order_intent_id,
+                "strategy_trade_id": intent.order_intent_id,
+                "submit_attempt_id": submit_attempt_id,
                 "intent_type": intent.intent_type.value,
                 "quantity": intent.quantity,
                 "reason_code": intent.reason_code,
@@ -1611,7 +1695,9 @@ class StrategyEngine:
             payload={
                 **self._runtime_identity,
                 "instrument": intent.symbol,
+                "signal_id": intent.signal_id,
                 "order_intent_id": intent.order_intent_id,
+                "strategy_trade_id": intent.order_intent_id,
                 "intent_type": intent.intent_type.value,
                 "reason_code": intent.reason_code,
                 "occurred_at": occurred_at.isoformat(),
@@ -1637,7 +1723,12 @@ class StrategyEngine:
         reason = default_reason
         if failure is not None and failure.order_intent_id == intent.order_intent_id:
             reason = f"{default_reason} Broker stage={failure.failure_stage}: {failure.error}"
-        self._emit_order_rejection_alert(intent, occurred_at, reason=reason)
+        self._emit_order_rejection_alert(
+            intent,
+            occurred_at,
+            reason=reason,
+            submit_attempt_id=failure.submit_attempt_id if failure is not None else None,
+        )
         if failure is None or failure.order_intent_id != intent.order_intent_id:
             return state
         reconciler = self._build_reconciler()
@@ -1678,7 +1769,9 @@ class StrategyEngine:
         return {
             "bar_id": bar.bar_id,
             "bar_end_ts": bar.end_ts.isoformat(),
+            "signal_id": intent.signal_id,
             "order_intent_id": intent.order_intent_id,
+            "strategy_trade_id": intent.order_intent_id,
             "symbol": intent.symbol,
             "intent_type": intent.intent_type.value,
             "quantity": intent.quantity,
@@ -1717,7 +1810,9 @@ class StrategyEngine:
         return {
             "bar_id": bar.bar_id,
             "bar_end_ts": bar.end_ts.isoformat(),
+            "signal_id": intent.signal_id,
             "order_intent_id": intent.order_intent_id,
+            "strategy_trade_id": intent.order_intent_id,
             "symbol": intent.symbol,
             "intent_type": intent.intent_type.value,
             "quantity": intent.quantity,
@@ -1810,19 +1905,8 @@ def _signal_present(signal_packet: SignalPacket) -> bool:
 
 
 def _bar_matches_probationary_session_restriction(bar: Bar, restriction: str, timezone_info) -> bool:
-    local_time = bar.end_ts.astimezone(timezone_info).time()
-    normalized = restriction.upper()
-    if "/" in normalized:
-        allowed = {part.strip() for part in normalized.split("/") if part.strip()}
-        coarse = _phase_coarse_session_group(label_session_phase_for_bar(bar, timezone_info))
-        return coarse in allowed or label_session_phase_for_bar(bar, timezone_info) in allowed
-    if _gold_probationary_session_matches_time(local_time, normalized):
-        return True
-    if normalized == "ASIA_EARLY":
-        return time(18, 0) < local_time < time(20, 30)
-    if normalized == "US_LATE":
-        return time(13, 30) <= local_time < time(16, 0)
-    return True
+    observed_ts = bar.end_ts.astimezone(timezone_info) if bar.end_ts.tzinfo is not None else bar.end_ts.replace(tzinfo=timezone_info)
+    return session_restriction_matches_timestamp(observed_ts, restriction)
 
 
 def _gold_probationary_session_matches_time(local_time: time, restriction: str) -> bool:
@@ -1882,14 +1966,7 @@ def label_session_phase_for_bar(bar: Bar, timezone_info) -> str:
 
 
 def _phase_coarse_session_group(phase: str) -> str:
-    normalized = str(phase or "").upper()
-    if normalized.startswith("ASIA_"):
-        return "ASIA"
-    if normalized.startswith("LONDON_"):
-        return "LONDON"
-    if normalized.startswith("US_"):
-        return "US"
-    return "UNKNOWN"
+    return phase_coarse_session_group(phase)
 
 
 def _empty_signal_packet_payload(bar_id: str) -> dict[str, bool | str | None]:

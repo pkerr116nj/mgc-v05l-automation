@@ -17,6 +17,7 @@ class OrderIntent:
     quantity: int
     created_at: datetime
     reason_code: str
+    signal_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.order_intent_id:
