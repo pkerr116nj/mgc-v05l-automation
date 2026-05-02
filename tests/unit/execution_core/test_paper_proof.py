@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from mgc_v05l.execution_core.models import TerminalClassification
-from mgc_v05l.execution_core.paper_proof import PaperProofConfig, run_paper_proof
+from mgc_v05l.execution_core.harness import HarnessConfig
+from mgc_v05l.execution_core.models import Action, BrokerOrder, FillEvent, OrderIntent, SubmitAttempt, TerminalClassification
+from mgc_v05l.execution_core.paper_proof import PaperProofConfig, run_ibkr_paper_proof, run_paper_proof
 from mgc_v05l.execution_core.preflight import PreflightClassification, PreflightResult, ReadOnlyPreflightConfig
 
 
@@ -77,6 +78,78 @@ def passing_proof_runner(tmp_path: Path):
         )
 
     return run
+
+
+class RecordingPaperAdapter:
+    def __init__(self) -> None:
+        self.submitted: list[OrderIntent] = []
+        self.connected = False
+        self.disconnected = False
+
+    def connect(self) -> None:
+        self.connected = True
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+    def managed_accounts(self) -> tuple[str, ...]:
+        return ("DUM882026",)
+
+    def require_configured_account(self) -> str:
+        return "DUM882026"
+
+    def qualify_contract(self, *, run_id: str, contract_key: str, now: datetime):  # type: ignore[no-untyped-def]
+        return {"run_id": run_id, "contract_key": contract_key, "local_symbol": "MGCM6"}
+
+    def submit_limit_order(self, *, submit_attempt: SubmitAttempt, order_intent: OrderIntent) -> int:
+        self.submitted.append(order_intent)
+        return len(self.submitted)
+
+    def wait_for_broker_order(self, *, submit_attempt_id: str) -> BrokerOrder:
+        intent = self._intent_for(submit_attempt_id)
+        index = len([item for item in self.submitted if item.order_intent_id <= intent.order_intent_id])
+        return BrokerOrder(
+            broker_order_event_id=f"broker_order_{submit_attempt_id}",
+            run_id=intent.run_id,
+            submit_attempt_id=submit_attempt_id,
+            account_id=intent.account_id,
+            broker_order_id=f"FAKE-ORDER-{index:04d}",
+            perm_id=f"FAKE-PERM-{index:04d}",
+            client_id=17077,
+            contract_key=intent.contract_key,
+            action=intent.action,
+            quantity=1,
+            order_type="LMT",
+            limit_price=intent.limit_price,
+            status="Filled",
+            filled_quantity=1,
+            remaining_quantity=0,
+            average_fill_price=intent.limit_price,
+            observed_at=aware_now(),
+        )
+
+    def wait_for_fill(self, *, submit_attempt_id: str) -> FillEvent:
+        intent = self._intent_for(submit_attempt_id)
+        index = len([item for item in self.submitted if item.order_intent_id <= intent.order_intent_id])
+        return FillEvent(
+            fill_event_id=f"fill_{submit_attempt_id}",
+            run_id=intent.run_id,
+            submit_attempt_id=submit_attempt_id,
+            order_intent_id=intent.order_intent_id,
+            account_id=intent.account_id,
+            broker_order_id=f"FAKE-ORDER-{index:04d}",
+            perm_id=f"FAKE-PERM-{index:04d}",
+            execution_id=f"FAKE-EXEC-{index:04d}",
+            contract_key=intent.contract_key,
+            action=intent.action,
+            quantity=1,
+            price=intent.limit_price,
+            filled_at=aware_now(),
+        )
+
+    def _intent_for(self, submit_attempt_id: str) -> OrderIntent:
+        index = 0 if submit_attempt_id.endswith("_1") else 1
+        return self.submitted[index]
 
 
 @pytest.mark.parametrize(
@@ -168,9 +241,9 @@ def test_missing_or_unknown_quote_blocks_pricing_dependent_proof(tmp_path: Path)
     assert "observed quote" in str(result.report["failure_or_ambiguity"])
 
 
-def test_missing_quote_with_valid_manual_limit_price_proceeds_as_paper_only_manual_price(tmp_path: Path) -> None:
+def test_missing_quote_with_valid_manual_open_close_prices_proceeds_as_paper_only_manual_price(tmp_path: Path) -> None:
     result = run_paper_proof(
-        config=config(tmp_path, manual_limit_price="2345.1"),
+        config=config(tmp_path, manual_open_limit_price="2345.1", manual_close_limit_price="2344.9"),
         preflight_runner=preflight_runner(
             ready_preflight(
                 tmp_path,
@@ -189,7 +262,8 @@ def test_missing_quote_with_valid_manual_limit_price_proceeds_as_paper_only_manu
     payload = json.loads(result.report_json.read_text(encoding="utf-8"))
 
     assert result.classification == TerminalClassification.PASSED
-    assert payload["manual_limit_price"] == "2345.1"
+    assert payload["manual_open_limit_price"] == "2345.1"
+    assert payload["manual_close_limit_price"] == "2344.9"
     assert payload["pricing_source"] == "OPERATOR_SUPPLIED_MANUAL_LIMIT"
     assert payload["operator_manual_price_acknowledgement"] is True
     assert payload["market_data_provider"] == "IBKR"
@@ -200,17 +274,19 @@ def test_missing_quote_with_valid_manual_limit_price_proceeds_as_paper_only_manu
 
 
 @pytest.mark.parametrize(
-    ("manual_limit_price", "reason"),
+    ("manual_open_limit_price", "manual_close_limit_price", "reason"),
     [
-        ("0", "positive"),
-        ("-1", "positive"),
-        ("not-a-number", "positive decimal"),
-        ("2345.15", "tick_size"),
+        ("0", "2344.9", "positive"),
+        ("-1", "2344.9", "positive"),
+        ("not-a-number", "2344.9", "positive decimal"),
+        ("2345.15", "2344.9", "tick_size"),
+        ("2345.1", "2344.95", "tick_size"),
     ],
 )
 def test_invalid_manual_limit_price_blocks_before_proof_runner(
     tmp_path: Path,
-    manual_limit_price: str,
+    manual_open_limit_price: str,
+    manual_close_limit_price: str,
     reason: str,
 ) -> None:
     called = False
@@ -221,7 +297,11 @@ def test_invalid_manual_limit_price_blocks_before_proof_runner(
         return passing_proof_runner(tmp_path)(config, run_id)
 
     result = run_paper_proof(
-        config=config(tmp_path, manual_limit_price=manual_limit_price),
+        config=config(
+            tmp_path,
+            manual_open_limit_price=manual_open_limit_price,
+            manual_close_limit_price=manual_close_limit_price,
+        ),
         preflight_runner=preflight_runner(ready_preflight(tmp_path, quote_observed=False, market_data_mode="DELAYED")),
         proof_runner=proof_runner,
         run_id="run-invalid-manual-price",
@@ -232,9 +312,14 @@ def test_invalid_manual_limit_price_blocks_before_proof_runner(
     assert called is False
 
 
-def test_manual_limit_price_requires_delayed_data_paper_approval(tmp_path: Path) -> None:
+def test_manual_limit_prices_require_delayed_data_paper_approval(tmp_path: Path) -> None:
     result = run_paper_proof(
-        config=config(tmp_path, manual_limit_price="2345.1", allow_delayed_data_for_paper_proof=False),
+        config=config(
+            tmp_path,
+            manual_open_limit_price="2345.1",
+            manual_close_limit_price="2344.9",
+            allow_delayed_data_for_paper_proof=False,
+        ),
         preflight_runner=preflight_runner(ready_preflight(tmp_path, quote_observed=False, market_data_mode="DELAYED")),
         proof_runner=passing_proof_runner(tmp_path),
         run_id="run-manual-price-no-approval",
@@ -242,6 +327,77 @@ def test_manual_limit_price_requires_delayed_data_paper_approval(tmp_path: Path)
 
     assert result.classification == TerminalClassification.BLOCKED
     assert "delayed-data paper-proof approval" in str(result.report["failure_or_ambiguity"])
+
+
+def test_manual_pricing_requires_both_open_and_close_prices(tmp_path: Path) -> None:
+    result = run_paper_proof(
+        config=config(tmp_path, manual_open_limit_price="2345.1"),
+        preflight_runner=preflight_runner(ready_preflight(tmp_path, quote_observed=False, market_data_mode="DELAYED")),
+        proof_runner=passing_proof_runner(tmp_path),
+        run_id="run-manual-one-price",
+    )
+
+    assert result.classification == TerminalClassification.BLOCKED
+    assert "manual_close_limit_price is required" in str(result.report["failure_or_ambiguity"])
+
+
+def test_deprecated_single_manual_limit_price_is_rejected(tmp_path: Path) -> None:
+    result = run_paper_proof(
+        config=config(tmp_path, manual_limit_price="2345.1"),
+        preflight_runner=preflight_runner(ready_preflight(tmp_path, quote_observed=False, market_data_mode="DELAYED")),
+        proof_runner=passing_proof_runner(tmp_path),
+        run_id="run-manual-deprecated",
+    )
+
+    assert result.classification == TerminalClassification.BLOCKED
+    assert "deprecated" in str(result.report["failure_or_ambiguity"])
+
+
+@pytest.mark.parametrize(
+    ("side", "open_action", "close_action"),
+    [
+        ("BUY", Action.BUY, Action.SELL),
+        ("SELL", Action.SELL, Action.BUY),
+    ],
+)
+def test_real_runner_uses_separate_manual_open_and_close_prices(
+    tmp_path: Path,
+    side: str,
+    open_action: Action,
+    close_action: Action,
+) -> None:
+    adapter = RecordingPaperAdapter()
+
+    result = run_ibkr_paper_proof(
+        config=HarnessConfig(
+            account_id="DUM882026",
+            client_id=17077,
+            side=side,
+            output_root=tmp_path / "proof_runs",
+        ),
+        run_id=f"run-real-manual-{side.lower()}",
+        preflight=ready_preflight(
+            tmp_path,
+            quote=None,
+            quote_observed=False,
+            market_data_mode="DELAYED",
+            market_data_provider="IBKR",
+            market_data_role="DIAGNOSTIC",
+            production_live_money_readiness=False,
+        ),
+        manual_open_limit_price="2345.1",
+        manual_close_limit_price="2344.9",
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+
+    assert result.classification == TerminalClassification.PASSED
+    assert adapter.connected is True
+    assert adapter.disconnected is True
+    assert [(intent.action, str(intent.limit_price)) for intent in adapter.submitted] == [
+        (open_action, "2345.1"),
+        (close_action, "2344.9"),
+    ]
+    assert all(intent.order_type == "LMT" and intent.time_in_force == "DAY" for intent in adapter.submitted)
 
 
 def test_delayed_data_can_pass_paper_proof_but_not_live_money_readiness(tmp_path: Path) -> None:

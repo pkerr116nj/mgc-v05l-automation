@@ -50,6 +50,8 @@ class PaperProofConfig:
     submit_enabled: bool = False
     confirm_paper_submit: bool = False
     allow_delayed_data_for_paper_proof: bool = False
+    manual_open_limit_price: str | Decimal | None = None
+    manual_close_limit_price: str | Decimal | None = None
     manual_limit_price: str | Decimal | None = None
     contract_allowlist: dict[str, dict[str, object]] | None = None
 
@@ -69,6 +71,8 @@ class PaperProofConfig:
             "submit_enabled": self.submit_enabled,
             "confirm_paper_submit": self.confirm_paper_submit,
             "allow_delayed_data_for_paper_proof": self.allow_delayed_data_for_paper_proof,
+            "manual_open_limit_price": str(self.manual_open_limit_price) if self.manual_open_limit_price is not None else None,
+            "manual_close_limit_price": str(self.manual_close_limit_price) if self.manual_close_limit_price is not None else None,
             "manual_limit_price": str(self.manual_limit_price) if self.manual_limit_price is not None else None,
         }
 
@@ -151,7 +155,8 @@ def run_paper_proof(
             config=cfg,
             run_id=rid,
             preflight=preflight,
-            manual_limit_price=config.manual_limit_price,
+            manual_open_limit_price=config.manual_open_limit_price,
+            manual_close_limit_price=config.manual_close_limit_price,
         )
     )
     proof = actual_proof_runner(proof_config, actual_run_id)
@@ -195,9 +200,11 @@ def _validate_config(config: PaperProofConfig) -> str | None:
     if str(config.time_in_force).upper() != "DAY":
         return "time_in_force must be DAY"
     if config.manual_limit_price is not None:
+        return "manual_limit_price is deprecated for paper proof; use manual_open_limit_price and manual_close_limit_price"
+    if _has_any_manual_price(config):
         if not config.allow_delayed_data_for_paper_proof:
-            return "manual_limit_price requires delayed-data paper-proof approval"
-        manual_price_error = _manual_limit_price_error(config)
+            return "manual limit prices require delayed-data paper-proof approval"
+        manual_price_error = _manual_price_pair_error(config)
         if manual_price_error is not None:
             return manual_price_error
     return None
@@ -226,8 +233,8 @@ def _preflight_blocker(*, config: PaperProofConfig, preflight: PreflightResult) 
     mode = str(report.get("market_data_mode") or "UNKNOWN").upper()
     quote_observed = bool(report.get("quote_observed"))
     if not quote_observed:
-        if config.manual_limit_price is None:
-            return "pricing-dependent proof submit requires an observed quote or manual limit price"
+        if not _has_manual_price_pair(config):
+            return "pricing-dependent proof submit requires an observed quote or separate manual open/close limit prices"
         if mode != "DELAYED":
             return "manual limit price proof requires delayed-data paper context"
     if mode == "DELAYED" and not config.allow_delayed_data_for_paper_proof:
@@ -279,28 +286,55 @@ def _proof_pass_chain_complete(proof_payload: Mapping[str, object]) -> bool:
     return final.get("status") == "CLEAN"
 
 
-def _manual_limit_price_error(config: PaperProofConfig) -> str | None:
+def _has_any_manual_price(config: PaperProofConfig) -> bool:
+    return config.manual_open_limit_price is not None or config.manual_close_limit_price is not None
+
+
+def _has_manual_price_pair(config: PaperProofConfig) -> bool:
+    return config.manual_open_limit_price is not None and config.manual_close_limit_price is not None
+
+
+def _manual_price_pair_error(config: PaperProofConfig) -> str | None:
+    if config.manual_open_limit_price is None:
+        return "manual_open_limit_price is required when using manual paper-proof pricing"
+    if config.manual_close_limit_price is None:
+        return "manual_close_limit_price is required when using manual paper-proof pricing"
+    open_error = _manual_limit_price_error(
+        value=config.manual_open_limit_price,
+        label="manual_open_limit_price",
+        config=config,
+    )
+    if open_error is not None:
+        return open_error
+    return _manual_limit_price_error(
+        value=config.manual_close_limit_price,
+        label="manual_close_limit_price",
+        config=config,
+    )
+
+
+def _manual_limit_price_error(*, value: str | Decimal, label: str, config: PaperProofConfig) -> str | None:
     try:
-        price = Decimal(str(config.manual_limit_price))
+        price = Decimal(str(value))
     except (InvalidOperation, ValueError):
-        return "manual_limit_price must be a positive decimal"
+        return f"{label} must be a positive decimal"
     if not price.is_finite() or price <= 0:
-        return "manual_limit_price must be positive"
+        return f"{label} must be positive"
     allowlist = config.contract_allowlist or HarnessConfig().contract_allowlist
     entry = allowlist.get(config.contract_key)
     if entry is None:
-        return "manual_limit_price requires exact allowlisted contract"
+        return f"{label} requires exact allowlisted contract"
     raw_tick_size = entry.get("tick_size")
     if raw_tick_size is None:
-        return "manual_limit_price requires configured contract tick_size"
+        return f"{label} requires configured contract tick_size"
     try:
         tick_size = Decimal(str(raw_tick_size))
     except (InvalidOperation, ValueError):
-        return "manual_limit_price requires valid contract tick_size"
+        return f"{label} requires valid contract tick_size"
     if not tick_size.is_finite() or tick_size <= 0:
-        return "manual_limit_price requires positive contract tick_size"
+        return f"{label} requires positive contract tick_size"
     if price % tick_size != 0:
-        return "manual_limit_price must be valid for contract tick_size"
+        return f"{label} must be valid for contract tick_size"
     return None
 
 
@@ -334,9 +368,11 @@ def _write_result(
         "market_data_role": preflight_report.get("market_data_role"),
         "delayed_data_warning_seen": preflight_report.get("delayed_data_warning_seen"),
         "quote_observed": preflight_report.get("quote_observed"),
+        "manual_open_limit_price": str(config.manual_open_limit_price) if config.manual_open_limit_price is not None else None,
+        "manual_close_limit_price": str(config.manual_close_limit_price) if config.manual_close_limit_price is not None else None,
         "manual_limit_price": str(config.manual_limit_price) if config.manual_limit_price is not None else None,
-        "pricing_source": "OPERATOR_SUPPLIED_MANUAL_LIMIT" if config.manual_limit_price is not None else None,
-        "operator_manual_price_acknowledgement": config.manual_limit_price is not None,
+        "pricing_source": "OPERATOR_SUPPLIED_MANUAL_LIMIT" if _has_any_manual_price(config) else None,
+        "operator_manual_price_acknowledgement": _has_any_manual_price(config),
         "paper_route_readiness": preflight_report.get("paper_route_readiness"),
         "production_live_money_readiness": False,
         "failure_or_ambiguity": reason,
@@ -403,7 +439,8 @@ def run_ibkr_paper_proof(
     config: HarnessConfig,
     run_id: str,
     preflight: PreflightResult,
-    manual_limit_price: str | Decimal | None = None,
+    manual_open_limit_price: str | Decimal | None = None,
+    manual_close_limit_price: str | Decimal | None = None,
     adapter: IbkrPaperAdapter | None = None,
 ) -> HarnessResult:
     """Run the real IBKR paper proof path after paper_proof gates have passed."""
@@ -440,15 +477,15 @@ def run_ibkr_paper_proof(
         contract = actual_adapter.qualify_contract(run_id=run_id, contract_key=config.contract_key, now=now)
         append("contract_qualified", contract)
 
-        if manual_limit_price is not None:
-            open_limit_price = Decimal(str(manual_limit_price))
-            close_limit_price = open_limit_price
+        if manual_open_limit_price is not None and manual_close_limit_price is not None:
+            open_limit_price = Decimal(str(manual_open_limit_price))
+            close_limit_price = Decimal(str(manual_close_limit_price))
             append(
                 "pricing_decision_created",
                 {
                     "pricing_decision_id": f"pricing_{run_id}_manual_open",
                     "pricing_source": "OPERATOR_SUPPLIED_MANUAL_LIMIT",
-                    "manual_limit_price": str(open_limit_price),
+                    "manual_open_limit_price": str(open_limit_price),
                     "market_data_provider": preflight.report.get("market_data_provider") or "IBKR",
                     "market_data_mode": preflight.report.get("market_data_mode") or "DELAYED",
                     "market_data_role": preflight.report.get("market_data_role") or "DIAGNOSTIC",
@@ -506,13 +543,13 @@ def run_ibkr_paper_proof(
         ledger.append_model_event(event_type="fill_event_created", model=open_fill)
 
         close_action = Action.SELL if open_intent.action == Action.BUY else Action.BUY
-        if manual_limit_price is not None:
+        if manual_open_limit_price is not None and manual_close_limit_price is not None:
             append(
                 "pricing_decision_created",
                 {
                     "pricing_decision_id": f"pricing_{run_id}_manual_close",
                     "pricing_source": "OPERATOR_SUPPLIED_MANUAL_LIMIT",
-                    "manual_limit_price": str(close_limit_price),
+                    "manual_close_limit_price": str(close_limit_price),
                     "market_data_provider": preflight.report.get("market_data_provider") or "IBKR",
                     "market_data_mode": preflight.report.get("market_data_mode") or "DELAYED",
                     "market_data_role": preflight.report.get("market_data_role") or "DIAGNOSTIC",

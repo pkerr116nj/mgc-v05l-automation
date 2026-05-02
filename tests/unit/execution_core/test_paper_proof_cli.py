@@ -120,7 +120,7 @@ def test_cli_rejects_missing_operator_submit_flags(tmp_path: Path, remove: str, 
 @pytest.mark.parametrize(
     ("remove", "message"),
     [
-        ("--allow-delayed-data-paper-proof", "--manual-limit-price requires --allow-delayed-data-paper-proof"),
+        ("--allow-delayed-data-paper-proof", "manual limit prices require --allow-delayed-data-paper-proof"),
         ("--confirm-paper-submit", "--confirm-paper-submit is required"),
         ("--submit-enabled", "--submit-enabled is required"),
     ],
@@ -131,7 +131,7 @@ def test_cli_rejects_manual_price_without_required_paper_flags(
     message: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    args = cli_args(tmp_path, "--manual-limit-price", "2345.1")
+    args = cli_args(tmp_path, "--manual-open-limit-price", "2345.1", "--manual-close-limit-price", "2344.9")
     args.remove(remove)
 
     with pytest.raises(SystemExit):
@@ -141,24 +141,45 @@ def test_cli_rejects_manual_price_without_required_paper_flags(
 
 
 @pytest.mark.parametrize(
-    ("value", "message"),
+    ("option", "value", "message"),
     [
-        ("0", "--manual-limit-price must be positive"),
-        ("-1", "--manual-limit-price must be positive"),
-        ("not-a-number", "--manual-limit-price must be a positive decimal"),
-        ("2345.15", "--manual-limit-price must be valid for contract tick_size"),
+        ("--manual-open-limit-price", "0", "--manual-open-limit-price must be positive"),
+        ("--manual-open-limit-price", "-1", "--manual-open-limit-price must be positive"),
+        ("--manual-open-limit-price", "not-a-number", "--manual-open-limit-price must be a positive decimal"),
+        ("--manual-open-limit-price", "2345.15", "--manual-open-limit-price must be valid for contract tick_size"),
+        ("--manual-close-limit-price", "2344.95", "--manual-close-limit-price must be valid for contract tick_size"),
     ],
 )
 def test_cli_rejects_invalid_manual_limit_price(
     tmp_path: Path,
+    option: str,
     value: str,
     message: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    args = cli_args(tmp_path, "--manual-open-limit-price", "2345.1", "--manual-close-limit-price", "2344.9")
+    args[args.index(option) + 1] = value
     with pytest.raises(SystemExit):
-        paper_proof_cli.main(cli_args(tmp_path, "--manual-limit-price", value), transport_factory=lambda cfg: FakeTransport())
+        paper_proof_cli.main(args, transport_factory=lambda cfg: FakeTransport())
 
     assert message in capsys.readouterr().err
+
+
+def test_cli_rejects_one_missing_manual_price(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        paper_proof_cli.main(
+            cli_args(tmp_path, "--manual-open-limit-price", "2345.1"),
+            transport_factory=lambda cfg: FakeTransport(),
+        )
+
+    assert "--manual-close-limit-price is required" in capsys.readouterr().err
+
+
+def test_cli_rejects_deprecated_single_manual_limit_price(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        paper_proof_cli.main(cli_args(tmp_path, "--manual-limit-price", "2345.1"), transport_factory=lambda cfg: FakeTransport())
+
+    assert "--manual-limit-price is deprecated" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -211,7 +232,7 @@ def test_cli_runs_with_fake_transport_and_fake_proof_runner(tmp_path: Path, caps
     assert Path(output["report_json"]).exists()
 
 
-def test_cli_runs_with_manual_limit_price_and_keeps_lmt_day(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_accepts_separate_manual_limit_prices_and_keeps_lmt_day(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     seen: dict[str, object] = {}
 
     def proof_runner(config, run_id):  # type: ignore[no-untyped-def]
@@ -228,7 +249,7 @@ def test_cli_runs_with_manual_limit_price_and_keeps_lmt_day(tmp_path: Path, caps
         )
 
     exit_code = paper_proof_cli.main(
-        cli_args(tmp_path, "--manual-limit-price", "2345.1"),
+        cli_args(tmp_path, "--manual-open-limit-price", "2345.1", "--manual-close-limit-price", "2344.9"),
         transport_factory=lambda cfg: FakeTransport(),
         proof_runner=proof_runner,
     )
