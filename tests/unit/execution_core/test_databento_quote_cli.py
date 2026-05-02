@@ -4,6 +4,7 @@ import inspect
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 import pytest
 
@@ -133,8 +134,54 @@ class FailingParseProvider:
                 "parser_ask_field_source": None,
                 "parser_last_field_source": "price",
                 "no_quote_records_reason": "no records returned for schema mbp-1",
+                "resolved_instrument_id": "123456",
+                "resolved_symbol_stype": "instrument_id",
+                "quote_request_symbol": "123456",
+                "quote_request_stype_in": "instrument_id",
+                "dataset": "GLBX.MDP3",
+                "schema": {"bid_ask": "mbp-1", "last": "trades"},
+                "start": "2026-05-02T11:55:00+00:00",
+                "end": "2026-05-02T12:00:00+00:00",
+                "encoding": "json",
+                "request_details": {
+                    "bid_ask": {
+                        "endpoint": "https://hist.databento.com/v0/timeseries.get_range",
+                        "dataset": "GLBX.MDP3",
+                        "schema": "mbp-1",
+                        "symbol": "123456",
+                        "stype_in": "instrument_id",
+                        "start": "2026-05-02T11:55:00+00:00",
+                        "end": "2026-05-02T12:00:00+00:00",
+                        "encoding": "json",
+                        "compression": "none",
+                        "limit": 1000,
+                    },
+                    "trades": {
+                        "endpoint": "https://hist.databento.com/v0/timeseries.get_range",
+                        "dataset": "GLBX.MDP3",
+                        "schema": "trades",
+                        "symbol": "123456",
+                        "stype_in": "instrument_id",
+                        "start": "2026-05-02T11:55:00+00:00",
+                        "end": "2026-05-02T12:00:00+00:00",
+                        "encoding": "json",
+                        "compression": "none",
+                        "limit": 1000,
+                    },
+                },
+                "raw_provider_error": None,
             },
         )
+
+
+class FakeDiagnosticTransport:
+    def __init__(self, records_by_schema: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
+        self.records_by_schema = records_by_schema
+        self.requests: list[dict[str, Any]] = []
+
+    def request_records(self, **kwargs: Any) -> Sequence[Mapping[str, Any]]:
+        self.requests.append(dict(kwargs))
+        return tuple(self.records_by_schema.get(str(kwargs["schema"]), ()))
 
 
 def test_cli_requires_databento_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -340,7 +387,86 @@ def test_cli_quote_parse_failure_includes_parser_diagnostics(
     assert payload["parser_ask_field_source"] is None
     assert payload["parser_last_field_source"] == "price"
     assert payload["no_quote_records_reason"] == "no records returned for schema mbp-1"
+    assert payload["resolved_instrument_id"] == "123456"
+    assert payload["quote_request_symbol"] == "123456"
+    assert payload["quote_request_stype_in"] == "instrument_id"
+    assert payload["request_details"]["bid_ask"]["schema"] == "mbp-1"
+    assert payload["request_details"]["bid_ask"]["symbol"] == "123456"
     assert report["first_raw_record_keys_or_shape"]["trades"]["root_keys"] == ["price", "ts_event"]
+
+
+def test_cli_diagnostic_mode_reports_zero_records_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    args = cli_args(tmp_path)
+    index = args.index("--databento-continuous-symbol")
+    del args[index : index + 2]
+    args.extend(
+        [
+            "--databento-symbol",
+            "MGCM6",
+            "--diagnose-records",
+            "--diagnostic-start",
+            "2026-05-01T13:30:00+00:00",
+            "--diagnostic-end",
+            "2026-05-01T20:00:00+00:00",
+        ]
+    )
+
+    exit_code = databento_quote_cli.main(args, diagnostic_transport_factory=lambda: FakeDiagnosticTransport({}))
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(payload["report_json"]).read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert payload["classification"] == "ZERO_RECORDS_OR_PROVIDER_ERROR"
+    assert report["symbol"] == "MGCM6"
+    assert report["stype_in"] == "raw_symbol"
+    assert {result["request"]["schema"] for result in report["results"]} == {"mbp-1", "trades"}
+    assert all(result["records_returned"] == 0 for result in report["results"])
+
+
+def test_cli_diagnostic_mode_reports_record_timestamps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    args = cli_args(tmp_path)
+    index = args.index("--databento-continuous-symbol")
+    del args[index : index + 2]
+    args.extend(
+        [
+            "--databento-symbol",
+            "42008160",
+            "--stype-in",
+            "instrument_id",
+            "--diagnose-records",
+            "--diagnostic-start",
+            "2026-05-01T13:30:00+00:00",
+            "--diagnostic-end",
+            "2026-05-01T20:00:00+00:00",
+            "--diagnostic-schema",
+            "trades",
+        ]
+    )
+
+    exit_code = databento_quote_cli.main(
+        args,
+        diagnostic_transport_factory=lambda: FakeDiagnosticTransport(
+            {"trades": ({"ts_event": "2026-05-01T13:31:00+00:00", "price": "4620.0"},)}
+        ),
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["classification"] == "RECORDS_FOUND"
+    assert payload["results"][0]["request"]["symbol"] == "42008160"
+    assert payload["results"][0]["request"]["stype_in"] == "instrument_id"
+    assert payload["results"][0]["first_record_timestamp"] == "2026-05-01T13:31:00+00:00"
+    assert payload["results"][0]["first_raw_record_keys_or_shape"] == {"root_keys": ["price", "ts_event"]}
 
 
 def test_cli_manual_databento_symbol_override_remains_supported(

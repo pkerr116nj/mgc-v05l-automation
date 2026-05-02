@@ -132,6 +132,45 @@ class DatabentoQuoteProviderConfig:
     realtime_max_age_seconds: int = 15
 
 
+@dataclass(frozen=True)
+class DatabentoRecordDiagnosticRequest:
+    api_key: str
+    dataset: str
+    symbol: str
+    stype_in: str
+    schema: str
+    start: datetime
+    end: datetime
+    base_url: str = "https://hist.databento.com/v0"
+    record_limit: int = 1000
+
+
+@dataclass(frozen=True)
+class DatabentoRecordDiagnosticResult:
+    classification: str
+    request: Mapping[str, Any]
+    records_returned: int
+    first_record_timestamp: str | None
+    last_record_timestamp: str | None
+    first_raw_record_keys_or_shape: Mapping[str, Any] | None
+    provider_available_end: str | None
+    provider_error: str | None
+    failure_assessment: str | None
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "classification": self.classification,
+            "request": dict(self.request),
+            "records_returned": self.records_returned,
+            "first_record_timestamp": self.first_record_timestamp,
+            "last_record_timestamp": self.last_record_timestamp,
+            "first_raw_record_keys_or_shape": dict(self.first_raw_record_keys_or_shape) if self.first_raw_record_keys_or_shape else None,
+            "provider_available_end": self.provider_available_end,
+            "provider_error": self.provider_error,
+            "failure_assessment": self.failure_assessment,
+        }
+
+
 class UrllibDatabentoQuoteTransport:
     def __init__(self, *, timeout_seconds: float = 10.0) -> None:
         self.timeout_seconds = float(timeout_seconds)
@@ -190,6 +229,88 @@ class UrllibDatabentoQuoteTransport:
         except URLError as exc:  # pragma: no cover - exercised only by real operator command.
             raise DatabentoQuoteProviderError(f"Databento transport error: {exc}") from exc
         return tuple(json.loads(line) for line in text.splitlines() if line.strip())
+
+
+def run_databento_record_diagnostic(
+    *,
+    request: DatabentoRecordDiagnosticRequest,
+    transport: DatabentoQuoteTransport | None = None,
+) -> DatabentoRecordDiagnosticResult:
+    transport = transport or UrllibDatabentoQuoteTransport()
+    request_details = _record_request_details(
+        base_url=request.base_url,
+        dataset=request.dataset,
+        symbol=request.symbol,
+        schema=request.schema,
+        start=request.start,
+        end=request.end,
+        stype_in=request.stype_in,
+        limit=request.record_limit,
+    )
+    try:
+        records = tuple(
+            transport.request_records(
+                base_url=request.base_url,
+                api_key=request.api_key,
+                dataset=request.dataset,
+                symbol=request.symbol,
+                schema=request.schema,
+                start=request.start,
+                end=request.end,
+                stype_in=request.stype_in,
+                limit=request.record_limit,
+            )
+        )
+    except DatabentoAvailableEndError as exc:
+        return DatabentoRecordDiagnosticResult(
+            classification="PROVIDER_ERROR",
+            request=request_details,
+            records_returned=0,
+            first_record_timestamp=None,
+            last_record_timestamp=None,
+            first_raw_record_keys_or_shape=None,
+            provider_available_end=exc.provider_available_end.isoformat() if exc.provider_available_end is not None else None,
+            provider_error=_sanitize_provider_error(exc.detail or str(exc)),
+            failure_assessment="BAD_WINDOW_AFTER_AVAILABLE_END",
+        )
+    except DatabentoQuoteProviderError as exc:
+        return DatabentoRecordDiagnosticResult(
+            classification="PROVIDER_ERROR",
+            request=request_details,
+            records_returned=0,
+            first_record_timestamp=None,
+            last_record_timestamp=None,
+            first_raw_record_keys_or_shape=None,
+            provider_available_end=getattr(exc, "provider_available_end", None).isoformat()
+            if getattr(exc, "provider_available_end", None) is not None
+            else None,
+            provider_error=_sanitize_provider_error(str(exc)),
+            failure_assessment="PROVIDER_ERROR_OR_ENTITLEMENT",
+        )
+    if not records:
+        return DatabentoRecordDiagnosticResult(
+            classification="ZERO_RECORDS",
+            request=request_details,
+            records_returned=0,
+            first_record_timestamp=None,
+            last_record_timestamp=None,
+            first_raw_record_keys_or_shape=None,
+            provider_available_end=None,
+            provider_error=None,
+            failure_assessment="NO_DATA_BAD_SYMBOL_STYPE_BAD_SCHEMA_BAD_WINDOW_OR_ENTITLEMENT",
+        )
+    timestamps = tuple(_record_timestamp(record) for record in records)
+    return DatabentoRecordDiagnosticResult(
+        classification="RECORDS_FOUND",
+        request=request_details,
+        records_returned=len(records),
+        first_record_timestamp=min(timestamps).isoformat(),
+        last_record_timestamp=max(timestamps).isoformat(),
+        first_raw_record_keys_or_shape=_record_shape(records[0]),
+        provider_available_end=None,
+        provider_error=None,
+        failure_assessment=None,
+    )
 
 
 class UrllibDatabentoSymbolResolver:
@@ -284,6 +405,10 @@ class DatabentoQuoteProvider:
         latest_trade = _latest_record_with_price(trade_records)
         parser_diagnostics = _quote_parser_diagnostics(
             config=self.config,
+            resolved_symbol=resolved_symbol,
+            start=actual_start,
+            end=actual_end,
+            provider_available_end=provider_available_end,
             bbo_records=bbo_records,
             trade_records=trade_records,
             latest_bbo=latest_bbo,
@@ -674,6 +799,10 @@ def _nested_value_with_source(record: Mapping[str, Any], key: str) -> tuple[Any,
 def _quote_parser_diagnostics(
     *,
     config: DatabentoQuoteProviderConfig,
+    resolved_symbol: _ResolvedQuoteSymbol,
+    start: datetime,
+    end: datetime,
+    provider_available_end: datetime | None,
     bbo_records: Sequence[Mapping[str, Any]],
     trade_records: Sequence[Mapping[str, Any]],
     latest_bbo: Mapping[str, Any] | None,
@@ -687,7 +816,39 @@ def _quote_parser_diagnostics(
         no_quote_records_reason = f"no records returned for schema {config.bbo_schema}"
     elif latest_bbo is None:
         no_quote_records_reason = f"records returned for schema {config.bbo_schema}, but none contained parseable bid and ask fields"
+    bbo_request = _record_request_details(
+        base_url=config.base_url,
+        dataset=config.dataset,
+        symbol=resolved_symbol.symbol,
+        schema=config.bbo_schema,
+        start=start,
+        end=end,
+        stype_in=resolved_symbol.stype_in,
+        limit=config.record_limit,
+    )
+    trade_request = _record_request_details(
+        base_url=config.base_url,
+        dataset=config.dataset,
+        symbol=resolved_symbol.symbol,
+        schema=config.trades_schema,
+        start=start,
+        end=end,
+        stype_in=resolved_symbol.stype_in,
+        limit=config.record_limit,
+    )
     return {
+        "resolved_instrument_id": resolved_symbol.resolved_instrument_id,
+        "resolved_symbol_stype": resolved_symbol.stype_in,
+        "quote_request_symbol": resolved_symbol.symbol,
+        "quote_request_stype_in": resolved_symbol.stype_in,
+        "dataset": config.dataset,
+        "schema": {"bid_ask": config.bbo_schema, "last": config.trades_schema},
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "encoding": "json",
+        "provider_available_end": provider_available_end.isoformat() if provider_available_end is not None else None,
+        "raw_provider_error": None,
+        "request_details": {"bid_ask": bbo_request, "trades": trade_request},
         "databento_schema": {"bid_ask": config.bbo_schema, "last": config.trades_schema},
         "records_returned": {"bid_ask": len(bbo_records), "trades": len(trade_records)},
         "first_raw_record_keys_or_shape": {
@@ -698,6 +859,31 @@ def _quote_parser_diagnostics(
         "parser_ask_field_source": ask_parse.source,
         "parser_last_field_source": last_parse.source,
         "no_quote_records_reason": no_quote_records_reason,
+    }
+
+
+def _record_request_details(
+    *,
+    base_url: str,
+    dataset: str,
+    symbol: str,
+    schema: str,
+    start: datetime,
+    end: datetime,
+    stype_in: str,
+    limit: int,
+) -> dict[str, Any]:
+    return {
+        "endpoint": f"{base_url.rstrip('/')}/timeseries.get_range",
+        "dataset": dataset,
+        "schema": schema,
+        "symbol": symbol,
+        "stype_in": stype_in,
+        "start": start.astimezone(UTC).isoformat(),
+        "end": end.astimezone(UTC).isoformat(),
+        "encoding": "json",
+        "compression": "none",
+        "limit": int(limit),
     }
 
 
@@ -712,6 +898,13 @@ def _record_shape(record: Mapping[str, Any]) -> dict[str, Any]:
         if levels and isinstance(levels[0], Mapping):
             shape["levels[0]_keys"] = sorted(str(key) for key in levels[0].keys())
     return shape
+
+
+def _sanitize_provider_error(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"Basic\s+[A-Za-z0-9+/=]+", "Basic <redacted>", text)
+    text = re.sub(r"(?i)(api[_-]?key['\"\s:=]+)[^'\"\s,}]+", r"\1<redacted>", text)
+    return text
 
 
 def _record_timestamp(record: Mapping[str, Any] | None) -> datetime:

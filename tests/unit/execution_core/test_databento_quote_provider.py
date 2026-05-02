@@ -15,9 +15,11 @@ from mgc_v05l.execution_core.databento_quote_provider import (
     DatabentoQuoteProvider,
     DatabentoQuoteProviderConfig,
     DatabentoQuoteProviderError,
+    DatabentoRecordDiagnosticRequest,
     DatabentoSymbolResolution,
     DatabentoSymbolResolutionRequest,
     UrllibDatabentoSymbolResolver,
+    run_databento_record_diagnostic,
 )
 from mgc_v05l.execution_core.pricing import MarketDataMode
 from mgc_v05l.execution_core.quote_provider import validate_quote_for_pricing
@@ -632,6 +634,85 @@ def test_empty_quote_records_fail_cleanly_with_parser_diagnostics() -> None:
     assert exc_info.value.diagnostics["databento_schema"] == {"bid_ask": "mbp-1", "last": "trades"}
     assert exc_info.value.diagnostics["records_returned"] == {"bid_ask": 0, "trades": 0}
     assert exc_info.value.diagnostics["no_quote_records_reason"] == "no records returned for schema mbp-1"
+    assert exc_info.value.diagnostics["quote_request_symbol"] == "MGCM6"
+    assert exc_info.value.diagnostics["quote_request_stype_in"] == "raw_symbol"
+    assert exc_info.value.diagnostics["resolved_symbol_stype"] == "raw_symbol"
+    assert exc_info.value.diagnostics["dataset"] == "GLBX.MDP3"
+    assert exc_info.value.diagnostics["schema"] == {"bid_ask": "mbp-1", "last": "trades"}
+    assert exc_info.value.diagnostics["encoding"] == "json"
+    assert exc_info.value.diagnostics["request_details"]["bid_ask"]["schema"] == "mbp-1"
+    assert exc_info.value.diagnostics["request_details"]["bid_ask"]["symbol"] == "MGCM6"
+
+
+def test_zero_record_failure_preserves_resolved_instrument_id_and_request_details() -> None:
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
+        transport=FakeTransport(bbo_records=(), trade_records=()),
+        resolver=FakeResolver(resolution(raw_symbol=None), resolution(requested_symbol="123456", resolved_instrument_id=None, raw_symbol="MGCM6")),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoQuoteParseError) as exc_info:
+        provider.get_quote("MGC-202606")
+
+    diagnostics = exc_info.value.diagnostics
+    assert diagnostics["resolved_instrument_id"] == "123456"
+    assert diagnostics["resolved_symbol_stype"] == "instrument_id"
+    assert diagnostics["quote_request_symbol"] == "123456"
+    assert diagnostics["quote_request_stype_in"] == "instrument_id"
+    assert diagnostics["request_details"]["bid_ask"]["endpoint"].endswith("/timeseries.get_range")
+    assert diagnostics["request_details"]["bid_ask"]["start"] == "2026-05-02T11:55:00+00:00"
+    assert diagnostics["request_details"]["bid_ask"]["end"] == "2026-05-02T12:00:00+00:00"
+    assert diagnostics["raw_provider_error"] is None
+
+
+def test_record_diagnostic_reports_zero_records_without_traceback() -> None:
+    result = run_databento_record_diagnostic(
+        request=DatabentoRecordDiagnosticRequest(
+            api_key="test-key",
+            dataset="GLBX.MDP3",
+            symbol="MGCM6",
+            stype_in="raw_symbol",
+            schema="mbp-1",
+            start=datetime(2026, 5, 1, 13, 30, tzinfo=timezone.utc),
+            end=datetime(2026, 5, 1, 20, 0, tzinfo=timezone.utc),
+        ),
+        transport=FakeTransport(bbo_records=(), trade_records=()),
+    )
+
+    assert result.classification == "ZERO_RECORDS"
+    assert result.records_returned == 0
+    assert result.request["symbol"] == "MGCM6"
+    assert result.request["stype_in"] == "raw_symbol"
+    assert result.request["schema"] == "mbp-1"
+    assert result.failure_assessment == "NO_DATA_BAD_SYMBOL_STYPE_BAD_SCHEMA_BAD_WINDOW_OR_ENTITLEMENT"
+
+
+def test_record_diagnostic_reports_first_and_last_timestamp_when_records_exist() -> None:
+    result = run_databento_record_diagnostic(
+        request=DatabentoRecordDiagnosticRequest(
+            api_key="test-key",
+            dataset="GLBX.MDP3",
+            symbol="42008160",
+            stype_in="instrument_id",
+            schema="trades",
+            start=datetime(2026, 5, 1, 13, 30, tzinfo=timezone.utc),
+            end=datetime(2026, 5, 1, 20, 0, tzinfo=timezone.utc),
+        ),
+        transport=FakeTransport(
+            bbo_records=(),
+            trade_records=(
+                {"ts_event": "2026-05-01T13:31:00+00:00", "price": "4620.0"},
+                {"ts_event": "2026-05-01T19:59:00+00:00", "price": "4626.0"},
+            ),
+        ),
+    )
+
+    assert result.classification == "RECORDS_FOUND"
+    assert result.records_returned == 2
+    assert result.first_record_timestamp == "2026-05-01T13:31:00+00:00"
+    assert result.last_record_timestamp == "2026-05-01T19:59:00+00:00"
+    assert result.first_raw_record_keys_or_shape == {"root_keys": ["price", "ts_event"]}
 
 
 def test_wrong_quote_schema_fails_with_clear_parser_diagnostic() -> None:

@@ -11,12 +11,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
-from .databento_quote_provider import DatabentoAvailableEndError, DatabentoQuoteProvider, DatabentoQuoteProviderConfig, DatabentoQuoteProviderError
+from .databento_quote_provider import (
+    DatabentoAvailableEndError,
+    DatabentoQuoteProvider,
+    DatabentoQuoteProviderConfig,
+    DatabentoQuoteProviderError,
+    DatabentoQuoteTransport,
+    DatabentoRecordDiagnosticRequest,
+    run_databento_record_diagnostic,
+)
 from .quote_provider import validate_quote_for_pricing
 
 
 DEFAULT_OUTPUT_ROOT = Path("outputs/track_b_execution_core/quotes")
 ProviderFactory = Callable[[DatabentoQuoteProviderConfig], DatabentoQuoteProvider]
+DiagnosticTransportFactory = Callable[[], DatabentoQuoteTransport]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,10 +53,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-available-end-fallback", action="store_true")
     parser.add_argument("--max-age-seconds", type=int, default=15)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--diagnose-records", action="store_true")
+    parser.add_argument("--diagnostic-start")
+    parser.add_argument("--diagnostic-end")
+    parser.add_argument("--diagnostic-schema", action="append")
     return parser
 
 
-def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    provider_factory: ProviderFactory | None = None,
+    diagnostic_transport_factory: DiagnosticTransportFactory | None = None,
+) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     raw_symbol = str(args.databento_symbol or "").strip()
@@ -81,6 +99,8 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
         allow_available_end_fallback=args.allow_available_end_fallback,
         realtime_max_age_seconds=args.max_age_seconds,
     )
+    if args.diagnose_records:
+        return _run_records_diagnostic(args=args, config=config, diagnostic_transport_factory=diagnostic_transport_factory)
     factory = provider_factory or (lambda cfg: DatabentoQuoteProvider(config=cfg))
     provider = factory(config)
     run_id = f"databento_quote_{uuid.uuid4().hex}"
@@ -109,6 +129,17 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
             "provider_error": str(exc),
             "provider_available_end": provider_available_end.isoformat() if provider_available_end is not None else None,
             "corrective_message": corrective_message,
+            "resolved_instrument_id": parser_diagnostics.get("resolved_instrument_id"),
+            "resolved_symbol_stype": parser_diagnostics.get("resolved_symbol_stype"),
+            "quote_request_symbol": parser_diagnostics.get("quote_request_symbol"),
+            "quote_request_stype_in": parser_diagnostics.get("quote_request_stype_in"),
+            "dataset": parser_diagnostics.get("dataset"),
+            "schema": parser_diagnostics.get("schema"),
+            "start": parser_diagnostics.get("start"),
+            "end": parser_diagnostics.get("end"),
+            "encoding": parser_diagnostics.get("encoding"),
+            "request_details": parser_diagnostics.get("request_details"),
+            "raw_provider_error": parser_diagnostics.get("raw_provider_error"),
             "databento_schema": parser_diagnostics.get("databento_schema"),
             "records_returned": parser_diagnostics.get("records_returned"),
             "first_raw_record_keys_or_shape": parser_diagnostics.get("first_raw_record_keys_or_shape"),
@@ -135,6 +166,17 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
                     "provider_error": str(exc),
                     "provider_available_end": report["provider_available_end"],
                     "corrective_message": corrective_message,
+                    "resolved_instrument_id": report["resolved_instrument_id"],
+                    "resolved_symbol_stype": report["resolved_symbol_stype"],
+                    "quote_request_symbol": report["quote_request_symbol"],
+                    "quote_request_stype_in": report["quote_request_stype_in"],
+                    "dataset": report["dataset"],
+                    "schema": report["schema"],
+                    "start": report["start"],
+                    "end": report["end"],
+                    "encoding": report["encoding"],
+                    "request_details": report["request_details"],
+                    "raw_provider_error": report["raw_provider_error"],
                     "databento_schema": report["databento_schema"],
                     "records_returned": report["records_returned"],
                     "first_raw_record_keys_or_shape": report["first_raw_record_keys_or_shape"],
@@ -279,6 +321,74 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
         )
     )
     return 0 if readiness_error is None else 2
+
+
+def _run_records_diagnostic(
+    *,
+    args: argparse.Namespace,
+    config: DatabentoQuoteProviderConfig,
+    diagnostic_transport_factory: DiagnosticTransportFactory | None,
+) -> int:
+    if not config.databento_symbol:
+        raise SystemExit("--diagnose-records requires --databento-symbol as the exact diagnostic symbol to send")
+    if not args.diagnostic_start or not args.diagnostic_end:
+        raise SystemExit("--diagnose-records requires --diagnostic-start and --diagnostic-end")
+    schemas = tuple(args.diagnostic_schema or ("mbp-1", "trades"))
+    start = _parse_cli_datetime(args.diagnostic_start, "--diagnostic-start")
+    end = _parse_cli_datetime(args.diagnostic_end, "--diagnostic-end")
+    transport = diagnostic_transport_factory() if diagnostic_transport_factory else None
+    run_id = f"databento_records_diagnostic_{uuid.uuid4().hex}"
+    report_json = Path(args.output_root) / run_id / "records_diagnostic_report.json"
+    results = [
+        run_databento_record_diagnostic(
+            request=DatabentoRecordDiagnosticRequest(
+                api_key=config.api_key,
+                dataset=config.dataset,
+                symbol=str(config.databento_symbol),
+                stype_in=config.stype_in,
+                schema=schema,
+                start=start,
+                end=end,
+                base_url=config.base_url,
+                record_limit=config.record_limit,
+            ),
+            transport=transport,
+        ).to_json_dict()
+        for schema in schemas
+    ]
+    classification = "RECORDS_FOUND" if any(result["records_returned"] for result in results) else "ZERO_RECORDS_OR_PROVIDER_ERROR"
+    report = {
+        "schema_version": "track_b_databento_records_diagnostic_v1",
+        "run_id": run_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "classification": classification,
+        "contract_key": args.contract_key,
+        "symbol": config.databento_symbol,
+        "stype_in": config.stype_in,
+        "dataset": config.dataset,
+        "diagnostic_start": start.isoformat(),
+        "diagnostic_end": end.isoformat(),
+        "results": results,
+        "api_key_present": True,
+        "api_key_value": None,
+        "submit_enabled": False,
+        "place_order_called": False,
+        "cancel_called": False,
+    }
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    print(json.dumps({**report, "report_json": str(report_json)}, sort_keys=True))
+    return 0 if classification == "RECORDS_FOUND" else 2
+
+
+def _parse_cli_datetime(value: str, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SystemExit(f"{label} must be an ISO timestamp") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 if __name__ == "__main__":
