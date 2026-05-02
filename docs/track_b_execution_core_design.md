@@ -1059,6 +1059,98 @@ These modules caused or preserve authority confusion for Track B's purpose. They
 - `src/mgc_v05l/research/*` and `src/validation_layer/*`: broad research framework is out of scope.
 - Existing `var/paper_strategy_position_ledger.json`, `var/per_strategy_paper_status.json`, and `outputs/operator_dashboard/*`: not authority for Track B.
 
+## Additional Production Safety Constraints
+
+These constraints are not all required for the first fake-adapter or read-only
+preflight slices, but they are required design boundaries before Track B becomes
+an automated production-capable execution core.
+
+### Futures Contract Rollover Safety
+
+- Logical symbols may resolve to candidate contracts, but the executable contract must remain explicit and allowlisted.
+- Milestone one allows no automatic rollover.
+- Default `roll_cutoff_days` is `14` calendar days before last trade date or expiration.
+- New entries are blocked inside the roll window.
+- Existing positions inside the roll window require operator review.
+- `contract_month`, `expiry`, `local_symbol`, `exchange`, `currency`, `multiplier`, and `con_id` must be internally consistent.
+- Broker/front-month convention mismatch fails closed.
+
+### Session Calendar And Holidays
+
+- Track B must not use wall-clock-only market-open assumptions.
+- An exchange session calendar is required before automated trading.
+- Holiday, early close, and Globex maintenance handling are required before automated trading.
+- Durable timestamps are stored in UTC; display timezone is a separate presentation concern.
+
+### Time Authority
+
+- Durable timestamps are stored in UTC.
+- Broker, market, and system timestamps are normalized before comparison.
+- String timestamp comparisons are forbidden.
+- Clock skew should be detected and reported.
+
+### Market Data Authority
+
+- Quotes price orders.
+- Bars drive strategy decisions.
+- Broker truth drives positions, orders, and fills.
+- Dashboard, cache, and snapshot files are never authority.
+
+### Order Policy
+
+- Milestone one allows single-contract `LMT` `DAY` orders only.
+- `MKT`, stops, brackets, OCO, parent/child, algo, combo/spread, options, and futures options are forbidden until separately designed.
+
+### Position Ownership
+
+- Track B may only close positions it opened and correlated.
+- Unowned broker positions block automation.
+- Manual intervention must be recorded and cannot produce a clean proof `PASS`.
+
+### Client ID And Account Isolation
+
+- Account id must be explicit.
+- First-account inference is forbidden.
+- Read-only preflight and submit proof should use separate client ID ranges.
+- Client ID collision fails closed.
+
+### Restart, Reconnect, And Idempotency
+
+- Unresolved prior runs require broker reconciliation and manual review.
+- Track B must not automatically resume submit after a crash.
+- Only one active run is allowed per account and contract.
+- Duplicate submit for the same intent is forbidden.
+
+### Error Severity Taxonomy
+
+- Broker errors must be classified as informational, warning, blocking, ambiguous, or fatal.
+- Blocking and ambiguous errors stop automation.
+
+### Risk Envelope
+
+- Milestone one quantity is exactly `1`.
+- Milestone one permits one open and one close maximum.
+- Future production design requires per-instrument max quantity, notional, loss, and session-attempt limits.
+
+### Mobile / API Safety
+
+- Mobile and iPad clients are operator clients only.
+- Server/core remains execution authority.
+- All dangerous actions pass the server-side risk gate.
+- Future service design must not expose an unauthenticated LAN submit endpoint.
+
+### Secrets And Reports
+
+- Credentials must not be committed to git.
+- Local config should be ignored unless an explicitly scrubbed template is being versioned.
+- Proof reports may contain account and order data and should not be committed unless intentionally scrubbed.
+
+### Data Retention
+
+- Runtime logs and generated research outputs require a retention policy.
+- Huge outputs should not be committed.
+- Track B proof ledgers are retained locally but reviewed before sharing.
+
 ## Test Plan
 
 Unit tests:
