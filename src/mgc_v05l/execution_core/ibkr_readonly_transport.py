@@ -90,6 +90,18 @@ class IbkrReadOnlyTwsTransport:
         self._event_loop_started = False
         self._event_loop_error: str | None = None
         self._ibkr_errors: list[dict[str, Any]] = []
+        self._last_error_raw_args: tuple[str, ...] = ()
+        self._connect_started_at: datetime | None = None
+        self._socket_connected_at: datetime | None = None
+        self._event_loop_started_at: datetime | None = None
+        self._event_loop_exited_at: datetime | None = None
+        self._connection_closed_at: datetime | None = None
+        self._connect_ack_received = False
+        self._connect_ack_at: datetime | None = None
+        self._disconnect_called_by_track_b = False
+        self._is_connected_before_wait: bool | None = None
+        self._is_connected_after_wait: bool | None = None
+        self._is_connected_after_loop_exit: bool | None = None
 
     def connect(self, *, host: str, port: int, client_id: int, readonly: bool) -> None:
         if not readonly:
@@ -104,15 +116,18 @@ class IbkrReadOnlyTwsTransport:
         self._host = host
         self._port = int(port)
         self._client_id = int(client_id)
+        self._connect_started_at = _utc_now()
         self._bridge = self._build_bridge()
         self._bridge.connect(host, int(port), int(client_id))
-        is_connected = getattr(self._bridge, "isConnected", None)
-        self._socket_connected = bool(is_connected()) if callable(is_connected) else True
+        self._socket_connected = self._is_connected()
+        if self._socket_connected:
+            self._socket_connected_at = _utc_now()
         self._thread = threading.Thread(target=self._run_loop, name="track-b-ibkr-readonly", daemon=True)
         self._thread.start()
 
     def disconnect(self) -> None:
         if self._bridge is not None:
+            self._disconnect_called_by_track_b = True
             self._bridge.disconnect()
 
     def bridge_for_test(self) -> Any:
@@ -124,9 +139,20 @@ class IbkrReadOnlyTwsTransport:
             "port": self._port,
             "client_id": self._client_id,
             "connected_socket": self._socket_connected,
+            "connect_started_at": _iso_or_none(self._connect_started_at),
+            "socket_connected_at": _iso_or_none(self._socket_connected_at),
             "event_loop_thread_started": self._event_loop_started,
             "event_loop_thread_alive": bool(self._thread and self._thread.is_alive()),
             "event_loop_error": self._event_loop_error,
+            "event_loop_started_at": _iso_or_none(self._event_loop_started_at),
+            "event_loop_exited_at": _iso_or_none(self._event_loop_exited_at),
+            "connection_closed_at": _iso_or_none(self._connection_closed_at),
+            "disconnect_called_by_track_b": self._disconnect_called_by_track_b,
+            "is_connected_before_wait": self._is_connected_before_wait,
+            "is_connected_after_wait": self._is_connected_after_wait,
+            "is_connected_after_loop_exit": self._is_connected_after_loop_exit,
+            "connect_ack_received": self._connect_ack_received,
+            "connect_ack_at": _iso_or_none(self._connect_ack_at),
             "next_valid_id_received": self._next_valid_id is not None,
             "next_valid_id": self._next_valid_id,
             "handshake_timeout_seconds": self.config.request_timeout_seconds,
@@ -155,6 +181,7 @@ class IbkrReadOnlyTwsTransport:
             raise IbkrPaperConfigError("; ".join(issues))
 
         bridge = self._require_bridge()
+        self._ensure_api_ready()
         request_id = self._next_request_id()
         self._last_contract_key = contract_key
         self._last_allowlist_entry = dict(allowlist_entry)
@@ -283,6 +310,12 @@ class IbkrReadOnlyTwsTransport:
             def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
                 owner._record_managed_accounts(accountsList)
 
+            def connectAck(self) -> None:  # noqa: N802
+                owner._record_connect_ack()
+
+            def connectionClosed(self) -> None:  # noqa: N802
+                owner._record_connection_closed()
+
             def contractDetails(self, reqId: int, contractDetails: Any) -> None:  # noqa: N802
                 owner._record_contract_details(reqId, contractDetails)
 
@@ -343,10 +376,14 @@ class IbkrReadOnlyTwsTransport:
 
     def _run_loop(self) -> None:
         self._event_loop_started = True
+        self._event_loop_started_at = _utc_now()
         try:
             self._require_bridge().run()
         except Exception as exc:  # noqa: BLE001 - surface background reader failures in diagnostics.
             self._event_loop_error = str(exc)
+        finally:
+            self._event_loop_exited_at = _utc_now()
+            self._is_connected_after_loop_exit = self._is_connected()
 
     def _next_request_id(self) -> int:
         with self._lock:
@@ -359,7 +396,10 @@ class IbkrReadOnlyTwsTransport:
         self._wait(self._next_valid_id_ready, "nextValidId")
 
     def _wait(self, event: threading.Event, callback_name: str) -> None:
-        if not event.wait(float(self.config.request_timeout_seconds)):
+        self._is_connected_before_wait = self._is_connected()
+        completed = event.wait(float(self.config.request_timeout_seconds))
+        self._is_connected_after_wait = self._is_connected()
+        if not completed:
             raise IbkrReadOnlyTimeoutError(f"missing {callback_name} callback")
 
     def _record_next_valid_id(self, order_id: int) -> None:
@@ -369,6 +409,13 @@ class IbkrReadOnlyTwsTransport:
     def _record_managed_accounts(self, accounts_list: str) -> None:
         self._managed_accounts = tuple(account.strip() for account in str(accounts_list or "").split(",") if account.strip())
         self._managed_accounts_ready.set()
+
+    def _record_connect_ack(self) -> None:
+        self._connect_ack_received = True
+        self._connect_ack_at = _utc_now()
+
+    def _record_connection_closed(self) -> None:
+        self._connection_closed_at = _utc_now()
 
     def _record_contract_details(self, request_id: int, contract_details: Any) -> None:
         contract = getattr(contract_details, "contract", contract_details)
@@ -423,6 +470,7 @@ class IbkrReadOnlyTwsTransport:
             self._quote_ready.setdefault(request_id, threading.Event()).set()
 
     def _record_error_from_callback(self, args: tuple[Any, ...]) -> None:
+        self._last_error_raw_args = tuple(repr(arg) for arg in args)
         request_id: int
         error_code: int
         error_string: str
@@ -446,6 +494,7 @@ class IbkrReadOnlyTwsTransport:
                 "request_id": request_id,
                 "error_code": error_code,
                 "error_string": error_string,
+                "raw_args": list(getattr(self, "_last_error_raw_args", ())),
             }
         )
         if request_id in self._contract_ready and error_code >= 200:
@@ -464,6 +513,10 @@ class IbkrReadOnlyTwsTransport:
             causes.append("socket connection not established")
         if not self._event_loop_started:
             causes.append("event loop thread did not start")
+        if self._event_loop_exited_at is not None:
+            causes.append("IBKR API event loop exited before nextValidId")
+        if self._connection_closed_at is not None:
+            causes.append("IBKR connectionClosed callback received")
         if self._event_loop_error:
             causes.append("event loop thread error")
         causes.extend(
@@ -474,6 +527,12 @@ class IbkrReadOnlyTwsTransport:
             ]
         )
         return tuple(dict.fromkeys(causes))
+
+    def _is_connected(self) -> bool:
+        if self._bridge is None:
+            return False
+        is_connected = getattr(self._bridge, "isConnected", None)
+        return bool(is_connected()) if callable(is_connected) else True
 
     def _contract_matches(self, contract_key: str, row: Mapping[str, Any]) -> bool:
         if self._last_contract_key != contract_key or self._last_allowlist_entry is None:
@@ -531,3 +590,11 @@ def _contract_payload(contract: Any) -> dict[str, Any]:
         "contract_month": getattr(contract, "lastTradeDateOrContractMonth", None),
         "multiplier": getattr(contract, "multiplier", None),
     }
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None

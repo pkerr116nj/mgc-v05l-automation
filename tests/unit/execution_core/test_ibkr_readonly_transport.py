@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 import types
 
 import pytest
@@ -103,6 +104,95 @@ def test_readiness_blocks_account_request_until_next_valid_id_exists() -> None:
     assert "TWS did not complete API handshake before timeout" in diagnostics["suspected_causes"]
 
 
+def test_contract_request_is_blocked_until_next_valid_id_exists() -> None:
+    transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+    bridge = transport.bridge_for_test()
+
+    with pytest.raises(IbkrReadOnlyTimeoutError, match="missing nextValidId callback"):
+        transport.qualify_contract(
+            contract_key="MGC-202606",
+            allowlist_entry={
+                "symbol": "MGC",
+                "security_type": "FUT",
+                "exchange": "COMEX",
+                "currency": "USD",
+                "local_symbol": "MGCM6",
+            },
+        )
+
+    assert bridge.req_contract_details_count == 0
+
+
+def test_loop_exit_without_next_valid_id_has_specific_diagnostic() -> None:
+    transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+    time.sleep(0.02)
+
+    with pytest.raises(IbkrReadOnlyTimeoutError, match="missing nextValidId callback"):
+        transport.next_valid_id()
+
+    diagnostics = transport.diagnostics_report()
+    assert diagnostics["event_loop_started_at"] is not None
+    assert diagnostics["event_loop_exited_at"] is not None
+    assert diagnostics["is_connected_after_loop_exit"] is True
+    assert "IBKR API event loop exited before nextValidId" in diagnostics["suspected_causes"]
+
+
+def test_connection_closed_callback_is_recorded() -> None:
+    transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+
+    transport.bridge_for_test().connectionClosed()
+
+    diagnostics = transport.diagnostics_report()
+    assert diagnostics["connection_closed_at"] is not None
+    assert "IBKR connectionClosed callback received" in diagnostics["suspected_causes"]
+
+
+def test_connect_ack_callback_is_recorded() -> None:
+    transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+
+    transport.bridge_for_test().connectAck()
+
+    diagnostics = transport.diagnostics_report()
+    assert diagnostics["connect_ack_received"] is True
+    assert diagnostics["connect_ack_at"] is not None
+
+
+def test_disconnect_is_not_called_before_readiness_timeout() -> None:
+    transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+    bridge = transport.bridge_for_test()
+
+    with pytest.raises(IbkrReadOnlyTimeoutError, match="missing nextValidId callback"):
+        transport.managed_accounts()
+
+    assert bridge.disconnected is False
+    assert transport.diagnostics_report()["disconnect_called_by_track_b"] is False
+    transport.disconnect()
+    assert bridge.disconnected is True
+    assert transport.diagnostics_report()["disconnect_called_by_track_b"] is True
+
+
+def test_error_callback_variants_are_captured_with_raw_args() -> None:
+    transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+    bridge = transport.bridge_for_test()
+
+    bridge.error(-1, 326, "client id in use")
+    bridge.error(-1, "20260502 12:00:00", 502, "could not connect", "{}")
+
+    errors = transport.diagnostics_report()["ibkr_errors"]
+    assert errors[0]["error_code"] == 326
+    assert errors[0]["error_string"] == "client id in use"
+    assert errors[0]["raw_args"] == ["-1", "326", "'client id in use'"]
+    assert errors[1]["error_code"] == 502
+    assert errors[1]["error_string"] == "could not connect"
+    assert errors[1]["raw_args"] == ["-1", "'20260502 12:00:00'", "502", "'could not connect'", "'{}'"]
+
+
 def test_managed_accounts_callback_before_next_valid_id_is_preserved() -> None:
     transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
     transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
@@ -151,7 +241,12 @@ def test_ibkr_handshake_error_is_captured_in_preflight_report(tmp_path) -> None:
     assert diagnostics["client_id"] == 17077
     assert diagnostics["handshake_timeout_seconds"] == 0.01
     assert diagnostics["ibkr_errors"] == [
-        {"error_code": 326, "error_string": "client id is already in use", "request_id": -1}
+        {
+            "error_code": 326,
+            "error_string": "client id is already in use",
+            "raw_args": ["-1", "326", "'client id is already in use'"],
+            "request_id": -1,
+        }
     ]
     assert "client_id collision" in diagnostics["suspected_causes"]
 
@@ -240,17 +335,24 @@ def fake_ibapi_loader(*, managed_accounts: str = "DUM882026", handshake_error: t
             self.wrapper = wrapper
             self.req_ids_calls: list[int] = []
             self.req_managed_accounts_count = 0
+            self.req_contract_details_count = 0
             self.connected_with: tuple[str, int, int] | None = None
             self.disconnected = False
+            self.connected = False
 
         def connect(self, host: str, port: int, client_id: int) -> None:
             self.connected_with = (host, port, client_id)
+            self.connected = True
 
         def run(self) -> None:
             return None
 
         def disconnect(self) -> None:
             self.disconnected = True
+            self.connected = False
+
+        def isConnected(self) -> bool:  # noqa: N802
+            return self.connected
 
         def reqIds(self, request_id: int) -> None:  # noqa: N802
             self.req_ids_calls.append(request_id)
@@ -262,6 +364,9 @@ def fake_ibapi_loader(*, managed_accounts: str = "DUM882026", handshake_error: t
             self.req_managed_accounts_count += 1
             if managed_accounts:
                 self.wrapper.managedAccounts(managed_accounts)
+
+        def reqContractDetails(self, request_id: int, contract) -> None:  # noqa: N802, ANN001
+            self.req_contract_details_count += 1
 
     class FakeContract:
         pass
