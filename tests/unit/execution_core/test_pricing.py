@@ -6,6 +6,8 @@ from decimal import Decimal
 import pytest
 
 from mgc_v05l.execution_core.pricing import (
+    MarketDataMode,
+    MarketDataRole,
     PricingError,
     QuoteObservation,
     create_marketable_limit_decision,
@@ -48,6 +50,31 @@ def test_marketable_buy_limit_is_rounded_up_and_bounded() -> None:
 
     assert decision.limit_price == Decimal("2345.2")
     assert decision.mid == Decimal("2345.05")
+
+
+def test_quote_observation_carries_market_data_reporting_fields() -> None:
+    observed = quote(
+        market_data_provider="IBKR",
+        market_data_mode=MarketDataMode.DELAYED,
+        market_data_role=MarketDataRole.BACKUP,
+        delayed_data_warning_seen=True,
+        tick_size="0.1",
+        exchange="COMEX",
+        currency="USD",
+        provider_warnings=("10167: delayed data",),
+    )
+
+    payload = observed.to_json_dict()
+
+    assert payload["market_data_provider"] == "IBKR"
+    assert payload["market_data_mode"] == "DELAYED"
+    assert payload["market_data_role"] == "BACKUP"
+    assert payload["delayed_data_warning_seen"] is True
+    assert payload["timestamp"] == "2026-05-02T12:00:00+00:00"
+    assert payload["tick_size"] == "0.1"
+    assert payload["exchange"] == "COMEX"
+    assert payload["currency"] == "USD"
+    assert payload["provider_warnings"] == ["10167: delayed data"]
 
 
 def test_marketable_sell_limit_is_rounded_down_and_bounded() -> None:

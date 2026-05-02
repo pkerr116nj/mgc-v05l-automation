@@ -14,6 +14,19 @@ class PricingError(ValueError):
     """Raised when a proof quote cannot safely produce a bounded LMT price."""
 
 
+class MarketDataMode(str):
+    REALTIME = "REALTIME"
+    DELAYED = "DELAYED"
+    UNKNOWN = "UNKNOWN"
+
+
+class MarketDataRole(str):
+    PRIMARY = "PRIMARY"
+    SECONDARY = "SECONDARY"
+    BACKUP = "BACKUP"
+    DIAGNOSTIC = "DIAGNOSTIC"
+
+
 @dataclass(frozen=True)
 class QuoteObservation(JsonSerializable):
     quote_id: str
@@ -24,6 +37,15 @@ class QuoteObservation(JsonSerializable):
     ask: Decimal | int | float | str | None
     last: Decimal | int | float | str | None
     observed_at: datetime
+    market_data_provider: str = "UNKNOWN"
+    market_data_mode: str = MarketDataMode.UNKNOWN
+    market_data_role: str = MarketDataRole.DIAGNOSTIC
+    delayed_data_warning_seen: bool = False
+    timestamp: datetime | None = None
+    tick_size: Decimal | int | float | str | None = None
+    exchange: str | None = None
+    currency: str | None = None
+    provider_warnings: tuple[str, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -32,6 +54,26 @@ class QuoteObservation(JsonSerializable):
         object.__setattr__(self, "contract_key", require_id(self.contract_key, "contract_key"))
         object.__setattr__(self, "source", require_id(self.source, "source"))
         object.__setattr__(self, "observed_at", require_aware_datetime(self.observed_at, "observed_at"))
+        timestamp = self.timestamp or self.observed_at
+        object.__setattr__(self, "timestamp", require_aware_datetime(timestamp, "timestamp"))
+        object.__setattr__(self, "market_data_provider", require_id(self.market_data_provider, "market_data_provider"))
+        object.__setattr__(self, "market_data_mode", _normalize_market_data_mode(self.market_data_mode))
+        object.__setattr__(self, "market_data_role", _normalize_market_data_role(self.market_data_role))
+        object.__setattr__(self, "provider_warnings", tuple(str(item) for item in self.provider_warnings))
+
+
+def _normalize_market_data_mode(value: str) -> str:
+    normalized = str(value or "").strip().upper()
+    if normalized not in {MarketDataMode.REALTIME, MarketDataMode.DELAYED, MarketDataMode.UNKNOWN}:
+        raise TrackBModelError("market_data_mode must be REALTIME, DELAYED, or UNKNOWN.")
+    return normalized
+
+
+def _normalize_market_data_role(value: str) -> str:
+    normalized = str(value or "").strip().upper()
+    if normalized not in {MarketDataRole.PRIMARY, MarketDataRole.SECONDARY, MarketDataRole.BACKUP, MarketDataRole.DIAGNOSTIC}:
+        raise TrackBModelError("market_data_role must be PRIMARY, SECONDARY, BACKUP, or DIAGNOSTIC.")
+    return normalized
 
 
 @dataclass(frozen=True)

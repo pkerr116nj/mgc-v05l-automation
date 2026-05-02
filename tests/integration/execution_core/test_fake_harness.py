@@ -39,6 +39,11 @@ def test_fake_harness_passes_full_open_close_spine(tmp_path) -> None:  # type: i
     assert payload["classification"] == "TRACK_B_PAPER_PROOF_PASSED"
     assert payload["environment"] == "FAKE"
     assert payload["broker"] == "FAKE_IBKR_ADAPTER"
+    assert payload["market_data_provider"] == "FAKE"
+    assert payload["market_data_mode"] == "UNKNOWN"
+    assert payload["market_data_role"] == "DIAGNOSTIC"
+    assert payload["paper_route_readiness"] is True
+    assert payload["production_live_money_readiness"] is False
     assert payload["final_reconciliation"]["status"] == "CLEAN"
     assert payload["open_broker_order"]["broker_order_id"] == "FAKE-ORDER-0001"
     assert payload["open_broker_order"]["perm_id"] == "FAKE-PERM-0001"

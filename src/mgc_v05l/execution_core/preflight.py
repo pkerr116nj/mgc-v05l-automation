@@ -21,7 +21,7 @@ from .ibkr_paper_adapter import (
     IbkrPaperReadinessError,
 )
 from .models import BrokerOrder, PositionSource, PositionState, require_aware_datetime, to_jsonable
-from .pricing import QuoteObservation
+from .pricing import MarketDataMode, MarketDataRole, QuoteObservation
 
 
 DEFAULT_PREFLIGHT_OUTPUT_ROOT = Path("outputs/track_b_execution_core/preflight")
@@ -458,6 +458,14 @@ def _quote_from_transport(
         ask=raw_quote.get("ask"),
         last=raw_quote.get("last"),
         observed_at=observed_at,
+        market_data_provider=str(raw_quote.get("market_data_provider") or "IBKR"),
+        market_data_mode=str(raw_quote.get("market_data_mode") or MarketDataMode.UNKNOWN),
+        market_data_role=str(raw_quote.get("market_data_role") or MarketDataRole.DIAGNOSTIC),
+        delayed_data_warning_seen=bool(raw_quote.get("delayed_data_warning_seen") or False),
+        tick_size=raw_quote.get("tick_size"),
+        exchange=raw_quote.get("exchange"),
+        currency=raw_quote.get("currency"),
+        provider_warnings=tuple(raw_quote.get("provider_warnings") or ()),
         raw=dict(raw_quote.get("raw") or {}),
     )
 
@@ -483,6 +491,12 @@ def _write_result(
     required_action: str | None,
     transport_diagnostics: dict[str, Any] | None = None,
 ) -> PreflightResult:
+    actual_transport_diagnostics = transport_diagnostics or {}
+    market_data = _market_data_report(
+        quote=quote,
+        transport_diagnostics=actual_transport_diagnostics,
+        paper_route_readiness=classification == PreflightClassification.READY_READ_ONLY,
+    )
     report = {
         "schema_version": "track_b_read_only_preflight_v1",
         "classification": classification.value,
@@ -497,12 +511,22 @@ def _write_result(
         "position": position.to_json_dict() if position is not None else None,
         "open_orders": [order.to_json_dict() for order in open_orders],
         "quote": quote.to_json_dict() if quote is not None else None,
+        "market_data": market_data,
+        "market_data_provider": market_data["market_data_provider"],
+        "market_data_mode": market_data["market_data_mode"],
+        "market_data_role": market_data["market_data_role"],
+        "delayed_data_warning_seen": market_data["delayed_data_warning_seen"],
+        "quote_observed": market_data["quote_observed"],
+        "quote_blocking_for_paper": market_data["quote_blocking_for_paper"],
+        "quote_blocking_for_live_money": market_data["quote_blocking_for_live_money"],
+        "paper_route_readiness": market_data["paper_route_readiness"],
+        "production_live_money_readiness": market_data["production_live_money_readiness"],
         "checks": checks,
         "missing_callbacks": sorted(set(missing_callbacks)),
         "broker_errors": broker_errors,
         "failure_or_ambiguity": failure_or_ambiguity,
         "required_action": required_action,
-        "transport_diagnostics": transport_diagnostics or {},
+        "transport_diagnostics": actual_transport_diagnostics,
         "submit_enabled": False,
         "place_order_called": False,
         "report_json_path": str(report_json),
@@ -543,7 +567,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
         json.dumps({"position": report["position"], "open_orders": report["open_orders"]}, indent=2, sort_keys=True),
         "",
         "## Quote",
-        json.dumps(report["quote"], indent=2, sort_keys=True),
+        json.dumps({"quote": report["quote"], "market_data": report["market_data"]}, indent=2, sort_keys=True),
         "",
         "## Broker Errors And Missing Callbacks",
         json.dumps({"broker_errors": report["broker_errors"], "missing_callbacks": report["missing_callbacks"]}, indent=2, sort_keys=True),
@@ -568,3 +592,63 @@ def _transport_diagnostics(transport: ReadOnlyPreflightTransport) -> dict[str, A
     except Exception as exc:  # noqa: BLE001 - diagnostics must not hide original failure.
         return {"diagnostics_error": str(exc)}
     return dict(diagnostics or {})
+
+
+def _market_data_report(
+    *,
+    quote: QuoteObservation | None,
+    transport_diagnostics: Mapping[str, Any],
+    paper_route_readiness: bool,
+) -> dict[str, Any]:
+    provider_warnings = _provider_warnings(transport_diagnostics)
+    delayed_warning_seen = _delayed_data_warning_seen(provider_warnings)
+    if quote is None:
+        provider = "IBKR"
+        mode = MarketDataMode.UNKNOWN
+        role = MarketDataRole.DIAGNOSTIC
+        quote_observed = False
+        tick_size = exchange = currency = None
+    else:
+        provider = quote.market_data_provider
+        mode = quote.market_data_mode
+        role = quote.market_data_role
+        quote_observed = True
+        tick_size = quote.tick_size
+        exchange = quote.exchange
+        currency = quote.currency
+        provider_warnings = tuple(dict.fromkeys((*provider_warnings, *quote.provider_warnings)))
+        delayed_warning_seen = delayed_warning_seen or quote.delayed_data_warning_seen
+    if delayed_warning_seen and mode == MarketDataMode.UNKNOWN:
+        mode = MarketDataMode.DELAYED
+
+    production_live_money_readiness = mode == MarketDataMode.REALTIME and quote_observed
+    return {
+        "market_data_provider": provider,
+        "market_data_mode": mode,
+        "market_data_role": role,
+        "delayed_data_warning_seen": delayed_warning_seen,
+        "quote_observed": quote_observed,
+        "quote_blocking_for_paper": False,
+        "quote_blocking_for_live_money": mode in {MarketDataMode.DELAYED, MarketDataMode.UNKNOWN} or not quote_observed,
+        "paper_route_readiness": paper_route_readiness,
+        "production_live_money_readiness": production_live_money_readiness,
+        "proves_paper_mechanics_only": not production_live_money_readiness,
+        "provider_warnings": list(provider_warnings),
+        "tick_size": str(tick_size) if tick_size is not None else None,
+        "exchange": exchange,
+        "currency": currency,
+    }
+
+
+def _provider_warnings(transport_diagnostics: Mapping[str, Any]) -> tuple[str, ...]:
+    warnings: list[str] = []
+    for error in transport_diagnostics.get("ibkr_errors", []) or []:
+        code = error.get("error_code")
+        text = str(error.get("error_string") or "")
+        if code in {2103, 2104, 2106, 2158, 10167, 10168} or "farm" in text.lower() or "delayed" in text.lower():
+            warnings.append(f"{code}: {text}")
+    return tuple(warnings)
+
+
+def _delayed_data_warning_seen(warnings: Sequence[str]) -> bool:
+    return any("delayed" in warning.lower() or warning.startswith("10167:") or warning.startswith("10168:") for warning in warnings)

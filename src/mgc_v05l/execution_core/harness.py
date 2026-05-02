@@ -32,7 +32,7 @@ from .models import (
     SubmitAttemptState,
     TerminalClassification,
 )
-from .pricing import PricingError, QuoteObservation, create_marketable_limit_decision
+from .pricing import MarketDataMode, MarketDataRole, PricingError, QuoteObservation, create_marketable_limit_decision
 from .reconcile import reconcile_position
 from .risk_gate import evaluate_order_gate
 
@@ -932,6 +932,11 @@ def _build_report(
     broker_orders = by_type.get("broker_order_observed", [])
     fills = by_type.get("fill_event_created", [])
     gate_checks = [row for row in by_type.get("gate_decision_created", [])]
+    market_data = _market_data_report(
+        quotes=by_type.get("quote_observed", []),
+        context=context,
+        paper_route_readiness=classification == TerminalClassification.PASSED,
+    )
     return {
         "schema_version": "track_b_fake_harness_v1",
         "classification": classification.value,
@@ -949,6 +954,13 @@ def _build_report(
         "event_ids": [{"event_id": event.event_id, "event_type": event.event_type, "sequence": event.sequence} for event in events],
         "config": context.get("config"),
         "quotes": by_type.get("quote_observed", []),
+        "market_data": market_data,
+        "market_data_provider": market_data["market_data_provider"],
+        "market_data_mode": market_data["market_data_mode"],
+        "market_data_role": market_data["market_data_role"],
+        "delayed_data_warning_seen": market_data["delayed_data_warning_seen"],
+        "paper_route_readiness": market_data["paper_route_readiness"],
+        "production_live_money_readiness": market_data["production_live_money_readiness"],
         "pricing_decisions": by_type.get("pricing_decision_created", []),
         "pre_open_reconciliation": by_stage.get("PRE_OPEN"),
         "open_intent": intents[0] if intents else None,
@@ -993,7 +1005,7 @@ def _render_markdown_report(report: dict[str, Any]) -> str:
         json.dumps(report.get("contract"), indent=2, sort_keys=True),
         "",
         "## Quote And Pricing",
-        json.dumps({"quotes": report.get("quotes"), "pricing_decisions": report.get("pricing_decisions")}, indent=2, sort_keys=True),
+        json.dumps({"quotes": report.get("quotes"), "market_data": report.get("market_data"), "pricing_decisions": report.get("pricing_decisions")}, indent=2, sort_keys=True),
         "",
         "## Event Chain",
         json.dumps(report.get("event_ids"), indent=2, sort_keys=True),
@@ -1050,6 +1062,40 @@ def _render_markdown_report(report: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _market_data_report(
+    *,
+    quotes: list[dict[str, Any]],
+    context: dict[str, Any],
+    paper_route_readiness: bool,
+) -> dict[str, Any]:
+    quote = quotes[0] if quotes else {}
+    is_fake = context.get("environment") == "FAKE"
+    provider = str(quote.get("market_data_provider") or "UNKNOWN")
+    if is_fake and provider == "UNKNOWN":
+        provider = "FAKE"
+    mode = str(quote.get("market_data_mode") or MarketDataMode.UNKNOWN)
+    role = str(quote.get("market_data_role") or MarketDataRole.DIAGNOSTIC)
+    delayed_warning_seen = bool(quote.get("delayed_data_warning_seen") or False)
+    quote_observed = bool(quotes)
+    production_live_money_readiness = bool(quote_observed and mode == MarketDataMode.REALTIME and not is_fake)
+    return {
+        "market_data_provider": provider,
+        "market_data_mode": mode,
+        "market_data_role": role,
+        "delayed_data_warning_seen": delayed_warning_seen,
+        "quote_observed": quote_observed,
+        "quote_blocking_for_paper": False,
+        "quote_blocking_for_live_money": mode in {MarketDataMode.DELAYED, MarketDataMode.UNKNOWN} or is_fake or not quote_observed,
+        "paper_route_readiness": paper_route_readiness,
+        "production_live_money_readiness": production_live_money_readiness,
+        "proves_paper_mechanics_only": not production_live_money_readiness,
+        "provider_warnings": list(quote.get("provider_warnings") or ()),
+        "tick_size": quote.get("tick_size"),
+        "exchange": quote.get("exchange"),
+        "currency": quote.get("currency"),
+    }
 
 
 def _validate_config(config: HarnessConfig) -> list[str]:
