@@ -1164,6 +1164,28 @@ an automated production-capable execution core.
 - Broker truth drives positions, orders, and fills.
 - Dashboard, cache, and snapshot files are never authority.
 
+## Provider-Agnostic Market Data Policy
+
+- Magic must be designed with a provider-agnostic market data layer.
+- Databento should be treated as the primary real-time market data authority for strategy bars, signal inputs, and real-time quote/pricing data when available.
+- IBKR remains the broker, execution, and reconciliation authority for account validation, contract qualification, positions, open orders, broker order status, fills/executions, and final reconciliation.
+- IBKR market data may be used as secondary, backup, diagnostic, or broker-side quote data, but it must be labeled by entitlement and timeliness as `REALTIME`, `DELAYED`, or `UNKNOWN`.
+- Delayed IBKR market data is acceptable for live paper trading and paper-route proof work when the run is explicitly labeled as delayed-data paper trading.
+- Delayed IBKR market data is not acceptable as silent real-time data for live-money production trading.
+- Paper route proof using delayed data may classify `paper_route_readiness = true` and `production_live_money_readiness = false`.
+- Any proof report or preflight report that uses market data must include `market_data_provider`, `market_data_mode`, `market_data_role`, `delayed_data_warning_seen` when applicable, and whether the run proves paper mechanics only or live-money readiness.
+- IBKR market data warnings, including delayed-data and farm-status warnings, should be captured and reported.
+- Informational farm-status warnings are not fatal by default.
+- Delayed-data warnings do not block paper trading by default.
+- Delayed-data warnings must block or prevent live-money readiness classification.
+- Order pricing should eventually consume a provider-agnostic quote object, not raw IBKR or raw Databento objects directly.
+- The future provider interface should normalize at least provider name, symbol or contract key, bid, ask, last, timestamp, mode `REALTIME` / `DELAYED` / `UNKNOWN`, entitlement/status warnings, source latency or age, tick size, currency, and exchange.
+- For milestone paper proof, Databento real-time data may be preferred if already available through the provider layer.
+- For milestone paper proof, IBKR delayed data may be allowed as a temporary paper-only fallback.
+- All milestone paper proof market data use must be explicit in config and reporting.
+- No live-money readiness may be claimed until realtime entitlement and quote freshness are verified.
+- The mobile, UI, or client layer must not become a market data authority; market data authority remains server-side/core.
+
 ### Order Policy
 
 - Milestone one allows single-contract `LMT` `DAY` orders only.
