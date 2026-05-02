@@ -103,9 +103,14 @@ class IbkrReadOnlyTwsTransport:
         if self._bridge is not None:
             self._bridge.disconnect()
 
+    def bridge_for_test(self) -> Any:
+        return self._require_bridge()
+
     def managed_accounts(self) -> Sequence[str]:
         bridge = self._require_bridge()
-        bridge.reqManagedAccts()
+        self._ensure_api_ready()
+        if not self._managed_accounts:
+            bridge.reqManagedAccts()
         self._wait(self._managed_accounts_ready, "managedAccounts")
         return self._managed_accounts
 
@@ -312,6 +317,11 @@ class IbkrReadOnlyTwsTransport:
         with self._lock:
             self._request_id += 1
             return self._request_id
+
+    def _ensure_api_ready(self) -> None:
+        if self._next_valid_id is None:
+            self._require_bridge().reqIds(-1)
+        self._wait(self._next_valid_id_ready, "nextValidId")
 
     def _wait(self, event: threading.Event, callback_name: str) -> None:
         if not event.wait(float(self.config.request_timeout_seconds)):
