@@ -11,7 +11,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -50,6 +50,7 @@ class PaperProofConfig:
     submit_enabled: bool = False
     confirm_paper_submit: bool = False
     allow_delayed_data_for_paper_proof: bool = False
+    manual_limit_price: str | Decimal | None = None
     contract_allowlist: dict[str, dict[str, object]] | None = None
 
     def to_report_dict(self) -> dict[str, object]:
@@ -68,6 +69,7 @@ class PaperProofConfig:
             "submit_enabled": self.submit_enabled,
             "confirm_paper_submit": self.confirm_paper_submit,
             "allow_delayed_data_for_paper_proof": self.allow_delayed_data_for_paper_proof,
+            "manual_limit_price": str(self.manual_limit_price) if self.manual_limit_price is not None else None,
         }
 
 
@@ -144,7 +146,14 @@ def run_paper_proof(
         output_root=Path(config.output_root) / "proof_runs",
         contract_allowlist=config.contract_allowlist or HarnessConfig().contract_allowlist,
     )
-    actual_proof_runner = proof_runner or (lambda cfg, rid: run_ibkr_paper_proof(config=cfg, run_id=rid, preflight=preflight))
+    actual_proof_runner = proof_runner or (
+        lambda cfg, rid: run_ibkr_paper_proof(
+            config=cfg,
+            run_id=rid,
+            preflight=preflight,
+            manual_limit_price=config.manual_limit_price,
+        )
+    )
     proof = actual_proof_runner(proof_config, actual_run_id)
     proof_payload = _read_json(proof.proof_report_json)
     classification = _classification_from_proof(proof, proof_payload)
@@ -185,6 +194,12 @@ def _validate_config(config: PaperProofConfig) -> str | None:
         return "order_type must be LMT"
     if str(config.time_in_force).upper() != "DAY":
         return "time_in_force must be DAY"
+    if config.manual_limit_price is not None:
+        if not config.allow_delayed_data_for_paper_proof:
+            return "manual_limit_price requires delayed-data paper-proof approval"
+        manual_price_error = _manual_limit_price_error(config)
+        if manual_price_error is not None:
+            return manual_price_error
     return None
 
 
@@ -211,7 +226,10 @@ def _preflight_blocker(*, config: PaperProofConfig, preflight: PreflightResult) 
     mode = str(report.get("market_data_mode") or "UNKNOWN").upper()
     quote_observed = bool(report.get("quote_observed"))
     if not quote_observed:
-        return "pricing-dependent proof submit requires an observed quote"
+        if config.manual_limit_price is None:
+            return "pricing-dependent proof submit requires an observed quote or manual limit price"
+        if mode != "DELAYED":
+            return "manual limit price proof requires delayed-data paper context"
     if mode == "DELAYED" and not config.allow_delayed_data_for_paper_proof:
         return "delayed market data requires explicit paper-proof approval"
     if mode == "UNKNOWN":
@@ -261,6 +279,31 @@ def _proof_pass_chain_complete(proof_payload: Mapping[str, object]) -> bool:
     return final.get("status") == "CLEAN"
 
 
+def _manual_limit_price_error(config: PaperProofConfig) -> str | None:
+    try:
+        price = Decimal(str(config.manual_limit_price))
+    except (InvalidOperation, ValueError):
+        return "manual_limit_price must be a positive decimal"
+    if not price.is_finite() or price <= 0:
+        return "manual_limit_price must be positive"
+    allowlist = config.contract_allowlist or HarnessConfig().contract_allowlist
+    entry = allowlist.get(config.contract_key)
+    if entry is None:
+        return "manual_limit_price requires exact allowlisted contract"
+    raw_tick_size = entry.get("tick_size")
+    if raw_tick_size is None:
+        return "manual_limit_price requires configured contract tick_size"
+    try:
+        tick_size = Decimal(str(raw_tick_size))
+    except (InvalidOperation, ValueError):
+        return "manual_limit_price requires valid contract tick_size"
+    if not tick_size.is_finite() or tick_size <= 0:
+        return "manual_limit_price requires positive contract tick_size"
+    if price % tick_size != 0:
+        return "manual_limit_price must be valid for contract tick_size"
+    return None
+
+
 def _write_result(
     *,
     run_id: str,
@@ -291,6 +334,9 @@ def _write_result(
         "market_data_role": preflight_report.get("market_data_role"),
         "delayed_data_warning_seen": preflight_report.get("delayed_data_warning_seen"),
         "quote_observed": preflight_report.get("quote_observed"),
+        "manual_limit_price": str(config.manual_limit_price) if config.manual_limit_price is not None else None,
+        "pricing_source": "OPERATOR_SUPPLIED_MANUAL_LIMIT" if config.manual_limit_price is not None else None,
+        "operator_manual_price_acknowledgement": config.manual_limit_price is not None,
         "paper_route_readiness": preflight_report.get("paper_route_readiness"),
         "production_live_money_readiness": False,
         "failure_or_ambiguity": reason,
@@ -357,6 +403,7 @@ def run_ibkr_paper_proof(
     config: HarnessConfig,
     run_id: str,
     preflight: PreflightResult,
+    manual_limit_price: str | Decimal | None = None,
     adapter: IbkrPaperAdapter | None = None,
 ) -> HarnessResult:
     """Run the real IBKR paper proof path after paper_proof gates have passed."""
@@ -393,43 +440,61 @@ def run_ibkr_paper_proof(
         contract = actual_adapter.qualify_contract(run_id=run_id, contract_key=config.contract_key, now=now)
         append("contract_qualified", contract)
 
-        preflight_quote = preflight.report.get("quote")
-        if not isinstance(preflight_quote, Mapping):
-            raise RuntimeError("preflight quote is required for paper proof pricing")
-        quote = QuoteObservation(
-            quote_id=f"quote_{run_id}_preflight",
-            run_id=run_id,
-            contract_key=config.contract_key,
-            source=str(preflight_quote.get("source") or "preflight"),
-            bid=preflight_quote.get("bid"),
-            ask=preflight_quote.get("ask"),
-            last=preflight_quote.get("last"),
-            observed_at=now,
-            market_data_provider=str(preflight.report.get("market_data_provider") or "IBKR"),
-            market_data_mode=str(preflight.report.get("market_data_mode") or "UNKNOWN"),
-            market_data_role=str(preflight.report.get("market_data_role") or "DIAGNOSTIC"),
-            delayed_data_warning_seen=bool(preflight.report.get("delayed_data_warning_seen")),
-            tick_size=config.contract_allowlist[config.contract_key].get("tick_size"),
-            exchange=config.contract_allowlist[config.contract_key].get("exchange"),
-            currency=config.contract_allowlist[config.contract_key].get("currency"),
-            raw={"source": "preflight_report", "preflight_run_id": preflight.run_id},
-        )
-        ledger.append_model_event(event_type="quote_observed", model=quote)
-        open_pricing = create_marketable_limit_decision(
-            pricing_decision_id=f"pricing_{run_id}_open",
-            quote=quote,
-            action=config.side,
-            tick_size=config.contract_allowlist[config.contract_key].get("tick_size"),
-            fill_offset_ticks=config.fill_offset_ticks,
-            max_quote_age_seconds=config.max_quote_age_seconds,
-            max_distance_ticks=config.max_distance_ticks,
-            max_distance_percent=config.max_distance_percent,
-            now=now,
-        )
-        ledger.append_model_event(event_type="pricing_decision_created", model=open_pricing)
+        if manual_limit_price is not None:
+            open_limit_price = Decimal(str(manual_limit_price))
+            close_limit_price = open_limit_price
+            append(
+                "pricing_decision_created",
+                {
+                    "pricing_decision_id": f"pricing_{run_id}_manual_open",
+                    "pricing_source": "OPERATOR_SUPPLIED_MANUAL_LIMIT",
+                    "manual_limit_price": str(open_limit_price),
+                    "market_data_provider": preflight.report.get("market_data_provider") or "IBKR",
+                    "market_data_mode": preflight.report.get("market_data_mode") or "DELAYED",
+                    "market_data_role": preflight.report.get("market_data_role") or "DIAGNOSTIC",
+                    "paper_only": True,
+                    "operator_manual_price_acknowledgement": True,
+                },
+            )
+        else:
+            preflight_quote = preflight.report.get("quote")
+            if not isinstance(preflight_quote, Mapping):
+                raise RuntimeError("preflight quote is required for paper proof pricing")
+            quote = QuoteObservation(
+                quote_id=f"quote_{run_id}_preflight",
+                run_id=run_id,
+                contract_key=config.contract_key,
+                source=str(preflight_quote.get("source") or "preflight"),
+                bid=preflight_quote.get("bid"),
+                ask=preflight_quote.get("ask"),
+                last=preflight_quote.get("last"),
+                observed_at=now,
+                market_data_provider=str(preflight.report.get("market_data_provider") or "IBKR"),
+                market_data_mode=str(preflight.report.get("market_data_mode") or "UNKNOWN"),
+                market_data_role=str(preflight.report.get("market_data_role") or "DIAGNOSTIC"),
+                delayed_data_warning_seen=bool(preflight.report.get("delayed_data_warning_seen")),
+                tick_size=config.contract_allowlist[config.contract_key].get("tick_size"),
+                exchange=config.contract_allowlist[config.contract_key].get("exchange"),
+                currency=config.contract_allowlist[config.contract_key].get("currency"),
+                raw={"source": "preflight_report", "preflight_run_id": preflight.run_id},
+            )
+            ledger.append_model_event(event_type="quote_observed", model=quote)
+            open_pricing = create_marketable_limit_decision(
+                pricing_decision_id=f"pricing_{run_id}_open",
+                quote=quote,
+                action=config.side,
+                tick_size=config.contract_allowlist[config.contract_key].get("tick_size"),
+                fill_offset_ticks=config.fill_offset_ticks,
+                max_quote_age_seconds=config.max_quote_age_seconds,
+                max_distance_ticks=config.max_distance_ticks,
+                max_distance_percent=config.max_distance_percent,
+                now=now,
+            )
+            ledger.append_model_event(event_type="pricing_decision_created", model=open_pricing)
+            open_limit_price = open_pricing.limit_price
 
         signal = _signal(config=config, run_id=run_id, now=now)
-        open_intent = _intent(config=config, run_id=run_id, signal=signal, kind=IntentKind.OPEN, action=Action(config.side), limit_price=open_pricing.limit_price, now=now, index=1)
+        open_intent = _intent(config=config, run_id=run_id, signal=signal, kind=IntentKind.OPEN, action=Action(config.side), limit_price=open_limit_price, now=now, index=1)
         open_submit = _submit(config=config, run_id=run_id, intent=open_intent, now=now, index=1)
         ledger.append_model_event(event_type="signal_event_created", model=signal)
         ledger.append_model_event(event_type="order_intent_created", model=open_intent)
@@ -441,19 +506,35 @@ def run_ibkr_paper_proof(
         ledger.append_model_event(event_type="fill_event_created", model=open_fill)
 
         close_action = Action.SELL if open_intent.action == Action.BUY else Action.BUY
-        close_pricing = create_marketable_limit_decision(
-            pricing_decision_id=f"pricing_{run_id}_close",
-            quote=quote,
-            action=close_action,
-            tick_size=config.contract_allowlist[config.contract_key].get("tick_size"),
-            fill_offset_ticks=config.fill_offset_ticks,
-            max_quote_age_seconds=config.max_quote_age_seconds,
-            max_distance_ticks=config.max_distance_ticks,
-            max_distance_percent=config.max_distance_percent,
-            now=now,
-        )
-        ledger.append_model_event(event_type="pricing_decision_created", model=close_pricing)
-        close_intent = _intent(config=config, run_id=run_id, signal=signal, kind=IntentKind.CLOSE, action=close_action, limit_price=close_pricing.limit_price, now=now, index=2)
+        if manual_limit_price is not None:
+            append(
+                "pricing_decision_created",
+                {
+                    "pricing_decision_id": f"pricing_{run_id}_manual_close",
+                    "pricing_source": "OPERATOR_SUPPLIED_MANUAL_LIMIT",
+                    "manual_limit_price": str(close_limit_price),
+                    "market_data_provider": preflight.report.get("market_data_provider") or "IBKR",
+                    "market_data_mode": preflight.report.get("market_data_mode") or "DELAYED",
+                    "market_data_role": preflight.report.get("market_data_role") or "DIAGNOSTIC",
+                    "paper_only": True,
+                    "operator_manual_price_acknowledgement": True,
+                },
+            )
+        else:
+            close_pricing = create_marketable_limit_decision(
+                pricing_decision_id=f"pricing_{run_id}_close",
+                quote=quote,
+                action=close_action,
+                tick_size=config.contract_allowlist[config.contract_key].get("tick_size"),
+                fill_offset_ticks=config.fill_offset_ticks,
+                max_quote_age_seconds=config.max_quote_age_seconds,
+                max_distance_ticks=config.max_distance_ticks,
+                max_distance_percent=config.max_distance_percent,
+                now=now,
+            )
+            ledger.append_model_event(event_type="pricing_decision_created", model=close_pricing)
+            close_limit_price = close_pricing.limit_price
+        close_intent = _intent(config=config, run_id=run_id, signal=signal, kind=IntentKind.CLOSE, action=close_action, limit_price=close_limit_price, now=now, index=2)
         close_submit = _submit(config=config, run_id=run_id, intent=close_intent, now=now, index=2)
         ledger.append_model_event(event_type="order_intent_created", model=close_intent)
         ledger.append_model_event(event_type="submit_attempt_created", model=close_submit)

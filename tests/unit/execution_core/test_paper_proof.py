@@ -168,6 +168,82 @@ def test_missing_or_unknown_quote_blocks_pricing_dependent_proof(tmp_path: Path)
     assert "observed quote" in str(result.report["failure_or_ambiguity"])
 
 
+def test_missing_quote_with_valid_manual_limit_price_proceeds_as_paper_only_manual_price(tmp_path: Path) -> None:
+    result = run_paper_proof(
+        config=config(tmp_path, manual_limit_price="2345.1"),
+        preflight_runner=preflight_runner(
+            ready_preflight(
+                tmp_path,
+                quote=None,
+                quote_observed=False,
+                market_data_provider="IBKR",
+                market_data_mode="DELAYED",
+                market_data_role="DIAGNOSTIC",
+                delayed_data_warning_seen=True,
+                production_live_money_readiness=False,
+            )
+        ),
+        proof_runner=passing_proof_runner(tmp_path),
+        run_id="run-manual-price",
+    )
+    payload = json.loads(result.report_json.read_text(encoding="utf-8"))
+
+    assert result.classification == TerminalClassification.PASSED
+    assert payload["manual_limit_price"] == "2345.1"
+    assert payload["pricing_source"] == "OPERATOR_SUPPLIED_MANUAL_LIMIT"
+    assert payload["operator_manual_price_acknowledgement"] is True
+    assert payload["market_data_provider"] == "IBKR"
+    assert payload["market_data_mode"] == "DELAYED"
+    assert payload["quote_observed"] is False
+    assert payload["paper_route_readiness"] is True
+    assert payload["production_live_money_readiness"] is False
+
+
+@pytest.mark.parametrize(
+    ("manual_limit_price", "reason"),
+    [
+        ("0", "positive"),
+        ("-1", "positive"),
+        ("not-a-number", "positive decimal"),
+        ("2345.15", "tick_size"),
+    ],
+)
+def test_invalid_manual_limit_price_blocks_before_proof_runner(
+    tmp_path: Path,
+    manual_limit_price: str,
+    reason: str,
+) -> None:
+    called = False
+
+    def proof_runner(config, run_id):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+        return passing_proof_runner(tmp_path)(config, run_id)
+
+    result = run_paper_proof(
+        config=config(tmp_path, manual_limit_price=manual_limit_price),
+        preflight_runner=preflight_runner(ready_preflight(tmp_path, quote_observed=False, market_data_mode="DELAYED")),
+        proof_runner=proof_runner,
+        run_id="run-invalid-manual-price",
+    )
+
+    assert result.classification == TerminalClassification.BLOCKED
+    assert reason in str(result.report["failure_or_ambiguity"])
+    assert called is False
+
+
+def test_manual_limit_price_requires_delayed_data_paper_approval(tmp_path: Path) -> None:
+    result = run_paper_proof(
+        config=config(tmp_path, manual_limit_price="2345.1", allow_delayed_data_for_paper_proof=False),
+        preflight_runner=preflight_runner(ready_preflight(tmp_path, quote_observed=False, market_data_mode="DELAYED")),
+        proof_runner=passing_proof_runner(tmp_path),
+        run_id="run-manual-price-no-approval",
+    )
+
+    assert result.classification == TerminalClassification.BLOCKED
+    assert "delayed-data paper-proof approval" in str(result.report["failure_or_ambiguity"])
+
+
 def test_delayed_data_can_pass_paper_proof_but_not_live_money_readiness(tmp_path: Path) -> None:
     result = run_paper_proof(
         config=config(tmp_path, allow_delayed_data_for_paper_proof=True),

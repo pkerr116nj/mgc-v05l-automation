@@ -118,6 +118,50 @@ def test_cli_rejects_missing_operator_submit_flags(tmp_path: Path, remove: str, 
 
 
 @pytest.mark.parametrize(
+    ("remove", "message"),
+    [
+        ("--allow-delayed-data-paper-proof", "--manual-limit-price requires --allow-delayed-data-paper-proof"),
+        ("--confirm-paper-submit", "--confirm-paper-submit is required"),
+        ("--submit-enabled", "--submit-enabled is required"),
+    ],
+)
+def test_cli_rejects_manual_price_without_required_paper_flags(
+    tmp_path: Path,
+    remove: str,
+    message: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    args = cli_args(tmp_path, "--manual-limit-price", "2345.1")
+    args.remove(remove)
+
+    with pytest.raises(SystemExit):
+        paper_proof_cli.main(args, transport_factory=lambda cfg: FakeTransport())
+
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("0", "--manual-limit-price must be positive"),
+        ("-1", "--manual-limit-price must be positive"),
+        ("not-a-number", "--manual-limit-price must be a positive decimal"),
+        ("2345.15", "--manual-limit-price must be valid for contract tick_size"),
+    ],
+)
+def test_cli_rejects_invalid_manual_limit_price(
+    tmp_path: Path,
+    value: str,
+    message: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        paper_proof_cli.main(cli_args(tmp_path, "--manual-limit-price", value), transport_factory=lambda cfg: FakeTransport())
+
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
     ("option", "value", "message"),
     [
         ("--mode", "LIVE", "--mode must be PAPER"),
@@ -165,3 +209,30 @@ def test_cli_runs_with_fake_transport_and_fake_proof_runner(tmp_path: Path, caps
     assert exit_code == 0
     assert output["classification"] == "TRACK_B_PAPER_PROOF_PASSED"
     assert Path(output["report_json"]).exists()
+
+
+def test_cli_runs_with_manual_limit_price_and_keeps_lmt_day(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    seen: dict[str, object] = {}
+
+    def proof_runner(config, run_id):  # type: ignore[no-untyped-def]
+        from mgc_v05l.execution_core.fake_adapter import FakePaperAdapter
+        from mgc_v05l.execution_core.harness import run_fake_paper_proof
+
+        seen["order_type"] = config.order_type
+        seen["time_in_force"] = config.time_in_force
+        return run_fake_paper_proof(
+            config=config,
+            adapter=FakePaperAdapter(account_id=config.account_id, contract_key=config.contract_key, scenario="pass"),
+            run_id=run_id,
+            now=aware_now(),
+        )
+
+    exit_code = paper_proof_cli.main(
+        cli_args(tmp_path, "--manual-limit-price", "2345.1"),
+        transport_factory=lambda cfg: FakeTransport(),
+        proof_runner=proof_runner,
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert seen == {"order_type": "LMT", "time_in_force": "DAY"}

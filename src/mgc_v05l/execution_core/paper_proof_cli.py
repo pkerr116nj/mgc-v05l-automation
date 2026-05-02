@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--submit-enabled", action="store_true")
     parser.add_argument("--confirm-paper-submit", action="store_true")
     parser.add_argument("--allow-delayed-data-paper-proof", action="store_true")
+    parser.add_argument("--manual-limit-price")
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--quote-timeout-seconds", type=float, default=3.0)
     return parser
@@ -63,6 +65,7 @@ def main(
         submit_enabled=args.submit_enabled,
         confirm_paper_submit=args.confirm_paper_submit,
         allow_delayed_data_for_paper_proof=args.allow_delayed_data_paper_proof,
+        manual_limit_price=args.manual_limit_price,
     )
     transport_config = IbkrReadOnlyTransportConfig(
         request_timeout_seconds=args.request_timeout_seconds,
@@ -109,6 +112,26 @@ def _validate_operator_args(parser: argparse.ArgumentParser, args: argparse.Name
         parser.error("--order-type must be LMT")
     if str(args.time_in_force).upper() != "DAY":
         parser.error("--time-in-force must be DAY")
+    if args.manual_limit_price is not None:
+        if not args.allow_delayed_data_paper_proof:
+            parser.error("--manual-limit-price requires --allow-delayed-data-paper-proof")
+        try:
+            manual_price = Decimal(str(args.manual_limit_price))
+        except (InvalidOperation, ValueError):
+            parser.error("--manual-limit-price must be a positive decimal")
+        if not manual_price.is_finite() or manual_price <= 0:
+            parser.error("--manual-limit-price must be positive")
+        allowlist_entry = ReadOnlyPreflightConfig().contract_allowlist.get(str(args.contract_key))
+        if allowlist_entry is None:
+            parser.error("--manual-limit-price requires exact allowlisted contract")
+        try:
+            tick_size = Decimal(str(allowlist_entry.get("tick_size")))
+        except (InvalidOperation, ValueError):
+            parser.error("--manual-limit-price requires valid contract tick_size")
+        if not tick_size.is_finite() or tick_size <= 0:
+            parser.error("--manual-limit-price requires positive contract tick_size")
+        if manual_price % tick_size != 0:
+            parser.error("--manual-limit-price must be valid for contract tick_size")
 
 
 def _print_result(result: PaperProofResult) -> None:
