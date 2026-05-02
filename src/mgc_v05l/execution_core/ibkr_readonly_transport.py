@@ -299,10 +299,10 @@ class IbkrReadOnlyTwsTransport:
         contract_cls = getattr(contract_module, "Contract")
         owner = self
 
-        class _ReadOnlyBridge(wrapper_cls, client_cls):  # type: ignore[misc, valid-type]
+        class ReadOnlyBridge(wrapper_cls, client_cls):  # type: ignore[misc, valid-type]
             def __init__(self) -> None:
                 wrapper_cls.__init__(self)
-                client_cls.__init__(self, wrapper=self)
+                client_cls.__init__(self, self)
 
             def nextValidId(self, orderId: int) -> None:  # noqa: N802
                 owner._record_next_valid_id(orderId)
@@ -344,7 +344,7 @@ class IbkrReadOnlyTwsTransport:
                 owner._record_error_from_callback(args)
 
         self._contract_cls = contract_cls
-        return _ReadOnlyBridge()
+        return ReadOnlyBridge()
 
     def _contract_from_allowlist(self, allowlist_entry: Mapping[str, Any]) -> Any:
         contract = self._contract_cls()

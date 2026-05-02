@@ -63,6 +63,22 @@ def test_transport_rejects_live_port_before_loading_ibapi() -> None:
     assert loaded == []
 
 
+def test_bridge_uses_direct_wrapper_client_self_wiring() -> None:
+    transport = IbkrReadOnlyTwsTransport(
+        config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01),
+        module_loader=fake_ibapi_loader(),
+    )
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+
+    bridge = transport.bridge_for_test()
+
+    assert type(bridge).__name__ == "ReadOnlyBridge"
+    assert bridge.wrapper is bridge
+    assert bridge.wrapper_is_self is True
+    assert isinstance(bridge, bridge.fake_wrapper_cls)
+    assert isinstance(bridge, bridge.fake_client_cls)
+
+
 def test_managed_accounts_callback_is_captured_when_delivered_after_ready() -> None:
     transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
     transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
@@ -332,7 +348,10 @@ def fake_ibapi_loader(*, managed_accounts: str = "DUM882026", handshake_error: t
 
     class FakeClient:
         def __init__(self, wrapper) -> None:
+            self.fake_wrapper_cls = FakeWrapper
+            self.fake_client_cls = FakeClient
             self.wrapper = wrapper
+            self.wrapper_is_self = wrapper is self
             self.req_ids_calls: list[int] = []
             self.req_managed_accounts_count = 0
             self.req_contract_details_count = 0
