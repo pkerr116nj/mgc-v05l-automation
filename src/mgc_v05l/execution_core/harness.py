@@ -81,7 +81,7 @@ class HarnessConfig:
                 "security_type": "FUT",
                 "exchange": "COMEX",
                 "currency": "USD",
-                "local_symbol": "MGCJ6",
+                "local_symbol": "MGCM6",
                 "tick_size": "0.1",
             }
         }

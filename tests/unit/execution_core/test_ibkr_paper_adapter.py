@@ -25,7 +25,7 @@ def allowlist() -> dict[str, dict[str, str]]:
             "security_type": "FUT",
             "exchange": "COMEX",
             "currency": "USD",
-            "local_symbol": "MGCJ6",
+            "local_symbol": "MGCM6",
             "con_id": "12345",
             "tick_size": "0.1",
         }
