@@ -63,6 +63,13 @@ class FakeProvider:
                 "resolved_raw_symbol": raw_symbol if self.config.databento_continuous_symbol else None,
                 "resolution_status": "RESOLVED" if self.config.databento_continuous_symbol else None,
                 "resolution_path": "continuous->instrument_id" if self.config.databento_continuous_symbol else None,
+                "requested_resolution_date": self.config.resolution_date or "2026-05-02",
+                "actual_resolution_date_used": "2026-05-01" if self.config.allow_prior_session_resolution else self.config.resolution_date or "2026-05-02",
+                "prior_session_fallback_used": self.config.allow_prior_session_resolution,
+                "fallback_lookback_days": self.config.prior_session_resolution_lookback_days,
+                "resolution_session_type": "PRIOR_SESSION_RESOLUTION_FALLBACK"
+                if self.config.allow_prior_session_resolution
+                else "CURRENT_SESSION",
                 "resolution_date": self.config.resolution_date or "2026-05-02",
                 "resolution_start": self.config.resolution_start or "2026-05-02",
                 "resolution_end": self.config.resolution_end or "2026-05-03",
@@ -122,6 +129,11 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert payload["resolved_instrument_id"] == "123456"
     assert payload["resolved_raw_symbol"] == "MGCM6"
     assert payload["resolution_path"] == "continuous->instrument_id"
+    assert payload["requested_resolution_date"] == "2026-05-02"
+    assert payload["actual_resolution_date_used"] == "2026-05-02"
+    assert payload["prior_session_fallback_used"] is False
+    assert payload["fallback_lookback_days"] == 3
+    assert payload["resolution_session_type"] == "CURRENT_SESSION"
     assert payload["resolution_date"] == "2026-05-02"
     assert payload["resolution_start"] == "2026-05-02"
     assert payload["resolution_end"] == "2026-05-03"
@@ -142,6 +154,11 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert report["resolution"]["resolved_instrument_id"] == "123456"
     assert report["resolution"]["resolved_raw_symbol"] == "MGCM6"
     assert report["resolution"]["resolution_path"] == "continuous->instrument_id"
+    assert report["resolution"]["requested_resolution_date"] == "2026-05-02"
+    assert report["resolution"]["actual_resolution_date_used"] == "2026-05-02"
+    assert report["resolution"]["prior_session_fallback_used"] is False
+    assert report["resolution"]["fallback_lookback_days"] == 3
+    assert report["resolution"]["resolution_session_type"] == "CURRENT_SESSION"
     assert report["resolution"]["resolution_date"] == "2026-05-02"
     assert report["resolution"]["resolution_start"] == "2026-05-02"
     assert report["resolution"]["resolution_end"] == "2026-05-03"
@@ -170,6 +187,28 @@ def test_cli_accepts_resolution_date(
 
     assert exit_code == 0
     assert report["resolution"]["resolution_date"] == "2026-05-02"
+
+
+def test_cli_accepts_prior_session_resolution_fallback_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+
+    exit_code = databento_quote_cli.main(
+        cli_args(tmp_path, "--resolution-date", "2026-05-02", "--allow-prior-session-resolution"),
+        provider_factory=FakeProvider,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(payload["report_json"]).read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["requested_resolution_date"] == "2026-05-02"
+    assert payload["actual_resolution_date_used"] == "2026-05-01"
+    assert payload["prior_session_fallback_used"] is True
+    assert payload["resolution_session_type"] == "PRIOR_SESSION_RESOLUTION_FALLBACK"
+    assert report["resolution"]["prior_session_fallback_used"] is True
 
 
 def test_cli_manual_databento_symbol_override_remains_supported(

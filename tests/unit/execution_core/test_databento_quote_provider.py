@@ -68,6 +68,9 @@ def resolution(
     requested_symbol: str = "MGC.v.0",
     resolved_instrument_id: str | None = "123456",
     raw_symbol: str | None = "MGCM6",
+    resolution_date: date = date(2026, 5, 2),
+    resolution_start: date = date(2026, 5, 2),
+    resolution_end: date = date(2026, 5, 3),
     resolution_status: str = DatabentoResolutionStatus.RESOLVED,
 ) -> DatabentoSymbolResolution:
     return DatabentoSymbolResolution(
@@ -77,9 +80,9 @@ def resolution(
         stype_out="instrument_id",
         resolved_instrument_id=resolved_instrument_id,
         raw_symbol=raw_symbol,
-        resolution_date=date(2026, 5, 2),
-        resolution_start=date(2026, 5, 2),
-        resolution_end=date(2026, 5, 3),
+        resolution_date=resolution_date,
+        resolution_start=resolution_start,
+        resolution_end=resolution_end,
         resolution_status=resolution_status,
     )
 
@@ -155,6 +158,11 @@ def test_fake_resolver_resolves_continuous_symbol_and_provider_uses_resolved_ins
     assert snapshot.raw["symbol_source"] == "CONTINUOUS_SYMBOL_RESOLUTION"
     assert snapshot.raw["requested_continuous_symbol"] == "MGC.v.0"
     assert snapshot.raw["resolution_path"] == "continuous->instrument_id"
+    assert snapshot.raw["requested_resolution_date"] == "2026-05-02"
+    assert snapshot.raw["actual_resolution_date_used"] == "2026-05-02"
+    assert snapshot.raw["prior_session_fallback_used"] is False
+    assert snapshot.raw["fallback_lookback_days"] == 3
+    assert snapshot.raw["resolution_session_type"] == "CURRENT_SESSION"
     assert snapshot.raw["resolution_date"] == "2026-05-02"
     assert snapshot.raw["resolution_start"] == "2026-05-02"
     assert snapshot.raw["resolution_end"] == "2026-05-03"
@@ -213,6 +221,73 @@ def test_date_aware_resolver_reports_no_active_mapping_for_date() -> None:
     assert resolved.resolution_status == DatabentoResolutionStatus.NOT_FOUND
     assert resolved.resolved_instrument_id is None
     assert "no active mapping" in resolved.warnings[0]
+
+
+def test_provider_fails_no_active_mapping_without_prior_session_fallback() -> None:
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", resolution_date="2026-05-02"),
+        transport=FakeTransport(),
+        resolver=FakeResolver(
+            resolution(
+                resolved_instrument_id=None,
+                raw_symbol=None,
+                resolution_status=DatabentoResolutionStatus.NOT_FOUND,
+                resolution_date=date(2026, 5, 2),
+            )
+        ),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoQuoteProviderError, match="NOT_FOUND"):
+        provider.get_quote("MGC-202606")
+
+
+def test_provider_prior_session_fallback_selects_first_active_prior_mapping() -> None:
+    resolver = FakeResolver(
+        resolution(
+            resolved_instrument_id=None,
+            raw_symbol=None,
+            resolution_status=DatabentoResolutionStatus.NOT_FOUND,
+            resolution_date=date(2026, 5, 2),
+        ),
+        resolution(
+            resolved_instrument_id="42008160",
+            raw_symbol=None,
+            resolution_date=date(2026, 5, 1),
+            resolution_start=date(2026, 5, 1),
+            resolution_end=date(2026, 5, 2),
+        ),
+        resolution(
+            requested_symbol="42008160",
+            resolved_instrument_id=None,
+            raw_symbol=None,
+            resolution_status=DatabentoResolutionStatus.NOT_FOUND,
+            resolution_date=date(2026, 5, 1),
+        ),
+    )
+    provider = DatabentoQuoteProvider(
+        config=config(
+            databento_symbol=None,
+            databento_continuous_symbol="MGC.v.0",
+            allowlisted_local_symbol="MGCM6",
+            resolution_date="2026-05-02",
+            allow_prior_session_resolution=True,
+        ),
+        transport=FakeTransport(),
+        resolver=resolver,
+        now=aware_now(),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert [request.resolution_date for request in resolver.requests[:2]] == [date(2026, 5, 2), date(2026, 5, 1)]
+    assert snapshot.raw["requested_resolution_date"] == "2026-05-02"
+    assert snapshot.raw["actual_resolution_date_used"] == "2026-05-01"
+    assert snapshot.raw["prior_session_fallback_used"] is True
+    assert snapshot.raw["fallback_lookback_days"] == 3
+    assert snapshot.raw["resolution_session_type"] == "PRIOR_SESSION_RESOLUTION_FALLBACK"
+    assert snapshot.raw["resolved_instrument_id"] == "42008160"
+    assert any("prior-session" in warning.lower() for warning in snapshot.provider_warnings)
 
 
 def test_default_resolution_date_is_applied_from_provider_clock() -> None:

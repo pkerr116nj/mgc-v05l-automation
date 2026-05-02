@@ -99,6 +99,8 @@ class DatabentoQuoteProviderConfig:
     resolution_date: str | None = None
     resolution_start: str | None = None
     resolution_end: str | None = None
+    allow_prior_session_resolution: bool = False
+    prior_session_resolution_lookback_days: int = 3
     raw_symbol_lookup_enabled: bool = True
     raw_symbol_lookup_stype_in: str = "instrument_id"
     raw_symbol_lookup_stype_out: str = "raw_symbol"
@@ -294,6 +296,15 @@ class DatabentoQuoteProvider:
                 "requested_continuous_symbol": self.config.databento_continuous_symbol,
                 "manual_provider_symbol_override": self.config.databento_symbol,
                 "resolution_path": resolved_symbol.resolution_path,
+                "requested_resolution_date": resolved_symbol.requested_resolution_date.isoformat()
+                if resolved_symbol.requested_resolution_date is not None
+                else None,
+                "actual_resolution_date_used": resolved_symbol.actual_resolution_date_used.isoformat()
+                if resolved_symbol.actual_resolution_date_used is not None
+                else None,
+                "prior_session_fallback_used": resolved_symbol.prior_session_fallback_used,
+                "fallback_lookback_days": resolved_symbol.fallback_lookback_days,
+                "resolution_session_type": resolved_symbol.resolution_session_type,
                 "resolution_date": resolved_symbol.resolution_date.isoformat() if resolved_symbol.resolution_date is not None else None,
                 "resolution_start": resolved_symbol.resolution_start.isoformat() if resolved_symbol.resolution_start is not None else None,
                 "resolution_end": resolved_symbol.resolution_end.isoformat() if resolved_symbol.resolution_end is not None else None,
@@ -321,6 +332,11 @@ class DatabentoQuoteProvider:
                 execution_validation_status="MANUAL_OVERRIDE_OPERATOR_REVIEW",
                 raw_symbol_match_status="MANUAL_OVERRIDE_OPERATOR_REVIEW",
                 resolution_path=None,
+                requested_resolution_date=None,
+                actual_resolution_date_used=None,
+                prior_session_fallback_used=False,
+                fallback_lookback_days=None,
+                resolution_session_type=None,
                 resolution_date=None,
                 resolution_start=None,
                 resolution_end=None,
@@ -337,16 +353,11 @@ class DatabentoQuoteProvider:
         resolution_date = _optional_date(self.config.resolution_date) or (self._now or datetime.now(UTC)).astimezone(UTC).date()
         resolution_start = _optional_date(self.config.resolution_start)
         resolution_end = _optional_date(self.config.resolution_end)
-        primary_resolution = self.resolver.resolve(
-            request=DatabentoSymbolResolutionRequest(
-                requested_symbol=requested,
-                dataset=self.config.dataset,
-                stype_in=self.config.resolver_stype_in,
-                stype_out=self.config.resolver_stype_out,
-                resolution_date=resolution_date,
-                resolution_start=resolution_start,
-                resolution_end=resolution_end,
-            )
+        primary_resolution, prior_session_fallback_used = self._resolve_primary_symbol(
+            requested_symbol=requested,
+            requested_resolution_date=resolution_date,
+            resolution_start=resolution_start,
+            resolution_end=resolution_end,
         )
         if primary_resolution.resolution_status != DatabentoResolutionStatus.RESOLVED:
             raise DatabentoQuoteProviderError(f"Databento symbol resolution did not resolve cleanly: {primary_resolution.resolution_status}")
@@ -354,6 +365,10 @@ class DatabentoQuoteProvider:
             raise DatabentoQuoteProviderError("Databento continuous symbol resolution returned no instrument_id")
 
         warnings = list(primary_resolution.warnings)
+        if prior_session_fallback_used:
+            warnings.append(
+                "Databento prior-session resolution fallback was used; this must not be treated as silent current-session resolution."
+            )
         resolved_raw_symbol: str | None = primary_resolution.raw_symbol
         raw_symbol_resolution_status: str | None = None
         raw_symbol_lookup_path: str | None = None
@@ -366,7 +381,7 @@ class DatabentoQuoteProvider:
                         dataset=self.config.dataset,
                         stype_in=self.config.raw_symbol_lookup_stype_in,
                         stype_out=self.config.raw_symbol_lookup_stype_out,
-                        resolution_date=resolution_date,
+                        resolution_date=primary_resolution.resolution_date or resolution_date,
                         resolution_start=resolution_start,
                         resolution_end=resolution_end,
                     )
@@ -405,6 +420,11 @@ class DatabentoQuoteProvider:
             execution_validation_status=execution_validation_status,
             raw_symbol_match_status=raw_symbol_match_status,
             resolution_path=f"{self.config.resolver_stype_in}->{self.config.resolver_stype_out}",
+            requested_resolution_date=resolution_date,
+            actual_resolution_date_used=primary_resolution.resolution_date,
+            prior_session_fallback_used=prior_session_fallback_used,
+            fallback_lookback_days=int(self.config.prior_session_resolution_lookback_days),
+            resolution_session_type="PRIOR_SESSION_RESOLUTION_FALLBACK" if prior_session_fallback_used else "CURRENT_SESSION",
             resolution_date=primary_resolution.resolution_date,
             resolution_start=primary_resolution.resolution_start,
             resolution_end=primary_resolution.resolution_end,
@@ -418,6 +438,57 @@ class DatabentoQuoteProvider:
             warnings=tuple(warnings),
         )
 
+    def _resolve_primary_symbol(
+        self,
+        *,
+        requested_symbol: str,
+        requested_resolution_date: date,
+        resolution_start: date | None,
+        resolution_end: date | None,
+    ) -> tuple[DatabentoSymbolResolution, bool]:
+        first = self._resolve_primary_for_date(
+            requested_symbol=requested_symbol,
+            resolution_date=requested_resolution_date,
+            resolution_start=resolution_start,
+            resolution_end=resolution_end,
+        )
+        if first.resolution_status == DatabentoResolutionStatus.RESOLVED or not self.config.allow_prior_session_resolution:
+            return first, False
+        lookback_days = int(self.config.prior_session_resolution_lookback_days)
+        if lookback_days < 1:
+            return first, False
+        for offset in range(1, lookback_days + 1):
+            fallback_date = requested_resolution_date - timedelta(days=offset)
+            candidate = self._resolve_primary_for_date(
+                requested_symbol=requested_symbol,
+                resolution_date=fallback_date,
+                resolution_start=fallback_date,
+                resolution_end=fallback_date + timedelta(days=1),
+            )
+            if candidate.resolution_status == DatabentoResolutionStatus.RESOLVED:
+                return candidate, True
+        return first, False
+
+    def _resolve_primary_for_date(
+        self,
+        *,
+        requested_symbol: str,
+        resolution_date: date,
+        resolution_start: date | None,
+        resolution_end: date | None,
+    ) -> DatabentoSymbolResolution:
+        return self.resolver.resolve(
+            request=DatabentoSymbolResolutionRequest(
+                requested_symbol=requested_symbol,
+                dataset=self.config.dataset,
+                stype_in=self.config.resolver_stype_in,
+                stype_out=self.config.resolver_stype_out,
+                resolution_date=resolution_date,
+                resolution_start=resolution_start,
+                resolution_end=resolution_end,
+            )
+        )
+
 
 @dataclass(frozen=True)
 class _ResolvedQuoteSymbol:
@@ -428,6 +499,11 @@ class _ResolvedQuoteSymbol:
     execution_validation_status: str
     raw_symbol_match_status: str
     resolution_path: str | None
+    requested_resolution_date: date | None
+    actual_resolution_date_used: date | None
+    prior_session_fallback_used: bool
+    fallback_lookback_days: int | None
+    resolution_session_type: str | None
     resolution_date: date | None
     resolution_start: date | None
     resolution_end: date | None

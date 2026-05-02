@@ -35,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resolution-date")
     parser.add_argument("--resolution-start")
     parser.add_argument("--resolution-end")
+    parser.add_argument("--allow-prior-session-resolution", action="store_true")
+    parser.add_argument("--prior-session-resolution-lookback-days", type=int, default=3)
     parser.add_argument("--base-url", default="https://hist.databento.com/v0")
     parser.add_argument("--lookback-seconds", type=int, default=300)
     parser.add_argument("--max-age-seconds", type=int, default=15)
@@ -68,6 +70,8 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
         resolution_date=args.resolution_date,
         resolution_start=args.resolution_start,
         resolution_end=args.resolution_end,
+        allow_prior_session_resolution=args.allow_prior_session_resolution,
+        prior_session_resolution_lookback_days=args.prior_session_resolution_lookback_days,
         base_url=args.base_url,
         lookback_seconds=args.lookback_seconds,
         realtime_max_age_seconds=args.max_age_seconds,
@@ -105,6 +109,11 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
             "resolved_raw_symbol": quote.raw.get("resolved_raw_symbol"),
             "resolution_status": quote.raw.get("resolution_status"),
             "resolution_path": quote.raw.get("resolution_path"),
+            "requested_resolution_date": quote.raw.get("requested_resolution_date"),
+            "actual_resolution_date_used": quote.raw.get("actual_resolution_date_used"),
+            "prior_session_fallback_used": quote.raw.get("prior_session_fallback_used"),
+            "fallback_lookback_days": quote.raw.get("fallback_lookback_days"),
+            "resolution_session_type": quote.raw.get("resolution_session_type"),
             "resolution_date": quote.raw.get("resolution_date"),
             "resolution_start": quote.raw.get("resolution_start"),
             "resolution_end": quote.raw.get("resolution_end"),
@@ -139,6 +148,11 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
                 "resolved_instrument_id": quote.raw.get("resolved_instrument_id"),
                 "resolved_raw_symbol": quote.raw.get("resolved_raw_symbol"),
                 "resolution_path": quote.raw.get("resolution_path"),
+                "requested_resolution_date": quote.raw.get("requested_resolution_date"),
+                "actual_resolution_date_used": quote.raw.get("actual_resolution_date_used"),
+                "prior_session_fallback_used": quote.raw.get("prior_session_fallback_used"),
+                "fallback_lookback_days": quote.raw.get("fallback_lookback_days"),
+                "resolution_session_type": quote.raw.get("resolution_session_type"),
                 "resolution_date": quote.raw.get("resolution_date"),
                 "resolution_start": quote.raw.get("resolution_start"),
                 "resolution_end": quote.raw.get("resolution_end"),
