@@ -665,6 +665,74 @@ Correlation rules:
 - Any callback account mismatch fails closed or becomes ambiguous if a submit has already been sent.
 - Any fill that cannot be tied to the exact `SubmitAttempt` remains broker evidence but does not become a Track B `FillEvent`.
 
+## Internal Trade Identity And Broker Correlation
+
+Magic internal IDs are authoritative for lifecycle, causation, idempotency, replay, audit, proof reports, and operator/mobile workflows.
+
+IBKR IDs are broker-side correlation fields only. They are authoritative for broker observations after submission, but they do not replace Magic lifecycle IDs.
+
+Required hierarchy:
+
+```text
+run_id
+  -> signal_event_id
+    -> order_intent_id
+      -> submit_attempt_id
+        -> broker_order_id / permId / execution_id
+```
+
+Magic must create durable internal IDs before any broker submission is attempted.
+
+Events that never reach IBKR must still have Magic IDs, including:
+
+- Preflight checks.
+- Synthetic proof signals.
+- Blocked signals.
+- Pricing decisions.
+- Risk gate rejections.
+- Stale quote blocks.
+- Account/contract validation blocks.
+- Cancel attempts.
+- Ambiguous/manual-review states.
+- Future mobile/operator approval requests.
+
+No Magic event may depend on the existence of an IBKR broker ID unless broker submission has actually occurred.
+
+For non-submitted events:
+
+- `order_intent_id` may exist.
+- `submit_attempt_id` should exist only if a real submit attempt was created.
+- `broker_order_id` must be null or absent.
+- `permId` must be null or absent.
+- `execution_id` must be null or absent.
+- Classification/reason must explain why no broker ID exists.
+
+For fake adapter tests:
+
+- Magic IDs remain real internal IDs.
+- Fake broker IDs may be generated only inside the fake adapter/test environment.
+- Fake broker IDs must be clearly namespaced, for example `FAKE-ORDER-0001`, `FAKE-PERM-0001`, and `FAKE-EXEC-0001`.
+- Reports must clearly mark `environment=FAKE` and `broker=FAKE_IBKR_ADAPTER`.
+
+For real IBKR paper:
+
+- `environment=PAPER`.
+- `broker=IBKR`.
+- `broker_order_id`, `permId`, and `execution_id` come only from IBKR callbacks/execution truth.
+- Local order id alone is insufficient for proof.
+
+Idempotency:
+
+- One `order_intent_id` cannot have two active `submit_attempt_id` values.
+- Duplicate submit for the same `order_intent_id` is forbidden.
+- Retry after ambiguous submit is forbidden.
+- Replay must detect duplicate or conflicting IDs and fail closed.
+
+Proof reports:
+
+- Must show both Magic internal IDs and broker correlation IDs.
+- Must not classify a run as `PASSED` unless the internal ID chain and broker correlation chain are both complete and consistent.
+
 ## TWS Paper Readiness
 
 The harness must prove TWS paper readiness before any submit attempt.
