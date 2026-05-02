@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from mgc_v05l.execution_core import databento_quote_cli
-from mgc_v05l.execution_core.databento_quote_provider import DatabentoQuoteProviderConfig
+from mgc_v05l.execution_core.databento_quote_provider import DatabentoAvailableEndError, DatabentoQuoteProviderConfig
 from mgc_v05l.execution_core.pricing import MarketDataMode, MarketDataRole
 from mgc_v05l.execution_core.quote_provider import QuoteSnapshot
 
@@ -45,7 +45,7 @@ class FakeProvider:
         raw_symbol = self.config.databento_symbol or "MGCM6"
         return QuoteSnapshot(
             provider="DATABENTO",
-            mode=MarketDataMode.REALTIME,
+            mode=MarketDataMode.UNKNOWN if self.config.allow_available_end_fallback else MarketDataMode.REALTIME,
             role=MarketDataRole.PRIMARY,
             contract_key=contract_key,
             provider_symbol=raw_symbol,
@@ -83,7 +83,28 @@ class FakeProvider:
                 "execution_contract_validation_status": "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
                 if self.config.databento_continuous_symbol
                 else "MANUAL_OVERRIDE_OPERATOR_REVIEW",
+                "requested_quote_start": "2026-05-02T11:55:00+00:00",
+                "requested_quote_end": "2026-05-02T12:00:00+00:00",
+                "actual_quote_start": "2026-05-01T23:54:00+00:00" if self.config.allow_available_end_fallback else "2026-05-02T11:55:00+00:00",
+                "actual_quote_end": "2026-05-01T23:59:00+00:00" if self.config.allow_available_end_fallback else "2026-05-02T12:00:00+00:00",
+                "provider_available_end": "2026-05-01T23:59:00+00:00" if self.config.allow_available_end_fallback else None,
+                "available_end_fallback_used": self.config.allow_available_end_fallback,
+                "quote_age_seconds": "0.0",
+                "usable_for_paper_pricing": not self.config.allow_available_end_fallback,
+                "usable_for_live_money_readiness": not self.config.allow_available_end_fallback,
             },
+        )
+
+
+class FailingAvailableEndProvider:
+    def __init__(self, config: DatabentoQuoteProviderConfig) -> None:
+        self.config = config
+
+    def get_quote(self, contract_key: str) -> QuoteSnapshot:
+        raise DatabentoAvailableEndError(
+            "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback or earlier --quote-end-timestamp",
+            provider_available_end=datetime(2026, 5, 1, 23, 59, tzinfo=timezone.utc),
+            detail="sanitized detail",
         )
 
 
@@ -145,6 +166,8 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert payload["bid"] == "4626.0"
     assert payload["ask"] == "4626.1"
     assert payload["last"] == "4626.0"
+    assert payload["quote_observed"] is True
+    assert payload["available_end_fallback_used"] is False
     assert report["api_key_present"] is True
     assert report["api_key_value"] is None
     assert report["databento_continuous_symbol"] == "MGC.v.0"
@@ -172,6 +195,9 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert report["submit_enabled"] is False
     assert report["place_order_called"] is False
     assert report["cancel_called"] is False
+    assert report["quote_observed"] is True
+    assert report["quote_window"]["requested_quote_start"] == "2026-05-02T11:55:00+00:00"
+    assert report["quote_window"]["available_end_fallback_used"] is False
 
 
 def test_cli_accepts_resolution_date(
@@ -209,6 +235,54 @@ def test_cli_accepts_prior_session_resolution_fallback_flag(
     assert payload["prior_session_fallback_used"] is True
     assert payload["resolution_session_type"] == "PRIOR_SESSION_RESOLUTION_FALLBACK"
     assert report["resolution"]["prior_session_fallback_used"] is True
+
+
+def test_cli_accepts_quote_window_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+
+    exit_code = databento_quote_cli.main(
+        cli_args(
+            tmp_path,
+            "--quote-lookback-seconds",
+            "600",
+            "--quote-end-timestamp",
+            "2026-05-01T23:59:00+00:00",
+            "--allow-available-end-fallback",
+        ),
+        provider_factory=FakeProvider,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(payload["report_json"]).read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert payload["available_end_fallback_used"] is True
+    assert report["quote_window"]["provider_available_end"] == "2026-05-01T23:59:00+00:00"
+    assert report["live_money_quote_ready"] is False
+
+
+def test_cli_available_end_failure_is_clean_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+
+    exit_code = databento_quote_cli.main(cli_args(tmp_path), provider_factory=FailingAvailableEndProvider)
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(payload["report_json"]).read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert payload["classification"] == "FAILED_BEFORE_QUOTE"
+    assert payload["quote_observed"] is False
+    assert payload["provider_available_end"] == "2026-05-01T23:59:00+00:00"
+    assert "allow-available-end-fallback" in payload["corrective_message"]
+    assert report["classification"] == "FAILED_BEFORE_QUOTE"
+    assert report["quote_observed"] is False
+    assert report["api_key_value"] is None
 
 
 def test_cli_manual_databento_symbol_override_remains_supported(

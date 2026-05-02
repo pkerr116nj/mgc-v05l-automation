@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -23,6 +24,15 @@ from .quote_provider import QuoteProviderError, QuoteSnapshot
 
 class DatabentoQuoteProviderError(QuoteProviderError):
     """Raised when Databento quote retrieval cannot produce a snapshot."""
+
+
+class DatabentoAvailableEndError(DatabentoQuoteProviderError):
+    """Raised when a requested Databento records window is beyond available_end."""
+
+    def __init__(self, message: str, *, provider_available_end: datetime | None, detail: str) -> None:
+        super().__init__(message)
+        self.provider_available_end = provider_available_end
+        self.detail = detail
 
 
 class DatabentoQuoteTransport(Protocol):
@@ -108,6 +118,8 @@ class DatabentoQuoteProviderConfig:
     bbo_schema: str = "mbp-1"
     trades_schema: str = "trades"
     lookback_seconds: int = 300
+    quote_end_timestamp: str | None = None
+    allow_available_end_fallback: bool = False
     record_limit: int = 1000
     realtime_max_age_seconds: int = 15
 
@@ -158,6 +170,14 @@ class UrllibDatabentoQuoteTransport:
                 text = response.read().decode("utf-8")
         except HTTPError as exc:  # pragma: no cover - exercised only by real operator command.
             detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 422:
+                available_end = _extract_available_end(detail)
+                if available_end is not None or "available_end" in detail or "available end" in detail:
+                    message = (
+                        "requested quote window is after Databento available_end; rerun with "
+                        "--allow-available-end-fallback or earlier --quote-end-timestamp"
+                    )
+                    raise DatabentoAvailableEndError(message, provider_available_end=available_end, detail=detail) from exc
             raise DatabentoQuoteProviderError(f"Databento HTTP error {exc.code}: {detail}") from exc
         except URLError as exc:  # pragma: no cover - exercised only by real operator command.
             raise DatabentoQuoteProviderError(f"Databento transport error: {exc}") from exc
@@ -229,34 +249,29 @@ class DatabentoQuoteProvider:
         if str(contract_key or "").strip() != self.config.contract_key:
             raise DatabentoQuoteProviderError("contract_key must match explicit Databento quote provider mapping")
         now = self._now or datetime.now(UTC)
-        start = now - timedelta(seconds=max(int(self.config.lookback_seconds), 1))
+        quote_end = _optional_datetime(self.config.quote_end_timestamp) or now
+        quote_lookback = max(int(self.config.lookback_seconds), 1)
+        requested_start = quote_end - timedelta(seconds=quote_lookback)
+        requested_end = quote_end
+        actual_start = requested_start
+        actual_end = requested_end
+        provider_available_end: datetime | None = None
+        available_end_fallback_used = False
         resolved_symbol = self._resolve_quote_symbol()
-        bbo_records = tuple(
-            self.transport.request_records(
-                base_url=self.config.base_url,
-                api_key=self.config.api_key,
-                dataset=self.config.dataset,
-                symbol=resolved_symbol.symbol,
-                schema=self.config.bbo_schema,
-                start=start,
-                end=now,
-                stype_in=resolved_symbol.stype_in,
-                limit=self.config.record_limit,
-            )
-        )
-        trade_records = tuple(
-            self.transport.request_records(
-                base_url=self.config.base_url,
-                api_key=self.config.api_key,
-                dataset=self.config.dataset,
-                symbol=resolved_symbol.symbol,
-                schema=self.config.trades_schema,
-                start=start,
-                end=now,
-                stype_in=resolved_symbol.stype_in,
-                limit=self.config.record_limit,
-            )
-        )
+        try:
+            bbo_records, trade_records = self._request_quote_records(resolved_symbol=resolved_symbol, start=actual_start, end=actual_end)
+        except DatabentoAvailableEndError as exc:
+            provider_available_end = exc.provider_available_end
+            if not self.config.allow_available_end_fallback:
+                raise
+            if provider_available_end is None:
+                raise DatabentoQuoteProviderError(
+                    "Databento available_end fallback was requested, but provider_available_end was not parseable"
+                ) from exc
+            actual_end = provider_available_end.astimezone(UTC)
+            actual_start = actual_end - timedelta(seconds=quote_lookback)
+            available_end_fallback_used = True
+            bbo_records, trade_records = self._request_quote_records(resolved_symbol=resolved_symbol, start=actual_start, end=actual_end)
         latest_bbo = _latest_record_with_bid_ask(bbo_records)
         latest_trade = _latest_record_with_price(trade_records)
         if latest_bbo is None:
@@ -268,8 +283,14 @@ class DatabentoQuoteProvider:
         warnings: list[str] = []
         if latest_trade is None:
             warnings.append("Databento returned no trade record for last price in lookback window.")
+        if available_end_fallback_used:
+            warnings.append("Databento available_end quote-window fallback was used; live-money readiness must remain false.")
         warnings.extend(resolved_symbol.warnings)
-        mode = MarketDataMode.REALTIME if (now - timestamp).total_seconds() <= int(self.config.realtime_max_age_seconds) else MarketDataMode.UNKNOWN
+        mode = (
+            MarketDataMode.REALTIME
+            if not available_end_fallback_used and (now - timestamp).total_seconds() <= int(self.config.realtime_max_age_seconds)
+            else MarketDataMode.UNKNOWN
+        )
         return QuoteSnapshot(
             provider=self.provider_name,
             mode=mode,
@@ -292,6 +313,15 @@ class DatabentoQuoteProvider:
                 "trades_schema": self.config.trades_schema,
                 "bbo_record_count": len(bbo_records),
                 "trade_record_count": len(trade_records),
+                "requested_quote_start": requested_start.isoformat(),
+                "requested_quote_end": requested_end.isoformat(),
+                "actual_quote_start": actual_start.isoformat(),
+                "actual_quote_end": actual_end.isoformat(),
+                "provider_available_end": provider_available_end.isoformat() if provider_available_end is not None else None,
+                "available_end_fallback_used": available_end_fallback_used,
+                "quote_age_seconds": str((actual_end - timestamp).total_seconds()),
+                "usable_for_paper_pricing": mode == MarketDataMode.REALTIME,
+                "usable_for_live_money_readiness": mode == MarketDataMode.REALTIME,
                 "symbol_source": resolved_symbol.symbol_source,
                 "requested_continuous_symbol": self.config.databento_continuous_symbol,
                 "manual_provider_symbol_override": self.config.databento_symbol,
@@ -321,6 +351,41 @@ class DatabentoQuoteProvider:
                 "execution_contract_validation_status": resolved_symbol.execution_validation_status,
             },
         )
+
+    def _request_quote_records(
+        self,
+        *,
+        resolved_symbol: "_ResolvedQuoteSymbol",
+        start: datetime,
+        end: datetime,
+    ) -> tuple[tuple[Mapping[str, Any], ...], tuple[Mapping[str, Any], ...]]:
+        bbo_records = tuple(
+            self.transport.request_records(
+                base_url=self.config.base_url,
+                api_key=self.config.api_key,
+                dataset=self.config.dataset,
+                symbol=resolved_symbol.symbol,
+                schema=self.config.bbo_schema,
+                start=start,
+                end=end,
+                stype_in=resolved_symbol.stype_in,
+                limit=self.config.record_limit,
+            )
+        )
+        trade_records = tuple(
+            self.transport.request_records(
+                base_url=self.config.base_url,
+                api_key=self.config.api_key,
+                dataset=self.config.dataset,
+                symbol=resolved_symbol.symbol,
+                schema=self.config.trades_schema,
+                start=start,
+                end=end,
+                stype_in=resolved_symbol.stype_in,
+                limit=self.config.record_limit,
+            )
+        )
+        return bbo_records, trade_records
 
     def _resolve_quote_symbol(self) -> "_ResolvedQuoteSymbol":
         if self.config.databento_symbol:
@@ -695,6 +760,58 @@ def _mapping_date(value: Any) -> date | None:
 
 def _date_to_datetime(value: date | None) -> datetime | None:
     return datetime(value.year, value.month, value.day, tzinfo=UTC) if value is not None else None
+
+
+def _extract_available_end(detail: str) -> datetime | None:
+    payload: Any = None
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        payload = None
+    for candidate in _walk_values(payload):
+        parsed = _provider_timestamp(candidate)
+        if parsed is not None:
+            return parsed
+    for match in re.findall(r"available[_ ]end[^\(]*\(([^\)]+)\)", detail, flags=re.IGNORECASE):
+        parsed = _provider_timestamp(match)
+        if parsed is not None:
+            return parsed
+    for match in re.findall(r"available[_ ]end['\"\s:=]+([0-9T:\.\-+Z]+)", detail, flags=re.IGNORECASE):
+        parsed = _provider_timestamp(match)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _walk_values(value: Any) -> tuple[Any, ...]:
+    if isinstance(value, Mapping):
+        values: list[Any] = []
+        for key, item in value.items():
+            if str(key).lower() in {"available_end", "available end", "end"}:
+                values.append(item)
+            values.extend(_walk_values(item))
+        return tuple(values)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        values = []
+        for item in value:
+            values.extend(_walk_values(item))
+        return tuple(values)
+    return (value,)
+
+
+def _provider_timestamp(value: Any) -> datetime | None:
+    normalized = str(value or "").strip().strip("'\"")
+    if not normalized or not re.search(r"\d{4}-\d{2}-\d{2}", normalized):
+        return None
+    normalized = normalized.replace("Z", "+00:00")
+    normalized = re.sub(r"(\.\d{6})\d+(\+00:00|[+-]\d{2}:\d{2})$", r"\1\2", normalized)
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _optional_datetime(value: Any) -> datetime | None:

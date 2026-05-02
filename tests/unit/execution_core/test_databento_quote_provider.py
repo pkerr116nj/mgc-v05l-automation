@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 import pytest
 
 from mgc_v05l.execution_core.databento_quote_provider import (
+    DatabentoAvailableEndError,
     DatabentoResolutionStatus,
     DatabentoQuoteProvider,
     DatabentoQuoteProviderConfig,
@@ -45,9 +46,12 @@ class FakeTransport:
         )
         self.trade_records = tuple(({"ts_event": "2026-05-02T12:00:00+00:00", "price": "4626.0"},) if trade_records is None else trade_records)
         self.requests: list[dict[str, Any]] = []
+        self.errors: list[Exception] = []
 
     def request_records(self, **kwargs: Any) -> Sequence[Mapping[str, Any]]:
         self.requests.append(dict(kwargs))
+        if self.errors:
+            raise self.errors.pop(0)
         return self.trade_records if kwargs["schema"] == "trades" else self.bbo_records
 
 
@@ -288,6 +292,118 @@ def test_provider_prior_session_fallback_selects_first_active_prior_mapping() ->
     assert snapshot.raw["resolution_session_type"] == "PRIOR_SESSION_RESOLUTION_FALLBACK"
     assert snapshot.raw["resolved_instrument_id"] == "42008160"
     assert any("prior-session" in warning.lower() for warning in snapshot.provider_warnings)
+
+
+def test_available_end_error_without_fallback_is_preserved() -> None:
+    transport = FakeTransport()
+    provider_available_end = datetime(2026, 5, 1, 23, 59, tzinfo=timezone.utc)
+    transport.errors.append(
+        DatabentoAvailableEndError(
+            "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback or earlier --quote-end-timestamp",
+            provider_available_end=provider_available_end,
+            detail="sanitized detail",
+        )
+    )
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0"),
+        transport=transport,
+        resolver=FakeResolver(resolution(raw_symbol=None)),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoAvailableEndError) as exc_info:
+        provider.get_quote("MGC-202606")
+
+    assert exc_info.value.provider_available_end == provider_available_end
+
+
+def test_available_end_fallback_retries_once_with_provider_available_end() -> None:
+    transport = FakeTransport()
+    provider_available_end = datetime(2026, 5, 1, 23, 59, tzinfo=timezone.utc)
+    transport.errors.append(
+        DatabentoAvailableEndError(
+            "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback or earlier --quote-end-timestamp",
+            provider_available_end=provider_available_end,
+            detail="sanitized detail",
+        )
+    )
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allow_available_end_fallback=True),
+        transport=transport,
+        resolver=FakeResolver(resolution(raw_symbol=None), resolution(requested_symbol="123456", resolved_instrument_id=None, raw_symbol=None)),
+        now=aware_now(),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert len(transport.requests) == 3
+    assert transport.requests[0]["end"] == aware_now()
+    assert transport.requests[1]["end"] == provider_available_end
+    assert transport.requests[2]["end"] == provider_available_end
+    assert snapshot.raw["provider_available_end"] == provider_available_end.isoformat()
+    assert snapshot.raw["available_end_fallback_used"] is True
+    assert snapshot.raw["actual_quote_end"] == provider_available_end.isoformat()
+    assert snapshot.raw["usable_for_live_money_readiness"] is False
+    assert snapshot.mode == MarketDataMode.UNKNOWN
+
+
+def test_available_end_fallback_retry_failure_does_not_loop() -> None:
+    transport = FakeTransport()
+    provider_available_end = datetime(2026, 5, 1, 23, 59, tzinfo=timezone.utc)
+    for _ in range(2):
+        transport.errors.append(
+            DatabentoAvailableEndError(
+                "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback or earlier --quote-end-timestamp",
+                provider_available_end=provider_available_end,
+                detail="sanitized detail",
+            )
+        )
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allow_available_end_fallback=True),
+        transport=transport,
+        resolver=FakeResolver(resolution(raw_symbol=None)),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoAvailableEndError):
+        provider.get_quote("MGC-202606")
+
+    assert len(transport.requests) == 2
+
+
+def test_http_422_available_end_error_is_caught_and_structured(monkeypatch: pytest.MonkeyPatch) -> None:
+    detail = (
+        b'{"detail":{"message":"start in query (2026-05-02T12:00:00Z) was after the available_end '
+        b'(2026-05-01T23:59:00.000000000Z) of dataset GLBX.MDP3"}}'
+    )
+
+    def fake_urlopen(*args: object, **kwargs: object) -> object:
+        raise HTTPError(
+            url="https://hist.databento.com/v0/timeseries.get_range",
+            code=422,
+            msg="Unprocessable Entity",
+            hdrs={},
+            fp=BytesIO(detail),
+        )
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    transport = provider_module.UrllibDatabentoQuoteTransport()
+
+    with pytest.raises(DatabentoAvailableEndError) as exc_info:
+        transport.request_records(
+            base_url="https://hist.databento.com/v0",
+            api_key="test-key",
+            dataset="GLBX.MDP3",
+            symbol="42008160",
+            schema="mbp-1",
+            start=aware_now(),
+            end=aware_now(),
+            stype_in="instrument_id",
+            limit=1,
+        )
+
+    assert exc_info.value.provider_available_end == datetime(2026, 5, 1, 23, 59, tzinfo=timezone.utc)
+    assert "allow-available-end-fallback" in str(exc_info.value)
 
 
 def test_default_resolution_date_is_applied_from_provider_clock() -> None:

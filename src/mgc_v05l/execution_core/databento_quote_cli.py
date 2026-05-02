@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
-from .databento_quote_provider import DatabentoQuoteProvider, DatabentoQuoteProviderConfig
+from .databento_quote_provider import DatabentoAvailableEndError, DatabentoQuoteProvider, DatabentoQuoteProviderConfig, DatabentoQuoteProviderError
 from .quote_provider import validate_quote_for_pricing
 
 
@@ -39,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prior-session-resolution-lookback-days", type=int, default=3)
     parser.add_argument("--base-url", default="https://hist.databento.com/v0")
     parser.add_argument("--lookback-seconds", type=int, default=300)
+    parser.add_argument("--quote-lookback-seconds", type=int)
+    parser.add_argument("--quote-end-timestamp")
+    parser.add_argument("--allow-available-end-fallback", action="store_true")
     parser.add_argument("--max-age-seconds", type=int, default=15)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     return parser
@@ -73,12 +76,63 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
         allow_prior_session_resolution=args.allow_prior_session_resolution,
         prior_session_resolution_lookback_days=args.prior_session_resolution_lookback_days,
         base_url=args.base_url,
-        lookback_seconds=args.lookback_seconds,
+        lookback_seconds=args.quote_lookback_seconds if args.quote_lookback_seconds is not None else args.lookback_seconds,
+        quote_end_timestamp=args.quote_end_timestamp,
+        allow_available_end_fallback=args.allow_available_end_fallback,
         realtime_max_age_seconds=args.max_age_seconds,
     )
     factory = provider_factory or (lambda cfg: DatabentoQuoteProvider(config=cfg))
     provider = factory(config)
-    quote = provider.get_quote(args.contract_key)
+    run_id = f"databento_quote_{uuid.uuid4().hex}"
+    report_json = Path(args.output_root) / run_id / "quote_report.json"
+    try:
+        quote = provider.get_quote(args.contract_key)
+    except DatabentoQuoteProviderError as exc:
+        provider_available_end = getattr(exc, "provider_available_end", None)
+        corrective_message = (
+            "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback "
+            "or earlier --quote-end-timestamp"
+            if isinstance(exc, DatabentoAvailableEndError)
+            else None
+        )
+        report = {
+            "schema_version": "track_b_databento_quote_v1",
+            "run_id": run_id,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "classification": "FAILED_BEFORE_QUOTE",
+            "contract_key": args.contract_key,
+            "databento_continuous_symbol": continuous_symbol or None,
+            "databento_symbol": raw_symbol or None,
+            "manual_provider_symbol_override": bool(raw_symbol),
+            "quote_observed": False,
+            "provider_error": str(exc),
+            "provider_available_end": provider_available_end.isoformat() if provider_available_end is not None else None,
+            "corrective_message": corrective_message,
+            "api_key_present": True,
+            "api_key_value": None,
+            "submit_enabled": False,
+            "place_order_called": False,
+            "cancel_called": False,
+        }
+        report_json.parent.mkdir(parents=True, exist_ok=True)
+        report_json.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        print(
+            json.dumps(
+                {
+                    "classification": "FAILED_BEFORE_QUOTE",
+                    "contract_key": args.contract_key,
+                    "databento_continuous_symbol": continuous_symbol or None,
+                    "databento_symbol": raw_symbol or None,
+                    "quote_observed": False,
+                    "provider_error": str(exc),
+                    "provider_available_end": report["provider_available_end"],
+                    "corrective_message": corrective_message,
+                    "report_json": str(report_json),
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
     readiness_error = None
     try:
         validate_quote_for_pricing(
@@ -91,12 +145,11 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
     except Exception as exc:  # noqa: BLE001 - quote diagnostics should report validation failure.
         readiness_error = str(exc)
 
-    run_id = f"databento_quote_{uuid.uuid4().hex}"
-    report_json = Path(args.output_root) / run_id / "quote_report.json"
     report = {
         "schema_version": "track_b_databento_quote_v1",
         "run_id": run_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "classification": "QUOTE_OBSERVED",
         "contract_key": args.contract_key,
         "databento_continuous_symbol": continuous_symbol or None,
         "databento_symbol": raw_symbol or None,
@@ -127,6 +180,18 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
             "execution_contract_validation_status": quote.raw.get("execution_contract_validation_status"),
         },
         "quote": quote.to_json_dict(),
+        "quote_observed": True,
+        "quote_window": {
+            "requested_quote_start": quote.raw.get("requested_quote_start"),
+            "requested_quote_end": quote.raw.get("requested_quote_end"),
+            "actual_quote_start": quote.raw.get("actual_quote_start"),
+            "actual_quote_end": quote.raw.get("actual_quote_end"),
+            "provider_available_end": quote.raw.get("provider_available_end"),
+            "available_end_fallback_used": quote.raw.get("available_end_fallback_used"),
+            "quote_age_seconds": quote.raw.get("quote_age_seconds"),
+            "usable_for_paper_pricing": quote.raw.get("usable_for_paper_pricing"),
+            "usable_for_live_money_readiness": quote.raw.get("usable_for_live_money_readiness"),
+        },
         "live_money_quote_ready": readiness_error is None,
         "readiness_error": readiness_error,
         "api_key_present": True,
@@ -141,6 +206,7 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
         json.dumps(
             {
                 "provider": quote.provider,
+                "classification": "QUOTE_OBSERVED",
                 "contract_key": quote.contract_key,
                 "databento_symbol": quote.provider_symbol,
                 "databento_continuous_symbol": continuous_symbol or None,
@@ -162,6 +228,16 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
                 "quote_request_stype_in": quote.raw.get("quote_request_stype_in"),
                 "execution_contract_validation_status": quote.raw.get("execution_contract_validation_status"),
                 "mode": quote.mode,
+                "quote_observed": True,
+                "requested_quote_start": quote.raw.get("requested_quote_start"),
+                "requested_quote_end": quote.raw.get("requested_quote_end"),
+                "actual_quote_start": quote.raw.get("actual_quote_start"),
+                "actual_quote_end": quote.raw.get("actual_quote_end"),
+                "provider_available_end": quote.raw.get("provider_available_end"),
+                "available_end_fallback_used": quote.raw.get("available_end_fallback_used"),
+                "quote_age_seconds": quote.raw.get("quote_age_seconds"),
+                "usable_for_paper_pricing": quote.raw.get("usable_for_paper_pricing"),
+                "usable_for_live_money_readiness": quote.raw.get("usable_for_live_money_readiness"),
                 "bid": str(quote.bid) if quote.bid is not None else None,
                 "ask": str(quote.ask) if quote.ask is not None else None,
                 "last": str(quote.last) if quote.last is not None else None,
