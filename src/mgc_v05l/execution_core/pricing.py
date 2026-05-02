@@ -17,6 +17,7 @@ class PricingError(ValueError):
 class MarketDataMode(str):
     REALTIME = "REALTIME"
     DELAYED = "DELAYED"
+    DELAYED_FROZEN = "DELAYED_FROZEN"
     UNKNOWN = "UNKNOWN"
 
 
@@ -64,8 +65,13 @@ class QuoteObservation(JsonSerializable):
 
 def _normalize_market_data_mode(value: str) -> str:
     normalized = str(value or "").strip().upper()
-    if normalized not in {MarketDataMode.REALTIME, MarketDataMode.DELAYED, MarketDataMode.UNKNOWN}:
-        raise TrackBModelError("market_data_mode must be REALTIME, DELAYED, or UNKNOWN.")
+    if normalized not in {
+        MarketDataMode.REALTIME,
+        MarketDataMode.DELAYED,
+        MarketDataMode.DELAYED_FROZEN,
+        MarketDataMode.UNKNOWN,
+    }:
+        raise TrackBModelError("market_data_mode must be REALTIME, DELAYED, DELAYED_FROZEN, or UNKNOWN.")
     return normalized
 
 

@@ -98,6 +98,21 @@ def test_cli_fake_preflight_path_prints_ready_report(tmp_path: Path, capsys: pyt
     assert output["classification"] == "READY_READ_ONLY"
     assert Path(output["report_json"]).exists()
     assert created[0].request_timeout_seconds == 10.0
+    assert created[0].market_data_mode == "DELAYED"
+
+
+def test_cli_allows_explicit_market_data_mode_override(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    created: list[IbkrReadOnlyTransportConfig] = []
+
+    def factory(config: IbkrReadOnlyTransportConfig) -> CliFakeTransport:
+        created.append(config)
+        return CliFakeTransport()
+
+    exit_code = preflight_cli.main(cli_args(tmp_path, "--market-data-mode", "UNKNOWN"), transport_factory=factory)
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["classification"] == "READY_READ_ONLY"
+    assert created[0].market_data_mode == "UNKNOWN"
 
 
 @pytest.mark.parametrize(

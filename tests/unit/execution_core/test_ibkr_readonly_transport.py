@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import time
 import types
+from datetime import datetime, timezone
 
 import pytest
 
@@ -14,6 +15,25 @@ from mgc_v05l.execution_core.ibkr_readonly_transport import (
     IbkrReadOnlyTwsTransport,
     detect_contract_allowlist_ambiguities,
 )
+
+
+def aware_now() -> datetime:
+    return datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc)
+
+
+def allowlisted_mgc() -> dict[str, object]:
+    return {
+        "symbol": "MGC",
+        "security_type": "FUT",
+        "exchange": "COMEX",
+        "currency": "USD",
+        "contract_month": "202606",
+        "expiry": "20260626",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "multiplier": "10",
+        "tick_size": "0.1",
+    }
 
 
 def test_read_only_transport_object_exposes_no_order_submission_methods() -> None:
@@ -225,6 +245,92 @@ def test_error_callback_variants_are_captured_with_raw_args() -> None:
     assert errors[1]["raw_args"] == ["-1", "'20260502 12:00:00'", "502", "'could not connect'", "'{}'"]
 
 
+def test_delayed_quote_request_sets_market_data_type_before_request_and_cancels() -> None:
+    transport = IbkrReadOnlyTwsTransport(
+        config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01, quote_timeout_seconds=0.01),
+        module_loader=fake_ibapi_loader(),
+    )
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+    bridge = transport.bridge_for_test()
+    bridge.nextValidId(1001)
+    transport.qualify_contract(
+        contract_key="MGC-202606",
+        allowlist_entry=allowlisted_mgc(),
+    )
+
+    quote = transport.observe_quote(
+        run_id="preflight-delayed",
+        contract_key="MGC-202606",
+        observed_at=aware_now(),
+    )
+
+    assert quote is not None
+    assert quote.bid == "2345.0"
+    assert quote.ask == "2345.1"
+    assert quote.last == "2345.05"
+    assert quote.market_data_provider == "IBKR"
+    assert quote.market_data_mode == "DELAYED"
+    assert quote.market_data_role == "DIAGNOSTIC"
+    assert quote.delayed_data_warning_seen is True
+    assert quote.raw["market_data_type"] == 3
+    assert bridge.calls.index(("reqMarketDataType", 3)) < bridge.calls.index(("reqMktData", 700002))
+    assert bridge.cancel_mkt_data_calls == [700002]
+    diagnostics = transport.diagnostics_report()
+    assert diagnostics["requested_market_data_mode"] == "DELAYED"
+    assert diagnostics["market_data_type_requests"][0]["market_data_type"] == 3
+    assert diagnostics["market_data_type_callbacks"] == {700002: 3}
+
+
+def test_realtime_quote_request_sets_market_data_type_one() -> None:
+    transport = IbkrReadOnlyTwsTransport(
+        config=IbkrReadOnlyTransportConfig(
+            request_timeout_seconds=0.01,
+            quote_timeout_seconds=0.01,
+            market_data_mode="REALTIME",
+        ),
+        module_loader=fake_ibapi_loader(market_data_type_callback=1),
+    )
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+    bridge = transport.bridge_for_test()
+    bridge.nextValidId(1001)
+    transport.qualify_contract(contract_key="MGC-202606", allowlist_entry=allowlisted_mgc())
+
+    quote = transport.observe_quote(
+        run_id="preflight-realtime",
+        contract_key="MGC-202606",
+        observed_at=aware_now(),
+    )
+
+    assert quote is not None
+    assert quote.market_data_mode == "REALTIME"
+    assert bridge.market_data_type_calls == [1]
+
+
+def test_unknown_quote_request_does_not_force_market_data_type() -> None:
+    transport = IbkrReadOnlyTwsTransport(
+        config=IbkrReadOnlyTransportConfig(
+            request_timeout_seconds=0.01,
+            quote_timeout_seconds=0.01,
+            market_data_mode="UNKNOWN",
+        ),
+        module_loader=fake_ibapi_loader(market_data_type_callback=None),
+    )
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+    bridge = transport.bridge_for_test()
+    bridge.nextValidId(1001)
+    transport.qualify_contract(contract_key="MGC-202606", allowlist_entry=allowlisted_mgc())
+
+    quote = transport.observe_quote(
+        run_id="preflight-unknown",
+        contract_key="MGC-202606",
+        observed_at=aware_now(),
+    )
+
+    assert quote is not None
+    assert quote.market_data_mode == "UNKNOWN"
+    assert bridge.market_data_type_calls == []
+
+
 def test_managed_accounts_callback_before_next_valid_id_is_preserved() -> None:
     transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
     transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
@@ -357,7 +463,12 @@ def test_contract_allowlist_validation_accepts_matching_mgc_local_symbol() -> No
     assert issues == ()
 
 
-def fake_ibapi_loader(*, managed_accounts: str = "DUM882026", handshake_error: tuple[int, str] | None = None):
+def fake_ibapi_loader(
+    *,
+    managed_accounts: str = "DUM882026",
+    handshake_error: tuple[int, str] | None = None,
+    market_data_type_callback: int | None = 3,
+):
     class FakeWrapper:
         def __init__(self) -> None:
             return None
@@ -368,9 +479,13 @@ def fake_ibapi_loader(*, managed_accounts: str = "DUM882026", handshake_error: t
             self.fake_client_cls = FakeClient
             self.wrapper = wrapper
             self.wrapper_is_self = wrapper is self
+            self.calls: list[tuple[str, int]] = []
             self.req_ids_calls: list[int] = []
             self.req_managed_accounts_count = 0
             self.req_contract_details_count = 0
+            self.market_data_type_calls: list[int] = []
+            self.req_mkt_data_calls: list[int] = []
+            self.cancel_mkt_data_calls: list[int] = []
             self.connected_with: tuple[str, int, int] | None = None
             self.disconnected = False
             self.connected = False
@@ -404,9 +519,36 @@ def fake_ibapi_loader(*, managed_accounts: str = "DUM882026", handshake_error: t
 
         def reqContractDetails(self, request_id: int, contract) -> None:  # noqa: N802, ANN001
             self.req_contract_details_count += 1
+            self.wrapper.contractDetails(request_id, types.SimpleNamespace(contract=contract))
+            self.wrapper.contractDetailsEnd(request_id)
+
+        def reqMarketDataType(self, market_data_type: int) -> None:  # noqa: N802
+            self.market_data_type_calls.append(market_data_type)
+            self.calls.append(("reqMarketDataType", market_data_type))
+
+        def reqMktData(self, request_id: int, contract, generic_ticks: str, snapshot: bool, regulatory_snapshot: bool, options) -> None:  # noqa: N802, ANN001, ARG002
+            self.req_mkt_data_calls.append(request_id)
+            self.calls.append(("reqMktData", request_id))
+            if market_data_type_callback is not None:
+                self.wrapper.marketDataType(request_id, market_data_type_callback)
+            self.wrapper.tickPrice(request_id, 66, 2345.0, None)
+            self.wrapper.tickPrice(request_id, 67, 2345.1, None)
+            self.wrapper.tickPrice(request_id, 68, 2345.05, None)
+            self.wrapper.tickSnapshotEnd(request_id)
+
+        def cancelMktData(self, request_id: int) -> None:  # noqa: N802
+            self.cancel_mkt_data_calls.append(request_id)
 
     class FakeContract:
-        pass
+        def __init__(self) -> None:
+            self.symbol = ""
+            self.secType = ""
+            self.exchange = ""
+            self.currency = ""
+            self.lastTradeDateOrContractMonth = ""
+            self.localSymbol = ""
+            self.conId = 0
+            self.multiplier = ""
 
     modules = {
         "ibapi.wrapper": types.SimpleNamespace(EWrapper=FakeWrapper),

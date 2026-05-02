@@ -604,7 +604,7 @@ def _market_data_report(
     delayed_warning_seen = _delayed_data_warning_seen(provider_warnings)
     if quote is None:
         provider = "IBKR"
-        mode = MarketDataMode.UNKNOWN
+        mode = _market_data_mode_from_diagnostics(transport_diagnostics)
         role = MarketDataRole.DIAGNOSTIC
         quote_observed = False
         tick_size = exchange = currency = None
@@ -629,7 +629,7 @@ def _market_data_report(
         "delayed_data_warning_seen": delayed_warning_seen,
         "quote_observed": quote_observed,
         "quote_blocking_for_paper": False,
-        "quote_blocking_for_live_money": mode in {MarketDataMode.DELAYED, MarketDataMode.UNKNOWN} or not quote_observed,
+        "quote_blocking_for_live_money": mode != MarketDataMode.REALTIME or not quote_observed,
         "paper_route_readiness": paper_route_readiness,
         "production_live_money_readiness": production_live_money_readiness,
         "proves_paper_mechanics_only": not production_live_money_readiness,
@@ -652,3 +652,28 @@ def _provider_warnings(transport_diagnostics: Mapping[str, Any]) -> tuple[str, .
 
 def _delayed_data_warning_seen(warnings: Sequence[str]) -> bool:
     return any("delayed" in warning.lower() or warning.startswith("10167:") or warning.startswith("10168:") for warning in warnings)
+
+
+def _market_data_mode_from_diagnostics(transport_diagnostics: Mapping[str, Any]) -> str:
+    callbacks = transport_diagnostics.get("market_data_type_callbacks") or {}
+    if isinstance(callbacks, Mapping):
+        for raw_value in callbacks.values():
+            try:
+                market_data_type = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if market_data_type == 1:
+                return MarketDataMode.REALTIME
+            if market_data_type == 3:
+                return MarketDataMode.DELAYED
+            if market_data_type == 4:
+                return MarketDataMode.DELAYED_FROZEN
+    requested = str(transport_diagnostics.get("requested_market_data_mode") or "").strip().upper()
+    if requested in {
+        MarketDataMode.REALTIME,
+        MarketDataMode.DELAYED,
+        MarketDataMode.DELAYED_FROZEN,
+        MarketDataMode.UNKNOWN,
+    }:
+        return requested
+    return MarketDataMode.UNKNOWN

@@ -268,6 +268,32 @@ def test_quote_missing_is_reported_without_submit(tmp_path: Path) -> None:
     assert transport.submit_called is False
 
 
+def test_quote_missing_with_requested_delayed_mode_is_non_fatal_for_read_only_preflight(tmp_path: Path) -> None:
+    transport = FakeReadOnlyTransport(
+        quote=None,
+        diagnostics={
+            "requested_market_data_mode": "DELAYED",
+            "market_data_type_requests": [{"mode": "DELAYED", "market_data_type": 3}],
+        },
+    )
+
+    result = run_read_only_preflight(
+        config=config(tmp_path),
+        transport=transport,
+        run_id="preflight-missing-delayed-quote",
+        now=aware_now(),
+    )
+    payload = read_report(result)
+
+    assert result.classification == PreflightClassification.READY_READ_ONLY
+    assert payload["quote"] is None
+    assert payload["quote_observed"] is False
+    assert payload["market_data_mode"] == "DELAYED"
+    assert payload["quote_blocking_for_paper"] is False
+    assert payload["quote_blocking_for_live_money"] is True
+    assert payload["production_live_money_readiness"] is False
+
+
 def test_delayed_market_data_is_non_blocking_for_paper_but_blocks_live_money_readiness(tmp_path: Path) -> None:
     transport = FakeReadOnlyTransport(
         quote={

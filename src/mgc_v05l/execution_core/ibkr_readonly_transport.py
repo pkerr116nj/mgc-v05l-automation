@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .ibkr_paper_adapter import IbkrPaperConfigError
 from .models import BrokerOrder, PositionSource, PositionState
-from .pricing import QuoteObservation
+from .pricing import MarketDataMode, MarketDataRole, QuoteObservation
 
 
 MONTH_CODES = {
@@ -52,6 +52,7 @@ class IbkrReadOnlyTimeoutError(IbkrReadOnlyTransportError):
 class IbkrReadOnlyTransportConfig:
     request_timeout_seconds: float = 10.0
     quote_timeout_seconds: float = 3.0
+    market_data_mode: str = MarketDataMode.DELAYED
 
 
 class IbkrReadOnlyTwsTransport:
@@ -77,6 +78,8 @@ class IbkrReadOnlyTwsTransport:
         self._positions: list[dict[str, Any]] = []
         self._open_orders: list[dict[str, Any]] = []
         self._quotes: dict[int, dict[str, Any]] = {}
+        self._market_data_type_requests: list[dict[str, Any]] = []
+        self._market_data_type_callbacks: dict[int, int] = {}
         self._managed_accounts_ready = threading.Event()
         self._next_valid_id_ready = threading.Event()
         self._positions_ready = threading.Event()
@@ -159,6 +162,9 @@ class IbkrReadOnlyTwsTransport:
             "next_valid_id": self._next_valid_id,
             "next_valid_id_source": self._next_valid_id_source,
             "next_valid_id_requested": self._next_valid_id_requested,
+            "requested_market_data_mode": self.config.market_data_mode,
+            "market_data_type_requests": list(self._market_data_type_requests),
+            "market_data_type_callbacks": dict(self._market_data_type_callbacks),
             "handshake_timeout_seconds": self.config.request_timeout_seconds,
             "ibkr_errors": list(self._ibkr_errors),
             "suspected_causes": self._suspected_handshake_causes(),
@@ -269,6 +275,7 @@ class IbkrReadOnlyTwsTransport:
         request_id = self._next_request_id()
         self._quotes[request_id] = {}
         self._quote_ready[request_id] = threading.Event()
+        self._request_market_data_type_if_configured()
         bridge.reqMktData(request_id, self._contract_from_allowlist(self._last_allowlist_entry), "", True, False, [])
         self._quote_ready[request_id].wait(float(self.config.quote_timeout_seconds))
         quote = self._quotes.get(request_id, {})
@@ -280,6 +287,10 @@ class IbkrReadOnlyTwsTransport:
         last = quote.get("last")
         if bid is None and ask is None and last is None:
             return None
+        market_data_mode = _market_data_mode_from_type(
+            self._market_data_type_callbacks.get(request_id),
+            fallback=str(self.config.market_data_mode),
+        )
         return QuoteObservation(
             quote_id=f"tws_quote_{run_id}_{contract_key}_{request_id}",
             run_id=run_id,
@@ -289,7 +300,19 @@ class IbkrReadOnlyTwsTransport:
             ask=ask,
             last=last,
             observed_at=observed_at,
-            raw={"request_id": request_id, "ticks": dict(quote)},
+            market_data_provider="IBKR",
+            market_data_mode=market_data_mode,
+            market_data_role=MarketDataRole.DIAGNOSTIC,
+            delayed_data_warning_seen=_market_data_mode_is_delayed(market_data_mode),
+            tick_size=self._last_allowlist_entry.get("tick_size"),
+            exchange=self._last_allowlist_entry.get("exchange"),
+            currency=self._last_allowlist_entry.get("currency"),
+            raw={
+                "request_id": request_id,
+                "ticks": dict(quote),
+                "market_data_type": self._market_data_type_callbacks.get(request_id),
+                "requested_market_data_mode": self.config.market_data_mode,
+            },
         )
 
     def _build_bridge(self) -> Any:
@@ -341,6 +364,9 @@ class IbkrReadOnlyTwsTransport:
 
             def tickSnapshotEnd(self, reqId: int) -> None:  # noqa: N802
                 owner._quote_ready.setdefault(reqId, threading.Event()).set()
+
+            def marketDataType(self, reqId: int, marketDataType: int) -> None:  # noqa: N802
+                owner._record_market_data_type(reqId, marketDataType)
 
             def error(self, *args: Any) -> None:  # noqa: N802
                 owner._record_error_from_callback(args)
@@ -395,6 +421,20 @@ class IbkrReadOnlyTwsTransport:
     def _ensure_api_ready(self) -> None:
         self._require_bridge()
         self._wait(self._next_valid_id_ready, "nextValidId")
+
+    def _request_market_data_type_if_configured(self) -> None:
+        market_data_type = _ibkr_market_data_type_from_mode(str(self.config.market_data_mode))
+        if market_data_type is None:
+            return
+        bridge = self._require_bridge()
+        bridge.reqMarketDataType(market_data_type)
+        self._market_data_type_requests.append(
+            {
+                "mode": str(self.config.market_data_mode).strip().upper(),
+                "market_data_type": market_data_type,
+                "requested_at": _utc_now().isoformat(),
+            }
+        )
 
     def _wait(self, event: threading.Event, callback_name: str) -> None:
         self._is_connected_before_wait = self._is_connected()
@@ -470,6 +510,10 @@ class IbkrReadOnlyTwsTransport:
         self._quotes.setdefault(request_id, {})[field] = str(price)
         if {"bid", "ask"}.issubset(self._quotes[request_id]):
             self._quote_ready.setdefault(request_id, threading.Event()).set()
+
+    def _record_market_data_type(self, request_id: int, market_data_type: int) -> None:
+        self._market_data_type_callbacks[int(request_id)] = int(market_data_type)
+        self._quotes.setdefault(int(request_id), {})["market_data_type"] = int(market_data_type)
 
     def _record_error_from_callback(self, args: tuple[Any, ...]) -> None:
         self._last_error_raw_args = tuple(repr(arg) for arg in args)
@@ -592,6 +636,39 @@ def _contract_payload(contract: Any) -> dict[str, Any]:
         "contract_month": getattr(contract, "lastTradeDateOrContractMonth", None),
         "multiplier": getattr(contract, "multiplier", None),
     }
+
+
+def _ibkr_market_data_type_from_mode(mode: str) -> int | None:
+    normalized = str(mode or "").strip().upper()
+    if normalized == MarketDataMode.REALTIME:
+        return 1
+    if normalized == MarketDataMode.DELAYED:
+        return 3
+    if normalized == MarketDataMode.DELAYED_FROZEN:
+        return 4
+    return None
+
+
+def _market_data_mode_from_type(market_data_type: int | None, *, fallback: str) -> str:
+    if market_data_type == 1:
+        return MarketDataMode.REALTIME
+    if market_data_type == 3:
+        return MarketDataMode.DELAYED
+    if market_data_type == 4:
+        return MarketDataMode.DELAYED_FROZEN
+    normalized = str(fallback or "").strip().upper()
+    if normalized in {
+        MarketDataMode.REALTIME,
+        MarketDataMode.DELAYED,
+        MarketDataMode.DELAYED_FROZEN,
+        MarketDataMode.UNKNOWN,
+    }:
+        return normalized
+    return MarketDataMode.UNKNOWN
+
+
+def _market_data_mode_is_delayed(mode: str) -> bool:
+    return str(mode or "").strip().upper() in {MarketDataMode.DELAYED, MarketDataMode.DELAYED_FROZEN}
 
 
 def _utc_now() -> datetime:

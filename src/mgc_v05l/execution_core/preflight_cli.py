@@ -10,6 +10,7 @@ from typing import Callable, Sequence
 
 from .ibkr_readonly_transport import IbkrReadOnlyTransportConfig, IbkrReadOnlyTwsTransport
 from .preflight import PreflightClassification, ReadOnlyPreflightConfig, run_read_only_preflight
+from .pricing import MarketDataMode
 
 
 TransportFactory = Callable[[IbkrReadOnlyTransportConfig], object]
@@ -27,6 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-quote", action="store_true")
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--quote-timeout-seconds", type=float, default=3.0)
+    parser.add_argument(
+        "--market-data-mode",
+        choices=(MarketDataMode.REALTIME, MarketDataMode.DELAYED, MarketDataMode.DELAYED_FROZEN, MarketDataMode.UNKNOWN),
+        default=MarketDataMode.DELAYED,
+    )
     return parser
 
 
@@ -52,6 +58,7 @@ def main(
     transport_config = IbkrReadOnlyTransportConfig(
         request_timeout_seconds=args.request_timeout_seconds,
         quote_timeout_seconds=args.quote_timeout_seconds,
+        market_data_mode=args.market_data_mode,
     )
     factory = transport_factory or (lambda cfg: IbkrReadOnlyTwsTransport(config=cfg))
     result = run_read_only_preflight(config=config, transport=factory(transport_config))  # type: ignore[arg-type]
