@@ -90,6 +90,14 @@ class FakeProvider:
                 "actual_quote_end": "2026-05-01T23:59:00+00:00" if self.config.allow_available_end_fallback else "2026-05-02T12:00:00+00:00",
                 "provider_available_end": "2026-05-01T23:59:00+00:00" if self.config.allow_available_end_fallback else None,
                 "available_end_fallback_used": self.config.allow_available_end_fallback,
+                "allow_available_end_fallback_requested": self.config.allow_available_end_fallback,
+                "allow_available_end_fallback_effective": self.config.allow_available_end_fallback,
+                "native_databento_path_used": self.config.allow_available_end_fallback,
+                "schemas_attempted": ["mbp-1", "trades"],
+                "available_end_retry_attempted": self.config.allow_available_end_fallback,
+                "available_end_retry_reason": "initial_data_start_after_available_end"
+                if self.config.allow_available_end_fallback
+                else None,
                 "quote_age_seconds": "0.0",
                 "usable_for_paper_pricing": not self.config.allow_available_end_fallback,
                 "usable_for_live_money_readiness": not self.config.allow_available_end_fallback,
@@ -130,6 +138,12 @@ class FailingAvailableEndProvider:
                 "actual_quote_start": "2026-05-02T11:55:00+00:00",
                 "actual_quote_end": "2026-05-02T12:00:00+00:00",
                 "available_end_fallback_used": False,
+                "allow_available_end_fallback_requested": False,
+                "allow_available_end_fallback_effective": False,
+                "native_databento_path_used": True,
+                "schemas_attempted": ["mbp-1", "trades"],
+                "available_end_retry_attempted": False,
+                "available_end_retry_reason": "fallback_not_enabled",
                 "encoding": "json",
                 "request_details": {
                     "bid_ask": {"schema": "mbp-1", "symbol": "123456", "stype_in": "instrument_id"},
@@ -138,6 +152,8 @@ class FailingAvailableEndProvider:
                 "raw_provider_error": "422 data_start_after_available_end sanitized detail",
                 "native_databento_error_code": "data_start_after_available_end",
                 "native_databento_error_message": "422 data_start_after_available_end sanitized detail",
+                "native_exception_class": "RuntimeError",
+                "native_exception_message_sanitized": "422 data_start_after_available_end sanitized detail",
             },
         )
 
@@ -370,6 +386,32 @@ def test_cli_accepts_quote_window_options(
     assert report["live_money_quote_ready"] is False
 
 
+def test_cli_passes_available_end_fallback_flag_to_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    captured: dict[str, bool] = {}
+
+    class CapturingProvider(FakeProvider):
+        def __init__(self, config: DatabentoQuoteProviderConfig) -> None:
+            captured["allow_available_end_fallback"] = config.allow_available_end_fallback
+            super().__init__(config)
+
+    exit_code = databento_quote_cli.main(
+        cli_args(tmp_path, "--allow-available-end-fallback"),
+        provider_factory=CapturingProvider,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(payload["report_json"]).read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert captured["allow_available_end_fallback"] is True
+    assert payload["allow_available_end_fallback_requested"] is True
+    assert report["quote_window"]["allow_available_end_fallback_requested"] is True
+
+
 def test_cli_available_end_failure_is_clean_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -391,7 +433,14 @@ def test_cli_available_end_failure_is_clean_report(
     assert payload["requested_quote_start"] == "2026-05-02T11:55:00+00:00"
     assert payload["actual_quote_end"] == "2026-05-02T12:00:00+00:00"
     assert payload["available_end_fallback_used"] is False
+    assert payload["allow_available_end_fallback_requested"] is False
+    assert payload["allow_available_end_fallback_effective"] is False
+    assert payload["native_databento_path_used"] is True
+    assert payload["schemas_attempted"] == ["mbp-1", "trades"]
+    assert payload["available_end_retry_attempted"] is False
+    assert payload["available_end_retry_reason"] == "fallback_not_enabled"
     assert payload["native_databento_error_code"] == "data_start_after_available_end"
+    assert payload["native_exception_class"] == "RuntimeError"
     assert report["classification"] == "FAILED_BEFORE_QUOTE"
     assert report["quote_observed"] is False
     assert report["api_key_value"] is None
