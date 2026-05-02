@@ -81,10 +81,11 @@ def passing_proof_runner(tmp_path: Path):
 
 
 class RecordingPaperAdapter:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_open_order_wait: bool = False) -> None:
         self.submitted: list[OrderIntent] = []
         self.connected = False
         self.disconnected = False
+        self.fail_open_order_wait = fail_open_order_wait
 
     def connect(self) -> None:
         self.connected = True
@@ -106,6 +107,8 @@ class RecordingPaperAdapter:
         return len(self.submitted)
 
     def wait_for_broker_order(self, *, submit_attempt_id: str) -> BrokerOrder:
+        if self.fail_open_order_wait and submit_attempt_id.endswith("_1"):
+            raise RuntimeError("missing openOrder/orderStatus callback")
         intent = self._intent_for(submit_attempt_id)
         index = len([item for item in self.submitted if item.order_intent_id <= intent.order_intent_id])
         return BrokerOrder(
@@ -150,6 +153,34 @@ class RecordingPaperAdapter:
     def _intent_for(self, submit_attempt_id: str) -> OrderIntent:
         index = 0 if submit_attempt_id.endswith("_1") else 1
         return self.submitted[index]
+
+    def submit_diagnostics(self, submit_attempt_id: str) -> dict[str, object]:
+        intent = self._intent_for(submit_attempt_id)
+        return {
+            "submit_attempt_id": submit_attempt_id,
+            "place_order_called": True,
+            "place_order_called_at": aware_now().isoformat(),
+            "broker_order_id_allocated": "1" if submit_attempt_id.endswith("_1") else "2",
+            "order_transmit_flag": True,
+            "order_action": intent.action.value,
+            "order_type": intent.order_type,
+            "limit_price": str(intent.limit_price),
+            "tif": intent.time_in_force,
+            "client_id": 17077,
+            "account_id": intent.account_id,
+            "contract_key": intent.contract_key,
+            "contract_local_symbol": "MGCM6",
+            "contract_con_id": 712565978,
+            "callback_wait_timeout_seconds": 30.0,
+            "openOrder_seen": False,
+            "orderStatus_seen": False,
+            "execDetails_seen": False,
+            "completedOrder_seen": False,
+            "error_callbacks_after_submit": [{"request_id": 1, "error_code": 201, "error_string": "simulated", "raw_args": []}],
+            "isConnected_before_placeOrder": True,
+            "isConnected_after_placeOrder": True,
+            "isConnected_after_callback_wait": True,
+        }
 
 
 @pytest.mark.parametrize(
@@ -398,6 +429,50 @@ def test_real_runner_uses_separate_manual_open_and_close_prices(
         (close_action, "2344.9"),
     ]
     assert all(intent.order_type == "LMT" and intent.time_in_force == "DAY" for intent in adapter.submitted)
+
+
+def test_real_runner_reports_submit_diagnostics_when_open_callbacks_are_missing(tmp_path: Path) -> None:
+    adapter = RecordingPaperAdapter(fail_open_order_wait=True)
+
+    result = run_ibkr_paper_proof(
+        config=HarnessConfig(
+            account_id="DUM882026",
+            client_id=17077,
+            output_root=tmp_path / "proof_runs",
+        ),
+        run_id="run-open-callback-missing",
+        preflight=ready_preflight(
+            tmp_path,
+            quote=None,
+            quote_observed=False,
+            market_data_mode="DELAYED",
+            market_data_provider="IBKR",
+            market_data_role="DIAGNOSTIC",
+            production_live_money_readiness=False,
+        ),
+        manual_open_limit_price="2345.1",
+        manual_close_limit_price="2344.9",
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+    payload = json.loads(result.proof_report_json.read_text(encoding="utf-8"))
+    diagnostics = payload["open_submit_diagnostics"]
+
+    assert result.classification == TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    assert len(adapter.submitted) == 1
+    assert payload["close_submit_attempt"] is None
+    assert diagnostics["place_order_called"] is True
+    assert diagnostics["broker_order_id_allocated"] == "1"
+    assert diagnostics["order_transmit_flag"] is True
+    assert diagnostics["order_action"] == "BUY"
+    assert diagnostics["order_type"] == "LMT"
+    assert diagnostics["limit_price"] == "2345.1"
+    assert diagnostics["tif"] == "DAY"
+    assert diagnostics["callback_wait_timeout_seconds"] == 30.0
+    assert diagnostics["openOrder_seen"] is False
+    assert diagnostics["orderStatus_seen"] is False
+    assert diagnostics["execDetails_seen"] is False
+    assert diagnostics["completedOrder_seen"] is False
+    assert diagnostics["error_callbacks_after_submit"][0]["error_code"] == 201
 
 
 def test_delayed_data_can_pass_paper_proof_but_not_live_money_readiness(tmp_path: Path) -> None:

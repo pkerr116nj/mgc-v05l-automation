@@ -460,6 +460,7 @@ def run_ibkr_paper_proof(
         submit_enabled=True,
     )
     events: list[dict[str, object]] = []
+    submitted_attempt_ids: list[str] = []
 
     def append(event_type: str, payload: Mapping[str, object]) -> None:
         event = ledger.append_event(run_id=run_id, event_type=event_type, payload=dict(payload))
@@ -536,6 +537,7 @@ def run_ibkr_paper_proof(
         ledger.append_model_event(event_type="signal_event_created", model=signal)
         ledger.append_model_event(event_type="order_intent_created", model=open_intent)
         ledger.append_model_event(event_type="submit_attempt_created", model=open_submit)
+        submitted_attempt_ids.append(open_submit.submit_attempt_id)
         actual_adapter.submit_limit_order(submit_attempt=open_submit, order_intent=open_intent)
         open_order = actual_adapter.wait_for_broker_order(submit_attempt_id=open_submit.submit_attempt_id)
         ledger.append_model_event(event_type="broker_order_observed", model=open_order)
@@ -575,6 +577,7 @@ def run_ibkr_paper_proof(
         close_submit = _submit(config=config, run_id=run_id, intent=close_intent, now=now, index=2)
         ledger.append_model_event(event_type="order_intent_created", model=close_intent)
         ledger.append_model_event(event_type="submit_attempt_created", model=close_submit)
+        submitted_attempt_ids.append(close_submit.submit_attempt_id)
         actual_adapter.submit_limit_order(submit_attempt=close_submit, order_intent=close_intent)
         close_order = actual_adapter.wait_for_broker_order(submit_attempt_id=close_submit.submit_attempt_id)
         ledger.append_model_event(event_type="broker_order_observed", model=close_order)
@@ -585,6 +588,12 @@ def run_ibkr_paper_proof(
     except Exception as exc:  # noqa: BLE001 - any submit uncertainty fails closed for operator review.
         classification = TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
         reason = str(exc)
+        diagnostic_method = getattr(actual_adapter, "submit_diagnostics", None)
+        if callable(diagnostic_method):
+            for submit_attempt_id in submitted_attempt_ids:
+                diagnostics = diagnostic_method(submit_attempt_id)
+                if diagnostics:
+                    append("submit_diagnostics_created", diagnostics)
     finally:
         actual_adapter.disconnect()
 
@@ -683,6 +692,7 @@ def _proof_payload(
     submits = by_type.get("submit_attempt_created", [])
     orders = by_type.get("broker_order_observed", [])
     fills = by_type.get("fill_event_created", [])
+    submit_diagnostics = by_type.get("submit_diagnostics_created", [])
     return {
         "schema_version": "track_b_ibkr_paper_proof_v1",
         "classification": classification.value,
@@ -693,10 +703,13 @@ def _proof_payload(
         "open_submit_attempt": submits[0] if submits else None,
         "open_broker_order": orders[0] if orders else None,
         "open_fill": fills[0] if fills else None,
+        "open_submit_diagnostics": submit_diagnostics[0] if submit_diagnostics else None,
         "close_intent": intents[1] if len(intents) > 1 else None,
         "close_submit_attempt": submits[1] if len(submits) > 1 else None,
         "close_broker_order": orders[1] if len(orders) > 1 else None,
         "close_fill": fills[1] if len(fills) > 1 else None,
+        "close_submit_diagnostics": submit_diagnostics[1] if len(submit_diagnostics) > 1 else None,
+        "submit_diagnostics": submit_diagnostics,
         "final_reconciliation": {"status": "CLEAN"} if classification == TerminalClassification.PASSED else None,
         "failure_or_ambiguity": reason,
         "required_manual_action": "Manual TWS review required." if reason else None,

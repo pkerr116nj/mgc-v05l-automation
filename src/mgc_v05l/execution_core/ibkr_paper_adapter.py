@@ -100,6 +100,7 @@ class IbkrPaperAdapter:
         self._fills: dict[str, FillEvent] = {}
         self._positions: dict[str, PositionState] = {}
         self._seen_execution_ids: set[str] = set()
+        self._submit_diagnostics: dict[str, dict[str, Any]] = {}
         self.ambiguous_contexts: dict[str, str] = {}
         self.missing_callbacks: set[str] = set()
         self.ibkr_errors: list[dict[str, Any]] = []
@@ -124,6 +125,11 @@ class IbkrPaperAdapter:
 
     def bridge_for_test(self) -> Any:
         return self._require_bridge()
+
+    def submit_diagnostics(self, submit_attempt_id: str | None = None) -> dict[str, Any]:
+        if submit_attempt_id is not None:
+            return dict(self._submit_diagnostics.get(submit_attempt_id, {}))
+        return {key: dict(value) for key, value in self._submit_diagnostics.items()}
 
     def managed_accounts(self) -> tuple[str, ...]:
         bridge = self._require_bridge()
@@ -430,30 +436,74 @@ class IbkrPaperAdapter:
         self._local_order_to_submit[str(local_order_id)] = submit_attempt.submit_attempt_id
         self._order_ready.setdefault(submit_attempt.submit_attempt_id, threading.Event())
         self._fill_ready.setdefault(submit_attempt.submit_attempt_id, threading.Event())
-        bridge.placeOrder(
-            local_order_id,
-            self._contract_from_allowlist(order_intent.contract_key),
-            self._order_from_intent(order_intent),
+        contract = self._contract_from_allowlist(order_intent.contract_key)
+        order = self._order_from_intent(order_intent)
+        diagnostics = self._submit_diagnostics.setdefault(submit_attempt.submit_attempt_id, {})
+        diagnostics.update(
+            {
+                "submit_attempt_id": submit_attempt.submit_attempt_id,
+                "place_order_called": False,
+                "place_order_called_at": None,
+                "broker_order_id_allocated": str(local_order_id),
+                "order_transmit_flag": bool(getattr(order, "transmit", False)),
+                "order_action": getattr(order, "action", None),
+                "order_type": getattr(order, "orderType", None),
+                "limit_price": str(order_intent.limit_price),
+                "tif": getattr(order, "tif", None),
+                "client_id": self.client_id,
+                "account_id": order_intent.account_id,
+                "contract_key": order_intent.contract_key,
+                "contract_local_symbol": getattr(contract, "localSymbol", None),
+                "contract_con_id": getattr(contract, "conId", None),
+                "callback_wait_timeout_seconds": self.request_timeout_seconds,
+                "openOrder_seen": False,
+                "orderStatus_seen": False,
+                "execDetails_seen": False,
+                "completedOrder_seen": False,
+                "error_callbacks_after_submit": [],
+                "isConnected_before_placeOrder": self._is_connected(),
+                "isConnected_after_placeOrder": None,
+                "isConnected_after_callback_wait": None,
+                "place_order_exception": None,
+            }
         )
+        try:
+            diagnostics["place_order_called"] = True
+            diagnostics["place_order_called_at"] = datetime.now(timezone.utc).isoformat()
+            bridge.placeOrder(local_order_id, contract, order)
+            diagnostics["isConnected_after_placeOrder"] = self._is_connected()
+        except Exception as exc:
+            diagnostics["isConnected_after_placeOrder"] = self._is_connected()
+            diagnostics["place_order_exception"] = repr(exc)
+            raise
         return local_order_id
 
     def wait_for_broker_order(self, *, submit_attempt_id: str, timeout_seconds: float | None = None) -> BrokerOrder:
-        self._wait(
-            self._order_ready.setdefault(submit_attempt_id, threading.Event()),
-            "openOrder/orderStatus",
-            timeout_seconds or self.request_timeout_seconds,
-        )
+        actual_timeout = timeout_seconds or self.request_timeout_seconds
+        diagnostics = self._submit_diagnostics.setdefault(submit_attempt_id, {})
+        diagnostics["callback_wait_timeout_seconds"] = actual_timeout
+        try:
+            self._wait(
+                self._order_ready.setdefault(submit_attempt_id, threading.Event()),
+                "openOrder/orderStatus",
+                actual_timeout,
+            )
+        finally:
+            diagnostics["isConnected_after_callback_wait"] = self._is_connected()
         for order in self._broker_orders.values():
             if order.submit_attempt_id == submit_attempt_id:
                 return order
         raise IbkrPaperReadinessError("missing broker order observation")
 
     def wait_for_fill(self, *, submit_attempt_id: str, timeout_seconds: float | None = None) -> FillEvent:
-        self._wait(
-            self._fill_ready.setdefault(submit_attempt_id, threading.Event()),
-            "execDetails",
-            timeout_seconds or self.fill_timeout_seconds,
-        )
+        try:
+            self._wait(
+                self._fill_ready.setdefault(submit_attempt_id, threading.Event()),
+                "execDetails",
+                timeout_seconds or self.fill_timeout_seconds,
+            )
+        finally:
+            self._submit_diagnostics.setdefault(submit_attempt_id, {})["isConnected_after_callback_wait"] = self._is_connected()
         fill = self._fills.get(submit_attempt_id)
         if fill is not None:
             return fill
@@ -586,6 +636,7 @@ class IbkrPaperAdapter:
         submit_attempt_id = self._submit_id_for_local_order(order_id)
         if submit_attempt_id is None:
             return
+        self._submit_diagnostics.setdefault(submit_attempt_id, {})["openOrder_seen"] = True
         broker_order = self.map_order_callback(
             submit_attempt_id=submit_attempt_id,
             account_id=str(getattr(order, "account", "") or ""),
@@ -612,6 +663,7 @@ class IbkrPaperAdapter:
         submit_attempt_id = self._submit_id_for_local_order(order_id)
         if submit_attempt_id is None:
             return
+        self._submit_diagnostics.setdefault(submit_attempt_id, {})["orderStatus_seen"] = True
         context = self._context(submit_attempt_id)
         broker_order = self.map_order_callback(
             submit_attempt_id=submit_attempt_id,
@@ -640,6 +692,7 @@ class IbkrPaperAdapter:
         submit_attempt_id = self._submit_id_for_local_order(order_id)
         if submit_attempt_id is None:
             return
+        self._submit_diagnostics.setdefault(submit_attempt_id, {})["execDetails_seen"] = True
         side = str(getattr(execution, "side", "") or "").upper()
         action = "BUY" if side in {"BOT", "BUY"} else "SELL"
         self.map_exec_details(
@@ -659,6 +712,9 @@ class IbkrPaperAdapter:
     def _record_completed_order_callback(self, contract: Any, order: Any, order_state: Any) -> None:
         order_id = getattr(order, "orderId", None)
         if order_id is not None:
+            submit_attempt_id = self._submit_id_for_local_order(order_id)
+            if submit_attempt_id is not None:
+                self._submit_diagnostics.setdefault(submit_attempt_id, {})["completedOrder_seen"] = True
             self._record_open_order_callback(int(order_id), contract, order, order_state)
 
     def _record_position_callback(self, account: str, contract: Any, pos: float, avg_cost: float) -> None:
@@ -690,6 +746,17 @@ class IbkrPaperAdapter:
         self.ibkr_errors.append(
             {"request_id": request_id, "error_code": error_code, "error_string": error_string, "raw_args": raw_args}
         )
+        submit_attempt_id = self._submit_id_for_local_order(request_id)
+        if submit_attempt_id is not None:
+            self._submit_diagnostics.setdefault(submit_attempt_id, {}).setdefault("error_callbacks_after_submit", []).append(
+                {"request_id": request_id, "error_code": error_code, "error_string": error_string, "raw_args": raw_args}
+            )
+
+    def _is_connected(self) -> bool:
+        if self._bridge is None:
+            return False
+        is_connected = getattr(self._bridge, "isConnected", None)
+        return bool(is_connected()) if callable(is_connected) else True
 
     def _submit_id_for_local_order(self, order_id: Any) -> str | None:
         return self._local_order_to_submit.get(str(order_id))

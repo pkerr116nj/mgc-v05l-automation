@@ -303,6 +303,22 @@ def test_submit_limit_order_places_lmt_day_only_after_explicit_enablement() -> N
     assert placed["order"].tif == "DAY"
     assert placed["order"].totalQuantity == 1.0
     assert placed["order"].transmit is True
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert diagnostics["place_order_called"] is True
+    assert diagnostics["place_order_called_at"] is not None
+    assert diagnostics["broker_order_id_allocated"] == "1001"
+    assert diagnostics["order_transmit_flag"] is True
+    assert diagnostics["order_action"] == "BUY"
+    assert diagnostics["order_type"] == "LMT"
+    assert diagnostics["limit_price"] == "2345.2"
+    assert diagnostics["tif"] == "DAY"
+    assert diagnostics["client_id"] == 77
+    assert diagnostics["account_id"] == "DU1234567"
+    assert diagnostics["contract_key"] == "MGC-202606"
+    assert diagnostics["contract_local_symbol"] == "MGCM6"
+    assert diagnostics["contract_con_id"] == 12345
+    assert diagnostics["isConnected_before_placeOrder"] is True
+    assert diagnostics["isConnected_after_placeOrder"] is True
 
 
 @pytest.mark.parametrize(
@@ -355,6 +371,9 @@ def test_stub_submit_callbacks_capture_broker_order_and_fill_correlation() -> No
     assert order.perm_id == "9001"
     assert fill.execution_id == "EXEC-1"
     assert fill.broker_order_id == "1001"
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert diagnostics["openOrder_seen"] is True
+    assert diagnostics["execDetails_seen"] is True
 
 
 def test_missing_order_truth_after_submit_times_out_cleanly() -> None:
@@ -367,9 +386,46 @@ def test_missing_order_truth_after_submit_times_out_cleanly() -> None:
         paper.wait_for_broker_order(submit_attempt_id="submit-1")
 
     assert "openOrder/orderStatus" in paper.missing_callbacks
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert diagnostics["place_order_called"] is True
+    assert diagnostics["openOrder_seen"] is False
+    assert diagnostics["orderStatus_seen"] is False
+    assert diagnostics["callback_wait_timeout_seconds"] == 0.01
+    assert diagnostics["isConnected_after_callback_wait"] is True
 
 
-def fake_ibapi_loader():
+def test_place_order_exception_is_captured_in_diagnostics() -> None:
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader(place_order_error=RuntimeError("rejected")))
+    paper.connect()
+
+    with pytest.raises(RuntimeError, match="rejected"):
+        paper.submit_limit_order(submit_attempt=submit_attempt(broker_order_id="1001"), order_intent=order_intent())
+
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert diagnostics["place_order_called"] is True
+    assert "RuntimeError('rejected')" == diagnostics["place_order_exception"]
+    assert diagnostics["broker_order_id_allocated"] == "1001"
+
+
+def test_error_callback_after_submit_is_included_in_diagnostics() -> None:
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader())
+    paper.connect()
+    paper.submit_limit_order(submit_attempt=submit_attempt(broker_order_id="1001"), order_intent=order_intent())
+
+    paper.bridge_for_test().error(1001, 201, "order rejected")
+
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert diagnostics["error_callbacks_after_submit"] == [
+        {
+            "request_id": 1001,
+            "error_code": 201,
+            "error_string": "order rejected",
+            "raw_args": ["1001", "201", "'order rejected'"],
+        }
+    ]
+
+
+def fake_ibapi_loader(*, place_order_error: Exception | None = None):
     class FakeWrapper:
         def __init__(self) -> None:
             return None
@@ -392,7 +448,12 @@ def fake_ibapi_loader():
         def disconnect(self) -> None:
             self.connected = False
 
+        def isConnected(self) -> bool:  # noqa: N802
+            return self.connected
+
         def placeOrder(self, order_id: int, contract, order) -> None:  # noqa: N802, ANN001
+            if place_order_error is not None:
+                raise place_order_error
             self.placed_orders.append({"order_id": order_id, "contract": contract, "order": order})
 
         def cancelOrder(self, order_id: int, *args: object) -> None:  # noqa: N802
