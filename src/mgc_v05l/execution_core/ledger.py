@@ -163,6 +163,9 @@ class JsonlLedger:
             observed_at=observed_at,
         )
 
+    def validate_identity_uniqueness(self, *, run_id: str) -> None:
+        validate_identity_uniqueness(self.read_events(run_id=run_id), run_id=run_id)
+
     def _next_sequence(self) -> int:
         if not self.events_path.exists():
             return 1
@@ -228,6 +231,45 @@ def replay_ledger_position(
         source_event_ids=tuple(source_event_ids),
         raw={"source": "track_b_ledger_replay"},
     )
+
+
+def validate_identity_uniqueness(events: Iterable[LedgerEvent], *, run_id: str) -> None:
+    """Fail closed on duplicate lifecycle or broker correlation IDs."""
+
+    seen_order_intents: dict[str, str] = {}
+    seen_submit_attempts: dict[str, str] = {}
+    seen_executions: dict[str, str] = {}
+    submit_by_intent: dict[str, str] = {}
+
+    for event in sorted(events, key=lambda item: item.sequence):
+        if event.run_id != run_id:
+            continue
+        if event.event_type == "order_intent_created":
+            order_intent_id = str(event.payload.get("order_intent_id") or "").strip()
+            if order_intent_id:
+                _remember_unique(seen_order_intents, order_intent_id, event.event_id, "order_intent_id")
+        elif event.event_type == "submit_attempt_created":
+            submit_attempt_id = str(event.payload.get("submit_attempt_id") or "").strip()
+            if submit_attempt_id:
+                _remember_unique(seen_submit_attempts, submit_attempt_id, event.event_id, "submit_attempt_id")
+            order_intent_id = str(event.payload.get("order_intent_id") or "").strip()
+            if order_intent_id:
+                _remember_unique(submit_by_intent, order_intent_id, event.event_id, "active submit_attempt for order_intent_id")
+        elif event.event_type == "fill_event_created":
+            fill_payload = _extract_fill_payload(event.payload)
+            execution_id = str(fill_payload.get("execution_id") or "").strip()
+            if execution_id:
+                _remember_unique(seen_executions, execution_id, event.event_id, "execution_id")
+
+
+def _remember_unique(seen: dict[str, str], value: str, event_id: str, field_name: str) -> None:
+    previous_event_id = seen.get(value)
+    if previous_event_id is not None:
+        raise LedgerError(
+            f"Duplicate {field_name} in ledger: {value} "
+            f"({previous_event_id}, {event_id})"
+        )
+    seen[value] = event_id
 
 
 def _next_average_price(

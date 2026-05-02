@@ -1174,6 +1174,8 @@ an automated production-capable execution core.
 - Track B may only close positions it opened and correlated.
 - Unowned broker positions block automation.
 - Manual intervention must be recorded and cannot produce a clean proof `PASS`.
+- Manual cancellation, flattening, or order modification in TWS must be recorded as manual intervention.
+- Any run requiring manual intervention must be classified as `TRACK_B_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED` or a future explicit `MANUALLY_RESOLVED` status, not `TRACK_B_PAPER_PROOF_PASSED`.
 
 ### Client ID And Account Isolation
 
@@ -1188,6 +1190,7 @@ an automated production-capable execution core.
 - Track B must not automatically resume submit after a crash.
 - Only one active run is allowed per account and contract.
 - Duplicate submit for the same intent is forbidden.
+- The first proof run must block if any existing open order exists in the configured paper account and exact contract, unless a future explicit waiver design is reviewed and implemented.
 
 ### Error Severity Taxonomy
 

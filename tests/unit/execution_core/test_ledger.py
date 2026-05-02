@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from mgc_v05l.execution_core.ledger import JsonlLedger
+import pytest
+
+from mgc_v05l.execution_core.ledger import JsonlLedger, LedgerError
 from mgc_v05l.execution_core.models import CancelAttempt, FillEvent
 
 
@@ -67,3 +69,48 @@ def test_ledger_records_durable_cancel_attempt(tmp_path) -> None:  # type: ignor
     assert event.correlation_id == "submit-1"
     assert ledger.read_events()[0].payload["cancel_attempt_id"] == "cancel-1"
 
+
+def test_ledger_identity_validation_rejects_duplicate_order_intent_id(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ledger = JsonlLedger(tmp_path / "events.jsonl")
+    payload = {"run_id": "run-1", "order_intent_id": "intent-1"}
+    ledger.append_event(run_id="run-1", event_type="order_intent_created", payload=payload)
+    ledger.append_event(run_id="run-1", event_type="order_intent_created", payload=payload)
+
+    with pytest.raises(LedgerError, match="Duplicate order_intent_id"):
+        ledger.validate_identity_uniqueness(run_id="run-1")
+
+
+def test_ledger_identity_validation_rejects_duplicate_submit_attempt_id(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ledger = JsonlLedger(tmp_path / "events.jsonl")
+    payload = {"run_id": "run-1", "submit_attempt_id": "submit-1"}
+    ledger.append_event(run_id="run-1", event_type="submit_attempt_created", payload=payload)
+    ledger.append_event(run_id="run-1", event_type="submit_attempt_created", payload=payload)
+
+    with pytest.raises(LedgerError, match="Duplicate submit_attempt_id"):
+        ledger.validate_identity_uniqueness(run_id="run-1")
+
+
+def test_ledger_identity_validation_rejects_two_submits_for_one_intent(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ledger = JsonlLedger(tmp_path / "events.jsonl")
+    ledger.append_event(
+        run_id="run-1",
+        event_type="submit_attempt_created",
+        payload={"run_id": "run-1", "order_intent_id": "intent-1", "submit_attempt_id": "submit-1"},
+    )
+    ledger.append_event(
+        run_id="run-1",
+        event_type="submit_attempt_created",
+        payload={"run_id": "run-1", "order_intent_id": "intent-1", "submit_attempt_id": "submit-2"},
+    )
+
+    with pytest.raises(LedgerError, match="active submit_attempt for order_intent_id"):
+        ledger.validate_identity_uniqueness(run_id="run-1")
+
+
+def test_ledger_identity_validation_rejects_duplicate_execution_id(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ledger = JsonlLedger(tmp_path / "events.jsonl")
+    ledger.append_model_event(event_type="fill_event_created", model=fill("open", "BUY", "exec-duplicate", "2345.1"))
+    ledger.append_model_event(event_type="fill_event_created", model=fill("close", "SELL", "exec-duplicate", "2345.5"))
+
+    with pytest.raises(LedgerError, match="Duplicate execution_id"):
+        ledger.validate_identity_uniqueness(run_id="run-1")

@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from mgc_v05l.execution_core.fake_adapter import FakePaperAdapter
+from mgc_v05l.execution_core.fake_adapter import FakePaperAdapter, FakeSubmitResult
 from mgc_v05l.execution_core.harness import HarnessConfig, run_fake_paper_proof
 from mgc_v05l.execution_core.ledger import JsonlLedger
-from mgc_v05l.execution_core.models import TerminalClassification
+from mgc_v05l.execution_core.models import BrokerOrder, TerminalClassification
 
 
 def aware_now() -> datetime:
@@ -37,9 +37,19 @@ def test_fake_harness_passes_full_open_close_spine(tmp_path) -> None:  # type: i
 
     assert result.classification == TerminalClassification.PASSED
     assert payload["classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert payload["environment"] == "FAKE"
+    assert payload["broker"] == "FAKE_IBKR_ADAPTER"
     assert payload["final_reconciliation"]["status"] == "CLEAN"
-    assert payload["open_fill"]["execution_id"] == "EXEC-1"
-    assert payload["close_fill"]["execution_id"] == "EXEC-2"
+    assert payload["open_broker_order"]["broker_order_id"] == "FAKE-ORDER-0001"
+    assert payload["open_broker_order"]["perm_id"] == "FAKE-PERM-0001"
+    assert payload["open_submit_attempt"]["submit_attempt_id"]
+    assert payload["open_fill"]["fill_event_id"]
+    assert payload["open_fill"]["execution_id"] == "FAKE-EXEC-0001"
+    assert payload["close_broker_order"]["broker_order_id"] == "FAKE-ORDER-0002"
+    assert payload["close_broker_order"]["perm_id"] == "FAKE-PERM-0002"
+    assert payload["close_submit_attempt"]["submit_attempt_id"]
+    assert payload["close_fill"]["fill_event_id"]
+    assert payload["close_fill"]["execution_id"] == "FAKE-EXEC-0002"
     assert adapter.submit_count == 2
     assert types[:3] == ["run_started", "config_loaded", "config_validated"]
     for required in (
@@ -61,6 +71,32 @@ def test_fake_harness_passes_full_open_close_spine(tmp_path) -> None:  # type: i
         "run_passed",
     ):
         assert required in types
+
+
+def test_fake_harness_downgrades_pass_when_broker_order_correlation_missing(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    class MissingBrokerOrderAdapter(FakePaperAdapter):
+        def submit_order(self, **kwargs):  # type: ignore[no-untyped-def]
+            result = super().submit_order(**kwargs)
+            if result.fill_event is not None:
+                return FakeSubmitResult(
+                    broker_order=None,
+                    fill_event=result.fill_event,
+                    broker_position=result.broker_position,
+                    open_orders=result.open_orders,
+                    missing_callbacks=result.missing_callbacks,
+                    ambiguous=result.ambiguous,
+                    failure_reason=result.failure_reason,
+                )
+            return result
+
+    adapter = MissingBrokerOrderAdapter(scenario="pass")
+
+    result = run_fake_paper_proof(config=config(tmp_path), adapter=adapter, run_id="run-missing-broker-order", now=aware_now())
+    payload = report(result)
+
+    assert result.classification == TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    assert "expected exactly two broker orders" in str(payload["failure_or_ambiguity"])
+    assert "run_passed" not in event_types(result)
 
 
 def test_missing_account_blocks_before_submit(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -119,6 +155,39 @@ def test_open_order_rests_cancel_confirmed_blocks_without_replacement(tmp_path) 
     assert "cancel_attempt_created" in types
     assert "cancel_status_observed" in types
     assert payload["cancel_attempts"][0]["observed_cancel_status"] == "Cancelled"
+
+
+def test_existing_open_order_blocks_first_proof_run_before_submit(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    adapter = FakePaperAdapter(scenario="pass")
+    adapter.open_orders.append(
+        BrokerOrder(
+            broker_order_event_id="existing-order-event",
+            run_id="external-run",
+            submit_attempt_id="external-submit",
+            account_id="DU1234567",
+            broker_order_id="FAKE-ORDER-9999",
+            perm_id="FAKE-PERM-9999",
+            client_id=77,
+            contract_key="MGC-202606",
+            action="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price="2345.2",
+            status="Submitted",
+            filled_quantity=0,
+            remaining_quantity=1,
+            average_fill_price=None,
+            observed_at=aware_now(),
+        )
+    )
+
+    result = run_fake_paper_proof(config=config(tmp_path), adapter=adapter, run_id="run-existing-open-order", now=aware_now())
+    payload = report(result)
+
+    assert result.classification == TerminalClassification.BLOCKED
+    assert adapter.submit_count == 0
+    assert "submit_attempt_created" not in event_types(result)
+    assert "OPEN_ORDER_MISMATCH" in payload["pre_open_reconciliation"]["issues"]
 
 
 def test_submit_sent_but_missing_order_truth_is_ambiguous(tmp_path) -> None:  # type: ignore[no-untyped-def]

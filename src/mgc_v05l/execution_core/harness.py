@@ -147,7 +147,9 @@ def run_fake_paper_proof(
     context: dict[str, Any] = {
         "run_id": actual_run_id,
         "config": config.to_report_dict(),
-        "environment": config.environment(),
+        "environment": "FAKE",
+        "broker": "FAKE_IBKR_ADAPTER",
+        "connection_environment": config.environment(),
         "validated_account_id": None,
         "contract": None,
         "broker_errors": [],
@@ -570,7 +572,9 @@ def _observe_and_price(
             context={
                 "run_id": run_id,
                 "config": config.to_report_dict(),
-                "environment": config.environment(),
+                "environment": "FAKE",
+                "broker": "FAKE_IBKR_ADAPTER",
+                "connection_environment": config.environment(),
                 "validated_account_id": config.account_id,
                 "contract": config.contract_allowlist.get(config.contract_key),
                 "broker_errors": [],
@@ -691,8 +695,8 @@ def _submit_attempt(
         order_intent_id=order_intent.order_intent_id,
         run_id=run_id,
         account_id=config.account_id,
-        broker="FAKE",
-        environment=config.environment(),
+        broker="FAKE_IBKR_ADAPTER",
+        environment={**config.environment(), "environment": "FAKE", "broker": "FAKE_IBKR_ADAPTER"},
         pre_submit_reconciliation_id=reconciliation.reconciliation_id,
         open_order_baseline_event_id=f"baseline_{run_id}_{index}",
         request_digest=f"{order_intent.order_intent_id}:{order_intent.limit_price}",
@@ -774,6 +778,14 @@ def _finish(
     run_id = context["run_id"]
     context["failure_or_ambiguity"] = reason
     context["required_manual_action"] = required_action
+    if classification == TerminalClassification.PASSED:
+        validation_issues = _validate_pass_ready(ledger=ledger, run_id=run_id)
+        if validation_issues:
+            classification = TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+            context["failure_or_ambiguity"] = "; ".join(validation_issues)
+            context["required_manual_action"] = "Manual review required; proof identity/correlation chain is incomplete."
+            reason = context["failure_or_ambiguity"]
+            required_action = context["required_manual_action"]
     proof_event = ledger.append_event(
         run_id=run_id,
         event_type="proof_report_written",
@@ -813,6 +825,85 @@ def _finish(
     )
 
 
+def _validate_pass_ready(*, ledger: JsonlLedger, run_id: str) -> list[str]:
+    events = ledger.read_events(run_id=run_id)
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        by_type.setdefault(event.event_type, []).append(event.payload)
+
+    issues: list[str] = []
+    try:
+        ledger.validate_identity_uniqueness(run_id=run_id)
+    except Exception as exc:  # noqa: BLE001 - convert replay corruption into proof ambiguity.
+        issues.append(f"ledger identity validation failed: {exc}")
+
+    if by_type.get("manual_intervention_recorded"):
+        issues.append("manual intervention was recorded")
+
+    signals = by_type.get("signal_event_created", [])
+    intents = by_type.get("order_intent_created", [])
+    submits = by_type.get("submit_attempt_created", [])
+    broker_orders = by_type.get("broker_order_observed", [])
+    fills = by_type.get("fill_event_created", [])
+    reconciliations = by_type.get("reconciliation_created", [])
+    final = next((row for row in reversed(reconciliations) if row.get("stage") == "FINAL"), None)
+
+    if not signals or not str(signals[0].get("signal_event_id") or "").strip():
+        issues.append("missing signal_event_id")
+    if len(intents) != 2:
+        issues.append("expected exactly two order intents")
+    if len(submits) != 2:
+        issues.append("expected exactly two submit attempts")
+    if len(broker_orders) != 2:
+        issues.append("expected exactly two broker orders")
+    if len(fills) != 2:
+        issues.append("expected exactly two fills")
+    if final is None or final.get("status") != "CLEAN":
+        issues.append("final reconciliation is not CLEAN")
+
+    for index, row in enumerate(intents, start=1):
+        if not str(row.get("order_intent_id") or "").strip():
+            issues.append(f"intent {index} missing order_intent_id")
+        if not str(row.get("signal_event_id") or "").strip():
+            issues.append(f"intent {index} missing signal_event_id")
+    for index, row in enumerate(submits, start=1):
+        if not str(row.get("submit_attempt_id") or "").strip():
+            issues.append(f"submit {index} missing submit_attempt_id")
+        if not str(row.get("order_intent_id") or "").strip():
+            issues.append(f"submit {index} missing order_intent_id")
+    for index, row in enumerate(broker_orders, start=1):
+        broker_order_id = str(row.get("broker_order_id") or "").strip()
+        perm_id = str(row.get("perm_id") or "").strip()
+        submit_attempt_id = str(row.get("submit_attempt_id") or "").strip()
+        if not broker_order_id:
+            issues.append(f"broker order {index} missing broker_order_id")
+        elif not broker_order_id.startswith("FAKE-ORDER-"):
+            issues.append(f"broker order {index} fake broker_order_id is not namespaced")
+        if not perm_id:
+            issues.append(f"broker order {index} missing permId")
+        elif not perm_id.startswith("FAKE-PERM-"):
+            issues.append(f"broker order {index} fake permId is not namespaced")
+        if not submit_attempt_id:
+            issues.append(f"broker order {index} missing submit_attempt_id")
+    for index, row in enumerate(fills, start=1):
+        fill_event_id = str(row.get("fill_event_id") or "").strip()
+        execution_id = str(row.get("execution_id") or "").strip()
+        submit_attempt_id = str(row.get("submit_attempt_id") or "").strip()
+        broker_order_id = str(row.get("broker_order_id") or "").strip()
+        if not fill_event_id:
+            issues.append(f"fill {index} missing fill_event_id")
+        if not execution_id:
+            issues.append(f"fill {index} missing execution_id")
+        elif not execution_id.startswith("FAKE-EXEC-"):
+            issues.append(f"fill {index} fake execution_id is not namespaced")
+        if not submit_attempt_id:
+            issues.append(f"fill {index} missing submit_attempt_id")
+        if not broker_order_id:
+            issues.append(f"fill {index} missing broker_order_id")
+
+    return issues
+
+
 def _build_report(
     *,
     classification: TerminalClassification,
@@ -843,6 +934,8 @@ def _build_report(
         "run_id": context["run_id"],
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "environment": context.get("environment"),
+        "broker": context.get("broker"),
+        "connection_environment": context.get("connection_environment"),
         "configured_account_id": context.get("config", {}).get("account_id"),
         "validated_account_id": context.get("validated_account_id"),
         "contract_key": context.get("config", {}).get("contract_key"),

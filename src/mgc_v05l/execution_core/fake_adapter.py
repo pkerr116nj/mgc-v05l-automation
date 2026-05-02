@@ -203,14 +203,14 @@ class FakePaperAdapter:
         filled: int,
         remaining: int,
     ) -> BrokerOrder:
-        broker_order_id = f"FAKE-{self.submit_count}"
+        broker_order_id = f"FAKE-ORDER-{self.submit_count:04d}"
         return BrokerOrder(
             broker_order_event_id=f"broker_order_{submit_attempt.submit_attempt_id}",
             run_id=order_intent.run_id,
             submit_attempt_id=submit_attempt.submit_attempt_id,
             account_id=order_intent.account_id,
             broker_order_id=broker_order_id,
-            perm_id=f"PERM-{self.submit_count}",
+            perm_id=f"FAKE-PERM-{self.submit_count:04d}",
             client_id=int(submit_attempt.environment.get("client_id", 0)),
             contract_key=order_intent.contract_key,
             action=order_intent.action,
@@ -222,7 +222,7 @@ class FakePaperAdapter:
             remaining_quantity=remaining,
             average_fill_price=order_intent.limit_price if filled else None,
             observed_at=now,
-            raw={"source": "fake_adapter"},
+            raw={"source": "fake_adapter", "broker": "FAKE_IBKR_ADAPTER", "environment": "FAKE"},
         )
 
     def _fill_event(
@@ -241,11 +241,11 @@ class FakePaperAdapter:
             account_id=order_intent.account_id,
             broker_order_id=broker_order.broker_order_id,
             perm_id=broker_order.perm_id,
-            execution_id=f"EXEC-{self.submit_count}",
+            execution_id=f"FAKE-EXEC-{self.submit_count:04d}",
             contract_key=order_intent.contract_key,
             action=order_intent.action,
             quantity=order_intent.quantity,
             price=order_intent.limit_price,
             filled_at=now,
-            raw={"source": "fake_adapter"},
+            raw={"source": "fake_adapter", "broker": "FAKE_IBKR_ADAPTER", "environment": "FAKE"},
         )
