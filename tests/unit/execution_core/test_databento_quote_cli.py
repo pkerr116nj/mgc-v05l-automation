@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from mgc_v05l.execution_core import databento_quote_cli
-from mgc_v05l.execution_core.databento_quote_provider import DatabentoAvailableEndError, DatabentoQuoteProviderConfig
+from mgc_v05l.execution_core.databento_quote_provider import DatabentoAvailableEndError, DatabentoQuoteParseError, DatabentoQuoteProviderConfig
 from mgc_v05l.execution_core.pricing import MarketDataMode, MarketDataRole
 from mgc_v05l.execution_core.quote_provider import QuoteSnapshot
 
@@ -92,6 +92,16 @@ class FakeProvider:
                 "quote_age_seconds": "0.0",
                 "usable_for_paper_pricing": not self.config.allow_available_end_fallback,
                 "usable_for_live_money_readiness": not self.config.allow_available_end_fallback,
+                "databento_schema": {"bid_ask": "mbp-1", "last": "trades"},
+                "records_returned": {"bid_ask": 1, "trades": 1},
+                "first_raw_record_keys_or_shape": {
+                    "bid_ask": {"root_keys": ["levels", "ts_event"], "levels_count": 1, "levels[0]_keys": ["ask_px", "bid_px"]},
+                    "trades": {"root_keys": ["price", "ts_event"]},
+                },
+                "parser_bid_field_source": "levels[0].bid_px",
+                "parser_ask_field_source": "levels[0].ask_px",
+                "parser_last_field_source": "price",
+                "no_quote_records_reason": None,
             },
         )
 
@@ -105,6 +115,25 @@ class FailingAvailableEndProvider:
             "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback or earlier --quote-end-timestamp",
             provider_available_end=datetime(2026, 5, 1, 23, 59, tzinfo=timezone.utc),
             detail="sanitized detail",
+        )
+
+
+class FailingParseProvider:
+    def __init__(self, config: DatabentoQuoteProviderConfig) -> None:
+        self.config = config
+
+    def get_quote(self, contract_key: str) -> QuoteSnapshot:
+        raise DatabentoQuoteParseError(
+            "Databento returned no bid/ask quote records for schema mbp-1",
+            diagnostics={
+                "databento_schema": {"bid_ask": "mbp-1", "last": "trades"},
+                "records_returned": {"bid_ask": 0, "trades": 1},
+                "first_raw_record_keys_or_shape": {"bid_ask": None, "trades": {"root_keys": ["price", "ts_event"]}},
+                "parser_bid_field_source": None,
+                "parser_ask_field_source": None,
+                "parser_last_field_source": "price",
+                "no_quote_records_reason": "no records returned for schema mbp-1",
+            },
         )
 
 
@@ -198,6 +227,13 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert report["quote_observed"] is True
     assert report["quote_window"]["requested_quote_start"] == "2026-05-02T11:55:00+00:00"
     assert report["quote_window"]["available_end_fallback_used"] is False
+    assert report["databento_schema"] == {"bid_ask": "mbp-1", "last": "trades"}
+    assert report["records_returned"] == {"bid_ask": 1, "trades": 1}
+    assert report["first_raw_record_keys_or_shape"]["bid_ask"]["levels[0]_keys"] == ["ask_px", "bid_px"]
+    assert report["parser_bid_field_source"] == "levels[0].bid_px"
+    assert report["parser_ask_field_source"] == "levels[0].ask_px"
+    assert report["parser_last_field_source"] == "price"
+    assert report["no_quote_records_reason"] is None
 
 
 def test_cli_accepts_resolution_date(
@@ -283,6 +319,28 @@ def test_cli_available_end_failure_is_clean_report(
     assert report["classification"] == "FAILED_BEFORE_QUOTE"
     assert report["quote_observed"] is False
     assert report["api_key_value"] is None
+
+
+def test_cli_quote_parse_failure_includes_parser_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+
+    exit_code = databento_quote_cli.main(cli_args(tmp_path), provider_factory=FailingParseProvider)
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(payload["report_json"]).read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert payload["classification"] == "FAILED_BEFORE_QUOTE"
+    assert payload["databento_schema"] == {"bid_ask": "mbp-1", "last": "trades"}
+    assert payload["records_returned"] == {"bid_ask": 0, "trades": 1}
+    assert payload["parser_bid_field_source"] is None
+    assert payload["parser_ask_field_source"] is None
+    assert payload["parser_last_field_source"] == "price"
+    assert payload["no_quote_records_reason"] == "no records returned for schema mbp-1"
+    assert report["first_raw_record_keys_or_shape"]["trades"]["root_keys"] == ["price", "ts_event"]
 
 
 def test_cli_manual_databento_symbol_override_remains_supported(

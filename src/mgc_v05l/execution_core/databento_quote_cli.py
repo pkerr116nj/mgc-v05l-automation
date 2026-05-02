@@ -89,6 +89,7 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
         quote = provider.get_quote(args.contract_key)
     except DatabentoQuoteProviderError as exc:
         provider_available_end = getattr(exc, "provider_available_end", None)
+        parser_diagnostics = getattr(exc, "diagnostics", {})
         corrective_message = (
             "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback "
             "or earlier --quote-end-timestamp"
@@ -108,6 +109,13 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
             "provider_error": str(exc),
             "provider_available_end": provider_available_end.isoformat() if provider_available_end is not None else None,
             "corrective_message": corrective_message,
+            "databento_schema": parser_diagnostics.get("databento_schema"),
+            "records_returned": parser_diagnostics.get("records_returned"),
+            "first_raw_record_keys_or_shape": parser_diagnostics.get("first_raw_record_keys_or_shape"),
+            "parser_bid_field_source": parser_diagnostics.get("parser_bid_field_source"),
+            "parser_ask_field_source": parser_diagnostics.get("parser_ask_field_source"),
+            "parser_last_field_source": parser_diagnostics.get("parser_last_field_source"),
+            "no_quote_records_reason": parser_diagnostics.get("no_quote_records_reason"),
             "api_key_present": True,
             "api_key_value": None,
             "submit_enabled": False,
@@ -127,6 +135,13 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
                     "provider_error": str(exc),
                     "provider_available_end": report["provider_available_end"],
                     "corrective_message": corrective_message,
+                    "databento_schema": report["databento_schema"],
+                    "records_returned": report["records_returned"],
+                    "first_raw_record_keys_or_shape": report["first_raw_record_keys_or_shape"],
+                    "parser_bid_field_source": report["parser_bid_field_source"],
+                    "parser_ask_field_source": report["parser_ask_field_source"],
+                    "parser_last_field_source": report["parser_last_field_source"],
+                    "no_quote_records_reason": report["no_quote_records_reason"],
                     "report_json": str(report_json),
                 },
                 sort_keys=True,
@@ -192,6 +207,13 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
             "usable_for_paper_pricing": quote.raw.get("usable_for_paper_pricing"),
             "usable_for_live_money_readiness": quote.raw.get("usable_for_live_money_readiness"),
         },
+        "databento_schema": quote.raw.get("databento_schema"),
+        "records_returned": quote.raw.get("records_returned"),
+        "first_raw_record_keys_or_shape": quote.raw.get("first_raw_record_keys_or_shape"),
+        "parser_bid_field_source": quote.raw.get("parser_bid_field_source"),
+        "parser_ask_field_source": quote.raw.get("parser_ask_field_source"),
+        "parser_last_field_source": quote.raw.get("parser_last_field_source"),
+        "no_quote_records_reason": quote.raw.get("no_quote_records_reason"),
         "live_money_quote_ready": readiness_error is None,
         "readiness_error": readiness_error,
         "api_key_present": True,
@@ -236,6 +258,13 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
                 "provider_available_end": quote.raw.get("provider_available_end"),
                 "available_end_fallback_used": quote.raw.get("available_end_fallback_used"),
                 "quote_age_seconds": quote.raw.get("quote_age_seconds"),
+                "databento_schema": quote.raw.get("databento_schema"),
+                "records_returned": quote.raw.get("records_returned"),
+                "first_raw_record_keys_or_shape": quote.raw.get("first_raw_record_keys_or_shape"),
+                "parser_bid_field_source": quote.raw.get("parser_bid_field_source"),
+                "parser_ask_field_source": quote.raw.get("parser_ask_field_source"),
+                "parser_last_field_source": quote.raw.get("parser_last_field_source"),
+                "no_quote_records_reason": quote.raw.get("no_quote_records_reason"),
                 "usable_for_paper_pricing": quote.raw.get("usable_for_paper_pricing"),
                 "usable_for_live_money_readiness": quote.raw.get("usable_for_live_money_readiness"),
                 "bid": str(quote.bid) if quote.bid is not None else None,

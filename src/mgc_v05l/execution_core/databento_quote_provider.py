@@ -35,6 +35,14 @@ class DatabentoAvailableEndError(DatabentoQuoteProviderError):
         self.detail = detail
 
 
+class DatabentoQuoteParseError(DatabentoQuoteProviderError):
+    """Raised when Databento records were returned but cannot form a quote."""
+
+    def __init__(self, message: str, *, diagnostics: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics)
+
+
 class DatabentoQuoteTransport(Protocol):
     def request_records(
         self,
@@ -274,11 +282,29 @@ class DatabentoQuoteProvider:
             bbo_records, trade_records = self._request_quote_records(resolved_symbol=resolved_symbol, start=actual_start, end=actual_end)
         latest_bbo = _latest_record_with_bid_ask(bbo_records)
         latest_trade = _latest_record_with_price(trade_records)
+        parser_diagnostics = _quote_parser_diagnostics(
+            config=self.config,
+            bbo_records=bbo_records,
+            trade_records=trade_records,
+            latest_bbo=latest_bbo,
+            latest_trade=latest_trade,
+        )
         if latest_bbo is None:
-            raise DatabentoQuoteProviderError("Databento returned no bid/ask quote records for explicit symbol")
-        bid = _first_decimal(latest_bbo, ("bid_px", "bid_price", "bid"))
-        ask = _first_decimal(latest_bbo, ("ask_px", "ask_price", "ask"))
-        last = _first_decimal(latest_trade or {}, ("price", "last", "last_px")) if latest_trade is not None else None
+            raise DatabentoQuoteParseError(
+                f"Databento returned no bid/ask quote records for schema {self.config.bbo_schema}",
+                diagnostics=parser_diagnostics,
+            )
+        bid_parse = _first_decimal_with_source(latest_bbo, ("bid_px", "bid_price", "bid"))
+        ask_parse = _first_decimal_with_source(latest_bbo, ("ask_px", "ask_price", "ask"))
+        if bid_parse.value is None or ask_parse.value is None:
+            raise DatabentoQuoteParseError(
+                f"Databento {self.config.bbo_schema} records did not contain parseable bid/ask fields",
+                diagnostics=parser_diagnostics,
+            )
+        bid = bid_parse.value
+        ask = ask_parse.value
+        last_parse = _first_decimal_with_source(latest_trade or {}, ("price", "last", "last_px")) if latest_trade is not None else _ParsedDecimal(None, None)
+        last = last_parse.value
         timestamp = max(_record_timestamp(latest_bbo), _record_timestamp(latest_trade) if latest_trade is not None else _record_timestamp(latest_bbo))
         warnings: list[str] = []
         if latest_trade is None:
@@ -313,6 +339,7 @@ class DatabentoQuoteProvider:
                 "trades_schema": self.config.trades_schema,
                 "bbo_record_count": len(bbo_records),
                 "trade_record_count": len(trade_records),
+                **parser_diagnostics,
                 "requested_quote_start": requested_start.isoformat(),
                 "requested_quote_end": requested_end.isoformat(),
                 "actual_quote_start": actual_start.isoformat(),
@@ -582,6 +609,12 @@ class _ResolvedQuoteSymbol:
     warnings: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _ParsedDecimal:
+    value: Decimal | None
+    source: str | None
+
+
 def _require_config(config: DatabentoQuoteProviderConfig) -> None:
     required = {
         "contract_key": config.contract_key,
@@ -608,26 +641,77 @@ def _latest_record_with_price(records: Sequence[Mapping[str, Any]]) -> Mapping[s
 
 
 def _first_decimal(record: Mapping[str, Any], keys: tuple[str, ...]) -> Decimal | None:
+    return _first_decimal_with_source(record, keys).value
+
+
+def _first_decimal_with_source(record: Mapping[str, Any], keys: tuple[str, ...]) -> _ParsedDecimal:
     for key in keys:
-        value = _nested_value(record, key)
+        value, source = _nested_value_with_source(record, key)
         if value is None or value == "":
             continue
         try:
-            return Decimal(str(value))
+            return _ParsedDecimal(Decimal(str(value)), source)
         except (InvalidOperation, ValueError):
             continue
-    return None
+    return _ParsedDecimal(None, None)
 
 
 def _nested_value(record: Mapping[str, Any], key: str) -> Any:
+    return _nested_value_with_source(record, key)[0]
+
+
+def _nested_value_with_source(record: Mapping[str, Any], key: str) -> tuple[Any, str | None]:
     if key in record:
-        return record[key]
+        return record[key], key
     levels = record.get("levels")
-    if isinstance(levels, Sequence) and levels:
+    if isinstance(levels, Sequence) and not isinstance(levels, (str, bytes)) and levels:
         first_level = levels[0]
         if isinstance(first_level, Mapping) and key in first_level:
-            return first_level[key]
-    return None
+            return first_level[key], f"levels[0].{key}"
+    return None, None
+
+
+def _quote_parser_diagnostics(
+    *,
+    config: DatabentoQuoteProviderConfig,
+    bbo_records: Sequence[Mapping[str, Any]],
+    trade_records: Sequence[Mapping[str, Any]],
+    latest_bbo: Mapping[str, Any] | None,
+    latest_trade: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    bid_parse = _first_decimal_with_source(latest_bbo or {}, ("bid_px", "bid_price", "bid"))
+    ask_parse = _first_decimal_with_source(latest_bbo or {}, ("ask_px", "ask_price", "ask"))
+    last_parse = _first_decimal_with_source(latest_trade or {}, ("price", "last", "last_px"))
+    no_quote_records_reason: str | None = None
+    if not bbo_records:
+        no_quote_records_reason = f"no records returned for schema {config.bbo_schema}"
+    elif latest_bbo is None:
+        no_quote_records_reason = f"records returned for schema {config.bbo_schema}, but none contained parseable bid and ask fields"
+    return {
+        "databento_schema": {"bid_ask": config.bbo_schema, "last": config.trades_schema},
+        "records_returned": {"bid_ask": len(bbo_records), "trades": len(trade_records)},
+        "first_raw_record_keys_or_shape": {
+            "bid_ask": _record_shape(bbo_records[0]) if bbo_records else None,
+            "trades": _record_shape(trade_records[0]) if trade_records else None,
+        },
+        "parser_bid_field_source": bid_parse.source,
+        "parser_ask_field_source": ask_parse.source,
+        "parser_last_field_source": last_parse.source,
+        "no_quote_records_reason": no_quote_records_reason,
+    }
+
+
+def _record_shape(record: Mapping[str, Any]) -> dict[str, Any]:
+    shape: dict[str, Any] = {"root_keys": sorted(str(key) for key in record.keys())}
+    header = record.get("hd")
+    if isinstance(header, Mapping):
+        shape["hd_keys"] = sorted(str(key) for key in header.keys())
+    levels = record.get("levels")
+    if isinstance(levels, Sequence) and not isinstance(levels, (str, bytes)):
+        shape["levels_count"] = len(levels)
+        if levels and isinstance(levels[0], Mapping):
+            shape["levels[0]_keys"] = sorted(str(key) for key in levels[0].keys())
+    return shape
 
 
 def _record_timestamp(record: Mapping[str, Any] | None) -> datetime:

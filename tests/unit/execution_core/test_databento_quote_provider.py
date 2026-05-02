@@ -10,6 +10,7 @@ import pytest
 
 from mgc_v05l.execution_core.databento_quote_provider import (
     DatabentoAvailableEndError,
+    DatabentoQuoteParseError,
     DatabentoResolutionStatus,
     DatabentoQuoteProvider,
     DatabentoQuoteProviderConfig,
@@ -120,6 +121,13 @@ def test_fake_transport_valid_realtime_quote_returns_track_b_snapshot() -> None:
     assert str(snapshot.bid) == "4626.0"
     assert str(snapshot.ask) == "4626.1"
     assert str(snapshot.last) == "4626.0"
+    assert snapshot.raw["databento_schema"] == {"bid_ask": "mbp-1", "last": "trades"}
+    assert snapshot.raw["records_returned"] == {"bid_ask": 1, "trades": 1}
+    assert snapshot.raw["first_raw_record_keys_or_shape"]["bid_ask"]["levels[0]_keys"] == ["ask_px", "bid_px"]
+    assert snapshot.raw["parser_bid_field_source"] == "levels[0].bid_px"
+    assert snapshot.raw["parser_ask_field_source"] == "levels[0].ask_px"
+    assert snapshot.raw["parser_last_field_source"] == "price"
+    assert snapshot.raw["no_quote_records_reason"] is None
     assert snapshot.exchange == "COMEX"
     assert snapshot.currency == "USD"
     assert snapshot.delayed_data_warning_seen is False
@@ -575,6 +583,76 @@ def test_missing_bid_ask_last_blocks_quote_derived_pricing() -> None:
     assert snapshot.last is None
     with pytest.raises(Exception, match="last is required"):
         validate_quote_for_pricing(snapshot, now=aware_now(), max_age_seconds=15, allow_delayed_for_paper=False, live_money=True)
+
+
+def test_mbp1_nested_levels_record_maps_to_bid_ask_with_field_sources() -> None:
+    provider = DatabentoQuoteProvider(
+        config=config(),
+        transport=FakeTransport(
+            bbo_records=({"ts_event": "2026-05-02T12:00:00+00:00", "levels": [{"bid_px": "4626.0", "ask_px": "4626.1"}]},),
+            trade_records=({"ts_event": "2026-05-02T12:00:00+00:00", "price": "4626.0"},),
+        ),
+        now=aware_now(),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert str(snapshot.bid) == "4626.0"
+    assert str(snapshot.ask) == "4626.1"
+    assert snapshot.raw["parser_bid_field_source"] == "levels[0].bid_px"
+    assert snapshot.raw["parser_ask_field_source"] == "levels[0].ask_px"
+
+
+def test_trade_record_maps_to_last_only_and_not_bid_ask() -> None:
+    record = {"ts_event": "2026-05-02T12:00:00+00:00", "price": "4626.0"}
+
+    last_parse = provider_module._first_decimal_with_source(record, ("price", "last", "last_px"))
+    bid_parse = provider_module._first_decimal_with_source(record, ("bid_px", "bid_price", "bid"))
+    ask_parse = provider_module._first_decimal_with_source(record, ("ask_px", "ask_price", "ask"))
+
+    assert str(last_parse.value) == "4626.0"
+    assert last_parse.source == "price"
+    assert bid_parse.value is None
+    assert bid_parse.source is None
+    assert ask_parse.value is None
+    assert ask_parse.source is None
+
+
+def test_empty_quote_records_fail_cleanly_with_parser_diagnostics() -> None:
+    provider = DatabentoQuoteProvider(
+        config=config(),
+        transport=FakeTransport(bbo_records=(), trade_records=()),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoQuoteParseError) as exc_info:
+        provider.get_quote("MGC-202606")
+
+    assert "no bid/ask quote records" in str(exc_info.value)
+    assert exc_info.value.diagnostics["databento_schema"] == {"bid_ask": "mbp-1", "last": "trades"}
+    assert exc_info.value.diagnostics["records_returned"] == {"bid_ask": 0, "trades": 0}
+    assert exc_info.value.diagnostics["no_quote_records_reason"] == "no records returned for schema mbp-1"
+
+
+def test_wrong_quote_schema_fails_with_clear_parser_diagnostic() -> None:
+    provider = DatabentoQuoteProvider(
+        config=config(bbo_schema="trades"),
+        transport=FakeTransport(
+            bbo_records=(),
+            trade_records=({"ts_event": "2026-05-02T12:00:00+00:00", "price": "4626.0"},),
+        ),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoQuoteParseError) as exc_info:
+        provider.get_quote("MGC-202606")
+
+    assert exc_info.value.diagnostics["databento_schema"] == {"bid_ask": "trades", "last": "trades"}
+    assert exc_info.value.diagnostics["records_returned"] == {"bid_ask": 1, "trades": 1}
+    assert exc_info.value.diagnostics["parser_bid_field_source"] is None
+    assert exc_info.value.diagnostics["parser_ask_field_source"] is None
+    assert exc_info.value.diagnostics["parser_last_field_source"] == "price"
+    assert "none contained parseable bid and ask" in exc_info.value.diagnostics["no_quote_records_reason"]
 
 
 def test_provider_source_has_no_track_a_live_feed_or_schwab_imports() -> None:
