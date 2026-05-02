@@ -7,11 +7,14 @@ import pytest
 
 from mgc_v05l.execution_core.models import (
     Action,
+    BrokerOrder,
+    BrokerOrderLifecycleStatus,
     FillEvent,
     IntentKind,
     OrderIntent,
     SignalEvent,
     TrackBModelError,
+    broker_order_blocks_same_account_contract_submit,
 )
 
 
@@ -116,3 +119,39 @@ def test_fill_event_requires_explicit_ids_and_quantity_one() -> None:
             filled_at=aware_now(),
         )
 
+
+def broker_order(*, status: str, remaining_quantity: str = "1") -> BrokerOrder:
+    return BrokerOrder(
+        broker_order_event_id=f"order-{status}",
+        run_id="run-1",
+        submit_attempt_id="submit-1",
+        account_id="DUM123",
+        broker_order_id="1",
+        perm_id="736787312",
+        client_id=77,
+        contract_key="MGC-202606",
+        action="BUY",
+        quantity=1,
+        order_type="LMT",
+        limit_price="4626.0",
+        status=status,
+        filled_quantity="0",
+        remaining_quantity=remaining_quantity,
+        average_fill_price=None,
+        observed_at=aware_now(),
+    )
+
+
+def test_pending_cancel_with_remaining_quantity_is_unresolved_broker_state() -> None:
+    order = broker_order(status="PendingCancel", remaining_quantity="1")
+
+    assert order.lifecycle_status == BrokerOrderLifecycleStatus.PENDING_CANCEL
+    assert order.blocks_same_account_contract_submit is True
+    assert broker_order_blocks_same_account_contract_submit(order) is True
+
+
+def test_terminal_cancelled_order_does_not_block_future_submit_after_clean_preflight() -> None:
+    order = broker_order(status="Cancelled", remaining_quantity="0")
+
+    assert order.lifecycle_status == BrokerOrderLifecycleStatus.CANCELLED
+    assert order.blocks_same_account_contract_submit is False

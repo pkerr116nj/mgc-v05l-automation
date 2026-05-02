@@ -223,9 +223,85 @@ def test_existing_open_order_is_reported_and_blocks_proof_readiness(tmp_path: Pa
 
     assert result.classification == PreflightClassification.BLOCKED
     assert payload["open_orders"][0]["broker_order_id"] == "1001"
-    assert "existing open order" in str(payload["failure_or_ambiguity"])
+    assert "unresolved broker order" in str(payload["failure_or_ambiguity"])
+    assert payload["unresolved_broker_order_detected"] is True
+    assert payload["unresolved_broker_order_status"] == "HELD_OR_PRESUBMITTED"
+    assert payload["blocks_same_account_contract_submit"] is True
     assert transport.place_order_called is False
     assert transport.submit_called is False
+
+
+def test_pending_cancel_remaining_quantity_blocks_submit_but_read_only_preflight_completes(tmp_path: Path) -> None:
+    transport = FakeReadOnlyTransport(
+        managed_accounts=("DUM882026",),
+        open_orders=(
+            {
+                "broker_order_id": "1",
+                "perm_id": "736787312",
+                "client_id": 17077,
+                "action": "BUY",
+                "quantity": 1,
+                "order_type": "LMT",
+                "limit_price": "4626.0",
+                "status": "PendingCancel",
+                "filled_quantity": 0,
+                "remaining_quantity": 1,
+            },
+        )
+    )
+
+    result = run_read_only_preflight(
+        config=config(tmp_path, account_id="DUM882026", client_id=17077),
+        transport=transport,
+        run_id="preflight-pending-cancel",
+        now=aware_now(),
+    )
+    payload = read_report(result)
+
+    assert result.classification == PreflightClassification.BLOCKED
+    assert payload["connected"] is True
+    assert payload["unresolved_broker_order_detected"] is True
+    assert payload["unresolved_broker_order_status"] == "PENDING_CANCEL"
+    assert payload["unresolved_broker_order_id"] == "1"
+    assert payload["unresolved_broker_perm_id"] == "736787312"
+    assert payload["unresolved_remaining_quantity"] == "1"
+    assert payload["blocks_same_account_contract_submit"] is True
+    assert "terminal state" in payload["next_required_action"]
+    assert transport.place_order_called is False
+    assert transport.submit_called is False
+
+
+def test_terminal_cancelled_order_with_flat_position_allows_future_proof_readiness(tmp_path: Path) -> None:
+    transport = FakeReadOnlyTransport(
+        managed_accounts=("DUM882026",),
+        open_orders=(
+            {
+                "broker_order_id": "1",
+                "perm_id": "736787312",
+                "client_id": 17077,
+                "action": "BUY",
+                "quantity": 1,
+                "order_type": "LMT",
+                "limit_price": "4626.0",
+                "status": "Cancelled",
+                "filled_quantity": 0,
+                "remaining_quantity": 0,
+            },
+        )
+    )
+
+    result = run_read_only_preflight(
+        config=config(tmp_path, account_id="DUM882026", client_id=17077),
+        transport=transport,
+        run_id="preflight-cancelled-clean",
+        now=aware_now(),
+    )
+    payload = read_report(result)
+
+    assert result.classification == PreflightClassification.READY_READ_ONLY
+    assert payload["open_orders"] == []
+    assert payload["unresolved_broker_order_detected"] is False
+    assert payload["blocks_same_account_contract_submit"] is False
 
 
 def test_existing_position_is_reported_and_blocks_proof_readiness(tmp_path: Path) -> None:

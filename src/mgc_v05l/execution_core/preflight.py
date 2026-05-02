@@ -20,7 +20,7 @@ from .ibkr_paper_adapter import (
     IbkrPaperConfigError,
     IbkrPaperReadinessError,
 )
-from .models import BrokerOrder, PositionSource, PositionState, require_aware_datetime, to_jsonable
+from .models import BrokerOrder, PositionSource, PositionState, broker_order_blocks_same_account_contract_submit, require_aware_datetime, to_jsonable
 from .pricing import MarketDataMode, MarketDataRole, QuoteObservation
 
 
@@ -236,7 +236,8 @@ def run_read_only_preflight(
             contract_key=config.contract_key,
             observed_at=observed_at,
         )
-        open_orders = tuple(_broker_order_from_transport(row, run_id=actual_run_id, config=config, observed_at=observed_at) for row in raw_orders)
+        observed_orders = tuple(_broker_order_from_transport(row, run_id=actual_run_id, config=config, observed_at=observed_at) for row in raw_orders)
+        open_orders = tuple(order for order in observed_orders if broker_order_blocks_same_account_contract_submit(order))
         _check(checks, "open_orders_snapshot_observed", True, "open orders snapshot observed")
 
         if config.observe_quote:
@@ -251,8 +252,9 @@ def run_read_only_preflight(
             else:
                 _check(checks, "quote_observed", True, "quote observed", blocking=False)
 
-        if open_orders:
-            _check(checks, "proof_open_orders_clean", False, "existing open order blocks proof readiness")
+        unresolved_order = _first_unresolved_broker_order(open_orders)
+        if unresolved_order is not None:
+            _check(checks, "proof_open_orders_clean", False, "unresolved broker order blocks proof readiness")
             return _write_result(
                 run_id=actual_run_id,
                 classification=PreflightClassification.BLOCKED,
@@ -269,8 +271,8 @@ def run_read_only_preflight(
                 missing_callbacks=missing_callbacks,
                 broker_errors=broker_errors,
                 connected=connected,
-                failure_or_ambiguity="existing open order blocks proof readiness",
-                required_action="Cancel or resolve existing open orders before proof.",
+                failure_or_ambiguity="unresolved broker order blocks proof readiness",
+                required_action="Wait for terminal broker order state, then rerun read-only preflight before any new proof submit.",
             )
         _check(checks, "proof_open_orders_clean", True, "no existing open orders")
 
@@ -470,6 +472,36 @@ def _quote_from_transport(
     )
 
 
+def _first_unresolved_broker_order(open_orders: tuple[BrokerOrder, ...]) -> BrokerOrder | None:
+    for order in open_orders:
+        if broker_order_blocks_same_account_contract_submit(order):
+            return order
+    return None
+
+
+def _unresolved_broker_order_report(open_orders: tuple[BrokerOrder, ...]) -> dict[str, Any]:
+    order = _first_unresolved_broker_order(open_orders)
+    if order is None:
+        return {
+            "unresolved_broker_order_detected": False,
+            "unresolved_broker_order_status": None,
+            "unresolved_broker_order_id": None,
+            "unresolved_broker_perm_id": None,
+            "unresolved_remaining_quantity": None,
+            "blocks_same_account_contract_submit": False,
+            "next_required_action": None,
+        }
+    return {
+        "unresolved_broker_order_detected": True,
+        "unresolved_broker_order_status": order.lifecycle_status.value,
+        "unresolved_broker_order_id": order.broker_order_id,
+        "unresolved_broker_perm_id": order.perm_id,
+        "unresolved_remaining_quantity": str(order.remaining_quantity),
+        "blocks_same_account_contract_submit": True,
+        "next_required_action": "Wait for the broker order to reach terminal state, then rerun read-only preflight before submitting again.",
+    }
+
+
 def _write_result(
     *,
     run_id: str,
@@ -497,6 +529,7 @@ def _write_result(
         transport_diagnostics=actual_transport_diagnostics,
         paper_route_readiness=classification == PreflightClassification.READY_READ_ONLY,
     )
+    unresolved_report = _unresolved_broker_order_report(open_orders)
     report = {
         "schema_version": "track_b_read_only_preflight_v1",
         "classification": classification.value,
@@ -510,6 +543,7 @@ def _write_result(
         "contract": contract,
         "position": position.to_json_dict() if position is not None else None,
         "open_orders": [order.to_json_dict() for order in open_orders],
+        **unresolved_report,
         "quote": quote.to_json_dict() if quote is not None else None,
         "market_data": market_data,
         "market_data_provider": market_data["market_data_provider"],

@@ -88,6 +88,16 @@ class SubmitAttemptState(str, Enum):
     AMBIGUOUS = "AMBIGUOUS"
 
 
+class BrokerOrderLifecycleStatus(str, Enum):
+    HELD_OR_PRESUBMITTED = "HELD_OR_PRESUBMITTED"
+    PENDING_CANCEL = "PENDING_CANCEL"
+    CANCELLED = "CANCELLED"
+    FILLED = "FILLED"
+    REJECTED = "REJECTED"
+    AMBIGUOUS = "AMBIGUOUS"
+    MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
+
+
 def require_id(value: str, field_name: str) -> str:
     normalized = str(value or "").strip()
     if not normalized:
@@ -158,6 +168,42 @@ def normalize_submit_state(value: SubmitAttemptState | str) -> SubmitAttemptStat
         return value if isinstance(value, SubmitAttemptState) else SubmitAttemptState(str(value).strip().upper())
     except ValueError as exc:
         raise TrackBModelError("state is not a valid submit attempt state.") from exc
+
+
+def normalize_broker_order_lifecycle_status(value: BrokerOrderLifecycleStatus | str) -> BrokerOrderLifecycleStatus:
+    try:
+        return value if isinstance(value, BrokerOrderLifecycleStatus) else BrokerOrderLifecycleStatus(str(value).strip().upper())
+    except ValueError as exc:
+        raise TrackBModelError("broker order lifecycle status is not valid.") from exc
+
+
+def classify_broker_order_lifecycle(status: str, remaining_quantity: Decimal | int | float | str) -> BrokerOrderLifecycleStatus:
+    normalized_status = str(status or "").replace("_", "").replace(" ", "").strip().upper()
+    remaining = normalize_decimal(remaining_quantity, "remaining_quantity")
+    if normalized_status in {"PENDINGCANCEL", "PENDCANCEL"}:
+        return BrokerOrderLifecycleStatus.PENDING_CANCEL if remaining > 0 else BrokerOrderLifecycleStatus.CANCELLED
+    if normalized_status in {"CANCELLED", "CANCELED"}:
+        return BrokerOrderLifecycleStatus.CANCELLED
+    if normalized_status == "FILLED":
+        return BrokerOrderLifecycleStatus.FILLED
+    if normalized_status in {"REJECTED", "INACTIVE"}:
+        return BrokerOrderLifecycleStatus.REJECTED
+    if normalized_status in {"PRESUBMITTED", "SUBMITTED", "PENDINGSUBMIT", "APIPENDING", "HELD"}:
+        return BrokerOrderLifecycleStatus.HELD_OR_PRESUBMITTED if remaining > 0 else BrokerOrderLifecycleStatus.FILLED
+    if normalized_status in {"UNKNOWN", "AMBIGUOUS", ""}:
+        return BrokerOrderLifecycleStatus.AMBIGUOUS
+    if remaining > 0:
+        return BrokerOrderLifecycleStatus.MANUAL_REVIEW_REQUIRED
+    return BrokerOrderLifecycleStatus.AMBIGUOUS
+
+
+def broker_order_blocks_same_account_contract_submit(order: "BrokerOrder") -> bool:
+    return classify_broker_order_lifecycle(order.status, order.remaining_quantity) in {
+        BrokerOrderLifecycleStatus.HELD_OR_PRESUBMITTED,
+        BrokerOrderLifecycleStatus.PENDING_CANCEL,
+        BrokerOrderLifecycleStatus.AMBIGUOUS,
+        BrokerOrderLifecycleStatus.MANUAL_REVIEW_REQUIRED,
+    }
 
 
 def ensure_lmt_day(order_type: str, time_in_force: str) -> None:
@@ -365,6 +411,14 @@ class BrokerOrder(JsonSerializable):
         if self.average_fill_price is not None:
             object.__setattr__(self, "average_fill_price", normalize_decimal(self.average_fill_price, "average_fill_price"))
         object.__setattr__(self, "observed_at", require_aware_datetime(self.observed_at, "observed_at"))
+
+    @property
+    def lifecycle_status(self) -> BrokerOrderLifecycleStatus:
+        return classify_broker_order_lifecycle(self.status, self.remaining_quantity)
+
+    @property
+    def blocks_same_account_contract_submit(self) -> bool:
+        return broker_order_blocks_same_account_contract_submit(self)
 
 
 @dataclass(frozen=True)

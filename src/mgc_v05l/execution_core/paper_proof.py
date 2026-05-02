@@ -225,6 +225,8 @@ def _preflight_blocker(*, config: PaperProofConfig, preflight: PreflightResult) 
     position = report.get("position") or {}
     if isinstance(position, Mapping) and int(Decimal(str(position.get("signed_quantity", "0")))) != 0:
         return "proof contract is not flat"
+    if report.get("unresolved_broker_order_detected"):
+        return "unresolved broker order blocks same account/contract submit"
     if report.get("open_orders"):
         return "proof contract has existing open orders"
     account_open_orders = report.get("account_open_orders") or report.get("account_wide_open_orders")
@@ -375,6 +377,13 @@ def _write_result(
         "operator_manual_price_acknowledgement": _has_any_manual_price(config),
         "paper_route_readiness": preflight_report.get("paper_route_readiness"),
         "production_live_money_readiness": False,
+        "unresolved_broker_order_detected": preflight_report.get("unresolved_broker_order_detected", False),
+        "unresolved_broker_order_status": preflight_report.get("unresolved_broker_order_status"),
+        "unresolved_broker_order_id": preflight_report.get("unresolved_broker_order_id"),
+        "unresolved_broker_perm_id": preflight_report.get("unresolved_broker_perm_id"),
+        "unresolved_remaining_quantity": preflight_report.get("unresolved_remaining_quantity"),
+        "blocks_same_account_contract_submit": preflight_report.get("blocks_same_account_contract_submit", False),
+        "next_required_action": preflight_report.get("next_required_action"),
         "failure_or_ambiguity": reason,
         "required_manual_action": required_action,
         "proof_payload": dict(proof_payload or {}),
@@ -693,6 +702,7 @@ def _proof_payload(
     orders = by_type.get("broker_order_observed", [])
     fills = by_type.get("fill_event_created", [])
     submit_diagnostics = by_type.get("submit_diagnostics_created", [])
+    unresolved_report = _unresolved_order_report_from_payloads(orders)
     return {
         "schema_version": "track_b_ibkr_paper_proof_v1",
         "classification": classification.value,
@@ -711,9 +721,54 @@ def _proof_payload(
         "close_submit_diagnostics": submit_diagnostics[1] if len(submit_diagnostics) > 1 else None,
         "submit_diagnostics": submit_diagnostics,
         "final_reconciliation": {"status": "CLEAN"} if classification == TerminalClassification.PASSED else None,
+        **unresolved_report,
         "failure_or_ambiguity": reason,
         "required_manual_action": "Manual TWS review required." if reason else None,
         "ledger_path": str(ledger_path),
         "json_report_path": str(proof_json),
         "markdown_report_path": str(proof_md),
     }
+
+
+def _unresolved_order_report_from_payloads(orders: list[dict[str, object]]) -> dict[str, object]:
+    for order in orders:
+        lifecycle = str(order.get("lifecycle_status") or "").strip()
+        remaining = Decimal(str(order.get("remaining_quantity") or "0"))
+        if not lifecycle:
+            lifecycle = _payload_lifecycle_status(str(order.get("status") or ""), remaining)
+        if lifecycle in {"HELD_OR_PRESUBMITTED", "PENDING_CANCEL", "AMBIGUOUS", "MANUAL_REVIEW_REQUIRED"}:
+            return {
+                "unresolved_broker_order_detected": True,
+                "unresolved_broker_order_status": lifecycle,
+                "unresolved_broker_order_id": order.get("broker_order_id"),
+                "unresolved_broker_perm_id": order.get("perm_id"),
+                "unresolved_remaining_quantity": str(remaining),
+                "blocks_same_account_contract_submit": True,
+                "next_required_action": "Wait for terminal broker order state, then rerun read-only preflight before submitting again.",
+            }
+    return {
+        "unresolved_broker_order_detected": False,
+        "unresolved_broker_order_status": None,
+        "unresolved_broker_order_id": None,
+        "unresolved_broker_perm_id": None,
+        "unresolved_remaining_quantity": None,
+        "blocks_same_account_contract_submit": False,
+        "next_required_action": None,
+    }
+
+
+def _payload_lifecycle_status(status: str, remaining: Decimal) -> str:
+    normalized = str(status or "").replace("_", "").replace(" ", "").strip().upper()
+    if normalized in {"PENDINGCANCEL", "PENDCANCEL"}:
+        return "PENDING_CANCEL" if remaining > 0 else "CANCELLED"
+    if normalized in {"PRESUBMITTED", "SUBMITTED", "PENDINGSUBMIT", "APIPENDING", "HELD"}:
+        return "HELD_OR_PRESUBMITTED" if remaining > 0 else "FILLED"
+    if normalized in {"CANCELLED", "CANCELED"}:
+        return "CANCELLED"
+    if normalized == "FILLED":
+        return "FILLED"
+    if normalized in {"REJECTED", "INACTIVE"}:
+        return "REJECTED"
+    if remaining > 0:
+        return "MANUAL_REVIEW_REQUIRED"
+    return "AMBIGUOUS"

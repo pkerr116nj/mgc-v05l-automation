@@ -267,6 +267,60 @@ def test_blocks_on_preflight_account_contract_position_or_order_mismatch(
     assert reason in str(result.report["failure_or_ambiguity"])
 
 
+def test_pending_cancel_preflight_blocks_same_account_contract_submit_with_recovery_fields(tmp_path: Path) -> None:
+    result = run_paper_proof(
+        config=config(tmp_path),
+        preflight_runner=preflight_runner(
+            ready_preflight(
+                tmp_path,
+                unresolved_broker_order_detected=True,
+                unresolved_broker_order_status="PENDING_CANCEL",
+                unresolved_broker_order_id="1",
+                unresolved_broker_perm_id="736787312",
+                unresolved_remaining_quantity="1",
+                blocks_same_account_contract_submit=True,
+                next_required_action="Wait for terminal broker order state, then rerun read-only preflight before submitting again.",
+                open_orders=[
+                    {
+                        "broker_order_id": "1",
+                        "perm_id": "736787312",
+                        "status": "PendingCancel",
+                        "remaining_quantity": "1",
+                    }
+                ],
+            )
+        ),
+        proof_runner=passing_proof_runner(tmp_path),
+        run_id="run-pending-cancel-block",
+    )
+
+    assert result.classification == TerminalClassification.BLOCKED
+    assert "unresolved broker order" in str(result.report["failure_or_ambiguity"])
+    assert result.report["unresolved_broker_order_detected"] is True
+    assert result.report["unresolved_broker_order_status"] == "PENDING_CANCEL"
+    assert result.report["blocks_same_account_contract_submit"] is True
+
+
+def test_manual_clean_follow_up_state_does_not_retroactively_mark_prior_ambiguous_proof_passed(tmp_path: Path) -> None:
+    adapter = RecordingPaperAdapter(fail_open_order_wait=True)
+
+    result = run_ibkr_paper_proof(
+        config=HarnessConfig(account_id="DUM882026", client_id=17077, output_root=tmp_path / "proof_runs"),
+        run_id="run-prior-ambiguous",
+        preflight=ready_preflight(tmp_path, quote=None, quote_observed=False, market_data_mode="DELAYED"),
+        manual_open_limit_price="2345.1",
+        manual_close_limit_price="2344.9",
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+    follow_up = ready_preflight(tmp_path, position={"signed_quantity": 0}, open_orders=[])
+
+    assert result.classification == TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    assert follow_up.classification == PreflightClassification.READY_READ_ONLY
+    assert json.loads(result.proof_report_json.read_text(encoding="utf-8"))["classification"] == (
+        "TRACK_B_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED"
+    )
+
+
 def test_delayed_market_data_requires_explicit_paper_approval(tmp_path: Path) -> None:
     result = run_paper_proof(
         config=config(tmp_path, allow_delayed_data_for_paper_proof=False),
