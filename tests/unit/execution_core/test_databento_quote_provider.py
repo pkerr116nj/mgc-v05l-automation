@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError
 
@@ -77,6 +77,9 @@ def resolution(
         stype_out="instrument_id",
         resolved_instrument_id=resolved_instrument_id,
         raw_symbol=raw_symbol,
+        resolution_date=date(2026, 5, 2),
+        resolution_start=date(2026, 5, 2),
+        resolution_end=date(2026, 5, 3),
         resolution_status=resolution_status,
     )
 
@@ -152,6 +155,9 @@ def test_fake_resolver_resolves_continuous_symbol_and_provider_uses_resolved_ins
     assert snapshot.raw["symbol_source"] == "CONTINUOUS_SYMBOL_RESOLUTION"
     assert snapshot.raw["requested_continuous_symbol"] == "MGC.v.0"
     assert snapshot.raw["resolution_path"] == "continuous->instrument_id"
+    assert snapshot.raw["resolution_date"] == "2026-05-02"
+    assert snapshot.raw["resolution_start"] == "2026-05-02"
+    assert snapshot.raw["resolution_end"] == "2026-05-03"
     assert snapshot.raw["raw_symbol_lookup_path"] == "instrument_id->raw_symbol"
     assert snapshot.raw["resolved_instrument_id"] == "123456"
     assert snapshot.raw["resolved_raw_symbol"] == "MGCM6"
@@ -159,6 +165,70 @@ def test_fake_resolver_resolves_continuous_symbol_and_provider_uses_resolved_ins
     assert snapshot.raw["quote_request_symbol"] == "123456"
     assert snapshot.raw["quote_request_stype_in"] == "instrument_id"
     assert snapshot.raw["execution_contract_validation_status"] == "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
+
+
+def test_date_aware_resolver_selects_active_mapping_for_resolution_date() -> None:
+    request = DatabentoSymbolResolutionRequest(
+        requested_symbol="MGC.v.0",
+        dataset="GLBX.MDP3",
+        stype_in="continuous",
+        stype_out="instrument_id",
+        resolution_date=date(2026, 5, 2),
+        resolution_start=date(2026, 5, 1),
+        resolution_end=date(2026, 5, 3),
+    )
+    payload = {
+        "result": {
+            "MGC.v.0": [
+                {"d0": "2026-03-01", "d1": "2026-04-01", "s": "111"},
+                {"d0": "2026-04-01", "d1": "2026-06-01", "s": "222"},
+                {"d0": "2026-06-01", "d1": "2026-08-01", "s": "333"},
+            ]
+        }
+    }
+
+    resolved = provider_module._resolution_from_payload(request=request, payload=payload)
+
+    assert resolved.resolution_status == DatabentoResolutionStatus.RESOLVED
+    assert resolved.resolved_instrument_id == "222"
+    assert resolved.resolution_date == date(2026, 5, 2)
+    assert resolved.resolution_start == date(2026, 5, 1)
+    assert resolved.resolution_end == date(2026, 5, 3)
+    assert resolved.active_mapping == {"d0": "2026-04-01", "d1": "2026-06-01", "s": "222"}
+    assert len(resolved.mapping_intervals) == 3
+
+
+def test_date_aware_resolver_reports_no_active_mapping_for_date() -> None:
+    request = DatabentoSymbolResolutionRequest(
+        requested_symbol="MGC.v.0",
+        dataset="GLBX.MDP3",
+        stype_in="continuous",
+        stype_out="instrument_id",
+        resolution_date=date(2026, 5, 2),
+    )
+    payload = {"result": {"MGC.v.0": [{"d0": "2026-01-01", "d1": "2026-02-01", "s": "111"}]}}
+
+    resolved = provider_module._resolution_from_payload(request=request, payload=payload)
+
+    assert resolved.resolution_status == DatabentoResolutionStatus.NOT_FOUND
+    assert resolved.resolved_instrument_id is None
+    assert "no active mapping" in resolved.warnings[0]
+
+
+def test_default_resolution_date_is_applied_from_provider_clock() -> None:
+    resolver = FakeResolver(resolution(raw_symbol=None), resolution(requested_symbol="123456", resolved_instrument_id=None, raw_symbol=None))
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
+        transport=FakeTransport(),
+        resolver=resolver,
+        now=aware_now(),
+    )
+
+    provider.get_quote("MGC-202606")
+
+    assert resolver.requests[0].resolution_date == date(2026, 5, 2)
+    assert resolver.requests[0].resolution_start is None
+    assert resolver.requests[0].resolution_end is None
 
 
 def test_missing_resolution_blocks_quote() -> None:

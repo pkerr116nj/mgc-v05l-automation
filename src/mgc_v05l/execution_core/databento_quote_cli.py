@@ -32,6 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stype-in", default="raw_symbol")
     parser.add_argument("--resolver-stype-in", default="continuous")
     parser.add_argument("--resolver-stype-out", default="instrument_id")
+    parser.add_argument("--resolution-date")
+    parser.add_argument("--resolution-start")
+    parser.add_argument("--resolution-end")
     parser.add_argument("--base-url", default="https://hist.databento.com/v0")
     parser.add_argument("--lookback-seconds", type=int, default=300)
     parser.add_argument("--max-age-seconds", type=int, default=15)
@@ -62,6 +65,9 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
         stype_in=args.stype_in,
         resolver_stype_in=args.resolver_stype_in,
         resolver_stype_out=args.resolver_stype_out,
+        resolution_date=args.resolution_date,
+        resolution_start=args.resolution_start,
+        resolution_end=args.resolution_end,
         base_url=args.base_url,
         lookback_seconds=args.lookback_seconds,
         realtime_max_age_seconds=args.max_age_seconds,
@@ -99,6 +105,11 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
             "resolved_raw_symbol": quote.raw.get("resolved_raw_symbol"),
             "resolution_status": quote.raw.get("resolution_status"),
             "resolution_path": quote.raw.get("resolution_path"),
+            "resolution_date": quote.raw.get("resolution_date"),
+            "resolution_start": quote.raw.get("resolution_start"),
+            "resolution_end": quote.raw.get("resolution_end"),
+            "mapping_intervals": quote.raw.get("mapping_intervals"),
+            "active_mapping": quote.raw.get("active_mapping"),
             "raw_symbol_lookup_path": quote.raw.get("raw_symbol_lookup_path"),
             "raw_symbol_resolution_status": quote.raw.get("raw_symbol_resolution_status"),
             "raw_symbol_match_status": quote.raw.get("raw_symbol_match_status"),
@@ -128,6 +139,9 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
                 "resolved_instrument_id": quote.raw.get("resolved_instrument_id"),
                 "resolved_raw_symbol": quote.raw.get("resolved_raw_symbol"),
                 "resolution_path": quote.raw.get("resolution_path"),
+                "resolution_date": quote.raw.get("resolution_date"),
+                "resolution_start": quote.raw.get("resolution_start"),
+                "resolution_end": quote.raw.get("resolution_end"),
                 "raw_symbol_lookup_path": quote.raw.get("raw_symbol_lookup_path"),
                 "raw_symbol_match_status": quote.raw.get("raw_symbol_match_status"),
                 "quote_request_symbol": quote.raw.get("quote_request_symbol"),

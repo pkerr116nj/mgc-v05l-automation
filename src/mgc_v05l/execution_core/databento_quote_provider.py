@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
@@ -58,6 +58,9 @@ class DatabentoSymbolResolutionRequest:
     dataset: str
     stype_in: str = "continuous"
     stype_out: str = "raw_symbol"
+    resolution_date: date | None = None
+    resolution_start: date | None = None
+    resolution_end: date | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,11 @@ class DatabentoSymbolResolution:
     raw_symbol: str | None
     effective_start: datetime | None = None
     effective_end: datetime | None = None
+    resolution_date: date | None = None
+    resolution_start: date | None = None
+    resolution_end: date | None = None
+    mapping_intervals: tuple[Mapping[str, Any], ...] = ()
+    active_mapping: Mapping[str, Any] | None = None
     resolution_status: str = DatabentoResolutionStatus.RESOLVED
     warnings: tuple[str, ...] = ()
 
@@ -88,6 +96,9 @@ class DatabentoQuoteProviderConfig:
     stype_in: str = "raw_symbol"
     resolver_stype_in: str = "continuous"
     resolver_stype_out: str = "instrument_id"
+    resolution_date: str | None = None
+    resolution_start: str | None = None
+    resolution_end: str | None = None
     raw_symbol_lookup_enabled: bool = True
     raw_symbol_lookup_stype_in: str = "instrument_id"
     raw_symbol_lookup_stype_out: str = "raw_symbol"
@@ -158,13 +169,16 @@ class UrllibDatabentoSymbolResolver:
         self.timeout_seconds = float(timeout_seconds)
 
     def resolve(self, *, request: DatabentoSymbolResolutionRequest) -> DatabentoSymbolResolution:
-        now = datetime.now(UTC).date().isoformat()
+        resolution_date = request.resolution_date or datetime.now(UTC).date()
+        resolution_start = request.resolution_start or resolution_date
+        resolution_end = request.resolution_end or (resolution_date + timedelta(days=1))
         form = {
             "dataset": request.dataset,
             "symbols": request.requested_symbol,
             "stype_in": request.stype_in,
             "stype_out": request.stype_out,
-            "start_date": now,
+            "start_date": resolution_start.isoformat(),
+            "end_date": resolution_end.isoformat(),
         }
         http_request = Request(
             url=f"{self.base_url.rstrip('/')}/symbology.resolve",
@@ -280,6 +294,11 @@ class DatabentoQuoteProvider:
                 "requested_continuous_symbol": self.config.databento_continuous_symbol,
                 "manual_provider_symbol_override": self.config.databento_symbol,
                 "resolution_path": resolved_symbol.resolution_path,
+                "resolution_date": resolved_symbol.resolution_date.isoformat() if resolved_symbol.resolution_date is not None else None,
+                "resolution_start": resolved_symbol.resolution_start.isoformat() if resolved_symbol.resolution_start is not None else None,
+                "resolution_end": resolved_symbol.resolution_end.isoformat() if resolved_symbol.resolution_end is not None else None,
+                "mapping_intervals": tuple(dict(row) for row in resolved_symbol.mapping_intervals),
+                "active_mapping": dict(resolved_symbol.active_mapping) if resolved_symbol.active_mapping is not None else None,
                 "raw_symbol_lookup_path": resolved_symbol.raw_symbol_lookup_path,
                 "raw_symbol_match_status": resolved_symbol.raw_symbol_match_status,
                 "quote_request_symbol": resolved_symbol.symbol,
@@ -302,6 +321,11 @@ class DatabentoQuoteProvider:
                 execution_validation_status="MANUAL_OVERRIDE_OPERATOR_REVIEW",
                 raw_symbol_match_status="MANUAL_OVERRIDE_OPERATOR_REVIEW",
                 resolution_path=None,
+                resolution_date=None,
+                resolution_start=None,
+                resolution_end=None,
+                mapping_intervals=(),
+                active_mapping=None,
                 raw_symbol_lookup_path=None,
                 resolved_instrument_id=None,
                 resolved_raw_symbol=None,
@@ -310,12 +334,18 @@ class DatabentoQuoteProvider:
                 warnings=("Manual Databento provider symbol override was used for market data only.",),
             )
         requested = str(self.config.databento_continuous_symbol or "").strip()
+        resolution_date = _optional_date(self.config.resolution_date) or (self._now or datetime.now(UTC)).astimezone(UTC).date()
+        resolution_start = _optional_date(self.config.resolution_start)
+        resolution_end = _optional_date(self.config.resolution_end)
         primary_resolution = self.resolver.resolve(
             request=DatabentoSymbolResolutionRequest(
                 requested_symbol=requested,
                 dataset=self.config.dataset,
                 stype_in=self.config.resolver_stype_in,
                 stype_out=self.config.resolver_stype_out,
+                resolution_date=resolution_date,
+                resolution_start=resolution_start,
+                resolution_end=resolution_end,
             )
         )
         if primary_resolution.resolution_status != DatabentoResolutionStatus.RESOLVED:
@@ -336,6 +366,9 @@ class DatabentoQuoteProvider:
                         dataset=self.config.dataset,
                         stype_in=self.config.raw_symbol_lookup_stype_in,
                         stype_out=self.config.raw_symbol_lookup_stype_out,
+                        resolution_date=resolution_date,
+                        resolution_start=resolution_start,
+                        resolution_end=resolution_end,
                     )
                 )
             except DatabentoQuoteProviderError as exc:
@@ -372,6 +405,11 @@ class DatabentoQuoteProvider:
             execution_validation_status=execution_validation_status,
             raw_symbol_match_status=raw_symbol_match_status,
             resolution_path=f"{self.config.resolver_stype_in}->{self.config.resolver_stype_out}",
+            resolution_date=primary_resolution.resolution_date,
+            resolution_start=primary_resolution.resolution_start,
+            resolution_end=primary_resolution.resolution_end,
+            mapping_intervals=primary_resolution.mapping_intervals,
+            active_mapping=primary_resolution.active_mapping,
             raw_symbol_lookup_path=raw_symbol_lookup_path,
             resolved_instrument_id=primary_resolution.resolved_instrument_id,
             resolved_raw_symbol=resolved_raw_symbol,
@@ -390,6 +428,11 @@ class _ResolvedQuoteSymbol:
     execution_validation_status: str
     raw_symbol_match_status: str
     resolution_path: str | None
+    resolution_date: date | None
+    resolution_start: date | None
+    resolution_end: date | None
+    mapping_intervals: tuple[Mapping[str, Any], ...]
+    active_mapping: Mapping[str, Any] | None
     raw_symbol_lookup_path: str | None
     resolved_instrument_id: str | None
     resolved_raw_symbol: str | None
@@ -462,13 +505,17 @@ def _record_timestamp(record: Mapping[str, Any] | None) -> datetime:
 
 
 def _resolution_from_payload(*, request: DatabentoSymbolResolutionRequest, payload: Mapping[str, Any]) -> DatabentoSymbolResolution:
+    resolution_date = request.resolution_date or datetime.now(UTC).date()
+    resolution_start = request.resolution_start or resolution_date
+    resolution_end = request.resolution_end or (resolution_date + timedelta(days=1))
     mappings = payload.get("result") or payload.get("mappings") or payload.get("symbols") or {}
     rows: Any = None
     if isinstance(mappings, Mapping):
         rows = mappings.get(request.requested_symbol) or next(iter(mappings.values()), None)
     elif isinstance(mappings, Sequence) and mappings:
         rows = mappings
-    row = _first_mapping_row(rows)
+    mapping_rows = _mapping_rows(rows)
+    row = _active_mapping_row(mapping_rows, resolution_date=resolution_date)
     if row is None:
         return DatabentoSymbolResolution(
             requested_symbol=request.requested_symbol,
@@ -477,38 +524,101 @@ def _resolution_from_payload(*, request: DatabentoSymbolResolutionRequest, paylo
             stype_out=request.stype_out,
             resolved_instrument_id=None,
             raw_symbol=None,
+            resolution_date=resolution_date,
+            resolution_start=resolution_start,
+            resolution_end=resolution_end,
+            mapping_intervals=tuple(dict(item) for item in mapping_rows),
             resolution_status=DatabentoResolutionStatus.NOT_FOUND,
-            warnings=("Databento symbology response contained no mapping rows.",),
+            warnings=(f"Databento symbology response contained no active mapping for {resolution_date.isoformat()}.",),
         )
+    start = _mapping_date(row.get("d0") or row.get("start_date") or row.get("start") or row.get("effective_start"))
+    end = _mapping_date(row.get("d1") or row.get("end_date") or row.get("end") or row.get("effective_end"))
+    resolved_symbol = _optional_str(row.get("s") or row.get("symbol") or row.get("raw_symbol") or row.get("instrument_id") or row.get("d_symbol"))
+    resolved_instrument_id = _optional_str(row.get("instrument_id"))
+    raw_symbol = _optional_str(row.get("raw_symbol") or row.get("symbol") or row.get("d_symbol"))
+    if request.stype_out == "instrument_id":
+        resolved_instrument_id = resolved_symbol or resolved_instrument_id
+    elif request.stype_out == "raw_symbol":
+        raw_symbol = resolved_symbol or raw_symbol
     return DatabentoSymbolResolution(
         requested_symbol=request.requested_symbol,
         dataset=request.dataset,
         stype_in=request.stype_in,
         stype_out=request.stype_out,
-        resolved_instrument_id=_optional_str(row.get("instrument_id")),
-        raw_symbol=_optional_str(row.get("s") or row.get("symbol") or row.get("raw_symbol") or row.get("d_symbol")),
-        effective_start=_optional_datetime(row.get("start_date") or row.get("start") or row.get("effective_start")),
-        effective_end=_optional_datetime(row.get("end_date") or row.get("end") or row.get("effective_end")),
+        resolved_instrument_id=resolved_instrument_id,
+        raw_symbol=raw_symbol,
+        effective_start=_date_to_datetime(start),
+        effective_end=_date_to_datetime(end),
+        resolution_date=resolution_date,
+        resolution_start=resolution_start,
+        resolution_end=resolution_end,
+        mapping_intervals=tuple(dict(item) for item in mapping_rows),
+        active_mapping=dict(row),
         resolution_status=DatabentoResolutionStatus.RESOLVED,
     )
 
 
-def _first_mapping_row(rows: Any) -> Mapping[str, Any] | None:
+def _mapping_rows(rows: Any) -> tuple[Mapping[str, Any], ...]:
     if isinstance(rows, Mapping):
         intervals = rows.get("intervals")
         if isinstance(intervals, Sequence) and intervals:
-            first = intervals[0]
-            return first if isinstance(first, Mapping) else None
-        return rows
-    if isinstance(rows, Sequence) and rows:
-        first = rows[0]
-        return first if isinstance(first, Mapping) else None
-    return None
+            return tuple(dict(item) for item in intervals if isinstance(item, Mapping))
+        return (rows,)
+    if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes)):
+        return tuple(dict(item) for item in rows if isinstance(item, Mapping))
+    return ()
+
+
+def _active_mapping_row(rows: Sequence[Mapping[str, Any]], *, resolution_date: date) -> Mapping[str, Any] | None:
+    undated: Mapping[str, Any] | None = None
+    for row in rows:
+        start = _mapping_date(row.get("d0") or row.get("start_date") or row.get("start") or row.get("effective_start"))
+        end = _mapping_date(row.get("d1") or row.get("end_date") or row.get("end") or row.get("effective_end"))
+        if start is None and end is None and undated is None:
+            undated = row
+            continue
+        if start is not None and resolution_date < start:
+            continue
+        if end is not None and resolution_date >= end:
+            continue
+        return row
+    return undated
 
 
 def _optional_str(value: Any) -> str | None:
     normalized = str(value or "").strip()
     return normalized or None
+
+
+def _optional_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    parsed = _mapping_date(normalized)
+    if parsed is None:
+        raise DatabentoQuoteProviderError(f"invalid resolution date: {normalized}")
+    return parsed
+
+
+def _mapping_date(value: Any) -> date | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    if len(normalized) == 8 and normalized.isdigit():
+        try:
+            return date(int(normalized[0:4]), int(normalized[4:6]), int(normalized[6:8]))
+        except ValueError:
+            return None
+    try:
+        return date.fromisoformat(normalized[:10])
+    except ValueError:
+        return None
+
+
+def _date_to_datetime(value: date | None) -> datetime | None:
+    return datetime(value.year, value.month, value.day, tzinfo=UTC) if value is not None else None
 
 
 def _optional_datetime(value: Any) -> datetime | None:

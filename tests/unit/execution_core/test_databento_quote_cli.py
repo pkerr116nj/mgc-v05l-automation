@@ -63,6 +63,11 @@ class FakeProvider:
                 "resolved_raw_symbol": raw_symbol if self.config.databento_continuous_symbol else None,
                 "resolution_status": "RESOLVED" if self.config.databento_continuous_symbol else None,
                 "resolution_path": "continuous->instrument_id" if self.config.databento_continuous_symbol else None,
+                "resolution_date": self.config.resolution_date or "2026-05-02",
+                "resolution_start": self.config.resolution_start or "2026-05-02",
+                "resolution_end": self.config.resolution_end or "2026-05-03",
+                "mapping_intervals": [{"d0": "2026-04-01", "d1": "2026-06-01", "s": "123456"}],
+                "active_mapping": {"d0": "2026-04-01", "d1": "2026-06-01", "s": "123456"},
                 "raw_symbol_lookup_path": "instrument_id->raw_symbol" if self.config.databento_continuous_symbol else None,
                 "raw_symbol_resolution_status": "RESOLVED" if self.config.databento_continuous_symbol else None,
                 "raw_symbol_match_status": "MATCH" if self.config.databento_continuous_symbol else "MANUAL_OVERRIDE_OPERATOR_REVIEW",
@@ -117,6 +122,9 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert payload["resolved_instrument_id"] == "123456"
     assert payload["resolved_raw_symbol"] == "MGCM6"
     assert payload["resolution_path"] == "continuous->instrument_id"
+    assert payload["resolution_date"] == "2026-05-02"
+    assert payload["resolution_start"] == "2026-05-02"
+    assert payload["resolution_end"] == "2026-05-03"
     assert payload["raw_symbol_lookup_path"] == "instrument_id->raw_symbol"
     assert payload["raw_symbol_match_status"] == "MATCH"
     assert payload["quote_request_symbol"] == "123456"
@@ -134,6 +142,11 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert report["resolution"]["resolved_instrument_id"] == "123456"
     assert report["resolution"]["resolved_raw_symbol"] == "MGCM6"
     assert report["resolution"]["resolution_path"] == "continuous->instrument_id"
+    assert report["resolution"]["resolution_date"] == "2026-05-02"
+    assert report["resolution"]["resolution_start"] == "2026-05-02"
+    assert report["resolution"]["resolution_end"] == "2026-05-03"
+    assert report["resolution"]["mapping_intervals"] == [{"d0": "2026-04-01", "d1": "2026-06-01", "s": "123456"}]
+    assert report["resolution"]["active_mapping"] == {"d0": "2026-04-01", "d1": "2026-06-01", "s": "123456"}
     assert report["resolution"]["raw_symbol_lookup_path"] == "instrument_id->raw_symbol"
     assert report["resolution"]["raw_symbol_match_status"] == "MATCH"
     assert report["resolution"]["quote_request_symbol"] == "123456"
@@ -142,6 +155,21 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert report["submit_enabled"] is False
     assert report["place_order_called"] is False
     assert report["cancel_called"] is False
+
+
+def test_cli_accepts_resolution_date(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+
+    exit_code = databento_quote_cli.main(cli_args(tmp_path, "--resolution-date", "2026-05-02"), provider_factory=FakeProvider)
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(payload["report_json"]).read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["resolution"]["resolution_date"] == "2026-05-02"
 
 
 def test_cli_manual_databento_symbol_override_remains_supported(
