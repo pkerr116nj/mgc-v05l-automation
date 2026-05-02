@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import inspect
 from io import BytesIO
 from datetime import date, datetime, timezone
@@ -15,6 +16,7 @@ from mgc_v05l.execution_core.databento_quote_provider import (
     DatabentoQuoteProvider,
     DatabentoQuoteProviderConfig,
     DatabentoQuoteProviderError,
+    NativeDatabentoQuoteTransport,
     DatabentoRecordDiagnosticRequest,
     DatabentoSymbolResolution,
     DatabentoSymbolResolutionRequest,
@@ -68,6 +70,42 @@ class FakeResolver:
         if self.resolutions:
             return self.resolutions.pop(0)
         return resolution(resolved_instrument_id=None, raw_symbol=None, resolution_status=DatabentoResolutionStatus.NOT_FOUND)
+
+
+class FakeDataFrame:
+    def __init__(self, records: Sequence[Mapping[str, Any]]) -> None:
+        self.records = tuple(records)
+        self.empty = not self.records
+
+    def reset_index(self) -> "FakeDataFrame":
+        return self
+
+    def to_dict(self, orient: str = "records") -> list[dict[str, Any]]:
+        assert orient == "records"
+        return [dict(record) for record in self.records]
+
+
+class FakeDBNStore:
+    def __init__(self, records: Sequence[Mapping[str, Any]]) -> None:
+        self.records = records
+
+    def to_df(self) -> FakeDataFrame:
+        return FakeDataFrame(self.records)
+
+
+class FakeNativeTimeseries:
+    def __init__(self, records_by_schema: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
+        self.records_by_schema = records_by_schema
+        self.requests: list[dict[str, Any]] = []
+
+    def get_range(self, **kwargs: Any) -> FakeDBNStore:
+        self.requests.append(dict(kwargs))
+        return FakeDBNStore(self.records_by_schema.get(str(kwargs["schema"]), ()))
+
+
+class FakeNativeClient:
+    def __init__(self, records_by_schema: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
+        self.timeseries = FakeNativeTimeseries(records_by_schema)
 
 
 def resolution(
@@ -135,6 +173,80 @@ def test_fake_transport_valid_realtime_quote_returns_track_b_snapshot() -> None:
     assert snapshot.delayed_data_warning_seen is False
     assert [request["schema"] for request in transport.requests] == ["mbp-1", "trades"]
     validate_quote_for_pricing(snapshot, now=aware_now(), max_age_seconds=15, allow_delayed_for_paper=False, live_money=True)
+
+
+def test_native_client_mbp1_dataframe_columns_parse_bid_ask() -> None:
+    fake_client = FakeNativeClient(
+        {
+            "mbp-1": (
+                {
+                    "ts_event": "2026-05-02T12:00:00+00:00",
+                    "bid_px_00": "4626.0",
+                    "ask_px_00": "4626.1",
+                },
+            ),
+            "trades": ({"ts_event": "2026-05-02T12:00:00+00:00", "price": "4626.0"},),
+        }
+    )
+    transport = NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client)
+    provider = DatabentoQuoteProvider(config=config(), transport=transport, now=aware_now())
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert str(snapshot.bid) == "4626.0"
+    assert str(snapshot.ask) == "4626.1"
+    assert snapshot.raw["parser_bid_field_source"] == "bid_px_00"
+    assert snapshot.raw["parser_ask_field_source"] == "ask_px_00"
+    assert [request["schema"] for request in fake_client.timeseries.requests] == ["mbp-1", "trades"]
+    assert fake_client.timeseries.requests[0]["symbols"] == ["MGCM6"]
+    assert fake_client.timeseries.requests[0]["stype_in"] == "raw_symbol"
+
+
+def test_native_client_trades_dataframe_parses_last() -> None:
+    fake_client = FakeNativeClient(
+        {
+            "mbp-1": ({"ts_event": "2026-05-02T12:00:00+00:00", "bid_px_00": "4626.0", "ask_px_00": "4626.1"},),
+            "trades": ({"ts_event": "2026-05-02T12:00:01+00:00", "price": "4626.2"},),
+        }
+    )
+    provider = DatabentoQuoteProvider(
+        config=config(),
+        transport=NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client),
+        now=aware_now(),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert str(snapshot.last) == "4626.2"
+    assert snapshot.raw["parser_last_field_source"] == "price"
+
+
+def test_native_client_empty_dataframe_fails_cleanly() -> None:
+    fake_client = FakeNativeClient({"mbp-1": (), "trades": ()})
+    provider = DatabentoQuoteProvider(
+        config=config(),
+        transport=NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoQuoteParseError, match="no bid/ask quote records") as exc_info:
+        provider.get_quote("MGC-202606")
+
+    assert exc_info.value.diagnostics["records_returned"] == {"bid_ask": 0, "trades": 0}
+
+
+def test_missing_native_databento_package_has_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "databento":
+            raise ModuleNotFoundError("No module named 'databento'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(DatabentoQuoteProviderError, match=r"pip install -e .*databento"):
+        provider_module._native_historical_client("test-key")
 
 
 def test_exactly_one_symbol_source_is_required() -> None:

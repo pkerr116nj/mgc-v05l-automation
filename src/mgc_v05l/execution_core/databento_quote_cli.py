@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-age-seconds", type=int, default=15)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--diagnose-records", action="store_true")
+    parser.add_argument("--native-databento", action="store_true", help="Use the native Databento client path. This is the Track B default.")
     parser.add_argument("--diagnostic-start")
     parser.add_argument("--diagnostic-end")
     parser.add_argument("--diagnostic-schema", action="append")

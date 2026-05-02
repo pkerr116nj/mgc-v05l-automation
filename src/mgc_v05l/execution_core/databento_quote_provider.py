@@ -1,7 +1,7 @@
 """Track B-local Databento quote provider.
 
 This module is intentionally independent of the legacy market-data runtime.
-It uses an injectable stdlib HTTP transport and normalizes provider records into
+It uses an injectable Databento transport and normalizes provider records into
 Track B QuoteSnapshot objects.
 """
 
@@ -10,10 +10,11 @@ from __future__ import annotations
 import base64
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -231,12 +232,51 @@ class UrllibDatabentoQuoteTransport:
         return tuple(json.loads(line) for line in text.splitlines() if line.strip())
 
 
+class NativeDatabentoQuoteTransport:
+    """Read-only records transport backed by Databento's native Python client."""
+
+    def __init__(self, *, client_factory: Callable[[str], Any] | None = None) -> None:
+        self.client_factory = client_factory
+
+    def request_records(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        dataset: str,
+        symbol: str,
+        schema: str,
+        start: datetime,
+        end: datetime,
+        stype_in: str,
+        limit: int,
+    ) -> Sequence[Mapping[str, Any]]:
+        del base_url, limit
+        client = self.client_factory(api_key) if self.client_factory else _native_historical_client(api_key)
+        try:
+            store = client.timeseries.get_range(
+                dataset=dataset,
+                symbols=[symbol],
+                schema=schema,
+                start=start.astimezone(UTC).isoformat(),
+                end=end.astimezone(UTC).isoformat(),
+                stype_in=stype_in,
+            )
+        except Exception as exc:  # noqa: BLE001 - provider errors must be reported cleanly.
+            raise DatabentoQuoteProviderError(f"Databento native get_range error: {_sanitize_provider_error(exc)}") from exc
+        try:
+            frame = store.to_df()
+        except Exception as exc:  # noqa: BLE001 - DBNStore parse errors should remain provider-scoped.
+            raise DatabentoQuoteProviderError(f"Databento native DBNStore to_df error: {_sanitize_provider_error(exc)}") from exc
+        return _records_from_dataframe(frame)
+
+
 def run_databento_record_diagnostic(
     *,
     request: DatabentoRecordDiagnosticRequest,
     transport: DatabentoQuoteTransport | None = None,
 ) -> DatabentoRecordDiagnosticResult:
-    transport = transport or UrllibDatabentoQuoteTransport()
+    transport = transport or NativeDatabentoQuoteTransport()
     request_details = _record_request_details(
         base_url=request.base_url,
         dataset=request.dataset,
@@ -369,7 +409,7 @@ class DatabentoQuoteProvider:
         now: datetime | None = None,
     ) -> None:
         self.config = config
-        self.transport = transport or UrllibDatabentoQuoteTransport()
+        self.transport = transport or NativeDatabentoQuoteTransport()
         self.resolver = resolver or UrllibDatabentoSymbolResolver(api_key=config.api_key, base_url=config.base_url)
         self._now = now
         _require_config(config)
@@ -419,8 +459,8 @@ class DatabentoQuoteProvider:
                 f"Databento returned no bid/ask quote records for schema {self.config.bbo_schema}",
                 diagnostics=parser_diagnostics,
             )
-        bid_parse = _first_decimal_with_source(latest_bbo, ("bid_px", "bid_price", "bid"))
-        ask_parse = _first_decimal_with_source(latest_bbo, ("ask_px", "ask_price", "ask"))
+        bid_parse = _first_decimal_with_source(latest_bbo, _BID_KEYS)
+        ask_parse = _first_decimal_with_source(latest_bbo, _ASK_KEYS)
         if bid_parse.value is None or ask_parse.value is None:
             raise DatabentoQuoteParseError(
                 f"Databento {self.config.bbo_schema} records did not contain parseable bid/ask fields",
@@ -428,7 +468,7 @@ class DatabentoQuoteProvider:
             )
         bid = bid_parse.value
         ask = ask_parse.value
-        last_parse = _first_decimal_with_source(latest_trade or {}, ("price", "last", "last_px")) if latest_trade is not None else _ParsedDecimal(None, None)
+        last_parse = _first_decimal_with_source(latest_trade or {}, _LAST_KEYS) if latest_trade is not None else _ParsedDecimal(None, None)
         last = last_parse.value
         timestamp = max(_record_timestamp(latest_bbo), _record_timestamp(latest_trade) if latest_trade is not None else _record_timestamp(latest_bbo))
         warnings: list[str] = []
@@ -740,6 +780,11 @@ class _ParsedDecimal:
     source: str | None
 
 
+_BID_KEYS = ("bid_px", "bid_price", "bid", "bid_px_00", "bid_price_00", "bid_0")
+_ASK_KEYS = ("ask_px", "ask_price", "ask", "ask_px_00", "ask_price_00", "ask_0")
+_LAST_KEYS = ("price", "last", "last_px")
+
+
 def _require_config(config: DatabentoQuoteProviderConfig) -> None:
     required = {
         "contract_key": config.contract_key,
@@ -756,12 +801,12 @@ def _require_config(config: DatabentoQuoteProviderConfig) -> None:
 
 
 def _latest_record_with_bid_ask(records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
-    candidates = [record for record in records if _first_decimal(record, ("bid_px", "bid_price", "bid")) is not None and _first_decimal(record, ("ask_px", "ask_price", "ask")) is not None]
+    candidates = [record for record in records if _first_decimal(record, _BID_KEYS) is not None and _first_decimal(record, _ASK_KEYS) is not None]
     return max(candidates, key=_record_timestamp) if candidates else None
 
 
 def _latest_record_with_price(records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
-    candidates = [record for record in records if _first_decimal(record, ("price", "last", "last_px")) is not None]
+    candidates = [record for record in records if _first_decimal(record, _LAST_KEYS) is not None]
     return max(candidates, key=_record_timestamp) if candidates else None
 
 
@@ -808,9 +853,9 @@ def _quote_parser_diagnostics(
     latest_bbo: Mapping[str, Any] | None,
     latest_trade: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    bid_parse = _first_decimal_with_source(latest_bbo or {}, ("bid_px", "bid_price", "bid"))
-    ask_parse = _first_decimal_with_source(latest_bbo or {}, ("ask_px", "ask_price", "ask"))
-    last_parse = _first_decimal_with_source(latest_trade or {}, ("price", "last", "last_px"))
+    bid_parse = _first_decimal_with_source(latest_bbo or {}, _BID_KEYS)
+    ask_parse = _first_decimal_with_source(latest_bbo or {}, _ASK_KEYS)
+    last_parse = _first_decimal_with_source(latest_trade or {}, _LAST_KEYS)
     no_quote_records_reason: str | None = None
     if not bbo_records:
         no_quote_records_reason = f"no records returned for schema {config.bbo_schema}"
@@ -898,6 +943,76 @@ def _record_shape(record: Mapping[str, Any]) -> dict[str, Any]:
         if levels and isinstance(levels[0], Mapping):
             shape["levels[0]_keys"] = sorted(str(key) for key in levels[0].keys())
     return shape
+
+
+def _native_historical_client(api_key: str) -> Any:
+    original_sys_path = list(sys.path)
+    try:
+        sys.path = [path for path in sys.path if not str(path).endswith("/src")]
+        import databento as db  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001 - optional dependency should fail only for real provider path.
+        raise DatabentoQuoteProviderError(
+            "Databento native client is unavailable; install the optional dependency with ./.venv/bin/python -m pip install -e \".[databento]\""
+        ) from exc
+    finally:
+        sys.path = original_sys_path
+    try:
+        return db.Historical(api_key)
+    except TypeError:
+        return db.Historical(key=api_key)
+
+
+def _records_from_dataframe(frame: Any) -> tuple[Mapping[str, Any], ...]:
+    if frame is None:
+        return ()
+    empty = getattr(frame, "empty", None)
+    if empty is True:
+        return ()
+    if hasattr(frame, "reset_index"):
+        try:
+            frame = frame.reset_index()
+        except Exception:
+            pass
+    if hasattr(frame, "to_dict"):
+        try:
+            records = frame.to_dict(orient="records")
+        except TypeError:
+            records = frame.to_dict("records")
+        if isinstance(records, Sequence) and not isinstance(records, (str, bytes)):
+            return tuple(_normalize_dataframe_record(record) for record in records if isinstance(record, Mapping))
+    if isinstance(frame, Sequence) and not isinstance(frame, (str, bytes)):
+        return tuple(_normalize_dataframe_record(record) for record in frame if isinstance(record, Mapping))
+    raise DatabentoQuoteProviderError("Databento native to_df returned an unsupported dataframe shape")
+
+
+def _normalize_dataframe_record(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in record.items():
+        key_text = _column_name(key)
+        normalized[key_text] = _json_safe_value(value)
+    return normalized
+
+
+def _column_name(key: Any) -> str:
+    if isinstance(key, tuple):
+        return ".".join(str(item) for item in key if str(item))
+    return str(key)
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except TypeError:
+            pass
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return value
 
 
 def _sanitize_provider_error(value: Any) -> str:
