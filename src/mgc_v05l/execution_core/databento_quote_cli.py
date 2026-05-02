@@ -22,12 +22,16 @@ ProviderFactory = Callable[[DatabentoQuoteProviderConfig], DatabentoQuoteProvide
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fetch one Track B read-only Databento quote snapshot.")
     parser.add_argument("--contract-key", required=True)
-    parser.add_argument("--databento-symbol", required=True)
+    parser.add_argument("--databento-continuous-symbol")
+    parser.add_argument("--databento-symbol")
+    parser.add_argument("--allowlisted-local-symbol")
     parser.add_argument("--tick-size", required=True)
     parser.add_argument("--exchange", required=True)
     parser.add_argument("--currency", required=True)
     parser.add_argument("--dataset", default="GLBX.MDP3")
     parser.add_argument("--stype-in", default="raw_symbol")
+    parser.add_argument("--resolver-stype-in", default="continuous")
+    parser.add_argument("--resolver-stype-out", default="raw_symbol")
     parser.add_argument("--base-url", default="https://hist.databento.com/v0")
     parser.add_argument("--lookback-seconds", type=int, default=300)
     parser.add_argument("--max-age-seconds", type=int, default=15)
@@ -38,18 +42,26 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    raw_symbol = str(args.databento_symbol or "").strip()
+    continuous_symbol = str(args.databento_continuous_symbol or "").strip()
+    if bool(raw_symbol) == bool(continuous_symbol):
+        parser.error("configure exactly one of --databento-continuous-symbol or --databento-symbol")
     api_key = str(os.environ.get("DATABENTO_API_KEY") or "").strip()
     if not api_key:
         parser.error("DATABENTO_API_KEY is required for read-only Databento quote retrieval")
     config = DatabentoQuoteProviderConfig(
         contract_key=args.contract_key,
-        databento_symbol=args.databento_symbol,
         tick_size=args.tick_size,
         exchange=args.exchange,
         currency=args.currency,
         api_key=api_key,
+        databento_symbol=raw_symbol or None,
+        databento_continuous_symbol=continuous_symbol or None,
+        allowlisted_local_symbol=args.allowlisted_local_symbol,
         dataset=args.dataset,
         stype_in=args.stype_in,
+        resolver_stype_in=args.resolver_stype_in,
+        resolver_stype_out=args.resolver_stype_out,
         base_url=args.base_url,
         lookback_seconds=args.lookback_seconds,
         realtime_max_age_seconds=args.max_age_seconds,
@@ -76,7 +88,18 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
         "run_id": run_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "contract_key": args.contract_key,
-        "databento_symbol": args.databento_symbol,
+        "databento_continuous_symbol": continuous_symbol or None,
+        "databento_symbol": raw_symbol or None,
+        "manual_provider_symbol_override": bool(raw_symbol),
+        "allowlisted_local_symbol": args.allowlisted_local_symbol,
+        "resolution": {
+            "symbol_source": quote.raw.get("symbol_source"),
+            "requested_continuous_symbol": quote.raw.get("requested_continuous_symbol"),
+            "resolved_instrument_id": quote.raw.get("resolved_instrument_id"),
+            "resolved_raw_symbol": quote.raw.get("resolved_raw_symbol"),
+            "resolution_status": quote.raw.get("resolution_status"),
+            "execution_contract_validation_status": quote.raw.get("execution_contract_validation_status"),
+        },
         "quote": quote.to_json_dict(),
         "live_money_quote_ready": readiness_error is None,
         "readiness_error": readiness_error,
@@ -94,6 +117,11 @@ def main(argv: Sequence[str] | None = None, *, provider_factory: ProviderFactory
                 "provider": quote.provider,
                 "contract_key": quote.contract_key,
                 "databento_symbol": quote.provider_symbol,
+                "databento_continuous_symbol": continuous_symbol or None,
+                "manual_provider_symbol_override": bool(raw_symbol),
+                "resolved_instrument_id": quote.raw.get("resolved_instrument_id"),
+                "resolved_raw_symbol": quote.raw.get("resolved_raw_symbol"),
+                "execution_contract_validation_status": quote.raw.get("execution_contract_validation_status"),
                 "mode": quote.mode,
                 "bid": str(quote.bid) if quote.bid is not None else None,
                 "ask": str(quote.ask) if quote.ask is not None else None,

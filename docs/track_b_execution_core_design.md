@@ -1240,6 +1240,11 @@ Timestamps must be timezone-aware UTC internally. Pricing logic must not compare
 
 - Databento is the primary realtime quote authority for Track B paper-proof pricing and future production pricing when a clean provider interface is available.
 - Databento is also the preferred authority for realtime bars and signal inputs.
+- Databento continuous futures symbols such as `MGC.v.0`, `MGC.c.0`, and `MGC.n.0` are market-data selection inputs only. They are never executable broker contracts.
+- Databento symbology resolution must report the requested continuous symbol, dataset, `stype_in`, `stype_out`, resolved instrument id, raw symbol when available, effective mapping window when available, status, and warnings.
+- The IBKR allowlist remains the execution authority. For `MGC-202606`, the executable contract remains the explicit allowlisted IBKR contract (`MGCM6`, conId `712565978`, expiry `20260626`) unless a later operator-reviewed change updates the allowlist.
+- If Databento resolution returns a raw symbol that conflicts with the allowlisted IBKR local symbol, quote-derived execution readiness blocks or requires operator review. If resolution returns only an instrument id and no raw symbol, exact execution-contract validation is incomplete and must be reported rather than silently passed.
+- Manual Databento raw-symbol overrides may be used only as an explicit operator override/fallback and must be labeled in reports.
 - IBKR remains the broker and reconciliation authority for account validation, contract qualification, positions, open orders, order status, fills, executions, and final reconciliation.
 - IBKR quotes are secondary, backup, diagnostic, or broker-side quote evidence only unless a later design explicitly promotes them for a specific paper-only use.
 

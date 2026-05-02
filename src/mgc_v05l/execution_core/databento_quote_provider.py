@@ -41,16 +41,53 @@ class DatabentoQuoteTransport(Protocol):
     ) -> Sequence[Mapping[str, Any]]: ...
 
 
+class DatabentoSymbolResolver(Protocol):
+    def resolve(self, *, request: "DatabentoSymbolResolutionRequest") -> "DatabentoSymbolResolution": ...
+
+
+class DatabentoResolutionStatus(str):
+    RESOLVED = "RESOLVED"
+    NOT_FOUND = "NOT_FOUND"
+    PARTIAL = "PARTIAL"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+@dataclass(frozen=True)
+class DatabentoSymbolResolutionRequest:
+    requested_symbol: str
+    dataset: str
+    stype_in: str = "continuous"
+    stype_out: str = "raw_symbol"
+
+
+@dataclass(frozen=True)
+class DatabentoSymbolResolution:
+    requested_symbol: str
+    dataset: str
+    stype_in: str
+    stype_out: str
+    resolved_instrument_id: str | None
+    raw_symbol: str | None
+    effective_start: datetime | None = None
+    effective_end: datetime | None = None
+    resolution_status: str = DatabentoResolutionStatus.RESOLVED
+    warnings: tuple[str, ...] = ()
+
+
 @dataclass(frozen=True)
 class DatabentoQuoteProviderConfig:
     contract_key: str
-    databento_symbol: str
     tick_size: str
     exchange: str
     currency: str
     api_key: str
+    databento_symbol: str | None = None
+    databento_continuous_symbol: str | None = None
+    allowlisted_local_symbol: str | None = None
     dataset: str = "GLBX.MDP3"
     stype_in: str = "raw_symbol"
+    resolver_stype_in: str = "continuous"
+    resolver_stype_out: str = "raw_symbol"
     base_url: str = "https://hist.databento.com/v0"
     bbo_schema: str = "mbp-1"
     trades_schema: str = "trades"
@@ -111,6 +148,42 @@ class UrllibDatabentoQuoteTransport:
         return tuple(json.loads(line) for line in text.splitlines() if line.strip())
 
 
+class UrllibDatabentoSymbolResolver:
+    def __init__(self, *, api_key: str, base_url: str = "https://hist.databento.com/v0", timeout_seconds: float = 10.0) -> None:
+        self.api_key = api_key
+        self.base_url = base_url
+        self.timeout_seconds = float(timeout_seconds)
+
+    def resolve(self, *, request: DatabentoSymbolResolutionRequest) -> DatabentoSymbolResolution:
+        now = datetime.now(UTC).date().isoformat()
+        form = {
+            "dataset": request.dataset,
+            "symbols": request.requested_symbol,
+            "stype_in": request.stype_in,
+            "stype_out": request.stype_out,
+            "start_date": now,
+        }
+        http_request = Request(
+            url=f"{self.base_url.rstrip('/')}/symbology.resolve",
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Authorization": _basic_auth_header(self.api_key),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data=urlencode(form).encode("utf-8"),
+        )
+        try:
+            with urlopen(http_request, timeout=self.timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:  # pragma: no cover - exercised only by real operator command.
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise DatabentoQuoteProviderError(f"Databento symbology HTTP error {exc.code}: {detail}") from exc
+        except URLError as exc:  # pragma: no cover - exercised only by real operator command.
+            raise DatabentoQuoteProviderError(f"Databento symbology transport error: {exc}") from exc
+        return _resolution_from_payload(request=request, payload=payload)
+
+
 class DatabentoQuoteProvider:
     provider_name = "DATABENTO"
 
@@ -119,10 +192,12 @@ class DatabentoQuoteProvider:
         *,
         config: DatabentoQuoteProviderConfig,
         transport: DatabentoQuoteTransport | None = None,
+        resolver: DatabentoSymbolResolver | None = None,
         now: datetime | None = None,
     ) -> None:
         self.config = config
         self.transport = transport or UrllibDatabentoQuoteTransport()
+        self.resolver = resolver or UrllibDatabentoSymbolResolver(api_key=config.api_key, base_url=config.base_url)
         self._now = now
         _require_config(config)
 
@@ -131,16 +206,17 @@ class DatabentoQuoteProvider:
             raise DatabentoQuoteProviderError("contract_key must match explicit Databento quote provider mapping")
         now = self._now or datetime.now(UTC)
         start = now - timedelta(seconds=max(int(self.config.lookback_seconds), 1))
+        resolved_symbol = self._resolve_quote_symbol()
         bbo_records = tuple(
             self.transport.request_records(
                 base_url=self.config.base_url,
                 api_key=self.config.api_key,
                 dataset=self.config.dataset,
-                symbol=self.config.databento_symbol,
+                symbol=resolved_symbol.symbol,
                 schema=self.config.bbo_schema,
                 start=start,
                 end=now,
-                stype_in=self.config.stype_in,
+                stype_in=resolved_symbol.stype_in,
                 limit=self.config.record_limit,
             )
         )
@@ -149,11 +225,11 @@ class DatabentoQuoteProvider:
                 base_url=self.config.base_url,
                 api_key=self.config.api_key,
                 dataset=self.config.dataset,
-                symbol=self.config.databento_symbol,
+                symbol=resolved_symbol.symbol,
                 schema=self.config.trades_schema,
                 start=start,
                 end=now,
-                stype_in=self.config.stype_in,
+                stype_in=resolved_symbol.stype_in,
                 limit=self.config.record_limit,
             )
         )
@@ -168,13 +244,14 @@ class DatabentoQuoteProvider:
         warnings: list[str] = []
         if latest_trade is None:
             warnings.append("Databento returned no trade record for last price in lookback window.")
+        warnings.extend(resolved_symbol.warnings)
         mode = MarketDataMode.REALTIME if (now - timestamp).total_seconds() <= int(self.config.realtime_max_age_seconds) else MarketDataMode.UNKNOWN
         return QuoteSnapshot(
             provider=self.provider_name,
             mode=mode,
             role=MarketDataRole.PRIMARY,
             contract_key=self.config.contract_key,
-            provider_symbol=self.config.databento_symbol,
+            provider_symbol=resolved_symbol.report_symbol,
             bid=bid,
             ask=ask,
             last=last,
@@ -186,19 +263,85 @@ class DatabentoQuoteProvider:
             delayed_data_warning_seen=False,
             raw={
                 "dataset": self.config.dataset,
-                "stype_in": self.config.stype_in,
+                "stype_in": resolved_symbol.stype_in,
                 "bbo_schema": self.config.bbo_schema,
                 "trades_schema": self.config.trades_schema,
                 "bbo_record_count": len(bbo_records),
                 "trade_record_count": len(trade_records),
+                "symbol_source": resolved_symbol.symbol_source,
+                "requested_continuous_symbol": self.config.databento_continuous_symbol,
+                "manual_provider_symbol_override": self.config.databento_symbol,
+                "resolved_instrument_id": resolved_symbol.resolution.resolved_instrument_id if resolved_symbol.resolution is not None else None,
+                "resolved_raw_symbol": resolved_symbol.resolution.raw_symbol if resolved_symbol.resolution is not None else None,
+                "resolution_status": resolved_symbol.resolution.resolution_status if resolved_symbol.resolution is not None else None,
+                "execution_contract_validation_status": resolved_symbol.execution_validation_status,
             },
         )
+
+    def _resolve_quote_symbol(self) -> "_ResolvedQuoteSymbol":
+        if self.config.databento_symbol:
+            return _ResolvedQuoteSymbol(
+                symbol=str(self.config.databento_symbol),
+                stype_in=self.config.stype_in,
+                report_symbol=str(self.config.databento_symbol),
+                symbol_source="MANUAL_PROVIDER_SYMBOL_OVERRIDE",
+                execution_validation_status="MANUAL_OVERRIDE_OPERATOR_REVIEW",
+                warnings=("Manual Databento provider symbol override was used for market data only.",),
+                resolution=None,
+            )
+        requested = str(self.config.databento_continuous_symbol or "").strip()
+        resolution = self.resolver.resolve(
+            request=DatabentoSymbolResolutionRequest(
+                requested_symbol=requested,
+                dataset=self.config.dataset,
+                stype_in=self.config.resolver_stype_in,
+                stype_out=self.config.resolver_stype_out,
+            )
+        )
+        if resolution.resolution_status != DatabentoResolutionStatus.RESOLVED:
+            raise DatabentoQuoteProviderError(f"Databento symbol resolution did not resolve cleanly: {resolution.resolution_status}")
+        if resolution.raw_symbol and self.config.allowlisted_local_symbol and resolution.raw_symbol != self.config.allowlisted_local_symbol:
+            raise DatabentoQuoteProviderError(
+                "Databento resolved raw symbol conflicts with IBKR allowlisted local symbol; operator review required"
+            )
+        warnings = list(resolution.warnings)
+        execution_validation_status = "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
+        if not resolution.raw_symbol:
+            execution_validation_status = "INCOMPLETE_NO_RAW_SYMBOL"
+            warnings.append("Databento resolution returned no raw symbol; execution contract exact-match validation is incomplete.")
+        if resolution.resolved_instrument_id:
+            symbol = resolution.resolved_instrument_id
+            stype_in = "instrument_id"
+        elif resolution.raw_symbol:
+            symbol = resolution.raw_symbol
+            stype_in = "raw_symbol"
+        else:
+            raise DatabentoQuoteProviderError("Databento symbol resolution returned neither instrument_id nor raw_symbol")
+        return _ResolvedQuoteSymbol(
+            symbol=symbol,
+            stype_in=stype_in,
+            report_symbol=resolution.raw_symbol or resolution.resolved_instrument_id or requested,
+            symbol_source="CONTINUOUS_SYMBOL_RESOLUTION",
+            execution_validation_status=execution_validation_status,
+            warnings=tuple(warnings),
+            resolution=resolution,
+        )
+
+
+@dataclass(frozen=True)
+class _ResolvedQuoteSymbol:
+    symbol: str
+    stype_in: str
+    report_symbol: str
+    symbol_source: str
+    execution_validation_status: str
+    warnings: tuple[str, ...]
+    resolution: DatabentoSymbolResolution | None
 
 
 def _require_config(config: DatabentoQuoteProviderConfig) -> None:
     required = {
         "contract_key": config.contract_key,
-        "databento_symbol": config.databento_symbol,
         "tick_size": config.tick_size,
         "exchange": config.exchange,
         "currency": config.currency,
@@ -207,6 +350,8 @@ def _require_config(config: DatabentoQuoteProviderConfig) -> None:
     missing = [key for key, value in required.items() if not str(value or "").strip()]
     if missing:
         raise DatabentoQuoteProviderError(f"Databento quote provider missing required field(s): {', '.join(missing)}")
+    if bool(str(config.databento_symbol or "").strip()) == bool(str(config.databento_continuous_symbol or "").strip()):
+        raise DatabentoQuoteProviderError("configure exactly one of databento_symbol or databento_continuous_symbol")
 
 
 def _latest_record_with_bid_ask(records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
@@ -252,6 +397,71 @@ def _record_timestamp(record: Mapping[str, Any] | None) -> datetime:
         return datetime.fromtimestamp(float(raw) / 1_000_000_000, tz=UTC)
     normalized = str(raw).replace("Z", "+00:00")
     parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _resolution_from_payload(*, request: DatabentoSymbolResolutionRequest, payload: Mapping[str, Any]) -> DatabentoSymbolResolution:
+    mappings = payload.get("result") or payload.get("mappings") or payload.get("symbols") or {}
+    rows: Any = None
+    if isinstance(mappings, Mapping):
+        rows = mappings.get(request.requested_symbol) or next(iter(mappings.values()), None)
+    elif isinstance(mappings, Sequence) and mappings:
+        rows = mappings
+    row = _first_mapping_row(rows)
+    if row is None:
+        return DatabentoSymbolResolution(
+            requested_symbol=request.requested_symbol,
+            dataset=request.dataset,
+            stype_in=request.stype_in,
+            stype_out=request.stype_out,
+            resolved_instrument_id=None,
+            raw_symbol=None,
+            resolution_status=DatabentoResolutionStatus.NOT_FOUND,
+            warnings=("Databento symbology response contained no mapping rows.",),
+        )
+    return DatabentoSymbolResolution(
+        requested_symbol=request.requested_symbol,
+        dataset=request.dataset,
+        stype_in=request.stype_in,
+        stype_out=request.stype_out,
+        resolved_instrument_id=_optional_str(row.get("instrument_id")),
+        raw_symbol=_optional_str(row.get("s") or row.get("symbol") or row.get("raw_symbol") or row.get("d_symbol")),
+        effective_start=_optional_datetime(row.get("start_date") or row.get("start") or row.get("effective_start")),
+        effective_end=_optional_datetime(row.get("end_date") or row.get("end") or row.get("effective_end")),
+        resolution_status=DatabentoResolutionStatus.RESOLVED,
+    )
+
+
+def _first_mapping_row(rows: Any) -> Mapping[str, Any] | None:
+    if isinstance(rows, Mapping):
+        intervals = rows.get("intervals")
+        if isinstance(intervals, Sequence) and intervals:
+            first = intervals[0]
+            return first if isinstance(first, Mapping) else None
+        return rows
+    if isinstance(rows, Sequence) and rows:
+        first = rows[0]
+        return first if isinstance(first, Mapping) else None
+    return None
+
+
+def _optional_str(value: Any) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _optional_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError:
+        return None
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)

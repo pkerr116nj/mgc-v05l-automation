@@ -7,9 +7,12 @@ from typing import Any, Mapping, Sequence
 import pytest
 
 from mgc_v05l.execution_core.databento_quote_provider import (
+    DatabentoResolutionStatus,
     DatabentoQuoteProvider,
     DatabentoQuoteProviderConfig,
     DatabentoQuoteProviderError,
+    DatabentoSymbolResolution,
+    DatabentoSymbolResolutionRequest,
 )
 from mgc_v05l.execution_core.pricing import MarketDataMode
 from mgc_v05l.execution_core.quote_provider import validate_quote_for_pricing
@@ -45,6 +48,34 @@ class FakeTransport:
         return self.trade_records if kwargs["schema"] == "trades" else self.bbo_records
 
 
+class FakeResolver:
+    def __init__(self, resolution: DatabentoSymbolResolution) -> None:
+        self.resolution = resolution
+        self.requests: list[DatabentoSymbolResolutionRequest] = []
+
+    def resolve(self, *, request: DatabentoSymbolResolutionRequest) -> DatabentoSymbolResolution:
+        self.requests.append(request)
+        return self.resolution
+
+
+def resolution(
+    *,
+    requested_symbol: str = "MGC.v.0",
+    resolved_instrument_id: str | None = "123456",
+    raw_symbol: str | None = "MGCM6",
+    resolution_status: str = DatabentoResolutionStatus.RESOLVED,
+) -> DatabentoSymbolResolution:
+    return DatabentoSymbolResolution(
+        requested_symbol=requested_symbol,
+        dataset="GLBX.MDP3",
+        stype_in="continuous",
+        stype_out="raw_symbol",
+        resolved_instrument_id=resolved_instrument_id,
+        raw_symbol=raw_symbol,
+        resolution_status=resolution_status,
+    )
+
+
 def config(**overrides: object) -> DatabentoQuoteProviderConfig:
     kwargs = {
         "contract_key": "MGC-202606",
@@ -69,6 +100,8 @@ def test_fake_transport_valid_realtime_quote_returns_track_b_snapshot() -> None:
     assert snapshot.role == "PRIMARY"
     assert snapshot.contract_key == "MGC-202606"
     assert snapshot.provider_symbol == "MGCM6"
+    assert snapshot.raw["symbol_source"] == "MANUAL_PROVIDER_SYMBOL_OVERRIDE"
+    assert snapshot.raw["execution_contract_validation_status"] == "MANUAL_OVERRIDE_OPERATOR_REVIEW"
     assert str(snapshot.bid) == "4626.0"
     assert str(snapshot.ask) == "4626.1"
     assert str(snapshot.last) == "4626.0"
@@ -79,9 +112,93 @@ def test_fake_transport_valid_realtime_quote_returns_track_b_snapshot() -> None:
     validate_quote_for_pricing(snapshot, now=aware_now(), max_age_seconds=15, allow_delayed_for_paper=False, live_money=True)
 
 
-def test_explicit_symbol_mapping_is_required() -> None:
-    with pytest.raises(DatabentoQuoteProviderError, match="databento_symbol"):
-        DatabentoQuoteProvider(config=config(databento_symbol=""), transport=FakeTransport(), now=aware_now())
+def test_exactly_one_symbol_source_is_required() -> None:
+    with pytest.raises(DatabentoQuoteProviderError, match="exactly one"):
+        DatabentoQuoteProvider(config=config(databento_symbol="", databento_continuous_symbol=""), transport=FakeTransport(), now=aware_now())
+    with pytest.raises(DatabentoQuoteProviderError, match="exactly one"):
+        DatabentoQuoteProvider(
+            config=config(databento_symbol="MGCM6", databento_continuous_symbol="MGC.v.0"),
+            transport=FakeTransport(),
+            now=aware_now(),
+        )
+
+
+def test_fake_resolver_resolves_continuous_symbol_and_provider_uses_resolved_instrument() -> None:
+    transport = FakeTransport()
+    resolver = FakeResolver(resolution())
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
+        transport=transport,
+        resolver=resolver,
+        now=aware_now(),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert resolver.requests[0].requested_symbol == "MGC.v.0"
+    assert resolver.requests[0].stype_in == "continuous"
+    assert {request["symbol"] for request in transport.requests} == {"123456"}
+    assert {request["stype_in"] for request in transport.requests} == {"instrument_id"}
+    assert snapshot.provider_symbol == "MGCM6"
+    assert snapshot.raw["symbol_source"] == "CONTINUOUS_SYMBOL_RESOLUTION"
+    assert snapshot.raw["requested_continuous_symbol"] == "MGC.v.0"
+    assert snapshot.raw["resolved_instrument_id"] == "123456"
+    assert snapshot.raw["resolved_raw_symbol"] == "MGCM6"
+    assert snapshot.raw["execution_contract_validation_status"] == "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
+
+
+def test_missing_resolution_blocks_quote() -> None:
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
+        transport=FakeTransport(),
+        resolver=FakeResolver(resolution(resolved_instrument_id=None, raw_symbol=None, resolution_status=DatabentoResolutionStatus.NOT_FOUND)),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoQuoteProviderError, match="did not resolve"):
+        provider.get_quote("MGC-202606")
+
+
+def test_partial_instrument_only_resolution_reports_incomplete_execution_validation() -> None:
+    transport = FakeTransport()
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
+        transport=transport,
+        resolver=FakeResolver(resolution(resolved_instrument_id="123456", raw_symbol=None)),
+        now=aware_now(),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert {request["symbol"] for request in transport.requests} == {"123456"}
+    assert snapshot.provider_symbol == "123456"
+    assert snapshot.raw["execution_contract_validation_status"] == "INCOMPLETE_NO_RAW_SYMBOL"
+    assert any("incomplete" in warning.lower() for warning in snapshot.provider_warnings)
+
+
+def test_raw_symbol_mismatch_against_allowlisted_local_symbol_blocks_quote_readiness() -> None:
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
+        transport=FakeTransport(),
+        resolver=FakeResolver(resolution(raw_symbol="MGCQ6")),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoQuoteProviderError, match="conflicts with IBKR allowlisted local symbol"):
+        provider.get_quote("MGC-202606")
+
+
+def test_manual_raw_symbol_override_remains_supported_and_reported() -> None:
+    transport = FakeTransport()
+    provider = DatabentoQuoteProvider(config=config(databento_symbol="MGCM6", databento_continuous_symbol=None), transport=transport, now=aware_now())
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert {request["symbol"] for request in transport.requests} == {"MGCM6"}
+    assert {request["stype_in"] for request in transport.requests} == {"raw_symbol"}
+    assert snapshot.raw["symbol_source"] == "MANUAL_PROVIDER_SYMBOL_OVERRIDE"
+    assert snapshot.raw["manual_provider_symbol_override"] == "MGCM6"
+    assert any("override" in warning.lower() for warning in snapshot.provider_warnings)
 
 
 def test_contract_key_must_match_explicit_mapping() -> None:
