@@ -62,6 +62,12 @@ class FakeProvider:
                 "resolved_instrument_id": "123456" if self.config.databento_continuous_symbol else None,
                 "resolved_raw_symbol": raw_symbol if self.config.databento_continuous_symbol else None,
                 "resolution_status": "RESOLVED" if self.config.databento_continuous_symbol else None,
+                "resolution_path": "continuous->instrument_id" if self.config.databento_continuous_symbol else None,
+                "raw_symbol_lookup_path": "instrument_id->raw_symbol" if self.config.databento_continuous_symbol else None,
+                "raw_symbol_resolution_status": "RESOLVED" if self.config.databento_continuous_symbol else None,
+                "raw_symbol_match_status": "MATCH" if self.config.databento_continuous_symbol else "MANUAL_OVERRIDE_OPERATOR_REVIEW",
+                "quote_request_symbol": "123456" if self.config.databento_continuous_symbol else raw_symbol,
+                "quote_request_stype_in": "instrument_id" if self.config.databento_continuous_symbol else self.config.stype_in,
                 "execution_contract_validation_status": "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
                 if self.config.databento_continuous_symbol
                 else "MANUAL_OVERRIDE_OPERATOR_REVIEW",
@@ -110,6 +116,11 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert payload["manual_provider_symbol_override"] is False
     assert payload["resolved_instrument_id"] == "123456"
     assert payload["resolved_raw_symbol"] == "MGCM6"
+    assert payload["resolution_path"] == "continuous->instrument_id"
+    assert payload["raw_symbol_lookup_path"] == "instrument_id->raw_symbol"
+    assert payload["raw_symbol_match_status"] == "MATCH"
+    assert payload["quote_request_symbol"] == "123456"
+    assert payload["quote_request_stype_in"] == "instrument_id"
     assert payload["execution_contract_validation_status"] == "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
     assert payload["bid"] == "4626.0"
     assert payload["ask"] == "4626.1"
@@ -122,6 +133,11 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert report["resolution"]["requested_continuous_symbol"] == "MGC.v.0"
     assert report["resolution"]["resolved_instrument_id"] == "123456"
     assert report["resolution"]["resolved_raw_symbol"] == "MGCM6"
+    assert report["resolution"]["resolution_path"] == "continuous->instrument_id"
+    assert report["resolution"]["raw_symbol_lookup_path"] == "instrument_id->raw_symbol"
+    assert report["resolution"]["raw_symbol_match_status"] == "MATCH"
+    assert report["resolution"]["quote_request_symbol"] == "123456"
+    assert report["resolution"]["quote_request_stype_in"] == "instrument_id"
     assert report["resolution"]["execution_contract_validation_status"] == "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
     assert report["submit_enabled"] is False
     assert report["place_order_called"] is False

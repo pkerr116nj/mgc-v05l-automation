@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import inspect
+from io import BytesIO
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
+from urllib.error import HTTPError
 
 import pytest
 
@@ -13,6 +15,7 @@ from mgc_v05l.execution_core.databento_quote_provider import (
     DatabentoQuoteProviderError,
     DatabentoSymbolResolution,
     DatabentoSymbolResolutionRequest,
+    UrllibDatabentoSymbolResolver,
 )
 from mgc_v05l.execution_core.pricing import MarketDataMode
 from mgc_v05l.execution_core.quote_provider import validate_quote_for_pricing
@@ -49,13 +52,15 @@ class FakeTransport:
 
 
 class FakeResolver:
-    def __init__(self, resolution: DatabentoSymbolResolution) -> None:
-        self.resolution = resolution
+    def __init__(self, *resolutions: DatabentoSymbolResolution) -> None:
+        self.resolutions = list(resolutions)
         self.requests: list[DatabentoSymbolResolutionRequest] = []
 
     def resolve(self, *, request: DatabentoSymbolResolutionRequest) -> DatabentoSymbolResolution:
         self.requests.append(request)
-        return self.resolution
+        if self.resolutions:
+            return self.resolutions.pop(0)
+        return resolution(resolved_instrument_id=None, raw_symbol=None, resolution_status=DatabentoResolutionStatus.NOT_FOUND)
 
 
 def resolution(
@@ -69,7 +74,7 @@ def resolution(
         requested_symbol=requested_symbol,
         dataset="GLBX.MDP3",
         stype_in="continuous",
-        stype_out="raw_symbol",
+        stype_out="instrument_id",
         resolved_instrument_id=resolved_instrument_id,
         raw_symbol=raw_symbol,
         resolution_status=resolution_status,
@@ -125,7 +130,7 @@ def test_exactly_one_symbol_source_is_required() -> None:
 
 def test_fake_resolver_resolves_continuous_symbol_and_provider_uses_resolved_instrument() -> None:
     transport = FakeTransport()
-    resolver = FakeResolver(resolution())
+    resolver = FakeResolver(resolution(raw_symbol=None), resolution(requested_symbol="123456", resolved_instrument_id=None, raw_symbol="MGCM6"))
     provider = DatabentoQuoteProvider(
         config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
         transport=transport,
@@ -137,13 +142,22 @@ def test_fake_resolver_resolves_continuous_symbol_and_provider_uses_resolved_ins
 
     assert resolver.requests[0].requested_symbol == "MGC.v.0"
     assert resolver.requests[0].stype_in == "continuous"
+    assert resolver.requests[0].stype_out == "instrument_id"
+    assert resolver.requests[1].requested_symbol == "123456"
+    assert resolver.requests[1].stype_in == "instrument_id"
+    assert resolver.requests[1].stype_out == "raw_symbol"
     assert {request["symbol"] for request in transport.requests} == {"123456"}
     assert {request["stype_in"] for request in transport.requests} == {"instrument_id"}
     assert snapshot.provider_symbol == "MGCM6"
     assert snapshot.raw["symbol_source"] == "CONTINUOUS_SYMBOL_RESOLUTION"
     assert snapshot.raw["requested_continuous_symbol"] == "MGC.v.0"
+    assert snapshot.raw["resolution_path"] == "continuous->instrument_id"
+    assert snapshot.raw["raw_symbol_lookup_path"] == "instrument_id->raw_symbol"
     assert snapshot.raw["resolved_instrument_id"] == "123456"
     assert snapshot.raw["resolved_raw_symbol"] == "MGCM6"
+    assert snapshot.raw["raw_symbol_match_status"] == "MATCH"
+    assert snapshot.raw["quote_request_symbol"] == "123456"
+    assert snapshot.raw["quote_request_stype_in"] == "instrument_id"
     assert snapshot.raw["execution_contract_validation_status"] == "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
 
 
@@ -172,15 +186,51 @@ def test_partial_instrument_only_resolution_reports_incomplete_execution_validat
 
     assert {request["symbol"] for request in transport.requests} == {"123456"}
     assert snapshot.provider_symbol == "123456"
+    assert snapshot.raw["raw_symbol_match_status"] == "UNAVAILABLE"
     assert snapshot.raw["execution_contract_validation_status"] == "INCOMPLETE_NO_RAW_SYMBOL"
     assert any("incomplete" in warning.lower() for warning in snapshot.provider_warnings)
+
+
+def test_continuous_raw_symbol_primary_resolution_is_not_attempted() -> None:
+    resolver = FakeResolver(resolution(raw_symbol=None), resolution(requested_symbol="123456", resolved_instrument_id=None, raw_symbol="MGCM6"))
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
+        transport=FakeTransport(),
+        resolver=resolver,
+        now=aware_now(),
+    )
+
+    provider.get_quote("MGC-202606")
+
+    assert resolver.requests[0].stype_in == "continuous"
+    assert resolver.requests[0].stype_out == "instrument_id"
+    assert not (resolver.requests[0].stype_in == "continuous" and resolver.requests[0].stype_out == "raw_symbol")
+
+
+def test_optional_raw_symbol_lookup_unavailable_does_not_break_instrument_quote_path() -> None:
+    provider = DatabentoQuoteProvider(
+        config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
+        transport=FakeTransport(),
+        resolver=FakeResolver(
+            resolution(resolved_instrument_id="123456", raw_symbol=None),
+            resolution(requested_symbol="123456", resolved_instrument_id=None, raw_symbol=None, resolution_status=DatabentoResolutionStatus.NOT_FOUND),
+        ),
+        now=aware_now(),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert snapshot.raw["quote_request_symbol"] == "123456"
+    assert snapshot.raw["raw_symbol_match_status"] == "UNAVAILABLE"
+    assert snapshot.raw["execution_contract_validation_status"] == "INCOMPLETE_NO_RAW_SYMBOL"
+    assert snapshot.raw["raw_symbol_resolution_status"] == "NOT_FOUND"
 
 
 def test_raw_symbol_mismatch_against_allowlisted_local_symbol_blocks_quote_readiness() -> None:
     provider = DatabentoQuoteProvider(
         config=config(databento_symbol=None, databento_continuous_symbol="MGC.v.0", allowlisted_local_symbol="MGCM6"),
         transport=FakeTransport(),
-        resolver=FakeResolver(resolution(raw_symbol="MGCQ6")),
+        resolver=FakeResolver(resolution(raw_symbol=None), resolution(requested_symbol="123456", resolved_instrument_id=None, raw_symbol="MGCQ6")),
         now=aware_now(),
     )
 
@@ -199,6 +249,30 @@ def test_manual_raw_symbol_override_remains_supported_and_reported() -> None:
     assert snapshot.raw["symbol_source"] == "MANUAL_PROVIDER_SYMBOL_OVERRIDE"
     assert snapshot.raw["manual_provider_symbol_override"] == "MGCM6"
     assert any("override" in warning.lower() for warning in snapshot.provider_warnings)
+
+
+def test_unsupported_continuous_to_raw_symbol_http_error_has_corrective_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(*args: object, **kwargs: object) -> object:
+        raise HTTPError(
+            url="https://hist.databento.com/v0/symbology.resolve",
+            code=422,
+            msg="Unprocessable Entity",
+            hdrs={},
+            fp=BytesIO(b"unsupported mapping"),
+        )
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    resolver = UrllibDatabentoSymbolResolver(api_key="test-key")
+
+    with pytest.raises(DatabentoQuoteProviderError, match="resolve continuous symbols to instrument_id first"):
+        resolver.resolve(
+            request=DatabentoSymbolResolutionRequest(
+                requested_symbol="MGC.v.0",
+                dataset="GLBX.MDP3",
+                stype_in="continuous",
+                stype_out="raw_symbol",
+            )
+        )
 
 
 def test_contract_key_must_match_explicit_mapping() -> None:

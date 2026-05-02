@@ -87,7 +87,10 @@ class DatabentoQuoteProviderConfig:
     dataset: str = "GLBX.MDP3"
     stype_in: str = "raw_symbol"
     resolver_stype_in: str = "continuous"
-    resolver_stype_out: str = "raw_symbol"
+    resolver_stype_out: str = "instrument_id"
+    raw_symbol_lookup_enabled: bool = True
+    raw_symbol_lookup_stype_in: str = "instrument_id"
+    raw_symbol_lookup_stype_out: str = "raw_symbol"
     base_url: str = "https://hist.databento.com/v0"
     bbo_schema: str = "mbp-1"
     trades_schema: str = "trades"
@@ -178,6 +181,11 @@ class UrllibDatabentoSymbolResolver:
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:  # pragma: no cover - exercised only by real operator command.
             detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 422 and request.stype_in == "continuous" and request.stype_out == "raw_symbol":
+                detail = (
+                    f"{detail} Track B corrective action: resolve continuous symbols to instrument_id first, "
+                    "then optionally resolve instrument_id to raw_symbol for reporting."
+                )
             raise DatabentoQuoteProviderError(f"Databento symbology HTTP error {exc.code}: {detail}") from exc
         except URLError as exc:  # pragma: no cover - exercised only by real operator command.
             raise DatabentoQuoteProviderError(f"Databento symbology transport error: {exc}") from exc
@@ -271,9 +279,15 @@ class DatabentoQuoteProvider:
                 "symbol_source": resolved_symbol.symbol_source,
                 "requested_continuous_symbol": self.config.databento_continuous_symbol,
                 "manual_provider_symbol_override": self.config.databento_symbol,
-                "resolved_instrument_id": resolved_symbol.resolution.resolved_instrument_id if resolved_symbol.resolution is not None else None,
-                "resolved_raw_symbol": resolved_symbol.resolution.raw_symbol if resolved_symbol.resolution is not None else None,
-                "resolution_status": resolved_symbol.resolution.resolution_status if resolved_symbol.resolution is not None else None,
+                "resolution_path": resolved_symbol.resolution_path,
+                "raw_symbol_lookup_path": resolved_symbol.raw_symbol_lookup_path,
+                "raw_symbol_match_status": resolved_symbol.raw_symbol_match_status,
+                "quote_request_symbol": resolved_symbol.symbol,
+                "quote_request_stype_in": resolved_symbol.stype_in,
+                "resolved_instrument_id": resolved_symbol.resolved_instrument_id,
+                "resolved_raw_symbol": resolved_symbol.resolved_raw_symbol,
+                "resolution_status": resolved_symbol.resolution_status,
+                "raw_symbol_resolution_status": resolved_symbol.raw_symbol_resolution_status,
                 "execution_contract_validation_status": resolved_symbol.execution_validation_status,
             },
         )
@@ -286,11 +300,17 @@ class DatabentoQuoteProvider:
                 report_symbol=str(self.config.databento_symbol),
                 symbol_source="MANUAL_PROVIDER_SYMBOL_OVERRIDE",
                 execution_validation_status="MANUAL_OVERRIDE_OPERATOR_REVIEW",
+                raw_symbol_match_status="MANUAL_OVERRIDE_OPERATOR_REVIEW",
+                resolution_path=None,
+                raw_symbol_lookup_path=None,
+                resolved_instrument_id=None,
+                resolved_raw_symbol=None,
+                resolution_status=None,
+                raw_symbol_resolution_status=None,
                 warnings=("Manual Databento provider symbol override was used for market data only.",),
-                resolution=None,
             )
         requested = str(self.config.databento_continuous_symbol or "").strip()
-        resolution = self.resolver.resolve(
+        primary_resolution = self.resolver.resolve(
             request=DatabentoSymbolResolutionRequest(
                 requested_symbol=requested,
                 dataset=self.config.dataset,
@@ -298,33 +318,66 @@ class DatabentoQuoteProvider:
                 stype_out=self.config.resolver_stype_out,
             )
         )
-        if resolution.resolution_status != DatabentoResolutionStatus.RESOLVED:
-            raise DatabentoQuoteProviderError(f"Databento symbol resolution did not resolve cleanly: {resolution.resolution_status}")
-        if resolution.raw_symbol and self.config.allowlisted_local_symbol and resolution.raw_symbol != self.config.allowlisted_local_symbol:
+        if primary_resolution.resolution_status != DatabentoResolutionStatus.RESOLVED:
+            raise DatabentoQuoteProviderError(f"Databento symbol resolution did not resolve cleanly: {primary_resolution.resolution_status}")
+        if not primary_resolution.resolved_instrument_id:
+            raise DatabentoQuoteProviderError("Databento continuous symbol resolution returned no instrument_id")
+
+        warnings = list(primary_resolution.warnings)
+        resolved_raw_symbol: str | None = primary_resolution.raw_symbol
+        raw_symbol_resolution_status: str | None = None
+        raw_symbol_lookup_path: str | None = None
+        if not resolved_raw_symbol and self.config.raw_symbol_lookup_enabled:
+            raw_symbol_lookup_path = f"{self.config.raw_symbol_lookup_stype_in}->{self.config.raw_symbol_lookup_stype_out}"
+            try:
+                raw_resolution = self.resolver.resolve(
+                    request=DatabentoSymbolResolutionRequest(
+                        requested_symbol=primary_resolution.resolved_instrument_id,
+                        dataset=self.config.dataset,
+                        stype_in=self.config.raw_symbol_lookup_stype_in,
+                        stype_out=self.config.raw_symbol_lookup_stype_out,
+                    )
+                )
+            except DatabentoQuoteProviderError as exc:
+                raw_symbol_resolution_status = "UNAVAILABLE"
+                warnings.append(f"Optional Databento raw-symbol lookup failed: {exc}")
+            else:
+                raw_symbol_resolution_status = raw_resolution.resolution_status
+                warnings.extend(raw_resolution.warnings)
+                if raw_resolution.resolution_status == DatabentoResolutionStatus.RESOLVED and raw_resolution.raw_symbol:
+                    resolved_raw_symbol = raw_resolution.raw_symbol
+                else:
+                    warnings.append("Optional Databento raw-symbol lookup did not return a raw symbol.")
+
+        raw_symbol_match_status = "UNAVAILABLE"
+        execution_validation_status = "INCOMPLETE_NO_RAW_SYMBOL"
+        if resolved_raw_symbol and self.config.allowlisted_local_symbol and resolved_raw_symbol != self.config.allowlisted_local_symbol:
+            raw_symbol_match_status = "MISMATCH"
             raise DatabentoQuoteProviderError(
                 "Databento resolved raw symbol conflicts with IBKR allowlisted local symbol; operator review required"
             )
-        warnings = list(resolution.warnings)
-        execution_validation_status = "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
-        if not resolution.raw_symbol:
-            execution_validation_status = "INCOMPLETE_NO_RAW_SYMBOL"
-            warnings.append("Databento resolution returned no raw symbol; execution contract exact-match validation is incomplete.")
-        if resolution.resolved_instrument_id:
-            symbol = resolution.resolved_instrument_id
-            stype_in = "instrument_id"
-        elif resolution.raw_symbol:
-            symbol = resolution.raw_symbol
-            stype_in = "raw_symbol"
+        if resolved_raw_symbol and self.config.allowlisted_local_symbol:
+            raw_symbol_match_status = "MATCH"
+            execution_validation_status = "MATCHED_ALLOWLISTED_LOCAL_SYMBOL"
+        elif resolved_raw_symbol:
+            raw_symbol_match_status = "UNAVAILABLE"
+            execution_validation_status = "RAW_SYMBOL_AVAILABLE_NO_ALLOWLIST_COMPARISON"
         else:
-            raise DatabentoQuoteProviderError("Databento symbol resolution returned neither instrument_id nor raw_symbol")
+            warnings.append("Databento raw symbol is unavailable; execution contract exact-match validation is incomplete.")
         return _ResolvedQuoteSymbol(
-            symbol=symbol,
-            stype_in=stype_in,
-            report_symbol=resolution.raw_symbol or resolution.resolved_instrument_id or requested,
+            symbol=primary_resolution.resolved_instrument_id,
+            stype_in="instrument_id",
+            report_symbol=resolved_raw_symbol or primary_resolution.resolved_instrument_id,
             symbol_source="CONTINUOUS_SYMBOL_RESOLUTION",
             execution_validation_status=execution_validation_status,
+            raw_symbol_match_status=raw_symbol_match_status,
+            resolution_path=f"{self.config.resolver_stype_in}->{self.config.resolver_stype_out}",
+            raw_symbol_lookup_path=raw_symbol_lookup_path,
+            resolved_instrument_id=primary_resolution.resolved_instrument_id,
+            resolved_raw_symbol=resolved_raw_symbol,
+            resolution_status=primary_resolution.resolution_status,
+            raw_symbol_resolution_status=raw_symbol_resolution_status,
             warnings=tuple(warnings),
-            resolution=resolution,
         )
 
 
@@ -335,8 +388,14 @@ class _ResolvedQuoteSymbol:
     report_symbol: str
     symbol_source: str
     execution_validation_status: str
+    raw_symbol_match_status: str
+    resolution_path: str | None
+    raw_symbol_lookup_path: str | None
+    resolved_instrument_id: str | None
+    resolved_raw_symbol: str | None
+    resolution_status: str | None
+    raw_symbol_resolution_status: str | None
     warnings: tuple[str, ...]
-    resolution: DatabentoSymbolResolution | None
 
 
 def _require_config(config: DatabentoQuoteProviderConfig) -> None:
