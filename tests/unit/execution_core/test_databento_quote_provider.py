@@ -94,18 +94,21 @@ class FakeDBNStore:
 
 
 class FakeNativeTimeseries:
-    def __init__(self, records_by_schema: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
+    def __init__(self, records_by_schema: Mapping[str, Sequence[Mapping[str, Any]]], errors: Sequence[Exception] = ()) -> None:
         self.records_by_schema = records_by_schema
+        self.errors = list(errors)
         self.requests: list[dict[str, Any]] = []
 
     def get_range(self, **kwargs: Any) -> FakeDBNStore:
         self.requests.append(dict(kwargs))
+        if self.errors:
+            raise self.errors.pop(0)
         return FakeDBNStore(self.records_by_schema.get(str(kwargs["schema"]), ()))
 
 
 class FakeNativeClient:
-    def __init__(self, records_by_schema: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
-        self.timeseries = FakeNativeTimeseries(records_by_schema)
+    def __init__(self, records_by_schema: Mapping[str, Sequence[Mapping[str, Any]]], errors: Sequence[Exception] = ()) -> None:
+        self.timeseries = FakeNativeTimeseries(records_by_schema, errors=errors)
 
 
 def resolution(
@@ -233,6 +236,85 @@ def test_native_client_empty_dataframe_fails_cleanly() -> None:
         provider.get_quote("MGC-202606")
 
     assert exc_info.value.diagnostics["records_returned"] == {"bid_ask": 0, "trades": 0}
+
+
+def native_available_end_error() -> RuntimeError:
+    return RuntimeError(
+        "422 data_start_after_available_end\n"
+        "`start` in query ('2026-05-02 23:05:00.000000+00:00') was after the available end "
+        "of dataset GLBX.MDP3 ('2026-05-02 23:00:00+00:00'). Try requesting with an earlier `start`."
+    )
+
+
+def test_native_client_available_end_error_is_caught() -> None:
+    fake_client = FakeNativeClient({}, errors=(native_available_end_error(),))
+    transport = NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client)
+
+    with pytest.raises(DatabentoAvailableEndError) as exc_info:
+        transport.request_records(
+            base_url="https://hist.databento.com/v0",
+            api_key="test-key",
+            dataset="GLBX.MDP3",
+            symbol="MGCM6",
+            schema="mbp-1",
+            start=datetime(2026, 5, 2, 23, 5, tzinfo=timezone.utc),
+            end=datetime(2026, 5, 2, 23, 10, tzinfo=timezone.utc),
+            stype_in="raw_symbol",
+            limit=1000,
+        )
+
+    assert exc_info.value.provider_available_end == datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)
+    assert "data_start_after_available_end" in exc_info.value.detail
+
+
+def test_native_available_end_fallback_retries_once_for_mbp1_and_trades() -> None:
+    fake_client = FakeNativeClient(
+        {
+            "mbp-1": ({"ts_event": "2026-05-02T22:59:59+00:00", "bid_px_00": "4626.0", "ask_px_00": "4626.1"},),
+            "trades": ({"ts_event": "2026-05-02T22:59:58+00:00", "price": "4626.0"},),
+        },
+        errors=(native_available_end_error(),),
+    )
+    provider = DatabentoQuoteProvider(
+        config=config(allow_available_end_fallback=True),
+        transport=NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client),
+        now=datetime(2026, 5, 2, 23, 10, tzinfo=timezone.utc),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert [request["schema"] for request in fake_client.timeseries.requests] == ["mbp-1", "mbp-1", "trades"]
+    assert fake_client.timeseries.requests[1]["end"] == "2026-05-02T23:00:00+00:00"
+    assert fake_client.timeseries.requests[2]["end"] == "2026-05-02T23:00:00+00:00"
+    assert snapshot.raw["provider_available_end"] == "2026-05-02T23:00:00+00:00"
+    assert snapshot.raw["available_end_fallback_used"] is True
+    assert snapshot.raw["actual_quote_end"] == "2026-05-02T23:00:00+00:00"
+    assert snapshot.raw["usable_for_live_money_readiness"] is False
+    assert snapshot.mode == MarketDataMode.UNKNOWN
+
+
+def test_native_available_end_without_fallback_fails_with_request_diagnostics() -> None:
+    fake_client = FakeNativeClient({}, errors=(native_available_end_error(),))
+    provider = DatabentoQuoteProvider(
+        config=config(allow_available_end_fallback=False),
+        transport=NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client),
+        now=datetime(2026, 5, 2, 23, 10, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(DatabentoAvailableEndError) as exc_info:
+        provider.get_quote("MGC-202606")
+
+    diagnostics = exc_info.value.diagnostics
+    assert diagnostics["provider_available_end"] == "2026-05-02T23:00:00+00:00"
+    assert diagnostics["available_end_fallback_used"] is False
+    assert diagnostics["quote_request_symbol"] == "MGCM6"
+    assert diagnostics["quote_request_stype_in"] == "raw_symbol"
+    assert diagnostics["requested_quote_start"] == "2026-05-02T23:05:00+00:00"
+    assert diagnostics["requested_quote_end"] == "2026-05-02T23:10:00+00:00"
+    assert diagnostics["actual_quote_start"] == "2026-05-02T23:05:00+00:00"
+    assert diagnostics["actual_quote_end"] == "2026-05-02T23:10:00+00:00"
+    assert diagnostics["native_databento_error_code"] == "data_start_after_available_end"
+    assert "available end" in diagnostics["native_databento_error_message"]
 
 
 def test_missing_native_databento_package_has_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:

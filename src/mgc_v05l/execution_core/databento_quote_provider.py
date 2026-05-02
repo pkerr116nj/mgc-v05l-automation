@@ -30,10 +30,18 @@ class DatabentoQuoteProviderError(QuoteProviderError):
 class DatabentoAvailableEndError(DatabentoQuoteProviderError):
     """Raised when a requested Databento records window is beyond available_end."""
 
-    def __init__(self, message: str, *, provider_available_end: datetime | None, detail: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_available_end: datetime | None,
+        detail: str,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.provider_available_end = provider_available_end
         self.detail = detail
+        self.diagnostics = dict(diagnostics or {})
 
 
 class DatabentoQuoteParseError(DatabentoQuoteProviderError):
@@ -263,7 +271,15 @@ class NativeDatabentoQuoteTransport:
                 stype_in=stype_in,
             )
         except Exception as exc:  # noqa: BLE001 - provider errors must be reported cleanly.
-            raise DatabentoQuoteProviderError(f"Databento native get_range error: {_sanitize_provider_error(exc)}") from exc
+            detail = _sanitize_provider_error(exc)
+            available_end = _extract_available_end(detail)
+            if available_end is not None or "data_start_after_available_end" in detail or "available_end" in detail or "available end" in detail:
+                raise DatabentoAvailableEndError(
+                    "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback or earlier --quote-end-timestamp",
+                    provider_available_end=available_end,
+                    detail=detail,
+                ) from exc
+            raise DatabentoQuoteProviderError(f"Databento native get_range error: {detail}") from exc
         try:
             frame = store.to_df()
         except Exception as exc:  # noqa: BLE001 - DBNStore parse errors should remain provider-scoped.
@@ -432,11 +448,34 @@ class DatabentoQuoteProvider:
         except DatabentoAvailableEndError as exc:
             provider_available_end = exc.provider_available_end
             if not self.config.allow_available_end_fallback:
+                exc.diagnostics = _quote_request_failure_diagnostics(
+                    config=self.config,
+                    resolved_symbol=resolved_symbol,
+                    requested_start=requested_start,
+                    requested_end=requested_end,
+                    actual_start=actual_start,
+                    actual_end=actual_end,
+                    provider_available_end=provider_available_end,
+                    available_end_fallback_used=False,
+                    raw_provider_error=exc.detail,
+                )
                 raise
             if provider_available_end is None:
-                raise DatabentoQuoteProviderError(
+                error = DatabentoQuoteProviderError(
                     "Databento available_end fallback was requested, but provider_available_end was not parseable"
-                ) from exc
+                )
+                error.diagnostics = _quote_request_failure_diagnostics(
+                    config=self.config,
+                    resolved_symbol=resolved_symbol,
+                    requested_start=requested_start,
+                    requested_end=requested_end,
+                    actual_start=actual_start,
+                    actual_end=actual_end,
+                    provider_available_end=None,
+                    available_end_fallback_used=False,
+                    raw_provider_error=exc.detail,
+                )
+                raise error from exc
             actual_end = provider_available_end.astimezone(UTC)
             actual_start = actual_end - timedelta(seconds=quote_lookback)
             available_end_fallback_used = True
@@ -890,9 +929,16 @@ def _quote_parser_diagnostics(
         "schema": {"bid_ask": config.bbo_schema, "last": config.trades_schema},
         "start": start.isoformat(),
         "end": end.isoformat(),
+        "requested_quote_start": start.isoformat(),
+        "requested_quote_end": end.isoformat(),
+        "actual_quote_start": start.isoformat(),
+        "actual_quote_end": end.isoformat(),
         "encoding": "json",
         "provider_available_end": provider_available_end.isoformat() if provider_available_end is not None else None,
+        "available_end_fallback_used": provider_available_end is not None,
         "raw_provider_error": None,
+        "native_databento_error_code": None,
+        "native_databento_error_message": None,
         "request_details": {"bid_ask": bbo_request, "trades": trade_request},
         "databento_schema": {"bid_ask": config.bbo_schema, "last": config.trades_schema},
         "records_returned": {"bid_ask": len(bbo_records), "trades": len(trade_records)},
@@ -905,6 +951,45 @@ def _quote_parser_diagnostics(
         "parser_last_field_source": last_parse.source,
         "no_quote_records_reason": no_quote_records_reason,
     }
+
+
+def _quote_request_failure_diagnostics(
+    *,
+    config: DatabentoQuoteProviderConfig,
+    resolved_symbol: _ResolvedQuoteSymbol,
+    requested_start: datetime,
+    requested_end: datetime,
+    actual_start: datetime,
+    actual_end: datetime,
+    provider_available_end: datetime | None,
+    available_end_fallback_used: bool,
+    raw_provider_error: str | None,
+) -> dict[str, Any]:
+    base = _quote_parser_diagnostics(
+        config=config,
+        resolved_symbol=resolved_symbol,
+        start=actual_start,
+        end=actual_end,
+        provider_available_end=provider_available_end,
+        bbo_records=(),
+        trade_records=(),
+        latest_bbo=None,
+        latest_trade=None,
+    )
+    code, message = _native_error_code_message(raw_provider_error)
+    base.update(
+        {
+            "requested_quote_start": requested_start.isoformat(),
+            "requested_quote_end": requested_end.isoformat(),
+            "actual_quote_start": actual_start.isoformat(),
+            "actual_quote_end": actual_end.isoformat(),
+            "available_end_fallback_used": available_end_fallback_used,
+            "raw_provider_error": raw_provider_error,
+            "native_databento_error_code": code,
+            "native_databento_error_message": message,
+        }
+    )
+    return base
 
 
 def _record_request_details(
@@ -1020,6 +1105,16 @@ def _sanitize_provider_error(value: Any) -> str:
     text = re.sub(r"Basic\s+[A-Za-z0-9+/=]+", "Basic <redacted>", text)
     text = re.sub(r"(?i)(api[_-]?key['\"\s:=]+)[^'\"\s,}]+", r"\1<redacted>", text)
     return text
+
+
+def _native_error_code_message(value: Any) -> tuple[str | None, str | None]:
+    text = _sanitize_provider_error(value)
+    if not text:
+        return None, None
+    match = re.search(r"\b(\d{3})\s+([A-Za-z0-9_]+)", text)
+    if match:
+        return match.group(2), text
+    return None, text
 
 
 def _record_timestamp(record: Mapping[str, Any] | None) -> datetime:
@@ -1160,8 +1255,13 @@ def _extract_available_end(detail: str) -> datetime | None:
         payload = json.loads(detail)
     except json.JSONDecodeError:
         payload = None
-    for candidate in _walk_values(payload):
-        parsed = _provider_timestamp(candidate)
+    if isinstance(payload, Mapping):
+        for candidate in _walk_available_end_values(payload):
+            parsed = _provider_timestamp(candidate)
+            if parsed is not None:
+                return parsed
+    for match in re.findall(r"available end of dataset[^\(]*\(([^\)]+)\)", detail, flags=re.IGNORECASE):
+        parsed = _provider_timestamp(match)
         if parsed is not None:
             return parsed
     for match in re.findall(r"available[_ ]end[^\(]*\(([^\)]+)\)", detail, flags=re.IGNORECASE):
@@ -1175,20 +1275,23 @@ def _extract_available_end(detail: str) -> datetime | None:
     return None
 
 
-def _walk_values(value: Any) -> tuple[Any, ...]:
+def _walk_available_end_values(value: Any) -> tuple[Any, ...]:
     if isinstance(value, Mapping):
         values: list[Any] = []
         for key, item in value.items():
             if str(key).lower() in {"available_end", "available end", "end"}:
                 values.append(item)
-            values.extend(_walk_values(item))
+            elif isinstance(item, Mapping):
+                values.extend(_walk_available_end_values(item))
+            elif isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+                values.extend(_walk_available_end_values(item))
         return tuple(values)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         values = []
         for item in value:
-            values.extend(_walk_values(item))
+            values.extend(_walk_available_end_values(item))
         return tuple(values)
-    return (value,)
+    return ()
 
 
 def _provider_timestamp(value: Any) -> datetime | None:

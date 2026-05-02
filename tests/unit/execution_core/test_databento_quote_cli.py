@@ -116,6 +116,29 @@ class FailingAvailableEndProvider:
             "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback or earlier --quote-end-timestamp",
             provider_available_end=datetime(2026, 5, 1, 23, 59, tzinfo=timezone.utc),
             detail="sanitized detail",
+            diagnostics={
+                "resolved_instrument_id": "123456",
+                "resolved_symbol_stype": "instrument_id",
+                "quote_request_symbol": "123456",
+                "quote_request_stype_in": "instrument_id",
+                "dataset": "GLBX.MDP3",
+                "schema": {"bid_ask": "mbp-1", "last": "trades"},
+                "start": "2026-05-02T11:55:00+00:00",
+                "end": "2026-05-02T12:00:00+00:00",
+                "requested_quote_start": "2026-05-02T11:55:00+00:00",
+                "requested_quote_end": "2026-05-02T12:00:00+00:00",
+                "actual_quote_start": "2026-05-02T11:55:00+00:00",
+                "actual_quote_end": "2026-05-02T12:00:00+00:00",
+                "available_end_fallback_used": False,
+                "encoding": "json",
+                "request_details": {
+                    "bid_ask": {"schema": "mbp-1", "symbol": "123456", "stype_in": "instrument_id"},
+                    "trades": {"schema": "trades", "symbol": "123456", "stype_in": "instrument_id"},
+                },
+                "raw_provider_error": "422 data_start_after_available_end sanitized detail",
+                "native_databento_error_code": "data_start_after_available_end",
+                "native_databento_error_message": "422 data_start_after_available_end sanitized detail",
+            },
         )
 
 
@@ -363,6 +386,12 @@ def test_cli_available_end_failure_is_clean_report(
     assert payload["quote_observed"] is False
     assert payload["provider_available_end"] == "2026-05-01T23:59:00+00:00"
     assert "allow-available-end-fallback" in payload["corrective_message"]
+    assert payload["resolved_instrument_id"] == "123456"
+    assert payload["quote_request_symbol"] == "123456"
+    assert payload["requested_quote_start"] == "2026-05-02T11:55:00+00:00"
+    assert payload["actual_quote_end"] == "2026-05-02T12:00:00+00:00"
+    assert payload["available_end_fallback_used"] is False
+    assert payload["native_databento_error_code"] == "data_start_after_available_end"
     assert report["classification"] == "FAILED_BEFORE_QUOTE"
     assert report["quote_observed"] is False
     assert report["api_key_value"] is None
