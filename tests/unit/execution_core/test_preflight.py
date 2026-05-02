@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core import preflight
+from mgc_v05l.execution_core.harness import HarnessConfig
+from mgc_v05l.execution_core.ibkr_readonly_transport import detect_contract_allowlist_ambiguities
 from mgc_v05l.execution_core.preflight import (
     PreflightClassification,
     ReadOnlyPreflightConfig,
@@ -46,6 +48,8 @@ class FakeReadOnlyTransport:
         self.disconnect_count = 0
         self.place_order_called = False
         self.submit_called = False
+        self.next_valid_id_source = "initial_passive"
+        self.next_valid_id_requested = False
 
     def connect(self, *, host: str, port: int, client_id: int, readonly: bool) -> None:
         self.connected_with = {
@@ -107,6 +111,13 @@ class FakeReadOnlyTransport:
         self.submit_called = True
         raise AssertionError("preflight must never submit")
 
+    def diagnostics_report(self) -> dict[str, Any]:
+        return {
+            "next_valid_id": self._next_valid_id,
+            "next_valid_id_source": self.next_valid_id_source,
+            "next_valid_id_requested": self.next_valid_id_requested,
+        }
+
 
 def read_report(result) -> dict[str, Any]:  # type: ignore[no-untyped-def]
     return json.loads(result.report_json.read_text(encoding="utf-8"))
@@ -128,6 +139,9 @@ def test_read_only_preflight_reports_ready_without_submit(tmp_path: Path) -> Non
     assert payload["submit_enabled"] is False
     assert payload["position"]["signed_quantity"] == 0
     assert payload["open_orders"] == []
+    assert payload["transport_diagnostics"]["next_valid_id"] == 1001
+    assert payload["transport_diagnostics"]["next_valid_id_source"] == "initial_passive"
+    assert payload["transport_diagnostics"]["next_valid_id_requested"] is False
     assert transport.connected_with == {"host": "127.0.0.1", "port": 7497, "client_id": 77, "readonly": True}
     assert transport.disconnect_count == 1
     assert transport.place_order_called is False
@@ -237,6 +251,35 @@ def test_quote_missing_is_reported_without_submit(tmp_path: Path) -> None:
     assert {"name": "quote_observed", "passed": False, "blocking": False, "detail": "quote missing"} in payload["checks"]
     assert transport.place_order_called is False
     assert transport.submit_called is False
+
+
+def test_runtime_allowlists_include_confirmed_mgc_202606_metadata() -> None:
+    expected = {
+        "symbol": "MGC",
+        "security_type": "FUT",
+        "exchange": "COMEX",
+        "currency": "USD",
+        "contract_month": "202606",
+        "expiry": "20260626",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "multiplier": "10",
+        "tick_size": "0.1",
+    }
+
+    preflight_entry = ReadOnlyPreflightConfig().contract_allowlist["MGC-202606"]
+    harness_entry = HarnessConfig().contract_allowlist["MGC-202606"]
+
+    assert preflight_entry == expected
+    assert harness_entry == expected
+    assert detect_contract_allowlist_ambiguities(
+        contract_key="MGC-202606",
+        allowlist_entry=preflight_entry,
+    ) == ()
+    assert detect_contract_allowlist_ambiguities(
+        contract_key="MGC-202606",
+        allowlist_entry=harness_entry,
+    ) == ()
 
 
 def test_preflight_source_has_no_submit_or_place_order_call_path() -> None:

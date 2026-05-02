@@ -81,7 +81,11 @@ class HarnessConfig:
                 "security_type": "FUT",
                 "exchange": "COMEX",
                 "currency": "USD",
+                "contract_month": "202606",
+                "expiry": "20260626",
                 "local_symbol": "MGCM6",
+                "con_id": 712565978,
+                "multiplier": "10",
                 "tick_size": "0.1",
             }
         }

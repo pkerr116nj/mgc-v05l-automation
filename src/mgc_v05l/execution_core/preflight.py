@@ -61,7 +61,11 @@ class ReadOnlyPreflightConfig:
                 "security_type": "FUT",
                 "exchange": "COMEX",
                 "currency": "USD",
+                "contract_month": "202606",
+                "expiry": "20260626",
                 "local_symbol": "MGCM6",
+                "con_id": 712565978,
+                "multiplier": "10",
                 "tick_size": "0.1",
             }
         }
@@ -311,6 +315,7 @@ def run_read_only_preflight(
             connected=connected,
             failure_or_ambiguity=None,
             required_action=None,
+            transport_diagnostics=_transport_diagnostics(transport),
         )
     except IbkrPaperAdapterError as exc:
         _check(checks, "adapter_readiness", False, str(exc))
