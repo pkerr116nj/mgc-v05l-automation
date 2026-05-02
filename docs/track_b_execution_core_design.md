@@ -234,6 +234,30 @@ All future strategy decisions must enter through:
 SignalEvent -> OrderIntent -> risk_gate -> IBKR paper adapter -> FillEvent -> ledger -> reconcile
 ```
 
+## Mobile / iOS / iPadOS Portability Constraint
+
+Magic is a personal trading system, not a commercial multi-user SaaS product.
+
+The execution core must remain headless and service-friendly. It must not depend on Electron, desktop UI state, local dashboard cache, browser DOM, or macOS-only UI assumptions.
+
+Milestone one still runs locally against TWS paper on `127.0.0.1:7497`.
+
+Future mobile access should be through a secure Magic service/API, not by having iOS or iPadOS talk directly to TWS or IBKR. The broker-facing process should remain local to the machine running TWS/IB Gateway, or become a local broker agent near that broker session.
+
+iPhone and iPad clients should be treated as operator clients for monitoring, approval, and limited command submission. Mobile clients must never be execution authority.
+
+All dangerous actions must still pass server-side through:
+
+```text
+SignalEvent -> OrderIntent -> risk_gate -> adapter -> ledger -> reconcile
+```
+
+Track B outputs, status, and proof reports should remain JSON-serializable and API-friendly.
+
+Future UI direction should prefer responsive web/PWA or a thin client first. Native iOS and iPadOS can be considered later.
+
+No mobile implementation is part of Track B slice 2.
+
 ## Proposed Module Layout
 
 ```text
