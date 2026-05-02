@@ -71,6 +71,8 @@ class IbkrReadOnlyTwsTransport:
         self._request_id = 700000
         self._managed_accounts: tuple[str, ...] = ()
         self._next_valid_id: int | None = None
+        self._next_valid_id_source: str | None = None
+        self._next_valid_id_requested = False
         self._contract_details: dict[int, list[dict[str, Any]]] = {}
         self._positions: list[dict[str, Any]] = []
         self._open_orders: list[dict[str, Any]] = []
@@ -155,6 +157,8 @@ class IbkrReadOnlyTwsTransport:
             "connect_ack_at": _iso_or_none(self._connect_ack_at),
             "next_valid_id_received": self._next_valid_id is not None,
             "next_valid_id": self._next_valid_id,
+            "next_valid_id_source": self._next_valid_id_source,
+            "next_valid_id_requested": self._next_valid_id_requested,
             "handshake_timeout_seconds": self.config.request_timeout_seconds,
             "ibkr_errors": list(self._ibkr_errors),
             "suspected_causes": self._suspected_handshake_causes(),
@@ -169,9 +173,7 @@ class IbkrReadOnlyTwsTransport:
         return self._managed_accounts
 
     def next_valid_id(self) -> int | None:
-        bridge = self._require_bridge()
-        if self._next_valid_id is None:
-            bridge.reqIds(-1)
+        self._require_bridge()
         self._wait(self._next_valid_id_ready, "nextValidId")
         return self._next_valid_id
 
@@ -391,8 +393,7 @@ class IbkrReadOnlyTwsTransport:
             return self._request_id
 
     def _ensure_api_ready(self) -> None:
-        if self._next_valid_id is None:
-            self._require_bridge().reqIds(-1)
+        self._require_bridge()
         self._wait(self._next_valid_id_ready, "nextValidId")
 
     def _wait(self, event: threading.Event, callback_name: str) -> None:
@@ -404,6 +405,7 @@ class IbkrReadOnlyTwsTransport:
 
     def _record_next_valid_id(self, order_id: int) -> None:
         self._next_valid_id = int(order_id)
+        self._next_valid_id_source = "requested" if self._next_valid_id_requested else "initial_passive"
         self._next_valid_id_ready.set()
 
     def _record_managed_accounts(self, accounts_list: str) -> None:

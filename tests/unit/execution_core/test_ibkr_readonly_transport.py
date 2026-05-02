@@ -99,7 +99,22 @@ def test_next_valid_id_callback_is_captured() -> None:
     transport.bridge_for_test().nextValidId(1001)
 
     assert transport.next_valid_id() == 1001
-    assert transport.diagnostics_report()["next_valid_id_received"] is True
+    diagnostics = transport.diagnostics_report()
+    assert diagnostics["next_valid_id_received"] is True
+    assert diagnostics["next_valid_id_source"] == "initial_passive"
+    assert diagnostics["next_valid_id_requested"] is False
+
+
+def test_initial_readiness_wait_does_not_request_ids_before_next_valid_id() -> None:
+    transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+    bridge = transport.bridge_for_test()
+
+    with pytest.raises(IbkrReadOnlyTimeoutError, match="missing nextValidId callback"):
+        transport.next_valid_id()
+
+    assert bridge.req_ids_calls == []
+    assert transport.diagnostics_report()["next_valid_id_requested"] is False
 
 
 def test_readiness_blocks_account_request_until_next_valid_id_exists() -> None:
@@ -110,12 +125,13 @@ def test_readiness_blocks_account_request_until_next_valid_id_exists() -> None:
     with pytest.raises(IbkrReadOnlyTimeoutError, match="missing nextValidId callback"):
         transport.managed_accounts()
 
-    assert bridge.req_ids_calls == [-1]
+    assert bridge.req_ids_calls == []
     assert bridge.req_managed_accounts_count == 0
     diagnostics = transport.diagnostics_report()
     assert diagnostics["connected_socket"] is True
     assert diagnostics["event_loop_thread_started"] is True
     assert diagnostics["next_valid_id_received"] is False
+    assert diagnostics["next_valid_id_requested"] is False
     assert diagnostics["client_id"] == 17077
     assert "TWS did not complete API handshake before timeout" in diagnostics["suspected_causes"]
 
@@ -358,12 +374,17 @@ def fake_ibapi_loader(*, managed_accounts: str = "DUM882026", handshake_error: t
             self.connected_with: tuple[str, int, int] | None = None
             self.disconnected = False
             self.connected = False
+            self.handshake_error_emitted = False
 
         def connect(self, host: str, port: int, client_id: int) -> None:
             self.connected_with = (host, port, client_id)
             self.connected = True
 
         def run(self) -> None:
+            if handshake_error is not None and not self.handshake_error_emitted:
+                self.handshake_error_emitted = True
+                code, message = handshake_error
+                self.wrapper.error(-1, code, message)
             return None
 
         def disconnect(self) -> None:
@@ -375,9 +396,6 @@ def fake_ibapi_loader(*, managed_accounts: str = "DUM882026", handshake_error: t
 
         def reqIds(self, request_id: int) -> None:  # noqa: N802
             self.req_ids_calls.append(request_id)
-            if handshake_error is not None:
-                code, message = handshake_error
-                self.wrapper.error(-1, code, message)
 
         def reqManagedAccts(self) -> None:  # noqa: N802
             self.req_managed_accounts_count += 1
