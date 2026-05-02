@@ -1186,6 +1186,119 @@ an automated production-capable execution core.
 - No live-money readiness may be claimed until realtime entitlement and quote freshness are verified.
 - The mobile, UI, or client layer must not become a market data authority; market data authority remains server-side/core.
 
+## Quote Provider Architecture
+
+Track B pricing must consume provider-agnostic quote snapshots. Strategy, UI, mobile clients, and broker adapters must not pass raw provider objects directly into order pricing.
+
+### QuoteProvider Interface Shape
+
+The minimal interface is:
+
+```python
+class QuoteProvider:
+    provider_name: str
+
+    def observe_quote(
+        self,
+        *,
+        contract_key: str,
+        as_of: datetime,
+        max_age_seconds: int,
+    ) -> QuoteSnapshot | None:
+        ...
+```
+
+The interface must be headless, JSON-serializable at its boundary, and usable from service code without Electron, dashboard cache, browser DOM, or desktop state.
+
+### QuoteSnapshot Fields
+
+`QuoteSnapshot` should normalize at least:
+
+- `quote_id`
+- `provider_name`
+- `provider_quote_id`, when available
+- `contract_key`
+- `symbol`
+- `bid`
+- `ask`
+- `last`
+- `timestamp`
+- `received_at`
+- `age_seconds`
+- `market_data_mode`: `REALTIME`, `DELAYED`, or `UNKNOWN`
+- `market_data_role`: `PRIMARY`, `SECONDARY`, `BACKUP`, or `DIAGNOSTIC`
+- `tick_size`
+- `exchange`
+- `currency`
+- `entitlement_status`
+- `provider_warnings`
+- `raw_reference`, if a compact provider payload reference is needed for audit
+
+Timestamps must be timezone-aware UTC internally. Pricing logic must not compare string timestamps.
+
+### Provider Authority
+
+- Databento is the primary realtime quote authority for Track B paper-proof pricing and future production pricing when a clean provider interface is available.
+- Databento is also the preferred authority for realtime bars and signal inputs.
+- IBKR remains the broker and reconciliation authority for account validation, contract qualification, positions, open orders, order status, fills, executions, and final reconciliation.
+- IBKR quotes are secondary, backup, diagnostic, or broker-side quote evidence only unless a later design explicitly promotes them for a specific paper-only use.
+
+### Fallback Order
+
+Pricing must choose the first available source in this order:
+
+1. Databento realtime quote through the provider interface.
+2. IBKR realtime or delayed quote only when explicitly allowed by config and clearly labeled in reports.
+3. Operator-supplied manual open and close limit prices for paper proof only.
+4. Block before submit.
+
+There is no market-order fallback.
+
+### Freshness And Validation
+
+- Realtime quotes must satisfy configured `max_quote_age_seconds`.
+- Paper-only delayed-data proof may use a separately configured delayed-data freshness window, but the report must clearly state that the run proves paper mechanics only.
+- Quotes must have at least one usable pricing anchor. Preferred pricing uses valid bid and ask; last-only pricing requires an explicit paper-only design decision.
+- Bid and ask must be positive, ordered, not crossed, and not locked unless a later design explicitly handles locked markets.
+- Limit prices must be rounded to the exact configured tick size for the allowlisted contract.
+- The quoted contract metadata must match the executable allowlist: contract key, exchange, currency, multiplier, local symbol, expiry, and conId when available.
+- Missing, stale, crossed, locked, off-tick, ambiguous, or metadata-mismatched quotes block pricing-dependent submit.
+
+### Delayed And Unknown Data Policy
+
+- `REALTIME` provider data may support paper-route readiness and future live-money readiness if all other gates pass.
+- `DELAYED` provider data may support paper-route proof only when explicitly allowed and labeled.
+- `UNKNOWN` market data mode cannot support live-money readiness.
+- Delayed or unknown data must keep `production_live_money_readiness = false`.
+- Delayed or unknown data must not be silently treated as realtime.
+
+### Proof Report Recording
+
+Every proof report that prices an order must include:
+
+- `pricing_source`
+- `quote_id`
+- `market_data_provider`
+- `market_data_mode`
+- `market_data_role`
+- `quote_timestamp`
+- `quote_received_at`
+- `quote_age_seconds`
+- `bid`
+- `ask`
+- `last`
+- `tick_size`
+- `provider_warnings`
+- `delayed_data_warning_seen`
+- whether pricing proves paper mechanics only
+- whether production live-money readiness is false and why
+
+For operator manual pricing, the proof report must include `pricing_source = OPERATOR_SUPPLIED_MANUAL_LIMIT`, separate manual open and close limit prices, and `operator_manual_price_acknowledgement = true`.
+
+### Mobile And UI Boundary
+
+Mobile, iPad, browser, desktop, and dashboard clients may display quotes and proof reports, but they are never market data authority. All dangerous actions and pricing decisions must run server-side/core through `SignalEvent -> OrderIntent -> risk_gate -> adapter -> ledger -> reconcile`.
+
 ### Order Policy
 
 - Milestone one allows single-contract `LMT` `DAY` orders only.
