@@ -354,6 +354,7 @@ def run_read_only_preflight(
             connected=connected,
             failure_or_ambiguity=str(exc),
             required_action="Manual TWS/API review required before proof.",
+            transport_diagnostics=_transport_diagnostics(transport),
         )
     finally:
         if connected:
@@ -475,6 +476,7 @@ def _write_result(
     connected: bool,
     failure_or_ambiguity: str | None,
     required_action: str | None,
+    transport_diagnostics: dict[str, Any] | None = None,
 ) -> PreflightResult:
     report = {
         "schema_version": "track_b_read_only_preflight_v1",
@@ -495,6 +497,7 @@ def _write_result(
         "broker_errors": broker_errors,
         "failure_or_ambiguity": failure_or_ambiguity,
         "required_action": required_action,
+        "transport_diagnostics": transport_diagnostics or {},
         "submit_enabled": False,
         "place_order_called": False,
         "report_json_path": str(report_json),
@@ -540,9 +543,23 @@ def _render_markdown(report: dict[str, Any]) -> str:
         "## Broker Errors And Missing Callbacks",
         json.dumps({"broker_errors": report["broker_errors"], "missing_callbacks": report["missing_callbacks"]}, indent=2, sort_keys=True),
         "",
+        "## Transport Diagnostics",
+        json.dumps(report.get("transport_diagnostics", {}), indent=2, sort_keys=True),
+        "",
     ]
     if report.get("failure_or_ambiguity"):
         sections.extend(["## Failure Or Ambiguity", str(report["failure_or_ambiguity"]), ""])
     if report.get("required_action"):
         sections.extend(["## Required Action", str(report["required_action"]), ""])
     return "\n".join(sections)
+
+
+def _transport_diagnostics(transport: ReadOnlyPreflightTransport) -> dict[str, Any]:
+    diagnostic_method = getattr(transport, "diagnostics_report", None)
+    if not callable(diagnostic_method):
+        return {}
+    try:
+        diagnostics = diagnostic_method()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not hide original failure.
+        return {"diagnostics_error": str(exc)}
+    return dict(diagnostics or {})

@@ -75,6 +75,34 @@ def test_managed_accounts_callback_is_captured_when_delivered_after_ready() -> N
     assert bridge.req_managed_accounts_count == 1
 
 
+def test_next_valid_id_callback_is_captured() -> None:
+    transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+
+    transport.bridge_for_test().nextValidId(1001)
+
+    assert transport.next_valid_id() == 1001
+    assert transport.diagnostics_report()["next_valid_id_received"] is True
+
+
+def test_readiness_blocks_account_request_until_next_valid_id_exists() -> None:
+    transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
+    transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
+    bridge = transport.bridge_for_test()
+
+    with pytest.raises(IbkrReadOnlyTimeoutError, match="missing nextValidId callback"):
+        transport.managed_accounts()
+
+    assert bridge.req_ids_calls == [-1]
+    assert bridge.req_managed_accounts_count == 0
+    diagnostics = transport.diagnostics_report()
+    assert diagnostics["connected_socket"] is True
+    assert diagnostics["event_loop_thread_started"] is True
+    assert diagnostics["next_valid_id_received"] is False
+    assert diagnostics["client_id"] == 17077
+    assert "TWS did not complete API handshake before timeout" in diagnostics["suspected_causes"]
+
+
 def test_managed_accounts_callback_before_next_valid_id_is_preserved() -> None:
     transport = IbkrReadOnlyTwsTransport(config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01), module_loader=fake_ibapi_loader())
     transport.connect(host="127.0.0.1", port=7497, client_id=17077, readonly=True)
@@ -95,6 +123,37 @@ def test_managed_accounts_times_out_cleanly_when_callback_missing() -> None:
 
     with pytest.raises(IbkrReadOnlyTimeoutError, match="missing managedAccounts callback"):
         transport.managed_accounts()
+
+
+def test_ibkr_handshake_error_is_captured_in_preflight_report(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from mgc_v05l.execution_core.preflight import PreflightClassification, ReadOnlyPreflightConfig, run_read_only_preflight
+
+    transport = IbkrReadOnlyTwsTransport(
+        config=IbkrReadOnlyTransportConfig(request_timeout_seconds=0.01),
+        module_loader=fake_ibapi_loader(handshake_error=(326, "client id is already in use")),
+    )
+
+    result = run_read_only_preflight(
+        config=ReadOnlyPreflightConfig(
+            account_id="DUM882026",
+            client_id=17077,
+            output_root=tmp_path / "preflight",
+        ),
+        transport=transport,
+        run_id="preflight-next-valid-id-error",
+    )
+
+    assert result.classification == PreflightClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    diagnostics = result.report["transport_diagnostics"]
+    assert diagnostics["connected_socket"] is True
+    assert diagnostics["event_loop_thread_started"] is True
+    assert diagnostics["next_valid_id_received"] is False
+    assert diagnostics["client_id"] == 17077
+    assert diagnostics["handshake_timeout_seconds"] == 0.01
+    assert diagnostics["ibkr_errors"] == [
+        {"error_code": 326, "error_string": "client id is already in use", "request_id": -1}
+    ]
+    assert "client_id collision" in diagnostics["suspected_causes"]
 
 
 def test_managed_account_exact_match_passes_through_preflight(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -171,7 +230,7 @@ def test_contract_allowlist_validation_accepts_matching_mgc_local_symbol() -> No
     assert issues == ()
 
 
-def fake_ibapi_loader(*, managed_accounts: str = "DUM882026"):
+def fake_ibapi_loader(*, managed_accounts: str = "DUM882026", handshake_error: tuple[int, str] | None = None):
     class FakeWrapper:
         def __init__(self) -> None:
             return None
@@ -195,6 +254,9 @@ def fake_ibapi_loader(*, managed_accounts: str = "DUM882026"):
 
         def reqIds(self, request_id: int) -> None:  # noqa: N802
             self.req_ids_calls.append(request_id)
+            if handshake_error is not None:
+                code, message = handshake_error
+                self.wrapper.error(-1, code, message)
 
         def reqManagedAccts(self) -> None:  # noqa: N802
             self.req_managed_accounts_count += 1

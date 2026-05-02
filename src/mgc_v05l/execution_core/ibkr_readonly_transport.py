@@ -83,6 +83,13 @@ class IbkrReadOnlyTwsTransport:
         self._quote_ready: dict[int, threading.Event] = {}
         self._last_contract_key: str | None = None
         self._last_allowlist_entry: dict[str, Any] | None = None
+        self._host: str | None = None
+        self._port: int | None = None
+        self._client_id: int | None = None
+        self._socket_connected = False
+        self._event_loop_started = False
+        self._event_loop_error: str | None = None
+        self._ibkr_errors: list[dict[str, Any]] = []
 
     def connect(self, *, host: str, port: int, client_id: int, readonly: bool) -> None:
         if not readonly:
@@ -94,9 +101,14 @@ class IbkrReadOnlyTwsTransport:
         if int(client_id) <= 0:
             raise IbkrPaperConfigError("client_id must be an explicit positive integer")
 
+        self._host = host
+        self._port = int(port)
+        self._client_id = int(client_id)
         self._bridge = self._build_bridge()
         self._bridge.connect(host, int(port), int(client_id))
-        self._thread = threading.Thread(target=self._bridge.run, name="track-b-ibkr-readonly", daemon=True)
+        is_connected = getattr(self._bridge, "isConnected", None)
+        self._socket_connected = bool(is_connected()) if callable(is_connected) else True
+        self._thread = threading.Thread(target=self._run_loop, name="track-b-ibkr-readonly", daemon=True)
         self._thread.start()
 
     def disconnect(self) -> None:
@@ -105,6 +117,22 @@ class IbkrReadOnlyTwsTransport:
 
     def bridge_for_test(self) -> Any:
         return self._require_bridge()
+
+    def diagnostics_report(self) -> dict[str, Any]:
+        return {
+            "host": self._host,
+            "port": self._port,
+            "client_id": self._client_id,
+            "connected_socket": self._socket_connected,
+            "event_loop_thread_started": self._event_loop_started,
+            "event_loop_thread_alive": bool(self._thread and self._thread.is_alive()),
+            "event_loop_error": self._event_loop_error,
+            "next_valid_id_received": self._next_valid_id is not None,
+            "next_valid_id": self._next_valid_id,
+            "handshake_timeout_seconds": self.config.request_timeout_seconds,
+            "ibkr_errors": list(self._ibkr_errors),
+            "suspected_causes": self._suspected_handshake_causes(),
+        }
 
     def managed_accounts(self) -> Sequence[str]:
         bridge = self._require_bridge()
@@ -279,8 +307,8 @@ class IbkrReadOnlyTwsTransport:
             def tickSnapshotEnd(self, reqId: int) -> None:  # noqa: N802
                 owner._quote_ready.setdefault(reqId, threading.Event()).set()
 
-            def error(self, reqId: int, errorCode: int, errorString: str, advancedOrderRejectJson: str = "") -> None:  # noqa: N802, ARG002
-                owner._record_error(reqId, errorCode, errorString)
+            def error(self, *args: Any) -> None:  # noqa: N802
+                owner._record_error_from_callback(args)
 
         self._contract_cls = contract_cls
         return _ReadOnlyBridge()
@@ -312,6 +340,13 @@ class IbkrReadOnlyTwsTransport:
         if self._bridge is None:
             raise IbkrReadOnlyTransportError("transport is not connected")
         return self._bridge
+
+    def _run_loop(self) -> None:
+        self._event_loop_started = True
+        try:
+            self._require_bridge().run()
+        except Exception as exc:  # noqa: BLE001 - surface background reader failures in diagnostics.
+            self._event_loop_error = str(exc)
 
     def _next_request_id(self) -> int:
         with self._lock:
@@ -387,11 +422,58 @@ class IbkrReadOnlyTwsTransport:
         if {"bid", "ask"}.issubset(self._quotes[request_id]):
             self._quote_ready.setdefault(request_id, threading.Event()).set()
 
+    def _record_error_from_callback(self, args: tuple[Any, ...]) -> None:
+        request_id: int
+        error_code: int
+        error_string: str
+        if len(args) >= 4 and isinstance(args[2], int):
+            request_id = int(args[0])
+            error_code = int(args[2])
+            error_string = str(args[3])
+        elif len(args) >= 3:
+            request_id = int(args[0])
+            error_code = int(args[1])
+            error_string = str(args[2])
+        else:
+            request_id = -1
+            error_code = -1
+            error_string = "unknown IBKR error callback shape"
+        self._record_error(request_id, error_code, error_string)
+
     def _record_error(self, request_id: int, error_code: int, error_string: str) -> None:
+        self._ibkr_errors.append(
+            {
+                "request_id": request_id,
+                "error_code": error_code,
+                "error_string": error_string,
+            }
+        )
         if request_id in self._contract_ready and error_code >= 200:
             self._contract_ready[request_id].set()
         if request_id in self._quote_ready and error_code >= 200:
             self._quote_ready[request_id].set()
+
+    def _suspected_handshake_causes(self) -> tuple[str, ...]:
+        if self._next_valid_id is not None:
+            return ()
+        causes: list[str] = []
+        codes = {int(error.get("error_code", -1)) for error in self._ibkr_errors}
+        if 326 in codes:
+            causes.append("client_id collision")
+        if not self._socket_connected:
+            causes.append("socket connection not established")
+        if not self._event_loop_started:
+            causes.append("event loop thread did not start")
+        if self._event_loop_error:
+            causes.append("event loop thread error")
+        causes.extend(
+            [
+                "TWS paper API disabled or not accepting clients",
+                "TWS modal dialog/API-block condition",
+                "TWS did not complete API handshake before timeout",
+            ]
+        )
+        return tuple(dict.fromkeys(causes))
 
     def _contract_matches(self, contract_key: str, row: Mapping[str, Any]) -> bool:
         if self._last_contract_key != contract_key or self._last_allowlist_entry is None:
