@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import types
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -276,3 +278,185 @@ def test_submit_limit_order_fails_closed_when_disabled() -> None:
 
     with pytest.raises(IbkrPaperSubmitDisabledError, match="submit_enabled"):
         paper.submit_limit_order(submit_attempt=submit_attempt(), order_intent=order_intent())
+
+
+def test_submit_enabled_defaults_to_false() -> None:
+    paper = adapter()
+
+    assert paper.submit_enabled is False
+
+
+def test_submit_limit_order_places_lmt_day_only_after_explicit_enablement() -> None:
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader())
+    paper.connect()
+    submit = submit_attempt(broker_order_id="1001", perm_id=None)
+    intent = order_intent()
+
+    local_order_id = paper.submit_limit_order(submit_attempt=submit, order_intent=intent)
+
+    placed = paper.bridge_for_test().placed_orders[0]
+    assert local_order_id == 1001
+    assert placed["order_id"] == 1001
+    assert placed["contract"].localSymbol == "MGCM6"
+    assert placed["order"].account == "DU1234567"
+    assert placed["order"].orderType == "LMT"
+    assert placed["order"].tif == "DAY"
+    assert placed["order"].totalQuantity == 1.0
+    assert placed["order"].transmit is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("order_type", "MKT", "order_type must be LMT"),
+        ("time_in_force", "GTC", "time_in_force must be DAY"),
+        ("quantity", Decimal("2"), "quantity must be exactly 1"),
+        ("extra_fields", {"parentId": 1}, "forbidden"),
+    ],
+)
+def test_submit_limit_order_rejects_unsafe_intent_even_when_enabled(field: str, value: object, message: str) -> None:
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader())
+    paper.connect()
+    intent = order_intent()
+    object.__setattr__(intent, field, value)
+
+    with pytest.raises(IbkrPaperConfigError, match=message):
+        paper.submit_limit_order(submit_attempt=submit_attempt(broker_order_id="1001"), order_intent=intent)
+
+    assert paper.bridge_for_test().placed_orders == []
+
+
+def test_submit_limit_order_rejects_unallowlisted_contract_even_when_enabled() -> None:
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader())
+    paper.connect()
+    intent = order_intent(contract_key="MNQ-202606")
+    object.__setattr__(intent, "contract_key", "MNQ-202606")
+
+    with pytest.raises(IbkrPaperConfigError, match="allowlisted"):
+        paper.submit_limit_order(submit_attempt=submit_attempt(broker_order_id="1001"), order_intent=intent)
+
+    assert paper.bridge_for_test().placed_orders == []
+
+
+def test_stub_submit_callbacks_capture_broker_order_and_fill_correlation() -> None:
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader())
+    paper.connect()
+    submit = submit_attempt(broker_order_id="1001", perm_id=None)
+    intent = order_intent()
+    paper.submit_limit_order(submit_attempt=submit, order_intent=intent)
+    bridge = paper.bridge_for_test()
+
+    bridge.emit_open_order(order_id=1001, account="DU1234567", local_symbol="MGCM6", perm_id=9001)
+    bridge.emit_exec_details(order_id=1001, account="DU1234567", local_symbol="MGCM6", perm_id=9001, exec_id="EXEC-1")
+
+    order = paper.wait_for_broker_order(submit_attempt_id="submit-1")
+    fill = paper.wait_for_fill(submit_attempt_id="submit-1")
+    assert order.broker_order_id == "1001"
+    assert order.perm_id == "9001"
+    assert fill.execution_id == "EXEC-1"
+    assert fill.broker_order_id == "1001"
+
+
+def test_missing_order_truth_after_submit_times_out_cleanly() -> None:
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader())
+    paper.request_timeout_seconds = 0.01
+    paper.connect()
+    paper.submit_limit_order(submit_attempt=submit_attempt(broker_order_id="1001"), order_intent=order_intent())
+
+    with pytest.raises(IbkrPaperReadinessError, match="missing openOrder/orderStatus"):
+        paper.wait_for_broker_order(submit_attempt_id="submit-1")
+
+    assert "openOrder/orderStatus" in paper.missing_callbacks
+
+
+def fake_ibapi_loader():
+    class FakeWrapper:
+        def __init__(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, wrapper) -> None:
+            self.wrapper = wrapper
+            self.connected = False
+            self.placed_orders: list[dict[str, object]] = []
+            self.cancelled_orders: list[int] = []
+
+        def connect(self, host: str, port: int, client_id: int) -> None:
+            self.connected = True
+            self.wrapper.nextValidId(1001)
+            self.wrapper.managedAccounts("DU1234567")
+
+        def run(self) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            self.connected = False
+
+        def placeOrder(self, order_id: int, contract, order) -> None:  # noqa: N802, ANN001
+            self.placed_orders.append({"order_id": order_id, "contract": contract, "order": order})
+
+        def cancelOrder(self, order_id: int, *args: object) -> None:  # noqa: N802
+            self.cancelled_orders.append(order_id)
+
+        def reqManagedAccts(self) -> None:  # noqa: N802
+            self.wrapper.managedAccounts("DU1234567")
+
+        def reqPositions(self) -> None:  # noqa: N802
+            self.wrapper.position("DU1234567", FakeContract(localSymbol="MGCM6", conId=12345), 0, 0.0)
+            self.wrapper.positionEnd()
+
+        def reqOpenOrders(self) -> None:  # noqa: N802
+            self.wrapper.openOrderEnd()
+
+        def emit_open_order(self, *, order_id: int, account: str, local_symbol: str, perm_id: int) -> None:
+            contract = FakeContract(localSymbol=local_symbol, conId=12345)
+            order = FakeOrder()
+            order.account = account
+            order.action = "BUY"
+            order.totalQuantity = 1
+            order.orderType = "LMT"
+            order.lmtPrice = 2345.2
+            order.tif = "DAY"
+            order.permId = perm_id
+            order.clientId = 77
+            state = types.SimpleNamespace(status="Filled")
+            self.wrapper.openOrder(order_id, contract, order, state)
+
+        def emit_exec_details(self, *, order_id: int, account: str, local_symbol: str, perm_id: int, exec_id: str) -> None:
+            contract = FakeContract(localSymbol=local_symbol, conId=12345)
+            execution = types.SimpleNamespace(
+                orderId=order_id,
+                acctNumber=account,
+                permId=perm_id,
+                execId=exec_id,
+                side="BOT",
+                shares=1,
+                price=2345.2,
+            )
+            self.wrapper.execDetails(1, contract, execution)
+
+    class FakeContract:
+        def __init__(self, **kwargs: object) -> None:
+            self.symbol = kwargs.get("symbol", "MGC")
+            self.secType = kwargs.get("secType", "FUT")
+            self.exchange = kwargs.get("exchange", "COMEX")
+            self.currency = kwargs.get("currency", "USD")
+            self.localSymbol = kwargs.get("localSymbol", "")
+            self.conId = kwargs.get("conId", 0)
+            self.multiplier = kwargs.get("multiplier", "10")
+            self.lastTradeDateOrContractMonth = kwargs.get("lastTradeDateOrContractMonth", "20260626")
+
+    class FakeOrder:
+        pass
+
+    modules = {
+        "ibapi.wrapper": types.SimpleNamespace(EWrapper=FakeWrapper),
+        "ibapi.client": types.SimpleNamespace(EClient=FakeClient),
+        "ibapi.contract": types.SimpleNamespace(Contract=FakeContract),
+        "ibapi.order": types.SimpleNamespace(Order=FakeOrder),
+    }
+
+    def loader(name: str):
+        return modules[name]
+
+    return loader

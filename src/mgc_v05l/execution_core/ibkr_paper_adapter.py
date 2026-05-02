@@ -8,10 +8,11 @@ can exercise callback normalization without TWS or ibapi installed.
 from __future__ import annotations
 
 import importlib
+import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .models import (
     Action,
@@ -69,6 +70,10 @@ class IbkrPaperAdapter:
         account_id: str,
         contract_allowlist: Mapping[str, Mapping[str, Any]],
         submit_enabled: bool = False,
+        module_loader: Callable[[str], Any] | None = None,
+        request_timeout_seconds: float = 30.0,
+        fill_timeout_seconds: float = 30.0,
+        cancel_timeout_seconds: float = 10.0,
     ) -> None:
         self.mode = str(mode or "").strip().upper()
         self.host = str(host or "").strip()
@@ -77,16 +82,55 @@ class IbkrPaperAdapter:
         self.account_id = str(account_id or "").strip()
         self.contract_allowlist = {str(key): dict(value) for key, value in contract_allowlist.items()}
         self.submit_enabled = bool(submit_enabled)
+        self._module_loader = module_loader or importlib.import_module
+        self.request_timeout_seconds = float(request_timeout_seconds)
+        self.fill_timeout_seconds = float(fill_timeout_seconds)
+        self.cancel_timeout_seconds = float(cancel_timeout_seconds)
         self._validate_config()
 
+        self._bridge: Any | None = None
+        self._thread: threading.Thread | None = None
+        self._contract_cls: Any | None = None
+        self._order_cls: Any | None = None
         self._managed_accounts: tuple[str, ...] = ()
         self.next_valid_id: int | None = None
         self._submit_contexts: dict[str, SubmitContext] = {}
+        self._local_order_to_submit: dict[str, str] = {}
         self._broker_orders: dict[str, BrokerOrder] = {}
+        self._fills: dict[str, FillEvent] = {}
         self._positions: dict[str, PositionState] = {}
         self._seen_execution_ids: set[str] = set()
         self.ambiguous_contexts: dict[str, str] = {}
         self.missing_callbacks: set[str] = set()
+        self.ibkr_errors: list[dict[str, Any]] = []
+        self._managed_accounts_ready = threading.Event()
+        self._next_valid_id_ready = threading.Event()
+        self._order_ready: dict[str, threading.Event] = {}
+        self._fill_ready: dict[str, threading.Event] = {}
+        self._cancel_ready: dict[str, threading.Event] = {}
+        self._positions_ready = threading.Event()
+        self._open_orders_ready = threading.Event()
+
+    def connect(self) -> None:
+        self._bridge = self._build_bridge()
+        self._bridge.connect(self.host, self.port, self.client_id)
+        self._thread = threading.Thread(target=self._bridge.run, name="track-b-ibkr-paper-submit", daemon=True)
+        self._thread.start()
+        self._wait(self._next_valid_id_ready, "nextValidId", self.request_timeout_seconds)
+
+    def disconnect(self) -> None:
+        if self._bridge is not None:
+            self._bridge.disconnect()
+
+    def bridge_for_test(self) -> Any:
+        return self._require_bridge()
+
+    def managed_accounts(self) -> tuple[str, ...]:
+        bridge = self._require_bridge()
+        if not self._managed_accounts:
+            bridge.reqManagedAccts()
+        self._wait(self._managed_accounts_ready, "managedAccounts", self.request_timeout_seconds)
+        return self._managed_accounts
 
     def record_managed_accounts(self, accounts: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
         if isinstance(accounts, str):
@@ -94,6 +138,7 @@ class IbkrPaperAdapter:
         else:
             rows = tuple(str(account or "").strip() for account in accounts if str(account or "").strip())
         self._managed_accounts = rows
+        self._managed_accounts_ready.set()
         return rows
 
     def require_account(self, account_id: str | None = None) -> str:
@@ -113,6 +158,7 @@ class IbkrPaperAdapter:
         if order_id is None or int(order_id) <= 0:
             raise IbkrPaperReadinessError("nextValidId must be a positive integer")
         self.next_valid_id = int(order_id)
+        self._next_valid_id_ready.set()
         return self.next_valid_id
 
     def readiness_report(self) -> dict[str, Any]:
@@ -281,7 +327,7 @@ class IbkrPaperAdapter:
         if normalized_execution_id in self._seen_execution_ids:
             self._mark_ambiguous(submit_attempt_id, "duplicate execution_id")
         self._seen_execution_ids.add(normalized_execution_id)
-        return FillEvent(
+        fill = FillEvent(
             fill_event_id=f"ibkr_fill_{submit_attempt_id}_{normalized_execution_id}",
             run_id=context.submit_attempt.run_id,
             submit_attempt_id=submit_attempt_id,
@@ -297,6 +343,9 @@ class IbkrPaperAdapter:
             filled_at=filled_at,
             raw=dict(raw or {}),
         )
+        self._fills[submit_attempt_id] = fill
+        self._fill_ready.setdefault(submit_attempt_id, threading.Event()).set()
+        return fill
 
     def record_position_callback(
         self,
@@ -334,6 +383,13 @@ class IbkrPaperAdapter:
         except KeyError as exc:
             raise IbkrPaperReadinessError("missing position callback for exact contract") from exc
 
+    def refresh_positions(self, *, contract_key: str) -> PositionState:
+        bridge = self._require_bridge()
+        self._positions_ready.clear()
+        bridge.reqPositions()
+        self._wait(self._positions_ready, "positionEnd", self.request_timeout_seconds)
+        return self.snapshot_position(contract_key=contract_key)
+
     def snapshot_open_orders(self, *, contract_key: str | None = None) -> tuple[BrokerOrder, ...]:
         rows = tuple(
             order
@@ -345,19 +401,312 @@ class IbkrPaperAdapter:
         self._require_allowlisted_contract(contract_key)
         return tuple(order for order in rows if order.contract_key == contract_key)
 
-    def submit_limit_order(self, *, submit_attempt: SubmitAttempt, order_intent: OrderIntent) -> None:
+    def refresh_open_orders(self, *, contract_key: str | None = None) -> tuple[BrokerOrder, ...]:
+        bridge = self._require_bridge()
+        self._open_orders_ready.clear()
+        bridge.reqOpenOrders()
+        self._wait(self._open_orders_ready, "openOrderEnd", self.request_timeout_seconds)
+        return self.snapshot_open_orders(contract_key=contract_key)
+
+    def submit_limit_order(self, *, submit_attempt: SubmitAttempt, order_intent: OrderIntent) -> int:
         if not self.submit_enabled:
             raise IbkrPaperSubmitDisabledError("submit_enabled must be true before any broker submit")
         if order_intent.order_type != "LMT":
             raise IbkrPaperConfigError("market orders are forbidden; order_type must be LMT")
+        if order_intent.time_in_force != "DAY":
+            raise IbkrPaperConfigError("time_in_force must be DAY")
+        if order_intent.quantity != Decimal("1"):
+            raise IbkrPaperConfigError("quantity must be exactly 1")
+        if _has_forbidden_order_fields(order_intent.extra_fields):
+            raise IbkrPaperConfigError("bracket/OCO/parent/child/algo fields are forbidden")
         self.require_ready()
         self.register_submit_context(
             submit_attempt=submit_attempt,
             order_intent=order_intent,
             created_at=submit_attempt.submitted_at,
         )
-        _load_ibapi()
-        raise NotImplementedError("real IBKR submit transport is intentionally not wired in slice 3A")
+        bridge = self._require_bridge()
+        local_order_id = self._allocate_local_order_id(submit_attempt)
+        self._local_order_to_submit[str(local_order_id)] = submit_attempt.submit_attempt_id
+        self._order_ready.setdefault(submit_attempt.submit_attempt_id, threading.Event())
+        self._fill_ready.setdefault(submit_attempt.submit_attempt_id, threading.Event())
+        bridge.placeOrder(
+            local_order_id,
+            self._contract_from_allowlist(order_intent.contract_key),
+            self._order_from_intent(order_intent),
+        )
+        return local_order_id
+
+    def wait_for_broker_order(self, *, submit_attempt_id: str, timeout_seconds: float | None = None) -> BrokerOrder:
+        self._wait(
+            self._order_ready.setdefault(submit_attempt_id, threading.Event()),
+            "openOrder/orderStatus",
+            timeout_seconds or self.request_timeout_seconds,
+        )
+        for order in self._broker_orders.values():
+            if order.submit_attempt_id == submit_attempt_id:
+                return order
+        raise IbkrPaperReadinessError("missing broker order observation")
+
+    def wait_for_fill(self, *, submit_attempt_id: str, timeout_seconds: float | None = None) -> FillEvent:
+        self._wait(
+            self._fill_ready.setdefault(submit_attempt_id, threading.Event()),
+            "execDetails",
+            timeout_seconds or self.fill_timeout_seconds,
+        )
+        fill = self._fills.get(submit_attempt_id)
+        if fill is not None:
+            return fill
+        raise IbkrPaperReadinessError("missing fill observation")
+
+    def cancel_order(self, *, submit_attempt_id: str, broker_order_id: str) -> None:
+        if not self.submit_enabled:
+            raise IbkrPaperSubmitDisabledError("submit_enabled must be true before broker cancel")
+        bridge = self._require_bridge()
+        local_order_id = int(str(broker_order_id))
+        self._cancel_ready.setdefault(submit_attempt_id, threading.Event())
+        try:
+            bridge.cancelOrder(local_order_id, "")
+        except TypeError:
+            bridge.cancelOrder(local_order_id)
+
+    def wait_for_cancel(self, *, submit_attempt_id: str, timeout_seconds: float | None = None) -> None:
+        self._wait(
+            self._cancel_ready.setdefault(submit_attempt_id, threading.Event()),
+            "cancel orderStatus",
+            timeout_seconds or self.cancel_timeout_seconds,
+        )
+
+    def _build_bridge(self) -> Any:
+        wrapper_module = self._load_module("ibapi.wrapper")
+        client_module = self._load_module("ibapi.client")
+        contract_module = self._load_module("ibapi.contract")
+        order_module = self._load_module("ibapi.order")
+        wrapper_cls = getattr(wrapper_module, "EWrapper")
+        client_cls = getattr(client_module, "EClient")
+        self._contract_cls = getattr(contract_module, "Contract")
+        self._order_cls = getattr(order_module, "Order")
+        owner = self
+
+        class PaperSubmitBridge(wrapper_cls, client_cls):  # type: ignore[misc, valid-type]
+            def __init__(self) -> None:
+                wrapper_cls.__init__(self)
+                client_cls.__init__(self, self)
+
+            def nextValidId(self, orderId: int) -> None:  # noqa: N802
+                owner.record_next_valid_id(orderId)
+
+            def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
+                owner.record_managed_accounts(accountsList)
+
+            def openOrder(self, orderId: int, contract: Any, order: Any, orderState: Any) -> None:  # noqa: N802
+                owner._record_open_order_callback(orderId, contract, order, orderState)
+
+            def orderStatus(self, orderId: int, status: str, filled: float, remaining: float, avgFillPrice: float, *args: Any) -> None:  # noqa: N802, ARG002
+                owner._record_order_status_callback(orderId, status, filled, remaining, avgFillPrice)
+
+            def execDetails(self, reqId: int, contract: Any, execution: Any) -> None:  # noqa: N802, ARG002
+                owner._record_exec_details_callback(contract, execution)
+
+            def completedOrder(self, contract: Any, order: Any, orderState: Any) -> None:  # noqa: N802
+                owner._record_completed_order_callback(contract, order, orderState)
+
+            def position(self, account: str, contract: Any, pos: float, avgCost: float) -> None:
+                owner._record_position_callback(account, contract, pos, avgCost)
+
+            def positionEnd(self) -> None:  # noqa: N802
+                owner._positions_ready.set()
+
+            def openOrderEnd(self) -> None:  # noqa: N802
+                owner._open_orders_ready.set()
+
+            def error(self, *args: Any) -> None:  # noqa: N802
+                owner._record_error(args)
+
+        return PaperSubmitBridge()
+
+    def _load_module(self, name: str) -> Any:
+        try:
+            return self._module_loader(name)
+        except ModuleNotFoundError as exc:
+            raise IbkrPaperConfigError(f"optional IBKR API module is unavailable: {name}") from exc
+
+    def _require_bridge(self) -> Any:
+        if self._bridge is None:
+            raise IbkrPaperReadinessError("IBKR paper adapter is not connected")
+        return self._bridge
+
+    def _wait(self, event: threading.Event, callback_name: str, timeout_seconds: float) -> None:
+        if not event.wait(float(timeout_seconds)):
+            self.missing_callbacks.add(callback_name)
+            raise IbkrPaperReadinessError(f"missing {callback_name} callback")
+
+    def _allocate_local_order_id(self, submit_attempt: SubmitAttempt) -> int:
+        explicit = str(submit_attempt.broker_order_id or "").strip()
+        if explicit:
+            return int(explicit)
+        if self.next_valid_id is None:
+            raise IbkrPaperReadinessError("missing nextValidId callback")
+        local_order_id = int(self.next_valid_id)
+        self.next_valid_id += 1
+        return local_order_id
+
+    def _contract_from_allowlist(self, contract_key: str) -> Any:
+        entry = self._require_allowlisted_contract(contract_key)
+        if self._contract_cls is None:
+            self._load_module("ibapi.contract")
+        contract = self._contract_cls()
+        contract.symbol = str(entry.get("symbol") or "")
+        contract.secType = str(entry.get("security_type") or entry.get("secType") or "FUT")
+        contract.exchange = str(entry.get("exchange") or "")
+        contract.currency = str(entry.get("currency") or "USD")
+        contract.lastTradeDateOrContractMonth = str(entry.get("expiry") or entry.get("contract_month") or "")
+        if entry.get("local_symbol"):
+            contract.localSymbol = str(entry["local_symbol"])
+        if entry.get("con_id") is not None:
+            contract.conId = int(entry["con_id"])
+        if entry.get("multiplier") is not None:
+            contract.multiplier = str(entry["multiplier"])
+        return contract
+
+    def _order_from_intent(self, order_intent: OrderIntent) -> Any:
+        if self._order_cls is None:
+            self._load_module("ibapi.order")
+        order = self._order_cls()
+        order.account = order_intent.account_id
+        order.action = order_intent.action.value
+        order.totalQuantity = float(order_intent.quantity)
+        order.orderType = order_intent.order_type
+        order.lmtPrice = float(order_intent.limit_price)
+        order.tif = order_intent.time_in_force
+        order.transmit = True
+        return order
+
+    def _record_open_order_callback(self, order_id: int, contract: Any, order: Any, order_state: Any) -> None:
+        submit_attempt_id = self._submit_id_for_local_order(order_id)
+        if submit_attempt_id is None:
+            return
+        broker_order = self.map_order_callback(
+            submit_attempt_id=submit_attempt_id,
+            account_id=str(getattr(order, "account", "") or ""),
+            broker_order_id=str(order_id),
+            perm_id=str(getattr(order, "permId", "") or "") or None,
+            client_id=getattr(order, "clientId", None),
+            contract_key=self._contract_key_from_contract(contract),
+            action=str(getattr(order, "action", "") or ""),
+            quantity=getattr(order, "totalQuantity", 1),
+            order_type=str(getattr(order, "orderType", "") or ""),
+            limit_price=getattr(order, "lmtPrice", 0),
+            status=str(getattr(order_state, "status", "") or "Submitted"),
+            filled_quantity=0,
+            remaining_quantity=getattr(order, "totalQuantity", 1),
+            average_fill_price=None,
+            observed_at=datetime.now(timezone.utc),
+            raw={"callback": "openOrder"},
+        )
+        self._order_ready.setdefault(submit_attempt_id, threading.Event()).set()
+        if _is_cancelled_status(broker_order.status):
+            self._cancel_ready.setdefault(submit_attempt_id, threading.Event()).set()
+
+    def _record_order_status_callback(self, order_id: int, status: str, filled: float, remaining: float, avg_fill_price: float) -> None:
+        submit_attempt_id = self._submit_id_for_local_order(order_id)
+        if submit_attempt_id is None:
+            return
+        context = self._context(submit_attempt_id)
+        broker_order = self.map_order_callback(
+            submit_attempt_id=submit_attempt_id,
+            account_id=context.order_intent.account_id,
+            broker_order_id=str(order_id),
+            perm_id=context.submit_attempt.perm_id,
+            client_id=self.client_id,
+            contract_key=context.order_intent.contract_key,
+            action=context.order_intent.action,
+            quantity=context.order_intent.quantity,
+            order_type=context.order_intent.order_type,
+            limit_price=context.order_intent.limit_price,
+            status=status,
+            filled_quantity=filled,
+            remaining_quantity=remaining,
+            average_fill_price=avg_fill_price if filled else None,
+            observed_at=datetime.now(timezone.utc),
+            raw={"callback": "orderStatus"},
+        )
+        self._order_ready.setdefault(submit_attempt_id, threading.Event()).set()
+        if _is_cancelled_status(broker_order.status):
+            self._cancel_ready.setdefault(submit_attempt_id, threading.Event()).set()
+
+    def _record_exec_details_callback(self, contract: Any, execution: Any) -> None:
+        order_id = getattr(execution, "orderId", None)
+        submit_attempt_id = self._submit_id_for_local_order(order_id)
+        if submit_attempt_id is None:
+            return
+        side = str(getattr(execution, "side", "") or "").upper()
+        action = "BUY" if side in {"BOT", "BUY"} else "SELL"
+        self.map_exec_details(
+            submit_attempt_id=submit_attempt_id,
+            account_id=str(getattr(execution, "acctNumber", "") or self.account_id),
+            broker_order_id=str(order_id),
+            perm_id=str(getattr(execution, "permId", "") or "") or None,
+            execution_id=str(getattr(execution, "execId", "") or ""),
+            contract_key=self._contract_key_from_contract(contract),
+            action=action,
+            quantity=getattr(execution, "shares", 1),
+            price=getattr(execution, "price", 0),
+            filled_at=datetime.now(timezone.utc),
+            raw={"callback": "execDetails"},
+        )
+
+    def _record_completed_order_callback(self, contract: Any, order: Any, order_state: Any) -> None:
+        order_id = getattr(order, "orderId", None)
+        if order_id is not None:
+            self._record_open_order_callback(int(order_id), contract, order, order_state)
+
+    def _record_position_callback(self, account: str, contract: Any, pos: float, avg_cost: float) -> None:
+        contract_key = self._contract_key_from_contract(contract)
+        self.record_position_callback(
+            run_id="ibkr_position_snapshot",
+            account_id=account,
+            contract_key=contract_key,
+            signed_quantity=int(pos),
+            average_price=avg_cost,
+            observed_at=datetime.now(timezone.utc),
+            raw={"callback": "position"},
+        )
+
+    def _record_error(self, args: tuple[Any, ...]) -> None:
+        raw_args = [repr(arg) for arg in args]
+        if len(args) >= 4 and isinstance(args[2], int):
+            request_id = int(args[0])
+            error_code = int(args[2])
+            error_string = str(args[3])
+        elif len(args) >= 3:
+            request_id = int(args[0])
+            error_code = int(args[1])
+            error_string = str(args[2])
+        else:
+            request_id = -1
+            error_code = -1
+            error_string = "unknown IBKR error callback shape"
+        self.ibkr_errors.append(
+            {"request_id": request_id, "error_code": error_code, "error_string": error_string, "raw_args": raw_args}
+        )
+
+    def _submit_id_for_local_order(self, order_id: Any) -> str | None:
+        return self._local_order_to_submit.get(str(order_id))
+
+    def _contract_key_from_contract(self, contract: Any) -> str:
+        con_id = getattr(contract, "conId", None)
+        local_symbol = str(getattr(contract, "localSymbol", "") or "")
+        for contract_key, entry in self.contract_allowlist.items():
+            if con_id is not None and entry.get("con_id") is not None and int(entry["con_id"]) == int(con_id):
+                return contract_key
+            if local_symbol and str(entry.get("local_symbol") or "") == local_symbol:
+                return contract_key
+        symbol = str(getattr(contract, "symbol", "") or "")
+        for contract_key, entry in self.contract_allowlist.items():
+            if symbol and str(entry.get("symbol") or "") == symbol:
+                return contract_key
+        raise IbkrPaperCorrelationError("contract callback did not match allowlist")
 
     def _validate_config(self) -> None:
         if self.mode != "PAPER":
@@ -422,6 +771,19 @@ class IbkrPaperAdapter:
 def _is_working_order(status: str, remaining_quantity: Decimal | int | str) -> bool:
     remaining = normalize_decimal(remaining_quantity, "remaining_quantity")
     return remaining > 0 and str(status or "").strip().upper() not in {"CANCELLED", "CANCELED", "FILLED", "INACTIVE"}
+
+
+def _is_cancelled_status(status: str) -> bool:
+    return str(status or "").strip().upper() in {"CANCELLED", "CANCELED"}
+
+
+def _has_forbidden_order_fields(extra_fields: Mapping[str, Any]) -> bool:
+    forbidden = {"algo", "algostrategy", "bracket", "child", "children", "oca", "ocagroup", "oco", "parent", "parentid"}
+    for key in extra_fields:
+        normalized = str(key).replace("_", "").replace("-", "").strip().lower()
+        if normalized in forbidden:
+            return True
+    return False
 
 
 def _load_ibapi() -> Any:
