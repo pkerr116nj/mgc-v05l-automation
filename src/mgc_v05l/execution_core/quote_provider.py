@@ -27,6 +27,7 @@ class QuoteSnapshot(JsonSerializable):
     mode: str
     role: str
     contract_key: str
+    provider_symbol: str | None
     bid: Decimal | int | float | str | None
     ask: Decimal | int | float | str | None
     last: Decimal | int | float | str | None
@@ -44,6 +45,8 @@ class QuoteSnapshot(JsonSerializable):
         object.__setattr__(self, "mode", _normalize_mode(self.mode))
         object.__setattr__(self, "role", _normalize_role(self.role))
         object.__setattr__(self, "contract_key", require_id(self.contract_key, "contract_key"))
+        if self.provider_symbol is not None:
+            object.__setattr__(self, "provider_symbol", require_id(self.provider_symbol, "provider_symbol"))
         object.__setattr__(self, "timestamp", require_aware_datetime(self.timestamp, "timestamp"))
         if self.tick_size is not None:
             object.__setattr__(self, "tick_size", normalize_decimal(self.tick_size, "tick_size"))

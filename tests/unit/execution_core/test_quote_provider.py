@@ -24,6 +24,7 @@ def quote(**overrides: object) -> QuoteSnapshot:
         "mode": MarketDataMode.REALTIME,
         "role": MarketDataRole.PRIMARY,
         "contract_key": "MGC-202606",
+        "provider_symbol": "MGCM6",
         "bid": "4626.0",
         "ask": "4626.1",
         "last": "4626.0",
@@ -54,6 +55,7 @@ def test_fake_provider_returns_quote_snapshot() -> None:
     snapshot = provider.get_quote("MGC-202606")
 
     assert snapshot.provider == "FAKE"
+    assert snapshot.provider_symbol == "MGCM6"
     assert snapshot.contract_key == "MGC-202606"
     assert snapshot.to_json_dict()["source_latency_ms"] == "12"
 
