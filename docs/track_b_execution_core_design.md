@@ -1142,7 +1142,7 @@ an automated production-capable execution core.
 ### Secrets And Reports
 
 - Credentials must not be committed to git.
-- Local config should be ignored unless an explicitly scrubbed template is being versioned.
+- Local config is ignored unless an explicitly scrubbed template is being versioned.
 - Proof reports may contain account and order data and should not be committed unless intentionally scrubbed.
 
 ### Data Retention
