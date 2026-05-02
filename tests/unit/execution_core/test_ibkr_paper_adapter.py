@@ -303,6 +303,8 @@ def test_submit_limit_order_places_lmt_day_only_after_explicit_enablement() -> N
     assert placed["order"].tif == "DAY"
     assert placed["order"].totalQuantity == 1.0
     assert placed["order"].transmit is True
+    assert placed["order"].eTradeOnly is False
+    assert placed["order"].firmQuoteOnly is False
     diagnostics = paper.submit_diagnostics("submit-1")
     assert diagnostics["place_order_called"] is True
     assert diagnostics["place_order_called_at"] is not None
@@ -407,20 +409,20 @@ def test_place_order_exception_is_captured_in_diagnostics() -> None:
     assert diagnostics["broker_order_id_allocated"] == "1001"
 
 
-def test_error_callback_after_submit_is_included_in_diagnostics() -> None:
+def test_unsupported_order_attribute_error_after_submit_is_included_in_diagnostics() -> None:
     paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader())
     paper.connect()
     paper.submit_limit_order(submit_attempt=submit_attempt(broker_order_id="1001"), order_intent=order_intent())
 
-    paper.bridge_for_test().error(1001, 201, "order rejected")
+    paper.bridge_for_test().error(1001, 10268, "The 'EtradeOnly' order attribute is not supported.")
 
     diagnostics = paper.submit_diagnostics("submit-1")
     assert diagnostics["error_callbacks_after_submit"] == [
         {
             "request_id": 1001,
-            "error_code": 201,
-            "error_string": "order rejected",
-            "raw_args": ["1001", "201", "'order rejected'"],
+            "error_code": 10268,
+            "error_string": "The 'EtradeOnly' order attribute is not supported.",
+            "raw_args": ["1001", "10268", "\"The 'EtradeOnly' order attribute is not supported.\""],
         }
     ]
 
@@ -508,7 +510,9 @@ def fake_ibapi_loader(*, place_order_error: Exception | None = None):
             self.lastTradeDateOrContractMonth = kwargs.get("lastTradeDateOrContractMonth", "20260626")
 
     class FakeOrder:
-        pass
+        def __init__(self) -> None:
+            self.eTradeOnly = True
+            self.firmQuoteOnly = True
 
     modules = {
         "ibapi.wrapper": types.SimpleNamespace(EWrapper=FakeWrapper),

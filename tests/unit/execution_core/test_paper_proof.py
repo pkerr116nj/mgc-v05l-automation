@@ -176,7 +176,14 @@ class RecordingPaperAdapter:
             "orderStatus_seen": False,
             "execDetails_seen": False,
             "completedOrder_seen": False,
-            "error_callbacks_after_submit": [{"request_id": 1, "error_code": 201, "error_string": "simulated", "raw_args": []}],
+            "error_callbacks_after_submit": [
+                {
+                    "request_id": 1,
+                    "error_code": 10268,
+                    "error_string": "The 'EtradeOnly' order attribute is not supported.",
+                    "raw_args": [],
+                }
+            ],
             "isConnected_before_placeOrder": True,
             "isConnected_after_placeOrder": True,
             "isConnected_after_callback_wait": True,
@@ -472,7 +479,8 @@ def test_real_runner_reports_submit_diagnostics_when_open_callbacks_are_missing(
     assert diagnostics["orderStatus_seen"] is False
     assert diagnostics["execDetails_seen"] is False
     assert diagnostics["completedOrder_seen"] is False
-    assert diagnostics["error_callbacks_after_submit"][0]["error_code"] == 201
+    assert diagnostics["error_callbacks_after_submit"][0]["error_code"] == 10268
+    assert "EtradeOnly" in diagnostics["error_callbacks_after_submit"][0]["error_string"]
 
 
 def test_delayed_data_can_pass_paper_proof_but_not_live_money_readiness(tmp_path: Path) -> None:

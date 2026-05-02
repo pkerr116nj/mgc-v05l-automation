@@ -629,6 +629,7 @@ class IbkrPaperAdapter:
         order.orderType = order_intent.order_type
         order.lmtPrice = float(order_intent.limit_price)
         order.tif = order_intent.time_in_force
+        _normalize_unsupported_order_defaults(order)
         order.transmit = True
         return order
 
@@ -851,6 +852,14 @@ def _has_forbidden_order_fields(extra_fields: Mapping[str, Any]) -> bool:
         if normalized in forbidden:
             return True
     return False
+
+
+def _normalize_unsupported_order_defaults(order: Any) -> None:
+    """Clear legacy IBKR defaults that TWS rejects for futures paper orders."""
+
+    for attr in ("eTradeOnly", "firmQuoteOnly"):
+        if hasattr(order, attr):
+            setattr(order, attr, False)
 
 
 def _load_ibapi() -> Any:
