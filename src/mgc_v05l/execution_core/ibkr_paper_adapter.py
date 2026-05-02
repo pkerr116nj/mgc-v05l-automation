@@ -8,6 +8,7 @@ can exercise callback normalization without TWS or ibapi installed.
 from __future__ import annotations
 
 import importlib
+import sys
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -860,6 +861,8 @@ def _normalize_unsupported_order_defaults(order: Any) -> None:
     for attr in ("eTradeOnly", "firmQuoteOnly"):
         if hasattr(order, attr):
             setattr(order, attr, False)
+    if hasattr(order, "nbboPriceCap"):
+        setattr(order, "nbboPriceCap", sys.float_info.max)
 
 
 def _load_ibapi() -> Any:

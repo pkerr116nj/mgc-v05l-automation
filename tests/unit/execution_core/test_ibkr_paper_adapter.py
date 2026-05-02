@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import types
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -305,6 +306,7 @@ def test_submit_limit_order_places_lmt_day_only_after_explicit_enablement() -> N
     assert placed["order"].transmit is True
     assert placed["order"].eTradeOnly is False
     assert placed["order"].firmQuoteOnly is False
+    assert placed["order"].nbboPriceCap == sys.float_info.max
     diagnostics = paper.submit_diagnostics("submit-1")
     assert diagnostics["place_order_called"] is True
     assert diagnostics["place_order_called_at"] is not None
@@ -409,20 +411,31 @@ def test_place_order_exception_is_captured_in_diagnostics() -> None:
     assert diagnostics["broker_order_id_allocated"] == "1001"
 
 
-def test_unsupported_order_attribute_error_after_submit_is_included_in_diagnostics() -> None:
+@pytest.mark.parametrize(
+    ("error_code", "attribute"),
+    [
+        (10268, "EtradeOnly"),
+        (10269, "firmQuoteOnly"),
+        (10270, "nbboPriceCap"),
+    ],
+)
+def test_deprecated_order_attribute_error_after_submit_is_included_in_diagnostics(
+    error_code: int,
+    attribute: str,
+) -> None:
     paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader())
     paper.connect()
     paper.submit_limit_order(submit_attempt=submit_attempt(broker_order_id="1001"), order_intent=order_intent())
 
-    paper.bridge_for_test().error(1001, 10268, "The 'EtradeOnly' order attribute is not supported.")
+    paper.bridge_for_test().error(1001, error_code, f"The '{attribute}' order attribute is not supported.")
 
     diagnostics = paper.submit_diagnostics("submit-1")
     assert diagnostics["error_callbacks_after_submit"] == [
         {
             "request_id": 1001,
-            "error_code": 10268,
-            "error_string": "The 'EtradeOnly' order attribute is not supported.",
-            "raw_args": ["1001", "10268", "\"The 'EtradeOnly' order attribute is not supported.\""],
+            "error_code": error_code,
+            "error_string": f"The '{attribute}' order attribute is not supported.",
+            "raw_args": ["1001", str(error_code), f"\"The '{attribute}' order attribute is not supported.\""],
         }
     ]
 
@@ -513,6 +526,7 @@ def fake_ibapi_loader(*, place_order_error: Exception | None = None):
         def __init__(self) -> None:
             self.eTradeOnly = True
             self.firmQuoteOnly = True
+            self.nbboPriceCap = 123.45
 
     modules = {
         "ibapi.wrapper": types.SimpleNamespace(EWrapper=FakeWrapper),

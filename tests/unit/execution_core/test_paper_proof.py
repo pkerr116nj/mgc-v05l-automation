@@ -182,7 +182,19 @@ class RecordingPaperAdapter:
                     "error_code": 10268,
                     "error_string": "The 'EtradeOnly' order attribute is not supported.",
                     "raw_args": [],
-                }
+                },
+                {
+                    "request_id": 1,
+                    "error_code": 10269,
+                    "error_string": "The 'firmQuoteOnly' order attribute is not supported.",
+                    "raw_args": [],
+                },
+                {
+                    "request_id": 1,
+                    "error_code": 10270,
+                    "error_string": "The 'nbboPriceCap' order attribute is not supported.",
+                    "raw_args": [],
+                },
             ],
             "isConnected_before_placeOrder": True,
             "isConnected_after_placeOrder": True,
@@ -479,8 +491,10 @@ def test_real_runner_reports_submit_diagnostics_when_open_callbacks_are_missing(
     assert diagnostics["orderStatus_seen"] is False
     assert diagnostics["execDetails_seen"] is False
     assert diagnostics["completedOrder_seen"] is False
-    assert diagnostics["error_callbacks_after_submit"][0]["error_code"] == 10268
+    assert [error["error_code"] for error in diagnostics["error_callbacks_after_submit"]] == [10268, 10269, 10270]
     assert "EtradeOnly" in diagnostics["error_callbacks_after_submit"][0]["error_string"]
+    assert "firmQuoteOnly" in diagnostics["error_callbacks_after_submit"][1]["error_string"]
+    assert "nbboPriceCap" in diagnostics["error_callbacks_after_submit"][2]["error_string"]
 
 
 def test_delayed_data_can_pass_paper_proof_but_not_live_money_readiness(tmp_path: Path) -> None:
