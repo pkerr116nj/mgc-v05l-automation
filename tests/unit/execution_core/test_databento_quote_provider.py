@@ -171,6 +171,13 @@ def test_fake_transport_valid_realtime_quote_returns_track_b_snapshot() -> None:
     assert snapshot.raw["parser_ask_field_source"] == "levels[0].ask_px"
     assert snapshot.raw["parser_last_field_source"] == "price"
     assert snapshot.raw["no_quote_records_reason"] is None
+    assert snapshot.raw["quote_temporal_scope"] == "UNKNOWN"
+    assert snapshot.raw["active_session_quote"] is True
+    assert snapshot.raw["current_executable_quote"] is True
+    assert snapshot.raw["session_closed_or_no_records"] is False
+    assert snapshot.raw["no_records_reason"] is None
+    assert snapshot.raw["quote_usable_for_paper_pricing"] is True
+    assert snapshot.raw["quote_usable_for_live_money_readiness"] is True
     assert snapshot.exchange == "COMEX"
     assert snapshot.currency == "USD"
     assert snapshot.delayed_data_warning_seen is False
@@ -236,6 +243,57 @@ def test_native_client_empty_dataframe_fails_cleanly() -> None:
         provider.get_quote("MGC-202606")
 
     assert exc_info.value.diagnostics["records_returned"] == {"bid_ask": 0, "trades": 0}
+    assert exc_info.value.diagnostics["session_closed_or_no_records"] is True
+    assert exc_info.value.diagnostics["no_records_reason"] == "UNKNOWN"
+    assert exc_info.value.diagnostics["quote_usable_for_paper_pricing"] is False
+    assert exc_info.value.diagnostics["quote_usable_for_live_money_readiness"] is False
+
+
+def test_historical_active_window_quote_is_diagnostic_not_executable() -> None:
+    fake_client = FakeNativeClient(
+        {
+            "mbp-1": ({"ts_event": "2026-05-01T19:59:59.900000+00:00", "bid_px_00": "4623.1", "ask_px_00": "4623.3"},),
+            "trades": ({"ts_event": "2026-05-01T19:59:59.800000+00:00", "price": "4623.0"},),
+        }
+    )
+    provider = DatabentoQuoteProvider(
+        config=config(quote_end_timestamp="2026-05-01T20:00:00+00:00", lookback_seconds=23400),
+        transport=NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client),
+        now=aware_now(),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert str(snapshot.bid) == "4623.1"
+    assert str(snapshot.ask) == "4623.3"
+    assert str(snapshot.last) == "4623.0"
+    assert snapshot.raw["quote_temporal_scope"] == "HISTORICAL_WINDOW"
+    assert snapshot.raw["active_session_quote"] is False
+    assert snapshot.raw["current_executable_quote"] is False
+    assert snapshot.raw["session_closed_or_no_records"] is False
+    assert snapshot.raw["quote_usable_for_paper_pricing"] is False
+    assert snapshot.raw["quote_usable_for_live_money_readiness"] is False
+    assert snapshot.raw["records_returned"] == {"bid_ask": 1, "trades": 1}
+
+
+def test_historical_zero_records_reports_closed_or_no_records_without_symbology_failure() -> None:
+    fake_client = FakeNativeClient({"mbp-1": (), "trades": ()})
+    provider = DatabentoQuoteProvider(
+        config=config(quote_end_timestamp="2026-05-03T04:30:00+00:00", lookback_seconds=300),
+        transport=NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client),
+        now=aware_now(),
+    )
+
+    with pytest.raises(DatabentoQuoteParseError) as exc_info:
+        provider.get_quote("MGC-202606")
+
+    diagnostics = exc_info.value.diagnostics
+    assert diagnostics["quote_temporal_scope"] == "HISTORICAL_WINDOW"
+    assert diagnostics["session_closed_or_no_records"] is True
+    assert diagnostics["no_records_reason"] == "WEEKEND_OR_CLOSED_SESSION"
+    assert diagnostics["quote_request_symbol"] == "MGCM6"
+    assert diagnostics["quote_request_stype_in"] == "raw_symbol"
+    assert diagnostics["records_returned"] == {"bid_ask": 0, "trades": 0}
 
 
 def native_available_end_error() -> RuntimeError:

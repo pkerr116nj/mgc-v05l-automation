@@ -122,11 +122,16 @@ def main(
             if isinstance(exc, DatabentoAvailableEndError)
             else None
         )
+        classification = (
+            "NO_ACTIVE_SESSION_OR_NO_RECORDS"
+            if parser_diagnostics.get("session_closed_or_no_records")
+            else "FAILED_BEFORE_QUOTE"
+        )
         report = {
             "schema_version": "track_b_databento_quote_v1",
             "run_id": run_id,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "classification": "FAILED_BEFORE_QUOTE",
+            "classification": classification,
             "contract_key": args.contract_key,
             "databento_continuous_symbol": continuous_symbol or None,
             "databento_symbol": raw_symbol or None,
@@ -172,6 +177,13 @@ def main(
             "parser_ask_field_source": parser_diagnostics.get("parser_ask_field_source"),
             "parser_last_field_source": parser_diagnostics.get("parser_last_field_source"),
             "no_quote_records_reason": parser_diagnostics.get("no_quote_records_reason"),
+            "quote_temporal_scope": parser_diagnostics.get("quote_temporal_scope"),
+            "active_session_quote": parser_diagnostics.get("active_session_quote"),
+            "current_executable_quote": parser_diagnostics.get("current_executable_quote"),
+            "session_closed_or_no_records": parser_diagnostics.get("session_closed_or_no_records"),
+            "no_records_reason": parser_diagnostics.get("no_records_reason"),
+            "quote_usable_for_paper_pricing": parser_diagnostics.get("quote_usable_for_paper_pricing"),
+            "quote_usable_for_live_money_readiness": parser_diagnostics.get("quote_usable_for_live_money_readiness"),
             "api_key_present": True,
             "api_key_value": None,
             "submit_enabled": False,
@@ -183,7 +195,7 @@ def main(
         print(
             json.dumps(
                 {
-                    "classification": "FAILED_BEFORE_QUOTE",
+                    "classification": classification,
                     "contract_key": args.contract_key,
                     "databento_continuous_symbol": continuous_symbol or None,
                     "databento_symbol": raw_symbol or None,
@@ -228,6 +240,13 @@ def main(
                     "parser_ask_field_source": report["parser_ask_field_source"],
                     "parser_last_field_source": report["parser_last_field_source"],
                     "no_quote_records_reason": report["no_quote_records_reason"],
+                    "quote_temporal_scope": report["quote_temporal_scope"],
+                    "active_session_quote": report["active_session_quote"],
+                    "current_executable_quote": report["current_executable_quote"],
+                    "session_closed_or_no_records": report["session_closed_or_no_records"],
+                    "no_records_reason": report["no_records_reason"],
+                    "quote_usable_for_paper_pricing": report["quote_usable_for_paper_pricing"],
+                    "quote_usable_for_live_money_readiness": report["quote_usable_for_live_money_readiness"],
                     "report_json": str(report_json),
                 },
                 sort_keys=True,
@@ -302,6 +321,8 @@ def main(
             "quote_age_seconds": quote.raw.get("quote_age_seconds"),
             "usable_for_paper_pricing": quote.raw.get("usable_for_paper_pricing"),
             "usable_for_live_money_readiness": quote.raw.get("usable_for_live_money_readiness"),
+            "quote_usable_for_paper_pricing": quote.raw.get("quote_usable_for_paper_pricing"),
+            "quote_usable_for_live_money_readiness": quote.raw.get("quote_usable_for_live_money_readiness"),
         },
         "databento_schema": quote.raw.get("databento_schema"),
         "records_returned": quote.raw.get("records_returned"),
@@ -310,6 +331,13 @@ def main(
         "parser_ask_field_source": quote.raw.get("parser_ask_field_source"),
         "parser_last_field_source": quote.raw.get("parser_last_field_source"),
         "no_quote_records_reason": quote.raw.get("no_quote_records_reason"),
+        "quote_temporal_scope": quote.raw.get("quote_temporal_scope"),
+        "active_session_quote": quote.raw.get("active_session_quote"),
+        "current_executable_quote": quote.raw.get("current_executable_quote"),
+        "session_closed_or_no_records": quote.raw.get("session_closed_or_no_records"),
+        "no_records_reason": quote.raw.get("no_records_reason"),
+        "quote_usable_for_paper_pricing": quote.raw.get("quote_usable_for_paper_pricing"),
+        "quote_usable_for_live_money_readiness": quote.raw.get("quote_usable_for_live_money_readiness"),
         "live_money_quote_ready": readiness_error is None,
         "readiness_error": readiness_error,
         "api_key_present": True,
@@ -373,6 +401,13 @@ def main(
                 "no_quote_records_reason": quote.raw.get("no_quote_records_reason"),
                 "usable_for_paper_pricing": quote.raw.get("usable_for_paper_pricing"),
                 "usable_for_live_money_readiness": quote.raw.get("usable_for_live_money_readiness"),
+                "quote_usable_for_paper_pricing": quote.raw.get("quote_usable_for_paper_pricing"),
+                "quote_usable_for_live_money_readiness": quote.raw.get("quote_usable_for_live_money_readiness"),
+                "quote_temporal_scope": quote.raw.get("quote_temporal_scope"),
+                "active_session_quote": quote.raw.get("active_session_quote"),
+                "current_executable_quote": quote.raw.get("current_executable_quote"),
+                "session_closed_or_no_records": quote.raw.get("session_closed_or_no_records"),
+                "no_records_reason": quote.raw.get("no_records_reason"),
                 "bid": str(quote.bid) if quote.bid is not None else None,
                 "ask": str(quote.ask) if quote.ask is not None else None,
                 "last": str(quote.last) if quote.last is not None else None,

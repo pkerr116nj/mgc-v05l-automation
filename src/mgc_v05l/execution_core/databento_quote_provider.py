@@ -586,6 +586,10 @@ class DatabentoQuoteProvider:
             if not available_end_fallback_used and (now - timestamp).total_seconds() <= int(self.config.realtime_max_age_seconds)
             else MarketDataMode.UNKNOWN
         )
+        quote_temporal_scope = _quote_temporal_scope(config=self.config, available_end_fallback_used=available_end_fallback_used)
+        active_session_quote = mode == MarketDataMode.REALTIME and quote_temporal_scope == "UNKNOWN"
+        quote_usable_for_paper_pricing = active_session_quote
+        quote_usable_for_live_money_readiness = active_session_quote
         return QuoteSnapshot(
             provider=self.provider_name,
             mode=mode,
@@ -622,8 +626,15 @@ class DatabentoQuoteProvider:
                 "available_end_buffer_seconds": int(self.config.available_end_buffer_seconds),
                 "available_end_retry_count": available_end_retry_count,
                 "quote_age_seconds": str((actual_end - timestamp).total_seconds()),
-                "usable_for_paper_pricing": mode == MarketDataMode.REALTIME,
-                "usable_for_live_money_readiness": mode == MarketDataMode.REALTIME,
+                "quote_temporal_scope": quote_temporal_scope,
+                "active_session_quote": active_session_quote,
+                "current_executable_quote": active_session_quote,
+                "session_closed_or_no_records": False,
+                "no_records_reason": None,
+                "quote_usable_for_paper_pricing": quote_usable_for_paper_pricing,
+                "quote_usable_for_live_money_readiness": quote_usable_for_live_money_readiness,
+                "usable_for_paper_pricing": quote_usable_for_paper_pricing,
+                "usable_for_live_money_readiness": quote_usable_for_live_money_readiness,
                 "symbol_source": resolved_symbol.symbol_source,
                 "requested_continuous_symbol": self.config.databento_continuous_symbol,
                 "manual_provider_symbol_override": self.config.databento_symbol,
@@ -981,10 +992,13 @@ def _quote_parser_diagnostics(
     ask_parse = _first_decimal_with_source(latest_bbo or {}, _ASK_KEYS)
     last_parse = _first_decimal_with_source(latest_trade or {}, _LAST_KEYS)
     no_quote_records_reason: str | None = None
+    no_records_reason: str | None = None
     if not bbo_records:
         no_quote_records_reason = f"no records returned for schema {config.bbo_schema}"
+        no_records_reason = _no_records_reason(config=config, provider_available_end=provider_available_end)
     elif latest_bbo is None:
         no_quote_records_reason = f"records returned for schema {config.bbo_schema}, but none contained parseable bid and ask fields"
+        no_records_reason = "ENTITLEMENT_OR_SCHEMA"
     bbo_request = _record_request_details(
         base_url=config.base_url,
         dataset=config.dataset,
@@ -1031,6 +1045,13 @@ def _quote_parser_diagnostics(
         "available_end_retry_attempted": bool(available_end_retry_attempted),
         "available_end_retry_count": int(available_end_retry_count),
         "available_end_retry_reason": available_end_retry_reason,
+        "quote_temporal_scope": _quote_temporal_scope(config=config, available_end_fallback_used=fallback_used),
+        "active_session_quote": False if no_quote_records_reason else None,
+        "current_executable_quote": False if no_quote_records_reason else None,
+        "session_closed_or_no_records": not bbo_records,
+        "no_records_reason": no_records_reason,
+        "quote_usable_for_paper_pricing": False,
+        "quote_usable_for_live_money_readiness": False,
         "raw_provider_error": None,
         "native_databento_error_code": None,
         "native_databento_error_message": None,
@@ -1366,6 +1387,20 @@ def _mapping_date(value: Any) -> date | None:
 
 def _date_to_datetime(value: date | None) -> datetime | None:
     return datetime(value.year, value.month, value.day, tzinfo=UTC) if value is not None else None
+
+
+def _quote_temporal_scope(*, config: DatabentoQuoteProviderConfig, available_end_fallback_used: bool) -> str:
+    if config.quote_end_timestamp:
+        return "HISTORICAL_WINDOW"
+    if available_end_fallback_used:
+        return "CURRENT_AVAILABLE_END"
+    return "UNKNOWN"
+
+
+def _no_records_reason(*, config: DatabentoQuoteProviderConfig, provider_available_end: datetime | None) -> str:
+    if config.quote_end_timestamp or provider_available_end is not None:
+        return "WEEKEND_OR_CLOSED_SESSION"
+    return "UNKNOWN"
 
 
 def _clamped_available_end(provider_available_end: datetime, buffer_seconds: int) -> datetime:

@@ -105,6 +105,13 @@ class FakeProvider:
                 "quote_age_seconds": "0.0",
                 "usable_for_paper_pricing": not self.config.allow_available_end_fallback,
                 "usable_for_live_money_readiness": not self.config.allow_available_end_fallback,
+                "quote_temporal_scope": "HISTORICAL_WINDOW" if self.config.quote_end_timestamp else "UNKNOWN",
+                "active_session_quote": self.config.quote_end_timestamp is None and not self.config.allow_available_end_fallback,
+                "current_executable_quote": self.config.quote_end_timestamp is None and not self.config.allow_available_end_fallback,
+                "session_closed_or_no_records": False,
+                "no_records_reason": None,
+                "quote_usable_for_paper_pricing": self.config.quote_end_timestamp is None and not self.config.allow_available_end_fallback,
+                "quote_usable_for_live_money_readiness": self.config.quote_end_timestamp is None and not self.config.allow_available_end_fallback,
                 "databento_schema": {"bid_ask": "mbp-1", "last": "trades"},
                 "records_returned": {"bid_ask": 1, "trades": 1},
                 "first_raw_record_keys_or_shape": {
@@ -221,6 +228,52 @@ class FailingParseProvider:
         )
 
 
+class FailingWeekendNoRecordsProvider:
+    def __init__(self, config: DatabentoQuoteProviderConfig) -> None:
+        self.config = config
+
+    def get_quote(self, contract_key: str) -> QuoteSnapshot:
+        raise DatabentoQuoteParseError(
+            "Databento returned no bid/ask quote records for schema mbp-1",
+            diagnostics={
+                "resolved_instrument_id": "42008160",
+                "resolved_symbol_stype": "instrument_id",
+                "quote_request_symbol": "42008160",
+                "quote_request_stype_in": "instrument_id",
+                "dataset": "GLBX.MDP3",
+                "schema": {"bid_ask": "mbp-1", "last": "trades"},
+                "start": "2026-05-03T04:20:00+00:00",
+                "end": "2026-05-03T04:25:00+00:00",
+                "requested_quote_start": "2026-05-03T04:32:31+00:00",
+                "requested_quote_end": "2026-05-03T04:37:31+00:00",
+                "actual_quote_start": "2026-05-03T04:20:00+00:00",
+                "actual_quote_end": "2026-05-03T04:25:00+00:00",
+                "available_end_fallback_used": True,
+                "allow_available_end_fallback_requested": True,
+                "allow_available_end_fallback_effective": True,
+                "native_databento_path_used": True,
+                "schemas_attempted": ["mbp-1", "trades"],
+                "available_end_retry_attempted": True,
+                "available_end_retry_count": 1,
+                "available_end_retry_reason": "initial_data_start_after_available_end",
+                "databento_schema": {"bid_ask": "mbp-1", "last": "trades"},
+                "records_returned": {"bid_ask": 0, "trades": 0},
+                "first_raw_record_keys_or_shape": {"bid_ask": None, "trades": None},
+                "parser_bid_field_source": None,
+                "parser_ask_field_source": None,
+                "parser_last_field_source": None,
+                "no_quote_records_reason": "no records returned for schema mbp-1",
+                "quote_temporal_scope": "CURRENT_AVAILABLE_END",
+                "active_session_quote": False,
+                "current_executable_quote": False,
+                "session_closed_or_no_records": True,
+                "no_records_reason": "WEEKEND_OR_CLOSED_SESSION",
+                "quote_usable_for_paper_pricing": False,
+                "quote_usable_for_live_money_readiness": False,
+            },
+        )
+
+
 class FakeDiagnosticTransport:
     def __init__(self, records_by_schema: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
         self.records_by_schema = records_by_schema
@@ -328,6 +381,12 @@ def test_cli_prints_and_writes_read_only_quote_report(
     assert report["parser_ask_field_source"] == "levels[0].ask_px"
     assert report["parser_last_field_source"] == "price"
     assert report["no_quote_records_reason"] is None
+    assert report["quote_temporal_scope"] == "UNKNOWN"
+    assert report["active_session_quote"] is True
+    assert report["current_executable_quote"] is True
+    assert report["session_closed_or_no_records"] is False
+    assert report["quote_usable_for_paper_pricing"] is True
+    assert report["quote_usable_for_live_money_readiness"] is True
 
 
 def test_cli_accepts_resolution_date(
@@ -390,6 +449,10 @@ def test_cli_accepts_quote_window_options(
 
     assert exit_code == 2
     assert payload["available_end_fallback_used"] is True
+    assert payload["quote_temporal_scope"] == "HISTORICAL_WINDOW"
+    assert payload["active_session_quote"] is False
+    assert payload["quote_usable_for_paper_pricing"] is False
+    assert payload["quote_usable_for_live_money_readiness"] is False
     assert report["quote_window"]["provider_available_end"] == "2026-05-01T23:59:00+00:00"
     assert report["live_money_quote_ready"] is False
 
@@ -479,6 +542,30 @@ def test_cli_quote_parse_failure_includes_parser_diagnostics(
     assert payload["request_details"]["bid_ask"]["schema"] == "mbp-1"
     assert payload["request_details"]["bid_ask"]["symbol"] == "123456"
     assert report["first_raw_record_keys_or_shape"]["trades"]["root_keys"] == ["price", "ts_event"]
+
+
+def test_cli_weekend_zero_records_classifies_no_active_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+
+    exit_code = databento_quote_cli.main(cli_args(tmp_path), provider_factory=FailingWeekendNoRecordsProvider)
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(payload["report_json"]).read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert payload["classification"] == "NO_ACTIVE_SESSION_OR_NO_RECORDS"
+    assert payload["quote_observed"] is False
+    assert payload["resolved_instrument_id"] == "42008160"
+    assert payload["records_returned"] == {"bid_ask": 0, "trades": 0}
+    assert payload["session_closed_or_no_records"] is True
+    assert payload["no_records_reason"] == "WEEKEND_OR_CLOSED_SESSION"
+    assert payload["quote_temporal_scope"] == "CURRENT_AVAILABLE_END"
+    assert payload["quote_usable_for_paper_pricing"] is False
+    assert payload["quote_usable_for_live_money_readiness"] is False
+    assert report["classification"] == "NO_ACTIVE_SESSION_OR_NO_RECORDS"
 
 
 def test_cli_diagnostic_mode_reports_zero_records_without_traceback(
