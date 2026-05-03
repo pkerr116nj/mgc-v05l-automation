@@ -256,6 +256,9 @@ def test_active_session_timing_allows_downstream_gates(tmp_path: Path) -> None:
 
     assert result.classification == TerminalClassification.PASSED
     assert calls == ["run-active-session"]
+    assert result.report["final_readiness_verdict"] == "READY_FOR_PAPER_PROOF"
+    assert result.report["submit_allowed"] is True
+    assert result.report["primary_blocker"] is None
     assert result.report["proof_timing_classification"] == "PROOF_TIMING_ALLOWED"
     assert result.report["proof_submit_attempted"] is True
 
@@ -287,6 +290,14 @@ def test_timing_guard_blocks_before_submit_with_operator_report(tmp_path: Path, 
     assert payload["proof_timing_classification"] == classification
     assert payload["proof_timing_allowed"] is False
     assert payload["proof_submit_attempted"] is False
+    assert payload["submit_allowed"] is False
+    assert payload["required_next_action"]
+    expected_verdict = (
+        "BLOCKED_OUTSIDE_ACTIVE_SESSION"
+        if status == "OUTSIDE_ACTIVE_SESSION"
+        else "BLOCKED_UNKNOWN_PROOF_TIMING"
+    )
+    assert payload["final_readiness_verdict"] == expected_verdict
     assert "held or PreSubmitted outside-session behavior" in str(payload["failure_or_ambiguity"])
 
 
@@ -347,6 +358,13 @@ def test_pending_cancel_preflight_blocks_same_account_contract_submit_with_recov
 
     assert result.classification == TerminalClassification.BLOCKED
     assert "unresolved broker order" in str(result.report["failure_or_ambiguity"])
+    assert result.report["final_readiness_verdict"] == "BLOCKED_UNRESOLVED_BROKER_ORDER"
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["required_next_action"]
+    assert result.report["broker_order_id"] == "1"
+    assert result.report["perm_id"] == "736787312"
+    assert result.report["broker_status"] == "PENDING_CANCEL"
     assert result.report["unresolved_broker_order_detected"] is True
     assert result.report["unresolved_broker_order_status"] == "PENDING_CANCEL"
     assert result.report["blocks_same_account_contract_submit"] is True
@@ -394,6 +412,9 @@ def test_missing_or_unknown_quote_blocks_pricing_dependent_proof(tmp_path: Path)
 
     assert result.classification == TerminalClassification.BLOCKED
     assert "observed quote" in str(result.report["failure_or_ambiguity"])
+    assert result.report["final_readiness_verdict"] == "BLOCKED_MARKET_DATA_MODE_OR_QUOTE_UNAVAILABLE"
+    assert result.report["submit_allowed"] is False
+    assert result.report["required_next_action"]
 
 
 def test_missing_quote_with_valid_manual_open_close_prices_proceeds_as_paper_only_manual_price(tmp_path: Path) -> None:
@@ -615,6 +636,8 @@ def test_delayed_data_can_pass_paper_proof_but_not_live_money_readiness(tmp_path
     assert payload["market_data_mode"] == "DELAYED"
     assert payload["paper_route_readiness"] is True
     assert payload["production_live_money_readiness"] is False
+    assert payload["submit_allowed"] is True
+    assert payload["final_readiness_verdict"] == "READY_FOR_PAPER_PROOF"
 
 
 def test_missing_broker_correlation_downgrades_pass_to_ambiguous(tmp_path: Path) -> None:

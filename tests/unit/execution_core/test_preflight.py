@@ -153,6 +153,11 @@ def test_read_only_preflight_reports_ready_without_submit(tmp_path: Path) -> Non
     assert payload["quote_blocking_for_paper"] is False
     assert payload["quote_blocking_for_live_money"] is True
     assert payload["production_live_money_readiness"] is False
+    assert payload["final_readiness_verdict"] == "READY_FOR_PAPER_PROOF"
+    assert payload["submit_allowed"] is True
+    assert payload["submit_attempted"] is False
+    assert payload["primary_blocker"] is None
+    assert payload["required_next_action"]
     assert transport.connected_with == {"host": "127.0.0.1", "port": 7497, "client_id": 77, "readonly": True}
     assert transport.disconnect_count == 1
     assert transport.place_order_called is False
@@ -266,6 +271,14 @@ def test_pending_cancel_remaining_quantity_blocks_submit_but_read_only_preflight
     assert payload["unresolved_broker_perm_id"] == "736787312"
     assert payload["unresolved_remaining_quantity"] == "1"
     assert payload["blocks_same_account_contract_submit"] is True
+    assert payload["final_readiness_verdict"] == "BLOCKED_UNRESOLVED_BROKER_ORDER"
+    assert payload["submit_allowed"] is False
+    assert payload["submit_attempted"] is False
+    assert payload["primary_blocker"] == "Unresolved broker order blocks same account/contract submit."
+    assert payload["required_next_action"]
+    assert payload["broker_order_id"] == "1"
+    assert payload["perm_id"] == "736787312"
+    assert payload["broker_status"] == "PENDING_CANCEL"
     assert "terminal state" in payload["next_required_action"]
     assert transport.place_order_called is False
     assert transport.submit_called is False
@@ -318,6 +331,10 @@ def test_existing_position_is_reported_and_blocks_proof_readiness(tmp_path: Path
     assert result.classification == PreflightClassification.BLOCKED
     assert payload["position"]["signed_quantity"] == 1
     assert "existing position" in str(payload["failure_or_ambiguity"])
+    assert payload["final_readiness_verdict"] == "BLOCKED_NON_FLAT_POSITION"
+    assert payload["submit_allowed"] is False
+    assert payload["position_qty"] == 1
+    assert "Flatten" in payload["required_next_action"]
     assert transport.place_order_called is False
     assert transport.submit_called is False
 

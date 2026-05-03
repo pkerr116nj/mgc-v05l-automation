@@ -21,6 +21,7 @@ from .ledger import JsonlLedger
 from .models import Action, BrokerOrder, FillEvent, IntentKind, OrderIntent, PositionSource, PositionState, SignalEvent, SubmitAttempt, SubmitAttemptState, TerminalClassification, to_jsonable
 from .pricing import QuoteObservation, create_marketable_limit_decision
 from .preflight import PreflightClassification, PreflightResult, ReadOnlyPreflightConfig
+from .readiness import FinalReadinessVerdict, OperatorReadiness, blocked_readiness, ready_for_paper_proof
 from .session_guard import ProofTimingDecision, evaluate_proof_timing
 
 
@@ -381,6 +382,16 @@ def _write_result(
 ) -> PaperProofResult:
     preflight_report = preflight.report if preflight is not None else {}
     timing_report = timing.to_report_dict() if timing is not None else {}
+    submit_attempted = proof is not None
+    operator_readiness = _operator_readiness_report(
+        config=config,
+        classification=classification,
+        reason=reason,
+        required_action=required_action,
+        preflight_report=preflight_report,
+        timing_report=timing_report,
+        submit_attempted=submit_attempted,
+    )
     report: dict[str, object] = {
         "schema_version": "track_b_paper_proof_submit_harness_v1",
         "run_id": run_id,
@@ -405,7 +416,8 @@ def _write_result(
         "paper_route_readiness": preflight_report.get("paper_route_readiness"),
         "production_live_money_readiness": False,
         **timing_report,
-        "proof_submit_attempted": proof is not None,
+        "proof_submit_attempted": submit_attempted,
+        **operator_readiness.to_report_dict(),
         "unresolved_broker_order_detected": preflight_report.get("unresolved_broker_order_detected", False),
         "unresolved_broker_order_status": preflight_report.get("unresolved_broker_order_status"),
         "unresolved_broker_order_id": preflight_report.get("unresolved_broker_order_id"),
@@ -430,6 +442,101 @@ def _write_result(
     )
 
 
+def _operator_readiness_report(
+    *,
+    config: PaperProofConfig,
+    classification: TerminalClassification,
+    reason: object | None,
+    required_action: object | None,
+    preflight_report: Mapping[str, object],
+    timing_report: Mapping[str, object],
+    submit_attempted: bool,
+) -> OperatorReadiness:
+    position = preflight_report.get("position")
+    position_qty = position.get("signed_quantity") if isinstance(position, Mapping) else None
+    timing_classification = timing_report.get("proof_timing_classification")
+    timing_allowed = timing_report.get("proof_timing_allowed")
+    if timing_classification == "PROOF_TIMING_BLOCKED_OUTSIDE_ACTIVE_SESSION":
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.BLOCKED_OUTSIDE_ACTIVE_SESSION,
+            primary_blocker=str(reason or "Proof timing is outside an active session."),
+            required_next_action=str(required_action or timing_report.get("proof_timing_required_action") or "Wait for an active session."),
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            position_qty=position_qty,
+            proof_timing_classification=timing_classification,
+            proof_timing_allowed=timing_allowed,
+            submit_attempted=submit_attempted,
+        )
+    if timing_classification == "PROOF_TIMING_UNKNOWN_BLOCKED":
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.BLOCKED_UNKNOWN_PROOF_TIMING,
+            primary_blocker=str(reason or "Proof timing is unknown."),
+            required_next_action=str(required_action or timing_report.get("proof_timing_required_action") or "Provide active-session timing evidence."),
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            position_qty=position_qty,
+            proof_timing_classification=timing_classification,
+            proof_timing_allowed=timing_allowed,
+            submit_attempted=submit_attempted,
+        )
+    if preflight_report.get("unresolved_broker_order_detected"):
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.BLOCKED_UNRESOLVED_BROKER_ORDER,
+            primary_blocker=str(reason or "Unresolved broker order blocks same account/contract submit."),
+            required_next_action=str(required_action or preflight_report.get("next_required_action") or "Wait for terminal broker order state."),
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            broker_order_id=preflight_report.get("unresolved_broker_order_id"),
+            perm_id=preflight_report.get("unresolved_broker_perm_id"),
+            broker_status=preflight_report.get("unresolved_broker_order_status"),
+            position_qty=position_qty,
+            proof_timing_classification=timing_classification,
+            proof_timing_allowed=timing_allowed,
+            submit_attempted=submit_attempted,
+        )
+    if position_qty not in (None, 0, "0", "0.0"):
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.BLOCKED_NON_FLAT_POSITION,
+            primary_blocker=str(reason or "Proof contract position is not flat."),
+            required_next_action=str(required_action or "Flatten or reconcile the account before proof."),
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            position_qty=position_qty,
+            proof_timing_classification=timing_classification,
+            proof_timing_allowed=timing_allowed,
+            submit_attempted=submit_attempted,
+        )
+    if classification == TerminalClassification.PASSED:
+        return ready_for_paper_proof(
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            position_qty=position_qty,
+            submit_attempted=submit_attempted,
+            required_next_action="Paper proof completed; no further submit is needed for this run.",
+            proof_timing_classification=timing_classification,
+            proof_timing_allowed=timing_allowed,
+        )
+    blocker = str(reason or "Paper proof is blocked or ambiguous.")
+    lowered = blocker.lower()
+    verdict = FinalReadinessVerdict.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    if "account" in lowered or "contract" in lowered or "allowlist" in lowered:
+        verdict = FinalReadinessVerdict.BLOCKED_CONTRACT_OR_ACCOUNT_MISMATCH
+    elif "market data" in lowered or "quote" in lowered or "pricing" in lowered:
+        verdict = FinalReadinessVerdict.BLOCKED_MARKET_DATA_MODE_OR_QUOTE_UNAVAILABLE
+    return blocked_readiness(
+        verdict=verdict,
+        primary_blocker=blocker,
+        required_next_action=str(required_action or "Resolve paper-proof blocker before any Track B submit."),
+        account_id=config.account_id,
+        contract_key=config.contract_key,
+        position_qty=position_qty,
+        proof_timing_classification=timing_classification,
+        proof_timing_allowed=timing_allowed,
+        submit_attempted=submit_attempted,
+    )
+
+
 def _render_markdown(report: Mapping[str, object]) -> str:
     return "\n".join(
         [
@@ -449,6 +556,10 @@ def _render_markdown(report: Mapping[str, object]) -> str:
                     "proof_timing_classification": report.get("proof_timing_classification"),
                     "proof_timing_allowed": report.get("proof_timing_allowed"),
                     "proof_submit_attempted": report.get("proof_submit_attempted"),
+                    "final_readiness_verdict": report.get("final_readiness_verdict"),
+                    "submit_allowed": report.get("submit_allowed"),
+                    "primary_blocker": report.get("primary_blocker"),
+                    "required_next_action": report.get("required_next_action"),
                 },
                 indent=2,
                 sort_keys=True,

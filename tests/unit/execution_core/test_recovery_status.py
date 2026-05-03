@@ -85,6 +85,14 @@ def test_pending_cancel_blocks_same_account_contract_submit(tmp_path: Path) -> N
     assert payload["blocks_same_account_contract_submit"] is True
     assert payload["matching_broker_order_id"] == "1"
     assert payload["matching_perm_id"] == "736787312"
+    assert payload["final_readiness_verdict"] == "BLOCKED_UNRESOLVED_BROKER_ORDER"
+    assert payload["submit_allowed"] is False
+    assert payload["submit_attempted"] is False
+    assert payload["primary_blocker"] == "unresolved broker order blocks same account/contract submit"
+    assert payload["required_next_action"]
+    assert payload["broker_order_id"] == "1"
+    assert payload["perm_id"] == "736787312"
+    assert payload["broker_status"] == "PENDING_CANCEL"
 
 
 def test_flat_no_open_orders_is_ready_clean(tmp_path: Path) -> None:
@@ -99,6 +107,10 @@ def test_flat_no_open_orders_is_ready_clean(tmp_path: Path) -> None:
     assert payload["position_quantity"] == "0"
     assert payload["proof_contract_open_orders"] == []
     assert payload["blocks_same_account_contract_submit"] is False
+    assert payload["final_readiness_verdict"] == "READY_FOR_PAPER_PROOF"
+    assert payload["submit_allowed"] is True
+    assert payload["primary_blocker"] is None
+    assert payload["required_next_action"]
 
 
 def test_cancelled_terminal_order_with_flat_no_open_orders_is_ready_clean(tmp_path: Path) -> None:
@@ -168,3 +180,6 @@ def test_conflicting_position_and_open_order_is_ambiguous(tmp_path: Path) -> Non
 
     assert result.classification == RecoveryStatusClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
     assert "conflicting broker position" in str(result.report["failure_or_ambiguity"])
+    assert result.report["final_readiness_verdict"] == "BLOCKED_NON_FLAT_POSITION"
+    assert result.report["submit_allowed"] is False
+    assert result.report["required_next_action"]

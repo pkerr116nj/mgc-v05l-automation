@@ -13,6 +13,7 @@ from typing import Callable, Mapping
 
 from .models import BrokerOrderLifecycleStatus, classify_broker_order_lifecycle, to_jsonable
 from .preflight import PreflightClassification, PreflightResult, ReadOnlyPreflightConfig
+from .readiness import FinalReadinessVerdict, OperatorReadiness, blocked_readiness, ready_for_paper_proof
 
 
 DEFAULT_RECOVERY_OUTPUT_ROOT = Path("outputs/track_b_execution_core/recovery_status")
@@ -281,6 +282,15 @@ def _write_result(
     open_orders = tuple(row for row in preflight_report.get("open_orders", []) if isinstance(row, Mapping))
     matching_order = _matching_order(config=config, report=preflight_report, open_orders=open_orders)
     lifecycle = _lifecycle_from_order_or_report(preflight_report, matching_order)
+    operator_readiness = _operator_readiness_report(
+        config=config,
+        classification=classification,
+        reason=reason,
+        next_required_action=next_required_action,
+        preflight_report=preflight_report,
+        matching_order=matching_order,
+        lifecycle=lifecycle,
+    )
     report: dict[str, object] = {
         "schema_version": "track_b_recovery_status_v1",
         "classification": classification.value,
@@ -298,6 +308,7 @@ def _write_result(
         "lifecycle_classification": lifecycle.value if lifecycle is not None else None,
         "blocks_same_account_contract_submit": classification != RecoveryStatusClassification.READY_CLEAN,
         "next_required_action": next_required_action,
+        **operator_readiness.to_report_dict(),
         "failure_or_ambiguity": reason,
         "preflight_classification": preflight.classification.value if preflight is not None else None,
         "preflight_report_json": str(preflight.report_json) if preflight is not None else None,
@@ -313,6 +324,61 @@ def _write_result(
     report_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
     report_md.write_text(_render_markdown(report), encoding="utf-8")
     return RecoveryStatusResult(run_id=run_id, classification=classification, report_json=report_json, report_md=report_md, report=report)
+
+
+def _operator_readiness_report(
+    *,
+    config: RecoveryStatusConfig,
+    classification: RecoveryStatusClassification,
+    reason: str | None,
+    next_required_action: str | None,
+    preflight_report: Mapping[str, object],
+    matching_order: Mapping[str, object] | None,
+    lifecycle: BrokerOrderLifecycleStatus | None,
+) -> OperatorReadiness:
+    position_qty = str(_position_quantity(preflight_report.get("position")))
+    if classification == RecoveryStatusClassification.READY_CLEAN:
+        return ready_for_paper_proof(
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            position_qty=position_qty,
+            required_next_action=next_required_action,
+        )
+    if classification == RecoveryStatusClassification.BLOCKED_UNRESOLVED_ORDER:
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.BLOCKED_UNRESOLVED_BROKER_ORDER,
+            primary_blocker=str(reason or "Unresolved broker order blocks same account/contract submit."),
+            required_next_action=str(next_required_action or "Wait for terminal broker order state, then rerun read-only recovery status."),
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            broker_order_id=_value_from_order_or_report(preflight_report, matching_order, "broker_order_id", "unresolved_broker_order_id"),
+            perm_id=_value_from_order_or_report(preflight_report, matching_order, "perm_id", "unresolved_broker_perm_id"),
+            broker_status=lifecycle.value if lifecycle is not None else preflight_report.get("unresolved_broker_order_status"),
+            position_qty=position_qty,
+        )
+    if _position_quantity(preflight_report.get("position")) != Decimal("0"):
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.BLOCKED_NON_FLAT_POSITION,
+            primary_blocker=str(reason or "Proof contract position is not flat."),
+            required_next_action=str(next_required_action or "Manual broker review required before any Track B submit."),
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            broker_order_id=_value_from_order_or_report(preflight_report, matching_order, "broker_order_id", "unresolved_broker_order_id"),
+            perm_id=_value_from_order_or_report(preflight_report, matching_order, "perm_id", "unresolved_broker_perm_id"),
+            broker_status=lifecycle.value if lifecycle is not None else None,
+            position_qty=position_qty,
+        )
+    return blocked_readiness(
+        verdict=FinalReadinessVerdict.AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
+        primary_blocker=str(reason or "Recovery status requires manual review."),
+        required_next_action=str(next_required_action or "Manual broker review required before any Track B submit."),
+        account_id=config.account_id,
+        contract_key=config.contract_key,
+        broker_order_id=_value_from_order_or_report(preflight_report, matching_order, "broker_order_id", "unresolved_broker_order_id"),
+        perm_id=_value_from_order_or_report(preflight_report, matching_order, "perm_id", "unresolved_broker_perm_id"),
+        broker_status=lifecycle.value if lifecycle is not None else None,
+        position_qty=position_qty,
+    )
 
 
 def _value_from_order_or_report(
@@ -346,6 +412,10 @@ def _render_markdown(report: Mapping[str, object]) -> str:
                     "remaining_quantity": report.get("remaining_quantity"),
                     "lifecycle_classification": report.get("lifecycle_classification"),
                     "blocks_same_account_contract_submit": report.get("blocks_same_account_contract_submit"),
+                    "final_readiness_verdict": report.get("final_readiness_verdict"),
+                    "submit_allowed": report.get("submit_allowed"),
+                    "primary_blocker": report.get("primary_blocker"),
+                    "required_next_action": report.get("required_next_action"),
                 },
                 indent=2,
                 sort_keys=True,

@@ -22,6 +22,7 @@ from .ibkr_paper_adapter import (
 )
 from .models import BrokerOrder, PositionSource, PositionState, broker_order_blocks_same_account_contract_submit, require_aware_datetime, to_jsonable
 from .pricing import MarketDataMode, MarketDataRole, QuoteObservation
+from .readiness import FinalReadinessVerdict, OperatorReadiness, blocked_readiness, ready_for_paper_proof
 
 
 DEFAULT_PREFLIGHT_OUTPUT_ROOT = Path("outputs/track_b_execution_core/preflight")
@@ -530,6 +531,15 @@ def _write_result(
         paper_route_readiness=classification == PreflightClassification.READY_READ_ONLY,
     )
     unresolved_report = _unresolved_broker_order_report(open_orders)
+    operator_readiness = _operator_readiness_report(
+        classification=classification,
+        config=config,
+        position=position,
+        unresolved_report=unresolved_report,
+        market_data=market_data,
+        failure_or_ambiguity=failure_or_ambiguity,
+        required_action=required_action,
+    )
     report = {
         "schema_version": "track_b_read_only_preflight_v1",
         "classification": classification.value,
@@ -560,6 +570,7 @@ def _write_result(
         "broker_errors": broker_errors,
         "failure_or_ambiguity": failure_or_ambiguity,
         "required_action": required_action,
+        **operator_readiness.to_report_dict(),
         "transport_diagnostics": actual_transport_diagnostics,
         "submit_enabled": False,
         "place_order_called": False,
@@ -578,6 +589,65 @@ def _write_result(
     )
 
 
+def _operator_readiness_report(
+    *,
+    classification: PreflightClassification,
+    config: ReadOnlyPreflightConfig,
+    position: PositionState | None,
+    unresolved_report: Mapping[str, Any],
+    market_data: Mapping[str, Any],
+    failure_or_ambiguity: str | None,
+    required_action: str | None,
+) -> OperatorReadiness:
+    position_qty = position.signed_quantity if position is not None else None
+    if unresolved_report.get("unresolved_broker_order_detected"):
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.BLOCKED_UNRESOLVED_BROKER_ORDER,
+            primary_blocker="Unresolved broker order blocks same account/contract submit.",
+            required_next_action=str(
+                required_action
+                or unresolved_report.get("next_required_action")
+                or "Wait for terminal broker order state, then rerun read-only preflight."
+            ),
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            broker_order_id=unresolved_report.get("unresolved_broker_order_id"),
+            perm_id=unresolved_report.get("unresolved_broker_perm_id"),
+            broker_status=unresolved_report.get("unresolved_broker_order_status"),
+            position_qty=position_qty,
+        )
+    if position is not None and position.signed_quantity != 0:
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.BLOCKED_NON_FLAT_POSITION,
+            primary_blocker="Proof contract position is not flat.",
+            required_next_action=str(required_action or "Flatten or reconcile the account before proof."),
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            position_qty=position_qty,
+        )
+    if classification == PreflightClassification.READY_READ_ONLY:
+        return ready_for_paper_proof(
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            position_qty=position_qty,
+        )
+    verdict = FinalReadinessVerdict.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    blocker = str(failure_or_ambiguity or "Read-only preflight is not ready.")
+    lowered = blocker.lower()
+    if "account" in lowered or "contract" in lowered or "allowlist" in lowered:
+        verdict = FinalReadinessVerdict.BLOCKED_CONTRACT_OR_ACCOUNT_MISMATCH
+    if market_data.get("quote_blocking_for_paper"):
+        verdict = FinalReadinessVerdict.BLOCKED_MARKET_DATA_MODE_OR_QUOTE_UNAVAILABLE
+    return blocked_readiness(
+        verdict=verdict,
+        primary_blocker=blocker,
+        required_next_action=str(required_action or "Resolve read-only preflight blocker before any Track B submit."),
+        account_id=config.account_id,
+        contract_key=config.contract_key,
+        position_qty=position_qty,
+    )
+
+
 def _render_markdown(report: dict[str, Any]) -> str:
     sections = [
         "# Track B Read-Only TWS Paper Preflight",
@@ -593,6 +663,23 @@ def _render_markdown(report: dict[str, Any]) -> str:
         "",
         "## Readiness",
         json.dumps({"next_valid_id": report["next_valid_id"], "checks": report["checks"]}, indent=2, sort_keys=True),
+        "",
+        "## Operator Readiness",
+        json.dumps(
+            {
+                "final_readiness_verdict": report.get("final_readiness_verdict"),
+                "submit_allowed": report.get("submit_allowed"),
+                "submit_attempted": report.get("submit_attempted"),
+                "primary_blocker": report.get("primary_blocker"),
+                "required_next_action": report.get("required_next_action"),
+                "broker_order_id": report.get("broker_order_id"),
+                "perm_id": report.get("perm_id"),
+                "broker_status": report.get("broker_status"),
+                "position_qty": report.get("position_qty"),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
         "",
         "## Contract",
         json.dumps(report["contract"], indent=2, sort_keys=True),
