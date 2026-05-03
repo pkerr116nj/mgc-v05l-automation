@@ -210,6 +210,12 @@ The operator quickstart is:
 docs/track_b_shadow_run_quickstart.md
 ```
 
+The future UI integration contract is:
+
+```text
+docs/track_b_ui_integration_contract.md
+```
+
 The example demonstrates:
 
 ```text
