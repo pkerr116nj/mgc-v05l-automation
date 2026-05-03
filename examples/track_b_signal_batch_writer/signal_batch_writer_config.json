@@ -1,0 +1,7 @@
+{
+  "batch_id": "track_b_writer_demo_batch_001",
+  "expected_account_id": "DUM882026",
+  "inbox_dir": "examples/track_b_shadow_listener/inbox",
+  "source_id": "manual_demo",
+  "writer_note": "Example values for the no-submit signal_batch_writer_cli. The CLI accepts these fields as explicit flags."
+}

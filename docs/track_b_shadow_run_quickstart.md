@@ -140,6 +140,24 @@ directories. The default behavior is poll-once and exit. Engine-running state
 does not imply submit authority; this listener remains no-submit and does not
 connect to TWS or Databento.
 
+Write a demo signal observation into the listener inbox:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.signal_batch_writer_cli \
+  --signal-json examples/track_b_signal_batch_writer/signal_observation.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --source-id manual_demo \
+  --batch-id track_b_writer_demo_batch_001 \
+  --expected-account-id DUM882026 \
+  --output-root outputs/track_b_execution_core/signal_batch_writer
+```
+
+The writer is an upstream producer only. It validates the signal or batch
+payload, writes a uniquely named JSON file into the listener inbox using a temp
+file plus rename, and stops. It does not invoke the listener, apply proposal
+policy, authorize lanes, create order plans, connect to broker/data providers,
+or submit.
+
 Run bounded watch mode explicitly:
 
 ```bash
@@ -156,6 +174,11 @@ artifacts for each cycle, and updates `latest_shadow_listener_heartbeat.json`
 under the listener output root. Keep `--max-cycles` bounded for operator proof
 runs. `--poll-seconds` controls the interval between cycles. Watch mode is
 still no-submit and does not create daemon/service authority.
+
+For a simple operator proof later, start bounded watch mode in one terminal,
+run `signal_batch_writer_cli` in another terminal, then inspect the listener
+heartbeat, latest health report, processed input file, runner summary, and
+attrition report paths. The listener/writer chain remains no-submit throughout.
 
 Each listener cycle also writes a health/status artifact plus a
 `latest_shadow_listener_health.json` pointer under the listener output root.

@@ -18,6 +18,7 @@ shadow_signal
 -> shadow_run_manifest
 -> shadow_run_assembler
 -> shadow_replay_runner
+-> signal_batch_writer
 -> shadow_listener
 -> operator_status
 -> attrition_report
@@ -105,6 +106,11 @@ Dashboard implication:
 - `shadow_replay_runner` orchestrates the existing no-submit chain from signal
   batch to proposal artifacts, shadow run assembly, attrition report, and a
   top-level summary. It creates no new authority and does not submit.
+- `signal_batch_writer` is an upstream no-submit inbox producer. It validates
+  supplied signal observations or signal batch payloads, atomically writes a
+  JSON file into the listener inbox, and stops. It does not invoke the
+  listener, evaluate proposal policy, authorize lanes, create order plans, or
+  submit.
 - `shadow_listener` is a poll-once file ingestion skeleton for signal batch
   JSON. It can run while the future engine is active, but it only invokes the
   no-submit replay runner and creates no submit authority. Its health report is
