@@ -140,6 +140,23 @@ directories. The default behavior is poll-once and exit. Engine-running state
 does not imply submit authority; this listener remains no-submit and does not
 connect to TWS or Databento.
 
+Run bounded watch mode explicitly:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.shadow_listener_cli \
+  --listener-config-json examples/track_b_shadow_listener/listener_config.json \
+  --output-root outputs/track_b_execution_core/shadow_listener \
+  --watch \
+  --max-cycles 5 \
+  --poll-seconds 10
+```
+
+Watch mode repeats poll-once listener cycles, writes normal cycle and health
+artifacts for each cycle, and updates `latest_shadow_listener_heartbeat.json`
+under the listener output root. Keep `--max-cycles` bounded for operator proof
+runs. `--poll-seconds` controls the interval between cycles. Watch mode is
+still no-submit and does not create daemon/service authority.
+
 Each listener cycle also writes a health/status artifact plus a
 `latest_shadow_listener_health.json` pointer under the listener output root.
 The health report summarizes the latest cycle, runner summary paths, file

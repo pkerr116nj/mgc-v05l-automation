@@ -109,7 +109,8 @@ Dashboard implication:
   JSON. It can run while the future engine is active, but it only invokes the
   no-submit replay runner and creates no submit authority. Its health report is
   observer/status data for operators and future dashboards, not trading
-  authority.
+  authority. Optional bounded watch mode repeats poll-once cycles and updates a
+  listener heartbeat artifact, while preserving no-submit semantics.
 - `operator_status` aggregates supplied Track B observer reports into one
   dashboard-ready read model. It is not source of truth, does not connect to
   broker or market data, and does not authorize submit.

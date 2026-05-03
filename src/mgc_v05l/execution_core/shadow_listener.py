@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
+from time import sleep
 from typing import Any, Mapping
 
 from .models import require_aware_datetime, to_jsonable
@@ -40,6 +42,13 @@ class ShadowListenerHealthVerdict(str, Enum):
     UNKNOWN = "SHADOW_LISTENER_HEALTH_UNKNOWN"
 
 
+class ShadowListenerWatchVerdict(str, Enum):
+    COMPLETED = "SHADOW_LISTENER_WATCH_COMPLETED"
+    COMPLETED_WITH_FAILURES = "SHADOW_LISTENER_WATCH_COMPLETED_WITH_FAILURES"
+    BLOCKED_INVALID_CONFIG = "SHADOW_LISTENER_WATCH_BLOCKED_INVALID_CONFIG"
+    BLOCKED_SCHEMA_ERROR = "SHADOW_LISTENER_WATCH_BLOCKED_SCHEMA_ERROR"
+
+
 @dataclass(frozen=True)
 class ShadowListenerConfig:
     listener_id: str
@@ -56,6 +65,9 @@ class ShadowListenerConfig:
     poll_once: bool
     file_glob: str
     submit_enabled: bool
+    watch_enabled: bool = False
+    max_cycles: int = 1
+    poll_seconds: float = 0.0
     live_money_readiness: bool = False
 
     @classmethod
@@ -75,6 +87,9 @@ class ShadowListenerConfig:
             poll_once=_bool(payload.get("poll_once", True)),
             file_glob=str(payload.get("file_glob") or "*.json").strip(),
             submit_enabled=_bool(payload.get("submit_enabled", False)),
+            watch_enabled=_bool(payload.get("watch_enabled", False)),
+            max_cycles=_int(payload.get("max_cycles", 1)),
+            poll_seconds=_float(payload.get("poll_seconds", 0.0)),
             live_money_readiness=False,
         )
 
@@ -83,6 +98,13 @@ class ShadowListenerConfig:
 class ShadowListenerResult:
     verdict: ShadowListenerVerdict
     report_json: Path
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ShadowListenerWatchResult:
+    verdict: ShadowListenerWatchVerdict
+    heartbeat_json: Path
     report: dict[str, Any]
 
 
@@ -182,6 +204,123 @@ def run_shadow_listener_cycle(
             action="Fix listener input JSON or referenced file paths before polling again.",
         )
         return _write(report_json, ShadowListenerVerdict.BLOCKED_SCHEMA_ERROR, report)
+
+
+def run_shadow_listener_watch(
+    *,
+    config_payload: Mapping[str, Any],
+    output_root: Path | None = None,
+    watch_id: str | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> ShadowListenerWatchResult:
+    clock = now_fn or (lambda: datetime.now(UTC))
+    sleeper = sleep_fn or sleep
+    actual_watch_id = watch_id or f"shadow_listener_watch_{uuid.uuid4().hex}"
+    fallback_listener_id = str(config_payload.get("listener_id") or f"shadow_listener_{uuid.uuid4().hex}")
+    fallback_root = Path(output_root or config_payload.get("output_root") or DEFAULT_SHADOW_LISTENER_OUTPUT_ROOT)
+    heartbeat_json = fallback_root / fallback_listener_id / "latest_shadow_listener_heartbeat.json"
+    started_at = clock()
+    require_aware_datetime(started_at, "watch_started_at")
+
+    try:
+        config = ShadowListenerConfig.from_mapping(config_payload, output_root_override=output_root)
+        config_blocker = _config_blocker(config)
+        if config_blocker is not None:
+            blocker, action = config_blocker
+            heartbeat = _watch_heartbeat(
+                config=config,
+                watch_id=actual_watch_id,
+                started_at=started_at,
+                generated_at=started_at,
+                ended_at=started_at,
+                verdict=ShadowListenerWatchVerdict.BLOCKED_INVALID_CONFIG,
+                cycles=[],
+                watch_exited_normally=False,
+                primary_blocker=blocker,
+                required_next_action=action,
+            )
+            return _write_watch_heartbeat(heartbeat_json, ShadowListenerWatchVerdict.BLOCKED_INVALID_CONFIG, heartbeat)
+
+        cycles: list[dict[str, Any]] = []
+        max_cycles = max(config.max_cycles, 1)
+        for cycle_number in range(1, max_cycles + 1):
+            cycle_started_at = clock()
+            require_aware_datetime(cycle_started_at, "cycle_started_at")
+            cycle_id = f"{actual_watch_id}_cycle_{cycle_number:04d}"
+            cycle_result = run_shadow_listener_cycle(
+                config_payload={**dict(config_payload), "watch_enabled": config.watch_enabled, "poll_once": config.poll_once},
+                output_root=config.output_root,
+                cycle_id=cycle_id,
+                now=cycle_started_at,
+            )
+            cycle_ended_at = clock()
+            require_aware_datetime(cycle_ended_at, "cycle_ended_at")
+            cycle_record = _watch_cycle_record(
+                cycle_number=cycle_number,
+                cycle_started_at=cycle_started_at,
+                cycle_ended_at=cycle_ended_at,
+                cycle_result=cycle_result,
+            )
+            cycles.append(cycle_record)
+            interim_verdict, primary, action = _watch_classification(cycles=cycles, completed_all_cycles=False)
+            interim = _watch_heartbeat(
+                config=config,
+                watch_id=actual_watch_id,
+                started_at=started_at,
+                generated_at=cycle_ended_at,
+                ended_at=None,
+                verdict=interim_verdict,
+                cycles=cycles,
+                watch_exited_normally=False,
+                primary_blocker=primary,
+                required_next_action=action,
+            )
+            _write_watch_heartbeat(heartbeat_json, interim_verdict, interim)
+            if cycle_result.verdict in {ShadowListenerVerdict.BLOCKED_INVALID_CONFIG, ShadowListenerVerdict.BLOCKED_SCHEMA_ERROR}:
+                break
+            if cycle_number < max_cycles and config.poll_seconds > 0:
+                sleeper(config.poll_seconds)
+
+        ended_at = clock()
+        require_aware_datetime(ended_at, "watch_ended_at")
+        verdict, primary_blocker, required_action = _watch_classification(cycles=cycles, completed_all_cycles=len(cycles) == max_cycles)
+        heartbeat = _watch_heartbeat(
+            config=config,
+            watch_id=actual_watch_id,
+            started_at=started_at,
+            generated_at=ended_at,
+            ended_at=ended_at,
+            verdict=verdict,
+            cycles=cycles,
+            watch_exited_normally=len(cycles) == max_cycles and verdict != ShadowListenerWatchVerdict.BLOCKED_INVALID_CONFIG,
+            primary_blocker=primary_blocker,
+            required_next_action=required_action,
+        )
+        return _write_watch_heartbeat(heartbeat_json, verdict, heartbeat)
+    except (TypeError, ValueError, OSError) as exc:
+        ended_at = clock()
+        require_aware_datetime(ended_at, "watch_ended_at")
+        heartbeat = {
+            "schema_version": "track_b_shadow_listener_watch_heartbeat_v1",
+            "generated_at": ended_at.isoformat(),
+            "listener_id": fallback_listener_id,
+            "listener_watch_id": actual_watch_id,
+            "listener_mode": "watch",
+            "watch_verdict": ShadowListenerWatchVerdict.BLOCKED_SCHEMA_ERROR.value,
+            "watch_exited_normally": False,
+            "primary_blocker": str(exc),
+            "secondary_blockers": [],
+            "required_next_action": "Fix listener watch configuration before retrying.",
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+            "broker_connection_attempted": False,
+            "market_data_connection_attempted": False,
+            "paper_proof_cli_wired": False,
+            "heartbeat_json_path": str(heartbeat_json),
+        }
+        return _write_watch_heartbeat(heartbeat_json, ShadowListenerWatchVerdict.BLOCKED_SCHEMA_ERROR, heartbeat)
 
 
 def _process_file(
@@ -397,8 +536,12 @@ def _config_blocker(config: ShadowListenerConfig) -> tuple[str, str] | None:
         return "Shadow listener accepts SHADOW or PAPER_REVIEW no-submit mode only.", "Use mode=SHADOW or mode=PAPER_REVIEW."
     if not config.listener_id:
         return "listener_id is required.", "Provide listener_id in listener config."
-    if not config.poll_once:
-        return "Only poll_once=true is supported by the current listener skeleton.", "Use poll_once=true; daemon/watch mode is future work."
+    if not config.poll_once and not config.watch_enabled:
+        return "poll_once=false requires explicit watch_enabled=true.", "Use poll_once=true or enable watch mode explicitly."
+    if config.watch_enabled and config.max_cycles <= 0:
+        return "watch mode requires max_cycles greater than zero.", "Set max_cycles to a positive bounded value."
+    if config.watch_enabled and config.poll_seconds < 0:
+        return "watch mode poll_seconds cannot be negative.", "Set poll_seconds to zero or a positive interval."
     if not config.file_glob:
         return "file_glob is required.", "Provide a file glob such as *.json."
     if config.submit_enabled:
@@ -470,6 +613,18 @@ def _bool(value: object) -> bool:
     return bool(value)
 
 
+def _int(value: object) -> int:
+    if value in (None, ""):
+        return 0
+    return int(value)
+
+
+def _float(value: object) -> float:
+    if value in (None, ""):
+        return 0.0
+    return float(value)
+
+
 def _write(report_json: Path, verdict: ShadowListenerVerdict, report: dict[str, Any]) -> ShadowListenerResult:
     report_json.parent.mkdir(parents=True, exist_ok=True)
     report_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
@@ -482,6 +637,137 @@ def _write(report_json: Path, verdict: ShadowListenerVerdict, report: dict[str, 
     health_report_path.write_text(health_payload, encoding="utf-8")
     latest_health_report_path.write_text(health_payload, encoding="utf-8")
     return ShadowListenerResult(verdict=verdict, report_json=report_json, report=report)
+
+
+def _watch_cycle_record(
+    *,
+    cycle_number: int,
+    cycle_started_at: datetime,
+    cycle_ended_at: datetime,
+    cycle_result: ShadowListenerResult,
+) -> dict[str, Any]:
+    health_path = Path(str(cycle_result.report["health_report_path"]))
+    health = _read_json(health_path) or {}
+    return {
+        "cycle_number": cycle_number,
+        "cycle_started_at": cycle_started_at.isoformat(),
+        "cycle_ended_at": cycle_ended_at.isoformat(),
+        "listener_cycle_id": cycle_result.report.get("listener_cycle_id"),
+        "listener_verdict": cycle_result.report.get("listener_verdict"),
+        "health_verdict": health.get("health_verdict"),
+        "files_discovered": cycle_result.report.get("files_discovered", 0),
+        "files_processed": cycle_result.report.get("files_processed", 0),
+        "files_succeeded": cycle_result.report.get("files_succeeded", 0),
+        "files_failed": cycle_result.report.get("files_failed", 0),
+        "cycle_summary_path": str(cycle_result.report_json),
+        "health_report_path": str(health_path),
+        "runner_summary_paths": list(cycle_result.report.get("runner_summary_paths") or ()),
+        "primary_blocker": cycle_result.report.get("primary_blocker"),
+        "required_next_action": cycle_result.report.get("required_next_action"),
+    }
+
+
+def _watch_classification(
+    *,
+    cycles: list[Mapping[str, Any]],
+    completed_all_cycles: bool,
+) -> tuple[ShadowListenerWatchVerdict, str | None, str]:
+    if any(cycle.get("listener_verdict") in {ShadowListenerVerdict.BLOCKED_INVALID_CONFIG.value, ShadowListenerVerdict.BLOCKED_SCHEMA_ERROR.value} for cycle in cycles):
+        return (
+            ShadowListenerWatchVerdict.BLOCKED_INVALID_CONFIG,
+            "One listener watch cycle blocked on configuration or schema.",
+            "Fix listener configuration before continuing watch mode.",
+        )
+    if any(int(cycle.get("files_failed") or 0) > 0 for cycle in cycles):
+        return (
+            ShadowListenerWatchVerdict.COMPLETED_WITH_FAILURES,
+            "One or more watch cycles had failed files.",
+            "Review listener event reports and failed input files.",
+        )
+    if completed_all_cycles:
+        return (
+            ShadowListenerWatchVerdict.COMPLETED,
+            None,
+            "Watch mode completed the bounded cycle count. Submit gates remain external and required.",
+        )
+    return (
+        ShadowListenerWatchVerdict.COMPLETED,
+        None,
+        "Watch mode is running bounded no-submit cycles. Submit gates remain external and required.",
+    )
+
+
+def _watch_heartbeat(
+    *,
+    config: ShadowListenerConfig,
+    watch_id: str,
+    started_at: datetime,
+    generated_at: datetime,
+    ended_at: datetime | None,
+    verdict: ShadowListenerWatchVerdict,
+    cycles: list[Mapping[str, Any]],
+    watch_exited_normally: bool,
+    primary_blocker: str | None,
+    required_next_action: str,
+) -> dict[str, Any]:
+    last_cycle = cycles[-1] if cycles else {}
+    return {
+        "schema_version": "track_b_shadow_listener_watch_heartbeat_v1",
+        "generated_at": generated_at.isoformat(),
+        "listener_id": config.listener_id,
+        "listener_watch_id": watch_id,
+        "listener_mode": "watch",
+        "watch_verdict": verdict.value,
+        "watch_started_at": started_at.isoformat(),
+        "watch_ended_at": None if ended_at is None else ended_at.isoformat(),
+        "watch_exited_normally": watch_exited_normally,
+        "current_cycle_number": len(cycles),
+        "last_cycle_number": last_cycle.get("cycle_number"),
+        "last_cycle_start_at": last_cycle.get("cycle_started_at"),
+        "last_cycle_end_at": last_cycle.get("cycle_ended_at"),
+        "last_listener_verdict": last_cycle.get("listener_verdict"),
+        "last_health_verdict": last_cycle.get("health_verdict"),
+        "processed_cycles": sum(1 for cycle in cycles if int(cycle.get("files_processed") or 0) > 0),
+        "failed_cycles": sum(1 for cycle in cycles if int(cycle.get("files_failed") or 0) > 0),
+        "no_file_cycles": sum(1 for cycle in cycles if cycle.get("listener_verdict") == ShadowListenerVerdict.NO_FILES.value),
+        "max_cycles": config.max_cycles,
+        "poll_seconds": config.poll_seconds,
+        "cycle_summary_paths": [str(cycle.get("cycle_summary_path")) for cycle in cycles if cycle.get("cycle_summary_path")],
+        "health_report_paths": [str(cycle.get("health_report_path")) for cycle in cycles if cycle.get("health_report_path")],
+        "runner_summary_paths": [path for cycle in cycles for path in cycle.get("runner_summary_paths", [])],
+        "primary_blocker": primary_blocker,
+        "secondary_blockers": _watch_secondary_blockers(cycles),
+        "required_next_action": required_next_action,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "broker_connection_attempted": False,
+        "market_data_connection_attempted": False,
+        "paper_proof_cli_wired": False,
+        "heartbeat_json_path": str(config.output_root / config.listener_id / "latest_shadow_listener_heartbeat.json"),
+    }
+
+
+def _watch_secondary_blockers(cycles: list[Mapping[str, Any]]) -> list[str]:
+    blockers: list[str] = []
+    seen: set[str] = set()
+    for cycle in cycles:
+        if cycle.get("primary_blocker"):
+            text = str(cycle["primary_blocker"])
+            if text not in seen:
+                seen.add(text)
+                blockers.append(text)
+    return blockers
+
+
+def _write_watch_heartbeat(
+    heartbeat_json: Path,
+    verdict: ShadowListenerWatchVerdict,
+    report: dict[str, Any],
+) -> ShadowListenerWatchResult:
+    heartbeat_json.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
+    return ShadowListenerWatchResult(verdict=verdict, heartbeat_json=heartbeat_json, report=report)
 
 
 def _health_report_from_cycle(*, report: Mapping[str, Any], now: str, report_json: Path) -> dict[str, Any]:

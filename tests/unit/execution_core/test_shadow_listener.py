@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mgc_v05l.execution_core.shadow_listener import ShadowListenerVerdict, run_shadow_listener_cycle
+from mgc_v05l.execution_core.shadow_listener import ShadowListenerVerdict, ShadowListenerWatchVerdict, run_shadow_listener_cycle, run_shadow_listener_watch
 from mgc_v05l.execution_core.shadow_listener_cli import main as shadow_listener_cli_main
 
 
@@ -262,3 +262,115 @@ def test_listener_cli_reads_config_and_writes_summary(tmp_path: Path, capsys) ->
     assert output["live_money_readiness"] is False
     assert Path(output["health_report"]).exists()
     assert Path(output["latest_health_report"]).exists()
+
+
+def test_watch_mode_runs_bounded_no_file_cycles(tmp_path: Path) -> None:
+    config = listener_config(tmp_path, watch_enabled=True, poll_once=False, max_cycles=2, poll_seconds=0)
+
+    result = run_shadow_listener_watch(
+        config_payload=config,
+        output_root=tmp_path / "watch_outputs",
+        watch_id="watch-empty",
+        now_fn=aware_now,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result.verdict == ShadowListenerWatchVerdict.COMPLETED
+    assert result.report["listener_mode"] == "watch"
+    assert result.report["current_cycle_number"] == 2
+    assert result.report["no_file_cycles"] == 2
+    assert result.report["watch_exited_normally"] is True
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+    assert Path(result.report["heartbeat_json_path"]).exists()
+
+
+def test_watch_mode_processes_one_file_then_continues_to_no_file_cycle(tmp_path: Path) -> None:
+    config = listener_config(tmp_path, watch_enabled=True, poll_once=False, max_cycles=2, poll_seconds=0)
+    inbox_file = Path(str(config["inbox_dir"])) / "batch.json"
+    write_json(inbox_file, signal_batch(signal()))
+
+    result = run_shadow_listener_watch(
+        config_payload=config,
+        output_root=tmp_path / "watch_outputs",
+        watch_id="watch-one-file",
+        now_fn=aware_now,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result.verdict == ShadowListenerWatchVerdict.COMPLETED
+    assert result.report["current_cycle_number"] == 2
+    assert result.report["processed_cycles"] == 1
+    assert result.report["no_file_cycles"] == 1
+    assert result.report["last_health_verdict"] == "SHADOW_LISTENER_HEALTH_NO_FILES"
+    assert result.report["runner_summary_paths"]
+    assert not inbox_file.exists()
+    assert result.report["watch_exited_normally"] is True
+
+
+def test_watch_mode_writes_degraded_heartbeat_for_failed_file(tmp_path: Path) -> None:
+    config = listener_config(tmp_path, watch_enabled=True, poll_once=False, max_cycles=1, poll_seconds=0)
+    inbox_file = Path(str(config["inbox_dir"])) / "bad_batch.json"
+    write_json(inbox_file, signal_batch(signal(), mode="LIVE"))
+
+    result = run_shadow_listener_watch(
+        config_payload=config,
+        output_root=tmp_path / "watch_outputs",
+        watch_id="watch-failed-file",
+        now_fn=aware_now,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result.verdict == ShadowListenerWatchVerdict.COMPLETED_WITH_FAILURES
+    assert result.report["failed_cycles"] == 1
+    assert result.report["primary_blocker"] == "One or more watch cycles had failed files."
+    assert result.report["submit_allowed"] is False
+    assert Path(result.heartbeat_json).exists()
+
+
+def test_watch_mode_invalid_config_blocks_safely(tmp_path: Path) -> None:
+    config = listener_config(tmp_path, watch_enabled=True, poll_once=False, max_cycles=0)
+
+    result = run_shadow_listener_watch(
+        config_payload=config,
+        output_root=tmp_path / "watch_outputs",
+        watch_id="watch-invalid-config",
+        now_fn=aware_now,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result.verdict == ShadowListenerWatchVerdict.BLOCKED_INVALID_CONFIG
+    assert result.report["watch_exited_normally"] is False
+    assert result.report["primary_blocker"] == "watch mode requires max_cycles greater than zero."
+    assert result.report["submit_attempted"] is False
+
+
+def test_listener_cli_watch_runs_bounded_cycles(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    config = listener_config(tmp_path)
+    config_path = tmp_path / "listener_config.json"
+    write_json(config_path, config)
+
+    exit_code = shadow_listener_cli_main(
+        [
+            "--listener-config-json",
+            str(config_path),
+            "--output-root",
+            str(tmp_path / "cli_watch_outputs"),
+            "--watch",
+            "--max-cycles",
+            "2",
+            "--poll-seconds",
+            "0",
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["watch_verdict"] == "SHADOW_LISTENER_WATCH_COMPLETED"
+    assert output["listener_mode"] == "watch"
+    assert output["current_cycle_number"] == 2
+    assert output["submit_allowed"] is False
+    assert output["submit_attempted"] is False
+    assert output["live_money_readiness"] is False
+    assert Path(output["heartbeat_json"]).exists()
