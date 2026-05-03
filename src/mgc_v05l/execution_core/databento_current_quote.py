@@ -1,0 +1,261 @@
+"""Track B Databento current quote boundary.
+
+This module is intentionally transport-injected. Tests use fakes; real Databento
+network access must be added behind an explicit operator path.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+from enum import Enum
+from pathlib import Path
+from typing import Any, Mapping, Protocol
+
+from .models import require_aware_datetime, to_jsonable
+from .pricing import MarketDataMode, MarketDataRole
+from .quote_provider import QuoteSnapshot
+
+
+class CurrentQuoteClassification(str, Enum):
+    AVAILABLE = "CURRENT_QUOTE_AVAILABLE"
+    UNAVAILABLE = "CURRENT_QUOTE_UNAVAILABLE"
+    STALE = "CURRENT_QUOTE_STALE"
+    PROVIDER_ERROR = "CURRENT_QUOTE_PROVIDER_ERROR"
+    MARKET_CLOSED_OR_NO_RECORDS = "CURRENT_QUOTE_MARKET_CLOSED_OR_NO_RECORDS"
+
+
+DEFAULT_CURRENT_QUOTE_OUTPUT_ROOT = Path("outputs/track_b_execution_core/current_quotes")
+
+
+class DatabentoCurrentQuoteTransport(Protocol):
+    def get_current_quote(
+        self,
+        *,
+        dataset: str,
+        symbol: str,
+        stype_in: str,
+        schema: str,
+        contract_key: str,
+    ) -> Mapping[str, Any] | None: ...
+
+
+@dataclass(frozen=True)
+class DatabentoCurrentQuoteConfig:
+    contract_key: str
+    dataset: str = "GLBX.MDP3"
+    databento_continuous_symbol: str | None = None
+    databento_symbol: str | None = None
+    stype_in: str = "continuous"
+    schema: str = "mbp-1"
+    allowlisted_local_symbol: str | None = None
+    tick_size: str = "0.1"
+    exchange: str = "COMEX"
+    currency: str = "USD"
+    max_age_seconds: int = 15
+    output_root: Path = DEFAULT_CURRENT_QUOTE_OUTPUT_ROOT
+
+    def selector_symbol(self) -> str:
+        symbol = str(self.databento_continuous_symbol or self.databento_symbol or "").strip()
+        if not symbol:
+            raise ValueError("databento_continuous_symbol or databento_symbol is required")
+        return symbol
+
+    def selector_source(self) -> str:
+        return "DATABENTO_CONTINUOUS_SYMBOL" if self.databento_continuous_symbol else "DATABENTO_RAW_SYMBOL_OVERRIDE"
+
+
+@dataclass(frozen=True)
+class CurrentQuoteResult:
+    classification: CurrentQuoteClassification
+    report_json: Path
+    report: dict[str, Any]
+    quote: QuoteSnapshot | None = None
+
+
+class DatabentoCurrentQuoteProvider:
+    provider_name = "DATABENTO"
+
+    def __init__(self, *, config: DatabentoCurrentQuoteConfig, transport: DatabentoCurrentQuoteTransport) -> None:
+        self.config = config
+        self.transport = transport
+
+    def fetch_current_quote(
+        self,
+        *,
+        run_id: str | None = None,
+        now: datetime | None = None,
+    ) -> CurrentQuoteResult:
+        actual_now = now or datetime.now(UTC)
+        require_aware_datetime(actual_now, "now")
+        actual_run_id = run_id or f"databento_current_quote_{uuid.uuid4().hex}"
+        report_json = Path(self.config.output_root) / actual_run_id / "current_quote_report.json"
+        symbol = self.config.selector_symbol()
+        try:
+            raw_quote = self.transport.get_current_quote(
+                dataset=self.config.dataset,
+                symbol=symbol,
+                stype_in=self.config.stype_in,
+                schema=self.config.schema,
+                contract_key=self.config.contract_key,
+            )
+        except Exception as exc:  # noqa: BLE001 - provider errors must become operator reports.
+            return self._write_report(
+                report_json=report_json,
+                classification=CurrentQuoteClassification.PROVIDER_ERROR,
+                now=actual_now,
+                raw_quote=None,
+                quote=None,
+                provider_error=str(exc),
+                no_records_reason=None,
+            )
+        if raw_quote is None:
+            return self._write_report(
+                report_json=report_json,
+                classification=CurrentQuoteClassification.MARKET_CLOSED_OR_NO_RECORDS,
+                now=actual_now,
+                raw_quote=None,
+                quote=None,
+                provider_error=None,
+                no_records_reason="MARKET_CLOSED_OR_NO_RECORDS",
+            )
+        try:
+            quote = self._quote_from_raw(raw_quote)
+        except ValueError as exc:
+            return self._write_report(
+                report_json=report_json,
+                classification=CurrentQuoteClassification.UNAVAILABLE,
+                now=actual_now,
+                raw_quote=raw_quote,
+                quote=None,
+                provider_error=str(exc),
+                no_records_reason="UNAVAILABLE_OR_INCOMPLETE_QUOTE",
+            )
+        age_seconds = quote.age_seconds(actual_now)
+        classification = (
+            CurrentQuoteClassification.AVAILABLE
+            if Decimal("0") <= age_seconds <= Decimal(str(self.config.max_age_seconds))
+            else CurrentQuoteClassification.STALE
+        )
+        return self._write_report(
+            report_json=report_json,
+            classification=classification,
+            now=actual_now,
+            raw_quote=raw_quote,
+            quote=quote,
+            provider_error=None,
+            no_records_reason=None,
+        )
+
+    def _quote_from_raw(self, raw_quote: Mapping[str, Any]) -> QuoteSnapshot:
+        timestamp = _parse_timestamp(raw_quote.get("timestamp") or raw_quote.get("ts_event"))
+        bid = _required_decimal(raw_quote.get("bid"), "bid")
+        ask = _required_decimal(raw_quote.get("ask"), "ask")
+        last = raw_quote.get("last")
+        return QuoteSnapshot(
+            provider=self.provider_name,
+            mode=MarketDataMode.REALTIME,
+            role=MarketDataRole.PRIMARY,
+            contract_key=self.config.contract_key,
+            provider_symbol=str(raw_quote.get("provider_symbol") or self.config.selector_symbol()),
+            bid=bid,
+            ask=ask,
+            last=_required_decimal(last, "last") if last is not None else None,
+            timestamp=timestamp,
+            tick_size=self.config.tick_size,
+            exchange=self.config.exchange,
+            currency=self.config.currency,
+            provider_warnings=tuple(raw_quote.get("provider_warnings") or ()),
+            delayed_data_warning_seen=False,
+            raw={
+                "dataset": self.config.dataset,
+                "schema": self.config.schema,
+                "symbol_selector": self.config.selector_symbol(),
+                "symbol_selector_source": self.config.selector_source(),
+                "stype_in": self.config.stype_in,
+                "local_execution_contract_key": self.config.contract_key,
+                "allowlisted_local_symbol": self.config.allowlisted_local_symbol,
+                "databento_continuous_symbol_is_execution_authority": False,
+                "ibkr_allowlist_remains_execution_authority": True,
+            },
+        )
+
+    def _write_report(
+        self,
+        *,
+        report_json: Path,
+        classification: CurrentQuoteClassification,
+        now: datetime,
+        raw_quote: Mapping[str, Any] | None,
+        quote: QuoteSnapshot | None,
+        provider_error: str | None,
+        no_records_reason: str | None,
+    ) -> CurrentQuoteResult:
+        quote_age_seconds = str(quote.age_seconds(now)) if quote is not None else None
+        quote_available = classification == CurrentQuoteClassification.AVAILABLE
+        report = {
+            "schema_version": "track_b_databento_current_quote_v1",
+            "classification": classification.value,
+            "quote_status": classification.value,
+            "generated_at": now.isoformat(),
+            "market_data_provider": self.provider_name,
+            "market_data_mode": MarketDataMode.REALTIME if quote is not None else MarketDataMode.UNKNOWN,
+            "market_data_role": MarketDataRole.PRIMARY,
+            "dataset": self.config.dataset,
+            "schema": self.config.schema,
+            "contract_key": self.config.contract_key,
+            "local_execution_contract_key": self.config.contract_key,
+            "ibkr_allowlist_remains_execution_authority": True,
+            "allowlisted_local_symbol": self.config.allowlisted_local_symbol,
+            "databento_continuous_symbol": self.config.databento_continuous_symbol,
+            "databento_symbol": self.config.databento_symbol,
+            "symbol_selector": self.config.selector_symbol(),
+            "symbol_selector_source": self.config.selector_source(),
+            "databento_continuous_symbol_is_execution_authority": False,
+            "quote_observed": quote is not None,
+            "bid": str(quote.bid) if quote is not None else None,
+            "ask": str(quote.ask) if quote is not None else None,
+            "last": str(quote.last) if quote is not None and quote.last is not None else None,
+            "timestamp": quote.timestamp.isoformat() if quote is not None else None,
+            "quote_age_seconds": quote_age_seconds,
+            "max_age_seconds": int(self.config.max_age_seconds),
+            "current_quote_available": quote_available,
+            "current_executable_quote": quote_available,
+            "quote_usable_for_paper_pricing": quote_available,
+            "quote_usable_for_live_money_readiness": False,
+            "production_live_money_readiness": False,
+            "provider_error": provider_error,
+            "no_records_reason": no_records_reason,
+            "raw_quote_keys": sorted(str(key) for key in raw_quote.keys()) if raw_quote is not None else [],
+            "submit_enabled": False,
+            "place_order_called": False,
+            "cancel_called": False,
+        }
+        report_json.parent.mkdir(parents=True, exist_ok=True)
+        report["report_json_path"] = str(report_json)
+        report_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
+        return CurrentQuoteResult(classification=classification, report_json=report_json, report=report, quote=quote)
+
+
+def _parse_timestamp(value: Any) -> datetime:
+    if value is None:
+        raise ValueError("timestamp is required")
+    if isinstance(value, datetime):
+        return require_aware_datetime(value, "timestamp")
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return require_aware_datetime(parsed, "timestamp")
+
+
+def _required_decimal(value: Any, field_name: str) -> Decimal:
+    if value is None:
+        raise ValueError(f"{field_name} is required")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field_name} must be decimal-compatible") from exc
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be positive")
+    return parsed
