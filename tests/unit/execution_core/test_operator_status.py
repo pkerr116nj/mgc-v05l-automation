@@ -51,6 +51,73 @@ def listener_health(tmp_path: Path, **overrides: object) -> Path:
     return write_json(tmp_path / "listener_health.json", payload)
 
 
+def listener_heartbeat(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_shadow_listener_watch_heartbeat_v1",
+        "generated_at": aware_now().isoformat(),
+        "listener_id": "shadow_listener_test",
+        "listener_watch_id": "watch-001",
+        "listener_mode": "watch",
+        "watch_verdict": "SHADOW_LISTENER_WATCH_COMPLETED",
+        "watch_started_at": aware_now().isoformat(),
+        "watch_ended_at": aware_now().isoformat(),
+        "watch_exited_normally": True,
+        "current_cycle_number": 3,
+        "last_cycle_number": 3,
+        "last_cycle_start_at": aware_now().isoformat(),
+        "last_cycle_end_at": aware_now().isoformat(),
+        "last_listener_verdict": "SHADOW_LISTENER_CYCLE_NO_FILES",
+        "last_health_verdict": "SHADOW_LISTENER_HEALTH_NO_FILES",
+        "processed_cycles": 1,
+        "failed_cycles": 0,
+        "no_file_cycles": 2,
+        "runner_summary_paths": ["runner_summary.json"],
+        "primary_blocker": None,
+        "secondary_blockers": [],
+        "required_next_action": "Watch mode completed the bounded cycle count. Submit gates remain external and required.",
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "broker_connection_attempted": False,
+        "market_data_connection_attempted": False,
+        "paper_proof_cli_wired": False,
+        "heartbeat_json_path": "latest_shadow_listener_heartbeat.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "listener_heartbeat.json", payload)
+
+
+def signal_batch_writer_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_signal_batch_writer_v1",
+        "generated_at": aware_now().isoformat(),
+        "signal_batch_writer_id": "writer-001",
+        "signal_batch_writer_verdict": "SIGNAL_BATCH_WRITER_WROTE_BATCH",
+        "batch_file_written": True,
+        "batch_id": "writer_batch_001",
+        "shadow_run_id": "writer_shadow_run_001",
+        "source_id": "unit_test_writer",
+        "inbox_dir": str(tmp_path / "inbox"),
+        "batch_json_path": str(tmp_path / "inbox" / "writer_batch_001.json"),
+        "total_signals": 2,
+        "listener_invoked": False,
+        "runner_invoked": False,
+        "order_plan_created": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "broker_connection_attempted": False,
+        "market_data_connection_attempted": False,
+        "paper_proof_cli_wired": False,
+        "primary_blocker": None,
+        "secondary_blockers": [],
+        "required_next_action": "Let shadow_listener process the written no-submit signal batch file.",
+        "report_json_path": "writer_report.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "signal_batch_writer_report.json", payload)
+
+
 def recovery_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, object] = {
         "classification": "RECOVERY_READY_CLEAN",
@@ -99,6 +166,83 @@ def test_listener_health_ok_produces_ok_for_shadow_review(tmp_path: Path) -> Non
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_listener_heartbeat_is_summarized_for_watch_mode(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-heartbeat",
+        now=aware_now(),
+    )
+
+    assert result.verdict == OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW
+    assert result.report["listener_mode"] == "watch"
+    assert result.report["listener_current_cycle_number"] == 3
+    assert result.report["listener_last_cycle_number"] == 3
+    assert result.report["listener_processed_cycles"] == 1
+    assert result.report["listener_failed_cycles"] == 0
+    assert result.report["listener_no_file_cycles"] == 2
+    assert result.report["listener_watch_exited_normally"] is True
+    assert result.report["listener_last_health_verdict"] == "SHADOW_LISTENER_HEALTH_NO_FILES"
+    assert result.report["latest_listener_cycle_verdict"] == "SHADOW_LISTENER_CYCLE_NO_FILES"
+    assert "listener_health" in result.report["reports_missing"]
+    assert result.report["submit_allowed"] is False
+
+
+def test_missing_listener_heartbeat_is_explicit_when_health_is_supplied(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_health_json=listener_health(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-missing-heartbeat",
+        now=aware_now(),
+    )
+
+    assert result.report["listener_mode"] == "NOT_PROVIDED"
+    assert result.report["listener_current_cycle_number"] == "NOT_PROVIDED"
+    assert "listener_heartbeat" in result.report["reports_missing"]
+    assert result.report["reports_considered"]["listener_heartbeat"] is False
+
+
+def test_signal_batch_writer_report_is_summarized(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            signal_batch_writer_report_json=signal_batch_writer_report(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-writer",
+        now=aware_now(),
+    )
+
+    assert result.report["signal_batch_writer_verdict"] == "SIGNAL_BATCH_WRITER_WROTE_BATCH"
+    assert result.report["signal_batch_writer_batch_file_written"] is True
+    assert result.report["signal_batch_writer_batch_json_path"].endswith("writer_batch_001.json")
+    assert result.report["signal_batch_writer_total_signals"] == 2
+    assert result.report["recent_writer_output_present"] is True
+    assert result.report["listener_invoked"] is False
+    assert result.report["runner_invoked"] is False
+    assert result.report["submit_attempted"] is False
+
+
+def test_missing_signal_batch_writer_report_is_explicit(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-missing-writer",
+        now=aware_now(),
+    )
+
+    assert result.report["signal_batch_writer_verdict"] == "NOT_PROVIDED"
+    assert result.report["signal_batch_writer_batch_json_path"] == "NOT_PROVIDED"
+    assert result.report["recent_writer_output_present"] is False
+    assert "signal_batch_writer" in result.report["reports_missing"]
 
 
 def test_listener_degraded_produces_degraded_status(tmp_path: Path) -> None:
@@ -189,8 +333,12 @@ def test_no_inputs_reports_missing_not_ok(tmp_path: Path) -> None:
 def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     exit_code = operator_status_cli_main(
         [
+            "--listener-heartbeat-json",
+            str(listener_heartbeat(tmp_path)),
             "--listener-health-json",
             str(listener_health(tmp_path)),
+            "--signal-batch-writer-report-json",
+            str(signal_batch_writer_report(tmp_path)),
             "--output-root",
             str(tmp_path / "operator_status_cli"),
         ]
@@ -199,6 +347,9 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
 
     assert exit_code == 0
     assert output["status_verdict"] == "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW"
+    assert output["listener_mode"] == "watch"
+    assert output["listener_current_cycle_number"] == 3
+    assert output["signal_batch_writer_verdict"] == "SIGNAL_BATCH_WRITER_WROTE_BATCH"
     assert output["shadow_listener_health_verdict"] == "SHADOW_LISTENER_HEALTH_OK"
     assert output["submit_allowed"] is False
     assert output["submit_attempted"] is False

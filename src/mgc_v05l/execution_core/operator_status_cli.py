@@ -13,10 +13,12 @@ from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatus
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create a Track B no-submit operator status summary from observer reports.")
+    parser.add_argument("--listener-heartbeat-json", type=Path)
     parser.add_argument("--listener-health-json", type=Path)
     parser.add_argument("--listener-cycle-json", type=Path)
     parser.add_argument("--shadow-runner-summary-json", type=Path)
     parser.add_argument("--attrition-report-json", type=Path)
+    parser.add_argument("--signal-batch-writer-report-json", type=Path)
     parser.add_argument("--readiness-summary-json", type=Path)
     parser.add_argument("--recovery-report-json", type=Path)
     parser.add_argument("--preflight-report-json", type=Path)
@@ -29,10 +31,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = create_operator_status_summary(
         inputs=OperatorStatusInputs(
+            listener_heartbeat_json=args.listener_heartbeat_json,
             listener_health_json=args.listener_health_json,
             listener_cycle_json=args.listener_cycle_json,
             shadow_runner_summary_json=args.shadow_runner_summary_json,
             attrition_report_json=args.attrition_report_json,
+            signal_batch_writer_report_json=args.signal_batch_writer_report_json,
             readiness_summary_json=args.readiness_summary_json,
             recovery_report_json=args.recovery_report_json,
             preflight_report_json=args.preflight_report_json,
@@ -44,7 +48,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dumps(
             {
                 "status_verdict": result.report["status_verdict"],
+                "listener_mode": result.report["listener_mode"],
+                "listener_current_cycle_number": result.report["listener_current_cycle_number"],
+                "listener_last_health_verdict": result.report["listener_last_health_verdict"],
                 "shadow_listener_health_verdict": result.report["shadow_listener_health_verdict"],
+                "signal_batch_writer_verdict": result.report["signal_batch_writer_verdict"],
+                "signal_batch_writer_batch_json_path": result.report["signal_batch_writer_batch_json_path"],
                 "readiness_verdict": result.report["readiness_verdict"],
                 "recovery_verdict": result.report["recovery_verdict"],
                 "submit_allowed": result.report["submit_allowed"],

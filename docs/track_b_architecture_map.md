@@ -278,10 +278,12 @@ Example command chain:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
+  --listener-heartbeat-json <LISTENER_HEARTBEAT_JSON optional> \
   --listener-health-json <LISTENER_HEALTH_JSON> \
   --listener-cycle-json <LISTENER_CYCLE_JSON optional> \
   --shadow-runner-summary-json <RUNNER_SUMMARY_JSON optional> \
   --attrition-report-json <ATTRITION_REPORT_JSON optional> \
+  --signal-batch-writer-report-json <WRITER_REPORT_JSON optional> \
   --readiness-summary-json <READINESS_SUMMARY_JSON optional> \
   --recovery-report-json <RECOVERY_REPORT_JSON optional> \
   --preflight-report-json <PREFLIGHT_REPORT_JSON optional> \

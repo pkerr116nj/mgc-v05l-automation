@@ -33,10 +33,12 @@ class OperatorStatusVerdict(str, Enum):
 
 @dataclass(frozen=True)
 class OperatorStatusInputs:
+    listener_heartbeat_json: Path | None = None
     listener_health_json: Path | None = None
     listener_cycle_json: Path | None = None
     shadow_runner_summary_json: Path | None = None
     attrition_report_json: Path | None = None
+    signal_batch_writer_report_json: Path | None = None
     readiness_summary_json: Path | None = None
     recovery_report_json: Path | None = None
     preflight_report_json: Path | None = None
@@ -79,10 +81,12 @@ def create_operator_status_summary(
 
 def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | None]:
     return {
+        "listener_heartbeat": _read_json(inputs.listener_heartbeat_json),
         "listener_health": _read_json(inputs.listener_health_json),
         "listener_cycle": _read_json(inputs.listener_cycle_json),
         "shadow_runner": _read_json(inputs.shadow_runner_summary_json),
         "attrition": _read_json(inputs.attrition_report_json),
+        "signal_batch_writer": _read_json(inputs.signal_batch_writer_report_json),
         "readiness": _read_json(inputs.readiness_summary_json),
         "recovery": _read_json(inputs.recovery_report_json),
         "preflight": _read_json(inputs.preflight_report_json),
@@ -95,6 +99,7 @@ def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[Operator
     readiness = reports.get("readiness") or {}
     preflight = reports.get("preflight") or {}
     listener_health = reports.get("listener_health") or {}
+    listener_heartbeat = reports.get("listener_heartbeat") or {}
 
     recovery_verdict = _recovery_verdict(recovery)
     if recovery_verdict in {"BLOCKED_UNRESOLVED_BROKER_ORDER", "RECOVERY_BLOCKED_UNRESOLVED_ORDER"}:
@@ -139,12 +144,12 @@ def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[Operator
             str(preflight.get("required_next_action") or "Resolve preflight blocker before paper proof review."),
         )
 
-    health_verdict = str(listener_health.get("health_verdict") or "")
+    health_verdict = str(listener_health.get("health_verdict") or listener_heartbeat.get("last_health_verdict") or "")
     if health_verdict == "SHADOW_LISTENER_HEALTH_DEGRADED_FAILURES":
         return (
             OperatorStatusVerdict.DEGRADED_SHADOW_FAILURES,
-            str(listener_health.get("last_primary_blocker") or "Listener health is degraded due to failed files."),
-            str(listener_health.get("last_required_next_action") or "Review listener event and replay reports."),
+            str(listener_health.get("last_primary_blocker") or listener_heartbeat.get("primary_blocker") or "Listener health is degraded due to failed files."),
+            str(listener_health.get("last_required_next_action") or listener_heartbeat.get("required_next_action") or "Review listener event and replay reports."),
         )
     if health_verdict == "SHADOW_LISTENER_HEALTH_OK":
         return (
@@ -183,19 +188,23 @@ def _report(
 ) -> dict[str, Any]:
     missing = [name for name, report in reports.items() if report is None]
     considered = {name: report is not None for name, report in reports.items()}
+    listener_heartbeat = reports.get("listener_heartbeat") or {}
     listener_health = reports.get("listener_health") or {}
     listener_cycle = reports.get("listener_cycle") or {}
     shadow_runner = reports.get("shadow_runner") or {}
     attrition = reports.get("attrition") or {}
+    signal_batch_writer = reports.get("signal_batch_writer") or {}
     readiness = reports.get("readiness") or {}
     recovery = reports.get("recovery") or {}
     preflight = reports.get("preflight") or {}
     quote = reports.get("quote") or {}
     latest_output_paths = {
+        "listener_heartbeat": listener_heartbeat.get("heartbeat_json_path"),
         "listener_health": listener_health.get("health_report_path") or listener_health.get("latest_health_report_path"),
         "listener_cycle": listener_cycle.get("report_json_path") or listener_health.get("latest_cycle_summary_path"),
         "shadow_runner": shadow_runner.get("report_json_path"),
         "attrition": attrition.get("report_json_path"),
+        "signal_batch_writer": signal_batch_writer.get("report_json_path"),
         "readiness": readiness.get("report_json_path"),
         "recovery": recovery.get("report_json_path"),
         "preflight": preflight.get("report_json_path"),
@@ -206,10 +215,26 @@ def _report(
         "generated_at": now.isoformat(),
         "operator_status_id": status_id,
         "status_verdict": verdict.value,
+        "listener_mode": listener_heartbeat.get("listener_mode") or NOT_PROVIDED,
+        "listener_current_cycle_number": listener_heartbeat.get("current_cycle_number") if listener_heartbeat else NOT_PROVIDED,
+        "listener_last_cycle_number": listener_heartbeat.get("last_cycle_number") if listener_heartbeat else NOT_PROVIDED,
+        "listener_last_cycle_start_at": listener_heartbeat.get("last_cycle_start_at") or NOT_PROVIDED,
+        "listener_last_cycle_end_at": listener_heartbeat.get("last_cycle_end_at") or NOT_PROVIDED,
+        "listener_processed_cycles": listener_heartbeat.get("processed_cycles") if listener_heartbeat else NOT_PROVIDED,
+        "listener_failed_cycles": listener_heartbeat.get("failed_cycles") if listener_heartbeat else NOT_PROVIDED,
+        "listener_no_file_cycles": listener_heartbeat.get("no_file_cycles") if listener_heartbeat else NOT_PROVIDED,
+        "listener_watch_exited_normally": listener_heartbeat.get("watch_exited_normally") if listener_heartbeat else NOT_PROVIDED,
+        "listener_watch_verdict": listener_heartbeat.get("watch_verdict") or NOT_PROVIDED,
         "shadow_listener_health_verdict": listener_health.get("health_verdict") or NOT_PROVIDED,
-        "latest_listener_cycle_verdict": listener_cycle.get("listener_verdict") or listener_health.get("last_cycle_verdict") or NOT_PROVIDED,
+        "listener_last_health_verdict": listener_heartbeat.get("last_health_verdict") or listener_health.get("health_verdict") or NOT_PROVIDED,
+        "latest_listener_cycle_verdict": listener_cycle.get("listener_verdict") or listener_health.get("last_cycle_verdict") or listener_heartbeat.get("last_listener_verdict") or NOT_PROVIDED,
         "shadow_replay_runner_verdict": shadow_runner.get("runner_verdict") or NOT_PROVIDED,
         "attrition_report_verdict": attrition.get("attrition_report_verdict") or NOT_PROVIDED,
+        "signal_batch_writer_verdict": signal_batch_writer.get("signal_batch_writer_verdict") or NOT_PROVIDED,
+        "signal_batch_writer_batch_file_written": signal_batch_writer.get("batch_file_written") if signal_batch_writer else NOT_PROVIDED,
+        "signal_batch_writer_batch_json_path": signal_batch_writer.get("batch_json_path") or NOT_PROVIDED,
+        "signal_batch_writer_total_signals": signal_batch_writer.get("total_signals") if signal_batch_writer else NOT_PROVIDED,
+        "recent_writer_output_present": bool(signal_batch_writer.get("batch_json_path")) if signal_batch_writer else False,
         "readiness_verdict": readiness.get("final_readiness_verdict") or NOT_PROVIDED,
         "recovery_verdict": _recovery_verdict(recovery) or NOT_PROVIDED,
         "preflight_verdict": preflight.get("final_readiness_verdict") or preflight.get("classification") or NOT_PROVIDED,
@@ -227,6 +252,8 @@ def _report(
         "live_money_readiness": False,
         "observer_status_only": True,
         "dashboard_is_not_authority": True,
+        "listener_invoked": False,
+        "runner_invoked": False,
         "paper_proof_cli_called": False,
         "broker_connection_attempted": False,
         "market_data_connection_attempted": False,
