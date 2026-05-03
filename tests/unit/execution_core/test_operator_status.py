@@ -166,6 +166,12 @@ def test_listener_health_ok_produces_ok_for_shadow_review(tmp_path: Path) -> Non
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+    latest_report = Path(result.report["latest_report_json_path"])
+    assert latest_report == tmp_path / "operator_status" / "latest_operator_status_summary.json"
+    assert latest_report.exists()
+    latest_payload = json.loads(latest_report.read_text(encoding="utf-8"))
+    assert latest_payload["operator_status_id"] == "status-ok"
+    assert latest_payload["report_json_path"] == str(result.report_json)
 
 
 def test_listener_heartbeat_is_summarized_for_watch_mode(tmp_path: Path) -> None:
@@ -227,6 +233,34 @@ def test_signal_batch_writer_report_is_summarized(tmp_path: Path) -> None:
     assert result.report["listener_invoked"] is False
     assert result.report["runner_invoked"] is False
     assert result.report["submit_attempted"] is False
+
+
+def test_operator_status_latest_pointer_updates_without_overwriting_canonical_reports(tmp_path: Path) -> None:
+    first = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_health_json=listener_health(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-first",
+        now=datetime(2026, 5, 1, 21, 0, tzinfo=timezone.utc),
+    )
+    second = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-second",
+        now=datetime(2026, 5, 1, 21, 1, tzinfo=timezone.utc),
+    )
+
+    latest_report = tmp_path / "operator_status" / "latest_operator_status_summary.json"
+    latest_payload = json.loads(latest_report.read_text(encoding="utf-8"))
+    assert latest_payload["operator_status_id"] == "status-second"
+    assert latest_payload["report_json_path"] == str(second.report_json)
+    assert first.report_json.exists()
+    assert second.report_json.exists()
+    assert first.report_json != latest_report
+    assert second.report_json != latest_report
 
 
 def test_missing_signal_batch_writer_report_is_explicit(tmp_path: Path) -> None:

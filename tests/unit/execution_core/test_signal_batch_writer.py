@@ -154,6 +154,13 @@ def test_writer_writes_valid_batch_file_to_inbox(tmp_path: Path) -> None:
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+    latest_report = Path(result.report["latest_report_json_path"])
+    assert latest_report == tmp_path / "writer_reports" / "latest_signal_batch_writer_report.json"
+    assert latest_report.exists()
+    latest_payload = json.loads(latest_report.read_text(encoding="utf-8"))
+    assert latest_payload["signal_batch_writer_id"] == "writer-valid"
+    assert latest_payload["report_json_path"] == str(result.report_json)
+    assert result.report_json.exists()
 
 
 def test_writer_uses_unique_filenames_without_overwriting(tmp_path: Path) -> None:
@@ -175,6 +182,39 @@ def test_writer_uses_unique_filenames_without_overwriting(tmp_path: Path) -> Non
     assert first.batch_json != second.batch_json
     assert first.batch_json.exists()
     assert second.batch_json.exists()
+
+
+def test_writer_latest_pointer_updates_to_newest_report_without_overwriting_canonical_reports(tmp_path: Path) -> None:
+    first = write_signal_batch_to_inbox(
+        inbox_dir=tmp_path / "inbox",
+        signal_payloads=[signal(signal_id="first")],
+        batch_id="first_batch",
+        source_id="unit_test",
+        expected_account_id="DUM882026",
+        output_root=tmp_path / "writer_reports",
+        writer_id="writer-first",
+        now=datetime(2026, 5, 1, 20, 30, tzinfo=timezone.utc),
+    )
+    second = write_signal_batch_to_inbox(
+        inbox_dir=tmp_path / "inbox",
+        signal_payloads=[signal(signal_id="second")],
+        batch_id="second_batch",
+        source_id="unit_test",
+        expected_account_id="DUM882026",
+        output_root=tmp_path / "writer_reports",
+        writer_id="writer-second",
+        now=datetime(2026, 5, 1, 20, 31, tzinfo=timezone.utc),
+    )
+
+    latest_report = tmp_path / "writer_reports" / "latest_signal_batch_writer_report.json"
+    latest_payload = json.loads(latest_report.read_text(encoding="utf-8"))
+    assert latest_payload["signal_batch_writer_id"] == "writer-second"
+    assert latest_payload["batch_id"] == "second_batch"
+    assert latest_payload["report_json_path"] == str(second.report_json)
+    assert first.report_json.exists()
+    assert second.report_json.exists()
+    assert first.report_json != latest_report
+    assert second.report_json != latest_report
 
 
 def test_writer_rejects_invalid_signal_safely(tmp_path: Path) -> None:

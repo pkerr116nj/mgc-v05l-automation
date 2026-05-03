@@ -156,7 +156,11 @@ The writer is an upstream producer only. It validates the signal or batch
 payload, writes a uniquely named JSON file into the listener inbox using a temp
 file plus rename, and stops. It does not invoke the listener, apply proposal
 policy, authorize lanes, create order plans, connect to broker/data providers,
-or submit.
+or submit. It also updates this stable latest report pointer:
+
+```text
+outputs/track_b_execution_core/signal_batch_writer/latest_signal_batch_writer_report.json
+```
 
 Run bounded watch mode explicitly:
 
@@ -187,16 +191,23 @@ counts, last blocker/action, and the same no-submit flags. It is observer data
 for operators and future dashboards; a healthy listener does not authorize
 paper or live submit.
 
+For the committed example listener id, the stable listener latest paths are:
+
+```text
+outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_health.json
+outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_heartbeat.json
+```
+
 Create an operator status summary from observer reports:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
-  --listener-heartbeat-json <LISTENER_HEARTBEAT_JSON optional> \
-  --listener-health-json <LISTENER_HEALTH_JSON> \
+  --listener-heartbeat-json outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_heartbeat.json \
+  --listener-health-json outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_health.json \
   --listener-cycle-json <LISTENER_CYCLE_JSON optional> \
   --shadow-runner-summary-json <RUNNER_SUMMARY_JSON optional> \
   --attrition-report-json <ATTRITION_REPORT_JSON optional> \
-  --signal-batch-writer-report-json <WRITER_REPORT_JSON optional> \
+  --signal-batch-writer-report-json outputs/track_b_execution_core/signal_batch_writer/latest_signal_batch_writer_report.json \
   --readiness-summary-json <READINESS_SUMMARY_JSON optional> \
   --recovery-report-json <RECOVERY_REPORT_JSON optional> \
   --preflight-report-json <PREFLIGHT_REPORT_JSON optional> \
@@ -209,7 +220,12 @@ and missing reports explicitly, summarizes listener heartbeat/watch state and
 recent writer output when provided, surfaces listener degradation, readiness
 blocks, and broker-state blocks distinctly, and keeps `submit_allowed=false`.
 Future dashboard screens should read this artifact instead of inventing state,
-but the artifact itself is still not truth authority or submit authority.
+but the artifact itself is still not truth authority or submit authority. Each
+run also updates:
+
+```text
+outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json
+```
 
 ## Shadow Run Command
 

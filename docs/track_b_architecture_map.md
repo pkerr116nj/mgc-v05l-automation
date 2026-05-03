@@ -110,7 +110,9 @@ Dashboard implication:
   supplied signal observations or signal batch payloads, atomically writes a
   JSON file into the listener inbox, and stops. It does not invoke the
   listener, evaluate proposal policy, authorize lanes, create order plans, or
-  submit.
+  submit. It updates
+  `outputs/track_b_execution_core/signal_batch_writer/latest_signal_batch_writer_report.json`
+  as a read-model convenience.
 - `shadow_listener` is a poll-once file ingestion skeleton for signal batch
   JSON. It can run while the future engine is active, but it only invokes the
   no-submit replay runner and creates no submit authority. Its health report is
@@ -119,7 +121,9 @@ Dashboard implication:
   listener heartbeat artifact, while preserving no-submit semantics.
 - `operator_status` aggregates supplied Track B observer reports into one
   dashboard-ready read model. It is not source of truth, does not connect to
-  broker or market data, and does not authorize submit.
+  broker or market data, and does not authorize submit. It updates
+  `outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json`
+  as the stable latest read-model artifact.
 - `attrition_report` explains where candidates dropped out across supplied
   no-submit summaries. It is explanatory only and treats missing stages as
   explicit `NOT_PROVIDED` inputs instead of silently reporting zero.
@@ -278,12 +282,12 @@ Example command chain:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
-  --listener-heartbeat-json <LISTENER_HEARTBEAT_JSON optional> \
-  --listener-health-json <LISTENER_HEALTH_JSON> \
+  --listener-heartbeat-json <LISTENER_OUTPUT_ROOT>/<LISTENER_ID>/latest_shadow_listener_heartbeat.json \
+  --listener-health-json <LISTENER_OUTPUT_ROOT>/<LISTENER_ID>/latest_shadow_listener_health.json \
   --listener-cycle-json <LISTENER_CYCLE_JSON optional> \
   --shadow-runner-summary-json <RUNNER_SUMMARY_JSON optional> \
   --attrition-report-json <ATTRITION_REPORT_JSON optional> \
-  --signal-batch-writer-report-json <WRITER_REPORT_JSON optional> \
+  --signal-batch-writer-report-json outputs/track_b_execution_core/signal_batch_writer/latest_signal_batch_writer_report.json \
   --readiness-summary-json <READINESS_SUMMARY_JSON optional> \
   --recovery-report-json <RECOVERY_REPORT_JSON optional> \
   --preflight-report-json <PREFLIGHT_REPORT_JSON optional> \

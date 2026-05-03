@@ -75,7 +75,11 @@ def create_operator_status_summary(
         required_next_action=required_next_action,
     )
     report_json.parent.mkdir(parents=True, exist_ok=True)
-    report_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
+    payload = json.dumps(to_jsonable(report), indent=2, sort_keys=True)
+    report_json.write_text(payload, encoding="utf-8")
+    latest_report_json = Path(str(report["latest_report_json_path"]))
+    latest_report_json.parent.mkdir(parents=True, exist_ok=True)
+    latest_report_json.write_text(payload, encoding="utf-8")
     return OperatorStatusResult(verdict=verdict, report_json=report_json, report=report)
 
 
@@ -258,6 +262,7 @@ def _report(
         "broker_connection_attempted": False,
         "market_data_connection_attempted": False,
         "report_json_path": str(report_json),
+        "latest_report_json_path": str(report_json.parent.parent / "latest_operator_status_summary.json"),
     }
 
 
