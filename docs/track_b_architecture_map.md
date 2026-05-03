@@ -9,7 +9,7 @@ Track B. The long-term destination is not Track B feeding back into Track A.
 The current Track B no-submit chain is:
 
 ```text
-candle_signal_producer, optionally
+candle_signal_producer or strategy_signal_adapter, optionally
 -> shadow_signal
 -> signal_intent_proposal
 -> strategy_intent
@@ -95,6 +95,14 @@ Dashboard implication:
   infer direction from price movement, authorize trades, invoke the listener,
   create order plans, or connect to broker/market-data paths. It updates
   `outputs/track_b_execution_core/candle_signal_producer/latest_candle_signal_producer_report.json`
+  as a read-model convenience.
+- `strategy_signal_adapter` is the first minimal strategy-like adapter proof.
+  The `demo_candle_direction_signal` adapter accepts explicit direction/side
+  from an event, emits BINARY or review-only HUMAN_REVIEW signal input through
+  `candle_signal_producer`, and stops. It does not port production strategy
+  rules, infer price direction, authorize lanes, invoke listener/runner/status
+  flows, create order plans, or submit. It updates
+  `outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json`
   as a read-model convenience.
 - `signal_intent_proposal` may create a proposed no-submit strategy intent from
   a validated signal under an explicit policy. It does not authorize a lane,
@@ -242,7 +250,7 @@ docs/track_b_ui_integration_contract.md
 The example demonstrates:
 
 ```text
-candle/event input, optionally
+candle/event or strategy-like input, optionally
 -> shadow signal
 -> signal-to-intent proposal policy
 -> proposed intent
@@ -253,6 +261,15 @@ candle/event input, optionally
 ```
 
 Example command chain:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.strategy_signal_adapter_cli \
+  --strategy-event-json examples/track_b_strategy_signal_adapter/demo_candle_direction_long.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id strategy_demo \
+  --output-root outputs/track_b_execution_core/strategy_signal_adapter
+```
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.candle_signal_producer_cli \

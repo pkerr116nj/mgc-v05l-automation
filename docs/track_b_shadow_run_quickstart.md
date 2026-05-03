@@ -185,6 +185,29 @@ updates:
 outputs/track_b_execution_core/candle_signal_producer/latest_candle_signal_producer_report.json
 ```
 
+Adapt one explicit strategy-like candle direction event into listener inbox
+work:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.strategy_signal_adapter_cli \
+  --strategy-event-json examples/track_b_strategy_signal_adapter/demo_candle_direction_long.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id strategy_demo \
+  --output-root outputs/track_b_execution_core/strategy_signal_adapter
+```
+
+The demo strategy signal adapter is not a production strategy port. It accepts
+explicit direction/side from the input event, emits BINARY or review-only
+HUMAN_REVIEW signal input through the candle signal producer, and stops. It
+does not infer direction from candle movement, authorize lanes, invoke the
+listener/runner/operator status, create order plans, connect to broker/data
+providers, or submit. It also updates:
+
+```text
+outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json
+```
+
 Run bounded watch mode explicitly:
 
 ```bash

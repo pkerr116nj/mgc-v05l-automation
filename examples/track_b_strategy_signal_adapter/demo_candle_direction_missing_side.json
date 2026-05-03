@@ -1,0 +1,25 @@
+{
+  "account_id": "DUM882026",
+  "adapter_name": "demo_candle_direction_signal",
+  "batch_id": "track_b_strategy_adapter_demo_missing_side_001",
+  "candle_timestamp": "2026-05-01T20:03:00+00:00",
+  "close": "4623.0",
+  "contract_key": "MGC-202606",
+  "high": "4623.2",
+  "instrument_family": "MGC",
+  "lane_id": "mgc_example_long_lmt_day",
+  "low": "4622.8",
+  "metadata": {
+    "example": true,
+    "note": "No side/direction is supplied, so the adapter emits HUMAN_REVIEW only."
+  },
+  "observed_at": "2026-05-01T20:03:00+00:00",
+  "open": "4623.1",
+  "reason": "Example strategy-like event without direction; no automatic intent should be proposed.",
+  "signal_family": "track_b_example_gold_shadow_v1",
+  "signal_type": "demo_candle_direction_signal",
+  "source_id": "track_b_strategy_adapter_demo",
+  "strategy_id": "track_b_example_gold_shadow_v1",
+  "timeframe": "1m",
+  "volume": 33
+}

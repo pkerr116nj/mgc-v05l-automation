@@ -1,0 +1,26 @@
+{
+  "account_id": "DUM882026",
+  "adapter_name": "demo_candle_direction_signal",
+  "batch_id": "track_b_strategy_adapter_demo_long_001",
+  "candle_timestamp": "2026-05-01T20:02:00+00:00",
+  "close": "4623.4",
+  "contract_key": "MGC-202606",
+  "high": "4623.6",
+  "instrument_family": "MGC",
+  "lane_id": "mgc_example_long_lmt_day",
+  "low": "4622.9",
+  "metadata": {
+    "example": true,
+    "note": "This demo adapter uses only the explicit LONG direction supplied here."
+  },
+  "observed_at": "2026-05-01T20:02:00+00:00",
+  "open": "4623.0",
+  "reason": "Example strategy-like event with explicit long direction for no-submit Track B review.",
+  "signal_direction": "LONG",
+  "signal_family": "track_b_example_gold_shadow_v1",
+  "signal_type": "demo_candle_direction_signal",
+  "source_id": "track_b_strategy_adapter_demo",
+  "strategy_id": "track_b_example_gold_shadow_v1",
+  "timeframe": "1m",
+  "volume": 57
+}
