@@ -81,6 +81,20 @@ The first two proposal commands should create embedded `proposed_intent`
 objects in their reports. The below-threshold signal should produce
 `INTENT_PROPOSAL_BLOCKED_STATIC_SCORE_BELOW_THRESHOLD`.
 
+Process the committed signal batch fixture:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.signal_batch_cli \
+  --batch-json examples/track_b_shadow_run/signal_batch.json \
+  --policy-json examples/track_b_shadow_run/proposal_policy_scored_static.json \
+  --expected-account-id DUM882026 \
+  --output-root outputs/track_b_execution_core/signal_batches
+```
+
+The batch should create proposed-intent artifacts for the binary and
+above-threshold static-scored signals, and count the below-threshold static
+signal as a blocked proposal.
+
 ## Shadow Run Command
 
 Run the committed golden example with:

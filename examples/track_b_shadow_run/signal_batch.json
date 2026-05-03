@@ -1,0 +1,103 @@
+{
+  "batch_id": "track_b_example_signal_batch_001",
+  "default_policy_id": "track_b_example_static_policy",
+  "expected_account_id": "DUM882026",
+  "generated_at": "2026-05-01T20:05:00+00:00",
+  "live_money_readiness": false,
+  "mode": "PAPER",
+  "output_root": "outputs/track_b_execution_core/signal_batches/example_signal_batch",
+  "proposal_policy_path": "examples/track_b_shadow_run/proposal_policy_scored_static.json",
+  "shadow_run_id": "track_b_example_mgc_shadow_run_001",
+  "signal_items": [
+    {
+      "signal": {
+        "account_id": "DUM882026",
+        "decision_style": "BINARY",
+        "instrument_family": "MGC",
+        "lane_id": "mgc_example_long_lmt_day",
+        "live_money_readiness": false,
+        "local_execution_contract_key": "MGC-202606",
+        "metadata": {
+          "example_note": "binary signal fixture inside batch"
+        },
+        "mode": "PAPER",
+        "observed_at": "2026-05-01T20:00:00+00:00",
+        "reason": "example binary no-submit signal inside batch",
+        "signal_direction": "LONG",
+        "signal_id": "track_b_example_batch_binary_signal_001",
+        "signal_timestamp": "2026-05-01T19:59:00+00:00",
+        "signal_type": "example_binary_breakout_retest",
+        "source": "track_b_example_fixture",
+        "strategy_id": "track_b_example_gold_shadow_v1",
+        "submit_requested": false
+      }
+    },
+    {
+      "signal": {
+        "account_id": "DUM882026",
+        "decision_style": "SCORED_STATIC",
+        "instrument_family": "MGC",
+        "lane_id": "mgc_example_long_lmt_day",
+        "live_money_readiness": false,
+        "local_execution_contract_key": "MGC-202606",
+        "metadata": {
+          "example_note": "static scored signal fixture inside batch"
+        },
+        "mode": "PAPER",
+        "observed_at": "2026-05-01T20:01:00+00:00",
+        "reason": "example static-scored no-submit signal above policy threshold inside batch",
+        "scoring": {
+          "confidence_level": "HIGH",
+          "expected_value_r": "0.34",
+          "model_version": "track_b_example_static_research_v1",
+          "probability_win": "0.62",
+          "sample_size": 250,
+          "score_scale": "ZERO_TO_ONE",
+          "scoring_authority": "INFORMATIONAL_ONLY",
+          "signal_score": "0.91"
+        },
+        "signal_direction": "LONG",
+        "signal_id": "track_b_example_batch_static_signal_001",
+        "signal_timestamp": "2026-05-01T20:00:30+00:00",
+        "signal_type": "example_static_scored_breakout_retest",
+        "source": "track_b_example_fixture",
+        "strategy_id": "track_b_example_gold_shadow_v1",
+        "submit_requested": false
+      }
+    },
+    {
+      "signal": {
+        "account_id": "DUM882026",
+        "decision_style": "SCORED_STATIC",
+        "instrument_family": "MGC",
+        "lane_id": "mgc_example_long_lmt_day",
+        "live_money_readiness": false,
+        "local_execution_contract_key": "MGC-202606",
+        "metadata": {
+          "example_note": "below-threshold static scored signal fixture inside batch"
+        },
+        "mode": "PAPER",
+        "observed_at": "2026-05-01T20:02:00+00:00",
+        "reason": "example static-scored no-submit signal below policy threshold inside batch",
+        "scoring": {
+          "confidence_level": "LOW",
+          "expected_value_r": "0.03",
+          "model_version": "track_b_example_static_research_v1",
+          "probability_win": "0.48",
+          "sample_size": 250,
+          "score_scale": "ZERO_TO_ONE",
+          "scoring_authority": "INFORMATIONAL_ONLY",
+          "signal_score": "0.41"
+        },
+        "signal_direction": "LONG",
+        "signal_id": "track_b_example_batch_static_signal_002",
+        "signal_timestamp": "2026-05-01T20:01:30+00:00",
+        "signal_type": "example_static_scored_breakout_retest",
+        "source": "track_b_example_fixture",
+        "strategy_id": "track_b_example_gold_shadow_v1",
+        "submit_requested": false
+      }
+    }
+  ],
+  "submit_enabled": false
+}
