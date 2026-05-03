@@ -137,6 +137,7 @@ class DatabentoQuoteProviderConfig:
     lookback_seconds: int = 300
     quote_end_timestamp: str | None = None
     allow_available_end_fallback: bool = False
+    available_end_buffer_seconds: int = 300
     record_limit: int = 1000
     realtime_max_age_seconds: int = 15
 
@@ -445,77 +446,96 @@ class DatabentoQuoteProvider:
         actual_start = requested_start
         actual_end = requested_end
         provider_available_end: datetime | None = None
+        provider_available_end_initial: datetime | None = None
+        provider_available_end_final: datetime | None = None
         available_end_fallback_used = False
         available_end_retry_attempted = False
+        available_end_retry_count = 0
         available_end_retry_reason: str | None = None
         native_databento_path_used = isinstance(self.transport, NativeDatabentoQuoteTransport)
         resolved_symbol = self._resolve_quote_symbol()
-        try:
-            bbo_records, trade_records = self._request_quote_records(resolved_symbol=resolved_symbol, start=actual_start, end=actual_end)
-        except DatabentoAvailableEndError as exc:
-            provider_available_end = exc.provider_available_end
-            if not self.config.allow_available_end_fallback:
-                exc.diagnostics = _quote_request_failure_diagnostics(
-                    config=self.config,
-                    resolved_symbol=resolved_symbol,
-                    requested_start=requested_start,
-                    requested_end=requested_end,
-                    actual_start=actual_start,
-                    actual_end=actual_end,
-                    provider_available_end=provider_available_end,
-                    available_end_fallback_used=False,
-                    available_end_retry_attempted=False,
-                    available_end_retry_reason="fallback_not_enabled",
-                    native_databento_path_used=native_databento_path_used,
-                    exception_diagnostics=getattr(exc, "diagnostics", {}),
-                    raw_provider_error=exc.detail,
-                )
-                raise
-            if provider_available_end is None:
-                error = DatabentoQuoteProviderError(
-                    "Databento available_end fallback was requested, but provider_available_end was not parseable"
-                )
-                error.diagnostics = _quote_request_failure_diagnostics(
-                    config=self.config,
-                    resolved_symbol=resolved_symbol,
-                    requested_start=requested_start,
-                    requested_end=requested_end,
-                    actual_start=actual_start,
-                    actual_end=actual_end,
-                    provider_available_end=None,
-                    available_end_fallback_used=False,
-                    available_end_retry_attempted=False,
-                    available_end_retry_reason="provider_available_end_unparseable",
-                    native_databento_path_used=native_databento_path_used,
-                    exception_diagnostics=getattr(exc, "diagnostics", {}),
-                    raw_provider_error=exc.detail,
-                )
-                raise error from exc
-            actual_end = provider_available_end.astimezone(UTC)
-            actual_start = actual_end - timedelta(seconds=quote_lookback)
-            available_end_fallback_used = True
-            available_end_retry_attempted = True
-            available_end_retry_reason = "initial_data_start_after_available_end"
+        max_available_end_retries = 2
+        while True:
             try:
                 bbo_records, trade_records = self._request_quote_records(resolved_symbol=resolved_symbol, start=actual_start, end=actual_end)
-            except DatabentoAvailableEndError as retry_exc:
-                retry_provider_available_end = retry_exc.provider_available_end or provider_available_end
-                retry_exc.diagnostics = _quote_request_failure_diagnostics(
-                    config=self.config,
-                    resolved_symbol=resolved_symbol,
-                    requested_start=requested_start,
-                    requested_end=requested_end,
-                    actual_start=actual_start,
-                    actual_end=actual_end,
-                    provider_available_end=retry_provider_available_end,
-                    available_end_fallback_used=True,
-                    available_end_retry_attempted=True,
-                    available_end_retry_reason=available_end_retry_reason,
-                    native_databento_path_used=native_databento_path_used,
-                    exception_diagnostics=getattr(retry_exc, "diagnostics", {}),
-                    raw_provider_error=retry_exc.detail,
+                break
+            except DatabentoAvailableEndError as exc:
+                provider_available_end = exc.provider_available_end
+                provider_available_end_initial = provider_available_end_initial or provider_available_end
+                provider_available_end_final = provider_available_end or provider_available_end_final
+                if not self.config.allow_available_end_fallback:
+                    exc.diagnostics = _quote_request_failure_diagnostics(
+                        config=self.config,
+                        resolved_symbol=resolved_symbol,
+                        requested_start=requested_start,
+                        requested_end=requested_end,
+                        actual_start=actual_start,
+                        actual_end=actual_end,
+                        provider_available_end=provider_available_end,
+                        provider_available_end_initial=provider_available_end_initial,
+                        provider_available_end_final=provider_available_end_final,
+                        available_end_fallback_used=False,
+                        available_end_retry_attempted=False,
+                        available_end_retry_count=available_end_retry_count,
+                        available_end_retry_reason="fallback_not_enabled",
+                        native_databento_path_used=native_databento_path_used,
+                        exception_diagnostics=getattr(exc, "diagnostics", {}),
+                        raw_provider_error=exc.detail,
+                    )
+                    raise
+                if provider_available_end_final is None:
+                    error = DatabentoQuoteProviderError(
+                        "Databento available_end fallback was requested, but provider_available_end was not parseable"
+                    )
+                    error.diagnostics = _quote_request_failure_diagnostics(
+                        config=self.config,
+                        resolved_symbol=resolved_symbol,
+                        requested_start=requested_start,
+                        requested_end=requested_end,
+                        actual_start=actual_start,
+                        actual_end=actual_end,
+                        provider_available_end=None,
+                        provider_available_end_initial=provider_available_end_initial,
+                        provider_available_end_final=provider_available_end_final,
+                        available_end_fallback_used=False,
+                        available_end_retry_attempted=available_end_retry_attempted,
+                        available_end_retry_count=available_end_retry_count,
+                        available_end_retry_reason="provider_available_end_unparseable",
+                        native_databento_path_used=native_databento_path_used,
+                        exception_diagnostics=getattr(exc, "diagnostics", {}),
+                        raw_provider_error=exc.detail,
+                    )
+                    raise error from exc
+                if available_end_retry_count >= max_available_end_retries:
+                    exc.diagnostics = _quote_request_failure_diagnostics(
+                        config=self.config,
+                        resolved_symbol=resolved_symbol,
+                        requested_start=requested_start,
+                        requested_end=requested_end,
+                        actual_start=actual_start,
+                        actual_end=actual_end,
+                        provider_available_end=provider_available_end_final,
+                        provider_available_end_initial=provider_available_end_initial,
+                        provider_available_end_final=provider_available_end_final,
+                        available_end_fallback_used=True,
+                        available_end_retry_attempted=available_end_retry_attempted,
+                        available_end_retry_count=available_end_retry_count,
+                        available_end_retry_reason=available_end_retry_reason or "available_end_retry_cap_reached",
+                        native_databento_path_used=native_databento_path_used,
+                        exception_diagnostics=getattr(exc, "diagnostics", {}),
+                        raw_provider_error=exc.detail,
+                    )
+                    raise
+                available_end_retry_count += 1
+                available_end_fallback_used = True
+                available_end_retry_attempted = True
+                available_end_retry_reason = (
+                    "initial_data_start_after_available_end"
+                    if available_end_retry_count == 1
+                    else "retry_data_end_after_available_end"
                 )
-                raise
+                actual_end = _clamped_available_end(provider_available_end_final, self.config.available_end_buffer_seconds)
+                actual_start = actual_end - timedelta(seconds=quote_lookback)
         latest_bbo = _latest_record_with_bid_ask(bbo_records)
         latest_trade = _latest_record_with_price(trade_records)
         parser_diagnostics = _quote_parser_diagnostics(
@@ -526,8 +546,11 @@ class DatabentoQuoteProvider:
             requested_start=requested_start,
             requested_end=requested_end,
             provider_available_end=provider_available_end,
+            provider_available_end_initial=provider_available_end_initial,
+            provider_available_end_final=provider_available_end_final,
             available_end_fallback_used=available_end_fallback_used,
             available_end_retry_attempted=available_end_retry_attempted,
+            available_end_retry_count=available_end_retry_count,
             available_end_retry_reason=available_end_retry_reason,
             native_databento_path_used=native_databento_path_used,
             bbo_records=bbo_records,
@@ -591,7 +614,13 @@ class DatabentoQuoteProvider:
                 "actual_quote_start": actual_start.isoformat(),
                 "actual_quote_end": actual_end.isoformat(),
                 "provider_available_end": provider_available_end.isoformat() if provider_available_end is not None else None,
+                "provider_available_end_initial": provider_available_end_initial.isoformat()
+                if provider_available_end_initial is not None
+                else None,
+                "provider_available_end_final": provider_available_end_final.isoformat() if provider_available_end_final is not None else None,
                 "available_end_fallback_used": available_end_fallback_used,
+                "available_end_buffer_seconds": int(self.config.available_end_buffer_seconds),
+                "available_end_retry_count": available_end_retry_count,
                 "quote_age_seconds": str((actual_end - timestamp).total_seconds()),
                 "usable_for_paper_pricing": mode == MarketDataMode.REALTIME,
                 "usable_for_live_money_readiness": mode == MarketDataMode.REALTIME,
@@ -879,6 +908,8 @@ def _require_config(config: DatabentoQuoteProviderConfig) -> None:
         raise DatabentoQuoteProviderError(f"Databento quote provider missing required field(s): {', '.join(missing)}")
     if bool(str(config.databento_symbol or "").strip()) == bool(str(config.databento_continuous_symbol or "").strip()):
         raise DatabentoQuoteProviderError("configure exactly one of databento_symbol or databento_continuous_symbol")
+    if int(config.available_end_buffer_seconds) < 0:
+        raise DatabentoQuoteProviderError("available_end_buffer_seconds must be non-negative")
 
 
 def _latest_record_with_bid_ask(records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
@@ -931,8 +962,11 @@ def _quote_parser_diagnostics(
     requested_start: datetime | None = None,
     requested_end: datetime | None = None,
     provider_available_end: datetime | None,
+    provider_available_end_initial: datetime | None = None,
+    provider_available_end_final: datetime | None = None,
     available_end_fallback_used: bool | None = None,
     available_end_retry_attempted: bool = False,
+    available_end_retry_count: int = 0,
     available_end_retry_reason: str | None = None,
     native_databento_path_used: bool = False,
     bbo_records: Sequence[Mapping[str, Any]],
@@ -987,11 +1021,15 @@ def _quote_parser_diagnostics(
         "actual_quote_end": end.isoformat(),
         "encoding": "json",
         "provider_available_end": provider_available_end.isoformat() if provider_available_end is not None else None,
+        "provider_available_end_initial": provider_available_end_initial.isoformat() if provider_available_end_initial is not None else None,
+        "provider_available_end_final": provider_available_end_final.isoformat() if provider_available_end_final is not None else None,
         "allow_available_end_fallback_requested": bool(config.allow_available_end_fallback),
         "allow_available_end_fallback_effective": bool(config.allow_available_end_fallback and provider_available_end is not None),
         "native_databento_path_used": bool(native_databento_path_used),
         "available_end_fallback_used": fallback_used,
+        "available_end_buffer_seconds": int(config.available_end_buffer_seconds),
         "available_end_retry_attempted": bool(available_end_retry_attempted),
+        "available_end_retry_count": int(available_end_retry_count),
         "available_end_retry_reason": available_end_retry_reason,
         "raw_provider_error": None,
         "native_databento_error_code": None,
@@ -1021,8 +1059,11 @@ def _quote_request_failure_diagnostics(
     actual_start: datetime,
     actual_end: datetime,
     provider_available_end: datetime | None,
+    provider_available_end_initial: datetime | None,
+    provider_available_end_final: datetime | None,
     available_end_fallback_used: bool,
     available_end_retry_attempted: bool,
+    available_end_retry_count: int,
     available_end_retry_reason: str | None,
     native_databento_path_used: bool,
     exception_diagnostics: Mapping[str, Any] | None,
@@ -1036,8 +1077,11 @@ def _quote_request_failure_diagnostics(
         requested_start=requested_start,
         requested_end=requested_end,
         provider_available_end=provider_available_end,
+        provider_available_end_initial=provider_available_end_initial,
+        provider_available_end_final=provider_available_end_final,
         available_end_fallback_used=available_end_fallback_used,
         available_end_retry_attempted=available_end_retry_attempted,
+        available_end_retry_count=available_end_retry_count,
         available_end_retry_reason=available_end_retry_reason,
         native_databento_path_used=native_databento_path_used,
         bbo_records=(),
@@ -1055,6 +1099,7 @@ def _quote_request_failure_diagnostics(
             "actual_quote_end": actual_end.isoformat(),
             "available_end_fallback_used": available_end_fallback_used,
             "available_end_retry_attempted": available_end_retry_attempted,
+            "available_end_retry_count": available_end_retry_count,
             "available_end_retry_reason": available_end_retry_reason,
             "raw_provider_error": raw_provider_error,
             "native_databento_error_code": code,
@@ -1323,6 +1368,11 @@ def _date_to_datetime(value: date | None) -> datetime | None:
     return datetime(value.year, value.month, value.day, tzinfo=UTC) if value is not None else None
 
 
+def _clamped_available_end(provider_available_end: datetime, buffer_seconds: int) -> datetime:
+    buffered = provider_available_end.astimezone(UTC) - timedelta(seconds=max(int(buffer_seconds), 0))
+    return buffered.replace(second=0, microsecond=0)
+
+
 def _extract_available_end(detail: str) -> datetime | None:
     payload: Any = None
     try:
@@ -1334,6 +1384,10 @@ def _extract_available_end(detail: str) -> datetime | None:
             parsed = _provider_timestamp(candidate)
             if parsed is not None:
                 return parsed
+    for match in re.findall(r"available up to\s+['\"]([^'\"]+)['\"]", detail, flags=re.IGNORECASE):
+        parsed = _provider_timestamp(match)
+        if parsed is not None:
+            return parsed
     for match in re.findall(r"available end of dataset[^\(]*\(([^\)]+)\)", detail, flags=re.IGNORECASE):
         parsed = _provider_timestamp(match)
         if parsed is not None:

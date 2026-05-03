@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import inspect
 from io import BytesIO
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError
 
@@ -246,6 +246,14 @@ def native_available_end_error() -> RuntimeError:
     )
 
 
+def native_data_end_after_available_end_error() -> RuntimeError:
+    return RuntimeError(
+        "422 data_end_after_available_end\n"
+        "The dataset GLBX.MDP3 has data available up to '2026-05-02 22:58:00+00:00'. "
+        "The `end` in the query ('2026-05-02 23:00:00+00:00') is after the available range."
+    )
+
+
 def test_native_client_available_end_error_is_caught() -> None:
     fake_client = FakeNativeClient({}, errors=(native_available_end_error(),))
     transport = NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client)
@@ -270,8 +278,8 @@ def test_native_client_available_end_error_is_caught() -> None:
 def test_native_available_end_fallback_retries_once_for_mbp1_and_trades() -> None:
     fake_client = FakeNativeClient(
         {
-            "mbp-1": ({"ts_event": "2026-05-02T22:59:59+00:00", "bid_px_00": "4626.0", "ask_px_00": "4626.1"},),
-            "trades": ({"ts_event": "2026-05-02T22:59:58+00:00", "price": "4626.0"},),
+            "mbp-1": ({"ts_event": "2026-05-02T22:54:59+00:00", "bid_px_00": "4626.0", "ask_px_00": "4626.1"},),
+            "trades": ({"ts_event": "2026-05-02T22:54:58+00:00", "price": "4626.0"},),
         },
         errors=(native_available_end_error(),),
     )
@@ -284,19 +292,44 @@ def test_native_available_end_fallback_retries_once_for_mbp1_and_trades() -> Non
     snapshot = provider.get_quote("MGC-202606")
 
     assert [request["schema"] for request in fake_client.timeseries.requests] == ["mbp-1", "mbp-1", "trades"]
-    assert fake_client.timeseries.requests[1]["end"] == "2026-05-02T23:00:00+00:00"
-    assert fake_client.timeseries.requests[2]["end"] == "2026-05-02T23:00:00+00:00"
+    assert fake_client.timeseries.requests[1]["end"] == "2026-05-02T22:55:00+00:00"
+    assert fake_client.timeseries.requests[2]["end"] == "2026-05-02T22:55:00+00:00"
     assert snapshot.raw["provider_available_end"] == "2026-05-02T23:00:00+00:00"
+    assert snapshot.raw["provider_available_end_initial"] == "2026-05-02T23:00:00+00:00"
+    assert snapshot.raw["provider_available_end_final"] == "2026-05-02T23:00:00+00:00"
     assert snapshot.raw["available_end_fallback_used"] is True
+    assert snapshot.raw["available_end_buffer_seconds"] == 300
     assert snapshot.raw["allow_available_end_fallback_requested"] is True
     assert snapshot.raw["allow_available_end_fallback_effective"] is True
     assert snapshot.raw["native_databento_path_used"] is True
     assert snapshot.raw["schemas_attempted"] == ["mbp-1", "trades"]
     assert snapshot.raw["available_end_retry_attempted"] is True
+    assert snapshot.raw["available_end_retry_count"] == 1
     assert snapshot.raw["available_end_retry_reason"] == "initial_data_start_after_available_end"
-    assert snapshot.raw["actual_quote_end"] == "2026-05-02T23:00:00+00:00"
+    assert snapshot.raw["actual_quote_end"] == "2026-05-02T22:55:00+00:00"
     assert snapshot.raw["usable_for_live_money_readiness"] is False
     assert snapshot.mode == MarketDataMode.UNKNOWN
+
+
+def test_native_data_end_after_available_end_error_is_caught() -> None:
+    fake_client = FakeNativeClient({}, errors=(native_data_end_after_available_end_error(),))
+    transport = NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client)
+
+    with pytest.raises(DatabentoAvailableEndError) as exc_info:
+        transport.request_records(
+            base_url="https://hist.databento.com/v0",
+            api_key="test-key",
+            dataset="GLBX.MDP3",
+            symbol="MGCM6",
+            schema="mbp-1",
+            start=datetime(2026, 5, 2, 22, 55, tzinfo=timezone.utc),
+            end=datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc),
+            stype_in="raw_symbol",
+            limit=1000,
+        )
+
+    assert exc_info.value.provider_available_end == datetime(2026, 5, 2, 22, 58, tzinfo=timezone.utc)
+    assert "data_end_after_available_end" in exc_info.value.detail
 
 
 def test_native_available_end_without_fallback_fails_with_request_diagnostics() -> None:
@@ -332,7 +365,10 @@ def test_native_available_end_without_fallback_fails_with_request_diagnostics() 
 
 
 def test_native_available_end_retry_failure_has_fallback_diagnostics() -> None:
-    fake_client = FakeNativeClient({}, errors=(native_available_end_error(), native_available_end_error()))
+    fake_client = FakeNativeClient(
+        {},
+        errors=(native_available_end_error(), native_available_end_error(), native_available_end_error()),
+    )
     provider = DatabentoQuoteProvider(
         config=config(allow_available_end_fallback=True),
         transport=NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client),
@@ -343,7 +379,7 @@ def test_native_available_end_retry_failure_has_fallback_diagnostics() -> None:
         provider.get_quote("MGC-202606")
 
     diagnostics = exc_info.value.diagnostics
-    assert [request["schema"] for request in fake_client.timeseries.requests] == ["mbp-1", "mbp-1"]
+    assert [request["schema"] for request in fake_client.timeseries.requests] == ["mbp-1", "mbp-1", "mbp-1"]
     assert diagnostics["provider_available_end"] == "2026-05-02T23:00:00+00:00"
     assert diagnostics["allow_available_end_fallback_requested"] is True
     assert diagnostics["allow_available_end_fallback_effective"] is True
@@ -351,12 +387,43 @@ def test_native_available_end_retry_failure_has_fallback_diagnostics() -> None:
     assert diagnostics["schemas_attempted"] == ["mbp-1", "trades"]
     assert diagnostics["available_end_fallback_used"] is True
     assert diagnostics["available_end_retry_attempted"] is True
-    assert diagnostics["available_end_retry_reason"] == "initial_data_start_after_available_end"
+    assert diagnostics["available_end_retry_reason"] == "retry_data_end_after_available_end"
     assert diagnostics["requested_quote_start"] == "2026-05-02T23:05:00+00:00"
     assert diagnostics["requested_quote_end"] == "2026-05-02T23:10:00+00:00"
-    assert diagnostics["actual_quote_start"] == "2026-05-02T22:55:00+00:00"
-    assert diagnostics["actual_quote_end"] == "2026-05-02T23:00:00+00:00"
+    assert diagnostics["provider_available_end_initial"] == "2026-05-02T23:00:00+00:00"
+    assert diagnostics["provider_available_end_final"] == "2026-05-02T23:00:00+00:00"
+    assert diagnostics["available_end_buffer_seconds"] == 300
+    assert diagnostics["available_end_retry_count"] == 2
+    assert diagnostics["actual_quote_start"] == "2026-05-02T22:50:00+00:00"
+    assert diagnostics["actual_quote_end"] == "2026-05-02T22:55:00+00:00"
     assert diagnostics["native_exception_class"] == "RuntimeError"
+
+
+def test_native_available_end_second_retry_uses_new_authoritative_end_and_is_capped() -> None:
+    fake_client = FakeNativeClient(
+        {
+            "mbp-1": ({"ts_event": "2026-05-02T22:52:59+00:00", "bid_px_00": "4626.0", "ask_px_00": "4626.1"},),
+            "trades": ({"ts_event": "2026-05-02T22:52:58+00:00", "price": "4626.0"},),
+        },
+        errors=(native_available_end_error(), native_data_end_after_available_end_error()),
+    )
+    provider = DatabentoQuoteProvider(
+        config=config(allow_available_end_fallback=True),
+        transport=NativeDatabentoQuoteTransport(client_factory=lambda api_key: fake_client),
+        now=datetime(2026, 5, 2, 23, 10, tzinfo=timezone.utc),
+    )
+
+    snapshot = provider.get_quote("MGC-202606")
+
+    assert [request["schema"] for request in fake_client.timeseries.requests] == ["mbp-1", "mbp-1", "mbp-1", "trades"]
+    assert fake_client.timeseries.requests[1]["end"] == "2026-05-02T22:55:00+00:00"
+    assert fake_client.timeseries.requests[2]["end"] == "2026-05-02T22:53:00+00:00"
+    assert fake_client.timeseries.requests[3]["end"] == "2026-05-02T22:53:00+00:00"
+    assert snapshot.raw["provider_available_end_initial"] == "2026-05-02T23:00:00+00:00"
+    assert snapshot.raw["provider_available_end_final"] == "2026-05-02T22:58:00+00:00"
+    assert snapshot.raw["available_end_retry_count"] == 2
+    assert snapshot.raw["actual_quote_end"] == "2026-05-02T22:53:00+00:00"
+    assert snapshot.raw["usable_for_live_money_readiness"] is False
 
 
 def test_missing_native_databento_package_has_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -584,15 +651,19 @@ def test_available_end_fallback_retries_once_with_provider_available_end() -> No
 
     assert len(transport.requests) == 3
     assert transport.requests[0]["end"] == aware_now()
-    assert transport.requests[1]["end"] == provider_available_end
-    assert transport.requests[2]["end"] == provider_available_end
+    assert transport.requests[1]["end"] == provider_available_end - timedelta(seconds=300)
+    assert transport.requests[2]["end"] == provider_available_end - timedelta(seconds=300)
     assert snapshot.raw["provider_available_end"] == provider_available_end.isoformat()
+    assert snapshot.raw["provider_available_end_initial"] == provider_available_end.isoformat()
+    assert snapshot.raw["provider_available_end_final"] == provider_available_end.isoformat()
     assert snapshot.raw["available_end_fallback_used"] is True
+    assert snapshot.raw["available_end_buffer_seconds"] == 300
     assert snapshot.raw["allow_available_end_fallback_requested"] is True
     assert snapshot.raw["allow_available_end_fallback_effective"] is True
     assert snapshot.raw["available_end_retry_attempted"] is True
+    assert snapshot.raw["available_end_retry_count"] == 1
     assert snapshot.raw["available_end_retry_reason"] == "initial_data_start_after_available_end"
-    assert snapshot.raw["actual_quote_end"] == provider_available_end.isoformat()
+    assert snapshot.raw["actual_quote_end"] == (provider_available_end - timedelta(seconds=300)).isoformat()
     assert snapshot.raw["usable_for_live_money_readiness"] is False
     assert snapshot.mode == MarketDataMode.UNKNOWN
 
@@ -600,7 +671,7 @@ def test_available_end_fallback_retries_once_with_provider_available_end() -> No
 def test_available_end_fallback_retry_failure_does_not_loop() -> None:
     transport = FakeTransport()
     provider_available_end = datetime(2026, 5, 1, 23, 59, tzinfo=timezone.utc)
-    for _ in range(2):
+    for _ in range(3):
         transport.errors.append(
             DatabentoAvailableEndError(
                 "requested quote window is after Databento available_end; rerun with --allow-available-end-fallback or earlier --quote-end-timestamp",
@@ -618,16 +689,19 @@ def test_available_end_fallback_retry_failure_does_not_loop() -> None:
     with pytest.raises(DatabentoAvailableEndError) as exc_info:
         provider.get_quote("MGC-202606")
 
-    assert len(transport.requests) == 2
+    assert len(transport.requests) == 3
     diagnostics = exc_info.value.diagnostics
     assert diagnostics["provider_available_end"] == provider_available_end.isoformat()
+    assert diagnostics["provider_available_end_initial"] == provider_available_end.isoformat()
+    assert diagnostics["provider_available_end_final"] == provider_available_end.isoformat()
     assert diagnostics["allow_available_end_fallback_requested"] is True
     assert diagnostics["allow_available_end_fallback_effective"] is True
     assert diagnostics["available_end_fallback_used"] is True
     assert diagnostics["available_end_retry_attempted"] is True
-    assert diagnostics["available_end_retry_reason"] == "initial_data_start_after_available_end"
+    assert diagnostics["available_end_retry_count"] == 2
+    assert diagnostics["available_end_retry_reason"] == "retry_data_end_after_available_end"
     assert diagnostics["requested_quote_end"] == aware_now().isoformat()
-    assert diagnostics["actual_quote_end"] == provider_available_end.isoformat()
+    assert diagnostics["actual_quote_end"] == (provider_available_end - timedelta(seconds=300)).isoformat()
 
 
 def test_http_422_available_end_error_is_caught_and_structured(monkeypatch: pytest.MonkeyPatch) -> None:
