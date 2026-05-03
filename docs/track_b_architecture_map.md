@@ -77,8 +77,8 @@ Promotion discipline:
 
 Dashboard implication:
 
-- A future dashboard should display lifecycle state and mode-specific
-  readiness.
+- A future dashboard should display lifecycle state, listener health, and
+  mode-specific readiness.
 - Dashboard controls must remain observer/control surfaces over Track B
   artifacts, not source of truth or hidden submit authority.
 
@@ -106,7 +106,9 @@ Dashboard implication:
   top-level summary. It creates no new authority and does not submit.
 - `shadow_listener` is a poll-once file ingestion skeleton for signal batch
   JSON. It can run while the future engine is active, but it only invokes the
-  no-submit replay runner and creates no submit authority.
+  no-submit replay runner and creates no submit authority. Its health report is
+  observer/status data for operators and future dashboards, not trading
+  authority.
 - `attrition_report` explains where candidates dropped out across supplied
   no-submit summaries. It is explanatory only and treats missing stages as
   explicit `NOT_PROVIDED` inputs instead of silently reporting zero.

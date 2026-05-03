@@ -160,6 +160,15 @@ def test_valid_listener_config_processes_one_signal_batch(tmp_path: Path) -> Non
     assert result.report["broker_connection_attempted"] is False
     assert result.report["market_data_connection_attempted"] is False
     assert result.report["paper_proof_cli_wired"] is False
+    health = json.loads(Path(result.report["health_report_path"]).read_text(encoding="utf-8"))
+    latest_health = json.loads(Path(result.report["latest_health_report_path"]).read_text(encoding="utf-8"))
+    assert health["health_verdict"] == "SHADOW_LISTENER_HEALTH_OK"
+    assert latest_health["health_verdict"] == "SHADOW_LISTENER_HEALTH_OK"
+    assert health["latest_cycle_summary_path"] == str(result.report_json)
+    assert health["latest_runner_summary_paths"] == result.report["runner_summary_paths"]
+    assert health["submit_allowed"] is False
+    assert health["submit_attempted"] is False
+    assert health["live_money_readiness"] is False
 
 
 def test_empty_inbox_produces_no_files_verdict(tmp_path: Path) -> None:
@@ -176,6 +185,9 @@ def test_empty_inbox_produces_no_files_verdict(tmp_path: Path) -> None:
     assert result.report["files_discovered"] == 0
     assert result.report["files_succeeded"] == 0
     assert result.report["submit_allowed"] is False
+    health = json.loads(Path(result.report["health_report_path"]).read_text(encoding="utf-8"))
+    assert health["health_verdict"] == "SHADOW_LISTENER_HEALTH_NO_FILES"
+    assert health["last_primary_blocker"] is None
 
 
 def test_invalid_config_blocks_clearly(tmp_path: Path) -> None:
@@ -193,6 +205,9 @@ def test_invalid_config_blocks_clearly(tmp_path: Path) -> None:
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+    health = json.loads(Path(result.report["health_report_path"]).read_text(encoding="utf-8"))
+    assert health["health_verdict"] == "SHADOW_LISTENER_HEALTH_BLOCKED_INVALID_CONFIG"
+    assert health["last_primary_blocker"] == "Shadow listener accepts SHADOW or PAPER_REVIEW no-submit mode only."
 
 
 def test_invalid_signal_batch_moves_to_failed_and_appears_in_summary(tmp_path: Path) -> None:
@@ -216,6 +231,10 @@ def test_invalid_signal_batch_moves_to_failed_and_appears_in_summary(tmp_path: P
     assert event["listener_file_verdict"] == "SHADOW_LISTENER_FILE_FAILED"
     assert event["runner_verdict"] == "SHADOW_REPLAY_RUN_BLOCKED_SIGNAL_BATCH"
     assert event["submit_allowed"] is False
+    health = json.loads(Path(result.report["health_report_path"]).read_text(encoding="utf-8"))
+    assert health["health_verdict"] == "SHADOW_LISTENER_HEALTH_DEGRADED_FAILURES"
+    assert health["files_failed"] == 1
+    assert health["latest_runner_summary_paths"] == result.report["runner_summary_paths"]
 
 
 def test_listener_cli_reads_config_and_writes_summary(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -241,3 +260,5 @@ def test_listener_cli_reads_config_and_writes_summary(tmp_path: Path, capsys) ->
     assert output["submit_allowed"] is False
     assert output["submit_attempted"] is False
     assert output["live_money_readiness"] is False
+    assert Path(output["health_report"]).exists()
+    assert Path(output["latest_health_report"]).exists()

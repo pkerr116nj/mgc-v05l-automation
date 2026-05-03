@@ -37,6 +37,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "live_money_readiness": result.report["live_money_readiness"],
                 "primary_blocker": result.report["primary_blocker"],
                 "required_next_action": result.report["required_next_action"],
+                "health_report": result.report["health_report_path"],
+                "latest_health_report": result.report["latest_health_report_path"],
                 "report_json": str(result.report_json),
             },
             sort_keys=True,

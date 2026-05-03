@@ -140,6 +140,13 @@ directories. The default behavior is poll-once and exit. Engine-running state
 does not imply submit authority; this listener remains no-submit and does not
 connect to TWS or Databento.
 
+Each listener cycle also writes a health/status artifact plus a
+`latest_shadow_listener_health.json` pointer under the listener output root.
+The health report summarizes the latest cycle, runner summary paths, file
+counts, last blocker/action, and the same no-submit flags. It is observer data
+for operators and future dashboards; a healthy listener does not authorize
+paper or live submit.
+
 ## Shadow Run Command
 
 Run the committed golden example with:

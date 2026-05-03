@@ -32,6 +32,14 @@ class ShadowListenerVerdict(str, Enum):
     BLOCKED_SCHEMA_ERROR = "SHADOW_LISTENER_BLOCKED_SCHEMA_ERROR"
 
 
+class ShadowListenerHealthVerdict(str, Enum):
+    OK = "SHADOW_LISTENER_HEALTH_OK"
+    NO_FILES = "SHADOW_LISTENER_HEALTH_NO_FILES"
+    DEGRADED_FAILURES = "SHADOW_LISTENER_HEALTH_DEGRADED_FAILURES"
+    BLOCKED_INVALID_CONFIG = "SHADOW_LISTENER_HEALTH_BLOCKED_INVALID_CONFIG"
+    UNKNOWN = "SHADOW_LISTENER_HEALTH_UNKNOWN"
+
+
 @dataclass(frozen=True)
 class ShadowListenerConfig:
     listener_id: str
@@ -309,6 +317,9 @@ def _cycle_summary(
         "listener_verdict": verdict.value,
         "mode": config.mode,
         "inbox_dir": str(config.inbox_dir),
+        "processing_dir": str(config.processing_dir),
+        "processed_dir": str(config.processed_dir),
+        "failed_dir": str(config.failed_dir),
         "file_glob": config.file_glob,
         "files_discovered": len(event_reports),
         "files_claimed": len(event_reports),
@@ -330,6 +341,8 @@ def _cycle_summary(
         "strategy_execution_attempted": False,
         "paper_proof_cli_wired": False,
         "poll_once": config.poll_once,
+        "health_report_path": str(report_json.parent / "shadow_listener_health.json"),
+        "latest_health_report_path": str(report_json.parent.parent / "latest_shadow_listener_health.json"),
         "report_json_path": str(report_json),
     }
 
@@ -350,6 +363,10 @@ def _blocked_report(
         "listener_id": listener_id,
         "listener_cycle_id": cycle_id,
         "listener_verdict": verdict.value,
+        "inbox_dir": None,
+        "processing_dir": None,
+        "processed_dir": None,
+        "failed_dir": None,
         "files_discovered": 0,
         "files_claimed": 0,
         "files_processed": 0,
@@ -369,6 +386,8 @@ def _blocked_report(
         "market_data_connection_attempted": False,
         "strategy_execution_attempted": False,
         "paper_proof_cli_wired": False,
+        "health_report_path": str(report_json.parent / "shadow_listener_health.json"),
+        "latest_health_report_path": str(report_json.parent.parent / "latest_shadow_listener_health.json"),
         "report_json_path": str(report_json),
     }
 
@@ -454,4 +473,63 @@ def _bool(value: object) -> bool:
 def _write(report_json: Path, verdict: ShadowListenerVerdict, report: dict[str, Any]) -> ShadowListenerResult:
     report_json.parent.mkdir(parents=True, exist_ok=True)
     report_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
+    health_report = _health_report_from_cycle(report=report, now=str(report["generated_at"]), report_json=report_json)
+    health_report_path = Path(str(report["health_report_path"]))
+    latest_health_report_path = Path(str(report["latest_health_report_path"]))
+    health_report_path.parent.mkdir(parents=True, exist_ok=True)
+    latest_health_report_path.parent.mkdir(parents=True, exist_ok=True)
+    health_payload = json.dumps(to_jsonable(health_report), indent=2, sort_keys=True)
+    health_report_path.write_text(health_payload, encoding="utf-8")
+    latest_health_report_path.write_text(health_payload, encoding="utf-8")
     return ShadowListenerResult(verdict=verdict, report_json=report_json, report=report)
+
+
+def _health_report_from_cycle(*, report: Mapping[str, Any], now: str, report_json: Path) -> dict[str, Any]:
+    health_verdict = _health_verdict(str(report.get("listener_verdict") or ""))
+    failed_paths = list(report.get("failed_paths") or ())
+    processed_paths = list(report.get("processed_paths") or ())
+    return {
+        "schema_version": "track_b_shadow_listener_health_v1",
+        "generated_at": now,
+        "listener_id": report.get("listener_id"),
+        "listener_cycle_id": report.get("listener_cycle_id"),
+        "health_verdict": health_verdict.value,
+        "last_cycle_verdict": report.get("listener_verdict"),
+        "last_cycle_generated_at": report.get("generated_at"),
+        "inbox_dir": report.get("inbox_dir"),
+        "processing_dir": report.get("processing_dir"),
+        "processed_dir": report.get("processed_dir"),
+        "failed_dir": report.get("failed_dir"),
+        "files_discovered": report.get("files_discovered", 0),
+        "files_processed": report.get("files_processed", 0),
+        "files_succeeded": report.get("files_succeeded", 0),
+        "files_failed": report.get("files_failed", 0),
+        "last_success_at": now if processed_paths else None,
+        "last_failure_at": now if failed_paths or report.get("primary_blocker") else None,
+        "last_primary_blocker": report.get("primary_blocker"),
+        "last_required_next_action": report.get("required_next_action"),
+        "latest_cycle_summary_path": str(report_json),
+        "latest_runner_summary_paths": list(report.get("runner_summary_paths") or ()),
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "observer_status_only": True,
+        "dashboard_is_not_authority": True,
+        "broker_connection_attempted": False,
+        "market_data_connection_attempted": False,
+        "paper_proof_cli_wired": False,
+        "health_report_path": report.get("health_report_path"),
+        "latest_health_report_path": report.get("latest_health_report_path"),
+    }
+
+
+def _health_verdict(listener_verdict: str) -> ShadowListenerHealthVerdict:
+    if listener_verdict == ShadowListenerVerdict.COMPLETED.value:
+        return ShadowListenerHealthVerdict.OK
+    if listener_verdict == ShadowListenerVerdict.NO_FILES.value:
+        return ShadowListenerHealthVerdict.NO_FILES
+    if listener_verdict in {ShadowListenerVerdict.COMPLETED_WITH_FAILURES.value, ShadowListenerVerdict.FILE_FAILED.value}:
+        return ShadowListenerHealthVerdict.DEGRADED_FAILURES
+    if listener_verdict == ShadowListenerVerdict.BLOCKED_INVALID_CONFIG.value:
+        return ShadowListenerHealthVerdict.BLOCKED_INVALID_CONFIG
+    return ShadowListenerHealthVerdict.UNKNOWN
