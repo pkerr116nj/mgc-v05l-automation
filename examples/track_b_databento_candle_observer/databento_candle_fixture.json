@@ -1,0 +1,15 @@
+{
+  "candle_timestamp": "2026-05-01T19:59:00+00:00",
+  "classification": "DATABENTO_CANDLE_AVAILABLE",
+  "close": "4623.2",
+  "contract_key": "MGC-202606",
+  "dataset": "GLBX.MDP3",
+  "databento_continuous_symbol": "MGC.v.0",
+  "high": "4623.4",
+  "local_execution_contract_key": "MGC-202606",
+  "low": "4622.7",
+  "open": "4622.8",
+  "quote_observed": true,
+  "schema_version": "track_b_databento_candle_fixture_v1",
+  "volume": 42
+}

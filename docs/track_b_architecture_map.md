@@ -9,7 +9,9 @@ Track B. The long-term destination is not Track B feeding back into Track A.
 The current Track B no-submit chain is:
 
 ```text
-candle_signal_producer or strategy_signal_adapter, optionally
+Databento market-data observer, optionally
+-> candle/event JSON
+-> candle_signal_producer or strategy_signal_adapter, optionally
 -> shadow_signal
 -> signal_intent_proposal
 -> strategy_intent
@@ -89,6 +91,17 @@ Dashboard implication:
 
 - `shadow_signal` is evidence only. It can carry BINARY or scored observations,
   but it is not an intent and cannot authorize a lane or submit.
+- `databento_candle_observer` is a market-data evidence bridge only. It accepts
+  a supplied Databento quote/candle artifact, writes a Track B candle/event JSON
+  file, and stops. It does not connect to IBKR/TWS, invoke Databento live
+  network calls in this scaffold, authorize trades, infer submit readiness,
+  invoke the listener/runner/operator status, create order plans, or submit.
+  Databento symbols remain market-data selectors only; the local execution
+  contract key and IBKR allowlist remain execution authority. It updates
+  `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json`
+  and
+  `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json`
+  as read-model conveniences.
 - `candle_signal_producer` is an upstream no-submit producer scaffold. It
   translates explicit candle/event JSON into Track B shadow signal observations
   and delegates validated inbox writes to `signal_batch_writer`. It does not
@@ -250,7 +263,8 @@ docs/track_b_ui_integration_contract.md
 The example demonstrates:
 
 ```text
-candle/event or strategy-like input, optionally
+Databento market-data artifact, candle/event, or strategy-like input, optionally
+-> candle/event JSON
 -> shadow signal
 -> signal-to-intent proposal policy
 -> proposed intent
@@ -261,6 +275,29 @@ candle/event or strategy-like input, optionally
 ```
 
 Example command chain:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --quote-report-json examples/track_b_databento_candle_observer/databento_quote_report_fixture.json \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id databento_demo \
+  --output-root outputs/track_b_execution_core/databento_candle_observer
+```
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.strategy_signal_adapter_cli \
+  --strategy-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id databento_strategy_demo \
+  --output-root outputs/track_b_execution_core/strategy_signal_adapter
+```
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.strategy_signal_adapter_cli \

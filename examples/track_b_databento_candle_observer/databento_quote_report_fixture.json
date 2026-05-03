@@ -1,0 +1,13 @@
+{
+  "ask": "4623.3",
+  "bid": "4623.1",
+  "classification": "CURRENT_QUOTE_AVAILABLE",
+  "contract_key": "MGC-202606",
+  "dataset": "GLBX.MDP3",
+  "databento_continuous_symbol": "MGC.v.0",
+  "last": "4623.0",
+  "local_execution_contract_key": "MGC-202606",
+  "quote_observed": true,
+  "schema_version": "track_b_databento_current_quote_v1",
+  "timestamp": "2026-05-01T19:59:59.977685+00:00"
+}

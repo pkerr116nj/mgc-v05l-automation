@@ -162,6 +162,47 @@ or submit. It also updates this stable latest report pointer:
 outputs/track_b_execution_core/signal_batch_writer/latest_signal_batch_writer_report.json
 ```
 
+Convert a supplied Databento quote/candle artifact into a Track B candle/event
+artifact:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --quote-report-json examples/track_b_databento_candle_observer/databento_quote_report_fixture.json \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id databento_demo \
+  --output-root outputs/track_b_execution_core/databento_candle_observer
+```
+
+The Databento candle observer is a market-data evidence bridge only. This first
+slice consumes a supplied quote/candle artifact and writes a no-submit
+candle/event JSON file; it does not connect to Databento live streaming, IBKR,
+TWS, the listener, the runner, operator status, or any submit path. Databento
+symbols remain market-data selectors only, and the local execution contract key
+remains execution authority. It updates:
+
+```text
+outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json
+outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json
+```
+
+Feed that market-data event into the explicit strategy adapter as a separate
+operator step:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.strategy_signal_adapter_cli \
+  --strategy-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id databento_strategy_demo \
+  --output-root outputs/track_b_execution_core/strategy_signal_adapter
+```
+
 Translate an explicit candle/event input into listener inbox work:
 
 ```bash
