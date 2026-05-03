@@ -19,6 +19,7 @@ shadow_signal
 -> shadow_run_assembler
 -> shadow_replay_runner
 -> shadow_listener
+-> operator_status
 -> attrition_report
 -> readiness_summary
 -> recovery / preflight / proof timing
@@ -109,6 +110,9 @@ Dashboard implication:
   no-submit replay runner and creates no submit authority. Its health report is
   observer/status data for operators and future dashboards, not trading
   authority.
+- `operator_status` aggregates supplied Track B observer reports into one
+  dashboard-ready read model. It is not source of truth, does not connect to
+  broker or market data, and does not authorize submit.
 - `attrition_report` explains where candidates dropped out across supplied
   no-submit summaries. It is explanatory only and treats missing stages as
   explicit `NOT_PROVIDED` inputs instead of silently reporting zero.
@@ -257,6 +261,19 @@ Example command chain:
 ./.venv/bin/python -m mgc_v05l.execution_core.shadow_listener_cli \
   --listener-config-json examples/track_b_shadow_listener/listener_config.json \
   --output-root outputs/track_b_execution_core/shadow_listener
+```
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
+  --listener-health-json <LISTENER_HEALTH_JSON> \
+  --listener-cycle-json <LISTENER_CYCLE_JSON optional> \
+  --shadow-runner-summary-json <RUNNER_SUMMARY_JSON optional> \
+  --attrition-report-json <ATTRITION_REPORT_JSON optional> \
+  --readiness-summary-json <READINESS_SUMMARY_JSON optional> \
+  --recovery-report-json <RECOVERY_REPORT_JSON optional> \
+  --preflight-report-json <PREFLIGHT_REPORT_JSON optional> \
+  --quote-report-json <QUOTE_REPORT_JSON optional> \
+  --output-root outputs/track_b_execution_core/operator_status
 ```
 
 All example commands are no-submit and do not connect to TWS or Databento.

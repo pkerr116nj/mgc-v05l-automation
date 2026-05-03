@@ -147,6 +147,27 @@ counts, last blocker/action, and the same no-submit flags. It is observer data
 for operators and future dashboards; a healthy listener does not authorize
 paper or live submit.
 
+Create an operator status summary from observer reports:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
+  --listener-health-json <LISTENER_HEALTH_JSON> \
+  --listener-cycle-json <LISTENER_CYCLE_JSON optional> \
+  --shadow-runner-summary-json <RUNNER_SUMMARY_JSON optional> \
+  --attrition-report-json <ATTRITION_REPORT_JSON optional> \
+  --readiness-summary-json <READINESS_SUMMARY_JSON optional> \
+  --recovery-report-json <RECOVERY_REPORT_JSON optional> \
+  --preflight-report-json <PREFLIGHT_REPORT_JSON optional> \
+  --quote-report-json <QUOTE_REPORT_JSON optional> \
+  --output-root outputs/track_b_execution_core/operator_status
+```
+
+The operator status summary is a dashboard-ready read model. It lists supplied
+and missing reports explicitly, surfaces listener degradation, readiness blocks,
+and broker-state blocks distinctly, and keeps `submit_allowed=false`. Future
+dashboard screens should read this artifact instead of inventing state, but the
+artifact itself is still not truth authority or submit authority.
+
 ## Shadow Run Command
 
 Run the committed golden example with:
