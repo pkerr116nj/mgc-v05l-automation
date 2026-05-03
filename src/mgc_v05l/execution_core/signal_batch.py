@@ -137,6 +137,7 @@ def process_signal_batch(
             "submit_attempted": False,
             "live_money_readiness": False,
             "primary_blocker": str(exc),
+            "secondary_blockers": [],
             "required_next_action": "Fix signal batch schema before no-submit processing.",
             "report_json_path": str(report_json),
         }
@@ -185,6 +186,7 @@ def _process_signal_item(
         "submit_attempted": False,
         "live_money_readiness": False,
         "primary_blocker": proposal.report.get("primary_blocker"),
+        "secondary_blockers": list(proposal.report.get("secondary_blockers") or ()),
         "required_next_action": proposal.report.get("required_next_action"),
         "signal_id": proposal.report.get("signal_id"),
         "strategy_id": proposal.report.get("strategy_id"),
@@ -232,6 +234,7 @@ def _write_summary(
         "submit_attempted": False,
         "live_money_readiness": False,
         "primary_blocker": primary_blocker,
+        "secondary_blockers": _summary_secondary_blockers(item_reports),
         "required_next_action": required_next_action,
         "broker_connection_attempted": False,
         "market_data_connection_attempted": False,
@@ -259,6 +262,20 @@ def _batch_blocker(
     if policy_payload is None:
         return SignalBatchVerdict.BLOCKED_MISSING_POLICY, "Proposal policy is required for signal batch processing.", "Provide --policy-json or policy_payload."
     return None, None, "Process signal batch."
+
+
+def _summary_secondary_blockers(item_reports: Sequence[Mapping[str, Any]]) -> list[str]:
+    blockers: list[str] = []
+    seen: set[str] = set()
+    for item in item_reports:
+        for blocker in (item.get("primary_blocker"), *tuple(item.get("secondary_blockers") or ())):
+            if not blocker:
+                continue
+            text = str(blocker)
+            if text not in seen:
+                seen.add(text)
+                blockers.append(text)
+    return blockers
 
 
 def _signal_items(value: object) -> tuple[Mapping[str, Any], ...]:

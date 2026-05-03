@@ -86,6 +86,9 @@ def test_attrition_report_from_signal_batch_summary_only_marks_missing_stages(tm
     assert result.report["intents_submitted_to_registry"] == "NOT_PROVIDED"
     assert result.report["lane_registry_blocked"] == "NOT_PROVIDED"
     assert result.report["missing_stages"] == ["shadow_run", "readiness"]
+    assert result.report["primary_blocker"] == "One or more attrition input stages were not provided."
+    assert result.report["secondary_blockers"] == ["missing_stage:shadow_run", "missing_stage:readiness"]
+    assert result.report["required_next_action"]
     assert result.report["primary_attrition_stage"] == "proposal"
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
@@ -133,6 +136,9 @@ def test_attrition_report_includes_readiness_blocker(tmp_path: Path) -> None:
     assert result.report["blockers_count_by_stage"]["readiness"] == 1
     assert result.report["primary_attrition_stage"] == "readiness"
     assert result.report["blockers_count_by_type"]["BLOCKED_UNRESOLVED_BROKER_ORDER"] == 1
+    assert result.report["primary_blocker"] is None
+    assert result.report["secondary_blockers"] == []
+    assert result.report["required_next_action"]
 
 
 def test_attrition_report_blocks_no_inputs(tmp_path: Path) -> None:
@@ -147,6 +153,7 @@ def test_attrition_report_blocks_no_inputs(tmp_path: Path) -> None:
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
     assert result.report["primary_blocker"]
+    assert result.report["secondary_blockers"] == []
 
 
 def test_attrition_report_cli_reads_summaries_and_writes_report(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]

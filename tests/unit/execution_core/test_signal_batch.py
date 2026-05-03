@@ -108,6 +108,7 @@ def test_valid_batch_processes_binary_and_static_signals_for_review(tmp_path: Pa
     assert result.report["live_money_readiness"] is False
     assert result.report["broker_connection_attempted"] is False
     assert result.report["market_data_connection_attempted"] is False
+    assert result.report["secondary_blockers"]
     assert len(result.report["proposed_intent_output_paths"]) == 2
 
     intents = [json.loads(Path(path).read_text(encoding="utf-8")) for path in result.report["proposed_intent_output_paths"]]
@@ -144,6 +145,7 @@ def test_signal_batch_blockers(
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
     assert result.report["primary_blocker"]
+    assert "secondary_blockers" in result.report
 
 
 def test_dynamic_scored_signal_is_blocked_for_automatic_proposal(tmp_path: Path) -> None:

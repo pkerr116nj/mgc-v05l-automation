@@ -90,6 +90,30 @@ or enables submit.
   additional proof submits on that account/contract until broker state is
   terminal and clean.
 
+## Consolidation Audit Note
+
+The no-submit spine uses stage-specific verdicts and a shared operator-facing
+report vocabulary: `submit_allowed`, `submit_attempted`,
+`live_money_readiness`, `primary_blocker`, `secondary_blockers`,
+`required_next_action`, and `generated_at`. Summary-style reports should keep
+missing stages explicit instead of treating them as zero.
+
+Small consistency cleanup from this audit:
+
+- Signal batch, shadow run assembler, and attrition reports now expose
+  `secondary_blockers` consistently.
+- Attrition reports now include a clear `primary_blocker` and
+  `required_next_action` when downstream stages are missing.
+
+Deferred cleanup candidates:
+
+- Some reports use `output_paths`; attrition reports use
+  `output_artifacts_considered` because they may consume multiple upstream
+  summaries. This is intentional for now and should not be renamed without a
+  compatibility pass.
+- A future shared report helper could reduce duplicated safety fields, but the
+  current explicit repetition keeps each no-submit boundary easy to audit.
+
 ## Migration Roadmap
 
 1. Finish and maintain the execution safety core.

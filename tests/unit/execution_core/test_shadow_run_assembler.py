@@ -116,6 +116,7 @@ def test_valid_manifest_registry_and_intent_assemble_shadow_run_for_review(tmp_p
     assert result.report["broker_connection_attempted"] is False
     assert result.report["market_data_connection_attempted"] is False
     assert result.report["paper_proof_cli_remains_only_submit_path"] is True
+    assert result.report["secondary_blockers"] == []
     assert result.report["output_paths"]["shadow_evaluation_reports"]
 
 
@@ -150,6 +151,7 @@ def test_empty_intent_list_blocks_clearly(tmp_path: Path) -> None:
     assert result.report["shadow_run_verdict"] == "SHADOW_RUN_BLOCKED_EMPTY_INTENTS"
     assert result.report["total_intents"] == 0
     assert result.report["primary_blocker"] == "No strategy intent payloads were provided."
+    assert result.report["secondary_blockers"] == []
     assert result.report["submit_attempted"] is False
 
 
@@ -171,6 +173,8 @@ def test_disabled_lane_creates_per_intent_blocker_and_run_blocker_summary(tmp_pa
     assert result.report["order_plans_created"] == 0
     assert result.report["shadow_evaluations_created"] == 0
     assert item_report["lane_validation_verdict"] == "LANE_BLOCKED_DISABLED"
+    assert result.report["secondary_blockers"]
+    assert item_report["secondary_blockers"] == []
     assert item_report["submit_allowed"] is False
     assert item_report["submit_attempted"] is False
 

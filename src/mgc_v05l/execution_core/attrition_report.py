@@ -151,6 +151,12 @@ def _report(
         "shadow_run_reports": (shadow_run_summary or {}).get("output_paths") if shadow_run_present else MISSING_STAGE,
         "readiness_summary": (readiness_summary or {}).get("report_json_path") if readiness_present else MISSING_STAGE,
     }
+    primary_blocker = "One or more attrition input stages were not provided." if missing_stages else None
+    required_next_action = (
+        "Supply missing stage summaries before interpreting downstream attrition counts."
+        if missing_stages
+        else "Review attrition counts and blocker attribution; this report does not authorize submit."
+    )
 
     return {
         "schema_version": "track_b_attrition_report_v1",
@@ -175,6 +181,9 @@ def _report(
         "submit_allowed": False,
         "submit_attempted": False,
         "live_money_readiness": False,
+        "primary_blocker": primary_blocker,
+        "secondary_blockers": [f"missing_stage:{stage}" for stage in missing_stages],
+        "required_next_action": required_next_action,
         "blockers_count_by_stage": blockers_by_stage,
         "blockers_count_by_type": dict(blockers_by_type),
         "primary_attrition_stage": primary_stage,
@@ -205,6 +214,7 @@ def _blocked_report(
         "submit_attempted": False,
         "live_money_readiness": False,
         "primary_blocker": blocker,
+        "secondary_blockers": [],
         "required_next_action": action,
         "report_is_explanatory_only": True,
         "broker_connection_attempted": False,

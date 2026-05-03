@@ -132,6 +132,7 @@ def assemble_shadow_run(
             "submit_attempted": False,
             "live_money_readiness": False,
             "primary_blocker": str(exc),
+            "secondary_blockers": [],
             "required_next_action": "Fix shadow run input schema before assembly.",
             "output_paths": {"summary_report_json": str(report_json)},
         }
@@ -224,6 +225,7 @@ def _process_intent(
         "submit_attempted": False,
         "live_money_readiness": False,
         "primary_blocker": primary_blocker,
+        "secondary_blockers": _item_secondary_blockers(intent_result, lane_result, order_plan, shadow_evaluation),
         "required_next_action": required_next_action,
         "strategy_id": intent_result.report.get("strategy_id") or lane_result.report.get("strategy_id"),
         "lane_id": intent_result.report.get("lane_id") or lane_result.report.get("lane_id"),
@@ -282,6 +284,7 @@ def _write_summary(
         "submit_attempted": False,
         "live_money_readiness": False,
         "primary_blocker": primary_blocker,
+        "secondary_blockers": _summary_secondary_blockers(per_intent_reports),
         "required_next_action": required_next_action,
         "output_paths": output_paths,
         "manifest_governs_run_context_only": True,
@@ -296,6 +299,42 @@ def _write_summary(
     report_json.parent.mkdir(parents=True, exist_ok=True)
     report_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
     return ShadowRunAssemblerResult(verdict=verdict, report_json=report_json, report=report)
+
+
+def _item_secondary_blockers(
+    intent_result: StrategyIntentValidationResult,
+    lane_result: LaneValidationResult,
+    order_plan: OrderPlanResult | None,
+    shadow_evaluation: ShadowEvaluationResult | None,
+) -> list[str]:
+    blockers: list[str] = []
+    for report in (
+        intent_result.report,
+        lane_result.report,
+        {} if order_plan is None else order_plan.report,
+        {} if shadow_evaluation is None else shadow_evaluation.report,
+    ):
+        blockers.extend(str(item) for item in report.get("secondary_blockers") or ())
+    return _dedupe(blockers)
+
+
+def _summary_secondary_blockers(per_intent_reports: Sequence[Mapping[str, Any]]) -> list[str]:
+    blockers: list[str] = []
+    for item in per_intent_reports:
+        if item.get("primary_blocker"):
+            blockers.append(str(item["primary_blocker"]))
+        blockers.extend(str(blocker) for blocker in item.get("secondary_blockers") or ())
+    return _dedupe(blockers)
+
+
+def _dedupe(values: Sequence[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
 
 
 def _prepare_readiness_summary(
