@@ -109,6 +109,22 @@ Attrition reports explain where candidates dropped out by stage and blocker
 type. Missing downstream stages are reported as missing, not silently counted
 as zero.
 
+Run the one-command no-submit replay runner:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.shadow_replay_runner_cli \
+  --signal-batch-json examples/track_b_shadow_run/signal_batch.json \
+  --proposal-policy-json examples/track_b_shadow_run/proposal_policy_scored_static.json \
+  --manifest-json examples/track_b_shadow_run/manifest.json \
+  --registry-json examples/track_b_shadow_run/lane_registry.json \
+  --output-root outputs/track_b_execution_core/shadow_replay_runs
+```
+
+The replay runner is orchestration only. It runs signal batch processing,
+shadow run assembly for created proposed-intent artifacts, attrition reporting,
+and a top-level runner summary. It creates no new authority, does not connect
+to TWS or Databento, and does not submit.
+
 ## Shadow Run Command
 
 Run the committed golden example with:
@@ -152,6 +168,9 @@ For the signal-to-shadow-run chain:
 - proposed intents that are created can pass through lane registry, order plan,
   and shadow evaluation review
 - blocked cases remain explicit and do not become hidden submit attempts
+- one-command shadow replay runner: links signal batch, shadow run, attrition,
+  and runner summary paths while preserving `submit_allowed=false`,
+  `submit_attempted=false`, and `live_money_readiness=false`
 
 This example proves the report chain only. It is not a strategy engine, not a
 scheduler, not broker recovery, and not a paper proof submit path.

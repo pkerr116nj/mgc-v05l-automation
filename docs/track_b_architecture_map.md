@@ -17,6 +17,7 @@ shadow_signal
 -> shadow_evaluation
 -> shadow_run_manifest
 -> shadow_run_assembler
+-> shadow_replay_runner
 -> attrition_report
 -> readiness_summary
 -> recovery / preflight / proof timing
@@ -45,6 +46,9 @@ dashboard runtime, or broker route.
   lanes.
 - `shadow_run_assembler` orchestrates no-submit review artifacts for one or
   more intents. It is not strategy execution and is not a broker route.
+- `shadow_replay_runner` orchestrates the existing no-submit chain from signal
+  batch to proposal artifacts, shadow run assembly, attrition report, and a
+  top-level summary. It creates no new authority and does not submit.
 - `attrition_report` explains where candidates dropped out across supplied
   no-submit summaries. It is explanatory only and treats missing stages as
   explicit `NOT_PROVIDED` inputs instead of silently reporting zero.
@@ -178,6 +182,15 @@ Example command chain:
   --intent-json examples/track_b_shadow_run/intent_valid.json \
   --intent-json examples/track_b_shadow_run/intent_blocked_qty.json \
   --output-root outputs/track_b_execution_core/shadow_runs
+```
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.shadow_replay_runner_cli \
+  --signal-batch-json examples/track_b_shadow_run/signal_batch.json \
+  --proposal-policy-json examples/track_b_shadow_run/proposal_policy_scored_static.json \
+  --manifest-json examples/track_b_shadow_run/manifest.json \
+  --registry-json examples/track_b_shadow_run/lane_registry.json \
+  --output-root outputs/track_b_execution_core/shadow_replay_runs
 ```
 
 All example commands are no-submit and do not connect to TWS or Databento.
