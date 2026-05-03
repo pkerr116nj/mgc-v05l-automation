@@ -27,6 +27,60 @@ shadow_signal
 The chain is file/report driven today. It is not a strategy engine, scheduler,
 dashboard runtime, or broker route.
 
+## Mode And Lane Lifecycle
+
+Engine-running state is separate from submit authority. A future Track B engine
+may have `engine_running=true` while every report still has
+`submit_allowed=false`. Shadow evaluation can run continuously because it is
+no-submit. Paper submit requires paper-specific recovery, preflight, timing,
+pricing, explicit submit flags, and operator confirmation. Live submit is not
+implemented and will require future live-specific gates.
+
+Lane lifecycle states:
+
+- `DISABLED`: no review and no submit.
+- `SHADOW_ONLY`: no-submit observation, replay, attrition, and reporting only.
+- `PAPER_REVIEW`: paper-mode no-submit review artifacts are allowed.
+- `PAPER_SUBMIT_ELIGIBLE`: the lane may proceed to paper readiness and explicit
+  paper submit gates. This state does not itself allow submit.
+- `LIVE_REVIEW`: future live-mode review artifacts are allowed, with no live
+  submit.
+- `LIVE_SUBMIT_ELIGIBLE`: future state only. It will require future
+  live-readiness gates, risk controls, account controls, and explicit live
+  submit authority.
+
+Mode-aware flow must keep candidates separated by authority:
+
+- The same signal may generate shadow artifacts.
+- A paper candidate exists only if the lane is paper eligible and the paper
+  review/submit gates pass.
+- A live candidate exists only if the lane is live eligible and future live
+  gates pass.
+- Each mode has separate account, contract, risk, readiness, and operator
+  controls.
+
+Current implementation status:
+
+- The current Track B replay runner is shadow/no-submit orchestration.
+- The paper proof path exists, but the known unresolved broker order blocks new
+  proof submits for `DUM882026` / `MGC-202606`.
+- Live trading is not implemented and not implied.
+- Current no-submit artifacts keep `live_money_readiness=false`.
+
+Promotion discipline:
+
+- Strategies do not promote themselves.
+- Lane lifecycle changes require explicit registry/config changes.
+- Promotion should be based on evidence from shadow reports, paper reports,
+  attrition, fills, risk metrics, and operator review.
+
+Dashboard implication:
+
+- A future dashboard should display lifecycle state and mode-specific
+  readiness.
+- Dashboard controls must remain observer/control surfaces over Track B
+  artifacts, not source of truth or hidden submit authority.
+
 ## Authority Boundaries
 
 - `shadow_signal` is evidence only. It can carry BINARY or scored observations,
