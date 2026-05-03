@@ -17,6 +17,7 @@ shadow_signal
 -> shadow_evaluation
 -> shadow_run_manifest
 -> shadow_run_assembler
+-> attrition_report
 -> readiness_summary
 -> recovery / preflight / proof timing
 -> paper_proof_cli later, only when broker state is clean
@@ -44,6 +45,9 @@ dashboard runtime, or broker route.
   lanes.
 - `shadow_run_assembler` orchestrates no-submit review artifacts for one or
   more intents. It is not strategy execution and is not a broker route.
+- `attrition_report` explains where candidates dropped out across supplied
+  no-submit summaries. It is explanatory only and treats missing stages as
+  explicit `NOT_PROVIDED` inputs instead of silently reporting zero.
 - `readiness_summary` summarizes broker/session/quote state. It does not submit
   and does not override proof gates.
 - `paper_proof_cli` remains the only current Track B submit path.
@@ -153,6 +157,10 @@ Example command chain:
 ```
 
 All example commands are no-submit and do not connect to TWS or Databento.
+
+Attrition reports are intended to avoid Track A-style unexplained trade count
+loss across competing layers. They can consume signal batch, shadow run, and
+readiness summaries and report blocker counts by stage/type.
 
 ## Non-Goals
 

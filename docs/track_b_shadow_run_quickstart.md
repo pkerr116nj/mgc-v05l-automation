@@ -95,6 +95,20 @@ The batch should create proposed-intent artifacts for the binary and
 above-threshold static-scored signals, and count the below-threshold static
 signal as a blocked proposal.
 
+Create an attrition report after generating summaries:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.attrition_report_cli \
+  --signal-batch-summary-json <SIGNAL_BATCH_SUMMARY_JSON> \
+  --shadow-run-summary-json <SHADOW_RUN_SUMMARY_JSON optional> \
+  --readiness-summary-json <READINESS_SUMMARY_JSON optional> \
+  --output-root outputs/track_b_execution_core/attrition_reports
+```
+
+Attrition reports explain where candidates dropped out by stage and blocker
+type. Missing downstream stages are reported as missing, not silently counted
+as zero.
+
 ## Shadow Run Command
 
 Run the committed golden example with:
