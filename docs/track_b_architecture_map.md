@@ -104,8 +104,9 @@ Dashboard implication:
   as read-model conveniences. Its event JSON is already compatible with
   `strategy_signal_adapter_cli`; no separate bridge module is required in this
   slice. Direction is explicit: pass `--signal-direction` to create directional
-  BINARY review input, or omit it to let the adapter emit review-only
-  HUMAN_REVIEW input. Optional bounded watch mode re-runs the same observer
+  BINARY review input on either the observer command or the strategy adapter
+  command, or omit it to let the adapter emit review-only HUMAN_REVIEW input.
+  Optional bounded watch mode re-runs the same observer
   conversion on a supplied artifact path and updates
   `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json`;
   it is still market-data evidence only and does not imply trading mode.
@@ -324,6 +325,7 @@ Example command chain:
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --source-id databento_strategy_demo \
+  --signal-direction LONG \
   --output-root outputs/track_b_execution_core/strategy_signal_adapter
 ```
 

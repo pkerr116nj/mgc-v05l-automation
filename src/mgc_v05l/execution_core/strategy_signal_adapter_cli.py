@@ -19,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inbox-dir", required=True, type=Path)
     parser.add_argument("--expected-account-id")
     parser.add_argument("--source-id")
+    parser.add_argument("--signal-direction", help="Optional explicit LONG/SHORT/FLAT/NONE direction override; never inferred from candle shape.")
+    parser.add_argument("--side", help="Alias for --signal-direction.")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_STRATEGY_SIGNAL_ADAPTER_OUTPUT_ROOT)
     parser.add_argument("--candle-producer-output-root", type=Path, default=DEFAULT_CANDLE_SIGNAL_PRODUCER_OUTPUT_ROOT)
     parser.add_argument("--writer-output-root", type=Path, default=DEFAULT_SIGNAL_BATCH_WRITER_OUTPUT_ROOT)
@@ -28,6 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     payload = json.loads(args.strategy_event_json.read_text(encoding="utf-8"))
+    explicit_direction = args.signal_direction or args.side
+    if explicit_direction:
+        payload["signal_direction"] = explicit_direction
+        payload["decision_style"] = "BINARY"
     result = adapt_demo_candle_direction_signal(
         strategy_event_payload=payload,
         inbox_dir=args.inbox_dir,

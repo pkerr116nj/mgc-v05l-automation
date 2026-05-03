@@ -299,3 +299,40 @@ def test_strategy_signal_adapter_cli_writes_batch(tmp_path: Path, capsys) -> Non
     assert output["submit_allowed"] is False
     assert output["submit_attempted"] is False
     assert output["live_money_readiness"] is False
+
+
+def test_strategy_signal_adapter_cli_accepts_explicit_direction_override(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    event_json = tmp_path / "strategy_event_without_direction.json"
+    write_json(event_json, strategy_event(signal_direction="", decision_style="HUMAN_REVIEW"))
+
+    exit_code = strategy_signal_adapter_cli_main(
+        [
+            "--strategy-event-json",
+            str(event_json),
+            "--inbox-dir",
+            str(tmp_path / "inbox"),
+            "--expected-account-id",
+            "DUM882026",
+            "--source-id",
+            "cli_strategy_direction_demo",
+            "--signal-direction",
+            "LONG",
+            "--output-root",
+            str(tmp_path / "adapter_reports"),
+            "--candle-producer-output-root",
+            str(tmp_path / "candle_reports"),
+            "--writer-output-root",
+            str(tmp_path / "writer_reports"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["adapter_verdict"] == "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH"
+    batch = json.loads(Path(output["output_batch_path"]).read_text(encoding="utf-8"))
+    signal = batch["signal_items"][0]["signal"]
+    assert signal["signal_direction"] == "LONG"
+    assert signal["decision_style"] == "BINARY"
+    assert output["submit_allowed"] is False
+    assert output["submit_attempted"] is False
+    assert output["live_money_readiness"] is False

@@ -226,9 +226,10 @@ or Databento live streaming, and it does not mean trading mode.
 
 The output event is already compatible with `strategy_signal_adapter_cli`; no
 extra bridge command is required in this slice. Direction is explicit, not
-inferred from candle shape. Include `--signal-direction LONG` or `SHORT` only
-when an upstream artifact is intentionally directional. Omit it for review-only
-HUMAN_REVIEW input.
+inferred from candle shape. Include `--signal-direction LONG` or `SHORT` on the
+observer command or on the strategy adapter command only when an upstream
+artifact is intentionally directional. Omit it for review-only HUMAN_REVIEW
+input.
 
 Feed that market-data event into the explicit strategy adapter as a separate
 operator step:
@@ -239,6 +240,7 @@ operator step:
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --source-id databento_strategy_demo \
+  --signal-direction LONG \
   --output-root outputs/track_b_execution_core/strategy_signal_adapter
 ```
 
