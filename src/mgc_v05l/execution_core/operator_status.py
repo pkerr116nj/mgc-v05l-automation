@@ -38,6 +38,8 @@ class OperatorStatusInputs:
     listener_cycle_json: Path | None = None
     shadow_runner_summary_json: Path | None = None
     attrition_report_json: Path | None = None
+    databento_candle_observer_report_json: Path | None = None
+    databento_candle_observer_heartbeat_json: Path | None = None
     strategy_signal_adapter_report_json: Path | None = None
     candle_signal_producer_report_json: Path | None = None
     signal_batch_writer_report_json: Path | None = None
@@ -92,6 +94,8 @@ def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | No
         "listener_cycle": _read_json(inputs.listener_cycle_json),
         "shadow_runner": _read_json(inputs.shadow_runner_summary_json),
         "attrition": _read_json(inputs.attrition_report_json),
+        "databento_candle_observer": _read_json(inputs.databento_candle_observer_report_json),
+        "databento_candle_observer_heartbeat": _read_json(inputs.databento_candle_observer_heartbeat_json),
         "strategy_signal_adapter": _read_json(inputs.strategy_signal_adapter_report_json),
         "candle_signal_producer": _read_json(inputs.candle_signal_producer_report_json),
         "signal_batch_writer": _read_json(inputs.signal_batch_writer_report_json),
@@ -201,6 +205,8 @@ def _report(
     listener_cycle = reports.get("listener_cycle") or {}
     shadow_runner = reports.get("shadow_runner") or {}
     attrition = reports.get("attrition") or {}
+    databento_candle_observer = reports.get("databento_candle_observer") or {}
+    databento_candle_observer_heartbeat = reports.get("databento_candle_observer_heartbeat") or {}
     strategy_signal_adapter = reports.get("strategy_signal_adapter") or {}
     candle_signal_producer = reports.get("candle_signal_producer") or {}
     signal_batch_writer = reports.get("signal_batch_writer") or {}
@@ -214,6 +220,8 @@ def _report(
         "listener_cycle": listener_cycle.get("report_json_path") or listener_health.get("latest_cycle_summary_path"),
         "shadow_runner": shadow_runner.get("report_json_path"),
         "attrition": attrition.get("report_json_path"),
+        "databento_candle_observer": databento_candle_observer.get("report_json_path"),
+        "databento_candle_observer_heartbeat": databento_candle_observer_heartbeat.get("heartbeat_json_path"),
         "strategy_signal_adapter": strategy_signal_adapter.get("report_json_path"),
         "candle_signal_producer": candle_signal_producer.get("report_json_path"),
         "signal_batch_writer": signal_batch_writer.get("report_json_path"),
@@ -242,6 +250,24 @@ def _report(
         "latest_listener_cycle_verdict": listener_cycle.get("listener_verdict") or listener_health.get("last_cycle_verdict") or listener_heartbeat.get("last_listener_verdict") or NOT_PROVIDED,
         "shadow_replay_runner_verdict": shadow_runner.get("runner_verdict") or NOT_PROVIDED,
         "attrition_report_verdict": attrition.get("attrition_report_verdict") or NOT_PROVIDED,
+        "databento_observer_verdict": databento_candle_observer.get("observer_verdict") or NOT_PROVIDED,
+        "databento_contract_key": databento_candle_observer.get("contract_key") or databento_candle_observer_heartbeat.get("contract_key") or NOT_PROVIDED,
+        "databento_symbol": databento_candle_observer.get("databento_continuous_symbol") or databento_candle_observer_heartbeat.get("databento_continuous_symbol") or NOT_PROVIDED,
+        "databento_dataset": databento_candle_observer.get("dataset") or databento_candle_observer_heartbeat.get("dataset") or NOT_PROVIDED,
+        "databento_timeframe": databento_candle_observer.get("timeframe") or NOT_PROVIDED,
+        "databento_source_id": databento_candle_observer.get("source_id") or NOT_PROVIDED,
+        "databento_event_timestamp": databento_candle_observer.get("event_timestamp") or databento_candle_observer.get("candle_timestamp") or databento_candle_observer_heartbeat.get("last_event_timestamp") or NOT_PROVIDED,
+        "databento_output_event_path": databento_candle_observer.get("output_candle_event_path") or databento_candle_observer_heartbeat.get("output_event_path") or NOT_PROVIDED,
+        "databento_observer_submit_allowed": databento_candle_observer.get("submit_allowed") if databento_candle_observer else NOT_PROVIDED,
+        "databento_observer_submit_attempted": databento_candle_observer.get("submit_attempted") if databento_candle_observer else NOT_PROVIDED,
+        "databento_observer_live_money_readiness": databento_candle_observer.get("live_money_readiness") if databento_candle_observer else NOT_PROVIDED,
+        "databento_observer_mode": databento_candle_observer_heartbeat.get("observer_mode") or databento_candle_observer.get("observer_mode") or NOT_PROVIDED,
+        "databento_observer_current_cycle": databento_candle_observer_heartbeat.get("current_cycle_number") if databento_candle_observer_heartbeat else NOT_PROVIDED,
+        "databento_observer_processed_cycles": databento_candle_observer_heartbeat.get("processed_cycles") if databento_candle_observer_heartbeat else NOT_PROVIDED,
+        "databento_observer_no_data_cycles": databento_candle_observer_heartbeat.get("no_data_cycles") if databento_candle_observer_heartbeat else NOT_PROVIDED,
+        "databento_observer_error_cycles": databento_candle_observer_heartbeat.get("error_cycles") if databento_candle_observer_heartbeat else NOT_PROVIDED,
+        "databento_observer_last_verdict": databento_candle_observer_heartbeat.get("last_observer_verdict") or NOT_PROVIDED,
+        "databento_observer_watch_exited_normally": databento_candle_observer_heartbeat.get("watch_exited_normally") if databento_candle_observer_heartbeat else NOT_PROVIDED,
         "strategy_adapter_verdict": strategy_signal_adapter.get("adapter_verdict") or NOT_PROVIDED,
         "strategy_id": strategy_signal_adapter.get("strategy_id") or NOT_PROVIDED,
         "signal_family": strategy_signal_adapter.get("signal_family") or NOT_PROVIDED,

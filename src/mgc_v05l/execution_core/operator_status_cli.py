@@ -18,6 +18,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listener-cycle-json", type=Path)
     parser.add_argument("--shadow-runner-summary-json", type=Path)
     parser.add_argument("--attrition-report-json", type=Path)
+    parser.add_argument("--databento-candle-observer-report-json", type=Path)
+    parser.add_argument("--databento-candle-observer-heartbeat-json", type=Path)
     parser.add_argument("--strategy-signal-adapter-report-json", type=Path)
     parser.add_argument("--candle-signal-producer-report-json", type=Path)
     parser.add_argument("--signal-batch-writer-report-json", type=Path)
@@ -38,6 +40,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             listener_cycle_json=args.listener_cycle_json,
             shadow_runner_summary_json=args.shadow_runner_summary_json,
             attrition_report_json=args.attrition_report_json,
+            databento_candle_observer_report_json=args.databento_candle_observer_report_json,
+            databento_candle_observer_heartbeat_json=args.databento_candle_observer_heartbeat_json,
             strategy_signal_adapter_report_json=args.strategy_signal_adapter_report_json,
             candle_signal_producer_report_json=args.candle_signal_producer_report_json,
             signal_batch_writer_report_json=args.signal_batch_writer_report_json,
@@ -56,6 +60,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "listener_current_cycle_number": result.report["listener_current_cycle_number"],
                 "listener_last_health_verdict": result.report["listener_last_health_verdict"],
                 "shadow_listener_health_verdict": result.report["shadow_listener_health_verdict"],
+                "databento_observer_verdict": result.report["databento_observer_verdict"],
+                "databento_observer_mode": result.report["databento_observer_mode"],
+                "databento_observer_current_cycle": result.report["databento_observer_current_cycle"],
+                "databento_observer_last_verdict": result.report["databento_observer_last_verdict"],
                 "strategy_adapter_verdict": result.report["strategy_adapter_verdict"],
                 "candle_producer_verdict": result.report["candle_producer_verdict"],
                 "signal_batch_writer_verdict": result.report["signal_batch_writer_verdict"],

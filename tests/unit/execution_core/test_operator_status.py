@@ -179,6 +179,72 @@ def candle_signal_producer_report(tmp_path: Path, **overrides: object) -> Path:
     return write_json(tmp_path / "candle_signal_producer_report.json", payload)
 
 
+def databento_candle_observer_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_databento_candle_observer_v1",
+        "generated_at": aware_now().isoformat(),
+        "databento_candle_observer_id": "databento-observer-001",
+        "observer_mode": "one_shot",
+        "observer_verdict": "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
+        "source_id": "unit_test_databento_observer",
+        "contract_key": "MGC-202606",
+        "local_execution_contract_key": "MGC-202606",
+        "databento_continuous_symbol": "MGC.v.0",
+        "databento_symbol": "MGC.v.0",
+        "dataset": "GLBX.MDP3",
+        "timeframe": "quote_snapshot",
+        "event_timestamp": aware_now().isoformat(),
+        "candle_timestamp": aware_now().isoformat(),
+        "output_candle_event_path": str(tmp_path / "databento_candle_event.json"),
+        "listener_invoked": False,
+        "runner_invoked": False,
+        "operator_status_invoked": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "primary_blocker": None,
+        "secondary_blockers": [],
+        "required_next_action": "Run strategy_signal_adapter_cli explicitly if needed.",
+        "report_json_path": "databento_candle_observer_report.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "databento_candle_observer_report.json", payload)
+
+
+def databento_candle_observer_heartbeat(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_databento_candle_observer_heartbeat_v1",
+        "generated_at": aware_now().isoformat(),
+        "observer_mode": "watch",
+        "watch_id": "databento-watch-001",
+        "current_cycle_number": 3,
+        "max_cycles": 5,
+        "processed_cycles": 2,
+        "no_data_cycles": 1,
+        "error_cycles": 0,
+        "last_observer_verdict": "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
+        "last_event_timestamp": aware_now().isoformat(),
+        "contract_key": "MGC-202606",
+        "local_execution_contract_key": "MGC-202606",
+        "databento_continuous_symbol": "MGC.v.0",
+        "dataset": "GLBX.MDP3",
+        "output_event_path": str(tmp_path / "latest_databento_candle_event.json"),
+        "watch_exited_normally": False,
+        "listener_invoked": False,
+        "runner_invoked": False,
+        "operator_status_invoked": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "primary_blocker": None,
+        "secondary_blockers": [],
+        "required_next_action": "Continue explicit no-submit downstream steps only when operator review requires them.",
+        "heartbeat_json_path": "databento_candle_observer_heartbeat.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "databento_candle_observer_heartbeat.json", payload)
+
+
 def recovery_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, object] = {
         "classification": "RECOVERY_READY_CLEAN",
@@ -332,6 +398,65 @@ def test_upstream_strategy_and_candle_reports_are_summarized(tmp_path: Path) -> 
     latest = json.loads((tmp_path / "operator_status" / "latest_operator_status_summary.json").read_text(encoding="utf-8"))
     assert latest["strategy_adapter_verdict"] == "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH"
     assert latest["candle_producer_verdict"] == "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH"
+
+
+def test_databento_observer_report_and_heartbeat_are_summarized(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            databento_candle_observer_report_json=databento_candle_observer_report(tmp_path),
+            databento_candle_observer_heartbeat_json=databento_candle_observer_heartbeat(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-databento-observer",
+        now=aware_now(),
+    )
+
+    assert result.report["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
+    assert result.report["databento_contract_key"] == "MGC-202606"
+    assert result.report["databento_symbol"] == "MGC.v.0"
+    assert result.report["databento_dataset"] == "GLBX.MDP3"
+    assert result.report["databento_timeframe"] == "quote_snapshot"
+    assert result.report["databento_source_id"] == "unit_test_databento_observer"
+    assert result.report["databento_event_timestamp"] == aware_now().isoformat()
+    assert result.report["databento_output_event_path"].endswith("databento_candle_event.json")
+    assert result.report["databento_observer_submit_allowed"] is False
+    assert result.report["databento_observer_submit_attempted"] is False
+    assert result.report["databento_observer_live_money_readiness"] is False
+    assert result.report["databento_observer_mode"] == "watch"
+    assert result.report["databento_observer_current_cycle"] == 3
+    assert result.report["databento_observer_processed_cycles"] == 2
+    assert result.report["databento_observer_no_data_cycles"] == 1
+    assert result.report["databento_observer_error_cycles"] == 0
+    assert result.report["databento_observer_last_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
+    assert result.report["databento_observer_watch_exited_normally"] is False
+    assert result.report["latest_output_paths"]["databento_candle_observer"] == "databento_candle_observer_report.json"
+    assert result.report["latest_output_paths"]["databento_candle_observer_heartbeat"] == "databento_candle_observer_heartbeat.json"
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+    latest = json.loads((tmp_path / "operator_status" / "latest_operator_status_summary.json").read_text(encoding="utf-8"))
+    assert latest["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
+
+
+def test_missing_databento_observer_reports_are_explicit(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-missing-databento-observer",
+        now=aware_now(),
+    )
+
+    assert result.report["databento_observer_verdict"] == "NOT_PROVIDED"
+    assert result.report["databento_observer_mode"] == "NOT_PROVIDED"
+    assert result.report["databento_observer_current_cycle"] == "NOT_PROVIDED"
+    assert result.report["databento_output_event_path"] == "NOT_PROVIDED"
+    assert "databento_candle_observer" in result.report["reports_missing"]
+    assert "databento_candle_observer_heartbeat" in result.report["reports_missing"]
+    assert result.report["reports_considered"]["databento_candle_observer"] is False
+    assert result.report["reports_considered"]["databento_candle_observer_heartbeat"] is False
 
 
 def test_operator_status_latest_pointer_updates_without_overwriting_canonical_reports(tmp_path: Path) -> None:
@@ -490,6 +615,10 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
             str(listener_heartbeat(tmp_path)),
             "--listener-health-json",
             str(listener_health(tmp_path)),
+            "--databento-candle-observer-report-json",
+            str(databento_candle_observer_report(tmp_path)),
+            "--databento-candle-observer-heartbeat-json",
+            str(databento_candle_observer_heartbeat(tmp_path)),
             "--signal-batch-writer-report-json",
             str(signal_batch_writer_report(tmp_path)),
             "--strategy-signal-adapter-report-json",
@@ -506,6 +635,10 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
     assert output["status_verdict"] == "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW"
     assert output["listener_mode"] == "watch"
     assert output["listener_current_cycle_number"] == 3
+    assert output["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
+    assert output["databento_observer_mode"] == "watch"
+    assert output["databento_observer_current_cycle"] == 3
+    assert output["databento_observer_last_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert output["strategy_adapter_verdict"] == "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH"
     assert output["candle_producer_verdict"] == "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH"
     assert output["signal_batch_writer_verdict"] == "SIGNAL_BATCH_WRITER_WROTE_BATCH"

@@ -3143,6 +3143,7 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null }) {
           <MetricCard label="Listener Mode" value={formatValue(status.listener_mode)} tone={statusTone(status.listener_mode)} />
           <MetricCard label="Current Cycle" value={formatValue(status.listener_current_cycle_number)} />
           <MetricCard label="Listener Health" value={formatValue(status.listener_last_health_verdict)} tone={statusTone(status.listener_last_health_verdict)} />
+          <MetricCard label="Databento Observer" value={formatValue(status.databento_observer_last_verdict ?? status.databento_observer_verdict)} tone={statusTone(status.databento_observer_last_verdict ?? status.databento_observer_verdict)} />
           <MetricCard label="Strategy Adapter" value={formatValue(status.strategy_adapter_verdict)} tone={statusTone(status.strategy_adapter_verdict)} />
           <MetricCard label="Candle Producer" value={formatValue(status.candle_producer_verdict)} tone={statusTone(status.candle_producer_verdict)} />
           <MetricCard label="Writer Verdict" value={formatValue(status.signal_batch_writer_verdict)} tone={statusTone(status.signal_batch_writer_verdict)} />
@@ -3151,6 +3152,37 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null }) {
           <MetricCard label="Submit Allowed" value={formatValue(status.submit_allowed)} tone={status.submit_allowed === false ? "good" : "warn"} />
           <MetricCard label="Submit Attempted" value={formatValue(status.submit_attempted)} tone={status.submit_attempted === false ? "good" : "warn"} />
           <MetricCard label="Live Money Readiness" value={formatValue(status.live_money_readiness)} tone={status.live_money_readiness === false ? "good" : "warn"} />
+        </div>
+      </Section>
+
+      <Section title="Market Data Observer" subtitle="Databento evidence layer from operator_status; market data only, no execution authority">
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Databento Watch</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Mode" value={formatValue(status.databento_observer_mode)} tone={statusTone(status.databento_observer_mode)} />
+              <MetricCard label="Verdict" value={formatValue(status.databento_observer_verdict)} tone={statusTone(status.databento_observer_verdict)} />
+              <MetricCard label="Last Verdict" value={formatValue(status.databento_observer_last_verdict)} tone={statusTone(status.databento_observer_last_verdict)} />
+              <MetricCard label="Current Cycle" value={formatValue(status.databento_observer_current_cycle)} />
+              <MetricCard label="Processed" value={formatValue(status.databento_observer_processed_cycles)} tone={statusTone(status.databento_observer_processed_cycles)} />
+              <MetricCard label="No Data" value={formatValue(status.databento_observer_no_data_cycles)} />
+              <MetricCard label="Errors" value={formatValue(status.databento_observer_error_cycles)} tone={Number(status.databento_observer_error_cycles ?? 0) > 0 ? "warn" : "muted"} />
+              <MetricCard label="Exited Normally" value={formatValue(status.databento_observer_watch_exited_normally)} />
+            </div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Latest Market Data Event</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Contract" value={formatValue(status.databento_contract_key)} />
+              <MetricCard label="Symbol" value={formatValue(status.databento_symbol)} />
+              <MetricCard label="Dataset" value={formatValue(status.databento_dataset)} />
+              <MetricCard label="Timeframe" value={formatValue(status.databento_timeframe)} />
+              <MetricCard label="Source" value={formatValue(status.databento_source_id)} />
+              <MetricCard label="Event Time" value={formatValue(status.databento_event_timestamp)} />
+            </div>
+            <h3 className="subsection-title">Latest Event Path</h3>
+            <div className="placeholder-note">{formatValue(status.databento_output_event_path)}</div>
+          </div>
         </div>
       </Section>
 

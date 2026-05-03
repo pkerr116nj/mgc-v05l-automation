@@ -465,6 +465,10 @@ test("Track B read-only status loads latest operator status artifact without inv
       {
         status_verdict: "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW",
         required_next_action: "Review no-submit artifacts.",
+        databento_observer_verdict: "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
+        databento_observer_mode: "watch",
+        databento_observer_current_cycle: 2,
+        databento_observer_last_verdict: "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
         strategy_adapter_verdict: "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH",
         candle_producer_verdict: "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH",
         signal_batch_writer_verdict: "SIGNAL_BATCH_WRITER_WROTE_BATCH",
@@ -484,6 +488,8 @@ test("Track B read-only status loads latest operator status artifact without inv
     assert.equal(trackB.malformed, false);
     assert.equal(trackB.operatorStatusPath, tempPath);
     assert.equal(trackB.status?.status_verdict, "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW");
+    assert.equal(trackB.status?.databento_observer_verdict, "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT");
+    assert.equal(trackB.status?.databento_observer_mode, "watch");
     assert.equal(trackB.status?.strategy_adapter_verdict, "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH");
     assert.equal(trackB.status?.candle_producer_verdict, "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH");
     assert.equal(trackB.status?.submit_allowed, false);
@@ -527,6 +533,10 @@ test("Track B status renderer is display-only and no-submit", () => {
 
   assert.match(appTsx, /TrackBStatusPage/);
   assert.match(appTsx, /NO-SUBMIT \/ SHADOW REVIEW/);
+  assert.match(appTsx, /Market Data Observer/);
+  assert.match(appTsx, /databento_observer_verdict/);
+  assert.match(appTsx, /databento_observer_last_verdict/);
+  assert.match(appTsx, /databento_output_event_path/);
   assert.match(appTsx, /Upstream Signal Chain/);
   assert.match(appTsx, /strategy_adapter_verdict/);
   assert.match(appTsx, /candle_producer_verdict/);

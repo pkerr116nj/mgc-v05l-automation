@@ -25,6 +25,9 @@ artifact.
 Recommended first sections:
 
 - Top status card: `operator_status` verdict and `required_next_action`
+- Market data observer card: Databento observer mode, verdict, cycle counts,
+  contract, symbol, dataset, event timestamp, and event path when summarized by
+  operator status
 - Listener health card
 - Latest listener cycle card
 - Latest shadow replay runner card
@@ -44,6 +47,8 @@ The app may read these Track B artifacts:
 
 - `latest_shadow_listener_health.json`
 - `latest_shadow_listener_heartbeat.json`
+- `latest_databento_candle_observer_report.json`
+- `latest_databento_candle_observer_heartbeat.json`
 - `latest_strategy_signal_adapter_report.json`
 - `latest_candle_signal_producer_report.json`
 - `latest_signal_batch_writer_report.json`
@@ -105,6 +110,8 @@ Missing reports must remain visible. Do not collapse missing reports into OK.
 The visible no-submit origin chain is:
 
 ```text
+databento_candle_observer
+-> latest Databento candle event
 strategy_signal_adapter
 -> candle_signal_producer
 -> signal_batch_writer
@@ -113,9 +120,10 @@ strategy_signal_adapter
 -> Track B Status UI
 ```
 
-The UI should prefer the upstream fields already summarized in
-`latest_operator_status_summary.json`; it should not read strategy/candle
-reports directly unless a future contract explicitly changes that.
+The UI should prefer the upstream and market-data observer fields already
+summarized in `latest_operator_status_summary.json`; it should not read
+Databento, strategy, or candle reports directly unless a future contract
+explicitly changes that.
 
 ## Non-Authority Rules
 

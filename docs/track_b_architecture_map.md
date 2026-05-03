@@ -159,7 +159,9 @@ Dashboard implication:
   dashboard-ready read model. It is not source of truth, does not connect to
   broker or market data, and does not authorize submit. It updates
   `outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json`
-  as the stable latest read-model artifact.
+  as the stable latest read-model artifact. It can summarize the Databento
+  candle observer report/heartbeat so the UI can display market-data observer
+  state without reading Databento artifacts directly.
 - `attrition_report` explains where candidates dropped out across supplied
   no-submit summaries. It is explanatory only and treats missing stages as
   explicit `NOT_PROVIDED` inputs instead of silently reporting zero.
@@ -384,6 +386,8 @@ Example command chain:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
+  --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --databento-candle-observer-heartbeat-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json \
   --listener-heartbeat-json <LISTENER_OUTPUT_ROOT>/<LISTENER_ID>/latest_shadow_listener_heartbeat.json \
   --listener-health-json <LISTENER_OUTPUT_ROOT>/<LISTENER_ID>/latest_shadow_listener_health.json \
   --listener-cycle-json <LISTENER_CYCLE_JSON optional> \
