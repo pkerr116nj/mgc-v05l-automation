@@ -1,0 +1,32 @@
+{
+  "account_id": "DUM882026",
+  "decision_style": "SCORED_STATIC",
+  "instrument_family": "MGC",
+  "lane_id": "mgc_example_long_lmt_day",
+  "live_money_readiness": false,
+  "local_execution_contract_key": "MGC-202606",
+  "metadata": {
+    "example_note": "static scored signal fixture below policy threshold"
+  },
+  "mode": "PAPER",
+  "observed_at": "2026-05-01T20:02:00+00:00",
+  "reason": "example static-scored no-submit signal below policy threshold",
+  "scoring": {
+    "calibration_window": "2025Q1-2026Q1",
+    "confidence_level": "LOW",
+    "expected_value_r": "0.03",
+    "model_version": "track_b_example_static_research_v1",
+    "probability_win": "0.48",
+    "sample_size": 250,
+    "score_scale": "ZERO_TO_ONE",
+    "scoring_authority": "INFORMATIONAL_ONLY",
+    "signal_score": "0.41"
+  },
+  "signal_direction": "LONG",
+  "signal_id": "track_b_example_static_signal_002",
+  "signal_timestamp": "2026-05-01T20:01:30+00:00",
+  "signal_type": "example_static_scored_breakout_retest",
+  "source": "track_b_example_fixture",
+  "strategy_id": "track_b_example_gold_shadow_v1",
+  "submit_requested": false
+}

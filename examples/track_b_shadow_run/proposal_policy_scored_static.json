@@ -1,0 +1,14 @@
+{
+  "allowed_confidence_levels": [
+    "MEDIUM",
+    "HIGH"
+  ],
+  "limit_price": "4623.1",
+  "limit_price_source": "example_operator_supplied_fixture",
+  "min_expected_value_r": "0.10",
+  "min_signal_score": "0.70",
+  "order_type": "LMT",
+  "quantity": 1,
+  "source": "track_b_example_static_signal_intent_proposal",
+  "time_in_force": "DAY"
+}
