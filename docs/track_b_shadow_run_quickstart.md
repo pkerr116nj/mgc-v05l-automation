@@ -192,6 +192,38 @@ outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle
 outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json
 ```
 
+For a bounded observation proof, explicitly enable watch mode:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --quote-report-json examples/track_b_databento_candle_observer/databento_quote_report_fixture.json \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id databento_demo \
+  --signal-direction LONG \
+  --output-root outputs/track_b_execution_core/databento_candle_observer \
+  --watch \
+  --max-cycles 5 \
+  --poll-seconds 10
+```
+
+Watch mode is still bounded no-submit infrastructure. It repeatedly re-reads
+the supplied market-data artifact, writes normal observer reports/events, and
+updates:
+
+```text
+outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json
+```
+
+No-data or malformed cycles are counted explicitly in the heartbeat. Watch mode
+does not run the strategy adapter, listener, runner, operator status, broker,
+or Databento live streaming, and it does not mean trading mode.
+
 The output event is already compatible with `strategy_signal_adapter_cli`; no
 extra bridge command is required in this slice. Direction is explicit, not
 inferred from candle shape. Include `--signal-direction LONG` or `SHORT` only

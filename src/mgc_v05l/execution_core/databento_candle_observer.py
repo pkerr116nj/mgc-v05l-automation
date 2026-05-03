@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
 
@@ -36,6 +36,13 @@ class DatabentoCandleObserverResult:
     report: dict[str, Any]
     candle_event_json: Path | None
     candle_event: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class DatabentoCandleObserverWatchResult:
+    heartbeat_json: Path
+    heartbeat: dict[str, Any]
+    cycle_results: tuple[DatabentoCandleObserverResult, ...]
 
 
 def observe_databento_candle_event(
@@ -243,6 +250,7 @@ def _write_report(
         "schema_version": "track_b_databento_candle_observer_v1",
         "generated_at": now.isoformat(),
         "databento_candle_observer_id": observer_id,
+        "observer_mode": "one_shot",
         "observer_verdict": verdict.value,
         "source_id": source_id,
         "contract_key": contract_key,
@@ -302,3 +310,189 @@ def _write_report(
         candle_event_json=None if candle_event is None else event_json,
         candle_event=candle_event,
     )
+
+
+def watch_databento_candle_observer(
+    *,
+    market_data_payload_reader: Callable[[], Mapping[str, Any]],
+    contract_key: str,
+    databento_continuous_symbol: str,
+    dataset: str,
+    expected_account_id: str,
+    strategy_id: str,
+    lane_id: str,
+    timeframe: str,
+    output_root: Path = DEFAULT_DATABENTO_CANDLE_OBSERVER_OUTPUT_ROOT,
+    source_id: str | None = None,
+    signal_direction: str | None = None,
+    max_cycles: int,
+    poll_seconds: float = 0.0,
+    sleep_func: Callable[[float], None] | None = None,
+    watch_id: str | None = None,
+    now_func: Callable[[], datetime] | None = None,
+) -> DatabentoCandleObserverWatchResult:
+    if max_cycles <= 0:
+        raise ValueError("max_cycles must be positive for Databento observer watch mode.")
+    if poll_seconds < 0:
+        raise ValueError("poll_seconds must be non-negative.")
+    actual_watch_id = watch_id or f"databento_candle_observer_watch_{uuid.uuid4().hex}"
+    actual_now_func = now_func or (lambda: datetime.now(UTC))
+    actual_sleep = sleep_func or (lambda seconds: None)
+    cycle_results: list[DatabentoCandleObserverResult] = []
+    processed_cycles = 0
+    no_data_cycles = 0
+    error_cycles = 0
+    last_started_at: str | None = None
+    last_ended_at: str | None = None
+    heartbeat: dict[str, Any] = {}
+
+    for cycle_number in range(1, max_cycles + 1):
+        started_at = actual_now_func()
+        require_aware_datetime(started_at, "started_at")
+        last_started_at = started_at.isoformat()
+        try:
+            payload = market_data_payload_reader()
+            if not isinstance(payload, Mapping):
+                raise ValueError("Databento observer watch payload reader must return a JSON object.")
+            result = observe_databento_candle_event(
+                market_data_payload=payload,
+                contract_key=contract_key,
+                databento_continuous_symbol=databento_continuous_symbol,
+                dataset=dataset,
+                expected_account_id=expected_account_id,
+                strategy_id=strategy_id,
+                lane_id=lane_id,
+                timeframe=timeframe,
+                output_root=output_root,
+                source_id=source_id,
+                signal_direction=signal_direction,
+                observer_id=f"{actual_watch_id}_cycle_{cycle_number}",
+                now=started_at,
+            )
+        except (TypeError, ValueError, OSError) as exc:
+            result = _write_report(
+                report_json=Path(output_root) / f"{actual_watch_id}_cycle_{cycle_number}" / "databento_candle_observer_report.json",
+                event_json=Path(output_root) / f"{actual_watch_id}_cycle_{cycle_number}" / "databento_candle_event.json",
+                verdict=DatabentoCandleObserverVerdict.BLOCKED_SCHEMA_ERROR,
+                now=started_at,
+                observer_id=f"{actual_watch_id}_cycle_{cycle_number}",
+                source_id=source_id or "databento_candle_observer",
+                contract_key=contract_key,
+                databento_continuous_symbol=databento_continuous_symbol,
+                dataset=dataset,
+                timeframe=timeframe,
+                candle_event=None,
+                primary_blocker=str(exc),
+                required_next_action="Fix Databento observer watch input before retrying.",
+            )
+        cycle_results.append(result)
+        if result.verdict == DatabentoCandleObserverVerdict.WROTE_EVENT:
+            processed_cycles += 1
+        elif result.verdict == DatabentoCandleObserverVerdict.BLOCKED_NO_MARKET_DATA:
+            no_data_cycles += 1
+        else:
+            error_cycles += 1
+        ended_at = actual_now_func()
+        require_aware_datetime(ended_at, "ended_at")
+        last_ended_at = ended_at.isoformat()
+        heartbeat = _write_heartbeat(
+            output_root=Path(output_root),
+            watch_id=actual_watch_id,
+            generated_at=ended_at,
+            current_cycle_number=cycle_number,
+            max_cycles=max_cycles,
+            last_cycle_start=last_started_at,
+            last_cycle_end=last_ended_at,
+            processed_cycles=processed_cycles,
+            no_data_cycles=no_data_cycles,
+            error_cycles=error_cycles,
+            last_result=result,
+            contract_key=contract_key,
+            databento_continuous_symbol=databento_continuous_symbol,
+            dataset=dataset,
+            watch_exited_normally=cycle_number == max_cycles,
+        )
+        if cycle_number < max_cycles and poll_seconds > 0:
+            actual_sleep(poll_seconds)
+    heartbeat_json = Path(heartbeat["latest_heartbeat_json_path"])
+    return DatabentoCandleObserverWatchResult(
+        heartbeat_json=heartbeat_json,
+        heartbeat=heartbeat,
+        cycle_results=tuple(cycle_results),
+    )
+
+
+def _write_heartbeat(
+    *,
+    output_root: Path,
+    watch_id: str,
+    generated_at: datetime,
+    current_cycle_number: int,
+    max_cycles: int,
+    last_cycle_start: str | None,
+    last_cycle_end: str | None,
+    processed_cycles: int,
+    no_data_cycles: int,
+    error_cycles: int,
+    last_result: DatabentoCandleObserverResult,
+    contract_key: str,
+    databento_continuous_symbol: str,
+    dataset: str,
+    watch_exited_normally: bool,
+) -> dict[str, Any]:
+    heartbeat_json = output_root / watch_id / "databento_candle_observer_heartbeat.json"
+    latest_heartbeat_json = output_root / "latest_databento_candle_observer_heartbeat.json"
+    heartbeat = {
+        "schema_version": "track_b_databento_candle_observer_heartbeat_v1",
+        "generated_at": generated_at.isoformat(),
+        "observer_mode": "watch",
+        "watch_id": watch_id,
+        "current_cycle_number": current_cycle_number,
+        "max_cycles": max_cycles,
+        "last_cycle_start": last_cycle_start,
+        "last_cycle_end": last_cycle_end,
+        "processed_cycles": processed_cycles,
+        "no_data_cycles": no_data_cycles,
+        "error_cycles": error_cycles,
+        "last_observer_verdict": last_result.verdict.value,
+        "last_event_timestamp": last_result.report.get("event_timestamp"),
+        "contract_key": contract_key,
+        "local_execution_contract_key": contract_key,
+        "databento_continuous_symbol": databento_continuous_symbol,
+        "dataset": dataset,
+        "output_event_path": last_result.report.get("output_candle_event_path"),
+        "latest_event_path": last_result.report.get("latest_candle_event_path"),
+        "latest_observer_report_path": last_result.report.get("latest_report_json_path"),
+        "last_observer_report_path": str(last_result.report_json),
+        "watch_exited_normally": watch_exited_normally,
+        "listener_invoked": False,
+        "runner_invoked": False,
+        "operator_status_invoked": False,
+        "strategy_adapter_invoked": False,
+        "candle_signal_producer_invoked": False,
+        "signal_batch_writer_invoked": False,
+        "lane_registry_invoked": False,
+        "order_plan_created": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "broker_connection_attempted": False,
+        "tws_connection_attempted": False,
+        "ibkr_connection_attempted": False,
+        "market_data_connection_attempted": False,
+        "databento_connection_attempted": False,
+        "paper_proof_cli_wired": False,
+        "place_order_called": False,
+        "cancel_called": False,
+        "primary_blocker": last_result.report.get("primary_blocker"),
+        "secondary_blockers": [],
+        "required_next_action": "Continue explicit no-submit downstream steps only when operator review requires them.",
+        "heartbeat_json_path": str(heartbeat_json),
+        "latest_heartbeat_json_path": str(latest_heartbeat_json),
+    }
+    payload = json.dumps(to_jsonable(heartbeat), indent=2, sort_keys=True)
+    heartbeat_json.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_json.write_text(payload, encoding="utf-8")
+    latest_heartbeat_json.parent.mkdir(parents=True, exist_ok=True)
+    latest_heartbeat_json.write_text(payload, encoding="utf-8")
+    return heartbeat

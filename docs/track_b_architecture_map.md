@@ -105,7 +105,10 @@ Dashboard implication:
   `strategy_signal_adapter_cli`; no separate bridge module is required in this
   slice. Direction is explicit: pass `--signal-direction` to create directional
   BINARY review input, or omit it to let the adapter emit review-only
-  HUMAN_REVIEW input.
+  HUMAN_REVIEW input. Optional bounded watch mode re-runs the same observer
+  conversion on a supplied artifact path and updates
+  `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json`;
+  it is still market-data evidence only and does not imply trading mode.
 - `candle_signal_producer` is an upstream no-submit producer scaffold. It
   translates explicit candle/event JSON into Track B shadow signal observations
   and delegates validated inbox writes to `signal_batch_writer`. It does not
@@ -293,6 +296,24 @@ Example command chain:
   --source-id databento_demo \
   --signal-direction LONG \
   --output-root outputs/track_b_execution_core/databento_candle_observer
+```
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --quote-report-json examples/track_b_databento_candle_observer/databento_quote_report_fixture.json \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id databento_demo \
+  --signal-direction LONG \
+  --output-root outputs/track_b_execution_core/databento_candle_observer \
+  --watch \
+  --max-cycles 5 \
+  --poll-seconds 10
 ```
 
 ```bash

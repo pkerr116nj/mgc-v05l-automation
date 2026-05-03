@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mgc_v05l.execution_core.databento_candle_observer import DatabentoCandleObserverVerdict, observe_databento_candle_event
+from mgc_v05l.execution_core.databento_candle_observer import DatabentoCandleObserverVerdict, observe_databento_candle_event, watch_databento_candle_observer
 from mgc_v05l.execution_core.databento_candle_observer_cli import main as databento_candle_observer_cli_main
 from mgc_v05l.execution_core.strategy_signal_adapter import StrategySignalAdapterVerdict, adapt_demo_candle_direction_signal
 from mgc_v05l.execution_core.strategy_signal_adapter_cli import main as strategy_signal_adapter_cli_main
@@ -77,6 +77,7 @@ def test_valid_databento_quote_writes_candle_event_and_latest_report(tmp_path: P
     assert event["metadata"]["market_data_provider"] == "DATABENTO"
     assert event["metadata"]["market_data_role"] == "EVIDENCE_ONLY"
     assert event["metadata"]["databento_is_execution_authority"] is False
+    assert result.report["observer_mode"] == "one_shot"
     assert result.report["observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert result.report["output_candle_event_path"] == str(result.candle_event_json)
     assert result.report["submit_allowed"] is False
@@ -304,6 +305,164 @@ def test_databento_candle_observer_cli_writes_event(tmp_path: Path, capsys) -> N
     assert output["observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert output["source_id"] == "cli_databento_observer"
     assert Path(output["output_candle_event_path"]).exists()
+    assert output["submit_allowed"] is False
+    assert output["submit_attempted"] is False
+    assert output["live_money_readiness"] is False
+    assert output["listener_invoked"] is False
+    assert output["runner_invoked"] is False
+
+
+def test_watch_mode_runs_bounded_cycles_and_updates_latest_artifacts(tmp_path: Path) -> None:
+    payloads = [
+        quote_report(last="4623.0", timestamp=aware_now().isoformat()),
+        quote_report(last="4624.0", timestamp=datetime(2026, 5, 1, 20, 1, tzinfo=timezone.utc).isoformat()),
+    ]
+    calls = {"count": 0}
+
+    def reader() -> dict[str, object]:
+        index = min(calls["count"], len(payloads) - 1)
+        calls["count"] += 1
+        return payloads[index]
+
+    result = watch_databento_candle_observer(
+        market_data_payload_reader=reader,
+        contract_key="MGC-202606",
+        databento_continuous_symbol="MGC.v.0",
+        dataset="GLBX.MDP3",
+        expected_account_id="DUM882026",
+        strategy_id="track_b_test_strategy",
+        lane_id="paper_review_lane",
+        timeframe="quote_snapshot",
+        output_root=tmp_path / "observer_reports",
+        source_id="watch_test",
+        signal_direction="LONG",
+        max_cycles=2,
+        poll_seconds=0,
+        watch_id="watch-001",
+        now_func=aware_now,
+    )
+
+    assert len(result.cycle_results) == 2
+    assert result.heartbeat["observer_mode"] == "watch"
+    assert result.heartbeat["current_cycle_number"] == 2
+    assert result.heartbeat["processed_cycles"] == 2
+    assert result.heartbeat["no_data_cycles"] == 0
+    assert result.heartbeat["error_cycles"] == 0
+    assert result.heartbeat["last_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
+    assert result.heartbeat["watch_exited_normally"] is True
+    assert result.heartbeat["submit_allowed"] is False
+    assert result.heartbeat["submit_attempted"] is False
+    assert result.heartbeat["live_money_readiness"] is False
+    assert result.heartbeat["listener_invoked"] is False
+    assert result.heartbeat["runner_invoked"] is False
+    latest_event = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_event.json").read_text(encoding="utf-8"))
+    latest_report = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_report.json").read_text(encoding="utf-8"))
+    latest_heartbeat = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_heartbeat.json").read_text(encoding="utf-8"))
+    assert latest_event["close"] == "4624.0"
+    assert latest_report["databento_candle_observer_id"] == "watch-001_cycle_2"
+    assert latest_heartbeat["current_cycle_number"] == 2
+
+
+def test_watch_mode_reports_no_data_cycles_without_failing_safety(tmp_path: Path) -> None:
+    result = watch_databento_candle_observer(
+        market_data_payload_reader=lambda: quote_report(quote_observed=False, classification="CURRENT_QUOTE_MARKET_CLOSED_OR_NO_RECORDS"),
+        contract_key="MGC-202606",
+        databento_continuous_symbol="MGC.v.0",
+        dataset="GLBX.MDP3",
+        expected_account_id="DUM882026",
+        strategy_id="track_b_test_strategy",
+        lane_id="paper_review_lane",
+        timeframe="quote_snapshot",
+        output_root=tmp_path / "observer_reports",
+        source_id="watch_no_data_test",
+        max_cycles=2,
+        poll_seconds=0,
+        watch_id="watch-no-data",
+        now_func=aware_now,
+    )
+
+    assert result.heartbeat["processed_cycles"] == 0
+    assert result.heartbeat["no_data_cycles"] == 2
+    assert result.heartbeat["error_cycles"] == 0
+    assert result.heartbeat["last_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_BLOCKED_NO_MARKET_DATA"
+    assert result.heartbeat["output_event_path"] is None
+    assert result.heartbeat["submit_allowed"] is False
+    assert result.heartbeat["submit_attempted"] is False
+    assert result.heartbeat["live_money_readiness"] is False
+    assert result.heartbeat["watch_exited_normally"] is True
+
+
+def test_watch_mode_catches_invalid_payload_reader_safely(tmp_path: Path) -> None:
+    result = watch_databento_candle_observer(
+        market_data_payload_reader=lambda: {"quote_observed": True, "timestamp": aware_now().isoformat()},
+        contract_key="MGC-202606",
+        databento_continuous_symbol="MGC.v.0",
+        dataset="GLBX.MDP3",
+        expected_account_id="DUM882026",
+        strategy_id="track_b_test_strategy",
+        lane_id="paper_review_lane",
+        timeframe="quote_snapshot",
+        output_root=tmp_path / "observer_reports",
+        source_id="watch_invalid_test",
+        max_cycles=1,
+        poll_seconds=0,
+        watch_id="watch-invalid",
+        now_func=aware_now,
+    )
+
+    assert result.heartbeat["processed_cycles"] == 0
+    assert result.heartbeat["no_data_cycles"] == 0
+    assert result.heartbeat["error_cycles"] == 1
+    assert result.heartbeat["last_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_BLOCKED_SCHEMA_ERROR"
+    assert "close or last is required" in result.cycle_results[0].report["primary_blocker"]
+    assert result.heartbeat["strategy_adapter_invoked"] is False
+    assert result.heartbeat["listener_invoked"] is False
+    assert result.heartbeat["runner_invoked"] is False
+    assert result.heartbeat["submit_allowed"] is False
+    assert result.heartbeat["live_money_readiness"] is False
+
+
+def test_databento_candle_observer_cli_watch_mode_writes_heartbeat(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    quote_json = tmp_path / "quote_report.json"
+    write_json(quote_json, quote_report())
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--quote-report-json",
+            str(quote_json),
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--timeframe",
+            "quote_snapshot",
+            "--source-id",
+            "cli_watch_databento_observer",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+            "--watch",
+            "--max-cycles",
+            "2",
+            "--poll-seconds",
+            "0",
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["observer_mode"] == "watch"
+    assert output["current_cycle_number"] == 2
+    assert output["processed_cycles"] == 2
+    assert output["watch_exited_normally"] is True
+    assert Path(output["heartbeat_json"]).exists()
     assert output["submit_allowed"] is False
     assert output["submit_attempted"] is False
     assert output["live_money_readiness"] is False
