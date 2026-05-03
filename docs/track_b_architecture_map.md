@@ -101,7 +101,11 @@ Dashboard implication:
   `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json`
   and
   `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json`
-  as read-model conveniences.
+  as read-model conveniences. Its event JSON is already compatible with
+  `strategy_signal_adapter_cli`; no separate bridge module is required in this
+  slice. Direction is explicit: pass `--signal-direction` to create directional
+  BINARY review input, or omit it to let the adapter emit review-only
+  HUMAN_REVIEW input.
 - `candle_signal_producer` is an upstream no-submit producer scaffold. It
   translates explicit candle/event JSON into Track B shadow signal observations
   and delegates validated inbox writes to `signal_batch_writer`. It does not
@@ -287,6 +291,7 @@ Example command chain:
   --lane-id mgc_example_long_lmt_day \
   --timeframe quote_snapshot \
   --source-id databento_demo \
+  --signal-direction LONG \
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
 

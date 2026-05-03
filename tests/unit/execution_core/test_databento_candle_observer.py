@@ -7,6 +7,7 @@ from pathlib import Path
 from mgc_v05l.execution_core.databento_candle_observer import DatabentoCandleObserverVerdict, observe_databento_candle_event
 from mgc_v05l.execution_core.databento_candle_observer_cli import main as databento_candle_observer_cli_main
 from mgc_v05l.execution_core.strategy_signal_adapter import StrategySignalAdapterVerdict, adapt_demo_candle_direction_signal
+from mgc_v05l.execution_core.strategy_signal_adapter_cli import main as strategy_signal_adapter_cli_main
 
 
 def aware_now() -> datetime:
@@ -173,6 +174,100 @@ def test_observer_event_can_feed_strategy_adapter_explicitly(tmp_path: Path) -> 
     assert observed.report["strategy_adapter_invoked"] is False
     assert adapter.report["submit_allowed"] is False
     assert adapter.report["live_money_readiness"] is False
+
+
+def test_observer_event_without_direction_feeds_strategy_adapter_as_human_review(tmp_path: Path) -> None:
+    observed = observe(tmp_path, quote_report())
+
+    assert observed.candle_event is not None
+    assert "signal_direction" not in observed.candle_event
+    adapter = adapt_demo_candle_direction_signal(
+        strategy_event_payload=observed.candle_event,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="databento_observer_review_only_test",
+        output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        adapter_id="adapter-from-observer-review-only",
+        now=aware_now(),
+    )
+
+    assert adapter.verdict == StrategySignalAdapterVerdict.EMITTED_SIGNAL_BATCH
+    assert adapter.batch_json is not None
+    batch = json.loads(adapter.batch_json.read_text(encoding="utf-8"))
+    signal = batch["signal_items"][0]["signal"]
+    assert signal["signal_direction"] == "NONE"
+    assert signal["decision_style"] == "HUMAN_REVIEW"
+    assert "Direction was missing" in signal["reason"]
+    assert adapter.report["submit_allowed"] is False
+    assert adapter.report["submit_attempted"] is False
+    assert adapter.report["live_money_readiness"] is False
+
+
+def test_databento_cli_latest_event_can_flow_through_strategy_adapter_cli_to_inbox(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    quote_json = tmp_path / "quote_report.json"
+    write_json(quote_json, quote_report())
+
+    observer_exit = databento_candle_observer_cli_main(
+        [
+            "--quote-report-json",
+            str(quote_json),
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--timeframe",
+            "quote_snapshot",
+            "--source-id",
+            "cli_databento_observer",
+            "--signal-direction",
+            "LONG",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+        ]
+    )
+    observer_output = json.loads(capsys.readouterr().out)
+
+    adapter_exit = strategy_signal_adapter_cli_main(
+        [
+            "--strategy-event-json",
+            str(tmp_path / "observer_reports" / "latest_databento_candle_event.json"),
+            "--inbox-dir",
+            str(tmp_path / "inbox"),
+            "--expected-account-id",
+            "DUM882026",
+            "--source-id",
+            "cli_databento_strategy_adapter",
+            "--output-root",
+            str(tmp_path / "adapter_reports"),
+            "--candle-producer-output-root",
+            str(tmp_path / "candle_reports"),
+            "--writer-output-root",
+            str(tmp_path / "writer_reports"),
+        ]
+    )
+    adapter_output = json.loads(capsys.readouterr().out)
+
+    assert observer_exit == 0
+    assert adapter_exit == 0
+    assert observer_output["observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
+    assert adapter_output["adapter_verdict"] == "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH"
+    assert Path(adapter_output["output_batch_path"]).exists()
+    assert list((tmp_path / "inbox").glob("*.json"))
+    assert adapter_output["listener_invoked"] is False
+    assert adapter_output["runner_invoked"] is False
+    assert adapter_output["submit_allowed"] is False
+    assert adapter_output["submit_attempted"] is False
+    assert adapter_output["live_money_readiness"] is False
 
 
 def test_databento_candle_observer_cli_writes_event(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]

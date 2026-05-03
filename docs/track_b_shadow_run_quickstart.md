@@ -176,6 +176,7 @@ artifact:
   --lane-id mgc_example_long_lmt_day \
   --timeframe quote_snapshot \
   --source-id databento_demo \
+  --signal-direction LONG \
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
 
@@ -190,6 +191,12 @@ remains execution authority. It updates:
 outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json
 outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json
 ```
+
+The output event is already compatible with `strategy_signal_adapter_cli`; no
+extra bridge command is required in this slice. Direction is explicit, not
+inferred from candle shape. Include `--signal-direction LONG` or `SHORT` only
+when an upstream artifact is intentionally directional. Omit it for review-only
+HUMAN_REVIEW input.
 
 Feed that market-data event into the explicit strategy adapter as a separate
 operator step:
