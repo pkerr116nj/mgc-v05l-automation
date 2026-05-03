@@ -18,6 +18,7 @@ shadow_signal
 -> shadow_run_manifest
 -> shadow_run_assembler
 -> shadow_replay_runner
+-> shadow_listener
 -> attrition_report
 -> readiness_summary
 -> recovery / preflight / proof timing
@@ -103,6 +104,9 @@ Dashboard implication:
 - `shadow_replay_runner` orchestrates the existing no-submit chain from signal
   batch to proposal artifacts, shadow run assembly, attrition report, and a
   top-level summary. It creates no new authority and does not submit.
+- `shadow_listener` is a poll-once file ingestion skeleton for signal batch
+  JSON. It can run while the future engine is active, but it only invokes the
+  no-submit replay runner and creates no submit authority.
 - `attrition_report` explains where candidates dropped out across supplied
   no-submit summaries. It is explanatory only and treats missing stages as
   explicit `NOT_PROVIDED` inputs instead of silently reporting zero.
@@ -245,6 +249,12 @@ Example command chain:
   --manifest-json examples/track_b_shadow_run/manifest.json \
   --registry-json examples/track_b_shadow_run/lane_registry.json \
   --output-root outputs/track_b_execution_core/shadow_replay_runs
+```
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.shadow_listener_cli \
+  --listener-config-json examples/track_b_shadow_listener/listener_config.json \
+  --output-root outputs/track_b_execution_core/shadow_listener
 ```
 
 All example commands are no-submit and do not connect to TWS or Databento.

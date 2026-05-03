@@ -1,0 +1,17 @@
+{
+  "failed_dir": "examples/track_b_shadow_listener/failed",
+  "file_glob": "*.json",
+  "generated_at": "2026-05-01T20:20:00+00:00",
+  "inbox_dir": "examples/track_b_shadow_listener/inbox",
+  "listener_id": "track_b_example_shadow_listener_v1",
+  "live_money_readiness": false,
+  "manifest_json": "examples/track_b_shadow_run/manifest.json",
+  "mode": "SHADOW",
+  "output_root": "outputs/track_b_execution_core/shadow_listener",
+  "poll_once": true,
+  "processed_dir": "examples/track_b_shadow_listener/processed",
+  "processing_dir": "examples/track_b_shadow_listener/processing",
+  "proposal_policy_json": "examples/track_b_shadow_run/proposal_policy_scored_static.json",
+  "registry_json": "examples/track_b_shadow_run/lane_registry.json",
+  "submit_enabled": false
+}
