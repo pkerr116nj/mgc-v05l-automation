@@ -162,6 +162,29 @@ or submit. It also updates this stable latest report pointer:
 outputs/track_b_execution_core/signal_batch_writer/latest_signal_batch_writer_report.json
 ```
 
+Translate an explicit candle/event input into listener inbox work:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.candle_signal_producer_cli \
+  --candle-event-json examples/track_b_candle_signal_producer/candle_event_binary_long.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id candle_demo \
+  --output-root outputs/track_b_execution_core/candle_signal_producer
+```
+
+The candle signal producer is a scaffold for upstream candle-style inputs. It
+translates explicit candle/event JSON into Track B shadow signal observations
+and reuses the signal batch writer for validated atomic inbox writes. It does
+not infer a trade direction from candle prices. Missing direction becomes
+review-only `HUMAN_REVIEW` input, and the producer never invokes the listener,
+runner, operator status, broker/data providers, or submit paths. It also
+updates:
+
+```text
+outputs/track_b_execution_core/candle_signal_producer/latest_candle_signal_producer_report.json
+```
+
 Run bounded watch mode explicitly:
 
 ```bash

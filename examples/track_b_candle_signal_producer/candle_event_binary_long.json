@@ -1,0 +1,25 @@
+{
+  "account_id": "DUM882026",
+  "batch_id": "track_b_candle_demo_binary_long_001",
+  "candle_timestamp": "2026-05-01T20:00:00+00:00",
+  "close": "4623.2",
+  "contract_key": "MGC-202606",
+  "decision_style": "BINARY",
+  "high": "4623.4",
+  "instrument_family": "MGC",
+  "lane_id": "mgc_example_long_lmt_day",
+  "low": "4622.7",
+  "metadata": {
+    "example": true,
+    "note": "Explicit LONG direction supplied by upstream demo input."
+  },
+  "observed_at": "2026-05-01T20:00:00+00:00",
+  "open": "4622.8",
+  "reason": "Example candle event with explicit long direction for no-submit Track B review.",
+  "signal_direction": "LONG",
+  "signal_type": "candle_demo_long",
+  "source_id": "track_b_candle_demo",
+  "strategy_id": "track_b_example_gold_shadow_v1",
+  "timeframe": "1m",
+  "volume": 42
+}

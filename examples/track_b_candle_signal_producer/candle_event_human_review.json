@@ -1,0 +1,24 @@
+{
+  "account_id": "DUM882026",
+  "batch_id": "track_b_candle_demo_human_review_001",
+  "candle_timestamp": "2026-05-01T20:01:00+00:00",
+  "close": "4622.9",
+  "contract_key": "MGC-202606",
+  "decision_style": "HUMAN_REVIEW",
+  "high": "4623.1",
+  "instrument_family": "MGC",
+  "lane_id": "mgc_example_long_lmt_day",
+  "low": "4622.6",
+  "metadata": {
+    "example": true,
+    "note": "No direction supplied; this remains review-only and should not auto-propose an intent."
+  },
+  "observed_at": "2026-05-01T20:01:00+00:00",
+  "open": "4623.0",
+  "reason": "Example candle event without trade direction for human review only.",
+  "signal_type": "candle_demo_review",
+  "source_id": "track_b_candle_demo",
+  "strategy_id": "track_b_example_gold_shadow_v1",
+  "timeframe": "1m",
+  "volume": 31
+}

@@ -9,7 +9,8 @@ Track B. The long-term destination is not Track B feeding back into Track A.
 The current Track B no-submit chain is:
 
 ```text
-shadow_signal
+candle_signal_producer, optionally
+-> shadow_signal
 -> signal_intent_proposal
 -> strategy_intent
 -> strategy_lane_registry
@@ -88,6 +89,13 @@ Dashboard implication:
 
 - `shadow_signal` is evidence only. It can carry BINARY or scored observations,
   but it is not an intent and cannot authorize a lane or submit.
+- `candle_signal_producer` is an upstream no-submit producer scaffold. It
+  translates explicit candle/event JSON into Track B shadow signal observations
+  and delegates validated inbox writes to `signal_batch_writer`. It does not
+  infer direction from price movement, authorize trades, invoke the listener,
+  create order plans, or connect to broker/market-data paths. It updates
+  `outputs/track_b_execution_core/candle_signal_producer/latest_candle_signal_producer_report.json`
+  as a read-model convenience.
 - `signal_intent_proposal` may create a proposed no-submit strategy intent from
   a validated signal under an explicit policy. It does not authorize a lane,
   create an order plan, summarize readiness, or submit.
@@ -234,7 +242,8 @@ docs/track_b_ui_integration_contract.md
 The example demonstrates:
 
 ```text
-shadow signal
+candle/event input, optionally
+-> shadow signal
 -> signal-to-intent proposal policy
 -> proposed intent
 -> lane registry authorization
@@ -244,6 +253,15 @@ shadow signal
 ```
 
 Example command chain:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.candle_signal_producer_cli \
+  --candle-event-json examples/track_b_candle_signal_producer/candle_event_binary_long.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id candle_demo \
+  --output-root outputs/track_b_execution_core/candle_signal_producer
+```
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.shadow_signal_cli \
