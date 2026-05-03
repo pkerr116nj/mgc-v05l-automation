@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.databento_candle_observer import DatabentoCandleObserverVerdict, observe_databento_candle_event, watch_databento_candle_observer
 from mgc_v05l.execution_core.databento_candle_observer_cli import main as databento_candle_observer_cli_main
+import mgc_v05l.execution_core.databento_candle_observer_cli as observer_cli_module
 from mgc_v05l.execution_core.strategy_signal_adapter import StrategySignalAdapterVerdict, adapt_demo_candle_direction_signal
 from mgc_v05l.execution_core.strategy_signal_adapter_cli import main as strategy_signal_adapter_cli_main
 
@@ -36,6 +37,29 @@ def quote_report(**overrides: object) -> dict[str, object]:
 def write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+class FakeCurrentQuoteTransport:
+    def __init__(self, quotes: list[dict[str, object]] | None = None, *, error: Exception | None = None) -> None:
+        self.quotes = quotes or [quote_report()]
+        self.error = error
+        self.calls = 0
+
+    def get_current_quote(self, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.quotes[min(self.calls - 1, len(self.quotes) - 1)]
+
+
+class FakeCurrentQuoteTransportFactory:
+    def __init__(self, quote_transport: FakeCurrentQuoteTransport) -> None:
+        self.quote_transport = quote_transport
+
+    def __call__(self, **kwargs: object) -> FakeCurrentQuoteTransport:
+        del kwargs
+        return self.quote_transport
 
 
 def observe(tmp_path: Path, payload: dict[str, object], **overrides: object):
@@ -125,7 +149,9 @@ def test_no_record_payload_blocks_safely(tmp_path: Path) -> None:
 
     assert result.verdict == DatabentoCandleObserverVerdict.BLOCKED_NO_MARKET_DATA
     assert result.candle_event_json is None
-    assert result.report["primary_blocker"] == "Databento market-data payload did not contain an observed quote/candle."
+    assert result.report["primary_blocker"] == (
+        "Databento market-data payload did not contain an observed quote/candle: CURRENT_QUOTE_MARKET_CLOSED_OR_NO_RECORDS"
+    )
     assert result.report["output_candle_event_path"] is None
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
@@ -310,6 +336,207 @@ def test_databento_candle_observer_cli_writes_event(tmp_path: Path, capsys) -> N
     assert output["live_money_readiness"] is False
     assert output["listener_invoked"] is False
     assert output["runner_invoked"] is False
+
+
+def test_databento_candle_observer_cli_live_current_quote_writes_event(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    quote_transport = FakeCurrentQuoteTransport([quote_report()])
+    monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
+    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--live-current-quote",
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--allowlisted-local-symbol",
+            "MGCM6",
+            "--tick-size",
+            "0.1",
+            "--exchange",
+            "COMEX",
+            "--currency",
+            "USD",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--timeframe",
+            "quote_snapshot",
+            "--source-id",
+            "cli_live_databento_observer",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+            "--current-quote-output-root",
+            str(tmp_path / "current_quotes"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    report = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_report.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert quote_transport.calls == 1
+    assert output["observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
+    assert Path(output["output_candle_event_path"]).exists()
+    assert report["market_data_connection_attempted"] is True
+    assert report["databento_connection_attempted"] is True
+    assert report["listener_invoked"] is False
+    assert report["runner_invoked"] is False
+    assert report["operator_status_invoked"] is False
+    assert report["submit_allowed"] is False
+    assert report["submit_attempted"] is False
+    assert report["live_money_readiness"] is False
+
+
+def test_databento_candle_observer_cli_live_current_quote_provider_error_blocks_safely(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    quote_transport = FakeCurrentQuoteTransport(error=RuntimeError("Databento provider unavailable"))
+    monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
+    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--live-current-quote",
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+            "--current-quote-output-root",
+            str(tmp_path / "current_quotes"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    report = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_report.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert output["observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_BLOCKED_NO_MARKET_DATA"
+    assert "Databento market-data provider error" in report["primary_blocker"]
+    assert report["market_data_connection_attempted"] is True
+    assert report["submit_allowed"] is False
+    assert report["submit_attempted"] is False
+    assert report["live_money_readiness"] is False
+    assert report["listener_invoked"] is False
+    assert report["runner_invoked"] is False
+
+
+def test_databento_candle_observer_cli_live_current_quote_missing_api_key_fails_safely(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--live-current-quote",
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    report = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_report.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert output["observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_BLOCKED_SCHEMA_ERROR"
+    assert "DATABENTO_API_KEY is required" in report["primary_blocker"]
+    assert "not-printed" not in json.dumps(report)
+    assert report["market_data_connection_attempted"] is False
+    assert report["databento_connection_attempted"] is False
+    assert report["submit_allowed"] is False
+    assert report["submit_attempted"] is False
+    assert report["live_money_readiness"] is False
+
+
+def test_databento_candle_observer_cli_live_current_quote_watch_is_bounded(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    quote_transport = FakeCurrentQuoteTransport(
+        [
+            quote_report(last="4623.0", timestamp=aware_now().isoformat()),
+            quote_report(last="4624.0", timestamp=datetime(2026, 5, 1, 20, 1, tzinfo=timezone.utc).isoformat()),
+        ]
+    )
+    monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
+    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--live-current-quote",
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+            "--current-quote-output-root",
+            str(tmp_path / "current_quotes"),
+            "--watch",
+            "--max-cycles",
+            "2",
+            "--poll-seconds",
+            "0",
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    latest_event = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_event.json").read_text(encoding="utf-8"))
+    latest_heartbeat = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_heartbeat.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert quote_transport.calls == 2
+    assert output["observer_mode"] == "watch"
+    assert output["current_cycle_number"] == 2
+    assert output["processed_cycles"] == 2
+    assert output["watch_exited_normally"] is True
+    assert latest_event["close"] == "4624.0"
+    assert latest_heartbeat["market_data_connection_attempted"] is True
+    assert latest_heartbeat["databento_connection_attempted"] is True
+    assert latest_heartbeat["submit_allowed"] is False
+    assert latest_heartbeat["submit_attempted"] is False
+    assert latest_heartbeat["live_money_readiness"] is False
 
 
 def test_watch_mode_runs_bounded_cycles_and_updates_latest_artifacts(tmp_path: Path) -> None:

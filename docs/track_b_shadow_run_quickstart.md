@@ -180,8 +180,8 @@ artifact:
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
 
-The Databento candle observer is a market-data evidence bridge only. This first
-slice consumes a supplied quote/candle artifact and writes a no-submit
+The Databento candle observer is a market-data evidence bridge only. The
+fixture path consumes a supplied quote/candle artifact and writes a no-submit
 candle/event JSON file; it does not connect to Databento live streaming, IBKR,
 TWS, the listener, the runner, operator status, or any submit path. Databento
 symbols remain market-data selectors only, and the local execution contract key
@@ -223,6 +223,64 @@ outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle
 No-data or malformed cycles are counted explicitly in the heartbeat. Watch mode
 does not run the strategy adapter, listener, runner, operator status, broker,
 or Databento live streaming, and it does not mean trading mode.
+
+For a bounded live/current Databento quote pull, explicitly enable the current
+quote path. This reuses the Track B Databento quote boundary, writes a current
+quote report under `outputs/track_b_execution_core/current_quotes`, then writes
+the normal observer event/report artifacts. It still does not infer direction,
+authorize trades, invoke the listener, or submit:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --live-current-quote \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id databento_live_demo \
+  --output-root outputs/track_b_execution_core/databento_candle_observer
+```
+
+Bound the current-quote observation loop when using watch mode:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --live-current-quote \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id databento_live_demo \
+  --output-root outputs/track_b_execution_core/databento_candle_observer \
+  --watch \
+  --max-cycles 5 \
+  --poll-seconds 10
+```
+
+`DATABENTO_API_KEY` is read from the operator environment and is not written to
+reports. If the key, entitlement, window, or quote data is unavailable, the
+observer writes an explicit blocked/no-data report instead of silently treating
+the state as OK.
 
 The output event is already compatible with `strategy_signal_adapter_cli`; no
 extra bridge command is required in this slice. Direction is explicit, not

@@ -92,12 +92,15 @@ Dashboard implication:
 - `shadow_signal` is evidence only. It can carry BINARY or scored observations,
   but it is not an intent and cannot authorize a lane or submit.
 - `databento_candle_observer` is a market-data evidence bridge only. It accepts
-  a supplied Databento quote/candle artifact, writes a Track B candle/event JSON
-  file, and stops. It does not connect to IBKR/TWS, invoke Databento live
-  network calls in this scaffold, authorize trades, infer submit readiness,
-  invoke the listener/runner/operator status, create order plans, or submit.
-  Databento symbols remain market-data selectors only; the local execution
-  contract key and IBKR allowlist remain execution authority. It updates
+  a supplied Databento quote/candle artifact or an explicit bounded
+  live/current Databento quote pull, writes a Track B candle/event JSON file,
+  and stops. It does not connect to IBKR/TWS, authorize trades, infer submit
+  readiness, invoke the listener/runner/operator status, create order plans, or
+  submit. The bounded live/current pull reuses the Track B Databento quote
+  boundary and remains market-data evidence only; it is not live trading or
+  Databento streaming. Databento symbols remain market-data selectors only; the
+  local execution contract key and IBKR allowlist remain execution authority. It
+  updates
   `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json`
   and
   `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json`
@@ -106,8 +109,8 @@ Dashboard implication:
   slice. Direction is explicit: pass `--signal-direction` to create directional
   BINARY review input on either the observer command or the strategy adapter
   command, or omit it to let the adapter emit review-only HUMAN_REVIEW input.
-  Optional bounded watch mode re-runs the same observer
-  conversion on a supplied artifact path and updates
+  Optional bounded watch mode re-runs the same observer conversion on a supplied
+  artifact path or bounded current-quote pull and updates
   `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json`;
   it is still market-data evidence only and does not imply trading mode.
 - `candle_signal_producer` is an upstream no-submit producer scaffold. It
@@ -313,6 +316,55 @@ Example command chain:
   --timeframe quote_snapshot \
   --source-id databento_demo \
   --signal-direction LONG \
+  --output-root outputs/track_b_execution_core/databento_candle_observer \
+  --watch \
+  --max-cycles 5 \
+  --poll-seconds 10
+```
+
+Bounded live/current quote pull path:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --live-current-quote \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id databento_live_demo \
+  --output-root outputs/track_b_execution_core/databento_candle_observer
+```
+
+Bounded current-quote watch path:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --live-current-quote \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id databento_live_demo \
   --output-root outputs/track_b_execution_core/databento_candle_observer \
   --watch \
   --max-cycles 5 \

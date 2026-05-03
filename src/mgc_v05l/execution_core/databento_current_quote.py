@@ -15,6 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+from .databento_quote_provider import DatabentoQuoteProvider, DatabentoQuoteProviderConfig
 from .models import require_aware_datetime, to_jsonable
 from .pricing import MarketDataMode, MarketDataRole
 from .quote_provider import QuoteSnapshot
@@ -238,6 +239,78 @@ class DatabentoCurrentQuoteProvider:
         report["report_json_path"] = str(report_json)
         report_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
         return CurrentQuoteResult(classification=classification, report_json=report_json, report=report, quote=quote)
+
+
+class DatabentoQuoteProviderCurrentQuoteTransport:
+    """Current-quote transport backed by the existing Track B Databento quote provider."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        allowlisted_local_symbol: str | None,
+        tick_size: str,
+        exchange: str,
+        currency: str,
+        max_age_seconds: int,
+        lookback_seconds: int = 300,
+        allow_available_end_fallback: bool = False,
+        available_end_buffer_seconds: int = 300,
+        base_url: str = "https://hist.databento.com/v0",
+        quote_provider_factory: Any | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.allowlisted_local_symbol = allowlisted_local_symbol
+        self.tick_size = tick_size
+        self.exchange = exchange
+        self.currency = currency
+        self.max_age_seconds = int(max_age_seconds)
+        self.lookback_seconds = int(lookback_seconds)
+        self.allow_available_end_fallback = bool(allow_available_end_fallback)
+        self.available_end_buffer_seconds = int(available_end_buffer_seconds)
+        self.base_url = base_url
+        self.quote_provider_factory = quote_provider_factory
+
+    def get_current_quote(
+        self,
+        *,
+        dataset: str,
+        symbol: str,
+        stype_in: str,
+        schema: str,
+        contract_key: str,
+    ) -> Mapping[str, Any] | None:
+        raw_symbol = symbol if stype_in == "raw_symbol" else None
+        continuous_symbol = symbol if stype_in != "raw_symbol" else None
+        config = DatabentoQuoteProviderConfig(
+            contract_key=contract_key,
+            tick_size=self.tick_size,
+            exchange=self.exchange,
+            currency=self.currency,
+            api_key=self.api_key,
+            databento_symbol=raw_symbol,
+            databento_continuous_symbol=continuous_symbol,
+            allowlisted_local_symbol=self.allowlisted_local_symbol,
+            dataset=dataset,
+            stype_in=stype_in,
+            bbo_schema=schema,
+            lookback_seconds=self.lookback_seconds,
+            allow_available_end_fallback=self.allow_available_end_fallback,
+            available_end_buffer_seconds=self.available_end_buffer_seconds,
+            base_url=self.base_url,
+            realtime_max_age_seconds=self.max_age_seconds,
+        )
+        factory = self.quote_provider_factory or (lambda cfg: DatabentoQuoteProvider(config=cfg))
+        quote = factory(config).get_quote(contract_key)
+        return {
+            "provider_symbol": quote.provider_symbol,
+            "bid": str(quote.bid),
+            "ask": str(quote.ask),
+            "last": str(quote.last) if quote.last is not None else None,
+            "timestamp": quote.timestamp.isoformat(),
+            "provider_warnings": list(quote.provider_warnings),
+            "raw": dict(quote.raw),
+        }
 
 
 def _parse_timestamp(value: Any) -> datetime:

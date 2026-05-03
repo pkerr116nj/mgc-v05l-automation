@@ -58,6 +58,7 @@ def observe_databento_candle_event(
     output_root: Path = DEFAULT_DATABENTO_CANDLE_OBSERVER_OUTPUT_ROOT,
     source_id: str | None = None,
     signal_direction: str | None = None,
+    market_data_connection_attempted: bool = False,
     observer_id: str | None = None,
     now: datetime | None = None,
 ) -> DatabentoCandleObserverResult:
@@ -89,7 +90,8 @@ def observe_databento_candle_event(
                 dataset=dataset,
                 timeframe=timeframe,
                 candle_event=None,
-                primary_blocker="Databento market-data payload did not contain an observed quote/candle.",
+                market_data_connection_attempted=market_data_connection_attempted,
+                primary_blocker=_market_data_blocker(market_data_payload),
                 required_next_action="Provide a Databento quote/candle artifact with observed market data before producing a Track B event.",
             )
 
@@ -143,6 +145,7 @@ def observe_databento_candle_event(
             dataset=dataset,
             timeframe=timeframe,
             candle_event=candle_event,
+            market_data_connection_attempted=market_data_connection_attempted,
             primary_blocker=None,
             required_next_action="Run strategy_signal_adapter_cli explicitly if this no-submit market-data event should enter the listener inbox.",
         )
@@ -159,9 +162,47 @@ def observe_databento_candle_event(
             dataset=dataset,
             timeframe=timeframe,
             candle_event=None,
+            market_data_connection_attempted=market_data_connection_attempted,
             primary_blocker=str(exc),
             required_next_action="Fix Databento candle observer input before retrying.",
         )
+
+
+def write_databento_candle_observer_blocked_report(
+    *,
+    contract_key: str,
+    databento_continuous_symbol: str,
+    dataset: str,
+    timeframe: str,
+    output_root: Path = DEFAULT_DATABENTO_CANDLE_OBSERVER_OUTPUT_ROOT,
+    source_id: str | None = None,
+    observer_id: str | None = None,
+    verdict: DatabentoCandleObserverVerdict = DatabentoCandleObserverVerdict.BLOCKED_SCHEMA_ERROR,
+    primary_blocker: str,
+    required_next_action: str,
+    market_data_connection_attempted: bool = False,
+    now: datetime | None = None,
+) -> DatabentoCandleObserverResult:
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    actual_observer_id = observer_id or f"databento_candle_observer_{uuid.uuid4().hex}"
+    actual_source_id = source_id or "databento_candle_observer"
+    return _write_report(
+        report_json=Path(output_root) / actual_observer_id / "databento_candle_observer_report.json",
+        event_json=Path(output_root) / actual_observer_id / "databento_candle_event.json",
+        verdict=verdict,
+        now=actual_now,
+        observer_id=actual_observer_id,
+        source_id=actual_source_id,
+        contract_key=contract_key,
+        databento_continuous_symbol=databento_continuous_symbol,
+        dataset=dataset,
+        timeframe=timeframe,
+        candle_event=None,
+        market_data_connection_attempted=market_data_connection_attempted,
+        primary_blocker=primary_blocker,
+        required_next_action=required_next_action,
+    )
 
 
 def _is_no_record_payload(payload: Mapping[str, Any]) -> bool:
@@ -171,6 +212,19 @@ def _is_no_record_payload(payload: Mapping[str, Any]) -> bool:
     if str(payload.get("classification") or "").strip().upper().endswith("NO_RECORDS"):
         return True
     return False
+
+
+def _market_data_blocker(payload: Mapping[str, Any]) -> str:
+    provider_error = _optional_text(payload.get("provider_error"))
+    no_records_reason = _optional_text(payload.get("no_records_reason"))
+    classification = _optional_text(payload.get("classification") or payload.get("quote_status"))
+    if provider_error:
+        return f"Databento market-data provider error: {provider_error}"
+    if no_records_reason:
+        return f"Databento market-data payload contained no records: {no_records_reason}"
+    if classification:
+        return f"Databento market-data payload did not contain an observed quote/candle: {classification}"
+    return "Databento market-data payload did not contain an observed quote/candle."
 
 
 def _extract_candle(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -234,6 +288,7 @@ def _write_report(
     dataset: str,
     timeframe: str,
     candle_event: dict[str, Any] | None,
+    market_data_connection_attempted: bool,
     primary_blocker: str | None,
     required_next_action: str,
 ) -> DatabentoCandleObserverResult:
@@ -283,8 +338,8 @@ def _write_report(
         "broker_connection_attempted": False,
         "tws_connection_attempted": False,
         "ibkr_connection_attempted": False,
-        "market_data_connection_attempted": False,
-        "databento_connection_attempted": False,
+        "market_data_connection_attempted": market_data_connection_attempted,
+        "databento_connection_attempted": market_data_connection_attempted,
         "paper_proof_cli_wired": False,
         "place_order_called": False,
         "cancel_called": False,
@@ -325,6 +380,7 @@ def watch_databento_candle_observer(
     output_root: Path = DEFAULT_DATABENTO_CANDLE_OBSERVER_OUTPUT_ROOT,
     source_id: str | None = None,
     signal_direction: str | None = None,
+    market_data_connection_attempted: bool = False,
     max_cycles: int,
     poll_seconds: float = 0.0,
     sleep_func: Callable[[float], None] | None = None,
@@ -366,6 +422,7 @@ def watch_databento_candle_observer(
                 output_root=output_root,
                 source_id=source_id,
                 signal_direction=signal_direction,
+                market_data_connection_attempted=market_data_connection_attempted,
                 observer_id=f"{actual_watch_id}_cycle_{cycle_number}",
                 now=started_at,
             )
@@ -382,6 +439,7 @@ def watch_databento_candle_observer(
                 dataset=dataset,
                 timeframe=timeframe,
                 candle_event=None,
+                market_data_connection_attempted=market_data_connection_attempted,
                 primary_blocker=str(exc),
                 required_next_action="Fix Databento observer watch input before retrying.",
             )
@@ -479,8 +537,8 @@ def _write_heartbeat(
         "broker_connection_attempted": False,
         "tws_connection_attempted": False,
         "ibkr_connection_attempted": False,
-        "market_data_connection_attempted": False,
-        "databento_connection_attempted": False,
+        "market_data_connection_attempted": bool(last_result.report.get("market_data_connection_attempted")),
+        "databento_connection_attempted": bool(last_result.report.get("databento_connection_attempted")),
         "paper_proof_cli_wired": False,
         "place_order_called": False,
         "cancel_called": False,

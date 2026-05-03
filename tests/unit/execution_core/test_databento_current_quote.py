@@ -9,7 +9,9 @@ from mgc_v05l.execution_core.databento_current_quote import (
     CurrentQuoteClassification,
     DatabentoCurrentQuoteConfig,
     DatabentoCurrentQuoteProvider,
+    DatabentoQuoteProviderCurrentQuoteTransport,
 )
+from mgc_v05l.execution_core.quote_provider import QuoteSnapshot
 
 
 def aware_now() -> datetime:
@@ -173,3 +175,63 @@ def test_raw_symbol_override_remains_market_data_selector_only(tmp_path: Path) -
     assert payload["local_execution_contract_key"] == "MGC-202606"
     assert payload["ibkr_allowlist_remains_execution_authority"] is True
     assert payload["databento_continuous_symbol_is_execution_authority"] is False
+
+
+def test_current_quote_transport_reuses_databento_quote_provider_config() -> None:
+    requests: list[Any] = []
+
+    class FakeQuoteProvider:
+        def __init__(self, cfg: Any) -> None:
+            requests.append(cfg)
+
+        def get_quote(self, contract_key: str) -> QuoteSnapshot:
+            assert contract_key == "MGC-202606"
+            return QuoteSnapshot(
+                provider="DATABENTO",
+                mode="REALTIME",
+                role="PRIMARY",
+                contract_key="MGC-202606",
+                provider_symbol="MGCM6",
+                bid="4623.1",
+                ask="4623.3",
+                last="4623.2",
+                timestamp=aware_now(),
+                tick_size="0.1",
+                exchange="COMEX",
+                currency="USD",
+                provider_warnings=("market data only",),
+                delayed_data_warning_seen=False,
+                raw={"resolved_raw_symbol": "MGCM6"},
+            )
+
+    transport = DatabentoQuoteProviderCurrentQuoteTransport(
+        api_key="not-printed",
+        allowlisted_local_symbol="MGCM6",
+        tick_size="0.1",
+        exchange="COMEX",
+        currency="USD",
+        max_age_seconds=15,
+        lookback_seconds=120,
+        quote_provider_factory=FakeQuoteProvider,
+    )
+
+    quote = transport.get_current_quote(
+        dataset="GLBX.MDP3",
+        symbol="MGC.v.0",
+        stype_in="continuous",
+        schema="mbp-1",
+        contract_key="MGC-202606",
+    )
+
+    assert quote is not None
+    assert quote["provider_symbol"] == "MGCM6"
+    assert quote["bid"] == "4623.1"
+    assert quote["ask"] == "4623.3"
+    assert quote["last"] == "4623.2"
+    assert quote["timestamp"] == aware_now().isoformat()
+    assert requests[0].contract_key == "MGC-202606"
+    assert requests[0].databento_continuous_symbol == "MGC.v.0"
+    assert requests[0].databento_symbol is None
+    assert requests[0].allowlisted_local_symbol == "MGCM6"
+    assert requests[0].lookback_seconds == 120
+    assert requests[0].api_key == "not-printed"
