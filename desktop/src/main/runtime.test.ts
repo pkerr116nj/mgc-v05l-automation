@@ -465,6 +465,9 @@ test("Track B read-only status loads latest operator status artifact without inv
       {
         status_verdict: "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW",
         required_next_action: "Review no-submit artifacts.",
+        strategy_adapter_verdict: "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH",
+        candle_producer_verdict: "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH",
+        signal_batch_writer_verdict: "SIGNAL_BATCH_WRITER_WROTE_BATCH",
         submit_allowed: false,
         submit_attempted: false,
         live_money_readiness: false,
@@ -481,6 +484,8 @@ test("Track B read-only status loads latest operator status artifact without inv
     assert.equal(trackB.malformed, false);
     assert.equal(trackB.operatorStatusPath, tempPath);
     assert.equal(trackB.status?.status_verdict, "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW");
+    assert.equal(trackB.status?.strategy_adapter_verdict, "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH");
+    assert.equal(trackB.status?.candle_producer_verdict, "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH");
     assert.equal(trackB.status?.submit_allowed, false);
   } finally {
     if (previous === undefined) {
@@ -522,6 +527,10 @@ test("Track B status renderer is display-only and no-submit", () => {
 
   assert.match(appTsx, /TrackBStatusPage/);
   assert.match(appTsx, /NO-SUBMIT \/ SHADOW REVIEW/);
+  assert.match(appTsx, /Upstream Signal Chain/);
+  assert.match(appTsx, /strategy_adapter_verdict/);
+  assert.match(appTsx, /candle_producer_verdict/);
+  assert.match(appTsx, /signal_batch_writer_verdict/);
   assert.match(appTsx, /latest_operator_status_summary\.json/);
   assert.match(appTsx, /page !== "track-b" && !PRIMARY_WORKSTATION_PAGES\.has\(page\)/);
   assert.match(appTsx, /const showSidebarEmergencyHalt = page !== "track-b"/);

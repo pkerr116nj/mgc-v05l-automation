@@ -3143,12 +3143,50 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null }) {
           <MetricCard label="Listener Mode" value={formatValue(status.listener_mode)} tone={statusTone(status.listener_mode)} />
           <MetricCard label="Current Cycle" value={formatValue(status.listener_current_cycle_number)} />
           <MetricCard label="Listener Health" value={formatValue(status.listener_last_health_verdict)} tone={statusTone(status.listener_last_health_verdict)} />
+          <MetricCard label="Strategy Adapter" value={formatValue(status.strategy_adapter_verdict)} tone={statusTone(status.strategy_adapter_verdict)} />
+          <MetricCard label="Candle Producer" value={formatValue(status.candle_producer_verdict)} tone={statusTone(status.candle_producer_verdict)} />
           <MetricCard label="Writer Verdict" value={formatValue(status.signal_batch_writer_verdict)} tone={statusTone(status.signal_batch_writer_verdict)} />
           <MetricCard label="Readiness Verdict" value={formatValue(status.readiness_verdict)} tone={statusTone(status.readiness_verdict)} />
           <MetricCard label="Recovery Verdict" value={formatValue(status.recovery_verdict)} tone={statusTone(status.recovery_verdict)} />
           <MetricCard label="Submit Allowed" value={formatValue(status.submit_allowed)} tone={status.submit_allowed === false ? "good" : "warn"} />
           <MetricCard label="Submit Attempted" value={formatValue(status.submit_attempted)} tone={status.submit_attempted === false ? "good" : "warn"} />
           <MetricCard label="Live Money Readiness" value={formatValue(status.live_money_readiness)} tone={status.live_money_readiness === false ? "good" : "warn"} />
+        </div>
+      </Section>
+
+      <Section title="Upstream Signal Chain" subtitle="Read-only signal origin fields from operator_status; no controls or CLI calls">
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Strategy Adapter</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Verdict" value={formatValue(status.strategy_adapter_verdict)} tone={statusTone(status.strategy_adapter_verdict)} />
+              <MetricCard label="Strategy" value={formatValue(status.strategy_id)} />
+              <MetricCard label="Signal Family" value={formatValue(status.signal_family)} />
+              <MetricCard label="Source" value={formatValue(status.strategy_source_id)} />
+              <MetricCard label="Batch" value={formatValue(status.strategy_batch_id)} />
+              <MetricCard label="Signals" value={formatValue(status.strategy_signal_count)} />
+            </div>
+            <h3 className="subsection-title">Strategy Output Batch</h3>
+            <div className="placeholder-note">{formatValue(status.strategy_output_batch_path)}</div>
+            <h3 className="subsection-title">Downstream Reports</h3>
+            <div className="placeholder-note">{formatValue(status.strategy_downstream_candle_producer_report_path)}</div>
+            <div className="placeholder-note">{formatValue(status.strategy_downstream_writer_report_path)}</div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Candle Producer</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Verdict" value={formatValue(status.candle_producer_verdict)} tone={statusTone(status.candle_producer_verdict)} />
+              <MetricCard label="Source" value={formatValue(status.candle_source_id)} />
+              <MetricCard label="Batch" value={formatValue(status.candle_batch_id)} />
+              <MetricCard label="Signals" value={formatValue(status.candle_signal_count)} />
+              <MetricCard label="Writer Verdict" value={formatValue(status.signal_batch_writer_verdict)} tone={statusTone(status.signal_batch_writer_verdict)} />
+              <MetricCard label="Listener Health" value={formatValue(status.listener_last_health_verdict)} tone={statusTone(status.listener_last_health_verdict)} />
+            </div>
+            <h3 className="subsection-title">Candle Output Batch</h3>
+            <div className="placeholder-note">{formatValue(status.candle_output_batch_path)}</div>
+            <h3 className="subsection-title">Writer Report</h3>
+            <div className="placeholder-note">{formatValue(status.candle_downstream_writer_report_path)}</div>
+          </div>
         </div>
       </Section>
 

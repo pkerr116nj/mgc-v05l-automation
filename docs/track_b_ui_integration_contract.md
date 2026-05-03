@@ -44,6 +44,8 @@ The app may read these Track B artifacts:
 
 - `latest_shadow_listener_health.json`
 - `latest_shadow_listener_heartbeat.json`
+- `latest_strategy_signal_adapter_report.json`
+- `latest_candle_signal_producer_report.json`
 - `latest_signal_batch_writer_report.json`
 - `latest_operator_status_summary.json`
 - Shadow listener health reports
@@ -69,6 +71,20 @@ The UI should display, when present:
 - `listener_verdict`
 - `runner_verdict`
 - `attrition_report_verdict`
+- `strategy_adapter_verdict`
+- `strategy_id`
+- `signal_family`
+- `strategy_source_id`
+- `strategy_batch_id`
+- `strategy_signal_count`
+- `strategy_output_batch_path`
+- `candle_producer_verdict`
+- `candle_source_id`
+- `candle_batch_id`
+- `candle_signal_count`
+- `candle_output_batch_path`
+- `signal_batch_writer_verdict`
+- `signal_batch_writer_batch_json_path`
 - `final_readiness_verdict`
 - `classification`
 - `quote_status`
@@ -85,6 +101,21 @@ The UI should display, when present:
   when supplied by recovery/preflight/readiness reports
 
 Missing reports must remain visible. Do not collapse missing reports into OK.
+
+The visible no-submit origin chain is:
+
+```text
+strategy_signal_adapter
+-> candle_signal_producer
+-> signal_batch_writer
+-> shadow_listener
+-> operator_status
+-> Track B Status UI
+```
+
+The UI should prefer the upstream fields already summarized in
+`latest_operator_status_summary.json`; it should not read strategy/candle
+reports directly unless a future contract explicitly changes that.
 
 ## Non-Authority Rules
 

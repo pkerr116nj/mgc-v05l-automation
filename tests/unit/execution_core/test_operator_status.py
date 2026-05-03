@@ -118,6 +118,67 @@ def signal_batch_writer_report(tmp_path: Path, **overrides: object) -> Path:
     return write_json(tmp_path / "signal_batch_writer_report.json", payload)
 
 
+def strategy_signal_adapter_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_strategy_signal_adapter_v1",
+        "generated_at": aware_now().isoformat(),
+        "strategy_signal_adapter_id": "adapter-001",
+        "adapter_name": "demo_candle_direction_signal",
+        "adapter_verdict": "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH",
+        "strategy_id": "track_b_test_strategy",
+        "signal_family": "track_b_test_strategy",
+        "lane_id": "paper_proof_lane",
+        "source_id": "unit_test_strategy_adapter",
+        "batch_id": "strategy_adapter_batch_001",
+        "signal_count": 1,
+        "output_batch_path": str(tmp_path / "inbox" / "strategy_adapter_batch_001.json"),
+        "candle_producer_report_path": str(tmp_path / "candle_report.json"),
+        "downstream_writer_report_path": str(tmp_path / "writer_report.json"),
+        "listener_invoked": False,
+        "runner_invoked": False,
+        "operator_status_invoked": False,
+        "lane_registry_invoked": False,
+        "order_plan_created": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "primary_blocker": None,
+        "secondary_blockers": [],
+        "required_next_action": "Let shadow_listener process the adapter-produced no-submit signal batch file.",
+        "report_json_path": "strategy_adapter_report.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "strategy_signal_adapter_report.json", payload)
+
+
+def candle_signal_producer_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_candle_signal_producer_v1",
+        "generated_at": aware_now().isoformat(),
+        "candle_signal_producer_id": "candle-producer-001",
+        "producer_verdict": "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH",
+        "source_id": "unit_test_candle",
+        "batch_id": "candle_batch_001",
+        "signal_count": 1,
+        "output_batch_path": str(tmp_path / "inbox" / "candle_batch_001.json"),
+        "writer_report_path": str(tmp_path / "writer_report.json"),
+        "signal_batch_writer_verdict": "SIGNAL_BATCH_WRITER_WROTE_BATCH",
+        "listener_invoked": False,
+        "runner_invoked": False,
+        "operator_status_invoked": False,
+        "order_plan_created": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "primary_blocker": None,
+        "secondary_blockers": [],
+        "required_next_action": "Let shadow_listener process the produced no-submit signal batch file.",
+        "report_json_path": "candle_signal_producer_report.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "candle_signal_producer_report.json", payload)
+
+
 def recovery_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, object] = {
         "classification": "RECOVERY_READY_CLEAN",
@@ -235,6 +296,44 @@ def test_signal_batch_writer_report_is_summarized(tmp_path: Path) -> None:
     assert result.report["submit_attempted"] is False
 
 
+def test_upstream_strategy_and_candle_reports_are_summarized(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            strategy_signal_adapter_report_json=strategy_signal_adapter_report(tmp_path),
+            candle_signal_producer_report_json=candle_signal_producer_report(tmp_path),
+            signal_batch_writer_report_json=signal_batch_writer_report(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-upstream-chain",
+        now=aware_now(),
+    )
+
+    assert result.report["strategy_adapter_verdict"] == "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH"
+    assert result.report["strategy_id"] == "track_b_test_strategy"
+    assert result.report["signal_family"] == "track_b_test_strategy"
+    assert result.report["strategy_source_id"] == "unit_test_strategy_adapter"
+    assert result.report["strategy_batch_id"] == "strategy_adapter_batch_001"
+    assert result.report["strategy_signal_count"] == 1
+    assert result.report["strategy_output_batch_path"].endswith("strategy_adapter_batch_001.json")
+    assert result.report["strategy_downstream_candle_producer_report_path"].endswith("candle_report.json")
+    assert result.report["strategy_downstream_writer_report_path"].endswith("writer_report.json")
+    assert result.report["candle_producer_verdict"] == "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH"
+    assert result.report["candle_source_id"] == "unit_test_candle"
+    assert result.report["candle_batch_id"] == "candle_batch_001"
+    assert result.report["candle_signal_count"] == 1
+    assert result.report["candle_output_batch_path"].endswith("candle_batch_001.json")
+    assert result.report["candle_downstream_writer_report_path"].endswith("writer_report.json")
+    assert result.report["latest_output_paths"]["strategy_signal_adapter"] == "strategy_adapter_report.json"
+    assert result.report["latest_output_paths"]["candle_signal_producer"] == "candle_signal_producer_report.json"
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+    latest = json.loads((tmp_path / "operator_status" / "latest_operator_status_summary.json").read_text(encoding="utf-8"))
+    assert latest["strategy_adapter_verdict"] == "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH"
+    assert latest["candle_producer_verdict"] == "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH"
+
+
 def test_operator_status_latest_pointer_updates_without_overwriting_canonical_reports(tmp_path: Path) -> None:
     first = create_operator_status_summary(
         inputs=OperatorStatusInputs(
@@ -277,6 +376,26 @@ def test_missing_signal_batch_writer_report_is_explicit(tmp_path: Path) -> None:
     assert result.report["signal_batch_writer_batch_json_path"] == "NOT_PROVIDED"
     assert result.report["recent_writer_output_present"] is False
     assert "signal_batch_writer" in result.report["reports_missing"]
+
+
+def test_missing_upstream_reports_are_explicit(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-missing-upstream",
+        now=aware_now(),
+    )
+
+    assert result.report["strategy_adapter_verdict"] == "NOT_PROVIDED"
+    assert result.report["candle_producer_verdict"] == "NOT_PROVIDED"
+    assert result.report["strategy_output_batch_path"] == "NOT_PROVIDED"
+    assert result.report["candle_output_batch_path"] == "NOT_PROVIDED"
+    assert "strategy_signal_adapter" in result.report["reports_missing"]
+    assert "candle_signal_producer" in result.report["reports_missing"]
+    assert result.report["reports_considered"]["strategy_signal_adapter"] is False
+    assert result.report["reports_considered"]["candle_signal_producer"] is False
 
 
 def test_listener_degraded_produces_degraded_status(tmp_path: Path) -> None:
@@ -373,6 +492,10 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
             str(listener_health(tmp_path)),
             "--signal-batch-writer-report-json",
             str(signal_batch_writer_report(tmp_path)),
+            "--strategy-signal-adapter-report-json",
+            str(strategy_signal_adapter_report(tmp_path)),
+            "--candle-signal-producer-report-json",
+            str(candle_signal_producer_report(tmp_path)),
             "--output-root",
             str(tmp_path / "operator_status_cli"),
         ]
@@ -383,6 +506,8 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
     assert output["status_verdict"] == "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW"
     assert output["listener_mode"] == "watch"
     assert output["listener_current_cycle_number"] == 3
+    assert output["strategy_adapter_verdict"] == "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH"
+    assert output["candle_producer_verdict"] == "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH"
     assert output["signal_batch_writer_verdict"] == "SIGNAL_BATCH_WRITER_WROTE_BATCH"
     assert output["shadow_listener_health_verdict"] == "SHADOW_LISTENER_HEALTH_OK"
     assert output["submit_allowed"] is False

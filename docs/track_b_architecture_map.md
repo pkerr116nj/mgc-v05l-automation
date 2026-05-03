@@ -326,6 +326,8 @@ Example command chain:
   --listener-cycle-json <LISTENER_CYCLE_JSON optional> \
   --shadow-runner-summary-json <RUNNER_SUMMARY_JSON optional> \
   --attrition-report-json <ATTRITION_REPORT_JSON optional> \
+  --strategy-signal-adapter-report-json outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json \
+  --candle-signal-producer-report-json outputs/track_b_execution_core/candle_signal_producer/latest_candle_signal_producer_report.json \
   --signal-batch-writer-report-json outputs/track_b_execution_core/signal_batch_writer/latest_signal_batch_writer_report.json \
   --readiness-summary-json <READINESS_SUMMARY_JSON optional> \
   --recovery-report-json <RECOVERY_REPORT_JSON optional> \

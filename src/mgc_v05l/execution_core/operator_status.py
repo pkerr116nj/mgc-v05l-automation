@@ -38,6 +38,8 @@ class OperatorStatusInputs:
     listener_cycle_json: Path | None = None
     shadow_runner_summary_json: Path | None = None
     attrition_report_json: Path | None = None
+    strategy_signal_adapter_report_json: Path | None = None
+    candle_signal_producer_report_json: Path | None = None
     signal_batch_writer_report_json: Path | None = None
     readiness_summary_json: Path | None = None
     recovery_report_json: Path | None = None
@@ -90,6 +92,8 @@ def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | No
         "listener_cycle": _read_json(inputs.listener_cycle_json),
         "shadow_runner": _read_json(inputs.shadow_runner_summary_json),
         "attrition": _read_json(inputs.attrition_report_json),
+        "strategy_signal_adapter": _read_json(inputs.strategy_signal_adapter_report_json),
+        "candle_signal_producer": _read_json(inputs.candle_signal_producer_report_json),
         "signal_batch_writer": _read_json(inputs.signal_batch_writer_report_json),
         "readiness": _read_json(inputs.readiness_summary_json),
         "recovery": _read_json(inputs.recovery_report_json),
@@ -197,6 +201,8 @@ def _report(
     listener_cycle = reports.get("listener_cycle") or {}
     shadow_runner = reports.get("shadow_runner") or {}
     attrition = reports.get("attrition") or {}
+    strategy_signal_adapter = reports.get("strategy_signal_adapter") or {}
+    candle_signal_producer = reports.get("candle_signal_producer") or {}
     signal_batch_writer = reports.get("signal_batch_writer") or {}
     readiness = reports.get("readiness") or {}
     recovery = reports.get("recovery") or {}
@@ -208,6 +214,8 @@ def _report(
         "listener_cycle": listener_cycle.get("report_json_path") or listener_health.get("latest_cycle_summary_path"),
         "shadow_runner": shadow_runner.get("report_json_path"),
         "attrition": attrition.get("report_json_path"),
+        "strategy_signal_adapter": strategy_signal_adapter.get("report_json_path"),
+        "candle_signal_producer": candle_signal_producer.get("report_json_path"),
         "signal_batch_writer": signal_batch_writer.get("report_json_path"),
         "readiness": readiness.get("report_json_path"),
         "recovery": recovery.get("report_json_path"),
@@ -234,6 +242,21 @@ def _report(
         "latest_listener_cycle_verdict": listener_cycle.get("listener_verdict") or listener_health.get("last_cycle_verdict") or listener_heartbeat.get("last_listener_verdict") or NOT_PROVIDED,
         "shadow_replay_runner_verdict": shadow_runner.get("runner_verdict") or NOT_PROVIDED,
         "attrition_report_verdict": attrition.get("attrition_report_verdict") or NOT_PROVIDED,
+        "strategy_adapter_verdict": strategy_signal_adapter.get("adapter_verdict") or NOT_PROVIDED,
+        "strategy_id": strategy_signal_adapter.get("strategy_id") or NOT_PROVIDED,
+        "signal_family": strategy_signal_adapter.get("signal_family") or NOT_PROVIDED,
+        "strategy_source_id": strategy_signal_adapter.get("source_id") or NOT_PROVIDED,
+        "strategy_batch_id": strategy_signal_adapter.get("batch_id") or NOT_PROVIDED,
+        "strategy_signal_count": strategy_signal_adapter.get("signal_count") if strategy_signal_adapter else NOT_PROVIDED,
+        "strategy_output_batch_path": strategy_signal_adapter.get("output_batch_path") or NOT_PROVIDED,
+        "strategy_downstream_candle_producer_report_path": strategy_signal_adapter.get("candle_producer_report_path") or NOT_PROVIDED,
+        "strategy_downstream_writer_report_path": strategy_signal_adapter.get("downstream_writer_report_path") or NOT_PROVIDED,
+        "candle_producer_verdict": candle_signal_producer.get("producer_verdict") or NOT_PROVIDED,
+        "candle_source_id": candle_signal_producer.get("source_id") or NOT_PROVIDED,
+        "candle_batch_id": candle_signal_producer.get("batch_id") or NOT_PROVIDED,
+        "candle_signal_count": candle_signal_producer.get("signal_count") if candle_signal_producer else NOT_PROVIDED,
+        "candle_output_batch_path": candle_signal_producer.get("output_batch_path") or NOT_PROVIDED,
+        "candle_downstream_writer_report_path": candle_signal_producer.get("writer_report_path") or NOT_PROVIDED,
         "signal_batch_writer_verdict": signal_batch_writer.get("signal_batch_writer_verdict") or NOT_PROVIDED,
         "signal_batch_writer_batch_file_written": signal_batch_writer.get("batch_file_written") if signal_batch_writer else NOT_PROVIDED,
         "signal_batch_writer_batch_json_path": signal_batch_writer.get("batch_json_path") or NOT_PROVIDED,
