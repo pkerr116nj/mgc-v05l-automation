@@ -134,6 +134,14 @@ export interface DesktopState {
     recentOutput: string[];
   };
   localAuth: LocalOperatorAuthState;
+  trackB: {
+    operatorStatusPath: string;
+    available: boolean;
+    malformed: boolean;
+    status: JsonRecord | null;
+    missingReason: string | null;
+    loadedAt: string;
+  };
   refreshedAt: string;
 }
 

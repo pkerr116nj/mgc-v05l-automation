@@ -39,6 +39,7 @@ type PageId =
   | "drawdown-lab"
   | "atp-performance"
   | "atp-attribution"
+  | "track-b"
   | "positions"
   | "market"
   | "replay"
@@ -673,6 +674,7 @@ const NAV_ITEMS: Array<{ id: PageId; label: string }> = [
   { id: "drawdown-lab", label: "Drawdown Recovery Lab" },
   { id: "atp-performance", label: "ATP Experimental Performance" },
   { id: "atp-attribution", label: "ATP Attribution" },
+  { id: "track-b", label: "Track B Status" },
   { id: "diagnostics", label: "Evidence" },
   { id: "settings", label: "Settings" },
 ];
@@ -1089,6 +1091,14 @@ const API_FALLBACK: OperatorDesktopApi = {
           events_path: "",
           secret_wrapper_path: "",
         },
+      },
+      trackB: {
+        operatorStatusPath: "outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json",
+        available: false,
+        malformed: false,
+        status: null,
+        missingReason: "No Track B operator status artifact found.",
+        loadedAt: new Date().toISOString(),
       },
       refreshedAt: new Date().toISOString(),
     };
@@ -3082,6 +3092,82 @@ function orderTimeoutWatchdogTone(status: unknown): Tone {
 function pageTitle(page: PageId): string {
   const item = NAV_ITEMS.find((candidate) => candidate.id === page);
   return item?.label ?? "Home";
+}
+
+function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null }) {
+  const status = asRecord(props.trackB?.status);
+  const available = props.trackB?.available === true;
+  const malformed = props.trackB?.malformed === true;
+  const safetyUnknownOrUnsafe =
+    status.submit_allowed !== false ||
+    status.submit_attempted !== false ||
+    status.live_money_readiness !== false;
+  const missingReports = asArray<string>(status.reports_missing);
+  const latestOutputPaths = asRecord(status.latest_output_paths);
+  const statusVerdict = available ? status.status_verdict : malformed ? "MALFORMED_ARTIFACT" : "NOT_FOUND";
+  const safetyLabel = safetyUnknownOrUnsafe ? "UNKNOWN / WARNING" : "NO-SUBMIT / SHADOW REVIEW";
+  const safetyTone: Tone = safetyUnknownOrUnsafe ? "warn" : "good";
+
+  if (!available) {
+    return (
+      <Section title="Track B Status" subtitle="Read-only view over sanctioned Track B artifact pointers">
+        <div className={`status-banner ${malformed ? "warn" : "muted"}`}>
+          <div className="status-banner-main">
+            <div className="status-banner-title">{malformed ? "Track B operator status artifact is malformed" : "No Track B operator status artifact found"}</div>
+            <div className="status-banner-body">{props.trackB?.missingReason ?? "No Track B operator status artifact found."}</div>
+            <div className="status-banner-body secondary">Path: {formatValue(props.trackB?.operatorStatusPath)}</div>
+          </div>
+        </div>
+        <div className="metric-grid">
+          <MetricCard label="Mode" value="NO-SUBMIT / SHADOW REVIEW" tone="muted" />
+          <MetricCard label="Submit Allowed" value="Unknown" tone="warn" />
+          <MetricCard label="Submit Attempted" value="Unknown" tone="warn" />
+          <MetricCard label="Live Money Readiness" value="Unknown" tone="warn" />
+        </div>
+      </Section>
+    );
+  }
+
+  return (
+    <>
+      <Section title="Track B Status" subtitle="Read-only no-submit status from latest_operator_status_summary.json">
+        <div className={`status-banner ${safetyTone}`}>
+          <div className="status-banner-main">
+            <div className="status-banner-title">{safetyLabel}</div>
+            <div className="status-banner-body">{formatValue(status.required_next_action)}</div>
+            <div className="status-banner-body secondary">Operator status path: {formatValue(props.trackB?.operatorStatusPath)}</div>
+          </div>
+        </div>
+        <div className="metric-grid">
+          <MetricCard label="Status Verdict" value={formatValue(statusVerdict)} tone={statusTone(statusVerdict)} />
+          <MetricCard label="Listener Mode" value={formatValue(status.listener_mode)} tone={statusTone(status.listener_mode)} />
+          <MetricCard label="Current Cycle" value={formatValue(status.listener_current_cycle_number)} />
+          <MetricCard label="Listener Health" value={formatValue(status.listener_last_health_verdict)} tone={statusTone(status.listener_last_health_verdict)} />
+          <MetricCard label="Writer Verdict" value={formatValue(status.signal_batch_writer_verdict)} tone={statusTone(status.signal_batch_writer_verdict)} />
+          <MetricCard label="Readiness Verdict" value={formatValue(status.readiness_verdict)} tone={statusTone(status.readiness_verdict)} />
+          <MetricCard label="Recovery Verdict" value={formatValue(status.recovery_verdict)} tone={statusTone(status.recovery_verdict)} />
+          <MetricCard label="Submit Allowed" value={formatValue(status.submit_allowed)} tone={status.submit_allowed === false ? "good" : "warn"} />
+          <MetricCard label="Submit Attempted" value={formatValue(status.submit_attempted)} tone={status.submit_attempted === false ? "good" : "warn"} />
+          <MetricCard label="Live Money Readiness" value={formatValue(status.live_money_readiness)} tone={status.live_money_readiness === false ? "good" : "warn"} />
+        </div>
+      </Section>
+
+      <Section title="Track B Artifact Inputs" subtitle="Stable read-model paths only; this screen does not invoke CLIs or services">
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Latest Writer Batch</h3>
+            <div className="placeholder-note">{formatValue(status.signal_batch_writer_batch_json_path)}</div>
+            <h3 className="subsection-title">Missing Reports</h3>
+            <div className="placeholder-note">{missingReports.length ? missingReports.join(", ") : "None reported"}</div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Latest Output Paths</h3>
+            <JsonBlock value={latestOutputPaths} />
+          </div>
+        </div>
+      </Section>
+    </>
+  );
 }
 
 function desktopModeLabel(startup: DesktopState["startup"] | null | undefined): string {
@@ -11545,7 +11631,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     desktopState?.source.mode === "attached_snapshot_bridge" &&
     desktopState?.backend.state === "healthy";
   const showGlobalStatusBanner = !PRIMARY_WORKSTATION_PAGES.has(page) && !healthyAttachedBridge;
-  const showGlobalCommandStrip = !PRIMARY_WORKSTATION_PAGES.has(page);
+  const showGlobalCommandStrip = page !== "track-b" && !PRIMARY_WORKSTATION_PAGES.has(page);
+  const showSidebarEmergencyHalt = page !== "track-b";
   const showWorkspaceContextBar = false;
   const showPrimaryCommandResult = page === "home" || page === "market" || page === "positions" || page === "diagnostics";
 
@@ -11604,18 +11691,20 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
             <MetricMini label="Source" value={desktopState?.source.label ?? "Loading"} tone={statusTone(desktopState?.source.label)} />
             <MetricMini label="Session" value={paperReadiness.current_detected_session ?? "Unknown"} />
           </div>
-          <button
-            className="danger-button"
-            disabled={busyAction !== null || !canRunLiveActions}
-            onClick={() =>
-              void runCommand("paper-halt-entries", () => api.runDashboardAction("paper-halt-entries"), {
-                confirmMessage: "Emergency Halt will stop new paper entries immediately. Proceed?",
-                requiresLive: true,
-              })
-            }
-          >
-            {busyAction === "paper-halt-entries" ? "Halting..." : "Emergency Halt"}
-          </button>
+          {showSidebarEmergencyHalt ? (
+            <button
+              className="danger-button"
+              disabled={busyAction !== null || !canRunLiveActions}
+              onClick={() =>
+                void runCommand("paper-halt-entries", () => api.runDashboardAction("paper-halt-entries"), {
+                  confirmMessage: "Emergency Halt will stop new paper entries immediately. Proceed?",
+                  requiresLive: true,
+                })
+              }
+            >
+              {busyAction === "paper-halt-entries" ? "Halting..." : "Emergency Halt"}
+            </button>
+          ) : null}
         </div>
       </aside>
 
@@ -18234,6 +18323,10 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                 </div>
               </Section>
             </>
+          ) : null}
+
+          {!loading && page === "track-b" ? (
+            <TrackBStatusPage trackB={desktopState?.trackB ?? null} />
           ) : null}
 
           {!loading && page === "history" ? (

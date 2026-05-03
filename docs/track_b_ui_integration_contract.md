@@ -5,14 +5,22 @@ tabs can remain during migration, but they are not the destination. Hide or
 remove legacy tabs only after Track B artifact views provide the same or better
 operator function.
 
-This document defines the future Track B-native app/dashboard contract. It does
-not implement UI, app code, broker execution, strategy logic, or submit
-behavior.
+This document defines the Track B-native app/dashboard contract. It does not
+authorize broker execution, strategy logic, or submit behavior.
 
 ## First Phase
 
-The first Track B UI phase is read-only. It should display existing Track B
-artifacts and links, not compute trading state.
+The first Track B UI phase is implemented as a read-only `Track B Status` tab.
+It displays existing Track B artifacts and links, not computed trading state.
+The sanctioned primary input is:
+
+```text
+outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json
+```
+
+If that artifact is missing or malformed, the tab must show an unknown/missing
+state. It must not infer health, spawn a process, or call a CLI to create the
+artifact.
 
 Recommended first sections:
 
@@ -26,11 +34,18 @@ Recommended first sections:
 - Artifact links and report paths
 - Safety flags: `submit_allowed`, `submit_attempted`, `live_money_readiness`
 
+The first tab displays `NO-SUBMIT / SHADOW REVIEW` only when all supplied safety
+flags remain explicitly false. Missing or non-false safety flags are warnings,
+not readiness.
+
 ## Approved Data Sources
 
 The app may read these Track B artifacts:
 
 - `latest_shadow_listener_health.json`
+- `latest_shadow_listener_heartbeat.json`
+- `latest_signal_batch_writer_report.json`
+- `latest_operator_status_summary.json`
 - Shadow listener health reports
 - Shadow listener cycle summaries
 - Shadow replay runner summaries
@@ -75,6 +90,8 @@ Missing reports must remain visible. Do not collapse missing reports into OK.
 
 The UI must not:
 
+- Call Track B CLIs from the UI
+- Connect to TWS, IBKR, Databento, broker, or market-data paths
 - Compute `submit_allowed` itself
 - Infer `live_money_readiness`
 - Infer broker flatness
@@ -86,6 +103,7 @@ The UI must not:
 - Call `paper_proof_cli` implicitly
 - Hide primary blockers
 - Treat dashboard/cache/snapshot state as execution authority
+- Show submit/action controls in the read-only first phase
 
 The UI is an observer/control surface over Track B artifacts. It is not source
 of truth and not hidden submit authority.
@@ -122,7 +140,9 @@ deliberate:
 - Backend Track B artifacts exist for no-submit signal intake, replay,
   listener health, attrition, readiness, recovery, preflight, quote
   diagnostics, and operator status.
-- UI is not implemented.
+- The first read-only Track B status tab is implemented behind its own
+  `Track B Status` navigation entry and reads
+  `latest_operator_status_summary.json` as the primary read model.
 - Paper proof remains blocked for `DUM882026` / `MGC-202606` while the known
   unresolved `PendingCancel` broker order exists.
 - Live trading is not implemented.

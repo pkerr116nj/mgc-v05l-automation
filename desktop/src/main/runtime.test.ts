@@ -114,6 +114,15 @@ function makeDesktopState(overrides: Partial<DesktopState> = {}): DesktopState {
       },
       ...(overrides.localAuth ?? {}),
     },
+    trackB: {
+      operatorStatusPath: "/tmp/latest_operator_status_summary.json",
+      available: false,
+      malformed: false,
+      status: null,
+      missingReason: "No Track B operator status artifact found.",
+      loadedAt: new Date().toISOString(),
+      ...(overrides.trackB ?? {}),
+    },
     refreshedAt: new Date().toISOString(),
     ...overrides,
   };
@@ -445,6 +454,79 @@ test("electron renderer readiness cards map corrected fireability fields", () =>
   assert.match(appTsx, /label:\s*"Blocked Lanes"[\s\S]*blocked_lanes_count/);
   assert.match(appTsx, /label:\s*"Ready This Bar"[\s\S]*eligible_to_trade_count/);
   assert.doesNotMatch(appTsx, /title:\s*"Tradable Now"/);
+});
+
+test("Track B read-only status loads latest operator status artifact without invoking runtime actions", async () => {
+  const previous = process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH;
+  const tempPath = path.join("/private/tmp", `tmp_track_b_operator_status_test_${process.pid}.json`);
+  fs.writeFileSync(
+    tempPath,
+    JSON.stringify(
+      {
+        status_verdict: "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW",
+        required_next_action: "Review no-submit artifacts.",
+        submit_allowed: false,
+        submit_attempted: false,
+        live_money_readiness: false,
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH = tempPath;
+  try {
+    const trackB = await __testing.buildTrackBReadOnlyStatus();
+    assert.equal(trackB.available, true);
+    assert.equal(trackB.malformed, false);
+    assert.equal(trackB.operatorStatusPath, tempPath);
+    assert.equal(trackB.status?.status_verdict, "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW");
+    assert.equal(trackB.status?.submit_allowed, false);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH;
+    } else {
+      process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH = previous;
+    }
+    fs.rmSync(tempPath, { force: true });
+  }
+});
+
+test("Track B read-only status handles missing and malformed artifacts safely", async () => {
+  const previous = process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH;
+  const missingPath = path.join("/private/tmp", `missing_track_b_operator_status_${process.pid}.json`);
+  process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH = missingPath;
+  try {
+    const missing = await __testing.buildTrackBReadOnlyStatus();
+    assert.equal(missing.available, false);
+    assert.equal(missing.malformed, false);
+    assert.match(missing.missingReason ?? "", /No Track B operator status artifact found/);
+
+    fs.writeFileSync(missingPath, "{not-json", "utf8");
+    const malformed = await __testing.buildTrackBReadOnlyStatus();
+    assert.equal(malformed.available, false);
+    assert.equal(malformed.malformed, true);
+    assert.match(malformed.missingReason ?? "", /Could not read Track B operator status artifact/);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH;
+    } else {
+      process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH = previous;
+    }
+    fs.rmSync(missingPath, { force: true });
+  }
+});
+
+test("Track B status renderer is display-only and no-submit", () => {
+  const appTsx = fs.readFileSync(path.resolve(__dirname, "../../src/renderer/App.tsx"), "utf8");
+
+  assert.match(appTsx, /TrackBStatusPage/);
+  assert.match(appTsx, /NO-SUBMIT \/ SHADOW REVIEW/);
+  assert.match(appTsx, /latest_operator_status_summary\.json/);
+  assert.match(appTsx, /page !== "track-b" && !PRIMARY_WORKSTATION_PAGES\.has\(page\)/);
+  assert.match(appTsx, /const showSidebarEmergencyHalt = page !== "track-b"/);
+  assert.doesNotMatch(appTsx, /page === "track-b"[\s\S]{0,2000}runDashboardAction/);
+  assert.doesNotMatch(appTsx, /page === "track-b"[\s\S]{0,2000}paper_proof_cli/);
 });
 
 test("desktop state promotes to live when Node localhost transport is denied but curl fallback succeeds", async () => {

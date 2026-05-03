@@ -136,6 +136,10 @@ Dashboard implication:
   authority.
 - Dashboard and app screens must be observer/control surfaces over Track B
   artifacts. They must not become truth sources or hidden execution authority.
+- The first Track B app surface is a read-only `Track B Status` tab. It reads
+  `outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json`
+  as the sanctioned primary read model, displays missing/malformed artifacts as
+  unknown, and exposes no submit/action controls.
 
 ## Decision Styles
 

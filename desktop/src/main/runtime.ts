@@ -141,7 +141,17 @@ export interface DesktopState {
     recentOutput: string[];
   };
   localAuth: LocalOperatorAuthState;
+  trackB: TrackBReadOnlyStatus;
   refreshedAt: string;
+}
+
+export interface TrackBReadOnlyStatus {
+  operatorStatusPath: string;
+  available: boolean;
+  malformed: boolean;
+  status: JsonRecord | null;
+  missingReason: string | null;
+  loadedAt: string;
 }
 
 function isWorkspaceRepoRoot(candidate: string): boolean {
@@ -238,6 +248,7 @@ function resolveWorkspaceRepoRoot(): string {
 const REPO_ROOT = resolveWorkspaceRepoRoot();
 const DESKTOP_ROOT = path.join(REPO_ROOT, "desktop");
 const OUTPUT_ROOT = path.join(REPO_ROOT, "outputs", "operator_dashboard");
+const TRACK_B_OPERATOR_STATUS_LATEST_FILE = path.join(REPO_ROOT, "outputs", "track_b_execution_core", "operator_status", "latest_operator_status_summary.json");
 const RUNTIME_ROOT = path.join(OUTPUT_ROOT, "runtime");
 const DEFAULT_INFO_FILE = path.join(RUNTIME_ROOT, "operator_dashboard.json");
 const DEFAULT_LOG_FILE = path.join(RUNTIME_ROOT, "operator_dashboard.log");
@@ -1460,6 +1471,49 @@ async function readJsonFile<T = JsonRecord>(filePath: string): Promise<T | null>
   }
 }
 
+function trackBOperatorStatusPath(): string {
+  const explicit = String(process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH || "").trim();
+  return explicit || TRACK_B_OPERATOR_STATUS_LATEST_FILE;
+}
+
+async function buildTrackBReadOnlyStatus(): Promise<TrackBReadOnlyStatus> {
+  const operatorStatusPath = trackBOperatorStatusPath();
+  const loadedAt = new Date().toISOString();
+  try {
+    const raw = await fs.readFile(operatorStatusPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {
+        operatorStatusPath,
+        available: false,
+        malformed: true,
+        status: null,
+        missingReason: "Track B operator status artifact is not a JSON object.",
+        loadedAt,
+      };
+    }
+    return {
+      operatorStatusPath,
+      available: true,
+      malformed: false,
+      status: parsed as JsonRecord,
+      missingReason: null,
+      loadedAt,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const missing = message.includes("ENOENT");
+    return {
+      operatorStatusPath,
+      available: false,
+      malformed: !missing,
+      status: null,
+      missingReason: missing ? "No Track B operator status artifact found." : `Could not read Track B operator status artifact: ${message}`,
+      loadedAt,
+    };
+  }
+}
+
 function looksLikeDashboardSnapshot(payload: JsonRecord | null | undefined): payload is JsonRecord {
   if (!payload || typeof payload !== "object") {
     return false;
@@ -1842,6 +1896,7 @@ async function applyDesktopStateFixtureOverride(state: DesktopState): Promise<De
 async function loadDesktopStateFixtureState(): Promise<DesktopState> {
   const override = await readJsonFile<JsonRecord>(DESKTOP_STATE_FIXTURE_PATH);
   const localAuth = await buildLocalOperatorAuthState();
+  const trackB = await buildTrackBReadOnlyStatus();
   const base: DesktopState = {
     connection: "unavailable",
     dashboard: null,
@@ -1906,6 +1961,7 @@ async function loadDesktopStateFixtureState(): Promise<DesktopState> {
       recentOutput: recentManagerOutput,
     },
     localAuth,
+    trackB,
     refreshedAt: nowIso(),
   };
   if (!override) {
@@ -3614,6 +3670,7 @@ async function probeDesktopState(
   const includeHeavyPayload = options.includeHeavyPayload !== false;
   const packagedLocalLaunch = packagedLocalBundleLaunchContext();
   const localAuth = await buildLocalOperatorAuthState();
+  const trackB = await buildTrackBReadOnlyStatus();
   const { urls, infoFiles } = await candidateUrls();
   const errors: string[] = [];
   const packagedBridge = await loadPackagedAttachedSnapshotBridge({ includeHeavyPayload });
@@ -3720,6 +3777,7 @@ async function probeDesktopState(
         recentOutput: recentManagerOutput,
       },
       localAuth,
+      trackB,
       refreshedAt: new Date().toISOString(),
     };
     const syncedState = applyHistoricalPlaybackSyncWarning(state, historicalPlaybackSync);
@@ -3764,6 +3822,7 @@ async function probeDesktopState(
         recentOutput: recentManagerOutput,
       },
       localAuth,
+      trackB,
       refreshedAt: new Date().toISOString(),
     };
     const syncedState = applyHistoricalPlaybackSyncWarning(state, historicalPlaybackSync);
@@ -3800,6 +3859,7 @@ async function probeDesktopState(
       recentOutput: recentManagerOutput,
     },
     localAuth,
+    trackB,
     refreshedAt: new Date().toISOString(),
   };
   await writeDesktopStartupStatus(state);
@@ -4093,6 +4153,9 @@ export const __testing = {
   },
   setGetDesktopStateHook(hook: (() => Promise<DesktopState>) | null): void {
     testGetDesktopStateHook = hook;
+  },
+  buildTrackBReadOnlyStatus(): Promise<TrackBReadOnlyStatus> {
+    return buildTrackBReadOnlyStatus();
   },
   setBeginDashboardLaunchHook(hook: ((options: { manual: boolean }) => Promise<DesktopState>) | null): void {
     testBeginDashboardLaunchHook = hook;
