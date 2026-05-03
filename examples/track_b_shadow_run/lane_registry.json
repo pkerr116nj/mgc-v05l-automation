@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-05-01T20:00:00+00:00",
+  "lanes": [
+    {
+      "allowed_instrument_family": "MGC",
+      "allowed_local_execution_contract_keys": [
+        "MGC-202606"
+      ],
+      "allowed_order_types": [
+        "LMT"
+      ],
+      "allowed_sides": [
+        "BUY"
+      ],
+      "allowed_time_in_force": [
+        "DAY"
+      ],
+      "expected_account_id": "DUM882026",
+      "lane_id": "mgc_example_long_lmt_day",
+      "lane_status": "PAPER_REVIEW",
+      "live_money_readiness": false,
+      "max_quantity": 1,
+      "mode_allowed": "PAPER",
+      "strategy_id": "track_b_example_gold_shadow_v1"
+    }
+  ],
+  "registry_version": "track_b_example_lane_registry_v1"
+}

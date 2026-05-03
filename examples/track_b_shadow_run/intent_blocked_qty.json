@@ -1,0 +1,19 @@
+{
+  "account_id": "DUM882026",
+  "decision_timestamp": "2026-05-01T20:01:00+00:00",
+  "instrument_family": "MGC",
+  "lane_id": "mgc_example_long_lmt_day",
+  "limit_price": "4623.1",
+  "live_money_readiness": false,
+  "local_execution_contract_key": "MGC-202606",
+  "mode": "PAPER",
+  "order_type": "LMT",
+  "quantity": 2,
+  "reason": "example quantity above lane max; should be blocked by lane registry",
+  "side": "BUY",
+  "signal_timestamp": "2026-05-01T20:00:30+00:00",
+  "source": "track_b_example_fixture",
+  "strategy_id": "track_b_example_gold_shadow_v1",
+  "submit_requested": false,
+  "time_in_force": "DAY"
+}

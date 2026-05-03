@@ -1,0 +1,21 @@
+{
+  "allowed_local_execution_contract_keys": [
+    "MGC-202606"
+  ],
+  "expected_account_id": "DUM882026",
+  "generated_at": "2026-05-01T20:00:00+00:00",
+  "input_source_type": "MANUAL_INTENT_JSON",
+  "live_money_readiness": false,
+  "output_root": "outputs/track_b_execution_core/shadow_runs/example_mgc_shadow_run",
+  "registry_path": "examples/track_b_shadow_run/lane_registry.json",
+  "registry_version": "track_b_example_lane_registry_v1",
+  "required_artifacts": [
+    "intent_validation",
+    "lane_validation",
+    "order_plan",
+    "shadow_evaluation"
+  ],
+  "run_id": "track_b_example_mgc_shadow_run_001",
+  "run_mode": "PAPER",
+  "submit_enabled": false
+}
