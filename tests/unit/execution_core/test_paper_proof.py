@@ -24,6 +24,7 @@ def config(tmp_path: Path, **overrides: object) -> PaperProofConfig:
         "submit_enabled": True,
         "confirm_paper_submit": True,
         "allow_delayed_data_for_paper_proof": True,
+        "proof_timing_status": "ACTIVE_SESSION",
     }
     kwargs.update(overrides)
     return PaperProofConfig(**kwargs)
@@ -237,6 +238,56 @@ def test_blocks_when_preflight_not_ready(tmp_path: Path) -> None:
 
     assert result.classification == TerminalClassification.BLOCKED
     assert "preflight was not ready" in str(result.report["failure_or_ambiguity"])
+
+
+def test_active_session_timing_allows_downstream_gates(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def proof_runner(config, run_id):  # type: ignore[no-untyped-def]
+        calls.append(run_id)
+        return passing_proof_runner(tmp_path)(config, run_id)
+
+    result = run_paper_proof(
+        config=config(tmp_path, proof_timing_status="ACTIVE_SESSION"),
+        preflight_runner=preflight_runner(ready_preflight(tmp_path)),
+        proof_runner=proof_runner,
+        run_id="run-active-session",
+    )
+
+    assert result.classification == TerminalClassification.PASSED
+    assert calls == ["run-active-session"]
+    assert result.report["proof_timing_classification"] == "PROOF_TIMING_ALLOWED"
+    assert result.report["proof_submit_attempted"] is True
+
+
+@pytest.mark.parametrize(
+    ("status", "classification"),
+    [
+        ("OUTSIDE_ACTIVE_SESSION", "PROOF_TIMING_BLOCKED_OUTSIDE_ACTIVE_SESSION"),
+        ("UNKNOWN", "PROOF_TIMING_UNKNOWN_BLOCKED"),
+    ],
+)
+def test_timing_guard_blocks_before_submit_with_operator_report(tmp_path: Path, status: str, classification: str) -> None:
+    calls: list[str] = []
+
+    def proof_runner(config, run_id):  # type: ignore[no-untyped-def]
+        calls.append(run_id)
+        return passing_proof_runner(tmp_path)(config, run_id)
+
+    result = run_paper_proof(
+        config=config(tmp_path, proof_timing_status=status),
+        preflight_runner=preflight_runner(ready_preflight(tmp_path)),
+        proof_runner=proof_runner,
+        run_id=f"run-timing-{status.lower()}",
+    )
+    payload = json.loads(result.report_json.read_text(encoding="utf-8"))
+
+    assert result.classification == TerminalClassification.BLOCKED
+    assert calls == []
+    assert payload["proof_timing_classification"] == classification
+    assert payload["proof_timing_allowed"] is False
+    assert payload["proof_submit_attempted"] is False
+    assert "held or PreSubmitted outside-session behavior" in str(payload["failure_or_ambiguity"])
 
 
 @pytest.mark.parametrize(

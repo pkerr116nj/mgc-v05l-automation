@@ -22,6 +22,7 @@ def config(tmp_path: Path, **overrides: object) -> PaperProofConfig:
         "submit_enabled": True,
         "confirm_paper_submit": True,
         "allow_delayed_data_for_paper_proof": True,
+        "proof_timing_status": "ACTIVE_SESSION",
     }
     kwargs.update(overrides)
     return PaperProofConfig(**kwargs)

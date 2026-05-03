@@ -37,6 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manual-open-limit-price")
     parser.add_argument("--manual-close-limit-price")
     parser.add_argument("--manual-limit-price")
+    parser.add_argument(
+        "--proof-timing-status",
+        default="UNKNOWN",
+        choices=["ACTIVE_SESSION", "OUTSIDE_ACTIVE_SESSION", "UNKNOWN"],
+        help="Fail-closed proof timing guard. Use ACTIVE_SESSION only when the operator has active-session evidence.",
+    )
+    parser.add_argument("--proof-timing-source", default="operator_cli")
+    parser.add_argument("--proof-timing-detail")
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--quote-timeout-seconds", type=float, default=3.0)
     return parser
@@ -70,6 +78,9 @@ def main(
         manual_open_limit_price=args.manual_open_limit_price,
         manual_close_limit_price=args.manual_close_limit_price,
         manual_limit_price=args.manual_limit_price,
+        proof_timing_status=args.proof_timing_status,
+        proof_timing_source=args.proof_timing_source,
+        proof_timing_detail=args.proof_timing_detail,
     )
     transport_config = IbkrReadOnlyTransportConfig(
         request_timeout_seconds=args.request_timeout_seconds,

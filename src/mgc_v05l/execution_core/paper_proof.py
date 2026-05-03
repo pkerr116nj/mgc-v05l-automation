@@ -21,6 +21,7 @@ from .ledger import JsonlLedger
 from .models import Action, BrokerOrder, FillEvent, IntentKind, OrderIntent, PositionSource, PositionState, SignalEvent, SubmitAttempt, SubmitAttemptState, TerminalClassification, to_jsonable
 from .pricing import QuoteObservation, create_marketable_limit_decision
 from .preflight import PreflightClassification, PreflightResult, ReadOnlyPreflightConfig
+from .session_guard import ProofTimingDecision, evaluate_proof_timing
 
 
 DEFAULT_PAPER_PROOF_OUTPUT_ROOT = Path("outputs/track_b_execution_core/paper_proof")
@@ -53,6 +54,9 @@ class PaperProofConfig:
     manual_open_limit_price: str | Decimal | None = None
     manual_close_limit_price: str | Decimal | None = None
     manual_limit_price: str | Decimal | None = None
+    proof_timing_status: str = "UNKNOWN"
+    proof_timing_source: str = "operator_config"
+    proof_timing_detail: str | None = None
     contract_allowlist: dict[str, dict[str, object]] | None = None
 
     def to_report_dict(self) -> dict[str, object]:
@@ -74,6 +78,9 @@ class PaperProofConfig:
             "manual_open_limit_price": str(self.manual_open_limit_price) if self.manual_open_limit_price is not None else None,
             "manual_close_limit_price": str(self.manual_close_limit_price) if self.manual_close_limit_price is not None else None,
             "manual_limit_price": str(self.manual_limit_price) if self.manual_limit_price is not None else None,
+            "proof_timing_status": self.proof_timing_status,
+            "proof_timing_source": self.proof_timing_source,
+            "proof_timing_detail": self.proof_timing_detail,
         }
 
 
@@ -109,6 +116,23 @@ def run_paper_proof(
             classification=TerminalClassification.BLOCKED,
             reason=config_error,
             required_action="Fix explicit paper-proof submit config.",
+        )
+
+    timing = evaluate_proof_timing(
+        status=config.proof_timing_status,
+        source=config.proof_timing_source,
+        detail=config.proof_timing_detail,
+    )
+    if not timing.allowed:
+        return _write_result(
+            run_id=actual_run_id,
+            config=config,
+            report_json=report_json,
+            report_md=report_md,
+            classification=TerminalClassification.BLOCKED,
+            reason=timing.reason,
+            required_action=timing.required_action,
+            timing=timing,
         )
 
     preflight_config = ReadOnlyPreflightConfig(
@@ -173,6 +197,7 @@ def run_paper_proof(
         preflight=preflight,
         proof=proof,
         proof_payload=proof_payload,
+        timing=timing,
     )
 
 
@@ -352,8 +377,10 @@ def _write_result(
     preflight: PreflightResult | None = None,
     proof: HarnessResult | None = None,
     proof_payload: Mapping[str, object] | None = None,
+    timing: ProofTimingDecision | None = None,
 ) -> PaperProofResult:
     preflight_report = preflight.report if preflight is not None else {}
+    timing_report = timing.to_report_dict() if timing is not None else {}
     report: dict[str, object] = {
         "schema_version": "track_b_paper_proof_submit_harness_v1",
         "run_id": run_id,
@@ -377,6 +404,8 @@ def _write_result(
         "operator_manual_price_acknowledgement": _has_any_manual_price(config),
         "paper_route_readiness": preflight_report.get("paper_route_readiness"),
         "production_live_money_readiness": False,
+        **timing_report,
+        "proof_submit_attempted": proof is not None,
         "unresolved_broker_order_detected": preflight_report.get("unresolved_broker_order_detected", False),
         "unresolved_broker_order_status": preflight_report.get("unresolved_broker_order_status"),
         "unresolved_broker_order_id": preflight_report.get("unresolved_broker_order_id"),
@@ -417,6 +446,9 @@ def _render_markdown(report: Mapping[str, object]) -> str:
                     "market_data_mode": report.get("market_data_mode"),
                     "paper_route_readiness": report.get("paper_route_readiness"),
                     "production_live_money_readiness": report.get("production_live_money_readiness"),
+                    "proof_timing_classification": report.get("proof_timing_classification"),
+                    "proof_timing_allowed": report.get("proof_timing_allowed"),
+                    "proof_submit_attempted": report.get("proof_submit_attempted"),
                 },
                 indent=2,
                 sort_keys=True,

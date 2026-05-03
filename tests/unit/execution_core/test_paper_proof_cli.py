@@ -33,6 +33,8 @@ def cli_args(tmp_path: Path, *extra: str) -> list[str]:
         "--submit-enabled",
         "--confirm-paper-submit",
         "--allow-delayed-data-paper-proof",
+        "--proof-timing-status",
+        "ACTIVE_SESSION",
         *extra,
     ]
 
