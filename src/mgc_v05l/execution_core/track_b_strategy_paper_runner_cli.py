@@ -24,6 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", default="PAPER")
     parser.add_argument("--input-event-json", type=Path, help="Existing strategy-rule input event JSON. Use --feature-event-json for an existing built feature event.")
     parser.add_argument("--maintained-history-json", type=Path, help="Track B data-maintenance latest_good_mgc_1m_history.json to combine with a separate realtime current quote report.")
+    parser.add_argument(
+        "--runtime-candle-context-json",
+        type=Path,
+        help="Track B runtime candle capture latest_runtime_mgc_1m_candles.json for execution-time feature context.",
+    )
     parser.add_argument("--candle-history-json", type=Path, help="Bounded MGC OHLCV history JSON to run through the Track B candle-history producer, market-history collector, and feature builder.")
     parser.add_argument("--current-quote-report-json", type=Path, help="Current quote or Databento observer report JSON proving realtime quote availability for --candle-history-json.")
     parser.add_argument("--build-features-from", type=Path, help="Source MGC candle/quote history JSON to run through track_b_feature_builder before strategy evaluation.")
@@ -120,6 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode=args.mode,
             input_event_json=args.input_event_json,
             maintained_history_json=args.maintained_history_json,
+            runtime_candle_context_json=args.runtime_candle_context_json,
             candle_history_json=args.candle_history_json,
             current_quote_report_json=args.current_quote_report_json,
             build_features_from_json=args.build_features_from,
@@ -201,11 +207,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "strategy_paper_runner_verdict": result.report["strategy_paper_runner_verdict"],
                 "mode": result.report["mode"],
                 "maintained_history_path": result.report["maintained_history_path"],
+                "runtime_candle_context_path": result.report["runtime_candle_context_path"],
                 "data_maintenance_history_requested": result.report["data_maintenance_history_requested"],
                 "maintained_history_age_seconds": result.report["maintained_history_age_seconds"],
                 "max_maintained_history_age_seconds": result.report["max_maintained_history_age_seconds"],
                 "runtime_intraday_freshness_policy": result.report["runtime_intraday_freshness_policy"],
                 "runtime_candle_context_required": result.report["runtime_candle_context_required"],
+                "runtime_candle_context_requested": result.report["runtime_candle_context_requested"],
                 "historical_context_ready": result.report["historical_context_ready"],
                 "maintained_history_ready": result.report["maintained_history_ready"],
                 "maintained_history_stale_override_requested": result.report["maintained_history_stale_override_requested"],

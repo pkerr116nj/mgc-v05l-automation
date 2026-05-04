@@ -381,8 +381,9 @@ Track B now has two separate data lanes. Historical/replay data maintenance is
 the Track A-style scheduled process: it pulls official Databento historical 1m
 bars, normally weekly, intended through Friday close, for research, replay,
 backtesting, and historical base data. Runtime live candle/quote capture is
-separate and should be added when an execution rule needs same-session candle
-context. Realtime quote evidence remains separate in all cases.
+separate and is now represented by a bounded runtime MGC 1m candle capture
+artifact when an execution rule needs same-session candle context. Realtime
+quote evidence remains separate in all cases.
 
 The realtime observer's latest candle event is only a single snapshot. The
 EMA/VWAP rule can use maintained history as historical context, but that should
@@ -445,6 +446,40 @@ quote evidence.
 On-demand historical fetch through `track_b_mgc_candle_history_producer_cli`
 remains available for diagnostics and maintenance inputs, but it is not the
 normal trade-decision path.
+
+For execution-time EMA/VWAP/reclaim features, use the bounded runtime candle
+capture lane instead of weekly historical maintenance. The first implementation
+accepts supplied runtime candle JSON, overwrites stable latest artifacts, keeps
+only a small number of run folders, and does not create an unbounded raw
+stream:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_runtime_candle_capture_cli \
+  --runtime-candle-json examples/track_b_runtime_candle_capture/runtime_mgc_1m_candles.json \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --local-symbol MGCM6 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --timeframe 1m \
+  --max-bars 250 \
+  --min-bars 3 \
+  --source-id track_b_runtime_mgc_capture \
+  --output-root outputs/track_b_execution_core/track_b_runtime_candle_capture
+```
+
+Stable runtime candle artifacts:
+
+```text
+outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json
+outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_candle_capture_report.json
+```
+
+This runtime capture artifact is not the research archive. It is a bounded
+same-session context window for feature building. If live Databento streaming
+is needed later, it should feed this same bounded artifact shape rather than
+writing an unbounded stream by default.
 
 The data-maintenance registry currently enables only `MGC` for runtime
 maintenance. Disabled planning entries preserve the broader Track A-style
@@ -647,7 +682,7 @@ The controlled strategy PAPER runner wires:
 
 ```text
 Databento realtime/current evidence
--> track_b_data_maintenance latest-good history
+-> track_b_runtime_candle_capture when runtime candles are required
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
@@ -662,8 +697,8 @@ are present:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --maintained-history-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
-  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --runtime-candle-context-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
+  --runtime-candle-context-required \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \
@@ -676,10 +711,12 @@ are present:
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
-This single command reads maintained local history, combines it with separate
-realtime current quote evidence, then runs the market-history collector,
-feature builder, strategy rule, and readiness check in sequence. If a
-market-history or feature event has already been built for review, use
+This single command reads bounded runtime candle context, then runs the
+market-history collector, feature builder, strategy rule, and readiness check
+in sequence. Weekly maintained local history remains available as historical
+context with `--maintained-history-json`, but rules requiring same-session
+candles should use `--runtime-candle-context-json`. If a market-history or
+feature event has already been built for review, use
 `--build-features-from outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json`
 or
 `--feature-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json`
@@ -690,8 +727,8 @@ PAPER submit requires all explicit gates. Prices and quantity are not inferred:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --maintained-history-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
-  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --runtime-candle-context-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
+  --runtime-candle-context-required \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \

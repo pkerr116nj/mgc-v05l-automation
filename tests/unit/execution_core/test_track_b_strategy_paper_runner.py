@@ -235,6 +235,23 @@ def maintained_history_payload(*, ready: bool = True, latest_timestamp: str | No
     }
 
 
+def runtime_candle_context_payload() -> dict[str, object]:
+    payload = maintained_history_payload()
+    payload.update(
+        {
+            "schema_version": "track_b_runtime_mgc_1m_candles_v1",
+            "source_id": "track_b_runtime_candle_capture",
+            "candle_source_mode": "SUPPLIED_RUNTIME_CANDLES",
+            "runtime_candle_context_ready": True,
+            "quote_provider_mode": "REALTIME",
+            "realtime_quote_received": True,
+            "current_quote_available": True,
+            "gap_count": 0,
+        }
+    )
+    return payload
+
+
 def feature_result(tmp_path: Path, *, ready: bool = True) -> TrackBFeatureBuilderResult:
     report_json = tmp_path / "feature_builder_report.json"
     event_json = tmp_path / "feature_event.json"
@@ -419,7 +436,7 @@ def stages(
         assert payload["quote_provider_mode"] == "REALTIME"
         assert payload["realtime_quote_received"] is True
         assert payload["current_quote_available"] is True
-        assert source_payload_path == config.maintained_history_json
+        assert source_payload_path in {config.maintained_history_json, config.runtime_candle_context_json}
         return market_history
 
     def feature_stage(config: TrackBStrategyPaperRunnerConfig) -> TrackBFeatureBuilderResult:
@@ -1093,6 +1110,48 @@ def test_runtime_candle_context_required_blocks_maintained_history_only(tmp_path
     assert calls.market_history == 0
     assert calls.proof == 0
     assert result.report["submit_attempted"] is False
+
+
+def test_runtime_candle_context_can_feed_feature_builder_and_rule(tmp_path: Path) -> None:
+    calls = Calls()
+    runtime_context_json = tmp_path / "latest_runtime_mgc_1m_candles.json"
+    runtime_context_json.write_text(json.dumps(runtime_candle_context_payload()), encoding="utf-8")
+
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            runtime_candle_context_json=runtime_context_json,
+            runtime_candle_context_required=True,
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-runtime-candle-context-ready-no-submit",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED
+    assert calls.candle_history == 0
+    assert calls.market_history == 1
+    assert calls.feature == 1
+    assert calls.strategy == 1
+    assert calls.readiness == 1
+    assert calls.proof == 0
+    assert result.report["runtime_candle_context_required"] is True
+    assert result.report["runtime_candle_context_requested"] is True
+    assert result.report["runtime_candle_context_supplied"] is True
+    assert result.report["runtime_candle_context_path"] == str(runtime_context_json)
+    assert result.report["market_history_collector_invoked"] is True
+    assert result.report["feature_builder_invoked"] is True
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
 
 
 def test_full_history_feature_rule_ready_without_submit_flags_stays_no_submit(tmp_path: Path) -> None:

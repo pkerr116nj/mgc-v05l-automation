@@ -1,0 +1,62 @@
+{
+  "account_id": "DUM882026",
+  "batch_id": "runtime_mgc_1m_demo_batch",
+  "candles": [
+    {
+      "candle_timestamp": "2026-05-04T14:26:00+00:00",
+      "close": "4574.1",
+      "high": "4574.2",
+      "low": "4573.9",
+      "open": "4574.0",
+      "volume": "1"
+    },
+    {
+      "candle_timestamp": "2026-05-04T14:27:00+00:00",
+      "close": "4574.3",
+      "high": "4574.4",
+      "low": "4574.0",
+      "open": "4574.1",
+      "volume": "1"
+    },
+    {
+      "candle_timestamp": "2026-05-04T14:28:00+00:00",
+      "close": "4574.6",
+      "high": "4574.7",
+      "low": "4574.2",
+      "open": "4574.3",
+      "volume": "1"
+    },
+    {
+      "candle_timestamp": "2026-05-04T14:29:00+00:00",
+      "close": "4574.8",
+      "high": "4574.9",
+      "low": "4574.5",
+      "open": "4574.6",
+      "volume": "1"
+    },
+    {
+      "candle_timestamp": "2026-05-04T14:30:00+00:00",
+      "close": "4575.3",
+      "high": "4575.4",
+      "low": "4574.7",
+      "open": "4574.8",
+      "volume": "1"
+    }
+  ],
+  "contract_key": "MGC-202606",
+  "current_quote_available": true,
+  "databento_continuous_symbol": "MGC.v.0",
+  "dataset": "GLBX.MDP3",
+  "instrument_family": "MGC",
+  "lane_id": "mgc_example_long_lmt_day",
+  "live_money_readiness": false,
+  "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+  "quote_provider_mode": "REALTIME",
+  "realtime_quote_received": true,
+  "source_id": "runtime_candle_demo",
+  "strategy_id": "track_b_example_gold_shadow_v1",
+  "submit_allowed": false,
+  "submit_attempted": false,
+  "symbol": "MGCM6",
+  "timeframe": "1m"
+}

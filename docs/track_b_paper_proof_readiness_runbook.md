@@ -268,6 +268,7 @@ Current Phase 2 chain:
 ```text
 Databento realtime quote/event
 -> track_b_data_maintenance
+-> track_b_runtime_candle_capture, when same-session candles are required
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
@@ -309,9 +310,25 @@ and mark the report `history_provider_mode=HISTORICAL_AVAILABLE_END`.
 `history_ready=true` requires enough bars, acceptable gaps, and
 `complete_through_cutoff=true`; it does not require the historical base to be
 fresh to the present minute. If an execution rule needs same-session candle
-context, use a separate runtime live candle capture path or explicitly require
-runtime candle context in the strategy runner. Paper execution continues to
-require a separate realtime current quote report.
+context, use `track_b_runtime_candle_capture` and explicitly require runtime
+candle context in the strategy runner. Paper execution continues to require a
+separate realtime current quote report.
+
+`track_b_runtime_candle_capture` is the bounded execution-time context lane for
+MGC 1m candles. It is not the research archive and it does not replace weekly
+historical maintenance. The first supported mode accepts supplied runtime candle
+JSON, bounds the retained window with `--max-bars` (default 250), overwrites
+stable latest artifacts, prunes old run folders, and writes:
+
+```text
+outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json
+outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_candle_capture_report.json
+```
+
+The strategy paper runner can consume that context with
+`--runtime-candle-context-json .../latest_runtime_mgc_1m_candles.json`. If
+`--runtime-candle-context-required` is supplied and only maintained historical
+context is available, the runner blocks before readiness or paper proof.
 
 `track_b_mgc_candle_history_producer` remains available for diagnostics and
 maintenance inputs. On-demand historical fetch is not the normal trade-decision
@@ -459,8 +476,8 @@ planning entries only; they are not runtime-maintained in this slice.
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --maintained-history-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
-  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --runtime-candle-context-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
+  --runtime-candle-context-required \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \
@@ -479,8 +496,8 @@ operator-owned submit gates:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --maintained-history-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
-  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --runtime-candle-context-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
+  --runtime-candle-context-required \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \
@@ -498,8 +515,8 @@ operator-owned submit gates:
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
-If the maintained history is insufficient, gappy, incomplete through cutoff, if
-the rule emits `NO_SIGNAL`, or if readiness blocks, the runner stops with
+If runtime candles are missing/insufficient/gappy, if the rule emits
+`NO_SIGNAL`, or if readiness blocks, the runner stops with
 `paper_proof_invoked=false`. A clean runner report is the audit trail; no
 separate dry-run command is required when the explicit PAPER submit flags are
 present.

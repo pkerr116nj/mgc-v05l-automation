@@ -90,6 +90,8 @@ class TrackBStrategyPaperRunnerConfig:
     candle_history_payload: Mapping[str, object] | None = None
     current_quote_report_json: Path | None = None
     current_quote_report_payload: Mapping[str, object] | None = None
+    runtime_candle_context_json: Path | None = None
+    runtime_candle_context_payload: Mapping[str, object] | None = None
     maintained_history_json: Path | None = None
     maintained_history_payload: Mapping[str, object] | None = None
     build_features_from_json: Path | None = None
@@ -266,7 +268,7 @@ def run_track_b_strategy_paper(
                 operator_status_stage=actual_stages.operator_status,
             )
 
-        candle_history_request_error = None if _maintained_history_requested(config) else _candle_history_producer_request_error(config)
+        candle_history_request_error = None if _maintained_history_requested(config) or _runtime_candle_context_requested(config) else _candle_history_producer_request_error(config)
         if candle_history_request_error:
             return _finalize(
                 config=config,
@@ -287,7 +289,50 @@ def run_track_b_strategy_paper(
 
         strategy_config = config
         feature_config = config
-        if _maintained_history_requested(config):
+        if _runtime_candle_context_requested(config):
+            runtime_payload_error = _runtime_candle_context_request_error(config)
+            if runtime_payload_error:
+                return _finalize(
+                    config=config,
+                    report_json=report_json,
+                    now=actual_now,
+                    runner_id=actual_runner_id,
+                    verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER,
+                    candle_history_producer=candle_history_producer,
+                    market_history=market_history,
+                    feature_builder=feature_builder,
+                    strategy_rule=strategy_rule,
+                    readiness=readiness,
+                    proof=proof,
+                    primary_blocker=runtime_payload_error,
+                    required_next_action="Provide a valid bounded runtime candle context JSON before feature building.",
+                    operator_status_stage=actual_stages.operator_status,
+                )
+            runtime_payload = _runtime_candle_context_payload(config)
+            market_history = actual_stages.market_history_from_payload(config, runtime_payload, config.runtime_candle_context_json)
+            if market_history.verdict != TrackBMarketHistoryVerdict.WROTE_HISTORY_EVENT or market_history.history_event is None:
+                return _finalize(
+                    config=config,
+                    report_json=report_json,
+                    now=actual_now,
+                    runner_id=actual_runner_id,
+                    verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER,
+                    candle_history_producer=candle_history_producer,
+                    market_history=market_history,
+                    feature_builder=feature_builder,
+                    strategy_rule=strategy_rule,
+                    readiness=readiness,
+                    proof=proof,
+                    primary_blocker=market_history.report.get("primary_blocker") or "Runtime candle context did not produce a feature-builder event.",
+                    required_next_action=str(market_history.report.get("required_next_action") or "Resolve runtime candle context blocker before feature building."),
+                    operator_status_stage=actual_stages.operator_status,
+                )
+            feature_config = replace(
+                config,
+                build_features_from_payload=market_history.history_event,
+                build_features_from_json=market_history.history_event_json,
+            )
+        elif _maintained_history_requested(config):
             maintained_history_error = _maintained_history_request_error(config, now=actual_now)
             if maintained_history_error:
                 return _finalize(
@@ -866,6 +911,8 @@ def _build_report(
         "rule_id": config.rule_id,
         "rule_mode": config.rule_mode,
         "maintained_history_path": str(config.maintained_history_json) if config.maintained_history_json is not None else None,
+        "runtime_candle_context_path": str(config.runtime_candle_context_json) if config.runtime_candle_context_json is not None else None,
+        "runtime_candle_context_requested": _runtime_candle_context_requested(config),
         "data_maintenance_history_requested": _maintained_history_requested(config),
         "maintained_history_age_seconds": maintained_history_status.get("maintained_history_age_seconds"),
         "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
@@ -945,6 +992,7 @@ def _build_report(
         "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_strategy_paper_runner_report.json"),
         "artifact_paths": {
             "maintained_history_json": str(config.maintained_history_json) if config.maintained_history_json else None,
+            "runtime_candle_context_json": str(config.runtime_candle_context_json) if config.runtime_candle_context_json else None,
             "candle_history_producer_report_json": str(candle_history_producer.report_json) if candle_history_producer else None,
             "candle_history_input_json": (
                 str(candle_history_producer.history_input_json)
@@ -1032,8 +1080,41 @@ def _maintained_history_payload(config: TrackBStrategyPaperRunnerConfig) -> Mapp
     return value
 
 
+def _runtime_candle_context_payload(config: TrackBStrategyPaperRunnerConfig) -> Mapping[str, object]:
+    if config.runtime_candle_context_payload is not None:
+        return config.runtime_candle_context_payload
+    if config.runtime_candle_context_json is None:
+        raise ValueError("runtime_candle_context_json or runtime_candle_context_payload is required.")
+    value = json.loads(Path(config.runtime_candle_context_json).read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise ValueError("runtime candle context JSON must contain an object.")
+    return value
+
+
 def _maintained_history_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:
     return config.maintained_history_json is not None or config.maintained_history_payload is not None
+
+
+def _runtime_candle_context_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    return config.runtime_candle_context_json is not None or config.runtime_candle_context_payload is not None
+
+
+def _runtime_candle_context_request_error(config: TrackBStrategyPaperRunnerConfig) -> str | None:
+    try:
+        payload = _runtime_candle_context_payload(config)
+    except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        return f"Runtime candle context JSON could not be read: {exc}"
+    if payload.get("runtime_candle_context_ready") is not True:
+        return str(payload.get("primary_blocker") or "Runtime candle context is not runtime_candle_context_ready=true.")
+    candles = payload.get("candles") or payload.get("candle_history")
+    if not isinstance(candles, list) or len(candles) < max(config.market_history_min_candles, config.feature_builder_min_history_candles):
+        return (
+            "Runtime candle context has insufficient candles for market-history collection and feature building: "
+            f"received {len(candles) if isinstance(candles, list) else 0}."
+        )
+    if payload.get("gap_count") not in {None, 0}:
+        return f"Runtime candle context has detected gaps: {payload.get('gap_count')}."
+    return None
 
 
 def _maintained_history_request_error(config: TrackBStrategyPaperRunnerConfig, *, now: datetime) -> str | None:
@@ -1223,7 +1304,8 @@ def _runtime_candle_context_supplied(config: TrackBStrategyPaperRunnerConfig) ->
     if _maintained_history_requested(config):
         return False
     return bool(
-        config.candle_history_json is not None
+        _runtime_candle_context_requested(config)
+        or config.candle_history_json is not None
         or config.candle_history_payload is not None
         or config.build_features_from_json is not None
         or config.build_features_from_payload is not None

@@ -12,6 +12,7 @@ The current Track B no-submit chain is:
 Databento market-data observer, optionally
 -> candle/event JSON
 -> track_b_data_maintenance, for maintained local MGC 1m history
+-> track_b_runtime_candle_capture, for bounded execution-time MGC 1m context
 -> track_b_mgc_candle_history_producer, optionally
 -> track_b_market_history, optionally
 -> track_b_feature_builder, optionally
@@ -191,6 +192,21 @@ Dashboard implication:
   strategy/paper execution still requires a separate realtime current quote
   report, and same-session candle context belongs to a separate runtime live
   candle/quote capture lane.
+- `track_b_runtime_candle_capture` owns the first bounded runtime MGC 1m candle
+  context artifact for execution-time feature building. It is separate from
+  weekly historical maintenance and is not a research archive. The first slice
+  supports supplied runtime candle JSON, bounds the window with `max_bars`
+  (default 250), overwrites stable latest artifacts, prunes old run folders,
+  and writes
+  `outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json`
+  plus
+  `outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_candle_capture_report.json`.
+  It reports `runtime_candle_context_ready`, candle counts/timestamps, duplicate
+  and gap counts, realtime quote-evidence fields, and no-submit safety fields.
+  It does not connect to broker/TWS/IBKR, run paper proof, infer execution
+  authority, submit/cancel/place orders, or write an unbounded raw stream.
+  Future live Databento candle capture should feed this bounded artifact shape
+  rather than replacing historical maintenance.
 - `track_b_strategy_paper_runner` distinguishes historical context from runtime
   intraday context when consuming `latest_good_mgc_1m_history.json`. It reports
   `historical_context_ready`, `runtime_candle_context_required`,
@@ -199,7 +215,12 @@ Dashboard implication:
   explicitly requested with `runtime_intraday_freshness_policy =
   REQUIRE_MAX_AGE`; weekly historical maintenance can be many hours or days old
   while still being complete through its cutoff. Realtime current quote
-  evidence remains separate.
+  evidence remains separate. When `mgc_ema_momentum_reclaim_long_v1` requires
+  execution-time candle context, the runner should consume
+  `--runtime-candle-context-json` pointing at
+  `outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json`
+  rather than treating weekly historical maintenance as current intraday
+  context.
 - `track_b_mgc_candle_history_producer` is the bounded upstream producer for
   the MGC 1m history JSON consumed by `track_b_market_history`. It can
   normalize a supplied Databento-like OHLCV history artifact, or make an

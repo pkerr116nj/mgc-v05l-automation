@@ -1,0 +1,571 @@
+"""Track B bounded runtime candle capture for MGC.
+
+This boundary maintains a small execution-time candle context artifact for the
+MGC strategy path. It is intentionally bounded and artifact-only: no broker
+access, no paper proof, no Databento stream orchestration, and no submit path.
+The first supported input mode is a supplied runtime candle JSON payload.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from enum import Enum
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from .models import require_aware_datetime, to_jsonable
+
+
+DEFAULT_TRACK_B_RUNTIME_CANDLE_CAPTURE_OUTPUT_ROOT = Path(
+    "outputs/track_b_execution_core/track_b_runtime_candle_capture"
+)
+MGC_CONTRACT_KEY = "MGC-202606"
+MGC_LOCAL_SYMBOL = "MGCM6"
+MGC_CONTINUOUS_SYMBOL = "MGC.v.0"
+MGC_DATASET = "GLBX.MDP3"
+
+
+class TrackBRuntimeCandleCaptureVerdict(str, Enum):
+    WROTE_RUNTIME_CANDLES = "TRACK_B_RUNTIME_CANDLE_CAPTURE_WROTE_RUNTIME_CANDLES"
+    BLOCKED_INSUFFICIENT_RUNTIME_CANDLES = "TRACK_B_RUNTIME_CANDLE_CAPTURE_BLOCKED_INSUFFICIENT_RUNTIME_CANDLES"
+    BLOCKED_INVALID_INPUT = "TRACK_B_RUNTIME_CANDLE_CAPTURE_BLOCKED_INVALID_INPUT"
+    BLOCKED_SCHEMA_ERROR = "TRACK_B_RUNTIME_CANDLE_CAPTURE_BLOCKED_SCHEMA_ERROR"
+
+
+@dataclass(frozen=True)
+class TrackBRuntimeCandleCaptureResult:
+    verdict: TrackBRuntimeCandleCaptureVerdict
+    report_json: Path
+    report: dict[str, Any]
+    runtime_candles_json: Path | None
+    runtime_candles_event: dict[str, Any] | None
+
+
+def capture_track_b_runtime_mgc_1m_candles(
+    *,
+    runtime_candle_payload: Mapping[str, Any],
+    source_payload_path: Path | None = None,
+    expected_account_id: str | None = "DUM882026",
+    account_id: str = "DUM882026",
+    contract_key: str = MGC_CONTRACT_KEY,
+    local_symbol: str = MGC_LOCAL_SYMBOL,
+    databento_continuous_symbol: str = MGC_CONTINUOUS_SYMBOL,
+    dataset: str = MGC_DATASET,
+    timeframe: str = "1m",
+    max_bars: int = 250,
+    min_bars: int = 3,
+    candle_source_mode: str = "SUPPLIED_RUNTIME_CANDLES",
+    source_id: str | None = None,
+    strategy_id: str = "track_b_example_gold_shadow_v1",
+    lane_id: str = "mgc_example_long_lmt_day",
+    output_root: Path = DEFAULT_TRACK_B_RUNTIME_CANDLE_CAPTURE_OUTPUT_ROOT,
+    capture_id: str | None = None,
+    retention_runs: int = 5,
+    now: datetime | None = None,
+) -> TrackBRuntimeCandleCaptureResult:
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    actual_capture_id = capture_id or f"track_b_runtime_candle_capture_{uuid.uuid4().hex}"
+    actual_source_id = source_id or _optional_text(runtime_candle_payload.get("source_id")) or "track_b_runtime_candle_capture"
+    report_json = Path(output_root) / actual_capture_id / "track_b_runtime_candle_capture_report.json"
+    event_json = Path(output_root) / actual_capture_id / "runtime_mgc_1m_candles.json"
+
+    try:
+        if max_bars <= 0:
+            raise ValueError("max_bars must be positive.")
+        if min_bars <= 0:
+            raise ValueError("min_bars must be positive.")
+        raw_candles = _raw_candles(runtime_candle_payload)
+        normalized = [_normalize_candle(item, index=index) for index, item in enumerate(raw_candles, start=1)]
+        deduped, duplicate_count = _dedupe_and_sort(normalized)
+        bounded = deduped[-max_bars:]
+        gap_count = _gap_count(bounded, timeframe=timeframe)
+        quote_evidence = _quote_evidence(runtime_candle_payload)
+        validation_blocker = _validation_blocker(
+            payload=runtime_candle_payload,
+            candles=bounded,
+            expected_account_id=expected_account_id,
+            expected_contract_key=contract_key,
+        )
+        if validation_blocker:
+            return _write_report(
+                report_json=report_json,
+                event_json=event_json,
+                verdict=TrackBRuntimeCandleCaptureVerdict.BLOCKED_INVALID_INPUT,
+                now=actual_now,
+                capture_id=actual_capture_id,
+                source_id=actual_source_id,
+                source_payload_path=source_payload_path,
+                account_id=account_id,
+                contract_key=contract_key,
+                local_symbol=local_symbol,
+                databento_continuous_symbol=databento_continuous_symbol,
+                dataset=dataset,
+                timeframe=timeframe,
+                candle_source_mode=candle_source_mode,
+                max_bars=max_bars,
+                min_bars=min_bars,
+                candles=bounded,
+                duplicate_count=duplicate_count,
+                gap_count=gap_count,
+                quote_evidence=quote_evidence,
+                runtime_event=None,
+                primary_blocker=validation_blocker,
+                required_next_action="Provide valid bounded MGC runtime candle input before feature building.",
+                retention_runs=retention_runs,
+            )
+        if len(bounded) < min_bars:
+            return _write_report(
+                report_json=report_json,
+                event_json=event_json,
+                verdict=TrackBRuntimeCandleCaptureVerdict.BLOCKED_INSUFFICIENT_RUNTIME_CANDLES,
+                now=actual_now,
+                capture_id=actual_capture_id,
+                source_id=actual_source_id,
+                source_payload_path=source_payload_path,
+                account_id=account_id,
+                contract_key=contract_key,
+                local_symbol=local_symbol,
+                databento_continuous_symbol=databento_continuous_symbol,
+                dataset=dataset,
+                timeframe=timeframe,
+                candle_source_mode=candle_source_mode,
+                max_bars=max_bars,
+                min_bars=min_bars,
+                candles=bounded,
+                duplicate_count=duplicate_count,
+                gap_count=gap_count,
+                quote_evidence=quote_evidence,
+                runtime_event=None,
+                primary_blocker=f"At least {min_bars} runtime candles are required; received {len(bounded)}.",
+                required_next_action="Collect more bounded MGC runtime candles before feature building.",
+                retention_runs=retention_runs,
+            )
+        if gap_count > 0:
+            return _write_report(
+                report_json=report_json,
+                event_json=event_json,
+                verdict=TrackBRuntimeCandleCaptureVerdict.BLOCKED_INVALID_INPUT,
+                now=actual_now,
+                capture_id=actual_capture_id,
+                source_id=actual_source_id,
+                source_payload_path=source_payload_path,
+                account_id=account_id,
+                contract_key=contract_key,
+                local_symbol=local_symbol,
+                databento_continuous_symbol=databento_continuous_symbol,
+                dataset=dataset,
+                timeframe=timeframe,
+                candle_source_mode=candle_source_mode,
+                max_bars=max_bars,
+                min_bars=min_bars,
+                candles=bounded,
+                duplicate_count=duplicate_count,
+                gap_count=gap_count,
+                quote_evidence=quote_evidence,
+                runtime_event=None,
+                primary_blocker=f"Runtime MGC 1m candle context has {gap_count} detected gaps.",
+                required_next_action="Repair or continue runtime candle capture until the bounded window is contiguous.",
+                retention_runs=retention_runs,
+            )
+        runtime_event = _runtime_event(
+            payload=runtime_candle_payload,
+            candles=bounded,
+            quote_evidence=quote_evidence,
+            capture_id=actual_capture_id,
+            source_id=actual_source_id,
+            source_payload_path=source_payload_path,
+            account_id=account_id,
+            contract_key=contract_key,
+            local_symbol=local_symbol,
+            databento_continuous_symbol=databento_continuous_symbol,
+            dataset=dataset,
+            timeframe=timeframe,
+            candle_source_mode=candle_source_mode,
+            max_bars=max_bars,
+            strategy_id=strategy_id,
+            lane_id=lane_id,
+            now=actual_now,
+        )
+        return _write_report(
+            report_json=report_json,
+            event_json=event_json,
+            verdict=TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES,
+            now=actual_now,
+            capture_id=actual_capture_id,
+            source_id=actual_source_id,
+            source_payload_path=source_payload_path,
+            account_id=account_id,
+            contract_key=contract_key,
+            local_symbol=local_symbol,
+            databento_continuous_symbol=databento_continuous_symbol,
+            dataset=dataset,
+            timeframe=timeframe,
+            candle_source_mode=candle_source_mode,
+            max_bars=max_bars,
+            min_bars=min_bars,
+            candles=bounded,
+            duplicate_count=duplicate_count,
+            gap_count=gap_count,
+            quote_evidence=quote_evidence,
+            runtime_event=runtime_event,
+            primary_blocker=None,
+            required_next_action="Runtime candle context is ready for track_b_feature_builder or track_b_strategy_paper_runner.",
+            retention_runs=retention_runs,
+        )
+    except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        return _write_report(
+            report_json=report_json,
+            event_json=event_json,
+            verdict=TrackBRuntimeCandleCaptureVerdict.BLOCKED_SCHEMA_ERROR,
+            now=actual_now,
+            capture_id=actual_capture_id,
+            source_id=actual_source_id,
+            source_payload_path=source_payload_path,
+            account_id=account_id,
+            contract_key=contract_key,
+            local_symbol=local_symbol,
+            databento_continuous_symbol=databento_continuous_symbol,
+            dataset=dataset,
+            timeframe=timeframe,
+            candle_source_mode=candle_source_mode,
+            max_bars=max_bars,
+            min_bars=min_bars,
+            candles=[],
+            duplicate_count=0,
+            gap_count=0,
+            quote_evidence={},
+            runtime_event=None,
+            primary_blocker=str(exc),
+            required_next_action="Fix Track B runtime candle capture input schema before retrying.",
+            retention_runs=retention_runs,
+        )
+
+
+def _raw_candles(payload: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+    raw = payload.get("candles") or payload.get("candle_history") or payload.get("runtime_candles") or payload.get("events")
+    if raw is None:
+        raw = [payload] if payload.get("close") is not None or payload.get("last") is not None else []
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise ValueError("candles/runtime_candles must be a list of objects.")
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"candles[{index}] must be an object.")
+    return raw
+
+
+def _normalize_candle(item: Mapping[str, Any], *, index: int) -> dict[str, Any]:
+    close = _decimal(item.get("close") if item.get("close") is not None else item.get("last"), f"candles[{index}].close")
+    open_price = _decimal(item.get("open") if item.get("open") is not None else close, f"candles[{index}].open")
+    high = _decimal(item.get("high") if item.get("high") is not None else close, f"candles[{index}].high")
+    low = _decimal(item.get("low") if item.get("low") is not None else close, f"candles[{index}].low")
+    timestamp = _required_text(
+        item.get("candle_timestamp") or item.get("timestamp") or item.get("observed_at") or item.get("ts_event"),
+        f"candles[{index}].timestamp",
+    )
+    return {
+        "candle_timestamp": _parse_timestamp(timestamp).isoformat(),
+        "observed_at": _optional_text(item.get("observed_at")) or _parse_timestamp(timestamp).isoformat(),
+        "open": _decimal_text(open_price),
+        "high": _decimal_text(high),
+        "low": _decimal_text(low),
+        "close": _decimal_text(close),
+        "volume": None if item.get("volume") in {None, ""} else _decimal_text(_decimal(item.get("volume"), f"candles[{index}].volume")),
+        "raw_symbol": item.get("raw_symbol"),
+        "provider_symbol": item.get("provider_symbol") or item.get("symbol"),
+    }
+
+
+def _dedupe_and_sort(candles: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    by_timestamp: dict[str, dict[str, Any]] = {}
+    duplicate_count = 0
+    for candle in candles:
+        timestamp = str(candle["candle_timestamp"])
+        if timestamp in by_timestamp:
+            duplicate_count += 1
+        by_timestamp[timestamp] = dict(candle)
+    return [by_timestamp[key] for key in sorted(by_timestamp, key=lambda value: _parse_timestamp(value))], duplicate_count
+
+
+def _gap_count(candles: Sequence[Mapping[str, Any]], *, timeframe: str) -> int:
+    if len(candles) < 2 or timeframe != "1m":
+        return 0
+    gaps = 0
+    previous = _parse_timestamp(str(candles[0]["candle_timestamp"]))
+    for candle in candles[1:]:
+        current = _parse_timestamp(str(candle["candle_timestamp"]))
+        if current - previous > timedelta(minutes=1):
+            gaps += 1
+        previous = current
+    return gaps
+
+
+def _quote_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    return {
+        "quote_provider_mode": _first_text(metadata.get("quote_provider_mode"), payload.get("quote_provider_mode")),
+        "realtime_quote_received": _first_bool(metadata.get("realtime_quote_received"), payload.get("realtime_quote_received")),
+        "current_quote_available": _first_bool(metadata.get("current_quote_available"), payload.get("current_quote_available")),
+        "quote_freshness_verdict": _first_text(metadata.get("quote_freshness_verdict"), payload.get("quote_freshness_verdict")),
+        "quote_report_path": _first_text(metadata.get("source_report_path"), payload.get("quote_report_path"), payload.get("source_report_path")),
+    }
+
+
+def _validation_blocker(
+    *,
+    payload: Mapping[str, Any],
+    candles: Sequence[Mapping[str, Any]],
+    expected_account_id: str | None,
+    expected_contract_key: str,
+) -> str | None:
+    if not candles:
+        return "Runtime candle input contains no candles."
+    account_id = _optional_text(payload.get("account_id") or payload.get("expected_account_id"))
+    if expected_account_id and account_id and account_id != expected_account_id:
+        return f"Runtime candle account_id {account_id} does not match expected_account_id {expected_account_id}."
+    contract_key = _optional_text(payload.get("contract_key") or payload.get("local_execution_contract_key"))
+    if contract_key != expected_contract_key:
+        return f"Only {expected_contract_key} is supported by this Track B runtime candle capture."
+    return None
+
+
+def _runtime_event(
+    *,
+    payload: Mapping[str, Any],
+    candles: Sequence[Mapping[str, Any]],
+    quote_evidence: Mapping[str, Any],
+    capture_id: str,
+    source_id: str,
+    source_payload_path: Path | None,
+    account_id: str,
+    contract_key: str,
+    local_symbol: str,
+    databento_continuous_symbol: str,
+    dataset: str,
+    timeframe: str,
+    candle_source_mode: str,
+    max_bars: int,
+    strategy_id: str,
+    lane_id: str,
+    now: datetime,
+) -> dict[str, Any]:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    latest = candles[-1]
+    return {
+        "schema_version": "track_b_runtime_mgc_1m_candles_v1",
+        "source_id": source_id,
+        "capture_id": capture_id,
+        "batch_id": _optional_text(payload.get("batch_id")) or f"track_b_runtime_candle_batch_{uuid.uuid4().hex}",
+        "account_id": _optional_text(payload.get("account_id")) or account_id,
+        "contract_key": contract_key,
+        "instrument_family": "MGC",
+        "symbol": local_symbol,
+        "local_symbol": local_symbol,
+        "allowlisted_local_symbol": local_symbol,
+        "databento_continuous_symbol": databento_continuous_symbol,
+        "dataset": dataset,
+        "timeframe": timeframe,
+        "candle_source_mode": candle_source_mode,
+        "generated_at": now.isoformat(),
+        "strategy_id": _optional_text(payload.get("strategy_id")) or strategy_id,
+        "lane_id": _optional_text(payload.get("lane_id")) or lane_id,
+        "max_bars": max_bars,
+        "bars_available": len(candles),
+        "first_candle_timestamp": candles[0].get("candle_timestamp"),
+        "last_candle_timestamp": latest.get("candle_timestamp"),
+        "candle_timestamp": latest.get("candle_timestamp"),
+        "observed_at": latest.get("observed_at"),
+        "open": latest.get("open"),
+        "high": latest.get("high"),
+        "low": latest.get("low"),
+        "close": latest.get("close"),
+        "volume": latest.get("volume"),
+        "candles": list(candles),
+        "candle_history": list(candles),
+        "runtime_candle_context_ready": True,
+        "quote_provider_mode": quote_evidence.get("quote_provider_mode"),
+        "realtime_quote_received": quote_evidence.get("realtime_quote_received"),
+        "current_quote_available": quote_evidence.get("current_quote_available"),
+        "quote_freshness_verdict": quote_evidence.get("quote_freshness_verdict"),
+        "metadata": {
+            **dict(metadata),
+            "track_b_runtime_candle_capture_boundary": "track_b_runtime_candle_capture",
+            "market_data_role": "RUNTIME_CONTEXT_EVIDENCE_ONLY",
+            "source_payload_path": None if source_payload_path is None else str(source_payload_path),
+            "source_report_path": quote_evidence.get("quote_report_path") or metadata.get("source_report_path"),
+            "bounded_max_bars": max_bars,
+            "research_archive": False,
+            "databento_is_execution_authority": False,
+            "local_execution_contract_key_remains_authority": True,
+        },
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+
+
+def _write_report(
+    *,
+    report_json: Path,
+    event_json: Path,
+    verdict: TrackBRuntimeCandleCaptureVerdict,
+    now: datetime,
+    capture_id: str,
+    source_id: str,
+    source_payload_path: Path | None,
+    account_id: str,
+    contract_key: str,
+    local_symbol: str,
+    databento_continuous_symbol: str,
+    dataset: str,
+    timeframe: str,
+    candle_source_mode: str,
+    max_bars: int,
+    min_bars: int,
+    candles: Sequence[Mapping[str, Any]],
+    duplicate_count: int,
+    gap_count: int,
+    quote_evidence: Mapping[str, Any],
+    runtime_event: dict[str, Any] | None,
+    primary_blocker: str | None,
+    required_next_action: str,
+    retention_runs: int,
+) -> TrackBRuntimeCandleCaptureResult:
+    output_root = report_json.parent.parent
+    latest_report_json = output_root / "latest_runtime_candle_capture_report.json"
+    latest_event_json = output_root / "latest_runtime_mgc_1m_candles.json"
+    wrote_event = runtime_event is not None and verdict == TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES
+    report = {
+        "schema_version": "track_b_runtime_candle_capture_report_v1",
+        "generated_at": now.isoformat(),
+        "track_b_runtime_candle_capture_id": capture_id,
+        "runtime_candle_capture_verdict": verdict.value,
+        "source_id": source_id,
+        "source_payload_path": None if source_payload_path is None else str(source_payload_path),
+        "account_id": account_id,
+        "contract_key": contract_key,
+        "symbol": local_symbol,
+        "local_symbol": local_symbol,
+        "databento_continuous_symbol": databento_continuous_symbol,
+        "dataset": dataset,
+        "timeframe": timeframe,
+        "candle_source_mode": candle_source_mode,
+        "max_bars": max_bars,
+        "min_bars": min_bars,
+        "bars_available": len(candles),
+        "first_candle_timestamp": candles[0].get("candle_timestamp") if candles else None,
+        "last_candle_timestamp": candles[-1].get("candle_timestamp") if candles else None,
+        "runtime_candle_context_ready": wrote_event,
+        "duplicate_count": duplicate_count,
+        "gap_count": gap_count,
+        "quote_provider_mode": quote_evidence.get("quote_provider_mode") or "NOT_PROVIDED",
+        "realtime_quote_received": quote_evidence.get("realtime_quote_received") if quote_evidence else False,
+        "current_quote_available": quote_evidence.get("current_quote_available") if quote_evidence else False,
+        "quote_freshness_verdict": quote_evidence.get("quote_freshness_verdict") or "NOT_PROVIDED",
+        "output_runtime_candles_path": str(event_json) if wrote_event else None,
+        "latest_runtime_candles_path": str(latest_event_json) if wrote_event else None,
+        "stored_run_count": _prune_old_runs(output_root=output_root, keep=max(int(retention_runs), 0), current_run_dir=report_json.parent),
+        "retention_runs": retention_runs,
+        "primary_blocker": primary_blocker,
+        "secondary_blockers": [],
+        "required_next_action": required_next_action,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "paper_proof_cli_called": False,
+        "listener_invoked": False,
+        "runner_invoked": False,
+        "broker_connection_attempted": False,
+        "tws_connection_attempted": False,
+        "ibkr_connection_attempted": False,
+        "place_order_called": False,
+        "cancel_called": False,
+        "report_json_path": str(report_json),
+        "latest_report_json_path": str(latest_report_json),
+    }
+    payload = json.dumps(to_jsonable(report), indent=2, sort_keys=True)
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(payload, encoding="utf-8")
+    latest_report_json.parent.mkdir(parents=True, exist_ok=True)
+    latest_report_json.write_text(payload, encoding="utf-8")
+    if wrote_event:
+        event_payload = json.dumps(to_jsonable(runtime_event), indent=2, sort_keys=True)
+        event_json.write_text(event_payload, encoding="utf-8")
+        latest_event_json.write_text(event_payload, encoding="utf-8")
+    return TrackBRuntimeCandleCaptureResult(
+        verdict=verdict,
+        report_json=report_json,
+        report=report,
+        runtime_candles_json=event_json if wrote_event else None,
+        runtime_candles_event=runtime_event,
+    )
+
+
+def _prune_old_runs(*, output_root: Path, keep: int, current_run_dir: Path) -> int:
+    if keep <= 0:
+        return 0
+    output_root.mkdir(parents=True, exist_ok=True)
+    existing_to_keep = max(keep - 1, 0) if not current_run_dir.exists() else keep
+    run_dirs = [
+        item
+        for item in output_root.iterdir()
+        if item.is_dir() and item.name.startswith("track_b_runtime_candle_capture_")
+    ]
+    run_dirs.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    retained = 0
+    for item in run_dirs:
+        if item == current_run_dir or retained < existing_to_keep:
+            retained += 1
+            continue
+        shutil.rmtree(item)
+    return min(retained + (0 if current_run_dir.exists() else 1), keep)
+
+
+def _parse_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _decimal(value: object, field_name: str) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field_name} must be decimal-compatible.") from exc
+
+
+def _decimal_text(value: Decimal) -> str:
+    return format(value.normalize(), "f")
+
+
+def _required_text(value: object, field_name: str) -> str:
+    text = _optional_text(value)
+    if text is None:
+        raise ValueError(f"{field_name} is required.")
+    return text
+
+
+def _optional_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _first_text(*values: object) -> str | None:
+    for value in values:
+        text = _optional_text(value)
+        if text is not None:
+            return text
+    return None
+
+
+def _first_bool(*values: object) -> bool | None:
+    for value in values:
+        if isinstance(value, bool):
+            return value
+    return None
