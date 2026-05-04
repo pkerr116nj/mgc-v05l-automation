@@ -417,7 +417,7 @@ def test_pending_cancel_preflight_blocks_same_account_contract_submit_with_recov
     assert result.report["blocks_same_account_contract_submit"] is True
 
 
-def test_manual_clean_follow_up_state_does_not_retroactively_mark_prior_ambiguous_proof_passed(tmp_path: Path) -> None:
+def test_manual_clean_follow_up_state_does_not_retroactively_mark_flat_provenance_gap_passed(tmp_path: Path) -> None:
     adapter = RecordingPaperAdapter(fail_open_order_wait=True, position_after_open=0)
 
     result = run_ibkr_paper_proof(
@@ -430,10 +430,10 @@ def test_manual_clean_follow_up_state_does_not_retroactively_mark_prior_ambiguou
     )
     follow_up = ready_preflight(tmp_path, position={"signed_quantity": 0}, open_orders=[])
 
-    assert result.classification == TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    assert result.classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
     assert follow_up.classification == PreflightClassification.READY_READ_ONLY
     assert json.loads(result.proof_report_json.read_text(encoding="utf-8"))["classification"] == (
-        "TRACK_B_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED"
+        "TRACK_B_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE"
     )
 
 
@@ -674,8 +674,31 @@ def test_real_runner_reports_submit_diagnostics_when_open_callbacks_are_missing(
     assert "nbboPriceCap" in diagnostics["error_callbacks_after_submit"][2]["error_string"]
 
 
-def test_real_runner_refuses_close_when_position_not_exactly_expected_after_open(tmp_path: Path) -> None:
+def test_real_runner_reports_flat_but_incomplete_when_position_is_flat_before_close(tmp_path: Path) -> None:
     adapter = RecordingPaperAdapter(fail_open_order_wait=True, position_after_open=0)
+
+    result = run_ibkr_paper_proof(
+        config=HarnessConfig(account_id="DUM882026", client_id=17077, output_root=tmp_path / "proof_runs"),
+        run_id="run-position-not-expected",
+        preflight=ready_preflight(tmp_path, quote=None, quote_observed=False, market_data_mode="DELAYED"),
+        manual_open_limit_price="2345.1",
+        manual_close_limit_price="2344.9",
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+    payload = json.loads(result.proof_report_json.read_text(encoding="utf-8"))
+
+    assert result.classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
+    assert payload["proof_lifecycle_status"] == "PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE"
+    assert len(adapter.submitted) == 1
+    assert payload["close_submit_attempt"] is None
+    assert payload["close_only_guard_reports"][0]["observed_signed_quantity"] == 0
+    assert payload["close_only_guard_reports"][0]["working_orders"] == []
+    assert payload["final_reconciliation"] is None
+    assert payload["live_money_readiness"] is False
+
+
+def test_real_runner_refuses_close_when_position_not_exactly_expected_after_open(tmp_path: Path) -> None:
+    adapter = RecordingPaperAdapter(fail_open_order_wait=True, position_after_open=-1)
 
     result = run_ibkr_paper_proof(
         config=HarnessConfig(account_id="DUM882026", client_id=17077, output_root=tmp_path / "proof_runs"),
@@ -691,7 +714,7 @@ def test_real_runner_refuses_close_when_position_not_exactly_expected_after_open
     assert payload["proof_lifecycle_status"] == "BLOCKED_POSITION_NOT_EXPECTED"
     assert len(adapter.submitted) == 1
     assert payload["close_submit_attempt"] is None
-    assert payload["close_only_guard_reports"][0]["observed_signed_quantity"] == 0
+    assert payload["close_only_guard_reports"][0]["observed_signed_quantity"] == -1
 
 
 def test_real_runner_refuses_close_when_working_order_exists_after_open(tmp_path: Path) -> None:
@@ -711,6 +734,27 @@ def test_real_runner_refuses_close_when_working_order_exists_after_open(tmp_path
     assert payload["proof_lifecycle_status"] == "BLOCKED_WORKING_ORDER_EXISTS"
     assert len(adapter.submitted) == 1
     assert payload["close_submit_attempt"] is None
+    assert payload["close_only_guard_reports"][0]["working_orders"]
+
+
+def test_real_runner_refuses_close_when_flat_but_working_order_exists_after_open(tmp_path: Path) -> None:
+    adapter = RecordingPaperAdapter(fail_open_order_wait=True, position_after_open=0, working_order_after_open=True)
+
+    result = run_ibkr_paper_proof(
+        config=HarnessConfig(account_id="DUM882026", client_id=17077, output_root=tmp_path / "proof_runs"),
+        run_id="run-flat-working-order-after-open",
+        preflight=ready_preflight(tmp_path, quote=None, quote_observed=False, market_data_mode="DELAYED"),
+        manual_open_limit_price="2345.1",
+        manual_close_limit_price="2344.9",
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+    payload = json.loads(result.proof_report_json.read_text(encoding="utf-8"))
+
+    assert result.classification == TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    assert payload["proof_lifecycle_status"] == "BLOCKED_WORKING_ORDER_EXISTS"
+    assert len(adapter.submitted) == 1
+    assert payload["close_submit_attempt"] is None
+    assert payload["close_only_guard_reports"][0]["observed_signed_quantity"] == 0
     assert payload["close_only_guard_reports"][0]["working_orders"]
 
 

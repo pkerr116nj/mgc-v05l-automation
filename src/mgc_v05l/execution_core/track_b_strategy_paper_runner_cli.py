@@ -175,7 +175,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED,
     }:
         return 0
-    if result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED:
+    if result.verdict in {
+        TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
+        TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE,
+    }:
         return 3
     return 2
 

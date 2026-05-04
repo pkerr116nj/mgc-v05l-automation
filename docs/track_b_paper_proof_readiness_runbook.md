@@ -79,6 +79,7 @@ The lifecycle is intentionally narrow:
 - If position is not exactly the expected one-lot state, Track B refuses the close and reports `BLOCKED_POSITION_NOT_EXPECTED`.
 - If any working same-contract broker order exists before close, Track B refuses the close and reports `BLOCKED_WORKING_ORDER_EXISTS`.
 - If the close fills and final broker truth is flat with no working same-contract orders, the lifecycle reports `PROOF_COMPLETE_FLAT`.
+- If broker truth is already flat before Track B submits its guarded close, and there are no working same-contract orders, the lifecycle reports `PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE` / `TRACK_B_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE`. This is not a passed proof because Track B did not own complete close provenance, but it is more precise than a generic position-not-expected blocker.
 - `AMBIGUOUS_MANUAL_REVIEW_REQUIRED` is reserved for cases where broker truth or callbacks are not sufficient to prove the safe next action.
 
 The proof report includes lifecycle fields such as `proof_lifecycle_status`, `close_only_guard_reports`, `flat_after_close_guard_reports`, `open_submit_diagnostics`, and `close_submit_diagnostics`. These are operator artifacts; the UI/dashboard must display them only and must not submit.
@@ -206,6 +207,8 @@ A clean post-proof or post-cleanup state requires:
   Inspect `close_only_guard_reports`; expected blocker is `BLOCKED_POSITION_NOT_EXPECTED`.
 - Working same-contract order before close:
   Inspect `close_only_guard_reports`; expected blocker is `BLOCKED_WORKING_ORDER_EXISTS`.
+- Flat before Track B close provenance:
+  Inspect `close_only_guard_reports`; expected classification is `TRACK_B_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE`. Verify broker activity and rerun read-only recovery before any further PAPER submit. Do not relabel this as `TRACK_B_PAPER_PROOF_PASSED` unless Track B artifacts include the complete open/close/final-flat proof chain.
 - Final not flat after close:
   Inspect `flat_after_close_guard_reports`; do not send another close order automatically.
 - IBKR callback contract-correlation errors:

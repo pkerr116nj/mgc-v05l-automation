@@ -117,12 +117,25 @@ def readiness_result(tmp_path: Path, *, ready: bool = True) -> TrackBReadinessCh
 def proof_result(tmp_path: Path, classification: TerminalClassification) -> PaperProofResult:
     report_json = tmp_path / "paper_proof_report.json"
     report_md = tmp_path / "paper_proof_report.md"
+    lifecycle_status = "AMBIGUOUS_MANUAL_REVIEW_REQUIRED"
+    final_reconciliation = None
+    failure_or_ambiguity = "callback gap"
+    required_manual_action = "Manual review required."
+    if classification == TerminalClassification.PASSED:
+        lifecycle_status = "PROOF_COMPLETE_FLAT"
+        final_reconciliation = {"status": "CLEAN"}
+        failure_or_ambiguity = None
+        required_manual_action = None
+    elif classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE:
+        lifecycle_status = "PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE"
+        failure_or_ambiguity = "flat but close provenance incomplete"
+        required_manual_action = "Verify broker activity."
     proof_payload = {
         "classification": classification.value,
-        "proof_lifecycle_status": "PROOF_COMPLETE_FLAT" if classification == TerminalClassification.PASSED else "AMBIGUOUS_MANUAL_REVIEW_REQUIRED",
-        "final_reconciliation": {"status": "CLEAN"} if classification == TerminalClassification.PASSED else None,
-        "failure_or_ambiguity": None if classification == TerminalClassification.PASSED else "callback gap",
-        "required_manual_action": None if classification == TerminalClassification.PASSED else "Manual review required.",
+        "proof_lifecycle_status": lifecycle_status,
+        "final_reconciliation": final_reconciliation,
+        "failure_or_ambiguity": failure_or_ambiguity,
+        "required_manual_action": required_manual_action,
     }
     report = {
         "classification": classification.value,
@@ -332,6 +345,36 @@ def test_ambiguous_paper_proof_requires_manual_review(tmp_path: Path) -> None:
     assert result.report["final_flat"] is False
     assert result.report["primary_blocker"] == "callback gap"
     assert result.report["submit_attempted"] is True
+
+
+def test_flat_but_close_provenance_incomplete_is_not_paper_proof_passed(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE),
+        ),
+        runner_id="paper-proof-flat-provenance",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
+    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE"
+    assert result.report["final_flat"] is True
+    assert result.report["primary_blocker"] == "flat but close provenance incomplete"
+    assert result.report["submit_attempted"] is True
+    assert result.report["live_money_readiness"] is False
 
 
 def test_non_paper_mode_refuses_before_strategy(tmp_path: Path) -> None:

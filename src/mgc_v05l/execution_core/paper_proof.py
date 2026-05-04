@@ -528,6 +528,18 @@ def _operator_readiness_report(
             proof_timing_classification=timing_classification,
             proof_timing_allowed=timing_allowed,
         )
+    if classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE:
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
+            primary_blocker=str(reason or "Proof ended flat, but Track B did not observe complete close provenance."),
+            required_next_action=str(required_action or "Verify broker activity and rerun read-only recovery before any further PAPER submit."),
+            account_id=config.account_id,
+            contract_key=config.contract_key,
+            position_qty=position_qty,
+            proof_timing_classification=timing_classification,
+            proof_timing_allowed=timing_allowed,
+            submit_attempted=submit_attempted,
+        )
     blocker = str(reason or "Paper proof is blocked or ambiguous.")
     lowered = blocker.lower()
     verdict = FinalReadinessVerdict.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
@@ -741,7 +753,7 @@ def run_ibkr_paper_proof(
             append("close_only_guard_evaluated", close_guard)
             if not close_guard["close_allowed"]:
                 raise _PaperProofLifecycleStop(
-                    classification=TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
+                    classification=_classification_for_close_guard(close_guard),
                     lifecycle_status=str(close_guard["proof_lifecycle_status"]),
                     reason=str(close_guard["primary_blocker"] or exc),
                     required_action=str(close_guard["required_next_action"]),
@@ -765,7 +777,7 @@ def run_ibkr_paper_proof(
         append("close_only_guard_evaluated", close_guard)
         if not close_guard["close_allowed"]:
             raise _PaperProofLifecycleStop(
-                classification=TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
+                classification=_classification_for_close_guard(close_guard),
                 lifecycle_status=str(close_guard["proof_lifecycle_status"]),
                 reason=str(close_guard["primary_blocker"]),
                 required_action=str(close_guard["required_next_action"]),
@@ -960,21 +972,6 @@ def _evaluate_close_only_guard(
     open_orders = _observe_open_order_truth(adapter=adapter, config=config)
     working_orders = [order.to_json_dict() if hasattr(order, "to_json_dict") else to_jsonable(order) for order in open_orders]
     observed_qty = _signed_quantity(position)
-    if observed_qty != expected_signed_quantity:
-        return {
-            "proof_lifecycle_status": "BLOCKED_POSITION_NOT_EXPECTED",
-            "close_allowed": False,
-            "stage": stage,
-            "expected_signed_quantity": expected_signed_quantity,
-            "observed_signed_quantity": observed_qty,
-            "position": position.to_json_dict(),
-            "working_orders": working_orders,
-            "primary_blocker": f"Close-only proof requires position exactly {expected_signed_quantity}; observed {observed_qty}.",
-            "required_next_action": "Do not submit a close order from Track B. Review TWS position and reconcile manually.",
-            "submit_allowed": False,
-            "submit_attempted": False,
-            "live_money_readiness": False,
-        }
     if working_orders:
         return {
             "proof_lifecycle_status": "BLOCKED_WORKING_ORDER_EXISTS",
@@ -986,6 +983,42 @@ def _evaluate_close_only_guard(
             "working_orders": working_orders,
             "primary_blocker": "Close-only proof refuses while working same-contract broker orders exist.",
             "required_next_action": "Do not submit a close order from Track B. Resolve working broker orders first.",
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        }
+    if observed_qty == 0:
+        return {
+            "proof_lifecycle_status": "PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE",
+            "close_allowed": False,
+            "flat_clean": True,
+            "close_provenance_complete": False,
+            "stage": stage,
+            "expected_signed_quantity": expected_signed_quantity,
+            "observed_signed_quantity": observed_qty,
+            "position": position.to_json_dict(),
+            "position_source": position.source.value if hasattr(position.source, "value") else str(position.source),
+            "working_orders": [],
+            "primary_blocker": (
+                "Broker truth is flat before Track B close submission, but Track B did not observe "
+                "complete open/close proof provenance."
+            ),
+            "required_next_action": "Verify broker activity and rerun read-only recovery before any further PAPER submit.",
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        }
+    if observed_qty != expected_signed_quantity:
+        return {
+            "proof_lifecycle_status": "BLOCKED_POSITION_NOT_EXPECTED",
+            "close_allowed": False,
+            "stage": stage,
+            "expected_signed_quantity": expected_signed_quantity,
+            "observed_signed_quantity": observed_qty,
+            "position": position.to_json_dict(),
+            "working_orders": working_orders,
+            "primary_blocker": f"Close-only proof requires position exactly {expected_signed_quantity}; observed {observed_qty}.",
+            "required_next_action": "Do not submit a close order from Track B. Review TWS position and reconcile manually.",
             "submit_allowed": False,
             "submit_attempted": False,
             "live_money_readiness": False,
@@ -1005,6 +1038,12 @@ def _evaluate_close_only_guard(
         "submit_attempted": False,
         "live_money_readiness": False,
     }
+
+
+def _classification_for_close_guard(close_guard: Mapping[str, object]) -> TerminalClassification:
+    if close_guard.get("proof_lifecycle_status") == "PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE":
+        return TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
+    return TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
 
 
 def _evaluate_flat_after_close_guard(

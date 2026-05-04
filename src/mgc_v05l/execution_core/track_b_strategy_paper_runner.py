@@ -54,6 +54,7 @@ class TrackBStrategyPaperRunnerVerdict(str, Enum):
     PAPER_READY_NO_SUBMIT_REQUESTED = "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_READY_NO_SUBMIT_REQUESTED"
     PAPER_PROOF_PASSED = "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED"
     PAPER_PROOF_BLOCKED = "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_BLOCKED"
+    PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE = "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE"
     PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED = "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED"
     BLOCKED_STAGE_ERROR = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_STAGE_ERROR"
 
@@ -292,6 +293,13 @@ def run_track_b_strategy_paper(
             verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_BLOCKED
             primary_blocker = _proof_blocker(proof.report)
             required_next_action = _proof_required_action(proof.report, "Resolve paper proof blocker before retrying.")
+        elif proof.classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE:
+            verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
+            primary_blocker = _proof_blocker(proof.report)
+            required_next_action = _proof_required_action(
+                proof.report,
+                "Verify broker activity and rerun read-only recovery before any further PAPER submit.",
+            )
         else:
             verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED
             primary_blocker = _proof_blocker(proof.report)
@@ -640,7 +648,12 @@ def _final_position_status(proof_payload: Mapping[str, object]) -> str | None:
 def _final_flat(proof_payload: Mapping[str, object], proof: PaperProofResult | None) -> bool | None:
     if proof is None:
         return None
-    return proof.classification == TerminalClassification.PASSED and proof_payload.get("proof_lifecycle_status") == "PROOF_COMPLETE_FLAT"
+    if proof.classification == TerminalClassification.PASSED and proof_payload.get("proof_lifecycle_status") == "PROOF_COMPLETE_FLAT":
+        return True
+    return (
+        proof.classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
+        and proof_payload.get("proof_lifecycle_status") == "PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE"
+    )
 
 
 def _secondary_blockers(*reports: Mapping[str, object]) -> list[str]:

@@ -197,7 +197,10 @@ def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[Operator
             str(track_b_strategy_paper_runner.get("primary_blocker") or f"Strategy PAPER runner is blocked: {paper_runner_verdict}"),
             str(track_b_strategy_paper_runner.get("required_next_action") or "Resolve strategy PAPER runner blocker before retrying."),
         )
-    if paper_runner_verdict == "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED":
+    if paper_runner_verdict in {
+        "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED",
+        "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE",
+    }:
         return (
             OperatorStatusVerdict.BLOCKED_READINESS,
             str(track_b_strategy_paper_runner.get("primary_blocker") or "Strategy PAPER proof is ambiguous and requires manual review."),
