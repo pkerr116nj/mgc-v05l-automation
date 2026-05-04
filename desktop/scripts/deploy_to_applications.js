@@ -7,9 +7,18 @@ const repoRoot = path.resolve(desktopRoot, "..");
 const releaseRoot = path.join(desktopRoot, "release", "local");
 const localAppLink = path.join(releaseRoot, "MGC Operator.app");
 const applicationsApp = "/Applications/MGC Operator.app";
-const args = new Set(process.argv.slice(2));
+const rawArgs = process.argv.slice(2);
+const args = new Set(rawArgs);
 const approved = args.has("--yes");
 const skipBuild = args.has("--skip-build");
+
+function optionValue(name) {
+  const prefix = `${name}=`;
+  const found = rawArgs.find((arg) => arg.startsWith(prefix));
+  return found ? found.slice(prefix.length) : null;
+}
+
+const targetApp = optionValue("--target-app") || applicationsApp;
 
 function run(command, commandArgs, options = {}) {
   const result = spawnSync(command, commandArgs, {
@@ -31,7 +40,7 @@ function resolveBundlePath(bundlePath) {
 }
 
 if (!approved) {
-  console.error("Refusing to replace /Applications/MGC Operator.app without explicit --yes.");
+  console.error(`Refusing to replace ${targetApp} without explicit --yes.`);
   console.error("Run: npm run deploy:applications -- --yes");
   process.exit(2);
 }
@@ -56,10 +65,11 @@ try {
   process.exit(1);
 }
 
-fs.rmSync(applicationsApp, { recursive: true, force: true });
-fs.cpSync(sourceApp, applicationsApp, { recursive: true, dereference: true });
+fs.rmSync(targetApp, { recursive: true, force: true });
+run("ditto", [sourceApp, targetApp], { cwd: desktopRoot });
+run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", targetApp], { cwd: desktopRoot });
 
-console.log(`Copied ${sourceApp} -> ${applicationsApp}`);
+console.log(`Copied ${sourceApp} -> ${targetApp}`);
 console.log(`Build commit: ${metadata.git_commit || "UNKNOWN"}`);
 console.log(`Build timestamp: ${metadata.build_generated_at || metadata.build_timestamp || "UNKNOWN"}`);
 console.log("No broker, TWS, IBKR, Databento, or submit paths are invoked by this packaging script.");
