@@ -135,6 +135,23 @@ Resolved issue status:
 - The attempt-2 MGC position callback correlation failure is resolved by `2f57118dd2`, which accepts legitimate exact MGC callback forms and captures callback errors as artifacts.
 - The final validation run above proves the Track B PAPER proof lifecycle can now open, verify, close, and end flat under the current guarded path.
 
+Phase 2 strategy-paper validation race:
+
+- Run artifact:
+  `outputs/track_b_execution_core/paper_proof/paper_proof_9eec720a567843748cc4988b14b29748/paper_proof_report.json`
+- Strategy runner artifact:
+  `outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json`
+- The strategy rule emitted a LONG signal and readiness was green with `READY_FOR_PAPER_PROOF`.
+- The strategy paper runner invoked the Track B paper-proof lifecycle with explicit PAPER submit flags and manual open/close limit prices.
+- Track B submitted the open PAPER `BUY 1` MGC limit order.
+- The proof lifecycle observed `openOrder` / `orderStatus` for the BUY, but did not receive `execDetails` within the callback wait window.
+- During the post-open callback-gap guard, broker position truth showed `0` while the same BUY order still appeared working as `Submitted` with remaining quantity `1.0`.
+- The proof report contains no Track B-owned close provenance: `close_intent=null`, `close_submit_attempt=null`, and `close_fill=null`.
+- TWS ended flat, but the flat state was not proven by a complete Track B open/close/final-flat chain.
+- Correct outcome: review-required, not passed. Current code classifies this pattern as `TRACK_B_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE` when broker truth is flat without working orders, and remains `AMBIGUOUS_MANUAL_REVIEW_REQUIRED` / `BLOCKED_WORKING_ORDER_EXISTS` when a same-contract order still appears working.
+
+This race is an expected fail-closed broker-state pattern, not a reason to loosen the close guard. If position truth, order truth, and fill callbacks disagree, Track B must preserve the contradiction in artifacts and refuse another automated broker mutation.
+
 ### Readiness Before Any Future Proof
 
 Run the no-submit readiness check runner first, or run its component checks manually:
@@ -209,6 +226,8 @@ A clean post-proof or post-cleanup state requires:
   Inspect `close_only_guard_reports`; expected blocker is `BLOCKED_WORKING_ORDER_EXISTS`.
 - Flat before Track B close provenance:
   Inspect `close_only_guard_reports`; expected classification is `TRACK_B_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE`. Verify broker activity and rerun read-only recovery before any further PAPER submit. Do not relabel this as `TRACK_B_PAPER_PROOF_PASSED` unless Track B artifacts include the complete open/close/final-flat proof chain.
+- Contradictory broker truth after open callback gap:
+  Inspect `open_submit_diagnostics`, `close_only_guard_reports`, and proof payload close fields. The pattern is `execDetails_seen=false`, broker position flat or unexpected, same-contract open order still appearing working, and no `close_intent` / `close_submit_attempt` / `close_fill`. Correct response is manual review: verify TWS position, flatten manually if needed, run `recovery_status_cli`, and proceed only after `RECOVERY_READY_CLEAN`.
 - Final not flat after close:
   Inspect `flat_after_close_guard_reports`; do not send another close order automatically.
 - IBKR callback contract-correlation errors:
