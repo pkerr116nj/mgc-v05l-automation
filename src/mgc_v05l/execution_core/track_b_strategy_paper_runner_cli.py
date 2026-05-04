@@ -232,6 +232,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "feature_event_path": result.report["feature_event_path"],
                 "strategy_rule_verdict": result.report["strategy_rule_verdict"],
                 "strategy_rule_evaluated": result.report["strategy_rule_evaluated"],
+                "asian_drift_watch_verdict": result.report["asian_drift_watch_verdict"],
+                "asian_drift_state_snapshot_path": result.report["asian_drift_state_snapshot_path"],
+                "asian_drift_state_ready": result.report["asian_drift_state_ready"],
                 "signal_source": result.report["signal_source"],
                 "real_strategy_signal": result.report["real_strategy_signal"],
                 "rule_decision": result.report["rule_decision"],
@@ -258,6 +261,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result.verdict in {
         TrackBStrategyPaperRunnerVerdict.NO_SIGNAL,
         TrackBStrategyPaperRunnerVerdict.HUMAN_REVIEW_NO_SIGNAL,
+        TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION,
+        TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT,
         TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED,
         TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED,
     }:

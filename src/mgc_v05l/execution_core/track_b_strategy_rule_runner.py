@@ -713,7 +713,7 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
     if rule_mode == TrackBStrategyRuleMode.HUMAN_REVIEW_ONLY:
         return "HUMAN_REVIEW_ONLY"
     if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
-        return "ASIAN_DRIFT_REAL_RULE"
+        return "ASIAN_DRIFT_V1"
     return "REAL_STRATEGY_RULE"
 
 

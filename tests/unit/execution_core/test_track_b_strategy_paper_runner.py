@@ -342,6 +342,57 @@ def demo_strategy_result(tmp_path: Path, *, emitted: bool = True) -> TrackBStrat
     return result
 
 
+def asian_drift_state_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "instrument_family": "MGC",
+        "strategy_id": "asian_drift_v1",
+        "lane_id": "mgc_example_long_lmt_day",
+        "timeframe": "5m",
+        "candle_timestamp": aware_now().isoformat(),
+        "observed_at": aware_now().isoformat(),
+        "close": "4575.3",
+        "quote_provider_mode": "REALTIME",
+        "realtime_quote_received": True,
+        "current_quote_available": True,
+        "asia_drift_state": "NO_TRADE",
+        "asia_drift_regime": "NO_TRADE",
+        "entry_window_open": True,
+        "in_scope": True,
+        "session_timeout": False,
+        "hypothetical_entry_ready": False,
+        "feature_version": "asia_drift_v1_phase1",
+        "calibration_profile": "recovery_confirmed",
+        "asian_drift_state_ready": True,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def asian_strategy_result(
+    tmp_path: Path,
+    *,
+    decision: str = "NO_SIGNAL",
+    emitted: bool = False,
+    signal_direction: str | None = None,
+) -> TrackBStrategyRuleRunnerResult:
+    result = strategy_result(tmp_path, decision=decision, emitted=emitted)
+    result.report["signal_source"] = "ASIAN_DRIFT_V1"
+    result.report["real_strategy_signal"] = True
+    result.report["rule_mode"] = "ASIAN_DRIFT_V1"
+    result.report["rule_name"] = "asian_drift_v1_state_snapshot"
+    result.report["signal_direction"] = signal_direction or ("LONG" if emitted else None)
+    result.report["asian_drift_watch_verdict"] = (
+        "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT" if emitted else "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
+    )
+    result.report_json.write_text(json.dumps(result.report), encoding="utf-8")
+    return result
+
+
 def readiness_result(tmp_path: Path, *, ready: bool = True) -> TrackBReadinessCheckRunnerResult:
     report_json = tmp_path / "readiness_report.json"
     verdict = (
@@ -1291,6 +1342,235 @@ def test_demo_wiring_signal_stays_no_submit_without_explicit_flags(tmp_path: Pat
     assert calls.proof == 0
     assert result.report["paper_proof_invoked"] is False
     assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_asian_drift_missing_state_reports_not_ready_and_no_mutation(tmp_path: Path) -> None:
+    calls = Calls()
+    blocked_strategy = strategy_result(
+        tmp_path,
+        verdict="TRACK_B_STRATEGY_RULE_RUNNER_BLOCKED_INVALID_INPUT",
+        decision="NO_SIGNAL",
+        emitted=False,
+    )
+    blocked_strategy.report["primary_blocker"] = "Asian Drift v1 requires explicit research state/feature snapshot fields."
+    blocked_strategy.report["asian_drift_watch_verdict"] = "ASIAN_DRIFT_NOT_READY_FOR_TONIGHT"
+    blocked_strategy.report_json.write_text(json.dumps(blocked_strategy.report), encoding="utf-8")
+
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload={"account_id": "DUM882026", "contract_key": "MGC-202606", "close": "4575.3"},
+            rule_id="asian_drift_v1",
+            rule_mode="ASIAN_DRIFT_V1",
+            emit_signal=True,
+        ),
+        stages=stages(calls=calls, strategy=blocked_strategy),
+        runner_id="paper-asian-drift-not-ready",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NOT_READY_FOR_TONIGHT
+    assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_NOT_READY_FOR_TONIGHT"
+    assert result.report["asian_drift_state_ready"] is False
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_asian_drift_valid_no_signal_state_reports_no_mutation(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=asian_drift_state_payload(),
+            rule_id="asian_drift_v1",
+            rule_mode="ASIAN_DRIFT_V1",
+            emit_signal=True,
+            strategy_id="asian_drift_v1",
+        ),
+        stages=stages(calls=calls, strategy=asian_strategy_result(tmp_path, decision="NO_SIGNAL", emitted=False)),
+        runner_id="paper-asian-drift-no-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION
+    assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
+    assert result.report["asian_drift_state_ready"] is True
+    assert result.report["rule_decision"] == "NO_SIGNAL"
+    assert result.report["signal_emitted"] is False
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_asian_drift_signal_without_paper_flags_reports_signal_ready_no_submit(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=asian_drift_state_payload(
+                asia_drift_state="ENTRY_ARMED",
+                asia_drift_regime="ASIA_DRIFT_LONG",
+                direction="LONG",
+                hypothetical_entry_ready=True,
+            ),
+            rule_id="asian_drift_v1",
+            rule_mode="ASIAN_DRIFT_V1",
+            emit_signal=True,
+            strategy_id="asian_drift_v1",
+        ),
+        stages=stages(calls=calls, strategy=asian_strategy_result(tmp_path, decision="LONG", emitted=True)),
+        runner_id="paper-asian-drift-signal-no-submit",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT
+    assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["signal_source"] == "ASIAN_DRIFT_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["signal_emitted"] is True
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_asian_drift_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=asian_drift_state_payload(
+                asia_drift_state="ENTRY_ARMED",
+                asia_drift_regime="ASIA_DRIFT_LONG",
+                direction="LONG",
+                hypothetical_entry_ready=True,
+            ),
+            rule_id="asian_drift_v1",
+            rule_mode="ASIAN_DRIFT_V1",
+            emit_signal=True,
+            strategy_id="asian_drift_v1",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=asian_strategy_result(tmp_path, decision="LONG", emitted=True),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-asian-drift-proof-passed",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["signal_source"] == "ASIAN_DRIFT_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert calls.readiness == 1
+    assert calls.proof == 1
+    assert result.report["readiness_invoked"] is True
+    assert result.report["paper_proof_invoked"] is True
+    assert result.report["submit_attempted"] is True
+    assert result.report["broker_state_mutated"] is True
+    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert result.report["paper_proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
+    assert result.report["final_flat"] is True
+    assert result.report["final_position_status"] == "CLEAN"
+    assert result.report["live_money_readiness"] is False
+
+
+def test_demo_wiring_signal_cannot_drive_asian_drift_paper_path(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=asian_drift_state_payload(
+                asia_drift_state="ENTRY_ARMED",
+                asia_drift_regime="ASIA_DRIFT_LONG",
+                direction="LONG",
+                hypothetical_entry_ready=True,
+            ),
+            rule_id="asian_drift_v1",
+            rule_mode="ASIAN_DRIFT_V1",
+            emit_signal=True,
+            strategy_id="asian_drift_v1",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=demo_strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-asian-drift-reject-demo",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NOT_READY_FOR_TONIGHT
+    assert result.report["signal_source"] == "DEMO_WIRING_PROOF"
+    assert result.report["real_strategy_signal"] is False
+    assert "DEMO/proof signals cannot drive this path" in result.report["required_next_action"]
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_asian_drift_short_signal_requires_sell_side_for_paper_submit(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=asian_drift_state_payload(
+                asia_drift_state="ENTRY_ARMED",
+                asia_drift_regime="ASIA_DRIFT_SHORT",
+                direction="SHORT",
+                hypothetical_entry_ready=True,
+            ),
+            rule_id="asian_drift_v1",
+            rule_mode="ASIAN_DRIFT_V1",
+            emit_signal=True,
+            strategy_id="asian_drift_v1",
+            side="BUY",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=asian_strategy_result(tmp_path, decision="SHORT", emitted=True, signal_direction="SHORT"),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-asian-drift-short-side-mismatch",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST
+    assert "requires --side SELL" in str(result.report["primary_blocker"])
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
     assert result.report["live_money_readiness"] is False
 
 

@@ -666,8 +666,19 @@ Minimum explicit semantics required for `real_strategy_signal=true`:
 Run no-submit watch/evaluation:
 
 ```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_state_cli \
+  --state-json <EXPLICIT_ASIAN_DRIFT_5M_STATE_JSON> \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --instrument-family MGC \
+  --source-id asian_drift_track_b_watch \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --output-root outputs/track_b_execution_core/asian_drift_state
+
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
-  --input-event-json <ASIAN_DRIFT_STATE_SNAPSHOT_JSON> \
+  --input-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --source-id asian_drift_track_b_watch \
@@ -688,6 +699,39 @@ The rule report includes `asian_drift_watch_verdict`:
 This path intentionally refuses to infer Asian Drift fields from raw candles.
 If tonight's live process cannot provide the explicit state snapshot, the
 correct outcome is `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`, not a fake signal.
+
+If the snapshot produces a real `ASIAN_DRIFT_V1` signal and one bounded PAPER
+execution is explicitly authorized, route it through the strategy paper runner:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
+  --mode PAPER \
+  --input-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --rule-id asian_drift_v1 \
+  --rule-mode ASIAN_DRIFT_V1 \
+  --emit-signal \
+  --side BUY \
+  --submit-paper \
+  --confirm-paper-submit \
+  --quantity 1 \
+  --manual-open-limit-price <SAFE_PAPER_OPEN_LIMIT> \
+  --manual-close-limit-price <SAFE_PAPER_CLOSE_LIMIT> \
+  --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
+```
+
+The runner refuses `DEMO_LONG_ONLY`/`DEMO_WIRING_PROOF` for this path and
+requires the paper order side to match the explicit Asian Drift signal
+direction: `LONG -> BUY`, `SHORT -> SELL`. Passing paper proof still requires
+Track B-owned open/close/final-flat provenance; flat without close provenance
+or contradictory broker truth remains review-required.
 
 Maintained weekly history is historical context. It may be many hours or days
 old and still be valid if `complete_through_cutoff=true`. The runner reports

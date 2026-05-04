@@ -282,6 +282,12 @@ Dashboard implication:
   produce `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`; no-submit non-setups produce
   `ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION`; explicit entry-ready snapshots produce
   `ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT`.
+- `track_b_asian_drift_state` is the explicit 5m state snapshot boundary for
+  the Asian Drift watch path. It validates and writes
+  `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json`
+  plus `latest_asian_drift_state_builder_report.json`. It is intentionally a
+  state snapshot writer, not a state machine: Track B does not infer Asian
+  Drift from raw candles in this slice.
 - `track_b_strategy_paper_runner` is the controlled Phase 2 PAPER handoff. It
   can now compose `track_b_data_maintenance` latest-good history with a
   separate realtime current quote report, then run `track_b_market_history ->
@@ -301,6 +307,10 @@ Dashboard implication:
   `outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json`
   with maintained-history, market-history collector, feature builder, rule,
   readiness, paper proof, and final broker-state classification.
+  For `ASIAN_DRIFT_V1`, it only accepts real Asian Drift state signals
+  (`signal_source=ASIAN_DRIFT_V1`, `real_strategy_signal=true`); demo/proof
+  signals are rejected, and the requested PAPER side must match the explicit
+  signal direction (`LONG -> BUY`, `SHORT -> SELL`).
 - `track_b_real_rule_wait_runner` is the bounded real-rule polling wrapper for
   eventual MGC PAPER signals. It repeatedly refreshes or reads bounded runtime
   candle context, delegates one cycle to `track_b_strategy_paper_runner` using

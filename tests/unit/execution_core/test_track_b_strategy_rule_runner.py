@@ -296,7 +296,7 @@ def test_asian_drift_v1_no_signal_on_non_setup_snapshot(tmp_path: Path) -> None:
 
     assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
     assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
-    assert result.report["signal_source"] == "ASIAN_DRIFT_REAL_RULE"
+    assert result.report["signal_source"] == "ASIAN_DRIFT_V1"
     assert result.report["real_strategy_signal"] is True
     assert result.report["decision"] == "NO_SIGNAL"
     assert result.report["signal_emitted"] is False

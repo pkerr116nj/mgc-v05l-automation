@@ -849,8 +849,19 @@ semantics. The minimum snapshot fields are:
 No-submit watch/evaluation:
 
 ```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_state_cli \
+  --state-json <EXPLICIT_ASIAN_DRIFT_5M_STATE_JSON> \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --instrument-family MGC \
+  --source-id asian_drift_track_b_watch \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --output-root outputs/track_b_execution_core/asian_drift_state
+
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
-  --input-event-json <ASIAN_DRIFT_STATE_SNAPSHOT_JSON> \
+  --input-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --source-id asian_drift_track_b_watch \
@@ -874,6 +885,38 @@ This watch mode reports `readiness_invoked=false`,
 `broker_state_mutated=false`, and `live_money_readiness=false`. PAPER proof
 remains a separate explicit Track B paper-runner decision and must not be
 triggered by UI controls or hidden submit logic.
+
+If the no-submit rule report shows an actual `ASIAN_DRIFT_V1` signal and the
+operator intentionally wants one bounded PAPER lifecycle, use the strategy
+paper runner. This is still not UI authority and not live money:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
+  --mode PAPER \
+  --input-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --rule-id asian_drift_v1 \
+  --rule-mode ASIAN_DRIFT_V1 \
+  --emit-signal \
+  --side BUY \
+  --submit-paper \
+  --confirm-paper-submit \
+  --quantity 1 \
+  --manual-open-limit-price <SAFE_PAPER_OPEN_LIMIT> \
+  --manual-close-limit-price <SAFE_PAPER_CLOSE_LIMIT> \
+  --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
+```
+
+Use `--side SELL` only for an explicit `SHORT` Asian Drift state signal. A
+side/signal mismatch blocks before readiness or paper proof. `DEMO_LONG_ONLY`
+and `DEMO_WIRING_PROOF` cannot drive the Asian Drift PAPER path.
 
 Translate an explicit candle/event input into listener inbox work:
 
