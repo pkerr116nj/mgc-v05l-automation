@@ -109,6 +109,25 @@ Current code now addresses these specific live-validation findings:
 - MGC contract callback correlation: IBKR callbacks may match exact `conId`, exact `localSymbol`, or exact futures symbol/security type/currency/contract-month/multiplier when noncritical fields are missing.
 - Callback error capture: IBKR reader callback exceptions are captured in `callback_errors` / `broker_callback_errors` instead of crashing without an artifact.
 
+Final validation:
+
+- Run artifact:
+  `outputs/track_b_execution_core/paper_proof/proof_runs/paper_proof_222fcd070b9d453c9bb9d0061b975889/proof_report.json`
+- Readiness was green with a realtime Databento quote before the proof command.
+- `paper_proof_cli` used TWS PAPER client id `17086`.
+- The open PAPER `BUY 1` MGC limit order filled with execution id `0000e1a7.69f8fef6.01.01`.
+- The guarded close-only PAPER `SELL 1` MGC limit order filled with execution id `0000e1a7.69f8fef8.01.01`.
+- The final broker position callback matched the allowlisted `MGC-202606` / `MGCM6` contract, including `conId=712565978`, `lastTradeDateOrContractMonth=20260626`, `multiplier=10`, and `tradingClass=MGC`.
+- `flat_after_close_guard_reports` recorded `flat_clean=true`, `observed_signed_quantity=0`, no working orders, `submit_allowed=false`, and `live_money_readiness=false`.
+- Final TWS state was flat.
+- Classification was `TRACK_B_PAPER_PROOF_PASSED` with `proof_lifecycle_status=PROOF_COMPLETE_FLAT`.
+
+Resolved issue status:
+
+- The attempt-1 callback gap is resolved by `31b81b3be1`, which added broker-truth reconciliation and guarded close-only lifecycle handling.
+- The attempt-2 MGC position callback correlation failure is resolved by `2f57118dd2`, which accepts legitimate exact MGC callback forms and captures callback errors as artifacts.
+- The final validation run above proves the Track B PAPER proof lifecycle can now open, verify, close, and end flat under the current guarded path.
+
 ### Readiness Before Any Future Proof
 
 Run the no-submit readiness check runner first, or run its component checks manually:
