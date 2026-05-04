@@ -267,6 +267,7 @@ Current Phase 2 chain:
 
 ```text
 Databento realtime quote/event
+-> track_b_mgc_candle_history_producer
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
@@ -292,10 +293,15 @@ metadata. It emits LONG only when:
 - `--rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG --emit-signal` is explicitly
   supplied.
 
+`track_b_mgc_candle_history_producer` is the upstream producer for the bounded
+1m MGC history JSON. It can normalize supplied OHLCV history or make an
+explicit bounded Databento `ohlcv-1m` request, but it requires a separate
+realtime current quote report before producing strategy-history input. This
+keeps historical bar provenance separate from current quote evidence and
+prevents a single snapshot candle from being treated as EMA/VWAP history.
+
 `track_b_market_history` is the bounded MGC history collector upstream of the
-feature builder. The current Databento observer event may contain only one
-snapshot candle, which is not enough to compute EMA/VWAP momentum fields. The
-collector normalizes explicit realtime/history input into a
+feature builder. The collector normalizes the produced history input into a
 `latest_track_b_market_history_event.json` artifact with `candles` /
 `candle_history`, provider metadata, and current quote evidence. If history is
 insufficient or evidence is non-realtime/stale, it blocks instead of faking
@@ -341,6 +347,7 @@ The first controlled handoff boundary is `track_b_strategy_paper_runner`:
 
 ```text
 Databento realtime/current evidence
+-> track_b_mgc_candle_history_producer
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner

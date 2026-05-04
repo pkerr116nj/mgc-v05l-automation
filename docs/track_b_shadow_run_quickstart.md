@@ -365,6 +365,7 @@ signal batch only when rule emission is explicit:
 
 ```text
 Databento realtime quote/event
+-> track_b_mgc_candle_history_producer
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
@@ -375,12 +376,68 @@ Databento realtime quote/event
 ```
 
 The realtime observer's latest candle event is only a single snapshot. The
-EMA/VWAP rule needs bounded history, so first normalize a supplied MGC
-realtime/history payload into an explicit market-history event:
+EMA/VWAP rule needs bounded history, so first produce an explicit MGC candle
+history input. The producer can normalize a supplied OHLCV history fixture, or
+make a bounded Databento `ohlcv-1m` request, but it also requires a realtime
+current quote report. Historical bars and realtime quote evidence stay
+separately labeled; no single snapshot is expanded into fake history.
+
+Fixture/supplied-history path:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_mgc_candle_history_producer_cli \
+  --history-json <MGC_OHLCV_HISTORY_JSON> \
+  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --timeframe 1m \
+  --max-candles 50 \
+  --min-candles 3 \
+  --output-root outputs/track_b_execution_core/track_b_mgc_candle_history_producer
+```
+
+Bounded Databento history request path:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_mgc_candle_history_producer_cli \
+  --fetch-databento-history \
+  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --schema ohlcv-1m \
+  --allowlisted-local-symbol MGCM6 \
+  --timeframe 1m \
+  --lookback-minutes 60 \
+  --max-candles 50 \
+  --min-candles 3 \
+  --output-root outputs/track_b_execution_core/track_b_mgc_candle_history_producer
+```
+
+Stable producer artifacts:
+
+```text
+outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json
+outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_producer_report.json
+```
+
+Then normalize that input into the market-history event consumed by the feature
+builder:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_market_history_cli \
-  --market-history-json <MGC_REALTIME_CANDLE_HISTORY_JSON> \
+  --market-history-json outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json \
   --expected-account-id DUM882026 \
   --contract-key MGC-202606 \
   --databento-continuous-symbol MGC.v.0 \
@@ -403,8 +460,8 @@ outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_hist
 
 The collector is market-data evidence only. It does not connect to broker
 paths, infer execution authority, invoke the listener, run paper proof, or
-submit. If only one candle is present, or if the evidence is historical/stale
-rather than explicitly realtime/current, it blocks with
+submit. If only one candle is present, or if realtime current quote evidence is
+missing/stale, it blocks with
 `TRACK_B_MARKET_HISTORY_BLOCKED_INSUFFICIENT_HISTORY` or
 `TRACK_B_MARKET_HISTORY_BLOCKED_NON_REALTIME_INPUT`.
 
@@ -512,6 +569,7 @@ The controlled strategy PAPER runner wires:
 
 ```text
 Databento realtime/current evidence
+-> track_b_mgc_candle_history_producer
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner

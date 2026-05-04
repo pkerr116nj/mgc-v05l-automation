@@ -11,6 +11,7 @@ The current Track B no-submit chain is:
 ```text
 Databento market-data observer, optionally
 -> candle/event JSON
+-> track_b_mgc_candle_history_producer, optionally
 -> track_b_market_history, optionally
 -> track_b_feature_builder, optionally
 -> track_b_strategy_rule_runner, optionally
@@ -159,6 +160,21 @@ Dashboard implication:
   flows, create order plans, or submit. It updates
   `outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json`
   as a read-model convenience.
+- `track_b_mgc_candle_history_producer` is the bounded upstream producer for
+  the MGC 1m history JSON consumed by `track_b_market_history`. It can
+  normalize a supplied Databento-like OHLCV history artifact, or make an
+  explicit bounded Databento `ohlcv-1m` historical request, but it also
+  requires a separate realtime current quote report before writing strategy
+  history input. The output labels history provenance separately from current
+  quote evidence: bounded historical candles are
+  `DATABENTO_HISTORICAL_BOUNDED_WITH_REALTIME_CURRENT`, while
+  `quote_provider_mode=REALTIME`, `realtime_quote_received=true`, and
+  `current_quote_available=true` come from the quote report. This prevents a
+  single snapshot candle or stale historical `available_end` data from
+  masquerading as realtime strategy history. It updates
+  `outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json`
+  and
+  `outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_producer_report.json`.
 - `track_b_market_history` is the bounded MGC market-history collector
   upstream of Phase 2 feature building. It normalizes explicit realtime
   quote/candle history into a Track B event with a `candles` /
