@@ -199,6 +199,11 @@ The UI must not:
 The UI is an observer/control surface over Track B artifacts. It is not source
 of truth and not hidden submit authority.
 
+Track B Phase 2 allows PAPER execution through explicit Track B-controlled
+paths, but the UI does not gain submit authority from that stance. A status
+verdict such as ready-for-paper-proof review may be displayed, but it is not a
+button press, hidden submit, or live-money permission.
+
 ## Future Controls
 
 If the UI later adds buttons, each control must:

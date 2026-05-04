@@ -2,6 +2,12 @@
 
 This runbook is the final mechanical checklist before running a Track B paper proof. It does not replace `paper_proof_cli` gates. It exists so the operator can see one clear readiness verdict and one clear next action before any broker submit is attempted.
 
+Track B Phase 1 has passed the full PAPER open/guarded-close/flat lifecycle.
+Phase 2 may execute PAPER trades through Track B-controlled paths when explicit
+operator/config flags request that handoff and every readiness/submit gate
+passes. Default strategy, listener, replay, operator-status, and UI flows remain
+no-submit. Live-money execution is not implemented.
+
 ## Broker-State Stop Condition
 
 Do not run `paper_proof_cli` for `DUM882026` / `MGC-202606` while any same-account/same-contract broker order remains working, ambiguous, or `PendingCancel`.
@@ -232,8 +238,8 @@ IBKR broker truth remains authority for account, contract qualification, positio
 After the successful Track B Phase 1 paper-proof lifecycle, Phase 2 begins with
 a no-submit strategy-rule runner. This runner evaluates realtime Databento
 quote/candle evidence and may write a Track B signal batch for shadow/listener
-review. It is deliberately separate from paper proof readiness and does not
-call `paper_proof_cli`.
+review. Its default mode is deliberately separate from paper proof readiness
+and does not call `paper_proof_cli`.
 
 Current Phase 2 chain:
 
@@ -258,5 +264,21 @@ rule. It emits LONG only when:
 Without `--emit-signal`, the runner writes HUMAN_REVIEW / NO_SIGNAL artifacts
 and no listener inbox work. Historical/fallback Databento evidence remains
 diagnostic only and cannot become a strategy signal without an explicit fixture
-demo flag. A strategy signal remains evidence/proposal input only; readiness
-and any future paper proof remain separate operator decisions.
+demo flag. A strategy signal remains evidence/proposal input only by default.
+
+Phase 2 may add an explicit handoff from a strategy rule to readiness and
+`paper_proof_cli`, but that handoff must be opt-in and artifact-driven:
+
+- explicit PAPER mode/account/contract/lane context;
+- explicit strategy-runner handoff flag/config;
+- clean read-only recovery and preflight;
+- realtime current quote evidence accepted by readiness;
+- explicit paper submit confirmation flags owned by the Track B submit path;
+- durable artifacts for strategy decision, readiness, submit diagnostics,
+  lifecycle state, fills or blockers, guarded close/flatten state, and final
+  broker-state classification.
+
+The UI must not initiate hidden submits or infer authority from a healthy
+strategy/listener/operator-status report. Any future UI control must call an
+explicit Track B API/CLI and display the resulting report. Live-money readiness
+remains false unless a future live-readiness phase explicitly changes it.

@@ -44,6 +44,30 @@ no-submit. Paper submit requires paper-specific recovery, preflight, timing,
 pricing, explicit submit flags, and operator confirmation. Live submit is not
 implemented and will require future live-specific gates.
 
+## Phase 2 Paper Execution Stance
+
+Track B Phase 1 proved the PAPER open/guarded-close/flat lifecycle. Phase 2 may
+therefore execute PAPER trades when, and only when, a Track B-controlled submit
+path is explicitly configured. Default strategy, listener, replay, operator
+status, and UI flows remain no-submit.
+
+The current stance is:
+
+- PAPER execution is allowed through Track B-controlled paths after explicit
+  readiness and submit gates pass.
+- Strategy-rule runners may hand off to readiness and paper proof only when
+  explicit operator/config flags request that handoff.
+- No strategy rule, listener, observation runner, operator status report, or UI
+  state may create hidden submit authority.
+- No live-money execution is implemented or implied.
+- UI/dashboard surfaces remain read models and controls over explicit Track B
+  APIs only; they are not execution authority.
+- Every PAPER execution must write durable artifacts, including submit
+  diagnostics, lifecycle state, fills/ambiguity blockers, close/flatten
+  outcome when applicable, and final broker-state classification.
+- Any missing, stale, or ambiguous broker/quote/readiness evidence must fail
+  closed rather than being interpreted as permission to submit.
+
 Lane lifecycle states:
 
 - `DISABLED`: no review and no submit.
@@ -139,7 +163,9 @@ Dashboard implication:
   input is proven realtime/current. Without the emit flag it writes HUMAN_REVIEW
   or NO_SIGNAL artifacts. It does not infer direction from candle shape, call
   paper proof, invoke the listener, create order plans, authorize lanes, or
-  submit. It delegates actual signal batch production to
+  submit in its default mode. A future explicit Phase 2 handoff may pass the
+  strategy signal into readiness and `paper_proof_cli` only through reviewed
+  Track B flags and artifacts. It delegates actual signal batch production to
   `strategy_signal_adapter -> candle_signal_producer -> signal_batch_writer` and
   updates
   `outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json`.

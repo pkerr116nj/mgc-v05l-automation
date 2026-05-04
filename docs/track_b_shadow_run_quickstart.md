@@ -420,6 +420,14 @@ test/demo. The latest runner read model is:
 outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json
 ```
 
+Phase 2 paper execution stance: because Track B paper proof has passed the
+full PAPER open/guarded-close/flat lifecycle, PAPER execution is now allowed
+only through explicit Track B-controlled submit paths. The strategy rule runner
+may hand off to readiness and paper proof in a later slice only when explicit
+flags/config request that handoff. This quickstart command remains no-submit by
+default and does not create hidden submit authority. Every future PAPER
+execution must write artifacts and a final broker-state classification.
+
 Translate an explicit candle/event input into listener inbox work:
 
 ```bash
