@@ -273,6 +273,15 @@ Dashboard implication:
   delegates actual signal batch production to `strategy_signal_adapter ->
   candle_signal_producer -> signal_batch_writer` and updates
   `outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json`.
+  The runner also has a narrow `ASIAN_DRIFT_V1` watch mode for tonight's Asia
+  Drift observation. That mode does not import Track A/research code or compute
+  Asia Drift from raw candles. It requires an explicit Asia Drift state/feature
+  snapshot with completed 5m decision-bar fields such as `asia_drift_state`,
+  `asia_drift_regime`, `hypothetical_entry_ready`, `entry_window_open`,
+  `in_scope`, `feature_version`, and `calibration_profile`. Missing fields
+  produce `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`; no-submit non-setups produce
+  `ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION`; explicit entry-ready snapshots produce
+  `ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT`.
 - `track_b_strategy_paper_runner` is the controlled Phase 2 PAPER handoff. It
   can now compose `track_b_data_maintenance` latest-good history with a
   separate realtime current quote report, then run `track_b_market_history ->

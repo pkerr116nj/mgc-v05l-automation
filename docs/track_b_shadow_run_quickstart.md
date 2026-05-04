@@ -827,6 +827,54 @@ mistaken for `mgc_ema_momentum_reclaim_long_v1`. The wait report stays bounded:
 it writes the final run report and latest pointer under
 `outputs/track_b_execution_core/track_b_real_rule_wait_runner/`.
 
+### Asian Drift tonight watch path
+
+Track B can watch Asian Drift tonight only from an explicit Asia Drift
+state/feature snapshot. It does not compute the Asia Drift state machine from
+raw runtime candles in this slice, and it does not guess missing rule
+semantics. The minimum snapshot fields are:
+
+- `strategy_id=asian_drift_v1`
+- `contract_key=MGC-202606`, `instrument_family=MGC`
+- `timeframe=5m`
+- `asia_drift_state`
+- `asia_drift_regime`
+- `hypothetical_entry_ready`
+- `entry_window_open`
+- `in_scope`
+- `feature_version`
+- `calibration_profile`
+- realtime quote evidence fields or a current quote report path
+
+No-submit watch/evaluation:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
+  --input-event-json <ASIAN_DRIFT_STATE_SNAPSHOT_JSON> \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id asian_drift_track_b_watch \
+  --rule-id asian_drift_v1 \
+  --rule-mode ASIAN_DRIFT_V1 \
+  --emit-signal \
+  --output-root outputs/track_b_execution_core/track_b_strategy_rule_runner
+```
+
+Valid no-submit outcomes:
+
+- `ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION`: explicit snapshot is valid, but no entry
+  setup is armed.
+- `ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT`: explicit snapshot is entry-ready and a
+  no-submit signal batch was written for listener observation.
+- `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`: required Asia Drift fields or realtime
+  evidence are missing.
+
+This watch mode reports `readiness_invoked=false`,
+`paper_proof_invoked=false`, `submit_attempted=false`,
+`broker_state_mutated=false`, and `live_money_readiness=false`. PAPER proof
+remains a separate explicit Track B paper-runner decision and must not be
+triggered by UI controls or hidden submit logic.
+
 Translate an explicit candle/event input into listener inbox work:
 
 ```bash

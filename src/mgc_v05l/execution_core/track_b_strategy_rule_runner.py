@@ -32,6 +32,7 @@ DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT = Path("outputs/track_b_executi
 MGC_CONTRACT_KEY = "MGC-202606"
 MGC_INSTRUMENT_FAMILY = "MGC"
 DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID = "mgc_ema_momentum_reclaim_long_v1"
+DEFAULT_ASIAN_DRIFT_RULE_ID = "asian_drift_v1"
 
 
 class TrackBStrategyRuleRunnerVerdict(str, Enum):
@@ -47,6 +48,7 @@ class TrackBStrategyRuleRunnerVerdict(str, Enum):
 class TrackBStrategyRuleMode(str, Enum):
     DEMO_LONG_ONLY = "DEMO_LONG_ONLY"
     MGC_EMA_MOMENTUM_RECLAIM_LONG = "MGC_EMA_MOMENTUM_RECLAIM_LONG"
+    ASIAN_DRIFT_V1 = "ASIAN_DRIFT_V1"
     HUMAN_REVIEW_ONLY = "HUMAN_REVIEW_ONLY"
 
 
@@ -97,11 +99,12 @@ def run_track_b_strategy_rule(
     try:
         actual_rule_mode = _rule_mode(rule_mode)
         quote_evidence = _quote_evidence_from_event(input_event_payload)
-        validation_blocker = _validate_mgc_realtime_input(
+        validation_blocker = _validate_input(
             event=input_event_payload,
             quote_evidence=quote_evidence,
             expected_account_id=expected_account_id,
             allow_fixture_input=allow_fixture_input,
+            rule_mode=actual_rule_mode,
         )
         if validation_blocker:
             verdict = (
@@ -157,7 +160,7 @@ def run_track_b_strategy_rule(
             rule_id=rule_id,
             rule_mode=actual_rule_mode,
         )
-        if rule_decision["decision"] != TrackBStrategyRuleDecision.LONG:
+        if rule_decision["decision"] not in {TrackBStrategyRuleDecision.LONG, TrackBStrategyRuleDecision.SHORT}:
             return _write_report(
                 report_json=report_json,
                 verdict=TrackBStrategyRuleRunnerVerdict.NO_SIGNAL,
@@ -209,6 +212,7 @@ def run_track_b_strategy_rule(
             expected_account_id=expected_account_id,
             rule_id=rule_id,
             rule_mode=actual_rule_mode,
+            signal_direction=str(rule_decision["decision"].value),
         )
         adapter = adapt_demo_candle_direction_signal(
             strategy_event_payload=strategy_event,
@@ -234,10 +238,10 @@ def run_track_b_strategy_rule(
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
                 rule_evaluation=rule_decision,
-                decision=TrackBStrategyRuleDecision.LONG,
-                decision_reason=f"{actual_rule_mode.value} produced explicit LONG, but downstream adapter rejected the event.",
+                decision=rule_decision["decision"],
+                decision_reason=f"{actual_rule_mode.value} produced explicit {rule_decision['decision'].value}, but downstream adapter rejected the event.",
                 signal_emitted=False,
-                signal_direction="LONG",
+                signal_direction=str(rule_decision["decision"].value),
                 downstream_adapter=adapter,
                 primary_blocker=str(adapter.report.get("primary_blocker") or "Strategy signal adapter rejected rule output."),
                 required_next_action=str(adapter.report.get("required_next_action") or "Review strategy adapter report before retrying."),
@@ -254,10 +258,10 @@ def run_track_b_strategy_rule(
             input_event=input_event_payload,
             quote_evidence=quote_evidence,
             rule_evaluation=rule_decision,
-            decision=TrackBStrategyRuleDecision.LONG,
+            decision=rule_decision["decision"],
             decision_reason=str(rule_decision["decision_reason"]),
             signal_emitted=True,
-            signal_direction="LONG",
+            signal_direction=str(rule_decision["decision"].value),
             downstream_adapter=adapter,
             primary_blocker=None,
             required_next_action="Let shadow_listener process the no-submit strategy-rule signal batch; paper proof remains a separate explicit operator decision.",
@@ -315,12 +319,13 @@ def _quote_evidence_from_event(event: Mapping[str, Any]) -> dict[str, Any]:
     return evidence
 
 
-def _validate_mgc_realtime_input(
+def _validate_input(
     *,
     event: Mapping[str, Any],
     quote_evidence: Mapping[str, Any],
     expected_account_id: str | None,
     allow_fixture_input: bool,
+    rule_mode: TrackBStrategyRuleMode,
 ) -> str | None:
     account_id = _optional_text(event.get("account_id") or event.get("expected_account_id"))
     if expected_account_id and account_id and account_id != expected_account_id:
@@ -345,6 +350,28 @@ def _validate_mgc_realtime_input(
         return "Input realtime_quote_received is not true."
     if not current_available:
         return "Input current_quote_available is not true."
+    if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
+        return _validate_asian_drift_snapshot(event)
+    return None
+
+
+def _validate_asian_drift_snapshot(event: Mapping[str, Any]) -> str | None:
+    metadata = event.get("metadata") if isinstance(event.get("metadata") or {}, Mapping) else {}
+    required = {
+        "asia_drift_state": _first_text(event, metadata, "asia_drift_state", "state"),
+        "asia_drift_regime": _first_text(event, metadata, "asia_drift_regime", "regime"),
+        "entry_window_open": _first_bool(event, metadata, "entry_window_open"),
+        "in_scope": _first_bool(event, metadata, "in_scope"),
+        "hypothetical_entry_ready": _first_bool(event, metadata, "hypothetical_entry_ready"),
+        "timeframe": _optional_text(event.get("timeframe") or metadata.get("timeframe")),
+        "feature_version": _first_text(event, metadata, "feature_version"),
+        "calibration_profile": _first_text(event, metadata, "calibration_profile"),
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        return "Asian Drift v1 requires explicit research state/feature snapshot fields: " + ", ".join(missing)
+    if required["timeframe"] != "5m":
+        return "Asian Drift v1 Track B watch requires completed 5m decision-bar state."
     return None
 
 
@@ -367,7 +394,70 @@ def _evaluate_rule_decision(
         }
     if rule_mode == TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG:
         return _evaluate_mgc_ema_momentum_reclaim_long(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
+    if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
+        return _evaluate_asian_drift_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     raise ValueError(f"Unsupported rule mode: {rule_mode.value}")
+
+
+def _evaluate_asian_drift_v1(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+) -> dict[str, Any]:
+    metadata = event.get("metadata") if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = _first_text(event, metadata, "asia_drift_state", "state")
+    regime = _first_text(event, metadata, "asia_drift_regime", "regime")
+    direction = _asian_drift_direction(event, metadata, regime)
+    entry_ready = _first_bool(event, metadata, "hypothetical_entry_ready")
+    entry_window_open = _first_bool(event, metadata, "entry_window_open")
+    in_scope = _first_bool(event, metadata, "in_scope")
+    session_timeout = _first_bool(event, metadata, "session_timeout")
+    feature_version = _first_text(event, metadata, "feature_version")
+    calibration_profile = _first_text(event, metadata, "calibration_profile")
+    signal_states = {"ENTRY_ARMED", "REQUALIFIED_CANDIDATE"}
+    conditions = {
+        "state_is_entry_eligible": state in signal_states,
+        "direction_is_explicit": direction in {"LONG", "SHORT"},
+        "entry_ready": entry_ready is True,
+        "entry_window_open": entry_window_open is True,
+        "in_scope": in_scope is True,
+        "session_not_timeout": session_timeout is not True,
+        "feature_version_present": feature_version is not None,
+        "calibration_profile_present": calibration_profile is not None,
+    }
+    failed = [name for name, passed in conditions.items() if passed is False]
+    blockers = []
+    if direction not in {"LONG", "SHORT"}:
+        blockers.append("Asian Drift direction is not explicit LONG/SHORT.")
+    if failed:
+        decision_reason = "Asian Drift v1 conditions did not pass: " + ", ".join(failed)
+    else:
+        decision_reason = f"Asian Drift v1 explicit state snapshot is entry-ready for {direction}."
+    return {
+        "rule_name": "asian_drift_v1_state_snapshot",
+        "decision": TrackBStrategyRuleDecision(direction) if direction in {"LONG", "SHORT"} and not failed else TrackBStrategyRuleDecision.NO_SIGNAL,
+        "decision_reason": decision_reason,
+        "rule_inputs": {
+            "asia_drift_state": state,
+            "asia_drift_regime": regime,
+            "direction": direction,
+            "entry_window_open": entry_window_open,
+            "in_scope": in_scope,
+            "session_timeout": session_timeout,
+            "hypothetical_entry_ready": entry_ready,
+            "feature_version": feature_version,
+            "calibration_profile": calibration_profile,
+            "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
+        },
+        "rule_conditions": conditions,
+        "rule_blockers": blockers,
+        "research_lineage": (
+            "Based on docs/specs/ASIA_DRIFT_V1_RESEARCH_SPEC.md and the research/asia_drift "
+            "feature/state snapshot contract. Track B does not infer these fields from raw candles."
+        ),
+        "rule_id": rule_id,
+    }
 
 
 def _evaluate_mgc_ema_momentum_reclaim_long(
@@ -460,6 +550,7 @@ def _strategy_event_for_adapter(
     expected_account_id: str | None,
     rule_id: str,
     rule_mode: TrackBStrategyRuleMode,
+    signal_direction: str,
 ) -> dict[str, Any]:
     metadata = dict(event.get("metadata") or {}) if isinstance(event.get("metadata") or {}, Mapping) else {}
     metadata.update(
@@ -487,7 +578,7 @@ def _strategy_event_for_adapter(
         "signal_family": _optional_text(event.get("signal_family")) or actual_strategy_id,
         "lane_id": actual_lane_id,
         "signal_type": "track_b_strategy_rule_signal",
-        "signal_direction": "LONG",
+        "signal_direction": signal_direction,
         "decision_style": "BINARY",
         "candle_timestamp": timestamp,
         "observed_at": _optional_text(event.get("observed_at")) or timestamp,
@@ -497,7 +588,7 @@ def _strategy_event_for_adapter(
         "low": event.get("low") or event.get("last") or event.get("close"),
         "close": event.get("close") or event.get("last"),
         "volume": event.get("volume"),
-        "reason": f"{rule_id} emitted explicit LONG no-submit Track B signal from realtime MGC rule evidence.",
+        "reason": f"{rule_id} emitted explicit {signal_direction} no-submit Track B signal from realtime MGC rule evidence.",
         "metadata": metadata,
     }
 
@@ -535,6 +626,7 @@ def _write_report(
         "rule_mode": rule_mode.value,
         "signal_source": _signal_source(rule_mode),
         "real_strategy_signal": _real_strategy_signal(rule_mode),
+        "asian_drift_watch_verdict": _asian_drift_watch_verdict(rule_mode, verdict, signal_emitted, primary_blocker),
         "rule_inputs": rule_evaluation.get("rule_inputs") or {},
         "rule_conditions": rule_evaluation.get("rule_conditions") or {},
         "rule_blockers": rule_blockers,
@@ -565,6 +657,9 @@ def _write_report(
         "signal_batch_writer_verdict": _writer_verdict(downstream_adapter),
         "listener_invoked": False,
         "runner_invoked": False,
+        "readiness_invoked": False,
+        "paper_proof_invoked": False,
+        "broker_state_mutated": False,
         "operator_status_invoked": False,
         "paper_proof_cli_called": False,
         "lane_registry_invoked": False,
@@ -617,11 +712,33 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
         return "DEMO_WIRING_PROOF"
     if rule_mode == TrackBStrategyRuleMode.HUMAN_REVIEW_ONLY:
         return "HUMAN_REVIEW_ONLY"
+    if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
+        return "ASIAN_DRIFT_REAL_RULE"
     return "REAL_STRATEGY_RULE"
 
 
 def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
-    return rule_mode == TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG
+    return rule_mode in {TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG, TrackBStrategyRuleMode.ASIAN_DRIFT_V1}
+
+
+def _asian_drift_watch_verdict(
+    rule_mode: TrackBStrategyRuleMode,
+    verdict: TrackBStrategyRuleRunnerVerdict,
+    signal_emitted: bool,
+    primary_blocker: str | None,
+) -> str | None:
+    if rule_mode != TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
+        return None
+    if primary_blocker or verdict in {
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_NON_REALTIME_INPUT,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_SCHEMA_ERROR,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_DOWNSTREAM_REJECTED,
+    }:
+        return "ASIAN_DRIFT_NOT_READY_FOR_TONIGHT"
+    if signal_emitted:
+        return "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT"
+    return "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
 
 
 def _rule_mode(value: str | TrackBStrategyRuleMode) -> TrackBStrategyRuleMode:
@@ -692,6 +809,50 @@ def _bool_field(*sources_and_names: object) -> bool | None:
             if text in {"false", "0", "no", "n"}:
                 return False
             return None
+    return None
+
+
+def _first_text(event: Mapping[str, Any], metadata: Mapping[str, Any], *names: str) -> str | None:
+    for name in names:
+        value = event.get(name)
+        if value is None:
+            value = metadata.get(name)
+        text = _optional_text(value)
+        if text is not None:
+            return text
+    return None
+
+
+def _first_bool(event: Mapping[str, Any], metadata: Mapping[str, Any], *names: str) -> bool | None:
+    for name in names:
+        value = event.get(name)
+        if value is None:
+            value = metadata.get(name)
+        if isinstance(value, bool):
+            return value
+        text = _optional_text(value)
+        if text is None:
+            continue
+        lowered = text.lower()
+        if lowered in {"true", "1", "yes", "y"}:
+            return True
+        if lowered in {"false", "0", "no", "n"}:
+            return False
+    return None
+
+
+def _asian_drift_direction(event: Mapping[str, Any], metadata: Mapping[str, Any], regime: str | None) -> str | None:
+    explicit = _first_text(event, metadata, "signal_side", "signal_direction", "direction", "side")
+    if explicit is not None:
+        normalized = explicit.upper()
+        if normalized in {"BUY", "LONG"}:
+            return "LONG"
+        if normalized in {"SELL", "SHORT"}:
+            return "SHORT"
+    if regime == "ASIA_DRIFT_LONG":
+        return "LONG"
+    if regime == "ASIA_DRIFT_SHORT":
+        return "SHORT"
     return None
 
 

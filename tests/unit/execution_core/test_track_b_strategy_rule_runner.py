@@ -92,6 +92,32 @@ def ema_reclaim_event(tmp_path: Path, **overrides: object) -> dict[str, object]:
     return event
 
 
+def asian_drift_event(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    event = realtime_event(
+        tmp_path,
+        strategy_id="asian_drift_v1",
+        lane_id="mgc_example_long_lmt_day",
+        timeframe="5m",
+    )
+    event.update(
+        {
+            "signal_family": "asian_drift_v1",
+            "asia_drift_state": "NO_TRADE",
+            "asia_drift_regime": "NO_TRADE",
+            "direction": None,
+            "entry_window_open": True,
+            "in_scope": True,
+            "session_timeout": False,
+            "hypothetical_entry_ready": False,
+            "feature_version": "asia_drift_v1_phase1",
+            "calibration_profile": "recovery_confirmed",
+            "close": "4575.3",
+        }
+    )
+    event.update(overrides)
+    return event
+
+
 def test_valid_realtime_quote_demo_long_emit_writes_no_submit_signal_batch(tmp_path: Path) -> None:
     result = run_track_b_strategy_rule(
         input_event_payload=realtime_event(tmp_path),
@@ -250,6 +276,102 @@ def test_mgc_ema_momentum_reclaim_long_missing_features_no_signal(tmp_path: Path
     assert "missing required EMA momentum rule field: vwap" in result.report["rule_blockers"]
     assert result.report["secondary_blockers"] == result.report["rule_blockers"]
     assert result.report["submit_allowed"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_asian_drift_v1_no_signal_on_non_setup_snapshot(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=asian_drift_event(tmp_path),
+        input_event_path=tmp_path / "asian_drift_state_snapshot.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_asian_drift",
+        rule_id="asian_drift_v1",
+        rule_mode="ASIAN_DRIFT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        runner_id="rule-runner-asian-drift-no-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
+    assert result.report["signal_source"] == "ASIAN_DRIFT_REAL_RULE"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["decision"] == "NO_SIGNAL"
+    assert result.report["signal_emitted"] is False
+    assert result.report["readiness_invoked"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["paper_proof_cli_called"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_asian_drift_v1_emits_signal_on_explicit_entry_armed_snapshot(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=asian_drift_event(
+            tmp_path,
+            asia_drift_state="ENTRY_ARMED",
+            asia_drift_regime="ASIA_DRIFT_LONG",
+            direction="LONG",
+            hypothetical_entry_ready=True,
+        ),
+        input_event_path=tmp_path / "asian_drift_state_snapshot.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_asian_drift",
+        rule_id="asian_drift_v1",
+        rule_mode="ASIAN_DRIFT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        strategy_adapter_output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        runner_id="rule-runner-asian-drift-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["rule_name"] == "asian_drift_v1_state_snapshot"
+    assert result.report["decision"] == "LONG"
+    assert result.report["signal_emitted"] is True
+    assert result.report["signal_direction"] == "LONG"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["readiness_invoked"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["paper_proof_cli_called"] is False
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+    assert result.output_batch_json is not None
+    batch = json.loads(result.output_batch_json.read_text(encoding="utf-8"))
+    assert batch["signal_items"][0]["signal"]["signal_direction"] == "LONG"
+
+
+def test_asian_drift_v1_missing_snapshot_fields_not_ready_for_tonight(tmp_path: Path) -> None:
+    event = realtime_event(tmp_path, strategy_id="asian_drift_v1", timeframe="5m")
+
+    result = run_track_b_strategy_rule(
+        input_event_payload=event,
+        input_event_path=None,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        rule_id="asian_drift_v1",
+        rule_mode="ASIAN_DRIFT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        runner_id="rule-runner-asian-drift-not-ready",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT
+    assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_NOT_READY_FOR_TONIGHT"
+    assert "explicit research state/feature snapshot fields" in str(result.report["primary_blocker"])
+    assert result.report["signal_emitted"] is False
+    assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
 
 

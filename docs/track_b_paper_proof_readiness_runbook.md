@@ -640,6 +640,55 @@ decision, signal emission, readiness/proof invocation, submit attempt, broker
 mutation, and blocker fields. PAPER proof may run only after a real strategy
 signal and the explicit PAPER flags. Live-money readiness remains `false`.
 
+### Asian Drift watch readiness for tonight
+
+Asian Drift has a concrete research definition and state machine in the repo,
+but Track B does not yet compute that state machine directly from live runtime
+candles. The safe tonight path is therefore a narrow state-snapshot adapter:
+`track_b_strategy_rule_runner --rule-mode ASIAN_DRIFT_V1`.
+
+Minimum explicit semantics required for `real_strategy_signal=true`:
+
+- Strategy/rule id: `asian_drift_v1`.
+- Instrument: `MGC-202606` / `MGC`.
+- Session scope: Asia Drift research scope anchored at 18:00 ET, with completed
+  5m decision bars.
+- Direction: explicit `LONG` / `SHORT`, or `ASIA_DRIFT_LONG` /
+  `ASIA_DRIFT_SHORT` in the supplied `asia_drift_regime`.
+- Entry condition: supplied Asia Drift state snapshot is `ENTRY_ARMED` or
+  `REQUALIFIED_CANDIDATE`, `hypothetical_entry_ready=true`,
+  `entry_window_open=true`, `in_scope=true`, and `session_timeout` is not true.
+- Required fields: `asia_drift_state`, `asia_drift_regime`,
+  `hypothetical_entry_ready`, `entry_window_open`, `in_scope`, `timeframe=5m`,
+  `feature_version`, `calibration_profile`, MGC contract fields, and realtime
+  quote evidence.
+
+Run no-submit watch/evaluation:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
+  --input-event-json <ASIAN_DRIFT_STATE_SNAPSHOT_JSON> \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id asian_drift_track_b_watch \
+  --rule-id asian_drift_v1 \
+  --rule-mode ASIAN_DRIFT_V1 \
+  --emit-signal \
+  --output-root outputs/track_b_execution_core/track_b_strategy_rule_runner
+```
+
+The rule report includes `asian_drift_watch_verdict`:
+
+- `ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION` for a valid non-setup snapshot.
+- `ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT` for an entry-ready snapshot that writes
+  a no-submit signal batch.
+- `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT` when the state snapshot or realtime
+  evidence is incomplete.
+
+This path intentionally refuses to infer Asian Drift fields from raw candles.
+If tonight's live process cannot provide the explicit state snapshot, the
+correct outcome is `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`, not a fake signal.
+
 Maintained weekly history is historical context. It may be many hours or days
 old and still be valid if `complete_through_cutoff=true`. The runner reports
 `historical_context_ready`, `runtime_candle_context_required`,
