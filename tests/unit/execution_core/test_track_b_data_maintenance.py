@@ -10,6 +10,11 @@ from mgc_v05l.execution_core.track_b_data_maintenance import (
     TrackBDataMaintenanceVerdict,
     maintain_track_b_mgc_1m_history,
 )
+from mgc_v05l.execution_core.track_b_data_maintenance_registry import (
+    TRACK_B_DATA_MAINTENANCE_REGISTRY,
+    get_data_maintenance_instrument,
+    require_runtime_data_maintenance_instrument,
+)
 from mgc_v05l.execution_core.track_b_data_maintenance_cli import main as data_maintenance_cli_main
 from mgc_v05l.execution_core.track_b_feature_builder import (
     TrackBFeatureBuilderVerdict,
@@ -49,6 +54,34 @@ def history_payload(candles: list[dict[str, object]]) -> dict[str, object]:
         "timeframe": "1m",
         "candles": candles,
     }
+
+
+def test_registry_loads_mgc_and_preserves_runtime_defaults() -> None:
+    instrument = require_runtime_data_maintenance_instrument("MGC")
+
+    assert instrument.internal_symbol == "MGC"
+    assert instrument.contract_key == "MGC-202606"
+    assert instrument.provider_symbol == "MGCM6"
+    assert instrument.continuous_symbol == "MGC.v.0"
+    assert instrument.dataset == "GLBX.MDP3"
+    assert instrument.schema == "ohlcv-1m"
+    assert instrument.timeframe == "1m"
+    assert instrument.enabled_for_runtime is True
+    assert instrument.enabled_for_research is True
+    assert str(instrument.latest_good_path) == "outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json"
+
+
+def test_registry_keeps_broader_universe_disabled_for_runtime() -> None:
+    assert get_data_maintenance_instrument("GC") is not None
+    assert get_data_maintenance_instrument("GC").enabled_for_runtime is False  # type: ignore[union-attr]
+    assert get_data_maintenance_instrument("SPY") is not None
+    assert "MES" in TRACK_B_DATA_MAINTENANCE_REGISTRY
+    try:
+        require_runtime_data_maintenance_instrument("GC")
+    except ValueError as exc:
+        assert "not enabled for runtime" in str(exc)
+    else:  # pragma: no cover - defensive assertion clarity.
+        raise AssertionError("GC should not be runtime-enabled in this slice.")
 
 
 def test_initial_backfill_creates_latest_good_history(tmp_path: Path) -> None:
@@ -271,6 +304,85 @@ def test_data_maintenance_cli_writes_latest_artifacts(tmp_path: Path, capsys) ->
     assert output["data_maintenance_verdict"].startswith("TRACK_B_DATA_MAINTENANCE_")
     assert (tmp_path / "maintenance_cli" / "latest_track_b_data_maintenance_report.json").exists()
     assert (tmp_path / "maintenance_cli" / "latest_good_mgc_1m_history.json").exists()
+
+
+def test_data_maintenance_cli_instrument_mgc_uses_registry_defaults(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    history_json = tmp_path / "history.json"
+    history_json.write_text(
+        json.dumps(
+            history_payload(
+                bars(
+                    "2026-05-04T15:28:00+00:00",
+                    "2026-05-04T15:29:00+00:00",
+                    "2026-05-04T15:30:00+00:00",
+                )
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = data_maintenance_cli_main(
+        [
+            "--instrument",
+            "MGC",
+            "--history-json",
+            str(history_json),
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_example_gold_shadow_v1",
+            "--lane-id",
+            "mgc_example_long_lmt_day",
+            "--min-bars",
+            "3",
+            "--export-bars",
+            "3",
+            "--output-root",
+            str(tmp_path / "maintenance_instrument"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code in {0, 2}
+    assert output["contract_key"] == "MGC-202606"
+    assert output["symbol"] == "MGCM6"
+    assert output["timeframe"] == "1m"
+    assert (tmp_path / "maintenance_instrument" / "latest_good_mgc_1m_history.json").exists()
+
+
+def test_data_maintenance_cli_disabled_or_unknown_instrument_fails_cleanly(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    history_json = tmp_path / "history.json"
+    history_json.write_text(json.dumps(history_payload(bars("2026-05-04T15:30:00+00:00"))), encoding="utf-8")
+
+    disabled_exit = data_maintenance_cli_main(
+        [
+            "--instrument",
+            "GC",
+            "--history-json",
+            str(history_json),
+            "--output-root",
+            str(tmp_path / "disabled"),
+        ]
+    )
+    disabled_output = json.loads(capsys.readouterr().out)
+    unknown_exit = data_maintenance_cli_main(
+        [
+            "--instrument",
+            "ABC",
+            "--history-json",
+            str(history_json),
+            "--output-root",
+            str(tmp_path / "unknown"),
+        ]
+    )
+    unknown_output = json.loads(capsys.readouterr().out)
+
+    assert disabled_exit == 2
+    assert "not enabled for runtime" in disabled_output["primary_blocker"]
+    assert unknown_exit == 2
+    assert "Unknown Track B data-maintenance instrument" in unknown_output["primary_blocker"]
+    assert disabled_output["submit_attempted"] is False
+    assert unknown_output["live_money_readiness"] is False
 
 
 def test_no_broker_or_proof_paths_are_invoked_by_data_maintenance() -> None:

@@ -20,6 +20,7 @@ from .track_b_data_maintenance import (
     maintain_track_b_mgc_1m_history,
     write_data_maintenance_provider_error,
 )
+from .track_b_data_maintenance_registry import require_runtime_data_maintenance_instrument
 from .track_b_mgc_candle_history_producer import fetch_databento_ohlcv_1m_records, provider_error_message
 
 
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--history-json", type=Path, help="Existing Databento-like MGC 1m OHLCV history JSON to merge into the rolling store.")
     source.add_argument("--fetch-databento-history", action="store_true", help="Fetch bounded Databento ohlcv-1m history for maintenance.")
+    parser.add_argument("--instrument", help="Track B data-maintenance registry instrument key. MGC is the only runtime-enabled instrument in this slice.")
     parser.add_argument("--expected-account-id", default="DUM882026")
     parser.add_argument("--strategy-id", default="track_b_example_gold_shadow_v1")
     parser.add_argument("--lane-id", default="mgc_example_long_lmt_day")
@@ -59,6 +61,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    registry_error = _apply_registry_defaults(args)
+    if registry_error:
+        result = write_data_maintenance_provider_error(
+            primary_blocker=registry_error,
+            required_next_action="Use --instrument MGC or omit --instrument and provide explicit MGC maintenance flags.",
+            output_root=args.output_root,
+            expected_account_id=args.expected_account_id,
+            strategy_id=args.strategy_id,
+            lane_id=args.lane_id,
+            contract_key=args.contract_key,
+            symbol=args.allowlisted_local_symbol,
+            databento_continuous_symbol=args.databento_continuous_symbol,
+            dataset=args.dataset,
+            timeframe=args.timeframe,
+            source_id=args.source_id,
+        )
+        _print_result(result)
+        return 2
     source_payload_path = args.history_json
     if args.fetch_databento_history:
         raw_api_key = str(os.environ.get("DATABENTO_API_KEY") or "").strip()
@@ -152,6 +172,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     _print_result(result)
     return 0 if result.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_READY else 2
+
+
+def _apply_registry_defaults(args: argparse.Namespace) -> str | None:
+    if not args.instrument:
+        return None
+    try:
+        instrument = require_runtime_data_maintenance_instrument(args.instrument)
+    except ValueError as exc:
+        return str(exc)
+    if instrument.contract_key is not None:
+        args.contract_key = instrument.contract_key
+    if instrument.provider_symbol is not None:
+        args.databento_symbol = instrument.provider_symbol
+    if instrument.continuous_symbol is not None:
+        args.databento_continuous_symbol = instrument.continuous_symbol
+    if instrument.dataset is not None:
+        args.dataset = instrument.dataset
+    args.schema = instrument.schema
+    args.timeframe = instrument.timeframe
+    return None
 
 
 def _print_result(result) -> None:  # type: ignore[no-untyped-def]

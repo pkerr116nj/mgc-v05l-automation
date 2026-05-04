@@ -169,7 +169,12 @@ Dashboard implication:
   `outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json`
   and
   `outputs/track_b_execution_core/track_b_data_maintenance/latest_track_b_data_maintenance_report.json`.
-  This is the normal source for strategy feature history.
+  This is the normal source for strategy feature history. The maintenance
+  layer is registry-based; `MGC` is the first and only runtime-enabled entry in
+  this slice (`MGC-202606`, `MGCM6`, `MGC.v.0`, `GLBX.MDP3`, `ohlcv-1m` /
+  `1m`). Broader Track A-style symbols are represented as disabled planning
+  entries for future research/runtime migration and are not fetched or
+  maintained by default.
 - `track_b_mgc_candle_history_producer` is the bounded upstream producer for
   the MGC 1m history JSON consumed by `track_b_market_history`. It can
   normalize a supplied Databento-like OHLCV history artifact, or make an

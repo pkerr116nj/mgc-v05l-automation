@@ -391,6 +391,7 @@ set -a
 source .env.local
 set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_data_maintenance_cli \
+  --instrument MGC \
   --fetch-databento-history \
   --expected-account-id DUM882026 \
   --strategy-id track_b_example_gold_shadow_v1 \
@@ -421,6 +422,13 @@ outputs/track_b_execution_core/track_b_data_maintenance/latest_track_b_data_main
 On-demand historical fetch through `track_b_mgc_candle_history_producer_cli`
 remains available for diagnostics and maintenance inputs, but it is not the
 normal trade-decision path.
+
+The data-maintenance registry currently enables only `MGC` for runtime
+maintenance. Disabled planning entries preserve the broader Track A-style
+universe shape for later migration: `GC`, `MES`, `ES`, `MNQ`, `NQ`, `ZT`, `ZF`,
+`ZN`, `ZB`, `ZQ`, `6E`, `6J`, `6B`, `6A`, `HG`, `QC`, `PL`, `CL`, `NG`, `MBT`,
+`YM`, plus research placeholders `SPY`, `QQQ`, `TQQQ`, and `SQQQ`. These are
+not fetched in this slice.
 
 Fixture/supplied-history path:
 

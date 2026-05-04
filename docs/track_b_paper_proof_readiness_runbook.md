@@ -396,6 +396,7 @@ set -a
 source .env.local
 set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_data_maintenance_cli \
+  --instrument MGC \
   --fetch-databento-history \
   --expected-account-id DUM882026 \
   --strategy-id track_b_example_gold_shadow_v1 \
@@ -436,6 +437,11 @@ set +a
   --source-id track_b_phase2_current_quote \
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
+
+`--instrument MGC` comes from the Track B data-maintenance registry and maps to
+`MGC-202606`, `MGCM6`, `MGC.v.0`, `GLBX.MDP3`, `ohlcv-1m`, and `1m`. Other
+Track A-style futures/research symbols are documented as disabled registry
+planning entries only; they are not runtime-maintained in this slice.
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
