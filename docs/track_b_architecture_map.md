@@ -26,6 +26,7 @@ Databento market-data observer, optionally
 -> operator_status
 -> attrition_report
 -> readiness_summary
+-> track_b_readiness_check_runner for bounded no-submit pre-proof evidence
 -> recovery / preflight / proof timing
 -> paper_proof_cli later, only when broker state is clean
 ```
@@ -136,6 +137,14 @@ Dashboard implication:
   market-data evidence only, and submit stays impossible in this path. It
   updates
   `outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json`.
+- `track_b_readiness_check_runner` is a bounded no-submit pre-proof evidence
+  wrapper. It runs read-only recovery status, read-only preflight, Databento
+  wait-for-current quote, readiness summary, and operator status, then writes
+  `outputs/track_b_execution_core/track_b_readiness_check_runner/latest_track_b_readiness_check_runner_report.json`.
+  It answers whether paper proof may be considered as a separate operator
+  decision. It does not call `paper_proof_cli`, submit, cancel, place orders,
+  create order plans, mutate broker state, infer direction, or turn fallback
+  historical quotes into readiness.
 - `signal_intent_proposal` may create a proposed no-submit strategy intent from
   a validated signal under an explicit policy. It does not authorize a lane,
   create an order plan, summarize readiness, or submit.
@@ -548,7 +557,37 @@ set +a
 ```
 
 ```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_readiness_check_runner_cli \
+  --mode PAPER \
+  --host 127.0.0.1 \
+  --port 7497 \
+  --client-id 17077 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --broker-order-id 1 \
+  --perm-id 736787312 \
+  --market-data-mode DELAYED \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --proof-timing-status ACTIVE_SESSION \
+  --max-wait-cycles 10 \
+  --wait-poll-seconds 15 \
+  --output-root outputs/track_b_execution_core/track_b_readiness_check_runner
+```
+
+```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
+  --track-b-readiness-check-runner-report-json outputs/track_b_execution_core/track_b_readiness_check_runner/latest_track_b_readiness_check_runner_report.json \
   --track-b-observation-runner-report-json outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json \
   --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --databento-candle-observer-heartbeat-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json \

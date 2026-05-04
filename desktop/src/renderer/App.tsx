@@ -3163,6 +3163,7 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
           <MetricCard label="Current Cycle" value={formatValue(status.listener_current_cycle_number)} />
           <MetricCard label="Listener Health" value={formatValue(status.listener_last_health_verdict)} tone={statusTone(status.listener_last_health_verdict)} />
           <MetricCard label="Databento Observer" value={formatValue(status.databento_observer_last_verdict ?? status.databento_observer_verdict)} tone={statusTone(status.databento_observer_last_verdict ?? status.databento_observer_verdict)} />
+          <MetricCard label="Readiness Check" value={formatValue(status.readiness_check_runner_verdict)} tone={statusTone(status.readiness_check_runner_verdict)} />
           <MetricCard label="Strategy Adapter" value={formatValue(status.strategy_adapter_verdict)} tone={statusTone(status.strategy_adapter_verdict)} />
           <MetricCard label="Candle Producer" value={formatValue(status.candle_producer_verdict)} tone={statusTone(status.candle_producer_verdict)} />
           <MetricCard label="Writer Verdict" value={formatValue(status.signal_batch_writer_verdict)} tone={statusTone(status.signal_batch_writer_verdict)} />
@@ -3224,6 +3225,35 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
             </div>
             <h3 className="subsection-title">Latest Operator Status From Runner</h3>
             <div className="placeholder-note">{formatValue(status.observation_runner_latest_operator_status_path)}</div>
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Readiness Check Runner" subtitle="No-submit pre-proof evidence: recovery, preflight, Databento current quote, and readiness summary">
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Runner State</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Verdict" value={formatValue(status.readiness_check_runner_verdict)} tone={statusTone(status.readiness_check_runner_verdict)} />
+              <MetricCard label="Recovery" value={formatValue(status.readiness_check_runner_recovery_verdict)} tone={statusTone(status.readiness_check_runner_recovery_verdict)} />
+              <MetricCard label="Preflight" value={formatValue(status.readiness_check_runner_preflight_verdict)} tone={statusTone(status.readiness_check_runner_preflight_verdict)} />
+              <MetricCard label="Quote Available" value={formatValue(status.readiness_check_runner_current_quote_available)} tone={status.readiness_check_runner_current_quote_available === true ? "good" : status.readiness_check_runner_current_quote_available === false ? "warn" : "muted"} />
+              <MetricCard label="Wait Succeeded" value={formatValue(status.readiness_check_runner_wait_succeeded)} tone={status.readiness_check_runner_wait_succeeded === true ? "good" : status.readiness_check_runner_wait_succeeded === false ? "warn" : "muted"} />
+              <MetricCard label="Readiness" value={formatValue(status.readiness_check_runner_readiness_verdict)} tone={statusTone(status.readiness_check_runner_readiness_verdict)} />
+            </div>
+            <h3 className="subsection-title">Runner Action</h3>
+            <div className="placeholder-note">{formatValue(status.readiness_check_runner_required_next_action)}</div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Safety Flags</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Databento" value={formatValue(status.readiness_check_runner_databento_observer_verdict)} tone={statusTone(status.readiness_check_runner_databento_observer_verdict)} />
+              <MetricCard label="Submit Allowed" value={formatValue(status.readiness_check_runner_submit_allowed)} tone={status.readiness_check_runner_submit_allowed === false ? "good" : "warn"} />
+              <MetricCard label="Submit Attempted" value={formatValue(status.readiness_check_runner_submit_attempted)} tone={status.readiness_check_runner_submit_attempted === false ? "good" : "warn"} />
+              <MetricCard label="Live Money" value={formatValue(status.readiness_check_runner_live_money_readiness)} tone={status.readiness_check_runner_live_money_readiness === false ? "good" : "warn"} />
+            </div>
+            <h3 className="subsection-title">Latest Readiness Check Report</h3>
+            <div className="placeholder-note">{formatValue(status.readiness_check_runner_latest_report_path)}</div>
           </div>
         </div>
       </Section>

@@ -430,6 +430,7 @@ Create an operator status summary from observer reports:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
+  --track-b-readiness-check-runner-report-json outputs/track_b_execution_core/track_b_readiness_check_runner/latest_track_b_readiness_check_runner_report.json \
   --track-b-observation-runner-report-json outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json \
   --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --databento-candle-observer-heartbeat-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json \
@@ -460,6 +461,71 @@ still not truth authority or submit authority. Each run also updates:
 ```text
 outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json
 ```
+
+## Readiness Check Runner
+
+The Track B readiness check runner is a bounded no-submit pre-proof evidence
+wrapper:
+
+```text
+track_b_readiness_check_runner
+-> recovery_status read-only
+-> preflight read-only
+-> Databento wait-for-current quote
+-> readiness_summary
+-> operator_status / Track B Status UI
+```
+
+It answers whether the current artifacts are clean enough to consider a
+separate paper proof decision. It does not run `paper_proof_cli`, submit,
+cancel, place orders, create order plans, or mutate broker state. A clean
+runner verdict is not automatic submit authority.
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_readiness_check_runner_cli \
+  --mode PAPER \
+  --host 127.0.0.1 \
+  --port 7497 \
+  --client-id 17077 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --broker-order-id 1 \
+  --perm-id 736787312 \
+  --market-data-mode DELAYED \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id track_b_readiness_check \
+  --proof-timing-status ACTIVE_SESSION \
+  --max-wait-cycles 10 \
+  --wait-poll-seconds 15 \
+  --output-root outputs/track_b_execution_core/track_b_readiness_check_runner
+```
+
+Each run updates:
+
+```text
+outputs/track_b_execution_core/track_b_readiness_check_runner/latest_track_b_readiness_check_runner_report.json
+outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json
+```
+
+Failure is explicit and fail-closed:
+
+- recovery not clean stops before preflight/quote readiness.
+- preflight not clean stops before quote readiness.
+- current quote unavailable after bounded wait stops with quote blocker.
+- fallback/historical Databento quotes do not count as current readiness.
+- readiness-summary blockers are surfaced without calling paper proof.
 
 ## Observation Runner
 
@@ -627,8 +693,8 @@ scheduler, not broker recovery, and not a paper proof submit path.
 
 ## Stop Conditions
 
-Do not proceed from this example to `paper_proof_cli`. Paper proof still
-requires clean broker recovery, read-only preflight, active proof timing,
-explicit submit flags, and operator approval. The known stale `PendingCancel`
-paper order for `DUM882026` / `MGC-202606` remains a block for new proof submits
-on that account/contract until broker state is terminal and clean.
+Do not proceed from this example to `paper_proof_cli` automatically. Paper
+proof still requires clean broker recovery, read-only preflight, current quote
+or explicitly acknowledged manual paper-only pricing, active proof timing,
+explicit submit flags, and operator approval. The readiness check runner only
+answers whether paper proof may be considered as a separate manual decision.

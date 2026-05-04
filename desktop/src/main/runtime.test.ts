@@ -494,6 +494,14 @@ test("Track B read-only status loads latest operator status artifact without inv
         observation_runner_submit_allowed: false,
         observation_runner_submit_attempted: false,
         observation_runner_live_money_readiness: false,
+        readiness_check_runner_verdict: "TRACK_B_READINESS_CHECK_READY_FOR_PAPER_PROOF_REVIEW",
+        readiness_check_runner_recovery_verdict: "RECOVERY_READY_CLEAN",
+        readiness_check_runner_preflight_verdict: "READY_READ_ONLY",
+        readiness_check_runner_current_quote_available: true,
+        readiness_check_runner_wait_succeeded: true,
+        readiness_check_runner_submit_allowed: false,
+        readiness_check_runner_submit_attempted: false,
+        readiness_check_runner_live_money_readiness: false,
         databento_observer_verdict: "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
         databento_observer_mode: "watch",
         databento_observer_current_cycle: 2,
@@ -519,6 +527,8 @@ test("Track B read-only status loads latest operator status artifact without inv
     assert.equal(trackB.status?.status_verdict, "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW");
     assert.equal(trackB.status?.observation_runner_verdict, "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW");
     assert.equal(trackB.status?.observation_runner_mode, "watch");
+    assert.equal(trackB.status?.readiness_check_runner_verdict, "TRACK_B_READINESS_CHECK_READY_FOR_PAPER_PROOF_REVIEW");
+    assert.equal(trackB.status?.readiness_check_runner_current_quote_available, true);
     assert.equal(trackB.status?.databento_observer_verdict, "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT");
     assert.equal(trackB.status?.databento_observer_mode, "watch");
     assert.equal(trackB.status?.strategy_adapter_verdict, "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH");
@@ -570,6 +580,9 @@ test("Track B status renderer is display-only and no-submit", () => {
   assert.match(appTsx, /Observation Runner/);
   assert.match(appTsx, /observation_runner_verdict/);
   assert.match(appTsx, /observation_runner_latest_operator_status_path/);
+  assert.match(appTsx, /Readiness Check Runner/);
+  assert.match(appTsx, /readiness_check_runner_verdict/);
+  assert.match(appTsx, /readiness_check_runner_current_quote_available/);
   assert.match(appTsx, /Market Data Observer/);
   assert.match(appTsx, /databento_observer_verdict/);
   assert.match(appTsx, /databento_observer_last_verdict/);
