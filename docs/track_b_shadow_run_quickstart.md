@@ -660,6 +660,7 @@ are present:
   --rule-id mgc_ema_momentum_reclaim_long_v1 \
   --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
   --emit-signal \
+  --max-maintained-history-age-seconds 900 \
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
@@ -693,6 +694,7 @@ PAPER submit requires all explicit gates. Prices and quantity are not inferred:
   --manual-close-limit-price <CLOSE_LIMIT_PRICE> \
   --submit-paper \
   --confirm-paper-submit \
+  --max-maintained-history-age-seconds 900 \
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
@@ -701,6 +703,12 @@ orders, UI authority, hidden submit, inferred direction, inferred prices, or
 broker mutation outside the Track B paper proof lifecycle. If the real rule
 emits `NO_SIGNAL`, if candle history/features are insufficient or non-realtime,
 or if readiness blocks, the runner stops cleanly and `paper_proof_invoked=false`.
+Align `--max-maintained-history-age-seconds` with the threshold used by
+`track_b_data_maintenance_cli`. For paper plumbing checks, an operator may use
+a wider explicit threshold such as `1200`; for real strategy validation, use a
+tighter threshold appropriate to the rule. Maintained 1m bars are historical
+context, not realtime quote evidence, so the runner still requires the separate
+realtime current quote report.
 The latest report is:
 
 ```text

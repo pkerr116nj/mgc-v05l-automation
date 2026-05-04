@@ -183,6 +183,15 @@ Dashboard implication:
   and `history_freshness_seconds`. Maintained bars are not realtime quote
   evidence; strategy/paper execution still requires a separate realtime current
   quote report.
+- `track_b_strategy_paper_runner` applies an explicit maintained-history
+  freshness policy when consuming
+  `latest_good_mgc_1m_history.json`. The CLI exposes
+  `--max-maintained-history-age-seconds` and reports
+  `maintained_history_age_seconds`, `max_maintained_history_age_seconds`, and
+  `maintained_history_ready`. Operators should align this with the data
+  maintenance `--max-history-age-seconds` threshold: wider values are useful
+  for paper plumbing checks, while real strategy validation should use tighter
+  rule-appropriate limits. Realtime current quote evidence remains separate.
 - `track_b_mgc_candle_history_producer` is the bounded upstream producer for
   the MGC 1m history JSON consumed by `track_b_market_history`. It can
   normalize a supplied Databento-like OHLCV history artifact, or make an

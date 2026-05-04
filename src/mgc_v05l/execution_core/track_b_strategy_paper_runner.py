@@ -844,6 +844,7 @@ def _build_report(
     proof_payload = proof_report.get("proof_payload") if isinstance(proof_report.get("proof_payload"), Mapping) else {}
     paper_proof_invoked = proof is not None
     submit_allowed = _paper_submit_requested(config) and proof is not None
+    maintained_history_status = _maintained_history_status(config, now=now)
     return {
         "schema_version": "track_b_strategy_paper_runner_v1",
         "generated_at": now.isoformat(),
@@ -857,7 +858,13 @@ def _build_report(
         "rule_mode": config.rule_mode,
         "maintained_history_path": str(config.maintained_history_json) if config.maintained_history_json is not None else None,
         "data_maintenance_history_requested": _maintained_history_requested(config),
+        "maintained_history_age_seconds": maintained_history_status.get("maintained_history_age_seconds"),
         "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        "maintained_history_ready": maintained_history_status.get("maintained_history_ready"),
+        "maintained_history_bar_count": maintained_history_status.get("maintained_history_bar_count"),
+        "maintained_history_gap_count": maintained_history_status.get("maintained_history_gap_count"),
+        "maintained_history_reported_ready": maintained_history_status.get("maintained_history_reported_ready"),
+        "maintained_history_reported_freshness_seconds": maintained_history_status.get("maintained_history_reported_freshness_seconds"),
         "candle_history_producer_invoked": candle_history_producer is not None,
         "candle_history_producer_verdict": candle_history_report.get("candle_history_producer_verdict"),
         "candle_history_producer_report_path": str(candle_history_producer.report_json) if candle_history_producer else None,
@@ -1013,30 +1020,119 @@ def _maintained_history_requested(config: TrackBStrategyPaperRunnerConfig) -> bo
 
 
 def _maintained_history_request_error(config: TrackBStrategyPaperRunnerConfig, *, now: datetime) -> str | None:
+    status = _maintained_history_status(config, now=now)
+    blocker = status.get("primary_blocker")
+    return str(blocker) if blocker else None
+
+
+def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: datetime) -> dict[str, object]:
     if not _maintained_history_requested(config):
-        return None
+        return {
+            "maintained_history_requested": False,
+            "maintained_history_ready": None,
+            "primary_blocker": None,
+        }
     has_current_quote = config.current_quote_report_json is not None or config.current_quote_report_payload is not None
     if not has_current_quote:
-        return "Maintained-history PAPER path requires a separate current quote report JSON/payload."
+        return {
+            "maintained_history_requested": True,
+            "maintained_history_ready": False,
+            "primary_blocker": "Maintained-history PAPER path requires a separate current quote report JSON/payload.",
+            "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        }
     try:
         payload = _maintained_history_payload(config)
     except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
-        return f"Maintained history JSON could not be read: {exc}"
+        return {
+            "maintained_history_requested": True,
+            "maintained_history_ready": False,
+            "primary_blocker": f"Maintained history JSON could not be read: {exc}",
+            "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        }
+    reported_ready = payload.get("history_ready")
+    reported_freshness = payload.get("history_freshness_seconds")
     if payload.get("history_ready") is not True:
-        return str(payload.get("primary_blocker") or "Maintained MGC 1m history is not history_ready=true.")
+        return {
+            "maintained_history_requested": True,
+            "maintained_history_ready": False,
+            "maintained_history_reported_ready": reported_ready,
+            "maintained_history_reported_freshness_seconds": reported_freshness,
+            "primary_blocker": str(payload.get("primary_blocker") or "Maintained MGC 1m history is not history_ready=true."),
+            "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        }
     candles = payload.get("candles") or payload.get("candle_history")
     if not isinstance(candles, list) or not candles:
-        return "Maintained MGC 1m history contains no candle array."
+        return {
+            "maintained_history_requested": True,
+            "maintained_history_ready": False,
+            "maintained_history_reported_ready": reported_ready,
+            "maintained_history_reported_freshness_seconds": reported_freshness,
+            "maintained_history_bar_count": 0,
+            "primary_blocker": "Maintained MGC 1m history contains no candle array.",
+            "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        }
+    min_bars = max(int(config.market_history_min_candles), int(config.feature_builder_min_history_candles))
+    if len(candles) < min_bars:
+        return {
+            "maintained_history_requested": True,
+            "maintained_history_ready": False,
+            "maintained_history_reported_ready": reported_ready,
+            "maintained_history_reported_freshness_seconds": reported_freshness,
+            "maintained_history_bar_count": len(candles),
+            "primary_blocker": f"Maintained MGC 1m history has {len(candles)} bars; requires at least {min_bars}.",
+            "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        }
+    gap_count = _optional_int(payload.get("gap_count"))
+    if gap_count is not None and gap_count > 0:
+        return {
+            "maintained_history_requested": True,
+            "maintained_history_ready": False,
+            "maintained_history_reported_ready": reported_ready,
+            "maintained_history_reported_freshness_seconds": reported_freshness,
+            "maintained_history_bar_count": len(candles),
+            "maintained_history_gap_count": gap_count,
+            "primary_blocker": f"Maintained MGC 1m history has {gap_count} detected 1m gaps.",
+            "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        }
     latest_timestamp = _latest_history_timestamp(payload)
     if latest_timestamp is None:
-        return "Maintained MGC 1m history has no latest candle timestamp."
+        return {
+            "maintained_history_requested": True,
+            "maintained_history_ready": False,
+            "maintained_history_reported_ready": reported_ready,
+            "maintained_history_reported_freshness_seconds": reported_freshness,
+            "maintained_history_bar_count": len(candles),
+            "maintained_history_gap_count": gap_count,
+            "primary_blocker": "Maintained MGC 1m history has no latest candle timestamp.",
+            "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        }
     history_age_seconds = max(int((now.astimezone(UTC) - latest_timestamp).total_seconds()), 0)
     if history_age_seconds > config.max_maintained_history_age_seconds:
-        return (
-            f"Maintained MGC 1m history is stale: {history_age_seconds}s old, "
-            f"max allowed {config.max_maintained_history_age_seconds}s."
-        )
-    return None
+        return {
+            "maintained_history_requested": True,
+            "maintained_history_ready": False,
+            "maintained_history_reported_ready": reported_ready,
+            "maintained_history_reported_freshness_seconds": reported_freshness,
+            "maintained_history_bar_count": len(candles),
+            "maintained_history_gap_count": gap_count,
+            "maintained_history_age_seconds": history_age_seconds,
+            "primary_blocker": (
+                f"Maintained MGC 1m history is stale: {history_age_seconds}s old, "
+                f"max allowed {config.max_maintained_history_age_seconds}s."
+            ),
+            "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        }
+    return {
+        "maintained_history_requested": True,
+        "maintained_history_ready": True,
+        "maintained_history_reported_ready": reported_ready,
+        "maintained_history_reported_freshness_seconds": reported_freshness,
+        "maintained_history_bar_count": len(candles),
+        "maintained_history_gap_count": gap_count,
+        "maintained_history_age_seconds": history_age_seconds,
+        "primary_blocker": None,
+        "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+    }
 
 
 def _maintained_history_market_payload(config: TrackBStrategyPaperRunnerConfig, *, now: datetime) -> Mapping[str, object]:
@@ -1081,6 +1177,15 @@ def _latest_history_timestamp(payload: Mapping[str, object]) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _optional_int(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _candle_history_producer_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:

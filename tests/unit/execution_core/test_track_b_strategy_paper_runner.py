@@ -200,6 +200,8 @@ def maintained_history_payload(*, ready: bool = True, latest_timestamp: str | No
         "timeframe": "1m",
         "history_provider_mode": "DATABENTO_MAINTAINED_LOCAL_1M",
         "history_ready": ready,
+        "history_freshness_seconds": 0,
+        "gap_count": 0,
         "primary_blocker": None if ready else "Maintained MGC 1m history is stale.",
         "candles": [
             {
@@ -770,6 +772,158 @@ def test_stale_maintained_history_blocks_before_strategy_or_proof(tmp_path: Path
     assert result.report["paper_proof_invoked"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_maintained_history_age_961s_blocks_with_default_900s_threshold(tmp_path: Path) -> None:
+    calls = Calls()
+    history_json = tmp_path / "latest_good_mgc_1m_history_961s.json"
+    history_json.write_text(
+        json.dumps(maintained_history_payload(latest_timestamp="2026-05-04T14:13:59+00:00")),
+        encoding="utf-8",
+    )
+
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            maintained_history_json=history_json,
+            current_quote_report_payload={"quote_provider_mode": "REALTIME", "realtime_quote_received": True, "current_quote_available": True},
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-maintained-history-961s-default-blocked",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_DATA_MAINTENANCE
+    assert result.report["maintained_history_age_seconds"] == 961
+    assert result.report["max_maintained_history_age_seconds"] == 900
+    assert result.report["maintained_history_ready"] is False
+    assert calls.market_history == 0
+    assert calls.proof == 0
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+
+
+def test_maintained_history_age_961s_passes_with_explicit_1200s_threshold(tmp_path: Path) -> None:
+    calls = Calls()
+    history_json = tmp_path / "latest_good_mgc_1m_history_961s_wide.json"
+    history_json.write_text(
+        json.dumps(maintained_history_payload(latest_timestamp="2026-05-04T14:13:59+00:00")),
+        encoding="utf-8",
+    )
+
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            maintained_history_json=history_json,
+            current_quote_report_payload={"quote_provider_mode": "REALTIME", "realtime_quote_received": True, "current_quote_available": True},
+            max_maintained_history_age_seconds=1200,
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-maintained-history-961s-explicit-pass",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED
+    assert result.report["maintained_history_age_seconds"] == 961
+    assert result.report["max_maintained_history_age_seconds"] == 1200
+    assert result.report["maintained_history_ready"] is True
+    assert calls.market_history == 1
+    assert calls.feature == 1
+    assert calls.strategy == 1
+    assert calls.readiness == 1
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+
+
+def test_maintained_history_insufficient_bars_blocks_even_if_reported_ready(tmp_path: Path) -> None:
+    calls = Calls()
+    history_json = tmp_path / "latest_good_mgc_1m_history_short.json"
+    short_payload = maintained_history_payload()
+    short_payload["candles"] = short_payload["candles"][-1:]  # type: ignore[index]
+    short_payload["candle_history"] = short_payload["candles"]
+    history_json.write_text(json.dumps(short_payload), encoding="utf-8")
+
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            maintained_history_json=history_json,
+            current_quote_report_payload={"quote_provider_mode": "REALTIME", "realtime_quote_received": True, "current_quote_available": True},
+            max_maintained_history_age_seconds=1200,
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-maintained-history-short-blocked",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_DATA_MAINTENANCE
+    assert result.report["maintained_history_ready"] is False
+    assert result.report["maintained_history_bar_count"] == 1
+    assert "requires at least" in str(result.report["primary_blocker"])
+    assert calls.market_history == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+
+
+def test_maintained_history_missing_realtime_quote_blocks(tmp_path: Path) -> None:
+    calls = Calls()
+    history_json = tmp_path / "latest_good_mgc_1m_history_missing_quote.json"
+    history_json.write_text(json.dumps(maintained_history_payload()), encoding="utf-8")
+
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            maintained_history_json=history_json,
+            max_maintained_history_age_seconds=1200,
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-maintained-history-missing-quote-blocked",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_DATA_MAINTENANCE
+    assert result.report["maintained_history_ready"] is False
+    assert "current quote report" in str(result.report["primary_blocker"])
+    assert calls.market_history == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
 
 
 def test_full_history_feature_rule_ready_without_submit_flags_stays_no_submit(tmp_path: Path) -> None:

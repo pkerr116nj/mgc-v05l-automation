@@ -464,6 +464,7 @@ planning entries only; they are not runtime-maintained in this slice.
   --rule-id mgc_ema_momentum_reclaim_long_v1 \
   --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
   --emit-signal \
+  --max-maintained-history-age-seconds 900 \
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
@@ -489,6 +490,7 @@ operator-owned submit gates:
   --manual-close-limit-price <CLOSE_LIMIT_PRICE> \
   --submit-paper \
   --confirm-paper-submit \
+  --max-maintained-history-age-seconds 900 \
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
@@ -497,3 +499,13 @@ If the maintained history is stale/insufficient, if the rule emits
 `paper_proof_invoked=false`. A clean runner report is the audit trail; no
 separate dry-run command is required when the explicit PAPER submit flags are
 present.
+
+Keep the maintained-history freshness policy aligned between data maintenance
+and the strategy paper runner. The maintenance CLI writes `history_ready` using
+its `--max-history-age-seconds` threshold, while the runner applies
+`--max-maintained-history-age-seconds` and reports
+`maintained_history_age_seconds`, `max_maintained_history_age_seconds`, and
+`maintained_history_ready`. For paper plumbing tests, an explicit wider value
+such as `1200` can be used; for real strategy validation, prefer a tighter
+threshold. This does not make maintained bars realtime: separate realtime quote
+evidence remains required.
