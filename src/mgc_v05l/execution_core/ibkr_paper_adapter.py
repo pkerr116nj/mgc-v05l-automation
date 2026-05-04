@@ -105,6 +105,7 @@ class IbkrPaperAdapter:
         self.ambiguous_contexts: dict[str, str] = {}
         self.missing_callbacks: set[str] = set()
         self.ibkr_errors: list[dict[str, Any]] = []
+        self.callback_errors: list[dict[str, Any]] = []
         self._managed_accounts_ready = threading.Event()
         self._next_valid_id_ready = threading.Event()
         self._order_ready: dict[str, threading.Event] = {}
@@ -545,25 +546,25 @@ class IbkrPaperAdapter:
                 client_cls.__init__(self, self)
 
             def nextValidId(self, orderId: int) -> None:  # noqa: N802
-                owner.record_next_valid_id(orderId)
+                owner._safe_callback("nextValidId", lambda: owner.record_next_valid_id(orderId))
 
             def managedAccounts(self, accountsList: str) -> None:  # noqa: N802
-                owner.record_managed_accounts(accountsList)
+                owner._safe_callback("managedAccounts", lambda: owner.record_managed_accounts(accountsList))
 
             def openOrder(self, orderId: int, contract: Any, order: Any, orderState: Any) -> None:  # noqa: N802
-                owner._record_open_order_callback(orderId, contract, order, orderState)
+                owner._safe_callback("openOrder", lambda: owner._record_open_order_callback(orderId, contract, order, orderState))
 
             def orderStatus(self, orderId: int, status: str, filled: float, remaining: float, avgFillPrice: float, *args: Any) -> None:  # noqa: N802, ARG002
-                owner._record_order_status_callback(orderId, status, filled, remaining, avgFillPrice)
+                owner._safe_callback("orderStatus", lambda: owner._record_order_status_callback(orderId, status, filled, remaining, avgFillPrice))
 
             def execDetails(self, reqId: int, contract: Any, execution: Any) -> None:  # noqa: N802, ARG002
-                owner._record_exec_details_callback(contract, execution)
+                owner._safe_callback("execDetails", lambda: owner._record_exec_details_callback(contract, execution))
 
             def completedOrder(self, contract: Any, order: Any, orderState: Any) -> None:  # noqa: N802
-                owner._record_completed_order_callback(contract, order, orderState)
+                owner._safe_callback("completedOrder", lambda: owner._record_completed_order_callback(contract, order, orderState))
 
             def position(self, account: str, contract: Any, pos: float, avgCost: float) -> None:
-                owner._record_position_callback(account, contract, pos, avgCost)
+                owner._safe_callback("position", lambda: owner._record_position_callback(account, contract, pos, avgCost))
 
             def positionEnd(self) -> None:  # noqa: N802
                 owner._positions_ready.set()
@@ -572,7 +573,7 @@ class IbkrPaperAdapter:
                 owner._open_orders_ready.set()
 
             def error(self, *args: Any) -> None:  # noqa: N802
-                owner._record_error(args)
+                owner._safe_callback("error", lambda: owner._record_error(args))
 
         return PaperSubmitBridge()
 
@@ -728,7 +729,7 @@ class IbkrPaperAdapter:
             signed_quantity=int(pos),
             average_price=avg_cost,
             observed_at=datetime.now(timezone.utc),
-            raw={"callback": "position"},
+            raw={"callback": "position", "contract": _contract_fields(contract)},
         )
 
     def _record_error(self, args: tuple[Any, ...]) -> None:
@@ -763,19 +764,41 @@ class IbkrPaperAdapter:
     def _submit_id_for_local_order(self, order_id: Any) -> str | None:
         return self._local_order_to_submit.get(str(order_id))
 
+    def _safe_callback(self, callback_name: str, handler: Callable[[], Any]) -> None:
+        try:
+            handler()
+        except Exception as exc:  # noqa: BLE001 - callback threads must report, not die silently.
+            self.callback_errors.append(
+                {
+                    "callback": callback_name,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            if callback_name == "position":
+                self._positions_ready.set()
+            if callback_name in {"openOrder", "orderStatus", "completedOrder"}:
+                self._open_orders_ready.set()
+
     def _contract_key_from_contract(self, contract: Any) -> str:
-        con_id = getattr(contract, "conId", None)
-        local_symbol = str(getattr(contract, "localSymbol", "") or "")
+        fields = _contract_fields(contract)
+        con_id = fields["conId"]
+        local_symbol = str(fields["localSymbol"] or "")
+        if _positive_int_or_none(con_id) is not None:
+            for contract_key, entry in self.contract_allowlist.items():
+                if _positive_int_or_none(entry.get("con_id")) == _positive_int_or_none(con_id):
+                    return contract_key
+            raise IbkrPaperCorrelationError(f"contract callback did not match allowlist conId: {_contract_fields(contract)}")
+        if local_symbol:
+            for contract_key, entry in self.contract_allowlist.items():
+                if _normalize_symbol(entry.get("local_symbol")) == _normalize_symbol(local_symbol):
+                    return contract_key
+            raise IbkrPaperCorrelationError(f"contract callback did not match allowlist localSymbol: {_contract_fields(contract)}")
         for contract_key, entry in self.contract_allowlist.items():
-            if con_id is not None and entry.get("con_id") is not None and int(entry["con_id"]) == int(con_id):
+            if _contract_month_match(fields, entry):
                 return contract_key
-            if local_symbol and str(entry.get("local_symbol") or "") == local_symbol:
-                return contract_key
-        symbol = str(getattr(contract, "symbol", "") or "")
-        for contract_key, entry in self.contract_allowlist.items():
-            if symbol and str(entry.get("symbol") or "") == symbol:
-                return contract_key
-        raise IbkrPaperCorrelationError("contract callback did not match allowlist")
+        raise IbkrPaperCorrelationError(f"contract callback did not match allowlist: {_contract_fields(contract)}")
 
     def _validate_config(self) -> None:
         if self.mode != "PAPER":
@@ -844,6 +867,50 @@ def _is_working_order(status: str, remaining_quantity: Decimal | int | str) -> b
 
 def _is_cancelled_status(status: str) -> bool:
     return str(status or "").strip().upper() in {"CANCELLED", "CANCELED"}
+
+
+def _contract_fields(contract: Any) -> dict[str, Any]:
+    return {
+        "symbol": getattr(contract, "symbol", None),
+        "secType": getattr(contract, "secType", None),
+        "exchange": getattr(contract, "exchange", None),
+        "currency": getattr(contract, "currency", None),
+        "lastTradeDateOrContractMonth": getattr(contract, "lastTradeDateOrContractMonth", None),
+        "localSymbol": getattr(contract, "localSymbol", None),
+        "conId": getattr(contract, "conId", None),
+        "multiplier": getattr(contract, "multiplier", None),
+        "tradingClass": getattr(contract, "tradingClass", None),
+    }
+
+
+def _contract_month_match(fields: Mapping[str, Any], entry: Mapping[str, Any]) -> bool:
+    symbol_ok = _normalize_symbol(fields.get("symbol")) == _normalize_symbol(entry.get("symbol"))
+    sec_type_ok = _normalize_symbol(fields.get("secType")) == _normalize_symbol(entry.get("security_type") or entry.get("secType") or "FUT")
+    currency_ok = not fields.get("currency") or _normalize_symbol(fields.get("currency")) == _normalize_symbol(entry.get("currency") or "USD")
+    callback_month = _normalize_contract_month(fields.get("lastTradeDateOrContractMonth"))
+    allowlist_month = _normalize_contract_month(entry.get("expiry") or entry.get("contract_month"))
+    month_ok = bool(callback_month and allowlist_month and callback_month.startswith(allowlist_month[:6]))
+    callback_multiplier = str(fields.get("multiplier") or "").strip()
+    allowlist_multiplier = str(entry.get("multiplier") or "").strip()
+    multiplier_ok = not callback_multiplier or not allowlist_multiplier or callback_multiplier == allowlist_multiplier
+    return symbol_ok and sec_type_ok and currency_ok and month_ok and multiplier_ok
+
+
+def _normalize_symbol(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _normalize_contract_month(value: Any) -> str:
+    raw = "".join(ch for ch in str(value or "").strip() if ch.isdigit())
+    return raw[:8] if len(raw) >= 8 else raw[:6]
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _has_forbidden_order_fields(extra_fields: Mapping[str, Any]) -> bool:

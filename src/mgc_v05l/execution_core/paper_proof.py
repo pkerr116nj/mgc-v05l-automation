@@ -644,6 +644,10 @@ def run_ibkr_paper_proof(
         if diagnostics:
             append("submit_diagnostics_created", diagnostics)
 
+    def append_adapter_callback_errors() -> None:
+        for error in getattr(actual_adapter, "callback_errors", []) or []:
+            append("broker_callback_error_observed", error)
+
     append("run_started", {"run_id": run_id})
     append("config_loaded", config.to_report_dict())
     append("config_validated", {"mode": config.mode, "submit_enabled": True})
@@ -853,12 +857,14 @@ def run_ibkr_paper_proof(
         lifecycle_status = exc.lifecycle_status
         lifecycle_required_action = exc.required_action
         reason = exc.reason
+        append_adapter_callback_errors()
     except Exception as exc:  # noqa: BLE001 - any submit uncertainty fails closed for operator review.
         classification = TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
         reason = str(exc)
         lifecycle_status = lifecycle_status if lifecycle_status != "CREATED" else "AMBIGUOUS_MANUAL_REVIEW_REQUIRED"
         for submit_attempt_id in submitted_attempt_ids:
             append_submit_diagnostics(submit_attempt_id)
+        append_adapter_callback_errors()
     finally:
         actual_adapter.disconnect()
 
@@ -1111,6 +1117,7 @@ def _proof_payload(
     orders = by_type.get("broker_order_observed", [])
     fills = by_type.get("fill_event_created", [])
     submit_diagnostics = by_type.get("submit_diagnostics_created", [])
+    callback_errors = by_type.get("broker_callback_error_observed", [])
     lifecycle_events = by_type.get("paper_proof_lifecycle_status", [])
     close_guards = by_type.get("close_only_guard_evaluated", [])
     flat_guards = by_type.get("flat_after_close_guard_evaluated", [])
@@ -1138,6 +1145,7 @@ def _proof_payload(
         "close_fill": fills[1] if len(fills) > 1 else None,
         "close_submit_diagnostics": close_diagnostics,
         "submit_diagnostics": submit_diagnostics,
+        "broker_callback_errors": callback_errors,
         "close_only_guard_reports": close_guards,
         "flat_after_close_guard_reports": flat_guards,
         "final_reconciliation": {"status": "CLEAN"} if classification == TerminalClassification.PASSED else None,

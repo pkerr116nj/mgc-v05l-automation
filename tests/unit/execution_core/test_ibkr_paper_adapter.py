@@ -30,6 +30,9 @@ def allowlist() -> dict[str, dict[str, str]]:
             "currency": "USD",
             "local_symbol": "MGCM6",
             "con_id": "12345",
+            "contract_month": "202606",
+            "expiry": "20260626",
+            "multiplier": "10",
             "tick_size": "0.1",
         }
     }
@@ -250,6 +253,65 @@ def test_position_callback_maps_to_track_b_position_state() -> None:
     assert paper.snapshot_position(contract_key="MGC-202606") == position
 
 
+def test_position_callback_real_mgc_field_shape_maps_by_contract_month_without_local_symbol() -> None:
+    paper = adapter(
+        contract_allowlist={
+            "MGC-202606": {
+                "symbol": "MGC",
+                "security_type": "FUT",
+                "exchange": "COMEX",
+                "currency": "USD",
+                "local_symbol": "MGCM6",
+                "con_id": "712565978",
+                "contract_month": "202606",
+                "expiry": "20260626",
+                "multiplier": "10",
+                "tick_size": "0.1",
+            }
+        },
+        module_loader=fake_ibapi_loader(position_contract_kwargs={"localSymbol": "", "conId": 0, "lastTradeDateOrContractMonth": "202606"}),
+    )
+    paper.connect()
+
+    position = paper.refresh_positions(contract_key="MGC-202606")
+
+    assert position.contract_key == "MGC-202606"
+    assert position.raw["contract"]["symbol"] == "MGC"
+    assert position.raw["contract"]["lastTradeDateOrContractMonth"] == "202606"
+    assert paper.callback_errors == []
+
+
+@pytest.mark.parametrize(
+    "contract_kwargs",
+    [
+        {"localSymbol": "MNQM6", "conId": 0, "lastTradeDateOrContractMonth": "202606"},
+        {"localSymbol": "", "conId": 999999, "lastTradeDateOrContractMonth": "202606"},
+    ],
+)
+def test_position_callback_wrong_exact_identifier_is_captured_not_uncaught(contract_kwargs: dict[str, object]) -> None:
+    paper = adapter(module_loader=fake_ibapi_loader(position_contract_kwargs=contract_kwargs))
+    paper.request_timeout_seconds = 0.01
+    paper.connect()
+
+    with pytest.raises(IbkrPaperReadinessError, match="missing position callback"):
+        paper.refresh_positions(contract_key="MGC-202606")
+
+    assert paper.callback_errors
+    assert paper.callback_errors[0]["callback"] == "position"
+    assert paper.callback_errors[0]["error_type"] == "IbkrPaperCorrelationError"
+    assert "allowlist" in str(paper.callback_errors[0]["error_message"])
+
+
+def test_position_callback_missing_noncritical_fields_still_maps_by_conid() -> None:
+    paper = adapter(module_loader=fake_ibapi_loader(position_contract_kwargs={"symbol": "", "localSymbol": "", "conId": 12345, "lastTradeDateOrContractMonth": ""}))
+    paper.connect()
+
+    position = paper.refresh_positions(contract_key="MGC-202606")
+
+    assert position.contract_key == "MGC-202606"
+    assert paper.callback_errors == []
+
+
 def test_quote_observation_requires_exact_allowlisted_contract() -> None:
     paper = adapter()
 
@@ -440,7 +502,7 @@ def test_deprecated_order_attribute_error_after_submit_is_included_in_diagnostic
     ]
 
 
-def fake_ibapi_loader(*, place_order_error: Exception | None = None):
+def fake_ibapi_loader(*, place_order_error: Exception | None = None, position_contract_kwargs: dict[str, object] | None = None):
     class FakeWrapper:
         def __init__(self) -> None:
             return None
@@ -478,7 +540,9 @@ def fake_ibapi_loader(*, place_order_error: Exception | None = None):
             self.wrapper.managedAccounts("DU1234567")
 
         def reqPositions(self) -> None:  # noqa: N802
-            self.wrapper.position("DU1234567", FakeContract(localSymbol="MGCM6", conId=12345), 0, 0.0)
+            kwargs = {"localSymbol": "MGCM6", "conId": 12345}
+            kwargs.update(position_contract_kwargs or {})
+            self.wrapper.position("DU1234567", FakeContract(**kwargs), 0, 0.0)
             self.wrapper.positionEnd()
 
         def reqOpenOrders(self) -> None:  # noqa: N802
