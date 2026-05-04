@@ -292,6 +292,15 @@ Dashboard implication:
   `outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json`
   with maintained-history, market-history collector, feature builder, rule,
   readiness, paper proof, and final broker-state classification.
+- `track_b_real_rule_wait_runner` is the bounded real-rule polling wrapper for
+  eventual MGC PAPER signals. It repeatedly refreshes or reads bounded runtime
+  candle context, delegates one cycle to `track_b_strategy_paper_runner` using
+  `mgc_ema_momentum_reclaim_long_v1`, and stops on `NO_SIGNAL_NO_MUTATION`,
+  `SIGNAL_READY_NO_SUBMIT`, or the first real-signal PAPER proof/review result.
+  It does not use `DEMO_WIRING_PROOF`, force the real rule, run unbounded
+  streams, or submit unless a real strategy signal appears and the explicit
+  PAPER submit gates are present. It writes
+  `outputs/track_b_execution_core/track_b_real_rule_wait_runner/latest_track_b_real_rule_wait_runner_report.json`.
 - `track_b_observation_runner` is a bounded operator convenience wrapper around
   the existing no-submit observation chain. It can run one cycle or bounded
   watch cycles from a fixture quote/candle artifact or explicit current

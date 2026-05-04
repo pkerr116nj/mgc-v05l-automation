@@ -768,6 +768,65 @@ The latest report is:
 outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json
 ```
 
+### Bounded real-rule wait mode
+
+Use `track_b_real_rule_wait_runner_cli` when you want Track B to keep checking
+the real MGC rule for a bounded number of cycles without forcing a signal:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_real_rule_wait_runner_cli \
+  --mode PAPER \
+  --runtime-candle-context-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
+  --max-cycles 10 \
+  --poll-seconds 15 \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --output-root outputs/track_b_execution_core/track_b_real_rule_wait_runner
+```
+
+Repeated `NO_SIGNAL` cycles end as
+`TRACK_B_REAL_RULE_WAIT_NO_SIGNAL_NO_MUTATION`; readiness, paper proof, submit,
+and broker mutation remain false. If a real-rule signal appears without PAPER
+submit flags, the runner stops as
+`TRACK_B_REAL_RULE_WAIT_SIGNAL_READY_NO_SUBMIT`.
+
+To allow PAPER execution only if a real-rule signal naturally appears, add the
+explicit PAPER gates:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_real_rule_wait_runner_cli \
+  --mode PAPER \
+  --runtime-candle-context-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
+  --max-cycles 10 \
+  --poll-seconds 15 \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --quantity 1 \
+  --manual-open-limit-price <OPEN_LIMIT_PRICE> \
+  --manual-close-limit-price <CLOSE_LIMIT_PRICE> \
+  --submit-paper \
+  --confirm-paper-submit \
+  --output-root outputs/track_b_execution_core/track_b_real_rule_wait_runner
+```
+
+This is real-rule only. `DEMO_WIRING_PROOF` belongs to the strategy paper
+runner proof branch and is blocked by the real-rule wait runner so it cannot be
+mistaken for `mgc_ema_momentum_reclaim_long_v1`. The wait report stays bounded:
+it writes the final run report and latest pointer under
+`outputs/track_b_execution_core/track_b_real_rule_wait_runner/`.
+
 Translate an explicit candle/event input into listener inbox work:
 
 ```bash

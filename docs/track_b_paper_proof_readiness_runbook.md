@@ -567,6 +567,79 @@ PAPER pass still requires `TRACK_B_PAPER_PROOF_PASSED` and
 review/provenance-incomplete, and contradictory broker truth remains
 review-required.
 
+### Real-rule bounded wait / polling
+
+For eventual real MGC PAPER signals, use the bounded real-rule wait runner. It
+re-evaluates `mgc_ema_momentum_reclaim_long_v1` across a finite number of
+cycles and does not use `DEMO_WIRING_PROOF`, force thresholds, or mutate broker
+state on repeated `NO_SIGNAL` cycles:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_real_rule_wait_runner_cli \
+  --mode PAPER \
+  --runtime-candle-context-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
+  --max-cycles 10 \
+  --poll-seconds 15 \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --output-root outputs/track_b_execution_core/track_b_real_rule_wait_runner
+```
+
+Expected bounded no-mutation outcomes:
+
+- `TRACK_B_REAL_RULE_WAIT_NO_SIGNAL_NO_MUTATION`: all attempted cycles stayed
+  `NO_SIGNAL` / review-only and `paper_proof_invoked=false`.
+- `TRACK_B_REAL_RULE_WAIT_SIGNAL_READY_NO_SUBMIT`: the real rule emitted a
+  signal and readiness could proceed, but explicit PAPER submit flags were not
+  supplied, so no broker mutation occurred.
+- `TRACK_B_REAL_RULE_WAIT_BLOCKED_NON_REAL_SIGNAL`: a demo/proof signal reached
+  this real-rule-only runner. Use the strategy paper runner directly for
+  `DEMO_WIRING_PROOF`.
+
+If the operator intentionally wants PAPER execution when a real-rule signal
+arrives, add the same explicit PAPER submit gates. The runner still stops on
+`NO_SIGNAL`, runtime context blockers, feature blockers, or readiness blockers
+without invoking proof:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_real_rule_wait_runner_cli \
+  --mode PAPER \
+  --runtime-candle-context-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
+  --max-cycles 10 \
+  --poll-seconds 15 \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --quantity 1 \
+  --manual-open-limit-price <OPEN_LIMIT_PRICE> \
+  --manual-close-limit-price <CLOSE_LIMIT_PRICE> \
+  --submit-paper \
+  --confirm-paper-submit \
+  --output-root outputs/track_b_execution_core/track_b_real_rule_wait_runner
+```
+
+The stable latest wait report is:
+
+```text
+outputs/track_b_execution_core/track_b_real_rule_wait_runner/latest_track_b_real_rule_wait_runner_report.json
+```
+
+Every cycle records runtime context readiness, feature/rule evaluation, rule
+decision, signal emission, readiness/proof invocation, submit attempt, broker
+mutation, and blocker fields. PAPER proof may run only after a real strategy
+signal and the explicit PAPER flags. Live-money readiness remains `false`.
+
 Maintained weekly history is historical context. It may be many hours or days
 old and still be valid if `complete_through_cutoff=true`. The runner reports
 `historical_context_ready`, `runtime_candle_context_required`,
