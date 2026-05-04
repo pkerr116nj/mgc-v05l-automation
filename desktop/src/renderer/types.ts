@@ -127,6 +127,7 @@ export interface DesktopState {
   backendLogPath: string | null;
   desktopLogPath: string | null;
   appVersion: string;
+  buildMetadata: DesktopBuildMetadata;
   manager: {
     running: boolean;
     lastExitCode: number | null;
@@ -143,6 +144,23 @@ export interface DesktopState {
     loadedAt: string;
   };
   refreshedAt: string;
+}
+
+export interface DesktopBuildMetadata {
+  schema_version: string;
+  app_name: string;
+  build_generated_at: string | null;
+  build_timestamp: string | null;
+  git_commit: string;
+  git_commit_full: string;
+  git_branch: string;
+  git_dirty: boolean | null;
+  repo_root: string;
+  desktop_root: string;
+  artifact_root: string;
+  packaged_app_path: string | null;
+  packaging_mode: string;
+  metadata_path: string | null;
 }
 
 export interface OperatorDesktopApi {

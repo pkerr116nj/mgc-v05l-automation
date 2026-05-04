@@ -25,6 +25,8 @@ artifact.
 Recommended first sections:
 
 - Top status card: `operator_status` verdict and `required_next_action`
+- Desktop build card: packaged app commit, build timestamp, packaging mode,
+  metadata path, and packaged/source artifact path
 - Observation runner card: one-command runner verdict, mode, source id, cycle,
   watch exit state, component verdicts, and latest operator status path when
   summarized by operator status
@@ -43,6 +45,11 @@ Recommended first sections:
 The first tab displays `NO-SUBMIT / SHADOW REVIEW` only when all supplied safety
 flags remain explicitly false. Missing or non-false safety flags are warnings,
 not readiness.
+
+The Track B status tab also displays desktop build metadata from the packaged
+bundle when available. This is an operator sanity check only: it helps confirm
+that `/Applications/MGC Operator.app` reflects the current repo build, but it
+does not become Track B truth or submit authority.
 
 ## Approved Data Sources
 
@@ -67,9 +74,34 @@ The app may read these Track B artifacts:
 - Preflight reports
 - Quote reports
 - Track B architecture docs and committed examples
+- Desktop package build metadata from `.mgc-build-metadata.json` inside the app
+  bundle
 
 The app must not scrape random runtime, cache, dashboard, desktop, or Track A
 state as authority.
+
+## Desktop Packaging
+
+The sanctioned local packaging command remains:
+
+```bash
+cd /Users/patrick/Dev/MGC-v05l-automation/desktop
+npm run package:local
+```
+
+To build, package, and replace the installed macOS app after explicit operator
+approval:
+
+```bash
+cd /Users/patrick/Dev/MGC-v05l-automation/desktop
+npm run deploy:applications -- --yes
+```
+
+The deploy script refuses to overwrite `/Applications/MGC Operator.app` without
+`--yes`. Packaging writes `.mgc-build-metadata.json` into the app bundle with
+the git commit, build timestamp, branch, dirty flag, and artifact paths. This
+workflow is packaging-only and does not invoke broker, TWS, IBKR, Databento,
+paper proof, or submit paths.
 
 ## Display Fields
 
@@ -202,6 +234,8 @@ deliberate:
 - The first read-only Track B status tab is implemented behind its own
   `Track B Status` navigation entry and reads
   `latest_operator_status_summary.json` as the primary read model.
+- The Track B status tab displays packaged desktop build metadata so operators
+  can detect stale `/Applications` bundles before testing.
 - Paper proof remains blocked for `DUM882026` / `MGC-202606` while the known
   unresolved `PendingCancel` broker order exists.
 - Live trading is not implemented.

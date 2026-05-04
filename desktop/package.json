@@ -22,6 +22,7 @@
     "package:local": "npm run build && node scripts/package_local_app.js",
     "package:dir": "npm run build && electron-builder --dir",
     "package:mac": "npm run build && electron-builder --mac dir",
+    "deploy:applications": "node scripts/deploy_to_applications.js",
     "package:open": "node scripts/open_packaged_app.js"
   },
   "dependencies": {

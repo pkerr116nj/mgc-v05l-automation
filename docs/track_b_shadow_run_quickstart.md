@@ -550,6 +550,31 @@ outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observa
 outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json
 ```
 
+## Desktop App Packaging
+
+To build the local desktop app bundle without replacing the installed
+`/Applications` app:
+
+```bash
+cd /Users/patrick/Dev/MGC-v05l-automation/desktop
+npm run package:local
+```
+
+To build, package, and replace `/Applications/MGC Operator.app` after explicit
+operator approval:
+
+```bash
+cd /Users/patrick/Dev/MGC-v05l-automation/desktop
+npm run deploy:applications -- --yes
+```
+
+The deploy script refuses to overwrite `/Applications/MGC Operator.app` without
+`--yes`. The packaged app writes `.mgc-build-metadata.json` into the bundle, and
+the Track B Status tab displays the build commit, build timestamp, packaging
+mode, and app/source path. This is a stale-bundle check only; it does not call
+broker, TWS, IBKR, Databento, `paper_proof_cli`, cancel, placeOrder, or submit
+paths.
+
 ## Shadow Run Command
 
 Run the committed golden example with:

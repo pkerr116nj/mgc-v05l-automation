@@ -190,6 +190,32 @@ Dashboard implication:
   `outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json`
   as the sanctioned primary read model, displays missing/malformed artifacts as
   unknown, and exposes no submit/action controls.
+- Desktop package build metadata is a visibility aid for operators. The local
+  package step writes `.mgc-build-metadata.json` into the app bundle, and the
+  Track B status tab shows the commit, build timestamp, packaging mode, and
+  bundle/source path so stale `/Applications` builds are obvious.
+
+## Desktop Package / Deploy
+
+Build the local desktop bundle without touching `/Applications`:
+
+```bash
+cd /Users/patrick/Dev/MGC-v05l-automation/desktop
+npm run package:local
+```
+
+After explicit approval, build, package, and replace the installed macOS app:
+
+```bash
+cd /Users/patrick/Dev/MGC-v05l-automation/desktop
+npm run deploy:applications -- --yes
+```
+
+The deploy script refuses to replace `/Applications/MGC Operator.app` unless
+`--yes` is supplied. It copies the freshly packaged `MGC Operator.app` bundle
+and preserves visible build metadata for the UI. This workflow is packaging and
+visibility only; it does not invoke broker, TWS, IBKR, Databento, paper proof,
+cancel, placeOrder, or submit behavior.
 
 ## Decision Styles
 

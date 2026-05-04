@@ -134,6 +134,7 @@ export interface DesktopState {
   backendLogPath: string | null;
   desktopLogPath: string | null;
   appVersion: string;
+  buildMetadata: DesktopBuildMetadata;
   manager: {
     running: boolean;
     lastExitCode: number | null;
@@ -152,6 +153,23 @@ export interface TrackBReadOnlyStatus {
   status: JsonRecord | null;
   missingReason: string | null;
   loadedAt: string;
+}
+
+export interface DesktopBuildMetadata {
+  schema_version: string;
+  app_name: string;
+  build_generated_at: string | null;
+  build_timestamp: string | null;
+  git_commit: string;
+  git_commit_full: string;
+  git_branch: string;
+  git_dirty: boolean | null;
+  repo_root: string;
+  desktop_root: string;
+  artifact_root: string;
+  packaged_app_path: string | null;
+  packaging_mode: string;
+  metadata_path: string | null;
 }
 
 function isWorkspaceRepoRoot(candidate: string): boolean {
@@ -278,12 +296,65 @@ const DESKTOP_LOCAL_STATE_ROOT = (() => {
 const DESKTOP_LOCAL_DASHBOARD_CACHE_FILE = path.join(DESKTOP_LOCAL_STATE_ROOT, "dashboard_api_snapshot.cache.json");
 const DESKTOP_LOCAL_READINESS_FILE = path.join(DESKTOP_LOCAL_STATE_ROOT, "operator_dashboard_readiness.json");
 const LOCAL_OPERATOR_AUTH_ROOT = path.join(DESKTOP_APP_STATE_ROOT, "local_operator_auth");
+const DESKTOP_BUILD_METADATA_FILE = ".mgc-build-metadata.json";
 const DASHBOARD_READINESS_FILE = path.join(RUNTIME_ROOT, "operator_dashboard_readiness.json");
 export const DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES = 8_000_000;
 const DESKTOP_RENDERER_TRADE_LOG_LIMIT = 200;
 const LOCAL_OPERATOR_AUTH_STATE_FILE = path.join(LOCAL_OPERATOR_AUTH_ROOT, "local_operator_auth_state.json");
 const LOCAL_OPERATOR_AUTH_EVENTS_FILE = path.join(LOCAL_OPERATOR_AUTH_ROOT, "local_operator_auth_events.jsonl");
 const LOCAL_SECRET_WRAPPER_FILE = path.join(LOCAL_OPERATOR_AUTH_ROOT, "local_secret_wrapper.json");
+
+function readDesktopBuildMetadata(): DesktopBuildMetadata {
+  const explicitPath = String(process.env.MGC_DESKTOP_BUILD_METADATA_PATH || "").trim();
+  const candidates = [
+    explicitPath || null,
+    typeof process.resourcesPath === "string" ? path.join(process.resourcesPath, "app", DESKTOP_BUILD_METADATA_FILE) : null,
+    typeof process.resourcesPath === "string" ? path.join(process.resourcesPath, DESKTOP_BUILD_METADATA_FILE) : null,
+    path.join(DESKTOP_ROOT, "release", "local", "MGC Operator.app", "Contents", "Resources", "app", DESKTOP_BUILD_METADATA_FILE),
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  for (const candidate of candidates) {
+    try {
+      if (!existsSync(candidate)) {
+        continue;
+      }
+      const payload = JSON.parse(readFileSync(candidate, "utf8")) as JsonRecord;
+      return {
+        schema_version: String(payload.schema_version || "mgc_desktop_build_metadata_v1"),
+        app_name: String(payload.app_name || "MGC Operator"),
+        build_generated_at: typeof payload.build_generated_at === "string" ? payload.build_generated_at : null,
+        build_timestamp: typeof payload.build_timestamp === "string" ? payload.build_timestamp : null,
+        git_commit: String(payload.git_commit || "UNKNOWN"),
+        git_commit_full: String(payload.git_commit_full || payload.git_commit || "UNKNOWN"),
+        git_branch: String(payload.git_branch || "UNKNOWN"),
+        git_dirty: typeof payload.git_dirty === "boolean" ? payload.git_dirty : null,
+        repo_root: String(payload.repo_root || REPO_ROOT),
+        desktop_root: String(payload.desktop_root || DESKTOP_ROOT),
+        artifact_root: String(payload.artifact_root || path.join(DESKTOP_ROOT, "release", "local")),
+        packaged_app_path: typeof payload.packaged_app_path === "string" ? payload.packaged_app_path : null,
+        packaging_mode: String(payload.packaging_mode || "local_workspace_bundle"),
+        metadata_path: candidate,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return {
+    schema_version: "mgc_desktop_build_metadata_v1",
+    app_name: "MGC Operator",
+    build_generated_at: null,
+    build_timestamp: null,
+    git_commit: String(process.env.MGC_DESKTOP_BUILD_COMMIT || "NOT_PACKAGED"),
+    git_commit_full: String(process.env.MGC_DESKTOP_BUILD_COMMIT_FULL || process.env.MGC_DESKTOP_BUILD_COMMIT || "NOT_PACKAGED"),
+    git_branch: String(process.env.MGC_DESKTOP_BUILD_BRANCH || "UNKNOWN"),
+    git_dirty: null,
+    repo_root: REPO_ROOT,
+    desktop_root: DESKTOP_ROOT,
+    artifact_root: path.join(DESKTOP_ROOT, "release", "local"),
+    packaged_app_path: null,
+    packaging_mode: "source_runtime",
+    metadata_path: null,
+  };
+}
 const DEFAULT_DASHBOARD_HOST = process.env.MGC_OPERATOR_DASHBOARD_HOST || "127.0.0.1";
 const DEFAULT_DASHBOARD_PORT = Number(process.env.MGC_OPERATOR_DASHBOARD_PORT || 8790);
 const DEFAULT_DASHBOARD_URL = `http://${DEFAULT_DASHBOARD_HOST}:${DEFAULT_DASHBOARD_PORT}/`;
@@ -1954,6 +2025,7 @@ async function loadDesktopStateFixtureState(): Promise<DesktopState> {
     backendLogPath: DEFAULT_LOG_FILE,
     desktopLogPath: DESKTOP_LOG_FILE,
     appVersion: String(packageJson.version ?? "0.0.0"),
+    buildMetadata: readDesktopBuildMetadata(),
     manager: {
       running: false,
       lastExitCode,
@@ -1971,6 +2043,7 @@ async function loadDesktopStateFixtureState(): Promise<DesktopState> {
   return {
     ...merged,
     appVersion: String(packageJson.version ?? "0.0.0"),
+    buildMetadata: readDesktopBuildMetadata(),
     refreshedAt: nowIso(),
   };
 }
@@ -3770,6 +3843,7 @@ async function probeDesktopState(
       backendLogPath: DEFAULT_LOG_FILE,
       desktopLogPath: DESKTOP_LOG_FILE,
       appVersion: String(packageJson.version ?? "0.0.0"),
+      buildMetadata: readDesktopBuildMetadata(),
       manager: {
         running: Boolean(dashboardManager),
         lastExitCode,
@@ -3815,6 +3889,7 @@ async function probeDesktopState(
       backendLogPath: DEFAULT_LOG_FILE,
       desktopLogPath: DESKTOP_LOG_FILE,
       appVersion: String(packageJson.version ?? "0.0.0"),
+      buildMetadata: readDesktopBuildMetadata(),
       manager: {
         running: Boolean(dashboardManager),
         lastExitCode,
@@ -3852,6 +3927,7 @@ async function probeDesktopState(
     backendLogPath: DEFAULT_LOG_FILE,
     desktopLogPath: DESKTOP_LOG_FILE,
     appVersion: String(packageJson.version ?? "0.0.0"),
+    buildMetadata: readDesktopBuildMetadata(),
     manager: {
       running: Boolean(dashboardManager),
       lastExitCode,

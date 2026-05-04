@@ -77,6 +77,23 @@ function makeDesktopState(overrides: Partial<DesktopState> = {}): DesktopState {
     backendLogPath: null,
     desktopLogPath: null,
     appVersion: "0.1.0",
+    buildMetadata: {
+      schema_version: "mgc_desktop_build_metadata_v1",
+      app_name: "MGC Operator",
+      build_generated_at: null,
+      build_timestamp: null,
+      git_commit: "unit-test",
+      git_commit_full: "unit-test",
+      git_branch: "track-b-paper-execution-core",
+      git_dirty: null,
+      repo_root: "/tmp/mgc-repo",
+      desktop_root: "/tmp/mgc-repo/desktop",
+      artifact_root: "/tmp/mgc-repo/desktop/release/local",
+      packaged_app_path: null,
+      packaging_mode: "source_runtime",
+      metadata_path: null,
+      ...(overrides.buildMetadata ?? {}),
+    },
     manager: {
       running: false,
       lastExitCode: null,
@@ -547,6 +564,9 @@ test("Track B status renderer is display-only and no-submit", () => {
 
   assert.match(appTsx, /TrackBStatusPage/);
   assert.match(appTsx, /NO-SUBMIT \/ SHADOW REVIEW/);
+  assert.match(appTsx, /Desktop Build/);
+  assert.match(appTsx, /buildMetadata\?\.git_commit/);
+  assert.match(appTsx, /buildMetadata\?\.packaged_app_path/);
   assert.match(appTsx, /Observation Runner/);
   assert.match(appTsx, /observation_runner_verdict/);
   assert.match(appTsx, /observation_runner_latest_operator_status_path/);

@@ -11,6 +11,7 @@ const stagedTargetApp = path.join(stagedReleaseRoot, "MGC Operator.app");
 const targetApp = path.join(releaseRoot, "MGC Operator.app");
 const appResourcesDir = path.join(stagedTargetApp, "Contents", "Resources", "app");
 const localConfigPath = path.join(appResourcesDir, ".mgc-local-config.json");
+const buildMetadataPath = path.join(appResourcesDir, ".mgc-build-metadata.json");
 const infoPlistPath = path.join(stagedTargetApp, "Contents", "Info.plist");
 const sourceExecutable = path.join(stagedTargetApp, "Contents", "MacOS", "Electron");
 const targetExecutable = path.join(stagedTargetApp, "Contents", "MacOS", "MGC Operator");
@@ -74,6 +75,43 @@ function publishReleaseSymlink() {
 const sourcePackageJson = path.join(desktopRoot, "package.json");
 const sourceDistDir = path.join(desktopRoot, "dist");
 
+function commandOutput(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd || path.resolve(desktopRoot, ".."),
+    encoding: "utf8",
+  });
+  if ((result.status ?? 1) !== 0) {
+    return null;
+  }
+  const output = String(result.stdout || "").trim();
+  return output || null;
+}
+
+function buildMetadata() {
+  const repoRoot = path.resolve(desktopRoot, "..");
+  const commit = commandOutput("git", ["rev-parse", "--short=12", "HEAD"], { cwd: repoRoot });
+  const commitFull = commandOutput("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
+  const branch = commandOutput("git", ["branch", "--show-current"], { cwd: repoRoot });
+  const dirtyStatus = commandOutput("git", ["status", "--short"], { cwd: repoRoot });
+  const generatedAt = new Date().toISOString();
+  return {
+    schema_version: "mgc_desktop_build_metadata_v1",
+    app_name: "MGC Operator",
+    build_generated_at: generatedAt,
+    build_timestamp: generatedAt,
+    git_commit: commit || "UNKNOWN",
+    git_commit_full: commitFull || "UNKNOWN",
+    git_branch: branch || "UNKNOWN",
+    git_dirty: Boolean(dirtyStatus),
+    repo_root: repoRoot,
+    desktop_root: desktopRoot,
+    packaged_app_path: targetApp,
+    staged_app_path: stagedTargetApp,
+    artifact_root: releaseRoot,
+    packaging_mode: "local_workspace_bundle",
+  };
+}
+
 function restoreRelativeSymlinks(sourceRoot, targetRoot) {
   const pending = [sourceRoot];
   while (pending.length > 0) {
@@ -116,13 +154,14 @@ fs.rmSync(appResourcesDir, { recursive: true, force: true });
 fs.mkdirSync(appResourcesDir, { recursive: true });
 fs.copyFileSync(sourcePackageJson, path.join(appResourcesDir, "package.json"));
 fs.cpSync(sourceDistDir, path.join(appResourcesDir, "dist"), { recursive: true });
+const metadata = buildMetadata();
 fs.writeFileSync(
   localConfigPath,
   `${JSON.stringify(
     {
       repo_root: path.resolve(desktopRoot, ".."),
       desktop_root: desktopRoot,
-      generated_at: new Date().toISOString(),
+      generated_at: metadata.build_generated_at,
       packaging_mode: "local_workspace_bundle",
     },
     null,
@@ -130,6 +169,7 @@ fs.writeFileSync(
   )}\n`,
   "utf8",
 );
+fs.writeFileSync(buildMetadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
 rewriteBundleMetadata();
 stripBundleMetadata();
 codesignBundle();
@@ -137,3 +177,5 @@ publishReleaseSymlink();
 
 console.log(`Local app bundle staged at ${stagedTargetApp}`);
 console.log(`Local app bundle linked at ${targetApp}`);
+console.log(`Local app build metadata written at ${buildMetadataPath}`);
+console.log(`Local app build commit ${metadata.git_commit} generated at ${metadata.build_generated_at}`);

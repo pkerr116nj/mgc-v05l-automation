@@ -1058,6 +1058,22 @@ const API_FALLBACK: OperatorDesktopApi = {
       backendLogPath: null,
       desktopLogPath: null,
       appVersion: "0.0.0",
+      buildMetadata: {
+        schema_version: "mgc_desktop_build_metadata_v1",
+        app_name: "MGC Operator",
+        build_generated_at: null,
+        build_timestamp: null,
+        git_commit: "NOT_PACKAGED",
+        git_commit_full: "NOT_PACKAGED",
+        git_branch: "UNKNOWN",
+        git_dirty: null,
+        repo_root: "",
+        desktop_root: "",
+        artifact_root: "",
+        packaged_app_path: null,
+        packaging_mode: "source_runtime",
+        metadata_path: null,
+      },
       manager: {
         running: false,
         lastExitCode: null,
@@ -3094,8 +3110,9 @@ function pageTitle(page: PageId): string {
   return item?.label ?? "Home";
 }
 
-function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null }) {
+function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildMetadata?: DesktopState["buildMetadata"] | null }) {
   const status = asRecord(props.trackB?.status);
+  const buildMetadata = props.buildMetadata ?? null;
   const available = props.trackB?.available === true;
   const malformed = props.trackB?.malformed === true;
   const safetyUnknownOrUnsafe =
@@ -3120,6 +3137,8 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null }) {
         </div>
         <div className="metric-grid">
           <MetricCard label="Mode" value="NO-SUBMIT / SHADOW REVIEW" tone="muted" />
+          <MetricCard label="Build Commit" value={formatValue(buildMetadata?.git_commit)} />
+          <MetricCard label="Build Mode" value={formatValue(buildMetadata?.packaging_mode)} />
           <MetricCard label="Submit Allowed" value="Unknown" tone="warn" />
           <MetricCard label="Submit Attempted" value="Unknown" tone="warn" />
           <MetricCard label="Live Money Readiness" value="Unknown" tone="warn" />
@@ -3152,6 +3171,27 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null }) {
           <MetricCard label="Submit Allowed" value={formatValue(status.submit_allowed)} tone={status.submit_allowed === false ? "good" : "warn"} />
           <MetricCard label="Submit Attempted" value={formatValue(status.submit_attempted)} tone={status.submit_attempted === false ? "good" : "warn"} />
           <MetricCard label="Live Money Readiness" value={formatValue(status.live_money_readiness)} tone={status.live_money_readiness === false ? "good" : "warn"} />
+        </div>
+      </Section>
+
+      <Section title="Desktop Build" subtitle="Packaged app metadata; display-only confirmation that this UI matches the current bundle">
+        <div className="metric-grid">
+          <MetricCard label="Build Commit" value={formatValue(buildMetadata?.git_commit)} />
+          <MetricCard label="Build Time" value={formatValue(buildMetadata?.build_generated_at ?? buildMetadata?.build_timestamp)} />
+          <MetricCard label="Build Branch" value={formatValue(buildMetadata?.git_branch)} />
+          <MetricCard label="Build Mode" value={formatValue(buildMetadata?.packaging_mode)} />
+          <MetricCard label="Dirty Tree" value={formatValue(buildMetadata?.git_dirty)} tone={buildMetadata?.git_dirty === true ? "warn" : "muted"} />
+          <MetricCard label="Metadata Path" value={formatValue(buildMetadata?.metadata_path)} />
+        </div>
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Packaged App Path</h3>
+            <div className="placeholder-note">{formatValue(buildMetadata?.packaged_app_path)}</div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Source / Artifact Root</h3>
+            <div className="placeholder-note">{formatValue(buildMetadata?.artifact_root || buildMetadata?.desktop_root || buildMetadata?.repo_root)}</div>
+          </div>
         </div>
       </Section>
 
@@ -18429,7 +18469,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
           ) : null}
 
           {!loading && page === "track-b" ? (
-            <TrackBStatusPage trackB={desktopState?.trackB ?? null} />
+            <TrackBStatusPage trackB={desktopState?.trackB ?? null} buildMetadata={desktopState?.buildMetadata ?? null} />
           ) : null}
 
           {!loading && page === "history" ? (
