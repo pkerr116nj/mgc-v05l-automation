@@ -12,6 +12,7 @@ from .candle_signal_producer import DEFAULT_CANDLE_SIGNAL_PRODUCER_OUTPUT_ROOT
 from .signal_batch_writer import DEFAULT_SIGNAL_BATCH_WRITER_OUTPUT_ROOT
 from .strategy_signal_adapter import DEFAULT_STRATEGY_SIGNAL_ADAPTER_OUTPUT_ROOT
 from .track_b_strategy_rule_runner import (
+    DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID,
     DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT,
     TrackBStrategyRuleMode,
     TrackBStrategyRuleRunnerVerdict,
@@ -29,8 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-id")
     parser.add_argument("--strategy-id")
     parser.add_argument("--lane-id")
-    parser.add_argument("--rule-id", default="mgc_realtime_quote_demo_long_v1")
-    parser.add_argument("--rule-mode", choices=[item.value for item in TrackBStrategyRuleMode], default=TrackBStrategyRuleMode.HUMAN_REVIEW_ONLY.value)
+    parser.add_argument("--rule-id", default=DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID)
+    parser.add_argument("--rule-mode", choices=[item.value for item in TrackBStrategyRuleMode], default=TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG.value)
     parser.add_argument("--emit-signal", action="store_true", help="Explicitly emit the no-submit rule signal when rule conditions pass.")
     parser.add_argument(
         "--allow-fixture-input",

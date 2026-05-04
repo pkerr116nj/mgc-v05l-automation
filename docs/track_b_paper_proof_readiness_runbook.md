@@ -274,22 +274,32 @@ Databento realtime quote/event
 -> shadow_listener / operator_status / Track B Status UI
 ```
 
-The first rule is `mgc_realtime_quote_demo_long_v1`, an auditable MGC-only demo
-rule. It emits LONG only when:
+The first real rule is `mgc_ema_momentum_reclaim_long_v1`, an auditable
+MGC-only EMA momentum reclaim rule. It consumes realtime Databento quote/candle
+evidence plus explicit precomputed EMA momentum/VWAP fields on the event
+metadata. It emits LONG only when:
 
 - the input event is for `MGC-202606`;
 - the referenced quote report proves `quote_provider_mode=REALTIME`;
 - `realtime_quote_received=true`;
 - `current_quote_available=true`;
-- `--rule-mode DEMO_LONG_ONLY --emit-signal` is explicitly supplied.
+- `close` reclaims VWAP after `prior_close` was below VWAP;
+- `momentum_turning_positive=true`;
+- `momentum_norm` and `momentum_acceleration` meet configured thresholds
+  defaulting to zero;
+- `--rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG --emit-signal` is explicitly
+  supplied.
 
 Without `--emit-signal`, the runner writes HUMAN_REVIEW / NO_SIGNAL artifacts
 and no listener inbox work. Historical/fallback Databento evidence remains
 diagnostic only and cannot become a strategy signal without an explicit fixture
-demo flag. A strategy signal remains evidence/proposal input only by default.
+demo flag. Missing feature fields or failed conditions produce NO_SIGNAL
+artifacts, not execution. The older `DEMO_LONG_ONLY` mode remains available as
+an explicit wiring proof, but it is not the default Phase 2 rule. A strategy
+signal remains evidence/proposal input only by default.
 
-Phase 2 may add an explicit handoff from a strategy rule to readiness and
-`paper_proof_cli`, but that handoff must be opt-in and artifact-driven:
+Phase 2 includes an explicit handoff from a strategy rule to readiness and
+`paper_proof_cli`, and that handoff remains opt-in and artifact-driven:
 
 - explicit PAPER mode/account/contract/lane context;
 - explicit strategy-runner handoff flag/config;

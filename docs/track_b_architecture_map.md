@@ -158,17 +158,18 @@ Dashboard implication:
   `outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json`
   as a read-model convenience.
 - `track_b_strategy_rule_runner` is the first Track B Phase 2 strategy-rule
-  wiring proof. It evaluates one MGC-only demo rule against realtime Databento
-  quote/candle evidence and emits a no-submit LONG signal only when
-  `--rule-mode DEMO_LONG_ONLY --emit-signal` is explicitly supplied and the
-  input is proven realtime/current. Without the emit flag it writes HUMAN_REVIEW
-  or NO_SIGNAL artifacts. It does not infer direction from candle shape, call
-  paper proof, invoke the listener, create order plans, authorize lanes, or
-  submit in its default mode. A future explicit Phase 2 handoff may pass the
-  strategy signal into readiness and `paper_proof_cli` only through reviewed
-  Track B flags and artifacts. It delegates actual signal batch production to
-  `strategy_signal_adapter -> candle_signal_producer -> signal_batch_writer` and
-  updates
+  runner. The current default rule is
+  `mgc_ema_momentum_reclaim_long_v1`, a narrow MGC-only LONG rule that consumes
+  realtime Databento quote/candle evidence plus explicit precomputed EMA
+  momentum/VWAP fields from the event metadata. It emits a no-submit signal
+  only when `--rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG --emit-signal` is
+  explicitly supplied, the input is proven realtime/current, and the rule
+  conditions pass. Without the emit flag it writes review/NO_SIGNAL artifacts.
+  It does not infer execution authority, call paper proof, invoke the listener,
+  create order plans, authorize lanes, or submit in its default mode. The older
+  `DEMO_LONG_ONLY` mode remains available only as an explicit wiring proof. It
+  delegates actual signal batch production to `strategy_signal_adapter ->
+  candle_signal_producer -> signal_batch_writer` and updates
   `outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json`.
 - `track_b_strategy_paper_runner` is the controlled Phase 2 PAPER handoff. It
   composes `track_b_strategy_rule_runner -> track_b_readiness_check_runner ->

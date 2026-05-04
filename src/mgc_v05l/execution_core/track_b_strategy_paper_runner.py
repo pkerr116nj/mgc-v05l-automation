@@ -35,6 +35,7 @@ from .track_b_readiness_check_runner import (
     run_track_b_readiness_check,
 )
 from .track_b_strategy_rule_runner import (
+    DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID,
     DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT,
     TrackBStrategyRuleRunnerResult,
     run_track_b_strategy_rule,
@@ -68,8 +69,8 @@ class TrackBStrategyPaperRunnerConfig:
     source_id: str = "track_b_strategy_paper_runner"
     strategy_id: str = "track_b_example_gold_shadow_v1"
     lane_id: str = "mgc_example_long_lmt_day"
-    rule_id: str = "mgc_realtime_quote_demo_long_v1"
-    rule_mode: str = "DEMO_LONG_ONLY"
+    rule_id: str = DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID
+    rule_mode: str = "MGC_EMA_MOMENTUM_RECLAIM_LONG"
     emit_signal: bool = False
     allow_fixture_input: bool = False
     host: str = "127.0.0.1"

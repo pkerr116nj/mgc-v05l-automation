@@ -14,6 +14,7 @@ from .track_b_strategy_paper_runner import (
     TrackBStrategyPaperRunnerVerdict,
     run_track_b_strategy_paper,
 )
+from .track_b_strategy_rule_runner import DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID, TrackBStrategyRuleMode
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,8 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-id", default="track_b_strategy_paper_runner")
     parser.add_argument("--strategy-id", default="track_b_example_gold_shadow_v1")
     parser.add_argument("--lane-id", default="mgc_example_long_lmt_day")
-    parser.add_argument("--rule-id", default="mgc_realtime_quote_demo_long_v1")
-    parser.add_argument("--rule-mode", default="DEMO_LONG_ONLY")
+    parser.add_argument("--rule-id", default=DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID)
+    parser.add_argument("--rule-mode", choices=[item.value for item in TrackBStrategyRuleMode], default=TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG.value)
     parser.add_argument("--emit-signal", action="store_true")
     parser.add_argument("--allow-fixture-input", action="store_true")
     parser.add_argument("--host", default="127.0.0.1")

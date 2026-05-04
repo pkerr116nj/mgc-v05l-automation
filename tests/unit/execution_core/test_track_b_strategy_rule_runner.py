@@ -77,6 +77,21 @@ def realtime_event(tmp_path: Path, **overrides: object) -> dict[str, object]:
     return payload
 
 
+def ema_reclaim_event(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    event = realtime_event(tmp_path)
+    metadata = dict(event["metadata"])
+    metadata["ema_momentum_features"] = {
+        "vwap": "4575.0",
+        "prior_close": "4574.8",
+        "momentum_norm": "0.18",
+        "momentum_acceleration": "0.03",
+        "momentum_turning_positive": True,
+    }
+    event["metadata"] = metadata
+    event.update(overrides)
+    return event
+
+
 def test_valid_realtime_quote_demo_long_emit_writes_no_submit_signal_batch(tmp_path: Path) -> None:
     result = run_track_b_strategy_rule(
         input_event_payload=realtime_event(tmp_path),
@@ -142,6 +157,99 @@ def test_valid_realtime_quote_without_emit_flag_stays_no_signal(tmp_path: Path) 
     assert not list((tmp_path / "inbox").glob("*.json"))
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_mgc_ema_momentum_reclaim_long_emits_no_submit_signal_when_conditions_pass(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=ema_reclaim_event(tmp_path),
+        input_event_path=tmp_path / "latest_databento_candle_event.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_ema_rule",
+        rule_id="mgc_ema_momentum_reclaim_long_v1",
+        rule_mode="MGC_EMA_MOMENTUM_RECLAIM_LONG",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        strategy_adapter_output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        runner_id="rule-runner-ema-pass",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert result.report["rule_name"] == "mgc_ema_momentum_reclaim_long"
+    assert result.report["decision"] == "LONG"
+    assert result.report["signal_emitted"] is True
+    assert result.report["signal_direction"] == "LONG"
+    assert result.report["rule_inputs"]["close"] == "4575.3"
+    assert result.report["rule_conditions"]["close_reclaimed_vwap"] is True
+    assert result.report["rule_conditions"]["prior_close_below_vwap"] is True
+    assert result.report["rule_conditions"]["momentum_turning_positive"] is True
+    assert result.report["rule_blockers"] == []
+    assert "research/ema_momentum.py" in result.report["research_lineage"]
+    assert result.output_batch_json is not None
+    batch = json.loads(result.output_batch_json.read_text(encoding="utf-8"))
+    signal = batch["signal_items"][0]["signal"]
+    assert signal["signal_direction"] == "LONG"
+    assert signal["decision_style"] == "BINARY"
+    assert result.report["paper_proof_cli_called"] is False
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_mgc_ema_momentum_reclaim_long_no_signal_when_conditions_fail(tmp_path: Path) -> None:
+    event = ema_reclaim_event(tmp_path)
+    event["close"] = "4574.9"
+
+    result = run_track_b_strategy_rule(
+        input_event_payload=event,
+        input_event_path=None,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        rule_id="mgc_ema_momentum_reclaim_long_v1",
+        rule_mode="MGC_EMA_MOMENTUM_RECLAIM_LONG",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        strategy_adapter_output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        runner_id="rule-runner-ema-fail",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert result.report["decision"] == "NO_SIGNAL"
+    assert result.report["signal_emitted"] is False
+    assert result.report["rule_conditions"]["close_reclaimed_vwap"] is False
+    assert "close_reclaimed_vwap" in result.report["decision_reason"]
+    assert result.output_batch_json is None
+    assert not list((tmp_path / "inbox").glob("*.json"))
+    assert result.report["submit_attempted"] is False
+
+
+def test_mgc_ema_momentum_reclaim_long_missing_features_no_signal(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=realtime_event(tmp_path),
+        input_event_path=None,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        rule_id="mgc_ema_momentum_reclaim_long_v1",
+        rule_mode="MGC_EMA_MOMENTUM_RECLAIM_LONG",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        runner_id="rule-runner-ema-missing",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert result.report["signal_emitted"] is False
+    assert "missing required EMA momentum rule field" in result.report["decision_reason"]
+    assert "missing required EMA momentum rule field: vwap" in result.report["rule_blockers"]
+    assert result.report["secondary_blockers"] == result.report["rule_blockers"]
+    assert result.report["submit_allowed"] is False
     assert result.report["live_money_readiness"] is False
 
 
@@ -298,6 +406,37 @@ def test_cli_emits_demo_long_signal_from_realtime_event(tmp_path: Path, capsys) 
     assert Path(output["output_batch_path"]).exists()
     assert output["paper_proof_cli_called"] is False
     assert output["submit_allowed"] is False
+    assert output["submit_attempted"] is False
+    assert output["live_money_readiness"] is False
+
+
+def test_cli_default_rule_evaluates_real_mgc_rule_without_emitting(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    event_json = tmp_path / "latest_databento_candle_event.json"
+    write_json(event_json, ema_reclaim_event(tmp_path))
+
+    exit_code = strategy_rule_runner_cli_main(
+        [
+            "--input-event-json",
+            str(event_json),
+            "--inbox-dir",
+            str(tmp_path / "inbox"),
+            "--expected-account-id",
+            "DUM882026",
+            "--source-id",
+            "cli_strategy_rule_default",
+            "--output-root",
+            str(tmp_path / "rule_reports"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["strategy_rule_id"] == "mgc_ema_momentum_reclaim_long_v1"
+    assert output["rule_name"] == "mgc_ema_momentum_reclaim_long"
+    assert output["rule_mode"] == "MGC_EMA_MOMENTUM_RECLAIM_LONG"
+    assert output["strategy_rule_runner_verdict"] == "TRACK_B_STRATEGY_RULE_RUNNER_NO_SIGNAL"
+    assert output["decision"] == "NO_SIGNAL"
+    assert output["signal_emitted"] is False
     assert output["submit_attempted"] is False
     assert output["live_money_readiness"] is False
 

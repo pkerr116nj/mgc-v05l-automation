@@ -12,6 +12,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
@@ -30,6 +31,7 @@ from .strategy_signal_adapter import (
 DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT = Path("outputs/track_b_execution_core/track_b_strategy_rule_runner")
 MGC_CONTRACT_KEY = "MGC-202606"
 MGC_INSTRUMENT_FAMILY = "MGC"
+DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID = "mgc_ema_momentum_reclaim_long_v1"
 
 
 class TrackBStrategyRuleRunnerVerdict(str, Enum):
@@ -44,6 +46,7 @@ class TrackBStrategyRuleRunnerVerdict(str, Enum):
 
 class TrackBStrategyRuleMode(str, Enum):
     DEMO_LONG_ONLY = "DEMO_LONG_ONLY"
+    MGC_EMA_MOMENTUM_RECLAIM_LONG = "MGC_EMA_MOMENTUM_RECLAIM_LONG"
     HUMAN_REVIEW_ONLY = "HUMAN_REVIEW_ONLY"
 
 
@@ -74,8 +77,8 @@ def run_track_b_strategy_rule(
     source_id: str | None = None,
     strategy_id: str | None = None,
     lane_id: str | None = None,
-    rule_id: str = "mgc_realtime_quote_demo_long_v1",
-    rule_mode: str | TrackBStrategyRuleMode = TrackBStrategyRuleMode.HUMAN_REVIEW_ONLY,
+    rule_id: str = DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID,
+    rule_mode: str | TrackBStrategyRuleMode = TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG,
     emit_signal: bool = False,
     allow_fixture_input: bool = False,
     output_root: Path = DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT,
@@ -117,6 +120,7 @@ def run_track_b_strategy_rule(
                 input_event_path=input_event_path,
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
+                rule_evaluation={},
                 decision=TrackBStrategyRuleDecision.NO_SIGNAL,
                 decision_reason=validation_blocker,
                 signal_emitted=False,
@@ -138,6 +142,7 @@ def run_track_b_strategy_rule(
                 input_event_path=input_event_path,
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
+                rule_evaluation={},
                 decision=TrackBStrategyRuleDecision.HUMAN_REVIEW,
                 decision_reason="Rule mode is HUMAN_REVIEW_ONLY; no Track B signal batch was emitted.",
                 signal_emitted=False,
@@ -146,6 +151,34 @@ def run_track_b_strategy_rule(
                 primary_blocker=None,
                 required_next_action="Review the rule report. Use --rule-mode DEMO_LONG_ONLY --emit-signal for the explicit no-submit wiring proof.",
             )
+        rule_decision = _evaluate_rule_decision(
+            event=input_event_payload,
+            quote_evidence=quote_evidence,
+            rule_id=rule_id,
+            rule_mode=actual_rule_mode,
+        )
+        if rule_decision["decision"] != TrackBStrategyRuleDecision.LONG:
+            return _write_report(
+                report_json=report_json,
+                verdict=TrackBStrategyRuleRunnerVerdict.NO_SIGNAL,
+                now=actual_now,
+                runner_id=actual_runner_id,
+                source_id=actual_source_id,
+                rule_id=rule_id,
+                rule_mode=actual_rule_mode,
+                input_event_path=input_event_path,
+                input_event=input_event_payload,
+                quote_evidence=quote_evidence,
+                rule_evaluation=rule_decision,
+                decision=TrackBStrategyRuleDecision.NO_SIGNAL,
+                decision_reason=str(rule_decision["decision_reason"]),
+                signal_emitted=False,
+                signal_direction=None,
+                downstream_adapter=None,
+                primary_blocker=None,
+                required_next_action="No Track B signal was emitted; continue observation until rule conditions pass.",
+            )
+
         if not emit_signal:
             return _write_report(
                 report_json=report_json,
@@ -158,8 +191,9 @@ def run_track_b_strategy_rule(
                 input_event_path=input_event_path,
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
+                rule_evaluation=rule_decision,
                 decision=TrackBStrategyRuleDecision.NO_SIGNAL,
-                decision_reason="Rule conditions were reviewable, but --emit-signal was not supplied.",
+                decision_reason="Rule conditions passed, but --emit-signal was not supplied.",
                 signal_emitted=False,
                 signal_direction=None,
                 downstream_adapter=None,
@@ -199,8 +233,9 @@ def run_track_b_strategy_rule(
                 input_event_path=input_event_path,
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
+                rule_evaluation=rule_decision,
                 decision=TrackBStrategyRuleDecision.LONG,
-                decision_reason="DEMO_LONG_ONLY produced explicit LONG, but downstream adapter rejected the event.",
+                decision_reason=f"{actual_rule_mode.value} produced explicit LONG, but downstream adapter rejected the event.",
                 signal_emitted=False,
                 signal_direction="LONG",
                 downstream_adapter=adapter,
@@ -218,8 +253,9 @@ def run_track_b_strategy_rule(
             input_event_path=input_event_path,
             input_event=input_event_payload,
             quote_evidence=quote_evidence,
+            rule_evaluation=rule_decision,
             decision=TrackBStrategyRuleDecision.LONG,
-            decision_reason="DEMO_LONG_ONLY emitted explicit LONG from valid realtime Databento MGC quote evidence with --emit-signal.",
+            decision_reason=str(rule_decision["decision_reason"]),
             signal_emitted=True,
             signal_direction="LONG",
             downstream_adapter=adapter,
@@ -238,6 +274,7 @@ def run_track_b_strategy_rule(
             input_event_path=input_event_path,
             input_event=input_event_payload,
             quote_evidence={},
+            rule_evaluation={},
             decision=TrackBStrategyRuleDecision.NO_SIGNAL,
             decision_reason=str(exc),
             signal_emitted=False,
@@ -311,6 +348,109 @@ def _validate_mgc_realtime_input(
     return None
 
 
+def _evaluate_rule_decision(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+    rule_mode: TrackBStrategyRuleMode,
+) -> dict[str, Any]:
+    if rule_mode == TrackBStrategyRuleMode.DEMO_LONG_ONLY:
+        return {
+            "rule_name": "mgc_realtime_quote_demo_long",
+            "decision": TrackBStrategyRuleDecision.LONG,
+            "decision_reason": "DEMO_LONG_ONLY emitted explicit LONG from valid realtime Databento MGC quote evidence.",
+            "rule_inputs": {},
+            "rule_conditions": {"demo_long_only": True},
+            "rule_blockers": [],
+            "research_lineage": "Track B wiring proof only; not a production strategy rule.",
+        }
+    if rule_mode == TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG:
+        return _evaluate_mgc_ema_momentum_reclaim_long(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
+    raise ValueError(f"Unsupported rule mode: {rule_mode.value}")
+
+
+def _evaluate_mgc_ema_momentum_reclaim_long(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+) -> dict[str, Any]:
+    metadata = dict(event.get("metadata") or {}) if isinstance(event.get("metadata") or {}, Mapping) else {}
+    features = metadata.get("ema_momentum_features") if isinstance(metadata.get("ema_momentum_features") or {}, Mapping) else {}
+    rule_config = metadata.get("strategy_rule_config") if isinstance(metadata.get("strategy_rule_config") or {}, Mapping) else {}
+    blockers: list[str] = []
+
+    close = _decimal_field(event, metadata, features, "close")
+    vwap = _decimal_field(event, metadata, features, "vwap", "reference_vwap")
+    prior_close = _decimal_field(event, metadata, features, "prior_close", "previous_close")
+    momentum_norm = _decimal_field(event, metadata, features, "momentum_norm")
+    momentum_acceleration = _decimal_field(event, metadata, features, "momentum_acceleration")
+    momentum_turning_positive = _bool_field(event, metadata, features, "momentum_turning_positive")
+    min_momentum_norm = _decimal_field(rule_config, metadata, features, "min_momentum_norm") or Decimal("0")
+    min_momentum_acceleration = _decimal_field(rule_config, metadata, features, "min_momentum_acceleration") or Decimal("0")
+
+    required_fields = {
+        "close": close,
+        "vwap": vwap,
+        "prior_close": prior_close,
+        "momentum_norm": momentum_norm,
+        "momentum_acceleration": momentum_acceleration,
+        "momentum_turning_positive": momentum_turning_positive,
+    }
+    for field_name, value in required_fields.items():
+        if value is None:
+            blockers.append(f"missing required EMA momentum rule field: {field_name}")
+
+    conditions: dict[str, bool | None] = {
+        "close_reclaimed_vwap": None,
+        "prior_close_below_vwap": None,
+        "momentum_turning_positive": momentum_turning_positive,
+        "momentum_norm_at_or_above_threshold": None,
+        "momentum_acceleration_at_or_above_threshold": None,
+    }
+    if close is not None and vwap is not None:
+        conditions["close_reclaimed_vwap"] = close >= vwap
+    if prior_close is not None and vwap is not None:
+        conditions["prior_close_below_vwap"] = prior_close < vwap
+    if momentum_norm is not None:
+        conditions["momentum_norm_at_or_above_threshold"] = momentum_norm >= min_momentum_norm
+    if momentum_acceleration is not None:
+        conditions["momentum_acceleration_at_or_above_threshold"] = momentum_acceleration >= min_momentum_acceleration
+
+    failed_conditions = [name for name, passed in conditions.items() if passed is False]
+    if blockers:
+        decision_reason = "MGC EMA momentum reclaim long rule could not evaluate: " + "; ".join(blockers)
+    elif failed_conditions:
+        decision_reason = "MGC EMA momentum reclaim long conditions did not pass: " + ", ".join(failed_conditions)
+    else:
+        decision_reason = (
+            "MGC EMA momentum reclaim long conditions passed: close reclaimed VWAP, prior close was below VWAP, "
+            "and EMA momentum turned positive with nonnegative acceleration."
+        )
+
+    return {
+        "rule_name": "mgc_ema_momentum_reclaim_long",
+        "decision": TrackBStrategyRuleDecision.LONG if not blockers and not failed_conditions else TrackBStrategyRuleDecision.NO_SIGNAL,
+        "decision_reason": decision_reason,
+        "rule_inputs": {
+            "close": None if close is None else str(close),
+            "vwap": None if vwap is None else str(vwap),
+            "prior_close": None if prior_close is None else str(prior_close),
+            "momentum_norm": None if momentum_norm is None else str(momentum_norm),
+            "momentum_acceleration": None if momentum_acceleration is None else str(momentum_acceleration),
+            "momentum_turning_positive": momentum_turning_positive,
+            "min_momentum_norm": str(min_momentum_norm),
+            "min_momentum_acceleration": str(min_momentum_acceleration),
+            "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
+        },
+        "rule_conditions": conditions,
+        "rule_blockers": blockers,
+        "research_lineage": "Based on research/ema_momentum.py causal EMA momentum and interpreted momentum-turning flags.",
+        "rule_id": rule_id,
+    }
+
+
 def _strategy_event_for_adapter(
     *,
     event: Mapping[str, Any],
@@ -346,7 +486,7 @@ def _strategy_event_for_adapter(
         "strategy_id": actual_strategy_id,
         "signal_family": _optional_text(event.get("signal_family")) or actual_strategy_id,
         "lane_id": actual_lane_id,
-        "signal_type": "track_b_demo_realtime_quote_rule",
+        "signal_type": "track_b_strategy_rule_signal",
         "signal_direction": "LONG",
         "decision_style": "BINARY",
         "candle_timestamp": timestamp,
@@ -357,7 +497,7 @@ def _strategy_event_for_adapter(
         "low": event.get("low") or event.get("last") or event.get("close"),
         "close": event.get("close") or event.get("last"),
         "volume": event.get("volume"),
-        "reason": f"{rule_id} emitted explicit LONG no-submit Track B signal from realtime MGC quote evidence.",
+        "reason": f"{rule_id} emitted explicit LONG no-submit Track B signal from realtime MGC rule evidence.",
         "metadata": metadata,
     }
 
@@ -374,6 +514,7 @@ def _write_report(
     input_event_path: Path | None,
     input_event: Mapping[str, Any],
     quote_evidence: Mapping[str, Any],
+    rule_evaluation: Mapping[str, Any],
     decision: TrackBStrategyRuleDecision,
     decision_reason: str,
     signal_emitted: bool,
@@ -382,14 +523,20 @@ def _write_report(
     primary_blocker: str | None,
     required_next_action: str,
 ) -> TrackBStrategyRuleRunnerResult:
+    raw_rule_blockers = rule_evaluation.get("rule_blockers")
+    rule_blockers = raw_rule_blockers if isinstance(raw_rule_blockers, list) else []
     report = {
         "schema_version": "track_b_strategy_rule_runner_v1",
         "generated_at": now.isoformat(),
         "track_b_strategy_rule_runner_id": runner_id,
         "strategy_rule_runner_verdict": verdict.value,
         "strategy_rule_id": rule_id,
-        "rule_name": "mgc_realtime_quote_momentum_reclaim_demo",
+        "rule_name": rule_evaluation.get("rule_name") or "NOT_PROVIDED",
         "rule_mode": rule_mode.value,
+        "rule_inputs": rule_evaluation.get("rule_inputs") or {},
+        "rule_conditions": rule_evaluation.get("rule_conditions") or {},
+        "rule_blockers": rule_blockers,
+        "research_lineage": rule_evaluation.get("research_lineage") or "NOT_PROVIDED",
         "source_id": source_id,
         "input_event_path": None if input_event_path is None else str(input_event_path),
         "input_quote_provider_mode": quote_evidence.get("input_quote_provider_mode") or "NOT_PROVIDED",
@@ -431,7 +578,7 @@ def _write_report(
         "place_order_called": False,
         "cancel_called": False,
         "primary_blocker": primary_blocker,
-        "secondary_blockers": [],
+        "secondary_blockers": list(rule_blockers),
         "required_next_action": required_next_action,
         "report_json_path": str(report_json),
         "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_strategy_rule_runner_report.json"),
@@ -498,6 +645,39 @@ def _coalesce_bool(first: object, second: object) -> bool | None:
         return first
     if isinstance(second, bool):
         return second
+    return None
+
+
+def _decimal_field(*sources_and_names: object) -> Decimal | None:
+    sources: list[Mapping[str, Any]] = [item for item in sources_and_names if isinstance(item, Mapping)]
+    names = [str(item) for item in sources_and_names if not isinstance(item, Mapping)]
+    for source in sources:
+        for name in names:
+            if name not in source or source.get(name) is None:
+                continue
+            try:
+                return Decimal(str(source.get(name)))
+            except (InvalidOperation, ValueError):
+                return None
+    return None
+
+
+def _bool_field(*sources_and_names: object) -> bool | None:
+    sources: list[Mapping[str, Any]] = [item for item in sources_and_names if isinstance(item, Mapping)]
+    names = [str(item) for item in sources_and_names if not isinstance(item, Mapping)]
+    for source in sources:
+        for name in names:
+            if name not in source or source.get(name) is None:
+                continue
+            value = source.get(name)
+            if isinstance(value, bool):
+                return value
+            text = str(value).strip().lower()
+            if text in {"true", "1", "yes", "y"}:
+                return True
+            if text in {"false", "0", "no", "n"}:
+                return False
+            return None
     return None
 
 

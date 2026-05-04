@@ -358,9 +358,10 @@ operator step:
 
 ## Phase 2 Strategy Rule Runner
 
-The first Track B strategy-rule runner is a no-submit MGC-only wiring proof. It
-evaluates realtime Databento quote/candle evidence and emits a Track B signal
-batch only when rule emission is explicit:
+The first real Track B strategy-rule runner is a no-submit MGC-only rule. It
+evaluates realtime Databento quote/candle evidence plus explicit precomputed
+EMA momentum/VWAP fields carried on the event metadata, then emits a Track B
+signal batch only when rule emission is explicit:
 
 ```text
 Databento realtime quote/event
@@ -372,7 +373,8 @@ Databento realtime quote/event
 ```
 
 Default behavior is review/no-signal. This command evaluates the latest
-realtime Databento event but does not emit listener inbox work:
+realtime Databento event with the current default rule but does not emit
+listener inbox work:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
@@ -382,14 +384,15 @@ realtime Databento event but does not emit listener inbox work:
   --source-id track_b_phase2_rule_review \
   --strategy-id track_b_example_gold_shadow_v1 \
   --lane-id mgc_example_long_lmt_day \
-  --rule-id mgc_realtime_quote_demo_long_v1 \
-  --rule-mode DEMO_LONG_ONLY \
+  --rule-id mgc_ema_momentum_reclaim_long_v1 \
+  --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
   --output-root outputs/track_b_execution_core/track_b_strategy_rule_runner
 ```
 
-For the first explicit wiring proof, add `--emit-signal`. The rule still only
-creates no-submit signal batch work; it does not call `paper_proof_cli`, create
-order plans, run lane authorization directly, or submit:
+To intentionally create no-submit listener inbox work when the rule conditions
+pass, add `--emit-signal`. The rule still only creates signal batch work; it
+does not call `paper_proof_cli`, create order plans, run lane authorization
+directly, or submit:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
@@ -399,22 +402,40 @@ order plans, run lane authorization directly, or submit:
   --source-id track_b_phase2_rule_demo \
   --strategy-id track_b_example_gold_shadow_v1 \
   --lane-id mgc_example_long_lmt_day \
-  --rule-id mgc_realtime_quote_demo_long_v1 \
-  --rule-mode DEMO_LONG_ONLY \
+  --rule-id mgc_ema_momentum_reclaim_long_v1 \
+  --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
   --emit-signal \
   --output-root outputs/track_b_execution_core/track_b_strategy_rule_runner
 ```
 
-The runner requires explicit realtime evidence fields from the Databento quote
-report referenced by the event:
+The `mgc_ema_momentum_reclaim_long_v1` rule requires explicit realtime evidence
+fields from the Databento quote report referenced by the event:
 
 - `quote_provider_mode=REALTIME`
 - `realtime_quote_received=true`
 - `current_quote_available=true`
 
+It also requires these event/metadata fields, typically under
+`metadata.ema_momentum_features`:
+
+- `close`
+- `vwap` or `reference_vwap`
+- `prior_close` or `previous_close`
+- `momentum_norm`
+- `momentum_acceleration`
+- `momentum_turning_positive`
+
+The initial LONG condition is intentionally narrow: close must reclaim VWAP
+after a prior close below VWAP, momentum must be turning positive, and momentum
+norm/acceleration must be at or above the configured thresholds, defaulting to
+zero. Missing fields or failed conditions produce NO_SIGNAL artifacts, not
+execution.
+
 Historical `available_end`, fallback, or fixture evidence cannot produce a
 strategy signal unless `--allow-fixture-input` is intentionally supplied for a
-test/demo. The latest runner read model is:
+test/demo. The older `DEMO_LONG_ONLY` mode remains available as an explicit
+wiring proof, but it is no longer the default strategy rule. The latest runner
+read model is:
 
 ```text
 outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json
@@ -422,11 +443,11 @@ outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strat
 
 Phase 2 paper execution stance: because Track B paper proof has passed the
 full PAPER open/guarded-close/flat lifecycle, PAPER execution is now allowed
-only through explicit Track B-controlled submit paths. The strategy rule runner
-may hand off to readiness and paper proof in a later slice only when explicit
-flags/config request that handoff. This quickstart command remains no-submit by
-default and does not create hidden submit authority. Every future PAPER
-execution must write artifacts and a final broker-state classification.
+only through explicit Track B-controlled submit paths. The strategy paper
+runner can hand off to readiness and paper proof only when explicit
+flags/config request that handoff. The strategy rule runner itself remains
+no-submit and does not create hidden submit authority. Every PAPER execution
+must write artifacts and a final broker-state classification.
 
 ## Phase 2 Strategy Paper Runner
 
@@ -453,8 +474,8 @@ are present:
   --contract-key MGC-202606 \
   --strategy-id track_b_example_gold_shadow_v1 \
   --lane-id mgc_example_long_lmt_day \
-  --rule-id mgc_realtime_quote_demo_long_v1 \
-  --rule-mode DEMO_LONG_ONLY \
+  --rule-id mgc_ema_momentum_reclaim_long_v1 \
+  --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
   --emit-signal \
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
@@ -471,8 +492,8 @@ PAPER submit requires all explicit gates. Prices and quantity are not inferred:
   --contract-key MGC-202606 \
   --strategy-id track_b_example_gold_shadow_v1 \
   --lane-id mgc_example_long_lmt_day \
-  --rule-id mgc_realtime_quote_demo_long_v1 \
-  --rule-mode DEMO_LONG_ONLY \
+  --rule-id mgc_ema_momentum_reclaim_long_v1 \
+  --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
   --emit-signal \
   --quantity 1 \
   --manual-open-limit-price <OPEN_LIMIT_PRICE> \
