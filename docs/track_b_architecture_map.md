@@ -11,6 +11,8 @@ The current Track B no-submit chain is:
 ```text
 Databento market-data observer, optionally
 -> candle/event JSON
+-> track_b_market_history, optionally
+-> track_b_feature_builder, optionally
 -> track_b_strategy_rule_runner, optionally
 -> track_b_strategy_paper_runner, explicitly for PAPER handoff
 -> candle_signal_producer or strategy_signal_adapter, optionally
@@ -157,6 +159,18 @@ Dashboard implication:
   flows, create order plans, or submit. It updates
   `outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json`
   as a read-model convenience.
+- `track_b_market_history` is the bounded MGC market-history collector
+  upstream of Phase 2 feature building. It normalizes explicit realtime
+  quote/candle history into a Track B event with a `candles` /
+  `candle_history` array, source/provider metadata, current quote evidence, and
+  no-submit safety flags. It requires `MGC-202606` and explicit realtime
+  evidence (`quote_provider_mode=REALTIME`, `realtime_quote_received=true`,
+  `current_quote_available=true`). If the input contains only a single
+  snapshot candle or non-realtime/stale evidence, it writes a blocked report
+  instead of fake EMA/VWAP history. It updates
+  `outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json`
+  and
+  `outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_report.json`.
 - `track_b_feature_builder` is the no-submit feature/event producer for the
   first real Track B MGC rule. It consumes explicit MGC quote/candle history,
   requires current realtime Databento evidence, and writes an enriched feature

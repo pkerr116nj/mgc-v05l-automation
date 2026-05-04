@@ -267,6 +267,7 @@ Current Phase 2 chain:
 
 ```text
 Databento realtime quote/event
+-> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
 -> strategy_signal_adapter
@@ -291,8 +292,18 @@ metadata. It emits LONG only when:
 - `--rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG --emit-signal` is explicitly
   supplied.
 
-`track_b_feature_builder` is the Track B-native producer for those fields. It
-accepts explicit MGC candle/quote history and writes
+`track_b_market_history` is the bounded MGC history collector upstream of the
+feature builder. The current Databento observer event may contain only one
+snapshot candle, which is not enough to compute EMA/VWAP momentum fields. The
+collector normalizes explicit realtime/history input into a
+`latest_track_b_market_history_event.json` artifact with `candles` /
+`candle_history`, provider metadata, and current quote evidence. If history is
+insufficient or evidence is non-realtime/stale, it blocks instead of faking
+features or signals.
+
+`track_b_feature_builder` is the Track B-native producer for rule fields. It
+accepts the bounded market-history event or other explicit MGC candle/quote
+history and writes
 `latest_track_b_feature_event.json` plus
 `latest_track_b_feature_builder_report.json`. If fewer than the required
 history candles are present, it reports
@@ -329,7 +340,8 @@ remains false unless a future live-readiness phase explicitly changes it.
 The first controlled handoff boundary is `track_b_strategy_paper_runner`:
 
 ```text
-realtime Databento event
+Databento realtime/current evidence
+-> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
 -> track_b_readiness_check_runner

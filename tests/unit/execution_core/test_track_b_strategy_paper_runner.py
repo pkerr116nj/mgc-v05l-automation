@@ -493,6 +493,38 @@ def test_feature_builder_blocked_stops_before_strategy_readiness_or_proof(tmp_pa
     assert result.report["live_money_readiness"] is False
 
 
+def test_missing_feature_event_path_blocks_cleanly_before_strategy_readiness_or_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    missing_feature_event = tmp_path / "missing_feature_event.json"
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            feature_event_json=missing_feature_event,
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-missing-feature-event",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER
+    assert calls.feature == 0
+    assert calls.strategy == 0
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["feature_event_path"] == str(missing_feature_event)
+    assert "Feature event JSON does not exist" in str(result.report["primary_blocker"])
+    assert "track_b_feature_builder_cli" in str(result.report["required_next_action"])
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
 def test_ambiguous_paper_proof_requires_manual_review(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(

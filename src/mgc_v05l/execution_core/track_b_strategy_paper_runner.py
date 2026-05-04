@@ -241,6 +241,21 @@ def run_track_b_strategy_paper(
                 )
             strategy_config = replace(config, input_event_payload=feature_builder.feature_event, input_event_json=feature_builder.feature_event_json)
         elif config.feature_event_json is not None:
+            if not Path(config.feature_event_json).exists():
+                return _finalize(
+                    config=config,
+                    report_json=report_json,
+                    now=actual_now,
+                    runner_id=actual_runner_id,
+                    verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER,
+                    feature_builder=feature_builder,
+                    strategy_rule=strategy_rule,
+                    readiness=readiness,
+                    proof=proof,
+                    primary_blocker=f"Feature event JSON does not exist: {config.feature_event_json}",
+                    required_next_action="Run track_b_feature_builder_cli or provide a valid --feature-event-json before strategy evaluation.",
+                    operator_status_stage=actual_stages.operator_status,
+                )
             strategy_config = replace(config, input_event_payload=None, input_event_json=config.feature_event_json)
 
         strategy_rule = actual_stages.strategy_rule(strategy_config)

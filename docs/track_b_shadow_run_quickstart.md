@@ -365,6 +365,7 @@ signal batch only when rule emission is explicit:
 
 ```text
 Databento realtime quote/event
+-> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
 -> strategy_signal_adapter
@@ -372,6 +373,40 @@ Databento realtime quote/event
 -> signal_batch_writer
 -> shadow_listener / operator_status / Track B Status UI
 ```
+
+The realtime observer's latest candle event is only a single snapshot. The
+EMA/VWAP rule needs bounded history, so first normalize a supplied MGC
+realtime/history payload into an explicit market-history event:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_market_history_cli \
+  --market-history-json <MGC_REALTIME_CANDLE_HISTORY_JSON> \
+  --expected-account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --timeframe 1m \
+  --max-candles 50 \
+  --min-candles 3 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --output-root outputs/track_b_execution_core/track_b_market_history
+```
+
+Stable market-history artifacts:
+
+```text
+outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json
+outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_report.json
+```
+
+The collector is market-data evidence only. It does not connect to broker
+paths, infer execution authority, invoke the listener, run paper proof, or
+submit. If only one candle is present, or if the evidence is historical/stale
+rather than explicitly realtime/current, it blocks with
+`TRACK_B_MARKET_HISTORY_BLOCKED_INSUFFICIENT_HISTORY` or
+`TRACK_B_MARKET_HISTORY_BLOCKED_NON_REALTIME_INPUT`.
 
 The feature builder is the upstream no-submit artifact producer for
 `mgc_ema_momentum_reclaim_long_v1`. It takes explicit MGC candle/quote history,
@@ -381,7 +416,7 @@ it blocks explicitly and does not fake a signal-ready event:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_feature_builder_cli \
-  --source-event-json <MGC_CANDLE_HISTORY_OR_EVENT_JSON> \
+  --source-event-json outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json \
   --expected-account-id DUM882026 \
   --rule-id mgc_ema_momentum_reclaim_long_v1 \
   --output-root outputs/track_b_execution_core/track_b_feature_builder
@@ -476,7 +511,8 @@ must write artifacts and a final broker-state classification.
 The controlled strategy PAPER runner wires:
 
 ```text
-realtime Databento event
+Databento realtime/current evidence
+-> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
 -> track_b_readiness_check_runner
@@ -490,7 +526,7 @@ are present:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --build-features-from <MGC_CANDLE_HISTORY_OR_EVENT_JSON> \
+  --build-features-from outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \
@@ -512,7 +548,7 @@ PAPER submit requires all explicit gates. Prices and quantity are not inferred:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --build-features-from <MGC_CANDLE_HISTORY_OR_EVENT_JSON> \
+  --build-features-from outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \
