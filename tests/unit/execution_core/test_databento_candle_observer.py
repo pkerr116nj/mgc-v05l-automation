@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mgc_v05l.execution_core.databento_candle_observer import DatabentoCandleObserverVerdict, observe_databento_candle_event, watch_databento_candle_observer
@@ -39,8 +39,25 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def available_end_lag_error() -> RuntimeError:
+    error = RuntimeError("requested quote window is after Databento available_end")
+    error.diagnostics = {  # type: ignore[attr-defined]
+        "requested_quote_start": "2026-05-03T03:55:00+00:00",
+        "requested_quote_end": "2026-05-03T04:00:00+00:00",
+        "actual_quote_start": "2026-05-03T03:55:00+00:00",
+        "actual_quote_end": "2026-05-03T04:00:00+00:00",
+        "provider_available_end": "2026-05-03T03:50:00+00:00",
+        "provider_available_end_final": "2026-05-03T03:50:00+00:00",
+        "available_end_fallback_used": False,
+        "allow_available_end_fallback_requested": False,
+        "available_end_retry_reason": "fallback_not_enabled",
+        "native_databento_error_code": "data_start_after_available_end",
+    }
+    return error
+
+
 class FakeCurrentQuoteTransport:
-    def __init__(self, quotes: list[dict[str, object]] | None = None, *, error: Exception | None = None) -> None:
+    def __init__(self, quotes: list[dict[str, object] | Exception] | None = None, *, error: Exception | None = None) -> None:
         self.quotes = quotes or [quote_report()]
         self.error = error
         self.calls = 0
@@ -50,7 +67,10 @@ class FakeCurrentQuoteTransport:
         self.calls += 1
         if self.error is not None:
             raise self.error
-        return self.quotes[min(self.calls - 1, len(self.quotes) - 1)]
+        quote = self.quotes[min(self.calls - 1, len(self.quotes) - 1)]
+        if isinstance(quote, Exception):
+            raise quote
+        return quote
 
 
 class FakeCurrentQuoteTransportFactory:
@@ -591,6 +611,233 @@ def test_databento_candle_observer_cli_live_current_quote_watch_is_bounded(
     assert latest_event["close"] == "4624.0"
     assert latest_heartbeat["market_data_connection_attempted"] is True
     assert latest_heartbeat["databento_connection_attempted"] is True
+    assert latest_heartbeat["submit_allowed"] is False
+    assert latest_heartbeat["submit_attempted"] is False
+    assert latest_heartbeat["live_money_readiness"] is False
+
+
+def test_databento_candle_observer_cli_wait_for_current_quote_succeeds_after_available_end_catches_up(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    quote_transport = FakeCurrentQuoteTransport(
+        [
+            available_end_lag_error(),
+            quote_report(last="4625.0", timestamp=aware_now().isoformat()),
+        ]
+    )
+    monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
+    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--live-current-quote",
+            "--wait-for-current-quote",
+            "--max-wait-cycles",
+            "3",
+            "--wait-poll-seconds",
+            "0",
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+            "--current-quote-output-root",
+            str(tmp_path / "current_quotes"),
+            "--max-age-seconds",
+            "999999",
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    latest_event = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_event.json").read_text(encoding="utf-8"))
+    latest_heartbeat = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_heartbeat.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert quote_transport.calls == 2
+    assert output["observer_mode"] == "wait_for_current_quote"
+    assert output["wait_succeeded"] is True
+    assert output["successful_current_quote_cycles"] == 1
+    assert output["available_end_lag_cycles"] == 1
+    assert output["current_quote_available"] is True
+    assert latest_event["close"] == "4625.0"
+    assert latest_heartbeat["wait_exited_normally"] is True
+    assert latest_heartbeat["submit_allowed"] is False
+    assert latest_heartbeat["submit_attempted"] is False
+    assert latest_heartbeat["live_money_readiness"] is False
+    assert latest_heartbeat["listener_invoked"] is False
+    assert latest_heartbeat["runner_invoked"] is False
+
+
+def test_databento_candle_observer_cli_wait_for_current_quote_exhausts_available_end_lag(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    quote_transport = FakeCurrentQuoteTransport([available_end_lag_error(), available_end_lag_error()])
+    monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
+    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--live-current-quote",
+            "--wait-for-current-quote",
+            "--max-wait-cycles",
+            "2",
+            "--wait-poll-seconds",
+            "0",
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+            "--current-quote-output-root",
+            str(tmp_path / "current_quotes"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    latest_heartbeat = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_heartbeat.json").read_text(encoding="utf-8"))
+    latest_report = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_report.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert quote_transport.calls == 2
+    assert output["wait_succeeded"] is False
+    assert output["available_end_lag_cycles"] == 2
+    assert output["no_data_cycles"] == 2
+    assert output["last_requested_quote_end"] == "2026-05-03T04:00:00+00:00"
+    assert output["last_provider_available_end"] == "2026-05-03T03:50:00+00:00"
+    assert latest_heartbeat["wait_exited_normally"] is True
+    assert latest_heartbeat["required_next_action"].startswith("Databento available_end is still behind")
+    assert latest_report["observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_BLOCKED_NO_MARKET_DATA"
+    assert latest_report["submit_allowed"] is False
+    assert latest_report["submit_attempted"] is False
+    assert latest_report["live_money_readiness"] is False
+
+
+def test_databento_candle_observer_cli_wait_for_current_quote_provider_error_fails_safely(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    quote_transport = FakeCurrentQuoteTransport(error=RuntimeError("Databento provider unavailable"))
+    monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
+    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--live-current-quote",
+            "--wait-for-current-quote",
+            "--max-wait-cycles",
+            "1",
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+            "--current-quote-output-root",
+            str(tmp_path / "current_quotes"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    latest_heartbeat = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_heartbeat.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert output["wait_succeeded"] is False
+    assert output["available_end_lag_cycles"] == 0
+    assert output["no_data_cycles"] == 1
+    assert output["error_cycles"] == 0
+    assert quote_transport.calls == 1
+    assert latest_heartbeat["wait_exited_normally"] is False
+    assert "Databento provider unavailable" in latest_heartbeat["primary_blocker"]
+    assert latest_heartbeat["submit_allowed"] is False
+    assert latest_heartbeat["submit_attempted"] is False
+    assert latest_heartbeat["live_money_readiness"] is False
+
+
+def test_databento_candle_observer_cli_wait_for_current_quote_fallback_does_not_count_as_ready(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    quote_transport = FakeCurrentQuoteTransport(
+        [
+            quote_report(
+                last="4625.0",
+                timestamp=(aware_now() - timedelta(minutes=5)).isoformat(),
+                raw={
+                    "requested_quote_end": "2026-05-03T04:00:00+00:00",
+                    "actual_quote_end": "2026-05-03T03:45:00+00:00",
+                    "provider_available_end": "2026-05-03T03:50:00+00:00",
+                    "available_end_fallback_used": True,
+                    "allow_available_end_fallback_requested": True,
+                    "quote_temporal_scope": "CURRENT_AVAILABLE_END",
+                    "active_session_quote": False,
+                },
+            )
+        ]
+    )
+    monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
+    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--live-current-quote",
+            "--wait-for-current-quote",
+            "--max-wait-cycles",
+            "1",
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+            "--current-quote-output-root",
+            str(tmp_path / "current_quotes"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    latest_heartbeat = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_heartbeat.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 2
+    assert output["wait_succeeded"] is False
+    assert output["current_quote_available"] is False
+    assert output["available_end_lag_cycles"] == 1
+    assert latest_heartbeat["last_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_BLOCKED_NO_MARKET_DATA"
     assert latest_heartbeat["submit_allowed"] is False
     assert latest_heartbeat["submit_attempted"] is False
     assert latest_heartbeat["live_money_readiness"] is False

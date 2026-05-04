@@ -14,6 +14,7 @@ from .databento_candle_observer import (
     DEFAULT_DATABENTO_CANDLE_OBSERVER_OUTPUT_ROOT,
     DatabentoCandleObserverVerdict,
     observe_databento_candle_event,
+    wait_for_current_databento_quote,
     watch_databento_candle_observer,
     write_databento_candle_observer_blocked_report,
 )
@@ -57,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--watch", action="store_true", help="Run bounded watch mode instead of one-shot conversion.")
     parser.add_argument("--max-cycles", type=int, default=1, help="Maximum watch cycles when --watch is enabled.")
     parser.add_argument("--poll-seconds", type=float, default=0.0, help="Seconds to sleep between watch cycles.")
+    parser.add_argument("--wait-for-current-quote", action="store_true", help="With --live-current-quote, poll until a current quote is available or max wait cycles are exhausted.")
+    parser.add_argument("--max-wait-cycles", type=int, default=1)
+    parser.add_argument("--wait-poll-seconds", type=float, default=0.0)
     return parser
 
 
@@ -190,6 +194,56 @@ def _run_live_current_quote(args: argparse.Namespace) -> int:
 
     def read_current_quote_report() -> dict[str, object]:
         return provider.fetch_current_quote().report
+
+    if args.wait_for_current_quote:
+        result = wait_for_current_databento_quote(
+            market_data_payload_reader=read_current_quote_report,
+            contract_key=args.contract_key,
+            databento_continuous_symbol=args.databento_continuous_symbol,
+            dataset=args.dataset,
+            expected_account_id=args.expected_account_id,
+            strategy_id=args.strategy_id,
+            lane_id=args.lane_id,
+            timeframe=args.timeframe,
+            source_id=args.source_id or "databento_wait_for_current_quote",
+            signal_direction=args.signal_direction,
+            market_data_connection_attempted=True,
+            output_root=args.output_root,
+            max_wait_cycles=args.max_wait_cycles,
+            wait_poll_seconds=args.wait_poll_seconds,
+            sleep_func=time.sleep,
+        )
+        print(
+            json.dumps(
+                {
+                    "observer_mode": result.heartbeat["observer_mode"],
+                    "wait_id": result.heartbeat["wait_id"],
+                    "current_cycle_number": result.heartbeat["current_cycle_number"],
+                    "max_wait_cycles": result.heartbeat["max_wait_cycles"],
+                    "wait_poll_seconds": result.heartbeat["wait_poll_seconds"],
+                    "successful_current_quote_cycles": result.heartbeat["successful_current_quote_cycles"],
+                    "available_end_lag_cycles": result.heartbeat["available_end_lag_cycles"],
+                    "no_data_cycles": result.heartbeat["no_data_cycles"],
+                    "error_cycles": result.heartbeat["error_cycles"],
+                    "last_requested_quote_end": result.heartbeat["last_requested_quote_end"],
+                    "last_provider_available_end": result.heartbeat["last_provider_available_end"],
+                    "last_observer_verdict": result.heartbeat["last_observer_verdict"],
+                    "current_quote_available": result.heartbeat["current_quote_available"],
+                    "wait_exited_normally": result.heartbeat["wait_exited_normally"],
+                    "wait_succeeded": result.heartbeat["wait_succeeded"],
+                    "required_next_action": result.heartbeat["required_next_action"],
+                    "output_event_path": result.heartbeat["output_event_path"],
+                    "submit_allowed": result.heartbeat["submit_allowed"],
+                    "submit_attempted": result.heartbeat["submit_attempted"],
+                    "live_money_readiness": result.heartbeat["live_money_readiness"],
+                    "listener_invoked": result.heartbeat["listener_invoked"],
+                    "runner_invoked": result.heartbeat["runner_invoked"],
+                    "heartbeat_json": str(result.heartbeat_json),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0 if result.heartbeat["wait_succeeded"] else 2
 
     if args.watch:
         result = watch_databento_candle_observer(

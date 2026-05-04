@@ -290,6 +290,40 @@ For historical evidence only, rerun with `--allow-available-end-fallback`; that
 may anchor the request to Databento `available_end`, but it must not be treated
 as paper pricing readiness, live-money readiness, or submit authority.
 
+To wait safely for Databento `available_end` to catch up enough for a current
+quote artifact, use explicit bounded wait mode:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --live-current-quote \
+  --wait-for-current-quote \
+  --max-wait-cycles 10 \
+  --wait-poll-seconds 15 \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id wait_for_current_quote_check \
+  --output-root outputs/track_b_execution_core/databento_candle_observer
+```
+
+This writes `latest_databento_candle_observer_heartbeat.json` with
+`observer_mode=wait_for_current_quote`, current/max cycle counts,
+`available_end_lag_cycles`, the last requested/available-end timestamps, and
+`wait_succeeded`. It waits for market-data availability only; it does not
+submit, authorize paper proof, run the listener, or turn fallback/historical
+quotes into readiness.
+
 The output event is already compatible with `strategy_signal_adapter_cli`; no
 extra bridge command is required in this slice. Direction is explicit, not
 inferred from candle shape. Include `--signal-direction LONG` or `SHORT` on the

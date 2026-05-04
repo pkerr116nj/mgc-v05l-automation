@@ -360,6 +360,37 @@ the current quote report must surface `requested_quote_end`,
 result remains blocked for current readiness and never implies paper/live submit
 authority.
 
+Bounded wait-for-current-quote mode:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --live-current-quote \
+  --wait-for-current-quote \
+  --max-wait-cycles 10 \
+  --wait-poll-seconds 15 \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id wait_for_current_quote_check \
+  --output-root outputs/track_b_execution_core/databento_candle_observer
+```
+
+Wait mode is a bounded market-data availability loop only. It writes heartbeat
+state with `observer_mode=wait_for_current_quote`, available-end lag counts, and
+`wait_succeeded`; it does not run strategy/listener/operator steps, submit, or
+authorize paper proof.
+
 Bounded current-quote watch path:
 
 ```bash

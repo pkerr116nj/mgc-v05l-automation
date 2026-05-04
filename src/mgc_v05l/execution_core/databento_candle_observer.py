@@ -45,6 +45,13 @@ class DatabentoCandleObserverWatchResult:
     cycle_results: tuple[DatabentoCandleObserverResult, ...]
 
 
+@dataclass(frozen=True)
+class DatabentoCandleObserverWaitResult:
+    heartbeat_json: Path
+    heartbeat: dict[str, Any]
+    cycle_results: tuple[DatabentoCandleObserverResult, ...]
+
+
 def observe_databento_candle_event(
     *,
     market_data_payload: Mapping[str, Any],
@@ -507,6 +514,133 @@ def watch_databento_candle_observer(
     )
 
 
+def wait_for_current_databento_quote(
+    *,
+    market_data_payload_reader: Callable[[], Mapping[str, Any]],
+    contract_key: str,
+    databento_continuous_symbol: str,
+    dataset: str,
+    expected_account_id: str,
+    strategy_id: str,
+    lane_id: str,
+    timeframe: str,
+    output_root: Path = DEFAULT_DATABENTO_CANDLE_OBSERVER_OUTPUT_ROOT,
+    source_id: str | None = None,
+    signal_direction: str | None = None,
+    market_data_connection_attempted: bool = False,
+    max_wait_cycles: int,
+    wait_poll_seconds: float = 0.0,
+    sleep_func: Callable[[float], None] | None = None,
+    wait_id: str | None = None,
+    now_func: Callable[[], datetime] | None = None,
+) -> DatabentoCandleObserverWaitResult:
+    if max_wait_cycles <= 0:
+        raise ValueError("max_wait_cycles must be positive for Databento current quote wait mode.")
+    if wait_poll_seconds < 0:
+        raise ValueError("wait_poll_seconds must be non-negative.")
+    actual_wait_id = wait_id or f"databento_current_quote_wait_{uuid.uuid4().hex}"
+    actual_now_func = now_func or (lambda: datetime.now(UTC))
+    actual_sleep = sleep_func or (lambda seconds: None)
+    cycle_results: list[DatabentoCandleObserverResult] = []
+    successful_current_quote_cycles = 0
+    available_end_lag_cycles = 0
+    no_data_cycles = 0
+    error_cycles = 0
+    heartbeat: dict[str, Any] = {}
+    wait_succeeded = False
+
+    for cycle_number in range(1, max_wait_cycles + 1):
+        started_at = actual_now_func()
+        require_aware_datetime(started_at, "started_at")
+        payload: Mapping[str, Any] | None = None
+        try:
+            payload = market_data_payload_reader()
+            if not isinstance(payload, Mapping):
+                raise ValueError("Databento current quote wait payload reader must return a JSON object.")
+            result = observe_databento_candle_event(
+                market_data_payload=payload,
+                contract_key=contract_key,
+                databento_continuous_symbol=databento_continuous_symbol,
+                dataset=dataset,
+                expected_account_id=expected_account_id,
+                strategy_id=strategy_id,
+                lane_id=lane_id,
+                timeframe=timeframe,
+                output_root=output_root,
+                source_id=source_id,
+                signal_direction=signal_direction,
+                market_data_connection_attempted=market_data_connection_attempted,
+                observer_id=f"{actual_wait_id}_cycle_{cycle_number}",
+                now=started_at,
+            )
+        except (TypeError, ValueError, OSError) as exc:
+            result = _write_report(
+                report_json=Path(output_root) / f"{actual_wait_id}_cycle_{cycle_number}" / "databento_candle_observer_report.json",
+                event_json=Path(output_root) / f"{actual_wait_id}_cycle_{cycle_number}" / "databento_candle_event.json",
+                verdict=DatabentoCandleObserverVerdict.BLOCKED_SCHEMA_ERROR,
+                now=started_at,
+                observer_id=f"{actual_wait_id}_cycle_{cycle_number}",
+                source_id=source_id or "databento_current_quote_wait",
+                contract_key=contract_key,
+                databento_continuous_symbol=databento_continuous_symbol,
+                dataset=dataset,
+                timeframe=timeframe,
+                candle_event=None,
+                market_data_connection_attempted=market_data_connection_attempted,
+                primary_blocker=str(exc),
+                required_next_action="Fix Databento current quote wait input before retrying.",
+            )
+        cycle_results.append(result)
+        if result.verdict == DatabentoCandleObserverVerdict.WROTE_EVENT:
+            successful_current_quote_cycles += 1
+            wait_succeeded = True
+        elif _is_available_end_lag_payload(payload or {}):
+            available_end_lag_cycles += 1
+            no_data_cycles += 1
+        elif result.verdict == DatabentoCandleObserverVerdict.BLOCKED_NO_MARKET_DATA:
+            no_data_cycles += 1
+        else:
+            error_cycles += 1
+        fatal_provider_error = bool(_optional_text((payload or {}).get("provider_error"))) and not _is_available_end_lag_payload(payload or {})
+        fatal_schema_error = result.verdict != DatabentoCandleObserverVerdict.BLOCKED_NO_MARKET_DATA and not wait_succeeded
+
+        ended_at = actual_now_func()
+        require_aware_datetime(ended_at, "ended_at")
+        heartbeat = _write_wait_heartbeat(
+            output_root=Path(output_root),
+            wait_id=actual_wait_id,
+            generated_at=ended_at,
+            current_cycle_number=cycle_number,
+            max_wait_cycles=max_wait_cycles,
+            wait_poll_seconds=wait_poll_seconds,
+            successful_current_quote_cycles=successful_current_quote_cycles,
+            available_end_lag_cycles=available_end_lag_cycles,
+            no_data_cycles=no_data_cycles,
+            error_cycles=error_cycles,
+            last_result=result,
+            last_payload=payload or {},
+            contract_key=contract_key,
+            databento_continuous_symbol=databento_continuous_symbol,
+            dataset=dataset,
+            wait_exited_normally=(wait_succeeded or cycle_number == max_wait_cycles) and not fatal_provider_error and not fatal_schema_error,
+            wait_succeeded=wait_succeeded,
+        )
+        if wait_succeeded:
+            break
+        if fatal_schema_error:
+            break
+        if fatal_provider_error:
+            break
+        if cycle_number < max_wait_cycles and wait_poll_seconds > 0:
+            actual_sleep(wait_poll_seconds)
+    heartbeat_json = Path(heartbeat["latest_heartbeat_json_path"])
+    return DatabentoCandleObserverWaitResult(
+        heartbeat_json=heartbeat_json,
+        heartbeat=heartbeat,
+        cycle_results=tuple(cycle_results),
+    )
+
+
 def _write_heartbeat(
     *,
     output_root: Path,
@@ -581,3 +715,113 @@ def _write_heartbeat(
     latest_heartbeat_json.parent.mkdir(parents=True, exist_ok=True)
     latest_heartbeat_json.write_text(payload, encoding="utf-8")
     return heartbeat
+
+
+def _write_wait_heartbeat(
+    *,
+    output_root: Path,
+    wait_id: str,
+    generated_at: datetime,
+    current_cycle_number: int,
+    max_wait_cycles: int,
+    wait_poll_seconds: float,
+    successful_current_quote_cycles: int,
+    available_end_lag_cycles: int,
+    no_data_cycles: int,
+    error_cycles: int,
+    last_result: DatabentoCandleObserverResult,
+    last_payload: Mapping[str, Any],
+    contract_key: str,
+    databento_continuous_symbol: str,
+    dataset: str,
+    wait_exited_normally: bool,
+    wait_succeeded: bool,
+) -> dict[str, Any]:
+    heartbeat_json = output_root / wait_id / "databento_candle_observer_heartbeat.json"
+    latest_heartbeat_json = output_root / "latest_databento_candle_observer_heartbeat.json"
+    current_quote_available = last_payload.get("current_quote_available")
+    requested_quote_end = _optional_text(last_payload.get("requested_quote_end"))
+    provider_available_end = _optional_text(last_payload.get("provider_available_end") or last_payload.get("provider_available_end_final"))
+    required_next_action = (
+        "Current Databento quote artifact is available for no-submit market-data review."
+        if wait_succeeded
+        else (
+            "Databento available_end is still behind the requested current quote window. Continue waiting or rerun later; "
+            "do not use fallback/historical data as readiness."
+            if available_end_lag_cycles > 0
+            else last_result.report.get("required_next_action")
+        )
+    )
+    heartbeat = {
+        "schema_version": "track_b_databento_candle_observer_heartbeat_v1",
+        "generated_at": generated_at.isoformat(),
+        "observer_mode": "wait_for_current_quote",
+        "wait_id": wait_id,
+        "watch_id": wait_id,
+        "current_cycle_number": current_cycle_number,
+        "max_cycles": max_wait_cycles,
+        "max_wait_cycles": max_wait_cycles,
+        "poll_seconds": wait_poll_seconds,
+        "wait_poll_seconds": wait_poll_seconds,
+        "successful_current_quote_cycles": successful_current_quote_cycles,
+        "available_end_lag_cycles": available_end_lag_cycles,
+        "no_data_cycles": no_data_cycles,
+        "error_cycles": error_cycles,
+        "last_requested_quote_end": requested_quote_end,
+        "last_provider_available_end": provider_available_end,
+        "last_observer_verdict": last_result.verdict.value,
+        "last_event_timestamp": last_result.report.get("event_timestamp"),
+        "current_quote_available": current_quote_available,
+        "wait_exited_normally": wait_exited_normally,
+        "watch_exited_normally": wait_exited_normally,
+        "wait_succeeded": wait_succeeded,
+        "contract_key": contract_key,
+        "local_execution_contract_key": contract_key,
+        "databento_continuous_symbol": databento_continuous_symbol,
+        "dataset": dataset,
+        "output_event_path": last_result.report.get("output_candle_event_path"),
+        "latest_event_path": last_result.report.get("latest_candle_event_path"),
+        "latest_observer_report_path": last_result.report.get("latest_report_json_path"),
+        "last_observer_report_path": str(last_result.report_json),
+        "listener_invoked": False,
+        "runner_invoked": False,
+        "operator_status_invoked": False,
+        "strategy_adapter_invoked": False,
+        "candle_signal_producer_invoked": False,
+        "signal_batch_writer_invoked": False,
+        "lane_registry_invoked": False,
+        "order_plan_created": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "broker_connection_attempted": False,
+        "tws_connection_attempted": False,
+        "ibkr_connection_attempted": False,
+        "market_data_connection_attempted": bool(last_result.report.get("market_data_connection_attempted")),
+        "databento_connection_attempted": bool(last_result.report.get("databento_connection_attempted")),
+        "paper_proof_cli_wired": False,
+        "place_order_called": False,
+        "cancel_called": False,
+        "primary_blocker": last_result.report.get("primary_blocker"),
+        "secondary_blockers": [],
+        "required_next_action": required_next_action,
+        "heartbeat_json_path": str(heartbeat_json),
+        "latest_heartbeat_json_path": str(latest_heartbeat_json),
+    }
+    payload = json.dumps(to_jsonable(heartbeat), indent=2, sort_keys=True)
+    heartbeat_json.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_json.write_text(payload, encoding="utf-8")
+    latest_heartbeat_json.parent.mkdir(parents=True, exist_ok=True)
+    latest_heartbeat_json.write_text(payload, encoding="utf-8")
+    return heartbeat
+
+
+def _is_available_end_lag_payload(payload: Mapping[str, Any]) -> bool:
+    if _optional_text(payload.get("requested_quote_end")) is None:
+        return False
+    if _optional_text(payload.get("provider_available_end") or payload.get("provider_available_end_final")) is None:
+        return False
+    if payload.get("current_quote_available") is False:
+        return True
+    error_code = str(payload.get("native_databento_error_code") or "").strip().lower()
+    return "available_end" in error_code
