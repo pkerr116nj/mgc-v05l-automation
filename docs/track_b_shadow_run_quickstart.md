@@ -282,6 +282,14 @@ reports. If the key, entitlement, window, or quote data is unavailable, the
 observer writes an explicit blocked/no-data report instead of silently treating
 the state as OK.
 
+If Databento reports that the requested current quote window is after
+`available_end`, Track B preserves `requested_quote_end`,
+`provider_available_end`, and fallback diagnostics in the current quote and
+observer reports. The no-submit observer remains blocked for current readiness.
+For historical evidence only, rerun with `--allow-available-end-fallback`; that
+may anchor the request to Databento `available_end`, but it must not be treated
+as paper pricing readiness, live-money readiness, or submit authority.
+
 The output event is already compatible with `strategy_signal_adapter_cli`; no
 extra bridge command is required in this slice. Direction is explicit, not
 inferred from candle shape. Include `--signal-direction LONG` or `SHORT` on the

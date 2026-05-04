@@ -353,6 +353,13 @@ set +a
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
 
+When Databento `available_end` is behind the requested current quote window,
+the current quote report must surface `requested_quote_end`,
+`provider_available_end`, and fallback diagnostics. Track B may use
+`--allow-available-end-fallback` for explicitly historical evidence, but the
+result remains blocked for current readiness and never implies paper/live submit
+authority.
+
 Bounded current-quote watch path:
 
 ```bash

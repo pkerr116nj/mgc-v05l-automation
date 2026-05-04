@@ -92,7 +92,7 @@ def observe_databento_candle_event(
                 candle_event=None,
                 market_data_connection_attempted=market_data_connection_attempted,
                 primary_blocker=_market_data_blocker(market_data_payload),
-                required_next_action="Provide a Databento quote/candle artifact with observed market data before producing a Track B event.",
+                required_next_action=_market_data_required_next_action(market_data_payload),
             )
 
         candle = _extract_candle(market_data_payload)
@@ -209,6 +209,9 @@ def _is_no_record_payload(payload: Mapping[str, Any]) -> bool:
     quote_observed = payload.get("quote_observed")
     if quote_observed is False:
         return True
+    if str(payload.get("schema_version") or "").strip() == "track_b_databento_current_quote_v1":
+        if payload.get("current_quote_available") is False:
+            return True
     if str(payload.get("classification") or "").strip().upper().endswith("NO_RECORDS"):
         return True
     return False
@@ -218,13 +221,37 @@ def _market_data_blocker(payload: Mapping[str, Any]) -> str:
     provider_error = _optional_text(payload.get("provider_error"))
     no_records_reason = _optional_text(payload.get("no_records_reason"))
     classification = _optional_text(payload.get("classification") or payload.get("quote_status"))
+    requested_end = _optional_text(payload.get("requested_quote_end"))
+    available_end = _optional_text(payload.get("provider_available_end") or payload.get("provider_available_end_final"))
     if provider_error:
+        if requested_end and available_end:
+            return (
+                f"Databento market-data provider error: {provider_error}; "
+                f"requested_quote_end={requested_end}; provider_available_end={available_end}"
+            )
         return f"Databento market-data provider error: {provider_error}"
+    if requested_end and available_end and payload.get("current_quote_available") is False:
+        return (
+            "Databento current quote is not currently available for the requested window; "
+            f"requested_quote_end={requested_end}; provider_available_end={available_end}"
+        )
     if no_records_reason:
         return f"Databento market-data payload contained no records: {no_records_reason}"
     if classification:
         return f"Databento market-data payload did not contain an observed quote/candle: {classification}"
     return "Databento market-data payload did not contain an observed quote/candle."
+
+
+def _market_data_required_next_action(payload: Mapping[str, Any]) -> str:
+    requested_end = _optional_text(payload.get("requested_quote_end"))
+    available_end = _optional_text(payload.get("provider_available_end") or payload.get("provider_available_end_final"))
+    if requested_end and available_end:
+        return (
+            "Databento available_end is behind the requested current quote window. Wait for fresh market data, "
+            "or rerun the no-submit observer with explicit --allow-available-end-fallback for historical evidence only; "
+            "do not treat the fallback as readiness or submit authority."
+        )
+    return "Provide a Databento quote/candle artifact with observed current market data before producing a Track B event."
 
 
 def _extract_candle(payload: Mapping[str, Any]) -> dict[str, Any]:

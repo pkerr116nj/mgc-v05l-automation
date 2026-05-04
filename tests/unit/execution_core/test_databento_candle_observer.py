@@ -378,6 +378,8 @@ def test_databento_candle_observer_cli_live_current_quote_writes_event(
             str(tmp_path / "observer_reports"),
             "--current-quote-output-root",
             str(tmp_path / "current_quotes"),
+            "--max-age-seconds",
+            "999999",
         ]
     )
     output = json.loads(capsys.readouterr().out)
@@ -439,6 +441,59 @@ def test_databento_candle_observer_cli_live_current_quote_provider_error_blocks_
     assert report["live_money_readiness"] is False
     assert report["listener_invoked"] is False
     assert report["runner_invoked"] is False
+
+
+def test_current_quote_after_available_end_blocks_with_window_diagnostics(tmp_path: Path) -> None:
+    result = observe(
+        tmp_path,
+        quote_report(
+            classification="CURRENT_QUOTE_PROVIDER_ERROR",
+            quote_observed=False,
+            current_quote_available=False,
+            provider_error="requested quote window is after Databento available_end",
+            requested_quote_end="2026-05-03T04:00:00+00:00",
+            provider_available_end="2026-05-03T03:50:00+00:00",
+            available_end_fallback_used=False,
+            allow_available_end_fallback_requested=False,
+        ),
+    )
+
+    assert result.verdict == DatabentoCandleObserverVerdict.BLOCKED_NO_MARKET_DATA
+    assert result.candle_event is None
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+    assert "requested_quote_end=2026-05-03T04:00:00+00:00" in result.report["primary_blocker"]
+    assert "provider_available_end=2026-05-03T03:50:00+00:00" in result.report["primary_blocker"]
+    assert "allow-available-end-fallback" in result.report["required_next_action"]
+    assert "do not treat the fallback as readiness" in result.report["required_next_action"]
+
+
+def test_current_quote_available_end_fallback_remains_no_data_for_current_readiness(tmp_path: Path) -> None:
+    result = observe(
+        tmp_path,
+        quote_report(
+            classification="CURRENT_QUOTE_STALE",
+            quote_observed=True,
+            current_quote_available=False,
+            requested_quote_end="2026-05-03T04:00:00+00:00",
+            actual_quote_end="2026-05-03T03:45:00+00:00",
+            provider_available_end="2026-05-03T03:50:00+00:00",
+            available_end_fallback_used=True,
+            allow_available_end_fallback_requested=True,
+            quote_usable_for_paper_pricing=False,
+            quote_usable_for_live_money_readiness=False,
+        ),
+    )
+
+    assert result.verdict == DatabentoCandleObserverVerdict.BLOCKED_NO_MARKET_DATA
+    assert result.candle_event is None
+    assert result.report["primary_blocker"].startswith("Databento current quote is not currently available")
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+    assert result.report["listener_invoked"] is False
+    assert result.report["runner_invoked"] is False
 
 
 def test_databento_candle_observer_cli_live_current_quote_missing_api_key_fails_safely(
@@ -514,6 +569,8 @@ def test_databento_candle_observer_cli_live_current_quote_watch_is_bounded(
             str(tmp_path / "observer_reports"),
             "--current-quote-output-root",
             str(tmp_path / "current_quotes"),
+            "--max-age-seconds",
+            "999999",
             "--watch",
             "--max-cycles",
             "2",

@@ -140,6 +140,89 @@ def test_provider_exception_becomes_provider_error_report(tmp_path: Path) -> Non
     assert payload["quote_observed"] is False
 
 
+def test_available_end_provider_error_preserves_window_diagnostics(tmp_path: Path) -> None:
+    error = RuntimeError("requested quote window is after Databento available_end")
+    error.diagnostics = {  # type: ignore[attr-defined]
+        "requested_quote_start": "2026-05-03T03:55:00+00:00",
+        "requested_quote_end": "2026-05-03T04:00:00+00:00",
+        "actual_quote_start": "2026-05-03T03:55:00+00:00",
+        "actual_quote_end": "2026-05-03T04:00:00+00:00",
+        "provider_available_end": "2026-05-03T03:50:00+00:00",
+        "provider_available_end_final": "2026-05-03T03:50:00+00:00",
+        "available_end_fallback_used": False,
+        "allow_available_end_fallback_requested": False,
+        "allow_available_end_fallback_effective": False,
+        "available_end_retry_attempted": False,
+        "available_end_retry_count": 0,
+        "available_end_retry_reason": "fallback_not_enabled",
+        "native_databento_error_code": "data_start_after_available_end",
+    }
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path),
+        transport=FakeCurrentQuoteTransport(error=error),
+    )
+
+    result = provider.fetch_current_quote(run_id="current-available-end-error", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.PROVIDER_ERROR
+    assert payload["classification"] == "CURRENT_QUOTE_PROVIDER_ERROR"
+    assert payload["provider_error"] == "requested quote window is after Databento available_end"
+    assert payload["requested_quote_end"] == "2026-05-03T04:00:00+00:00"
+    assert payload["actual_quote_end"] == "2026-05-03T04:00:00+00:00"
+    assert payload["provider_available_end"] == "2026-05-03T03:50:00+00:00"
+    assert payload["available_end_fallback_used"] is False
+    assert payload["available_end_retry_reason"] == "fallback_not_enabled"
+    assert payload["native_databento_error_code"] == "data_start_after_available_end"
+    assert payload["current_quote_available"] is False
+    assert payload["quote_usable_for_paper_pricing"] is False
+    assert payload["quote_usable_for_live_money_readiness"] is False
+    assert payload["place_order_called"] is False
+    assert payload["cancel_called"] is False
+
+
+def test_available_end_fallback_diagnostics_are_preserved_without_readiness(tmp_path: Path) -> None:
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path, max_age_seconds=15),
+        transport=FakeCurrentQuoteTransport(
+            raw_quote(
+                timestamp=(aware_now() - timedelta(minutes=5)).isoformat(),
+                raw={
+                    "requested_quote_start": "2026-05-03T03:55:00+00:00",
+                    "requested_quote_end": "2026-05-03T04:00:00+00:00",
+                    "actual_quote_start": "2026-05-03T03:40:00+00:00",
+                    "actual_quote_end": "2026-05-03T03:45:00+00:00",
+                    "provider_available_end": "2026-05-03T03:50:00+00:00",
+                    "provider_available_end_final": "2026-05-03T03:50:00+00:00",
+                    "available_end_fallback_used": True,
+                    "allow_available_end_fallback_requested": True,
+                    "allow_available_end_fallback_effective": True,
+                    "available_end_retry_attempted": True,
+                    "available_end_retry_count": 1,
+                    "available_end_retry_reason": "initial_data_start_after_available_end",
+                    "quote_temporal_scope": "CURRENT_AVAILABLE_END",
+                    "active_session_quote": False,
+                },
+            )
+        ),
+    )
+
+    result = provider.fetch_current_quote(run_id="current-available-end-fallback", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.STALE
+    assert payload["current_quote_available"] is False
+    assert payload["requested_quote_end"] == "2026-05-03T04:00:00+00:00"
+    assert payload["actual_quote_end"] == "2026-05-03T03:45:00+00:00"
+    assert payload["provider_available_end"] == "2026-05-03T03:50:00+00:00"
+    assert payload["available_end_fallback_used"] is True
+    assert payload["available_end_retry_count"] == 1
+    assert payload["quote_temporal_scope"] == "CURRENT_AVAILABLE_END"
+    assert payload["active_session_quote"] is False
+    assert payload["quote_usable_for_paper_pricing"] is False
+    assert payload["quote_usable_for_live_money_readiness"] is False
+
+
 def test_incomplete_current_quote_is_unavailable_without_crashing(tmp_path: Path) -> None:
     provider = DatabentoCurrentQuoteProvider(
         config=config(tmp_path),

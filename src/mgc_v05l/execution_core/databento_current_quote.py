@@ -111,6 +111,7 @@ class DatabentoCurrentQuoteProvider:
                 raw_quote=None,
                 quote=None,
                 provider_error=str(exc),
+                provider_diagnostics=_provider_diagnostics_from_exception(exc),
                 no_records_reason=None,
             )
         if raw_quote is None:
@@ -121,6 +122,7 @@ class DatabentoCurrentQuoteProvider:
                 raw_quote=None,
                 quote=None,
                 provider_error=None,
+                provider_diagnostics=None,
                 no_records_reason="MARKET_CLOSED_OR_NO_RECORDS",
             )
         try:
@@ -133,6 +135,7 @@ class DatabentoCurrentQuoteProvider:
                 raw_quote=raw_quote,
                 quote=None,
                 provider_error=str(exc),
+                provider_diagnostics=_provider_diagnostics_from_raw(raw_quote),
                 no_records_reason="UNAVAILABLE_OR_INCOMPLETE_QUOTE",
             )
         age_seconds = quote.age_seconds(actual_now)
@@ -148,6 +151,7 @@ class DatabentoCurrentQuoteProvider:
             raw_quote=raw_quote,
             quote=quote,
             provider_error=None,
+            provider_diagnostics=_provider_diagnostics_from_raw(raw_quote),
             no_records_reason=None,
         )
 
@@ -193,8 +197,10 @@ class DatabentoCurrentQuoteProvider:
         raw_quote: Mapping[str, Any] | None,
         quote: QuoteSnapshot | None,
         provider_error: str | None,
+        provider_diagnostics: Mapping[str, Any] | None,
         no_records_reason: str | None,
     ) -> CurrentQuoteResult:
+        diagnostics = dict(provider_diagnostics or {})
         quote_age_seconds = str(quote.age_seconds(now)) if quote is not None else None
         quote_available = classification == CurrentQuoteClassification.AVAILABLE
         report = {
@@ -230,6 +236,24 @@ class DatabentoCurrentQuoteProvider:
             "production_live_money_readiness": False,
             "provider_error": provider_error,
             "no_records_reason": no_records_reason,
+            "requested_quote_start": diagnostics.get("requested_quote_start"),
+            "requested_quote_end": diagnostics.get("requested_quote_end"),
+            "actual_quote_start": diagnostics.get("actual_quote_start"),
+            "actual_quote_end": diagnostics.get("actual_quote_end"),
+            "provider_available_end": diagnostics.get("provider_available_end"),
+            "provider_available_end_initial": diagnostics.get("provider_available_end_initial"),
+            "provider_available_end_final": diagnostics.get("provider_available_end_final"),
+            "available_end_fallback_used": diagnostics.get("available_end_fallback_used", False),
+            "available_end_buffer_seconds": diagnostics.get("available_end_buffer_seconds"),
+            "allow_available_end_fallback_requested": diagnostics.get("allow_available_end_fallback_requested"),
+            "allow_available_end_fallback_effective": diagnostics.get("allow_available_end_fallback_effective"),
+            "available_end_retry_attempted": diagnostics.get("available_end_retry_attempted", False),
+            "available_end_retry_count": diagnostics.get("available_end_retry_count", 0),
+            "available_end_retry_reason": diagnostics.get("available_end_retry_reason"),
+            "quote_temporal_scope": diagnostics.get("quote_temporal_scope"),
+            "active_session_quote": diagnostics.get("active_session_quote"),
+            "native_databento_error_code": diagnostics.get("native_databento_error_code"),
+            "native_databento_error_message": diagnostics.get("native_databento_error_message"),
             "raw_quote_keys": sorted(str(key) for key in raw_quote.keys()) if raw_quote is not None else [],
             "submit_enabled": False,
             "place_order_called": False,
@@ -311,6 +335,21 @@ class DatabentoQuoteProviderCurrentQuoteTransport:
             "provider_warnings": list(quote.provider_warnings),
             "raw": dict(quote.raw),
         }
+
+
+def _provider_diagnostics_from_exception(exc: Exception) -> dict[str, Any]:
+    diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
+    provider_available_end = getattr(exc, "provider_available_end", None)
+    if provider_available_end is not None and "provider_available_end" not in diagnostics:
+        diagnostics["provider_available_end"] = provider_available_end.isoformat()
+    return diagnostics
+
+
+def _provider_diagnostics_from_raw(raw_quote: Mapping[str, Any] | None) -> dict[str, Any]:
+    if raw_quote is None:
+        return {}
+    raw = raw_quote.get("raw")
+    return dict(raw) if isinstance(raw, Mapping) else {}
 
 
 def _parse_timestamp(value: Any) -> datetime:
