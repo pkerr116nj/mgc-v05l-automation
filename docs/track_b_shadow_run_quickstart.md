@@ -584,7 +584,8 @@ are present:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --build-features-from outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json \
+  --candle-history-json <BOUNDED_MGC_1M_HISTORY_JSON> \
+  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \
@@ -597,16 +598,21 @@ are present:
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
-If a feature event has already been built, use
+This single command runs the candle-history producer, market-history collector,
+feature builder, strategy rule, and readiness check in sequence. If a
+market-history or feature event has already been built, use
+`--build-features-from outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json`
+or
 `--feature-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json`
-instead of `--build-features-from`.
+instead of `--candle-history-json`.
 
 PAPER submit requires all explicit gates. Prices and quantity are not inferred:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --build-features-from outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json \
+  --candle-history-json <BOUNDED_MGC_1M_HISTORY_JSON> \
+  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \
@@ -626,7 +632,10 @@ PAPER submit requires all explicit gates. Prices and quantity are not inferred:
 
 This path remains PAPER-only. It does not support live-money execution, market
 orders, UI authority, hidden submit, inferred direction, inferred prices, or
-broker mutation outside the Track B paper proof lifecycle. The latest report is:
+broker mutation outside the Track B paper proof lifecycle. If the real rule
+emits `NO_SIGNAL`, if candle history/features are insufficient or non-realtime,
+or if readiness blocks, the runner stops cleanly and `paper_proof_invoked=false`.
+The latest report is:
 
 ```text
 outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json

@@ -33,6 +33,18 @@ from .track_b_feature_builder import (
     TrackBFeatureBuilderVerdict,
     build_track_b_mgc_feature_event,
 )
+from .track_b_market_history import (
+    DEFAULT_TRACK_B_MARKET_HISTORY_OUTPUT_ROOT,
+    TrackBMarketHistoryResult,
+    TrackBMarketHistoryVerdict,
+    collect_track_b_mgc_market_history,
+)
+from .track_b_mgc_candle_history_producer import (
+    DEFAULT_TRACK_B_MGC_CANDLE_HISTORY_PRODUCER_OUTPUT_ROOT,
+    TrackBMgcCandleHistoryProducerResult,
+    TrackBMgcCandleHistoryProducerVerdict,
+    produce_track_b_mgc_candle_history_input,
+)
 from .track_b_readiness_check_runner import (
     DEFAULT_READINESS_CHECK_RUNNER_OUTPUT_ROOT,
     TrackBReadinessCheckRunnerConfig,
@@ -72,6 +84,10 @@ class TrackBStrategyPaperRunnerConfig:
     mode: str = "PAPER"
     input_event_json: Path | None = None
     input_event_payload: Mapping[str, object] | None = None
+    candle_history_json: Path | None = None
+    candle_history_payload: Mapping[str, object] | None = None
+    current_quote_report_json: Path | None = None
+    current_quote_report_payload: Mapping[str, object] | None = None
     build_features_from_json: Path | None = None
     build_features_from_payload: Mapping[str, object] | None = None
     feature_event_json: Path | None = None
@@ -118,6 +134,12 @@ class TrackBStrategyPaperRunnerConfig:
     request_timeout_seconds: float = 10.0
     quote_timeout_seconds: float = 3.0
     output_root: Path = DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT
+    candle_history_producer_output_root: Path = DEFAULT_TRACK_B_MGC_CANDLE_HISTORY_PRODUCER_OUTPUT_ROOT
+    candle_history_max_candles: int = 50
+    candle_history_min_candles: int = 3
+    market_history_output_root: Path = DEFAULT_TRACK_B_MARKET_HISTORY_OUTPUT_ROOT
+    market_history_max_candles: int = 50
+    market_history_min_candles: int = 3
     feature_builder_output_root: Path = DEFAULT_TRACK_B_FEATURE_BUILDER_OUTPUT_ROOT
     feature_builder_min_history_candles: int = 3
     feature_builder_ema_span: int = 3
@@ -137,6 +159,8 @@ class TrackBStrategyPaperRunnerConfig:
 
 @dataclass(frozen=True)
 class TrackBStrategyPaperRunnerStages:
+    candle_history_producer: Callable[[TrackBStrategyPaperRunnerConfig], TrackBMgcCandleHistoryProducerResult]
+    market_history_collector: Callable[[TrackBStrategyPaperRunnerConfig, TrackBMgcCandleHistoryProducerResult], TrackBMarketHistoryResult]
     feature_builder: Callable[[TrackBStrategyPaperRunnerConfig], TrackBFeatureBuilderResult]
     strategy_rule: Callable[[TrackBStrategyPaperRunnerConfig], TrackBStrategyRuleRunnerResult]
     readiness: Callable[[TrackBStrategyPaperRunnerConfig], TrackBReadinessCheckRunnerResult]
@@ -149,6 +173,8 @@ class TrackBStrategyPaperRunnerResult:
     verdict: TrackBStrategyPaperRunnerVerdict
     report_json: Path
     report: dict[str, object]
+    candle_history_producer_result: TrackBMgcCandleHistoryProducerResult | None = None
+    market_history_result: TrackBMarketHistoryResult | None = None
     feature_builder_result: TrackBFeatureBuilderResult | None = None
     strategy_rule_result: TrackBStrategyRuleRunnerResult | None = None
     readiness_result: TrackBReadinessCheckRunnerResult | None = None
@@ -161,6 +187,8 @@ def default_stages(
     proof_runner: ProofRunner | None = None,
 ) -> TrackBStrategyPaperRunnerStages:
     return TrackBStrategyPaperRunnerStages(
+        candle_history_producer=_run_candle_history_producer,
+        market_history_collector=_run_market_history_collector,
         feature_builder=_run_feature_builder,
         strategy_rule=_run_strategy_rule,
         readiness=lambda config: _run_readiness(config, readiness_stages=readiness_stages),
@@ -181,6 +209,8 @@ def run_track_b_strategy_paper(
     actual_runner_id = runner_id or f"track_b_strategy_paper_runner_{uuid.uuid4().hex}"
     report_json = Path(config.output_root) / actual_runner_id / "track_b_strategy_paper_runner_report.json"
     actual_stages = stages or default_stages()
+    candle_history_producer: TrackBMgcCandleHistoryProducerResult | None = None
+    market_history: TrackBMarketHistoryResult | None = None
     feature_builder: TrackBFeatureBuilderResult | None = None
     strategy_rule: TrackBStrategyRuleRunnerResult | None = None
     readiness: TrackBReadinessCheckRunnerResult | None = None
@@ -195,6 +225,8 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_NON_PAPER_MODE,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
@@ -212,6 +244,8 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
@@ -219,18 +253,86 @@ def run_track_b_strategy_paper(
                 primary_blocker=submit_error,
                 required_next_action="Provide explicit PAPER submit flags, quantity, and manual open/close limit prices before retrying.",
                 operator_status_stage=actual_stages.operator_status,
-        )
+            )
+
+        candle_history_request_error = _candle_history_producer_request_error(config)
+        if candle_history_request_error:
+            return _finalize(
+                config=config,
+                report_json=report_json,
+                now=actual_now,
+                runner_id=actual_runner_id,
+                verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
+                feature_builder=feature_builder,
+                strategy_rule=strategy_rule,
+                readiness=readiness,
+                proof=proof,
+                primary_blocker=candle_history_request_error,
+                required_next_action="Provide both bounded candle history and a current quote report before running the history producer.",
+                operator_status_stage=actual_stages.operator_status,
+            )
 
         strategy_config = config
-        if _feature_builder_requested(config):
-            feature_builder = actual_stages.feature_builder(config)
-            if feature_builder.verdict != TrackBFeatureBuilderVerdict.WROTE_FEATURE_EVENT or feature_builder.feature_event is None:
+        feature_config = config
+        if _candle_history_producer_requested(config):
+            candle_history_producer = actual_stages.candle_history_producer(config)
+            if (
+                candle_history_producer.verdict != TrackBMgcCandleHistoryProducerVerdict.WROTE_HISTORY_INPUT
+                or candle_history_producer.history_input is None
+            ):
                 return _finalize(
                     config=config,
                     report_json=report_json,
                     now=actual_now,
                     runner_id=actual_runner_id,
                     verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER,
+                    candle_history_producer=candle_history_producer,
+                    market_history=market_history,
+                    feature_builder=feature_builder,
+                    strategy_rule=strategy_rule,
+                    readiness=readiness,
+                    proof=proof,
+                    primary_blocker=candle_history_producer.report.get("primary_blocker") or "Candle-history producer did not produce bounded strategy input.",
+                    required_next_action=str(candle_history_producer.report.get("required_next_action") or "Resolve candle-history producer blocker before feature building."),
+                    operator_status_stage=actual_stages.operator_status,
+                )
+            market_history = actual_stages.market_history_collector(config, candle_history_producer)
+            if market_history.verdict != TrackBMarketHistoryVerdict.WROTE_HISTORY_EVENT or market_history.history_event is None:
+                return _finalize(
+                    config=config,
+                    report_json=report_json,
+                    now=actual_now,
+                    runner_id=actual_runner_id,
+                    verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER,
+                    candle_history_producer=candle_history_producer,
+                    market_history=market_history,
+                    feature_builder=feature_builder,
+                    strategy_rule=strategy_rule,
+                    readiness=readiness,
+                    proof=proof,
+                    primary_blocker=market_history.report.get("primary_blocker") or "Market-history collector did not produce a feature-builder event.",
+                    required_next_action=str(market_history.report.get("required_next_action") or "Resolve market-history collector blocker before feature building."),
+                    operator_status_stage=actual_stages.operator_status,
+                )
+            feature_config = replace(
+                config,
+                build_features_from_payload=market_history.history_event,
+                build_features_from_json=market_history.history_event_json,
+            )
+
+        if _feature_builder_requested(feature_config):
+            feature_builder = actual_stages.feature_builder(feature_config)
+            if feature_builder.verdict != TrackBFeatureBuilderVerdict.WROTE_FEATURE_EVENT or feature_builder.feature_event is None:
+                return _finalize(
+                    config=feature_config,
+                    report_json=report_json,
+                    now=actual_now,
+                    runner_id=actual_runner_id,
+                    verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER,
+                    candle_history_producer=candle_history_producer,
+                    market_history=market_history,
                     feature_builder=feature_builder,
                     strategy_rule=strategy_rule,
                     readiness=readiness,
@@ -239,24 +341,26 @@ def run_track_b_strategy_paper(
                     required_next_action=str(feature_builder.report.get("required_next_action") or "Resolve feature builder blocker before strategy evaluation."),
                     operator_status_stage=actual_stages.operator_status,
                 )
-            strategy_config = replace(config, input_event_payload=feature_builder.feature_event, input_event_json=feature_builder.feature_event_json)
-        elif config.feature_event_json is not None:
-            if not Path(config.feature_event_json).exists():
+            strategy_config = replace(feature_config, input_event_payload=feature_builder.feature_event, input_event_json=feature_builder.feature_event_json)
+        elif feature_config.feature_event_json is not None:
+            if not Path(feature_config.feature_event_json).exists():
                 return _finalize(
-                    config=config,
+                    config=feature_config,
                     report_json=report_json,
                     now=actual_now,
                     runner_id=actual_runner_id,
                     verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER,
+                    candle_history_producer=candle_history_producer,
+                    market_history=market_history,
                     feature_builder=feature_builder,
                     strategy_rule=strategy_rule,
                     readiness=readiness,
                     proof=proof,
-                    primary_blocker=f"Feature event JSON does not exist: {config.feature_event_json}",
+                    primary_blocker=f"Feature event JSON does not exist: {feature_config.feature_event_json}",
                     required_next_action="Run track_b_feature_builder_cli or provide a valid --feature-event-json before strategy evaluation.",
                     operator_status_stage=actual_stages.operator_status,
                 )
-            strategy_config = replace(config, input_event_payload=None, input_event_json=config.feature_event_json)
+            strategy_config = replace(feature_config, input_event_payload=None, input_event_json=feature_config.feature_event_json)
 
         strategy_rule = actual_stages.strategy_rule(strategy_config)
         strategy_verdict = str(strategy_rule.report.get("strategy_rule_runner_verdict") or "")
@@ -267,6 +371,8 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_STRATEGY_RULE,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
@@ -288,6 +394,8 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=verdict,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
@@ -303,6 +411,8 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_STRATEGY_RULE,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
@@ -320,6 +430,8 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_READINESS,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
@@ -336,6 +448,8 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
@@ -372,6 +486,8 @@ def run_track_b_strategy_paper(
             now=actual_now,
             runner_id=actual_runner_id,
             verdict=verdict,
+            candle_history_producer=candle_history_producer,
+            market_history=market_history,
             feature_builder=feature_builder,
             strategy_rule=strategy_rule,
             readiness=readiness,
@@ -388,6 +504,8 @@ def run_track_b_strategy_paper(
             now=actual_now,
             runner_id=actual_runner_id,
             verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_STAGE_ERROR,
+            candle_history_producer=candle_history_producer,
+            market_history=market_history,
             feature_builder=feature_builder,
             strategy_rule=strategy_rule,
             readiness=readiness,
@@ -409,6 +527,53 @@ def _run_feature_builder(config: TrackBStrategyPaperRunnerConfig) -> TrackBFeatu
         source_id=config.source_id,
         min_history_candles=config.feature_builder_min_history_candles,
         ema_span=config.feature_builder_ema_span,
+    )
+
+
+def _run_candle_history_producer(config: TrackBStrategyPaperRunnerConfig) -> TrackBMgcCandleHistoryProducerResult:
+    history_payload = _candle_history_payload(config)
+    current_quote_payload = _current_quote_report_payload(config)
+    return produce_track_b_mgc_candle_history_input(
+        history_payload=history_payload,
+        current_quote_report_payload=current_quote_payload,
+        history_payload_path=config.candle_history_json,
+        current_quote_report_path=config.current_quote_report_json,
+        expected_account_id=config.expected_account_id,
+        strategy_id=config.strategy_id,
+        lane_id=config.lane_id,
+        contract_key=config.contract_key,
+        databento_continuous_symbol=config.databento_continuous_symbol,
+        allowlisted_local_symbol=config.allowlisted_local_symbol,
+        dataset=config.dataset,
+        timeframe="1m" if config.timeframe == "quote_snapshot" else config.timeframe,
+        max_candles=config.candle_history_max_candles,
+        min_candles=config.candle_history_min_candles,
+        source_id=config.source_id,
+        output_root=config.candle_history_producer_output_root,
+    )
+
+
+def _run_market_history_collector(
+    config: TrackBStrategyPaperRunnerConfig,
+    candle_history_producer: TrackBMgcCandleHistoryProducerResult,
+) -> TrackBMarketHistoryResult:
+    if candle_history_producer.history_input is None:
+        raise ValueError("candle history producer did not produce history input.")
+    return collect_track_b_mgc_market_history(
+        market_history_payload=candle_history_producer.history_input,
+        source_payload_path=candle_history_producer.history_input_json,
+        expected_account_id=config.expected_account_id,
+        contract_key=config.contract_key,
+        databento_continuous_symbol=config.databento_continuous_symbol,
+        dataset=config.dataset,
+        allowlisted_local_symbol=config.allowlisted_local_symbol,
+        timeframe="1m" if config.timeframe == "quote_snapshot" else config.timeframe,
+        max_candles=config.market_history_max_candles,
+        min_candles=config.market_history_min_candles,
+        output_root=config.market_history_output_root,
+        source_id=config.source_id,
+        strategy_id=config.strategy_id,
+        lane_id=config.lane_id,
     )
 
 
@@ -533,6 +698,8 @@ def _finalize(
     now: datetime,
     runner_id: str,
     verdict: TrackBStrategyPaperRunnerVerdict,
+    candle_history_producer: TrackBMgcCandleHistoryProducerResult | None,
+    market_history: TrackBMarketHistoryResult | None,
     feature_builder: TrackBFeatureBuilderResult | None,
     strategy_rule: TrackBStrategyRuleRunnerResult | None,
     readiness: TrackBReadinessCheckRunnerResult | None,
@@ -548,6 +715,8 @@ def _finalize(
         now=now,
         runner_id=runner_id,
         verdict=verdict,
+        candle_history_producer=candle_history_producer,
+        market_history=market_history,
         feature_builder=feature_builder,
         strategy_rule=strategy_rule,
         readiness=readiness,
@@ -566,6 +735,8 @@ def _finalize(
         verdict=verdict,
         report_json=report_json,
         report=report,
+        candle_history_producer_result=candle_history_producer,
+        market_history_result=market_history,
         feature_builder_result=feature_builder,
         strategy_rule_result=strategy_rule,
         readiness_result=readiness,
@@ -580,6 +751,8 @@ def _build_report(
     now: datetime,
     runner_id: str,
     verdict: TrackBStrategyPaperRunnerVerdict,
+    candle_history_producer: TrackBMgcCandleHistoryProducerResult | None,
+    market_history: TrackBMarketHistoryResult | None,
     feature_builder: TrackBFeatureBuilderResult | None,
     strategy_rule: TrackBStrategyRuleRunnerResult | None,
     readiness: TrackBReadinessCheckRunnerResult | None,
@@ -588,6 +761,8 @@ def _build_report(
     required_next_action: str,
     proof_classification: str | None,
 ) -> dict[str, object]:
+    candle_history_report = candle_history_producer.report if candle_history_producer else {}
+    market_history_report = market_history.report if market_history else {}
     feature_report = feature_builder.report if feature_builder else {}
     strategy_report = strategy_rule.report if strategy_rule else {}
     readiness_report = readiness.report if readiness else {}
@@ -606,6 +781,18 @@ def _build_report(
         "lane_id": config.lane_id,
         "rule_id": config.rule_id,
         "rule_mode": config.rule_mode,
+        "candle_history_producer_invoked": candle_history_producer is not None,
+        "candle_history_producer_verdict": candle_history_report.get("candle_history_producer_verdict"),
+        "candle_history_producer_report_path": str(candle_history_producer.report_json) if candle_history_producer else None,
+        "candle_history_input_path": (
+            str(candle_history_producer.history_input_json)
+            if candle_history_producer and candle_history_producer.history_input_json is not None
+            else str(config.candle_history_json) if config.candle_history_json is not None else None
+        ),
+        "market_history_collector_invoked": market_history is not None,
+        "market_history_collector_verdict": market_history_report.get("market_history_verdict"),
+        "market_history_collector_report_path": str(market_history.report_json) if market_history else None,
+        "market_history_event_path": str(market_history.history_event_json) if market_history and market_history.history_event_json else None,
         "feature_builder_invoked": feature_builder is not None,
         "feature_builder_verdict": feature_report.get("feature_builder_verdict"),
         "feature_builder_report_path": str(feature_builder.report_json) if feature_builder else None,
@@ -656,6 +843,14 @@ def _build_report(
         "report_json_path": str(report_json),
         "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_strategy_paper_runner_report.json"),
         "artifact_paths": {
+            "candle_history_producer_report_json": str(candle_history_producer.report_json) if candle_history_producer else None,
+            "candle_history_input_json": (
+                str(candle_history_producer.history_input_json)
+                if candle_history_producer and candle_history_producer.history_input_json is not None
+                else str(config.candle_history_json) if config.candle_history_json is not None else None
+            ),
+            "market_history_collector_report_json": str(market_history.report_json) if market_history else None,
+            "market_history_event_json": str(market_history.history_event_json) if market_history and market_history.history_event_json else None,
             "feature_builder_report_json": str(feature_builder.report_json) if feature_builder else None,
             "feature_event_json": (
                 str(feature_builder.feature_event_json)
@@ -700,6 +895,47 @@ def _feature_builder_source_payload(config: TrackBStrategyPaperRunnerConfig) -> 
     if not isinstance(value, Mapping):
         raise ValueError("feature builder source JSON must contain an object.")
     return value
+
+
+def _candle_history_payload(config: TrackBStrategyPaperRunnerConfig) -> Mapping[str, object]:
+    if config.candle_history_payload is not None:
+        return config.candle_history_payload
+    if config.candle_history_json is None:
+        raise ValueError("candle_history_json or candle_history_payload is required when candle-history production is requested.")
+    value = json.loads(Path(config.candle_history_json).read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise ValueError("candle history JSON must contain an object.")
+    return value
+
+
+def _current_quote_report_payload(config: TrackBStrategyPaperRunnerConfig) -> Mapping[str, object]:
+    if config.current_quote_report_payload is not None:
+        return config.current_quote_report_payload
+    if config.current_quote_report_json is None:
+        raise ValueError("current_quote_report_json or current_quote_report_payload is required when candle-history production is requested.")
+    value = json.loads(Path(config.current_quote_report_json).read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise ValueError("current quote report JSON must contain an object.")
+    return value
+
+
+def _candle_history_producer_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    return (
+        config.candle_history_json is not None
+        or config.candle_history_payload is not None
+        or config.current_quote_report_json is not None
+        or config.current_quote_report_payload is not None
+    )
+
+
+def _candle_history_producer_request_error(config: TrackBStrategyPaperRunnerConfig) -> str | None:
+    has_history = config.candle_history_json is not None or config.candle_history_payload is not None
+    has_current_quote = config.current_quote_report_json is not None or config.current_quote_report_payload is not None
+    if has_history and not has_current_quote:
+        return "Candle-history PAPER path requires a current quote report JSON/payload."
+    if has_current_quote and not has_history:
+        return "Candle-history PAPER path requires bounded candle history JSON/payload."
+    return None
 
 
 def _feature_builder_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:

@@ -14,6 +14,14 @@ from mgc_v05l.execution_core.track_b_feature_builder import (
     TrackBFeatureBuilderResult,
     TrackBFeatureBuilderVerdict,
 )
+from mgc_v05l.execution_core.track_b_market_history import (
+    TrackBMarketHistoryResult,
+    TrackBMarketHistoryVerdict,
+)
+from mgc_v05l.execution_core.track_b_mgc_candle_history_producer import (
+    TrackBMgcCandleHistoryProducerResult,
+    TrackBMgcCandleHistoryProducerVerdict,
+)
 from mgc_v05l.execution_core.track_b_strategy_paper_runner import (
     TrackBStrategyPaperRunnerConfig,
     TrackBStrategyPaperRunnerStages,
@@ -33,6 +41,8 @@ def aware_now() -> datetime:
 
 class Calls:
     def __init__(self) -> None:
+        self.candle_history = 0
+        self.market_history = 0
         self.feature = 0
         self.strategy = 0
         self.readiness = 0
@@ -66,6 +76,115 @@ def base_config(tmp_path: Path, **overrides: object) -> TrackBStrategyPaperRunne
     }
     payload.update(overrides)
     return TrackBStrategyPaperRunnerConfig(**payload)
+
+
+def candle_history_producer_result(tmp_path: Path, *, ready: bool = True) -> TrackBMgcCandleHistoryProducerResult:
+    report_json = tmp_path / "candle_history_producer_report.json"
+    input_json = tmp_path / "candle_history_input.json"
+    history_input = {
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "strategy_id": "track_b_example_gold_shadow_v1",
+        "lane_id": "mgc_example_long_lmt_day",
+        "databento_continuous_symbol": "MGC.v.0",
+        "dataset": "GLBX.MDP3",
+        "timeframe": "1m",
+        "quote_provider_mode": "REALTIME",
+        "realtime_quote_received": True,
+        "current_quote_available": True,
+        "candles": [
+            {
+                "candle_timestamp": "2026-05-04T14:28:00+00:00",
+                "open": "4574.6",
+                "high": "4574.6",
+                "low": "4574.6",
+                "close": "4574.6",
+                "volume": "1",
+            },
+            {
+                "candle_timestamp": "2026-05-04T14:29:00+00:00",
+                "open": "4574.8",
+                "high": "4574.8",
+                "low": "4574.8",
+                "close": "4574.8",
+                "volume": "1",
+            },
+            {
+                "candle_timestamp": "2026-05-04T14:30:00+00:00",
+                "open": "4575.3",
+                "high": "4575.3",
+                "low": "4575.3",
+                "close": "4575.3",
+                "volume": "1",
+            },
+        ],
+    }
+    report = {
+        "candle_history_producer_verdict": (
+            TrackBMgcCandleHistoryProducerVerdict.WROTE_HISTORY_INPUT.value
+            if ready
+            else TrackBMgcCandleHistoryProducerVerdict.BLOCKED_INSUFFICIENT_CANDLES.value
+        ),
+        "output_history_input_path": str(input_json) if ready else None,
+        "primary_blocker": None if ready else "At least 3 candles are required; received 1.",
+        "required_next_action": "history next",
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(json.dumps(report), encoding="utf-8")
+    if ready:
+        input_json.write_text(json.dumps(history_input), encoding="utf-8")
+    return TrackBMgcCandleHistoryProducerResult(
+        verdict=TrackBMgcCandleHistoryProducerVerdict.WROTE_HISTORY_INPUT
+        if ready
+        else TrackBMgcCandleHistoryProducerVerdict.BLOCKED_INSUFFICIENT_CANDLES,
+        report_json=report_json,
+        report=report,
+        history_input_json=input_json if ready else None,
+        history_input=history_input if ready else None,
+    )
+
+
+def market_history_result(tmp_path: Path, *, ready: bool = True) -> TrackBMarketHistoryResult:
+    report_json = tmp_path / "market_history_report.json"
+    event_json = tmp_path / "market_history_event.json"
+    history_event = {
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "strategy_id": "track_b_example_gold_shadow_v1",
+        "lane_id": "mgc_example_long_lmt_day",
+        "timeframe": "1m",
+        "quote_provider_mode": "REALTIME",
+        "realtime_quote_received": True,
+        "current_quote_available": True,
+        "candles": [],
+    }
+    report = {
+        "market_history_verdict": (
+            TrackBMarketHistoryVerdict.WROTE_HISTORY_EVENT.value
+            if ready
+            else TrackBMarketHistoryVerdict.BLOCKED_INSUFFICIENT_HISTORY.value
+        ),
+        "output_history_event_path": str(event_json) if ready else None,
+        "primary_blocker": None if ready else "At least 3 candles are required; received 1.",
+        "required_next_action": "collector next",
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(json.dumps(report), encoding="utf-8")
+    if ready:
+        event_json.write_text(json.dumps(history_event), encoding="utf-8")
+    return TrackBMarketHistoryResult(
+        verdict=TrackBMarketHistoryVerdict.WROTE_HISTORY_EVENT if ready else TrackBMarketHistoryVerdict.BLOCKED_INSUFFICIENT_HISTORY,
+        report_json=report_json,
+        report=report,
+        history_event_json=event_json if ready else None,
+        history_event=history_event if ready else None,
+    )
 
 
 def feature_result(tmp_path: Path, *, ready: bool = True) -> TrackBFeatureBuilderResult:
@@ -221,13 +340,32 @@ def stages(
     *,
     calls: Calls,
     strategy: TrackBStrategyRuleRunnerResult,
+    candle_history: TrackBMgcCandleHistoryProducerResult | None = None,
+    market_history: TrackBMarketHistoryResult | None = None,
     feature: TrackBFeatureBuilderResult | None = None,
     readiness: TrackBReadinessCheckRunnerResult | None = None,
     proof: PaperProofResult | None = None,
 ) -> TrackBStrategyPaperRunnerStages:
+    def candle_history_stage(config: TrackBStrategyPaperRunnerConfig) -> TrackBMgcCandleHistoryProducerResult:
+        calls.candle_history += 1
+        assert candle_history is not None
+        return candle_history
+
+    def market_history_stage(
+        config: TrackBStrategyPaperRunnerConfig,
+        candle_history_result: TrackBMgcCandleHistoryProducerResult,
+    ) -> TrackBMarketHistoryResult:
+        calls.market_history += 1
+        assert market_history is not None
+        if candle_history is not None:
+            assert candle_history_result == candle_history
+        return market_history
+
     def feature_stage(config: TrackBStrategyPaperRunnerConfig) -> TrackBFeatureBuilderResult:
         calls.feature += 1
         assert feature is not None
+        if market_history is not None and market_history.history_event is not None:
+            assert config.build_features_from_payload == market_history.history_event
         return feature
 
     def strategy_stage(config: TrackBStrategyPaperRunnerConfig) -> TrackBStrategyRuleRunnerResult:
@@ -250,6 +388,8 @@ def stages(
         calls.operator_status += 1
 
     return TrackBStrategyPaperRunnerStages(
+        candle_history_producer=candle_history_stage,
+        market_history_collector=market_history_stage,
         feature_builder=feature_stage,
         strategy_rule=strategy_stage,
         readiness=readiness_stage,
@@ -429,6 +569,192 @@ def test_feature_builder_signal_readiness_green_and_explicit_submit_invokes_pape
     assert result.report["paper_proof_invoked"] is True
     assert result.report["submit_attempted"] is True
     assert result.report["final_flat"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_full_history_feature_rule_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            candle_history_payload={"candles": []},
+            current_quote_report_payload={"current_quote_available": True},
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            candle_history=candle_history_producer_result(tmp_path),
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-full-real-rule-proof-passed",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert calls.candle_history == 1
+    assert calls.market_history == 1
+    assert calls.feature == 1
+    assert calls.strategy == 1
+    assert calls.readiness == 1
+    assert calls.proof == 1
+    assert result.report["candle_history_producer_invoked"] is True
+    assert result.report["candle_history_producer_verdict"] == "TRACK_B_MGC_CANDLE_HISTORY_PRODUCER_WROTE_HISTORY_INPUT"
+    assert result.report["market_history_collector_invoked"] is True
+    assert result.report["market_history_collector_verdict"] == "TRACK_B_MARKET_HISTORY_WROTE_HISTORY_EVENT"
+    assert result.report["feature_builder_verdict"] == "TRACK_B_FEATURE_BUILDER_WROTE_FEATURE_EVENT"
+    assert result.report["strategy_rule_verdict"] == "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL"
+    assert result.report["readiness_verdict"] == "READY_FOR_PAPER_PROOF"
+    assert result.report["paper_submit_requested"] is True
+    assert result.report["paper_proof_invoked"] is True
+    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert result.report["final_flat"] is True
+    assert result.report["submit_attempted"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_full_history_feature_rule_ready_without_submit_flags_stays_no_submit(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            candle_history_payload={"candles": []},
+            current_quote_report_payload={"current_quote_available": True},
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            candle_history=candle_history_producer_result(tmp_path),
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-full-real-rule-ready-no-submit",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED
+    assert calls.candle_history == 1
+    assert calls.market_history == 1
+    assert calls.feature == 1
+    assert calls.readiness == 1
+    assert calls.proof == 0
+    assert result.report["paper_submit_requested"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_history_producer_blocked_stops_before_collector_feature_readiness_or_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            candle_history_payload={"candles": []},
+            current_quote_report_payload={"current_quote_available": True},
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            candle_history=candle_history_producer_result(tmp_path, ready=False),
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-history-blocked",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER
+    assert calls.candle_history == 1
+    assert calls.market_history == 0
+    assert calls.feature == 0
+    assert calls.strategy == 0
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["candle_history_producer_verdict"] == "TRACK_B_MGC_CANDLE_HISTORY_PRODUCER_BLOCKED_INSUFFICIENT_CANDLES"
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_market_history_blocked_stops_before_feature_readiness_or_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            candle_history_payload={"candles": []},
+            current_quote_report_payload={"current_quote_available": True},
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            candle_history=candle_history_producer_result(tmp_path),
+            market_history=market_history_result(tmp_path, ready=False),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-market-history-blocked",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER
+    assert calls.candle_history == 1
+    assert calls.market_history == 1
+    assert calls.feature == 0
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["market_history_collector_verdict"] == "TRACK_B_MARKET_HISTORY_BLOCKED_INSUFFICIENT_HISTORY"
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_history_producer_request_requires_current_quote_report_before_any_stage(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            candle_history_payload={"candles": []},
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            candle_history=candle_history_producer_result(tmp_path),
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-history-missing-current-quote",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER
+    assert calls.candle_history == 0
+    assert calls.market_history == 0
+    assert calls.feature == 0
+    assert calls.strategy == 0
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert "current quote report" in str(result.report["primary_blocker"])
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
 
 

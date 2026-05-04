@@ -212,17 +212,23 @@ Dashboard implication:
   candle_signal_producer -> signal_batch_writer` and updates
   `outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json`.
 - `track_b_strategy_paper_runner` is the controlled Phase 2 PAPER handoff. It
-  can now compose `track_b_feature_builder -> track_b_strategy_rule_runner ->
-  track_b_readiness_check_runner -> paper_proof_cli / paper proof lifecycle` in
-  one artifacted command. It defaults to dry-run/no-submit. It can invoke paper
-  proof only when feature building succeeds, the strategy rule emits a signal,
-  readiness is `READY_FOR_PAPER_PROOF`, and `--mode PAPER`, `--submit-paper`,
-  `--confirm-paper-submit`, explicit `--quantity`, and explicit manual open and
-  close limit prices are supplied. It never supports live-money execution, UI
-  authority, hidden submit, inferred prices, inferred quantity, market orders,
-  or broker mutation outside the Track B paper proof lifecycle. It writes
+  can now compose `track_b_mgc_candle_history_producer ->
+  track_b_market_history -> track_b_feature_builder ->
+  track_b_strategy_rule_runner -> track_b_readiness_check_runner ->
+  paper_proof_cli / paper proof lifecycle` in one artifacted command. It
+  defaults to dry-run/no-submit. It can invoke paper proof only when bounded
+  realtime-backed candle history is accepted, feature building succeeds, the
+  strategy rule emits a signal, readiness is `READY_FOR_PAPER_PROOF`, and
+  `--mode PAPER`, `--submit-paper`, `--confirm-paper-submit`, explicit
+  `--quantity`, and explicit manual open and close limit prices are supplied.
+  If history/features are insufficient, the rule emits `NO_SIGNAL`, or
+  readiness blocks, it stops without invoking proof. It never supports
+  live-money execution, UI authority, hidden submit, inferred prices, inferred
+  quantity, market orders, or broker mutation outside the Track B paper proof
+  lifecycle. It writes
   `outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json`
-  with rule, readiness, paper proof, and final broker-state classification.
+  with candle-history producer, market-history collector, feature builder,
+  rule, readiness, paper proof, and final broker-state classification.
 - `track_b_observation_runner` is a bounded operator convenience wrapper around
   the existing no-submit observation chain. It can run one cycle or bounded
   watch cycles from a fixture quote/candle artifact or explicit current

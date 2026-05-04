@@ -375,6 +375,57 @@ feature building blocks, strategy/readiness/proof are not invoked. If the rule
 emits no signal, readiness/proof are not invoked. It reports
 `PAPER_READY_NO_SUBMIT_REQUESTED` when feature building, strategy signal, and
 readiness are green but submit flags are absent. If proof is invoked, the report
-records feature builder verdict/path, strategy verdict, readiness verdict, proof
-classification, proof report path, final flat status when available,
+records candle-history producer verdict/path, market-history collector
+verdict/path, feature builder verdict/path, strategy verdict, readiness verdict,
+proof classification, proof report path, final flat status when available,
 `submit_attempted=true`, and `live_money_readiness=false`.
+
+One-command no-submit review from bounded MGC history:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
+  --mode PAPER \
+  --candle-history-json <BOUNDED_MGC_1M_HISTORY_JSON> \
+  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --rule-id mgc_ema_momentum_reclaim_long_v1 \
+  --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
+  --emit-signal \
+  --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
+```
+
+One-command explicit PAPER execution uses the same artifacted path and adds the
+operator-owned submit gates:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
+  --mode PAPER \
+  --candle-history-json <BOUNDED_MGC_1M_HISTORY_JSON> \
+  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --rule-id mgc_ema_momentum_reclaim_long_v1 \
+  --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
+  --emit-signal \
+  --quantity 1 \
+  --manual-open-limit-price <OPEN_LIMIT_PRICE> \
+  --manual-close-limit-price <CLOSE_LIMIT_PRICE> \
+  --submit-paper \
+  --confirm-paper-submit \
+  --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
+```
+
+If the bounded history is insufficient or non-realtime, if the rule emits
+`NO_SIGNAL`, or if readiness blocks, the runner stops with
+`paper_proof_invoked=false`. A clean runner report is the audit trail; no
+separate dry-run command is required when the explicit PAPER submit flags are
+present.

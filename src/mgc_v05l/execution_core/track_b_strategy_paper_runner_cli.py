@@ -23,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", default="PAPER")
     parser.add_argument("--input-event-json", type=Path, help="Existing strategy-rule input event JSON. Use --feature-event-json for an existing built feature event.")
+    parser.add_argument("--candle-history-json", type=Path, help="Bounded MGC OHLCV history JSON to run through the Track B candle-history producer, market-history collector, and feature builder.")
+    parser.add_argument("--current-quote-report-json", type=Path, help="Current quote or Databento observer report JSON proving realtime quote availability for --candle-history-json.")
     parser.add_argument("--build-features-from", type=Path, help="Source MGC candle/quote history JSON to run through track_b_feature_builder before strategy evaluation.")
     parser.add_argument("--feature-event-json", type=Path, help="Existing track_b_feature_builder output event JSON to pass to the strategy rule.")
     parser.add_argument("--inbox-dir", required=True, type=Path)
@@ -68,6 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--quote-timeout-seconds", type=float, default=3.0)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT)
+    parser.add_argument("--candle-history-producer-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_mgc_candle_history_producer"))
+    parser.add_argument("--candle-history-max-candles", type=int, default=50)
+    parser.add_argument("--candle-history-min-candles", type=int, default=3)
+    parser.add_argument("--market-history-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_market_history"))
+    parser.add_argument("--market-history-max-candles", type=int, default=50)
+    parser.add_argument("--market-history-min-candles", type=int, default=3)
     parser.add_argument("--feature-builder-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_feature_builder"))
     parser.add_argument("--feature-builder-min-history-candles", type=int, default=3)
     parser.add_argument("--feature-builder-ema-span", type=int, default=3)
@@ -92,6 +100,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         config=TrackBStrategyPaperRunnerConfig(
             mode=args.mode,
             input_event_json=args.input_event_json,
+            candle_history_json=args.candle_history_json,
+            current_quote_report_json=args.current_quote_report_json,
             build_features_from_json=args.build_features_from,
             feature_event_json=args.feature_event_json,
             inbox_dir=args.inbox_dir,
@@ -137,6 +147,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_timeout_seconds=args.request_timeout_seconds,
             quote_timeout_seconds=args.quote_timeout_seconds,
             output_root=args.output_root,
+            candle_history_producer_output_root=args.candle_history_producer_output_root,
+            candle_history_max_candles=args.candle_history_max_candles,
+            candle_history_min_candles=args.candle_history_min_candles,
+            market_history_output_root=args.market_history_output_root,
+            market_history_max_candles=args.market_history_max_candles,
+            market_history_min_candles=args.market_history_min_candles,
             feature_builder_output_root=args.feature_builder_output_root,
             feature_builder_min_history_candles=args.feature_builder_min_history_candles,
             feature_builder_ema_span=args.feature_builder_ema_span,
@@ -159,6 +175,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "strategy_paper_runner_verdict": result.report["strategy_paper_runner_verdict"],
                 "mode": result.report["mode"],
+                "candle_history_producer_invoked": result.report["candle_history_producer_invoked"],
+                "candle_history_producer_verdict": result.report["candle_history_producer_verdict"],
+                "candle_history_input_path": result.report["candle_history_input_path"],
+                "market_history_collector_invoked": result.report["market_history_collector_invoked"],
+                "market_history_collector_verdict": result.report["market_history_collector_verdict"],
+                "market_history_event_path": result.report["market_history_event_path"],
                 "feature_builder_invoked": result.report["feature_builder_invoked"],
                 "feature_builder_verdict": result.report["feature_builder_verdict"],
                 "feature_event_path": result.report["feature_event_path"],
