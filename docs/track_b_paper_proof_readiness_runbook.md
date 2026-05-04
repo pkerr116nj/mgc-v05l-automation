@@ -267,7 +267,7 @@ Current Phase 2 chain:
 
 ```text
 Databento realtime quote/event
--> track_b_mgc_candle_history_producer
+-> track_b_data_maintenance
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
@@ -293,12 +293,16 @@ metadata. It emits LONG only when:
 - `--rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG --emit-signal` is explicitly
   supplied.
 
-`track_b_mgc_candle_history_producer` is the upstream producer for the bounded
-1m MGC history JSON. It can normalize supplied OHLCV history or make an
-explicit bounded Databento `ohlcv-1m` request, but it requires a separate
-realtime current quote report before producing strategy-history input. This
-keeps historical bar provenance separate from current quote evidence and
-prevents a single snapshot candle from being treated as EMA/VWAP history.
+`track_b_data_maintenance` is the upstream foundation for MGC 1m history. It
+maintains a local rolling store, handles initial backfill, incremental
+append/update, duplicate handling, monotonic timestamp ordering, gap detection,
+and latest-good bounded history export. The strategy path should consume
+`latest_good_mgc_1m_history.json` plus separate realtime current quote evidence
+rather than fetching Databento historical bars during the trade decision.
+
+`track_b_mgc_candle_history_producer` remains available for diagnostics and
+maintenance inputs. On-demand historical fetch is not the normal trade-decision
+path.
 
 `track_b_market_history` is the bounded MGC history collector upstream of the
 feature builder. The collector normalizes the produced history input into a
@@ -347,7 +351,7 @@ The first controlled handoff boundary is `track_b_strategy_paper_runner`:
 
 ```text
 Databento realtime/current evidence
--> track_b_mgc_candle_history_producer
+-> track_b_data_maintenance latest-good history
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
@@ -375,22 +379,42 @@ feature building blocks, strategy/readiness/proof are not invoked. If the rule
 emits no signal, readiness/proof are not invoked. It reports
 `PAPER_READY_NO_SUBMIT_REQUESTED` when feature building, strategy signal, and
 readiness are green but submit flags are absent. If proof is invoked, the report
-records candle-history producer verdict/path, market-history collector
+records maintained-history path, market-history collector
 verdict/path, feature builder verdict/path, strategy verdict, readiness verdict,
 proof classification, proof report path, final flat status when available,
 `submit_attempted=true`, and `live_money_readiness=false`.
 
-One-command no-submit review from bounded MGC history:
+One-command no-submit review from maintained MGC history:
 
-First produce the realtime quote report and bounded MGC 1m history input. The
-history input command writes
-`outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json`,
-which is the value to pass as `--candle-history-json`:
+First maintain the rolling MGC 1m history and produce the realtime quote
+report. The maintenance command writes
+`outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json`,
+which is the value to pass as `--maintained-history-json`:
 
 ```bash
 set -a
 source .env.local
 set +a
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_data_maintenance_cli \
+  --fetch-databento-history \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --databento-symbol MGCM6 \
+  --dataset GLBX.MDP3 \
+  --schema ohlcv-1m \
+  --allowlisted-local-symbol MGCM6 \
+  --timeframe 1m \
+  --lookback-minutes 240 \
+  --max-bars 5000 \
+  --export-bars 50 \
+  --min-bars 20 \
+  --max-history-age-seconds 900 \
+  --source-id track_b_data_maintenance_mgc_1m \
+  --output-root outputs/track_b_execution_core/track_b_data_maintenance
+
 ./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
   --live-current-quote \
   --quote-provider-mode REALTIME \
@@ -411,31 +435,12 @@ set +a
   --timeframe quote_snapshot \
   --source-id track_b_phase2_current_quote \
   --output-root outputs/track_b_execution_core/databento_candle_observer
-
-./.venv/bin/python -m mgc_v05l.execution_core.track_b_mgc_candle_history_producer_cli \
-  --fetch-databento-history \
-  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
-  --expected-account-id DUM882026 \
-  --strategy-id track_b_example_gold_shadow_v1 \
-  --lane-id mgc_example_long_lmt_day \
-  --contract-key MGC-202606 \
-  --databento-continuous-symbol MGC.v.0 \
-  --databento-symbol MGCM6 \
-  --dataset GLBX.MDP3 \
-  --schema ohlcv-1m \
-  --allowlisted-local-symbol MGCM6 \
-  --timeframe 1m \
-  --lookback-minutes 60 \
-  --max-candles 50 \
-  --min-candles 20 \
-  --source-id track_b_phase2_mgc_1m_history \
-  --output-root outputs/track_b_execution_core/track_b_mgc_candle_history_producer
 ```
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --candle-history-json outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json \
+  --maintained-history-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
   --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
@@ -455,7 +460,7 @@ operator-owned submit gates:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --candle-history-json outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json \
+  --maintained-history-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
   --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
@@ -474,7 +479,7 @@ operator-owned submit gates:
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
-If the bounded history is insufficient or non-realtime, if the rule emits
+If the maintained history is stale/insufficient, if the rule emits
 `NO_SIGNAL`, or if readiness blocks, the runner stops with
 `paper_proof_invoked=false`. A clean runner report is the audit trail; no
 separate dry-run command is required when the explicit PAPER submit flags are

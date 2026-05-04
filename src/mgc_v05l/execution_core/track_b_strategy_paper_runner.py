@@ -33,6 +33,7 @@ from .track_b_feature_builder import (
     TrackBFeatureBuilderVerdict,
     build_track_b_mgc_feature_event,
 )
+from .track_b_data_maintenance import DEFAULT_TRACK_B_DATA_MAINTENANCE_OUTPUT_ROOT
 from .track_b_market_history import (
     DEFAULT_TRACK_B_MARKET_HISTORY_OUTPUT_ROOT,
     TrackBMarketHistoryResult,
@@ -68,6 +69,7 @@ class TrackBStrategyPaperRunnerVerdict(str, Enum):
     HUMAN_REVIEW_NO_SIGNAL = "TRACK_B_STRATEGY_PAPER_RUNNER_HUMAN_REVIEW_NO_SIGNAL"
     BLOCKED_NON_PAPER_MODE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_NON_PAPER_MODE"
     BLOCKED_INVALID_SUBMIT_REQUEST = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_INVALID_SUBMIT_REQUEST"
+    BLOCKED_DATA_MAINTENANCE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_DATA_MAINTENANCE_STALE_OR_INSUFFICIENT"
     BLOCKED_FEATURE_BUILDER = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_FEATURE_BUILDER"
     BLOCKED_STRATEGY_RULE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_STRATEGY_RULE"
     BLOCKED_READINESS = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_READINESS"
@@ -88,6 +90,8 @@ class TrackBStrategyPaperRunnerConfig:
     candle_history_payload: Mapping[str, object] | None = None
     current_quote_report_json: Path | None = None
     current_quote_report_payload: Mapping[str, object] | None = None
+    maintained_history_json: Path | None = None
+    maintained_history_payload: Mapping[str, object] | None = None
     build_features_from_json: Path | None = None
     build_features_from_payload: Mapping[str, object] | None = None
     feature_event_json: Path | None = None
@@ -134,6 +138,8 @@ class TrackBStrategyPaperRunnerConfig:
     request_timeout_seconds: float = 10.0
     quote_timeout_seconds: float = 3.0
     output_root: Path = DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT
+    data_maintenance_output_root: Path = DEFAULT_TRACK_B_DATA_MAINTENANCE_OUTPUT_ROOT
+    max_maintained_history_age_seconds: int = 900
     candle_history_producer_output_root: Path = DEFAULT_TRACK_B_MGC_CANDLE_HISTORY_PRODUCER_OUTPUT_ROOT
     candle_history_max_candles: int = 50
     candle_history_min_candles: int = 3
@@ -161,6 +167,7 @@ class TrackBStrategyPaperRunnerConfig:
 class TrackBStrategyPaperRunnerStages:
     candle_history_producer: Callable[[TrackBStrategyPaperRunnerConfig], TrackBMgcCandleHistoryProducerResult]
     market_history_collector: Callable[[TrackBStrategyPaperRunnerConfig, TrackBMgcCandleHistoryProducerResult], TrackBMarketHistoryResult]
+    market_history_from_payload: Callable[[TrackBStrategyPaperRunnerConfig, Mapping[str, object], Path | None], TrackBMarketHistoryResult]
     feature_builder: Callable[[TrackBStrategyPaperRunnerConfig], TrackBFeatureBuilderResult]
     strategy_rule: Callable[[TrackBStrategyPaperRunnerConfig], TrackBStrategyRuleRunnerResult]
     readiness: Callable[[TrackBStrategyPaperRunnerConfig], TrackBReadinessCheckRunnerResult]
@@ -189,6 +196,7 @@ def default_stages(
     return TrackBStrategyPaperRunnerStages(
         candle_history_producer=_run_candle_history_producer,
         market_history_collector=_run_market_history_collector,
+        market_history_from_payload=_run_market_history_from_payload,
         feature_builder=_run_feature_builder,
         strategy_rule=_run_strategy_rule,
         readiness=lambda config: _run_readiness(config, readiness_stages=readiness_stages),
@@ -255,7 +263,7 @@ def run_track_b_strategy_paper(
                 operator_status_stage=actual_stages.operator_status,
             )
 
-        candle_history_request_error = _candle_history_producer_request_error(config)
+        candle_history_request_error = None if _maintained_history_requested(config) else _candle_history_producer_request_error(config)
         if candle_history_request_error:
             return _finalize(
                 config=config,
@@ -276,7 +284,50 @@ def run_track_b_strategy_paper(
 
         strategy_config = config
         feature_config = config
-        if _candle_history_producer_requested(config):
+        if _maintained_history_requested(config):
+            maintained_history_error = _maintained_history_request_error(config, now=actual_now)
+            if maintained_history_error:
+                return _finalize(
+                    config=config,
+                    report_json=report_json,
+                    now=actual_now,
+                    runner_id=actual_runner_id,
+                    verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_DATA_MAINTENANCE,
+                    candle_history_producer=candle_history_producer,
+                    market_history=market_history,
+                    feature_builder=feature_builder,
+                    strategy_rule=strategy_rule,
+                    readiness=readiness,
+                    proof=proof,
+                    primary_blocker=maintained_history_error,
+                    required_next_action="Run track_b_data_maintenance_cli until latest_good_mgc_1m_history.json is ready, and provide a separate realtime current quote report.",
+                    operator_status_stage=actual_stages.operator_status,
+                )
+            maintained_payload = _maintained_history_market_payload(config, now=actual_now)
+            market_history = actual_stages.market_history_from_payload(config, maintained_payload, config.maintained_history_json)
+            if market_history.verdict != TrackBMarketHistoryVerdict.WROTE_HISTORY_EVENT or market_history.history_event is None:
+                return _finalize(
+                    config=config,
+                    report_json=report_json,
+                    now=actual_now,
+                    runner_id=actual_runner_id,
+                    verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_DATA_MAINTENANCE,
+                    candle_history_producer=candle_history_producer,
+                    market_history=market_history,
+                    feature_builder=feature_builder,
+                    strategy_rule=strategy_rule,
+                    readiness=readiness,
+                    proof=proof,
+                    primary_blocker=market_history.report.get("primary_blocker") or "Maintained market history did not produce a feature-builder event.",
+                    required_next_action=str(market_history.report.get("required_next_action") or "Resolve maintained history blocker before feature building."),
+                    operator_status_stage=actual_stages.operator_status,
+                )
+            feature_config = replace(
+                config,
+                build_features_from_payload=market_history.history_event,
+                build_features_from_json=market_history.history_event_json,
+            )
+        elif _candle_history_producer_requested(config):
             candle_history_producer = actual_stages.candle_history_producer(config)
             if (
                 candle_history_producer.verdict != TrackBMgcCandleHistoryProducerVerdict.WROTE_HISTORY_INPUT
@@ -577,6 +628,29 @@ def _run_market_history_collector(
     )
 
 
+def _run_market_history_from_payload(
+    config: TrackBStrategyPaperRunnerConfig,
+    payload: Mapping[str, object],
+    source_payload_path: Path | None,
+) -> TrackBMarketHistoryResult:
+    return collect_track_b_mgc_market_history(
+        market_history_payload=payload,
+        source_payload_path=source_payload_path,
+        expected_account_id=config.expected_account_id,
+        contract_key=config.contract_key,
+        databento_continuous_symbol=config.databento_continuous_symbol,
+        dataset=config.dataset,
+        allowlisted_local_symbol=config.allowlisted_local_symbol,
+        timeframe="1m" if config.timeframe == "quote_snapshot" else config.timeframe,
+        max_candles=config.market_history_max_candles,
+        min_candles=config.market_history_min_candles,
+        output_root=config.market_history_output_root,
+        source_id=config.source_id,
+        strategy_id=config.strategy_id,
+        lane_id=config.lane_id,
+    )
+
+
 def _run_strategy_rule(config: TrackBStrategyPaperRunnerConfig) -> TrackBStrategyRuleRunnerResult:
     payload = _input_event_payload(config)
     return run_track_b_strategy_rule(
@@ -781,6 +855,9 @@ def _build_report(
         "lane_id": config.lane_id,
         "rule_id": config.rule_id,
         "rule_mode": config.rule_mode,
+        "maintained_history_path": str(config.maintained_history_json) if config.maintained_history_json is not None else None,
+        "data_maintenance_history_requested": _maintained_history_requested(config),
+        "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
         "candle_history_producer_invoked": candle_history_producer is not None,
         "candle_history_producer_verdict": candle_history_report.get("candle_history_producer_verdict"),
         "candle_history_producer_report_path": str(candle_history_producer.report_json) if candle_history_producer else None,
@@ -843,6 +920,7 @@ def _build_report(
         "report_json_path": str(report_json),
         "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_strategy_paper_runner_report.json"),
         "artifact_paths": {
+            "maintained_history_json": str(config.maintained_history_json) if config.maintained_history_json else None,
             "candle_history_producer_report_json": str(candle_history_producer.report_json) if candle_history_producer else None,
             "candle_history_input_json": (
                 str(candle_history_producer.history_input_json)
@@ -917,6 +995,92 @@ def _current_quote_report_payload(config: TrackBStrategyPaperRunnerConfig) -> Ma
     if not isinstance(value, Mapping):
         raise ValueError("current quote report JSON must contain an object.")
     return value
+
+
+def _maintained_history_payload(config: TrackBStrategyPaperRunnerConfig) -> Mapping[str, object]:
+    if config.maintained_history_payload is not None:
+        return config.maintained_history_payload
+    if config.maintained_history_json is None:
+        raise ValueError("maintained_history_json or maintained_history_payload is required.")
+    value = json.loads(Path(config.maintained_history_json).read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise ValueError("maintained history JSON must contain an object.")
+    return value
+
+
+def _maintained_history_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    return config.maintained_history_json is not None or config.maintained_history_payload is not None
+
+
+def _maintained_history_request_error(config: TrackBStrategyPaperRunnerConfig, *, now: datetime) -> str | None:
+    if not _maintained_history_requested(config):
+        return None
+    has_current_quote = config.current_quote_report_json is not None or config.current_quote_report_payload is not None
+    if not has_current_quote:
+        return "Maintained-history PAPER path requires a separate current quote report JSON/payload."
+    try:
+        payload = _maintained_history_payload(config)
+    except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        return f"Maintained history JSON could not be read: {exc}"
+    if payload.get("history_ready") is not True:
+        return str(payload.get("primary_blocker") or "Maintained MGC 1m history is not history_ready=true.")
+    candles = payload.get("candles") or payload.get("candle_history")
+    if not isinstance(candles, list) or not candles:
+        return "Maintained MGC 1m history contains no candle array."
+    latest_timestamp = _latest_history_timestamp(payload)
+    if latest_timestamp is None:
+        return "Maintained MGC 1m history has no latest candle timestamp."
+    history_age_seconds = max(int((now.astimezone(UTC) - latest_timestamp).total_seconds()), 0)
+    if history_age_seconds > config.max_maintained_history_age_seconds:
+        return (
+            f"Maintained MGC 1m history is stale: {history_age_seconds}s old, "
+            f"max allowed {config.max_maintained_history_age_seconds}s."
+        )
+    return None
+
+
+def _maintained_history_market_payload(config: TrackBStrategyPaperRunnerConfig, *, now: datetime) -> Mapping[str, object]:
+    del now
+    history = dict(_maintained_history_payload(config))
+    current_quote = _current_quote_report_payload(config)
+    metadata = history.get("metadata") if isinstance(history.get("metadata"), Mapping) else {}
+    quote_report_path = current_quote.get("report_json_path") or (None if config.current_quote_report_json is None else str(config.current_quote_report_json))
+    history.update(
+        {
+            "quote_provider_mode": current_quote.get("quote_provider_mode"),
+            "realtime_quote_received": current_quote.get("realtime_quote_received"),
+            "current_quote_available": current_quote.get("current_quote_available"),
+            "quote_freshness_verdict": current_quote.get("quote_freshness_verdict"),
+            "quote_report_path": quote_report_path,
+            "source_report_path": quote_report_path,
+            "metadata": {
+                **dict(metadata),
+                "source_report_path": quote_report_path,
+                "current_quote_report_path": quote_report_path,
+                "quote_provider_mode": current_quote.get("quote_provider_mode"),
+                "realtime_quote_received": current_quote.get("realtime_quote_received"),
+                "current_quote_available": current_quote.get("current_quote_available"),
+                "quote_freshness_verdict": current_quote.get("quote_freshness_verdict"),
+                "realtime_current_quote_is_separate": True,
+            },
+        }
+    )
+    return history
+
+
+def _latest_history_timestamp(payload: Mapping[str, object]) -> datetime | None:
+    timestamp = payload.get("candle_timestamp")
+    candles = payload.get("candles") or payload.get("candle_history")
+    if isinstance(candles, list) and candles:
+        latest = candles[-1]
+        if isinstance(latest, Mapping):
+            timestamp = latest.get("candle_timestamp") or latest.get("timestamp") or latest.get("observed_at")
+    if timestamp is None:
+        return None
+    parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _candle_history_producer_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:

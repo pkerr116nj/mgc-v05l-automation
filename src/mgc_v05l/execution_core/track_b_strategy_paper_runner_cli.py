@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", default="PAPER")
     parser.add_argument("--input-event-json", type=Path, help="Existing strategy-rule input event JSON. Use --feature-event-json for an existing built feature event.")
+    parser.add_argument("--maintained-history-json", type=Path, help="Track B data-maintenance latest_good_mgc_1m_history.json to combine with a separate realtime current quote report.")
     parser.add_argument("--candle-history-json", type=Path, help="Bounded MGC OHLCV history JSON to run through the Track B candle-history producer, market-history collector, and feature builder.")
     parser.add_argument("--current-quote-report-json", type=Path, help="Current quote or Databento observer report JSON proving realtime quote availability for --candle-history-json.")
     parser.add_argument("--build-features-from", type=Path, help="Source MGC candle/quote history JSON to run through track_b_feature_builder before strategy evaluation.")
@@ -70,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--quote-timeout-seconds", type=float, default=3.0)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT)
+    parser.add_argument("--data-maintenance-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_data_maintenance"))
+    parser.add_argument("--max-maintained-history-age-seconds", type=int, default=900)
     parser.add_argument("--candle-history-producer-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_mgc_candle_history_producer"))
     parser.add_argument("--candle-history-max-candles", type=int, default=50)
     parser.add_argument("--candle-history-min-candles", type=int, default=3)
@@ -100,6 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config=TrackBStrategyPaperRunnerConfig(
             mode=args.mode,
             input_event_json=args.input_event_json,
+            maintained_history_json=args.maintained_history_json,
             candle_history_json=args.candle_history_json,
             current_quote_report_json=args.current_quote_report_json,
             build_features_from_json=args.build_features_from,
@@ -147,6 +151,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_timeout_seconds=args.request_timeout_seconds,
             quote_timeout_seconds=args.quote_timeout_seconds,
             output_root=args.output_root,
+            data_maintenance_output_root=args.data_maintenance_output_root,
+            max_maintained_history_age_seconds=args.max_maintained_history_age_seconds,
             candle_history_producer_output_root=args.candle_history_producer_output_root,
             candle_history_max_candles=args.candle_history_max_candles,
             candle_history_min_candles=args.candle_history_min_candles,
@@ -175,6 +181,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "strategy_paper_runner_verdict": result.report["strategy_paper_runner_verdict"],
                 "mode": result.report["mode"],
+                "maintained_history_path": result.report["maintained_history_path"],
+                "data_maintenance_history_requested": result.report["data_maintenance_history_requested"],
                 "candle_history_producer_invoked": result.report["candle_history_producer_invoked"],
                 "candle_history_producer_verdict": result.report["candle_history_producer_verdict"],
                 "candle_history_input_path": result.report["candle_history_input_path"],

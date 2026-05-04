@@ -187,6 +187,52 @@ def market_history_result(tmp_path: Path, *, ready: bool = True) -> TrackBMarket
     )
 
 
+def maintained_history_payload(*, ready: bool = True, latest_timestamp: str | None = None) -> dict[str, object]:
+    latest = latest_timestamp or aware_now().isoformat()
+    return {
+        "schema_version": "track_b_latest_good_mgc_1m_history_v1",
+        "source_id": "track_b_data_maintenance",
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "instrument_family": "MGC",
+        "strategy_id": "track_b_example_gold_shadow_v1",
+        "lane_id": "mgc_example_long_lmt_day",
+        "timeframe": "1m",
+        "history_provider_mode": "DATABENTO_MAINTAINED_LOCAL_1M",
+        "history_ready": ready,
+        "primary_blocker": None if ready else "Maintained MGC 1m history is stale.",
+        "candles": [
+            {
+                "candle_timestamp": "2026-05-04T14:28:00+00:00",
+                "open": "4574.6",
+                "high": "4574.6",
+                "low": "4574.6",
+                "close": "4574.6",
+                "volume": "1",
+            },
+            {
+                "candle_timestamp": "2026-05-04T14:29:00+00:00",
+                "open": "4574.8",
+                "high": "4574.8",
+                "low": "4574.8",
+                "close": "4574.8",
+                "volume": "1",
+            },
+            {
+                "candle_timestamp": latest,
+                "open": "4575.3",
+                "high": "4575.3",
+                "low": "4575.3",
+                "close": "4575.3",
+                "volume": "1",
+            },
+        ],
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+
+
 def feature_result(tmp_path: Path, *, ready: bool = True) -> TrackBFeatureBuilderResult:
     report_json = tmp_path / "feature_builder_report.json"
     event_json = tmp_path / "feature_event.json"
@@ -361,6 +407,19 @@ def stages(
             assert candle_history_result == candle_history
         return market_history
 
+    def market_history_from_payload_stage(
+        config: TrackBStrategyPaperRunnerConfig,
+        payload: dict[str, object],
+        source_payload_path: Path | None,
+    ) -> TrackBMarketHistoryResult:
+        calls.market_history += 1
+        assert market_history is not None
+        assert payload["quote_provider_mode"] == "REALTIME"
+        assert payload["realtime_quote_received"] is True
+        assert payload["current_quote_available"] is True
+        assert source_payload_path == config.maintained_history_json
+        return market_history
+
     def feature_stage(config: TrackBStrategyPaperRunnerConfig) -> TrackBFeatureBuilderResult:
         calls.feature += 1
         assert feature is not None
@@ -390,6 +449,7 @@ def stages(
     return TrackBStrategyPaperRunnerStages(
         candle_history_producer=candle_history_stage,
         market_history_collector=market_history_stage,
+        market_history_from_payload=market_history_from_payload_stage,
         feature_builder=feature_stage,
         strategy_rule=strategy_stage,
         readiness=readiness_stage,
@@ -619,6 +679,96 @@ def test_full_history_feature_rule_readiness_green_and_explicit_submit_invokes_p
     assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
     assert result.report["final_flat"] is True
     assert result.report["submit_attempted"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_maintained_history_feature_rule_submit_uses_maintenance_without_history_fetch(tmp_path: Path) -> None:
+    calls = Calls()
+    maintained_history_json = tmp_path / "latest_good_mgc_1m_history.json"
+    maintained_history_json.write_text(json.dumps(maintained_history_payload()), encoding="utf-8")
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            maintained_history_json=maintained_history_json,
+            current_quote_report_payload={"quote_provider_mode": "REALTIME", "realtime_quote_received": True, "current_quote_available": True},
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            candle_history=candle_history_producer_result(tmp_path),
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-maintained-history-proof-passed",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert calls.candle_history == 0
+    assert calls.market_history == 1
+    assert calls.feature == 1
+    assert calls.strategy == 1
+    assert calls.readiness == 1
+    assert calls.proof == 1
+    assert result.report["data_maintenance_history_requested"] is True
+    assert result.report["maintained_history_path"] == str(maintained_history_json)
+    assert result.report["candle_history_producer_invoked"] is False
+    assert result.report["paper_proof_invoked"] is True
+    assert result.report["submit_attempted"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_stale_maintained_history_blocks_before_strategy_or_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    stale_history_json = tmp_path / "stale_latest_good_mgc_1m_history.json"
+    stale_history_json.write_text(
+        json.dumps(maintained_history_payload(latest_timestamp="2026-05-04T13:00:00+00:00")),
+        encoding="utf-8",
+    )
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            maintained_history_json=stale_history_json,
+            current_quote_report_payload={"quote_provider_mode": "REALTIME", "realtime_quote_received": True, "current_quote_available": True},
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-stale-maintained-history",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_DATA_MAINTENANCE
+    assert calls.candle_history == 0
+    assert calls.market_history == 0
+    assert calls.feature == 0
+    assert calls.strategy == 0
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert "stale" in str(result.report["primary_blocker"])
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
 
 

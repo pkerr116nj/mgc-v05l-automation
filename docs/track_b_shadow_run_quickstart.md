@@ -367,7 +367,7 @@ signal batch only when rule emission is explicit:
 
 ```text
 Databento realtime quote/event
--> track_b_mgc_candle_history_producer
+-> track_b_data_maintenance
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
@@ -378,11 +378,49 @@ Databento realtime quote/event
 ```
 
 The realtime observer's latest candle event is only a single snapshot. The
-EMA/VWAP rule needs bounded history, so first produce an explicit MGC candle
-history input. The producer can normalize a supplied OHLCV history fixture, or
-make a bounded Databento `ohlcv-1m` request, but it also requires a realtime
-current quote report. Historical bars and realtime quote evidence stay
+EMA/VWAP rule needs a maintained 1m history foundation. The normal path is to
+run Track B data maintenance independently of strategy execution, then pass the
+latest-good maintained history to the feature/rule runner with a separate
+realtime current quote report. Historical bars and realtime quote evidence stay
 separately labeled; no single snapshot is expanded into fake history.
+
+Maintain the local rolling MGC 1m history from a bounded Databento fetch:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_data_maintenance_cli \
+  --fetch-databento-history \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --databento-symbol MGCM6 \
+  --dataset GLBX.MDP3 \
+  --schema ohlcv-1m \
+  --allowlisted-local-symbol MGCM6 \
+  --timeframe 1m \
+  --lookback-minutes 240 \
+  --max-bars 5000 \
+  --export-bars 50 \
+  --min-bars 20 \
+  --max-history-age-seconds 900 \
+  --source-id track_b_data_maintenance_mgc_1m \
+  --output-root outputs/track_b_execution_core/track_b_data_maintenance
+```
+
+Stable data-maintenance artifacts:
+
+```text
+outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json
+outputs/track_b_execution_core/track_b_data_maintenance/latest_track_b_data_maintenance_report.json
+```
+
+On-demand historical fetch through `track_b_mgc_candle_history_producer_cli`
+remains available for diagnostics and maintenance inputs, but it is not the
+normal trade-decision path.
 
 Fixture/supplied-history path:
 
@@ -578,7 +616,7 @@ The controlled strategy PAPER runner wires:
 
 ```text
 Databento realtime/current evidence
--> track_b_mgc_candle_history_producer
+-> track_b_data_maintenance latest-good history
 -> track_b_market_history
 -> track_b_feature_builder
 -> track_b_strategy_rule_runner
@@ -593,7 +631,7 @@ are present:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --candle-history-json <BOUNDED_MGC_1M_HISTORY_JSON> \
+  --maintained-history-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
   --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
@@ -607,20 +645,21 @@ are present:
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
-This single command runs the candle-history producer, market-history collector,
+This single command reads maintained local history, combines it with separate
+realtime current quote evidence, then runs the market-history collector,
 feature builder, strategy rule, and readiness check in sequence. If a
-market-history or feature event has already been built, use
+market-history or feature event has already been built for review, use
 `--build-features-from outputs/track_b_execution_core/track_b_market_history/latest_track_b_market_history_event.json`
 or
 `--feature-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json`
-instead of `--candle-history-json`.
+instead of `--maintained-history-json`.
 
 PAPER submit requires all explicit gates. Prices and quantity are not inferred:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --candle-history-json <BOUNDED_MGC_1M_HISTORY_JSON> \
+  --maintained-history-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
   --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
