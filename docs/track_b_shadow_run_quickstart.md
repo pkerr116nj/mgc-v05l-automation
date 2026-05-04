@@ -717,3 +717,12 @@ proof still requires clean broker recovery, read-only preflight, current quote
 or explicitly acknowledged manual paper-only pricing, active proof timing,
 explicit submit flags, and operator approval. The readiness check runner only
 answers whether paper proof may be considered as a separate manual decision.
+
+When paper proof is explicitly run, `paper_proof_cli` owns the Track B open and
+close lifecycle. A filled open BUY proof may be closed by Track B only if broker
+truth shows exactly `+1` on the configured PAPER account/contract and no working
+same-contract orders. Otherwise the proof refuses the close with an explicit
+`BLOCKED_POSITION_NOT_EXPECTED`, `BLOCKED_WORKING_ORDER_EXISTS`, or truly
+ambiguous manual-review outcome. A clean proof lifecycle reports
+`PROOF_COMPLETE_FLAT`; manual TWS cleanup remains a fallback, not the normal
+Track B path.

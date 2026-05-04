@@ -32,6 +32,15 @@ class PaperProofConfigError(ValueError):
     """Raised when the operator submit-proof request is not explicit enough."""
 
 
+class _PaperProofLifecycleStop(RuntimeError):
+    def __init__(self, *, classification: TerminalClassification, lifecycle_status: str, reason: str, required_action: str) -> None:
+        super().__init__(reason)
+        self.classification = classification
+        self.lifecycle_status = lifecycle_status
+        self.reason = reason
+        self.required_action = required_action
+
+
 PreflightRunner = Callable[[ReadOnlyPreflightConfig, str], PreflightResult]
 ProofRunner = Callable[[HarnessConfig, str], HarnessResult]
 
@@ -282,6 +291,8 @@ def _check_passed(report: Mapping[str, object], name: str) -> bool:
 def _classification_from_proof(proof: HarnessResult, proof_payload: Mapping[str, object]) -> TerminalClassification:
     if proof.classification != TerminalClassification.PASSED:
         return proof.classification
+    if proof_payload.get("proof_lifecycle_status") == "PROOF_COMPLETE_FLAT":
+        return TerminalClassification.PASSED
     if not _proof_pass_chain_complete(proof_payload):
         return TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
     return TerminalClassification.PASSED
@@ -613,10 +624,25 @@ def run_ibkr_paper_proof(
     )
     events: list[dict[str, object]] = []
     submitted_attempt_ids: list[str] = []
+    lifecycle_status = "CREATED"
+    lifecycle_required_action: str | None = None
 
     def append(event_type: str, payload: Mapping[str, object]) -> None:
         event = ledger.append_event(run_id=run_id, event_type=event_type, payload=dict(payload))
         events.append({"event_id": event.event_id, "event_type": event.event_type, "sequence": event.sequence})
+
+    def set_lifecycle(status: str, **payload: object) -> None:
+        nonlocal lifecycle_status
+        lifecycle_status = status
+        append("paper_proof_lifecycle_status", {"proof_lifecycle_status": status, **payload})
+
+    def append_submit_diagnostics(submit_attempt_id: str) -> None:
+        diagnostic_method = getattr(actual_adapter, "submit_diagnostics", None)
+        if not callable(diagnostic_method):
+            return
+        diagnostics = diagnostic_method(submit_attempt_id)
+        if diagnostics:
+            append("submit_diagnostics_created", diagnostics)
 
     append("run_started", {"run_id": run_id})
     append("config_loaded", config.to_report_dict())
@@ -691,12 +717,55 @@ def run_ibkr_paper_proof(
         ledger.append_model_event(event_type="submit_attempt_created", model=open_submit)
         submitted_attempt_ids.append(open_submit.submit_attempt_id)
         actual_adapter.submit_limit_order(submit_attempt=open_submit, order_intent=open_intent)
-        open_order = actual_adapter.wait_for_broker_order(submit_attempt_id=open_submit.submit_attempt_id)
-        ledger.append_model_event(event_type="broker_order_observed", model=open_order)
-        open_fill = actual_adapter.wait_for_fill(submit_attempt_id=open_submit.submit_attempt_id)
-        ledger.append_model_event(event_type="fill_event_created", model=open_fill)
+        set_lifecycle("OPEN_SUBMITTED", submit_attempt_id=open_submit.submit_attempt_id)
+        try:
+            open_order = actual_adapter.wait_for_broker_order(submit_attempt_id=open_submit.submit_attempt_id)
+            ledger.append_model_event(event_type="broker_order_observed", model=open_order)
+            open_fill = actual_adapter.wait_for_fill(submit_attempt_id=open_submit.submit_attempt_id)
+            ledger.append_model_event(event_type="fill_event_created", model=open_fill)
+            set_lifecycle("OPEN_FILLED", submit_attempt_id=open_submit.submit_attempt_id, fill_source="broker_callback")
+        except Exception as exc:  # noqa: BLE001 - reconcile broker truth before deciding whether close is safe.
+            append_submit_diagnostics(open_submit.submit_attempt_id)
+            close_guard = _evaluate_close_only_guard(
+                adapter=actual_adapter,
+                config=config,
+                run_id=run_id,
+                expected_signed_quantity=1 if open_intent.action == Action.BUY else -1,
+                now=now,
+                stage="PRE_CLOSE_AFTER_OPEN_CALLBACK_GAP",
+            )
+            append("close_only_guard_evaluated", close_guard)
+            if not close_guard["close_allowed"]:
+                raise _PaperProofLifecycleStop(
+                    classification=TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
+                    lifecycle_status=str(close_guard["proof_lifecycle_status"]),
+                    reason=str(close_guard["primary_blocker"] or exc),
+                    required_action=str(close_guard["required_next_action"]),
+                ) from exc
+            set_lifecycle(
+                "OPEN_FILLED",
+                submit_attempt_id=open_submit.submit_attempt_id,
+                fill_source="broker_position_truth",
+                missing_callback_reason=str(exc),
+            )
 
         close_action = Action.SELL if open_intent.action == Action.BUY else Action.BUY
+        close_guard = _evaluate_close_only_guard(
+            adapter=actual_adapter,
+            config=config,
+            run_id=run_id,
+            expected_signed_quantity=1 if close_action == Action.SELL else -1,
+            now=now,
+            stage="PRE_CLOSE",
+        )
+        append("close_only_guard_evaluated", close_guard)
+        if not close_guard["close_allowed"]:
+            raise _PaperProofLifecycleStop(
+                classification=TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
+                lifecycle_status=str(close_guard["proof_lifecycle_status"]),
+                reason=str(close_guard["primary_blocker"]),
+                required_action=str(close_guard["required_next_action"]),
+            )
         if manual_open_limit_price is not None and manual_close_limit_price is not None:
             append(
                 "pricing_decision_created",
@@ -731,21 +800,65 @@ def run_ibkr_paper_proof(
         ledger.append_model_event(event_type="submit_attempt_created", model=close_submit)
         submitted_attempt_ids.append(close_submit.submit_attempt_id)
         actual_adapter.submit_limit_order(submit_attempt=close_submit, order_intent=close_intent)
-        close_order = actual_adapter.wait_for_broker_order(submit_attempt_id=close_submit.submit_attempt_id)
-        ledger.append_model_event(event_type="broker_order_observed", model=close_order)
-        close_fill = actual_adapter.wait_for_fill(submit_attempt_id=close_submit.submit_attempt_id)
-        ledger.append_model_event(event_type="fill_event_created", model=close_fill)
+        set_lifecycle("CLOSE_SUBMITTED", submit_attempt_id=close_submit.submit_attempt_id)
+        try:
+            close_order = actual_adapter.wait_for_broker_order(submit_attempt_id=close_submit.submit_attempt_id)
+            ledger.append_model_event(event_type="broker_order_observed", model=close_order)
+            close_fill = actual_adapter.wait_for_fill(submit_attempt_id=close_submit.submit_attempt_id)
+            ledger.append_model_event(event_type="fill_event_created", model=close_fill)
+            set_lifecycle("CLOSE_FILLED", submit_attempt_id=close_submit.submit_attempt_id, fill_source="broker_callback")
+        except Exception as exc:  # noqa: BLE001 - if close was sent, never retry; reconcile final broker truth.
+            append_submit_diagnostics(close_submit.submit_attempt_id)
+            final_guard = _evaluate_flat_after_close_guard(
+                adapter=actual_adapter,
+                config=config,
+                run_id=run_id,
+                now=now,
+                stage="FINAL_AFTER_CLOSE_CALLBACK_GAP",
+            )
+            append("flat_after_close_guard_evaluated", final_guard)
+            if not final_guard["flat_clean"]:
+                raise _PaperProofLifecycleStop(
+                    classification=TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
+                    lifecycle_status=str(final_guard["proof_lifecycle_status"]),
+                    reason=str(final_guard["primary_blocker"] or exc),
+                    required_action=str(final_guard["required_next_action"]),
+                ) from exc
+            set_lifecycle(
+                "CLOSE_FILLED",
+                submit_attempt_id=close_submit.submit_attempt_id,
+                fill_source="broker_position_truth",
+                missing_callback_reason=str(exc),
+            )
+        final_guard = _evaluate_flat_after_close_guard(
+            adapter=actual_adapter,
+            config=config,
+            run_id=run_id,
+            now=now,
+            stage="FINAL",
+        )
+        append("flat_after_close_guard_evaluated", final_guard)
+        if not final_guard["flat_clean"]:
+            raise _PaperProofLifecycleStop(
+                classification=TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
+                lifecycle_status=str(final_guard["proof_lifecycle_status"]),
+                reason=str(final_guard["primary_blocker"]),
+                required_action=str(final_guard["required_next_action"]),
+            )
+        set_lifecycle("PROOF_COMPLETE_FLAT", final_position_source=final_guard["position_source"])
         classification = TerminalClassification.PASSED
         reason = None
+    except _PaperProofLifecycleStop as exc:
+        classification = exc.classification
+        lifecycle_status = exc.lifecycle_status
+        lifecycle_required_action = exc.required_action
+        reason = exc.reason
     except Exception as exc:  # noqa: BLE001 - any submit uncertainty fails closed for operator review.
         classification = TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
         reason = str(exc)
-        diagnostic_method = getattr(actual_adapter, "submit_diagnostics", None)
-        if callable(diagnostic_method):
-            for submit_attempt_id in submitted_attempt_ids:
-                diagnostics = diagnostic_method(submit_attempt_id)
-                if diagnostics:
-                    append("submit_diagnostics_created", diagnostics)
+        lifecycle_status = lifecycle_status if lifecycle_status != "CREATED" else "AMBIGUOUS_MANUAL_REVIEW_REQUIRED"
+        for submit_attempt_id in submitted_attempt_ids:
+            append_submit_diagnostics(submit_attempt_id)
     finally:
         actual_adapter.disconnect()
 
@@ -757,6 +870,8 @@ def run_ibkr_paper_proof(
         proof_json=proof_json,
         proof_md=proof_md,
         reason=reason,
+        lifecycle_status=lifecycle_status,
+        lifecycle_required_action=lifecycle_required_action,
     )
     proof_json.parent.mkdir(parents=True, exist_ok=True)
     proof_json.write_text(json.dumps(to_jsonable(proof_payload), indent=2, sort_keys=True), encoding="utf-8")
@@ -826,6 +941,155 @@ def _submit(*, config: HarnessConfig, run_id: str, intent: OrderIntent, now: dat
     )
 
 
+def _evaluate_close_only_guard(
+    *,
+    adapter: object,
+    config: HarnessConfig,
+    run_id: str,
+    expected_signed_quantity: int,
+    now: datetime,
+    stage: str,
+) -> dict[str, object]:
+    position = _observe_position_truth(adapter=adapter, config=config, run_id=run_id, now=now, stage=stage)
+    open_orders = _observe_open_order_truth(adapter=adapter, config=config)
+    working_orders = [order.to_json_dict() if hasattr(order, "to_json_dict") else to_jsonable(order) for order in open_orders]
+    observed_qty = _signed_quantity(position)
+    if observed_qty != expected_signed_quantity:
+        return {
+            "proof_lifecycle_status": "BLOCKED_POSITION_NOT_EXPECTED",
+            "close_allowed": False,
+            "stage": stage,
+            "expected_signed_quantity": expected_signed_quantity,
+            "observed_signed_quantity": observed_qty,
+            "position": position.to_json_dict(),
+            "working_orders": working_orders,
+            "primary_blocker": f"Close-only proof requires position exactly {expected_signed_quantity}; observed {observed_qty}.",
+            "required_next_action": "Do not submit a close order from Track B. Review TWS position and reconcile manually.",
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        }
+    if working_orders:
+        return {
+            "proof_lifecycle_status": "BLOCKED_WORKING_ORDER_EXISTS",
+            "close_allowed": False,
+            "stage": stage,
+            "expected_signed_quantity": expected_signed_quantity,
+            "observed_signed_quantity": observed_qty,
+            "position": position.to_json_dict(),
+            "working_orders": working_orders,
+            "primary_blocker": "Close-only proof refuses while working same-contract broker orders exist.",
+            "required_next_action": "Do not submit a close order from Track B. Resolve working broker orders first.",
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        }
+    return {
+        "proof_lifecycle_status": "OPEN_FILLED",
+        "close_allowed": True,
+        "stage": stage,
+        "expected_signed_quantity": expected_signed_quantity,
+        "observed_signed_quantity": observed_qty,
+        "position": position.to_json_dict(),
+        "position_source": position.source.value if hasattr(position.source, "value") else str(position.source),
+        "working_orders": [],
+        "primary_blocker": None,
+        "required_next_action": "Submit exactly one close-only order through the Track B paper-proof lifecycle.",
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+
+
+def _evaluate_flat_after_close_guard(
+    *,
+    adapter: object,
+    config: HarnessConfig,
+    run_id: str,
+    now: datetime,
+    stage: str,
+) -> dict[str, object]:
+    position = _observe_position_truth(adapter=adapter, config=config, run_id=run_id, now=now, stage=stage)
+    open_orders = _observe_open_order_truth(adapter=adapter, config=config)
+    working_orders = [order.to_json_dict() if hasattr(order, "to_json_dict") else to_jsonable(order) for order in open_orders]
+    observed_qty = _signed_quantity(position)
+    if observed_qty != 0:
+        return {
+            "proof_lifecycle_status": "AMBIGUOUS_MANUAL_REVIEW_REQUIRED",
+            "flat_clean": False,
+            "stage": stage,
+            "expected_signed_quantity": 0,
+            "observed_signed_quantity": observed_qty,
+            "position": position.to_json_dict(),
+            "working_orders": working_orders,
+            "primary_blocker": f"Close proof did not leave the contract flat; observed position {observed_qty}.",
+            "required_next_action": "Manual broker review required. Do not send another close order from Track B.",
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        }
+    if working_orders:
+        return {
+            "proof_lifecycle_status": "BLOCKED_WORKING_ORDER_EXISTS",
+            "flat_clean": False,
+            "stage": stage,
+            "expected_signed_quantity": 0,
+            "observed_signed_quantity": observed_qty,
+            "position": position.to_json_dict(),
+            "working_orders": working_orders,
+            "primary_blocker": "Close proof left working same-contract broker orders.",
+            "required_next_action": "Manual broker review required. Do not send another close order from Track B.",
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        }
+    return {
+        "proof_lifecycle_status": "PROOF_COMPLETE_FLAT",
+        "flat_clean": True,
+        "stage": stage,
+        "expected_signed_quantity": 0,
+        "observed_signed_quantity": observed_qty,
+        "position": position.to_json_dict(),
+        "position_source": position.source.value if hasattr(position.source, "value") else str(position.source),
+        "working_orders": [],
+        "primary_blocker": None,
+        "required_next_action": "Paper proof lifecycle completed flat. No further proof submit is needed for this run.",
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+
+
+def _observe_position_truth(*, adapter: object, config: HarnessConfig, run_id: str, now: datetime, stage: str) -> PositionState:
+    refresh = getattr(adapter, "refresh_positions", None)
+    if callable(refresh):
+        return refresh(contract_key=config.contract_key)
+    snapshot = getattr(adapter, "snapshot_position", None)
+    if callable(snapshot):
+        return snapshot(contract_key=config.contract_key)
+    observe = getattr(adapter, "observe_position", None)
+    if callable(observe):
+        return observe(run_id=run_id, now=now, stage=stage)
+    raise RuntimeError("Track B close-only guard requires broker position truth.")
+
+
+def _observe_open_order_truth(*, adapter: object, config: HarnessConfig) -> tuple[BrokerOrder, ...]:
+    refresh = getattr(adapter, "refresh_open_orders", None)
+    if callable(refresh):
+        return tuple(refresh(contract_key=config.contract_key))
+    snapshot = getattr(adapter, "snapshot_open_orders", None)
+    if callable(snapshot):
+        return tuple(snapshot(contract_key=config.contract_key))
+    observe = getattr(adapter, "observe_open_orders", None)
+    if callable(observe):
+        return tuple(observe())
+    raise RuntimeError("Track B close-only guard requires broker open-order truth.")
+
+
+def _signed_quantity(position: PositionState) -> int:
+    return int(Decimal(str(position.signed_quantity)))
+
+
 def _proof_payload(
     *,
     run_id: str,
@@ -835,6 +1099,8 @@ def _proof_payload(
     proof_json: Path,
     proof_md: Path,
     reason: str | None,
+    lifecycle_status: str,
+    lifecycle_required_action: str | None,
 ) -> dict[str, object]:
     by_type: dict[str, list[dict[str, object]]] = {}
     events = ledger.read_events(run_id=run_id)
@@ -845,10 +1111,19 @@ def _proof_payload(
     orders = by_type.get("broker_order_observed", [])
     fills = by_type.get("fill_event_created", [])
     submit_diagnostics = by_type.get("submit_diagnostics_created", [])
+    lifecycle_events = by_type.get("paper_proof_lifecycle_status", [])
+    close_guards = by_type.get("close_only_guard_evaluated", [])
+    flat_guards = by_type.get("flat_after_close_guard_evaluated", [])
     unresolved_report = _unresolved_order_report_from_payloads(orders)
+    open_submit_id = str(submits[0].get("submit_attempt_id")) if submits else None
+    close_submit_id = str(submits[1].get("submit_attempt_id")) if len(submits) > 1 else None
+    open_diagnostics = _diagnostics_for_submit(submit_diagnostics, open_submit_id)
+    close_diagnostics = _diagnostics_for_submit(submit_diagnostics, close_submit_id)
     return {
         "schema_version": "track_b_ibkr_paper_proof_v1",
         "classification": classification.value,
+        "proof_lifecycle_status": lifecycle_status,
+        "proof_lifecycle_events": lifecycle_events,
         "run_id": run_id,
         "state_machine": [event.event_type for event in events],
         "event_ids": [{"event_id": event.event_id, "event_type": event.event_type, "sequence": event.sequence} for event in events],
@@ -856,21 +1131,37 @@ def _proof_payload(
         "open_submit_attempt": submits[0] if submits else None,
         "open_broker_order": orders[0] if orders else None,
         "open_fill": fills[0] if fills else None,
-        "open_submit_diagnostics": submit_diagnostics[0] if submit_diagnostics else None,
+        "open_submit_diagnostics": open_diagnostics,
         "close_intent": intents[1] if len(intents) > 1 else None,
         "close_submit_attempt": submits[1] if len(submits) > 1 else None,
         "close_broker_order": orders[1] if len(orders) > 1 else None,
         "close_fill": fills[1] if len(fills) > 1 else None,
-        "close_submit_diagnostics": submit_diagnostics[1] if len(submit_diagnostics) > 1 else None,
+        "close_submit_diagnostics": close_diagnostics,
         "submit_diagnostics": submit_diagnostics,
+        "close_only_guard_reports": close_guards,
+        "flat_after_close_guard_reports": flat_guards,
         "final_reconciliation": {"status": "CLEAN"} if classification == TerminalClassification.PASSED else None,
         **unresolved_report,
         "failure_or_ambiguity": reason,
-        "required_manual_action": "Manual TWS review required." if reason else None,
+        "required_manual_action": lifecycle_required_action or ("Manual TWS review required." if reason else None),
+        "paper_account_only": True,
+        "paper_proof_cli_submit_path": True,
+        "submit_attempted": bool(submits),
+        "live_money_readiness": False,
+        "production_live_money_readiness": False,
         "ledger_path": str(ledger_path),
         "json_report_path": str(proof_json),
         "markdown_report_path": str(proof_md),
     }
+
+
+def _diagnostics_for_submit(diagnostics: list[dict[str, object]], submit_attempt_id: str | None) -> dict[str, object] | None:
+    if submit_attempt_id is None:
+        return None
+    for row in diagnostics:
+        if str(row.get("submit_attempt_id") or "") == submit_attempt_id:
+            return row
+    return None
 
 
 def _unresolved_order_report_from_payloads(orders: list[dict[str, object]]) -> dict[str, object]:

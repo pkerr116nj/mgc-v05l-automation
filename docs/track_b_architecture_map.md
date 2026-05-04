@@ -203,7 +203,15 @@ Dashboard implication:
   explicit `NOT_PROVIDED` inputs instead of silently reporting zero.
 - `readiness_summary` summarizes broker/session/quote state. It does not submit
   and does not override proof gates.
-- `paper_proof_cli` remains the only current Track B submit path.
+- `paper_proof_cli` remains the only current Track B submit path. It owns the
+  explicit PAPER proof lifecycle: open submit, open-fill verification, guarded
+  close-only submit, close-fill verification, and final flat reconciliation.
+  After an open proof fill, Track B may submit the close-only order only when
+  broker truth shows the expected exact one-lot position for the configured
+  PAPER account/contract and no working same-contract broker orders. It refuses
+  the close with `BLOCKED_POSITION_NOT_EXPECTED` or
+  `BLOCKED_WORKING_ORDER_EXISTS` when those guards fail. A clean open/close
+  proof ends with `PROOF_COMPLETE_FLAT`; manual cleanup is fallback only.
 - Databento is market data authority only. Databento symbols and continuous
   selectors are not executable broker contracts.
 - IBKR allowlist and the local execution contract key remain execution

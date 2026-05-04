@@ -2,11 +2,11 @@
 
 This runbook is the final mechanical checklist before running a Track B paper proof. It does not replace `paper_proof_cli` gates. It exists so the operator can see one clear readiness verdict and one clear next action before any broker submit is attempted.
 
-## Current Stop Condition
+## Broker-State Stop Condition
 
-Do not run `paper_proof_cli` for `DUM882026` / `MGC-202606` while broker order `1` / permId `736787312` remains `PendingCancel`.
+Do not run `paper_proof_cli` for `DUM882026` / `MGC-202606` while any same-account/same-contract broker order remains working, ambiguous, or `PendingCancel`.
 
-That state is operationally blocked, not current economic exposure, because the known broker position is flat. Track B development may continue, but same account/contract proof submits must wait for terminal/clean broker state.
+That state is operationally blocked even if there is no known economic exposure. Track B development may continue, but same account/contract proof submits must wait for terminal/clean broker state.
 
 ## Command Order
 
@@ -61,6 +61,21 @@ Historical Databento diagnostics prove provider plumbing and parsing, not curren
 This command does not submit, cancel, place orders, or connect to a broker. It only summarizes report JSON.
 
 5. Run `paper_proof_cli` only after recovery/preflight are clean, proof timing is active, and pricing is explicitly approved.
+
+## Paper Proof Lifecycle
+
+Track B paper proof now owns the explicit open/close proof lifecycle inside `paper_proof_cli`. Manual cleanup is a fallback only.
+
+The lifecycle is intentionally narrow:
+
+- Open proof submits one PAPER `LMT DAY` order only after explicit submit flags, active timing, clean read-only preflight, and pricing gates pass.
+- If the open proof fills and broker truth shows exactly `+1` for the default BUY proof, no working same-contract orders, and the configured PAPER account/contract, Track B may submit one close-only `SELL 1` order.
+- If position is not exactly the expected one-lot state, Track B refuses the close and reports `BLOCKED_POSITION_NOT_EXPECTED`.
+- If any working same-contract broker order exists before close, Track B refuses the close and reports `BLOCKED_WORKING_ORDER_EXISTS`.
+- If the close fills and final broker truth is flat with no working same-contract orders, the lifecycle reports `PROOF_COMPLETE_FLAT`.
+- `AMBIGUOUS_MANUAL_REVIEW_REQUIRED` is reserved for cases where broker truth or callbacks are not sufficient to prove the safe next action.
+
+The proof report includes lifecycle fields such as `proof_lifecycle_status`, `close_only_guard_reports`, `flat_after_close_guard_reports`, `open_submit_diagnostics`, and `close_submit_diagnostics`. These are operator artifacts; the UI/dashboard must display them only and must not submit.
 
 ## Stop Conditions
 

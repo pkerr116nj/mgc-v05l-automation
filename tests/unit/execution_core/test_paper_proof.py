@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from mgc_v05l.execution_core.harness import HarnessConfig
-from mgc_v05l.execution_core.models import Action, BrokerOrder, FillEvent, OrderIntent, SubmitAttempt, TerminalClassification
+from mgc_v05l.execution_core.models import Action, BrokerOrder, FillEvent, OrderIntent, PositionSource, PositionState, SubmitAttempt, TerminalClassification
 from mgc_v05l.execution_core.paper_proof import PaperProofConfig, run_ibkr_paper_proof, run_paper_proof
 from mgc_v05l.execution_core.preflight import PreflightClassification, PreflightResult, ReadOnlyPreflightConfig
 
@@ -82,11 +82,23 @@ def passing_proof_runner(tmp_path: Path):
 
 
 class RecordingPaperAdapter:
-    def __init__(self, *, fail_open_order_wait: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_open_order_wait: bool = False,
+        fail_close_order_wait: bool = False,
+        position_after_open: int | None = None,
+        working_order_after_open: bool = False,
+    ) -> None:
         self.submitted: list[OrderIntent] = []
         self.connected = False
         self.disconnected = False
         self.fail_open_order_wait = fail_open_order_wait
+        self.fail_close_order_wait = fail_close_order_wait
+        self.position_after_open = position_after_open
+        self.working_order_after_open = working_order_after_open
+        self.position_quantity = 0
+        self._working_order: BrokerOrder | None = None
 
     def connect(self) -> None:
         self.connected = True
@@ -105,32 +117,25 @@ class RecordingPaperAdapter:
 
     def submit_limit_order(self, *, submit_attempt: SubmitAttempt, order_intent: OrderIntent) -> int:
         self.submitted.append(order_intent)
+        if order_intent.action == Action.BUY:
+            self.position_quantity += 1
+        else:
+            self.position_quantity -= 1
+        if len(self.submitted) == 1:
+            if self.position_after_open is not None:
+                self.position_quantity = self.position_after_open
+            if self.working_order_after_open:
+                self._working_order = self._broker_order_for(submit_attempt.submit_attempt_id, status="Submitted", remaining=1)
+        else:
+            self._working_order = None
         return len(self.submitted)
 
     def wait_for_broker_order(self, *, submit_attempt_id: str) -> BrokerOrder:
         if self.fail_open_order_wait and submit_attempt_id.endswith("_1"):
             raise RuntimeError("missing openOrder/orderStatus callback")
-        intent = self._intent_for(submit_attempt_id)
-        index = len([item for item in self.submitted if item.order_intent_id <= intent.order_intent_id])
-        return BrokerOrder(
-            broker_order_event_id=f"broker_order_{submit_attempt_id}",
-            run_id=intent.run_id,
-            submit_attempt_id=submit_attempt_id,
-            account_id=intent.account_id,
-            broker_order_id=f"FAKE-ORDER-{index:04d}",
-            perm_id=f"FAKE-PERM-{index:04d}",
-            client_id=17077,
-            contract_key=intent.contract_key,
-            action=intent.action,
-            quantity=1,
-            order_type="LMT",
-            limit_price=intent.limit_price,
-            status="Filled",
-            filled_quantity=1,
-            remaining_quantity=0,
-            average_fill_price=intent.limit_price,
-            observed_at=aware_now(),
-        )
+        if self.fail_close_order_wait and submit_attempt_id.endswith("_2"):
+            raise RuntimeError("missing close openOrder/orderStatus callback")
+        return self._broker_order_for(submit_attempt_id, status="Filled", remaining=0)
 
     def wait_for_fill(self, *, submit_attempt_id: str) -> FillEvent:
         intent = self._intent_for(submit_attempt_id)
@@ -154,6 +159,48 @@ class RecordingPaperAdapter:
     def _intent_for(self, submit_attempt_id: str) -> OrderIntent:
         index = 0 if submit_attempt_id.endswith("_1") else 1
         return self.submitted[index]
+
+    def _broker_order_for(self, submit_attempt_id: str, *, status: str, remaining: int) -> BrokerOrder:
+        intent = self._intent_for(submit_attempt_id)
+        index = 1 if submit_attempt_id.endswith("_1") else 2
+        return BrokerOrder(
+            broker_order_event_id=f"broker_order_{submit_attempt_id}",
+            run_id=intent.run_id,
+            submit_attempt_id=submit_attempt_id,
+            account_id=intent.account_id,
+            broker_order_id=f"FAKE-ORDER-{index:04d}",
+            perm_id=f"FAKE-PERM-{index:04d}",
+            client_id=17077,
+            contract_key=intent.contract_key,
+            action=intent.action,
+            quantity=1,
+            order_type="LMT",
+            limit_price=intent.limit_price,
+            status=status,
+            filled_quantity=0 if remaining else 1,
+            remaining_quantity=remaining,
+            average_fill_price=None if remaining else intent.limit_price,
+            observed_at=aware_now(),
+        )
+
+    def refresh_positions(self, *, contract_key: str) -> PositionState:
+        return PositionState(
+            position_state_id=f"recording_position_{contract_key}",
+            run_id="recording-paper-adapter",
+            source=PositionSource.BROKER,
+            account_id="DUM882026",
+            contract_key=contract_key,
+            signed_quantity=self.position_quantity,
+            average_price="2345.1" if self.position_quantity else None,
+            open_order_ids=tuple([self._working_order.broker_order_id] if self._working_order is not None else []),
+            observed_at=aware_now(),
+            raw={"source": "recording_test_adapter"},
+        )
+
+    def refresh_open_orders(self, *, contract_key: str) -> tuple[BrokerOrder, ...]:
+        if self._working_order is None or self._working_order.contract_key != contract_key:
+            return ()
+        return (self._working_order,)
 
     def submit_diagnostics(self, submit_attempt_id: str) -> dict[str, object]:
         intent = self._intent_for(submit_attempt_id)
@@ -371,7 +418,7 @@ def test_pending_cancel_preflight_blocks_same_account_contract_submit_with_recov
 
 
 def test_manual_clean_follow_up_state_does_not_retroactively_mark_prior_ambiguous_proof_passed(tmp_path: Path) -> None:
-    adapter = RecordingPaperAdapter(fail_open_order_wait=True)
+    adapter = RecordingPaperAdapter(fail_open_order_wait=True, position_after_open=0)
 
     result = run_ibkr_paper_proof(
         config=HarnessConfig(account_id="DUM882026", client_id=17077, output_root=tmp_path / "proof_runs"),
@@ -602,9 +649,13 @@ def test_real_runner_reports_submit_diagnostics_when_open_callbacks_are_missing(
     payload = json.loads(result.proof_report_json.read_text(encoding="utf-8"))
     diagnostics = payload["open_submit_diagnostics"]
 
-    assert result.classification == TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
-    assert len(adapter.submitted) == 1
-    assert payload["close_submit_attempt"] is None
+    assert result.classification == TerminalClassification.PASSED
+    assert payload["proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
+    assert len(adapter.submitted) == 2
+    assert payload["close_submit_attempt"] is not None
+    assert payload["close_submit_attempt"]["account_id"] == "DUM882026"
+    assert payload["close_intent"]["action"] == "SELL"
+    assert payload["close_intent"]["quantity"] == "1"
     assert diagnostics["place_order_called"] is True
     assert diagnostics["broker_order_id_allocated"] == "1"
     assert diagnostics["order_transmit_flag"] is True
@@ -621,6 +672,67 @@ def test_real_runner_reports_submit_diagnostics_when_open_callbacks_are_missing(
     assert "EtradeOnly" in diagnostics["error_callbacks_after_submit"][0]["error_string"]
     assert "firmQuoteOnly" in diagnostics["error_callbacks_after_submit"][1]["error_string"]
     assert "nbboPriceCap" in diagnostics["error_callbacks_after_submit"][2]["error_string"]
+
+
+def test_real_runner_refuses_close_when_position_not_exactly_expected_after_open(tmp_path: Path) -> None:
+    adapter = RecordingPaperAdapter(fail_open_order_wait=True, position_after_open=0)
+
+    result = run_ibkr_paper_proof(
+        config=HarnessConfig(account_id="DUM882026", client_id=17077, output_root=tmp_path / "proof_runs"),
+        run_id="run-position-not-expected",
+        preflight=ready_preflight(tmp_path, quote=None, quote_observed=False, market_data_mode="DELAYED"),
+        manual_open_limit_price="2345.1",
+        manual_close_limit_price="2344.9",
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+    payload = json.loads(result.proof_report_json.read_text(encoding="utf-8"))
+
+    assert result.classification == TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    assert payload["proof_lifecycle_status"] == "BLOCKED_POSITION_NOT_EXPECTED"
+    assert len(adapter.submitted) == 1
+    assert payload["close_submit_attempt"] is None
+    assert payload["close_only_guard_reports"][0]["observed_signed_quantity"] == 0
+
+
+def test_real_runner_refuses_close_when_working_order_exists_after_open(tmp_path: Path) -> None:
+    adapter = RecordingPaperAdapter(fail_open_order_wait=True, working_order_after_open=True)
+
+    result = run_ibkr_paper_proof(
+        config=HarnessConfig(account_id="DUM882026", client_id=17077, output_root=tmp_path / "proof_runs"),
+        run_id="run-working-order-after-open",
+        preflight=ready_preflight(tmp_path, quote=None, quote_observed=False, market_data_mode="DELAYED"),
+        manual_open_limit_price="2345.1",
+        manual_close_limit_price="2344.9",
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+    payload = json.loads(result.proof_report_json.read_text(encoding="utf-8"))
+
+    assert result.classification == TerminalClassification.AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+    assert payload["proof_lifecycle_status"] == "BLOCKED_WORKING_ORDER_EXISTS"
+    assert len(adapter.submitted) == 1
+    assert payload["close_submit_attempt"] is None
+    assert payload["close_only_guard_reports"][0]["working_orders"]
+
+
+def test_real_runner_close_callback_gap_finishes_flat_when_broker_truth_is_clean(tmp_path: Path) -> None:
+    adapter = RecordingPaperAdapter(fail_close_order_wait=True)
+
+    result = run_ibkr_paper_proof(
+        config=HarnessConfig(account_id="DUM882026", client_id=17077, output_root=tmp_path / "proof_runs"),
+        run_id="run-close-callback-gap-flat",
+        preflight=ready_preflight(tmp_path, quote=None, quote_observed=False, market_data_mode="DELAYED"),
+        manual_open_limit_price="2345.1",
+        manual_close_limit_price="2344.9",
+        adapter=adapter,  # type: ignore[arg-type]
+    )
+    payload = json.loads(result.proof_report_json.read_text(encoding="utf-8"))
+
+    assert result.classification == TerminalClassification.PASSED
+    assert payload["proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
+    assert len(adapter.submitted) == 2
+    assert payload["close_submit_diagnostics"]["place_order_called"] is True
+    assert payload["flat_after_close_guard_reports"][-1]["observed_signed_quantity"] == 0
+    assert payload["live_money_readiness"] is False
 
 
 def test_delayed_data_can_pass_paper_proof_but_not_live_money_readiness(tmp_path: Path) -> None:
