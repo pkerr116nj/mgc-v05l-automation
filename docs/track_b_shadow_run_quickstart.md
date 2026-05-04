@@ -477,6 +477,7 @@ The controlled strategy PAPER runner wires:
 
 ```text
 realtime Databento event
+-> track_b_feature_builder
 -> track_b_strategy_rule_runner
 -> track_b_readiness_check_runner
 -> paper_proof_cli / paper proof lifecycle
@@ -489,7 +490,7 @@ are present:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --input-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json \
+  --build-features-from <MGC_CANDLE_HISTORY_OR_EVENT_JSON> \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \
@@ -502,12 +503,16 @@ are present:
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
+If a feature event has already been built, use
+`--feature-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json`
+instead of `--build-features-from`.
+
 PAPER submit requires all explicit gates. Prices and quantity are not inferred:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --input-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json \
+  --build-features-from <MGC_CANDLE_HISTORY_OR_EVENT_JSON> \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \

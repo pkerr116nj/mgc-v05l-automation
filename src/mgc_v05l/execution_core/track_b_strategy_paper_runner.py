@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -27,6 +27,12 @@ from .paper_proof import DEFAULT_PAPER_PROOF_OUTPUT_ROOT, PaperProofConfig, Pape
 from .preflight import ReadOnlyPreflightConfig, run_read_only_preflight
 from .signal_batch_writer import DEFAULT_SIGNAL_BATCH_WRITER_OUTPUT_ROOT
 from .strategy_signal_adapter import DEFAULT_STRATEGY_SIGNAL_ADAPTER_OUTPUT_ROOT
+from .track_b_feature_builder import (
+    DEFAULT_TRACK_B_FEATURE_BUILDER_OUTPUT_ROOT,
+    TrackBFeatureBuilderResult,
+    TrackBFeatureBuilderVerdict,
+    build_track_b_mgc_feature_event,
+)
 from .track_b_readiness_check_runner import (
     DEFAULT_READINESS_CHECK_RUNNER_OUTPUT_ROOT,
     TrackBReadinessCheckRunnerConfig,
@@ -50,6 +56,7 @@ class TrackBStrategyPaperRunnerVerdict(str, Enum):
     HUMAN_REVIEW_NO_SIGNAL = "TRACK_B_STRATEGY_PAPER_RUNNER_HUMAN_REVIEW_NO_SIGNAL"
     BLOCKED_NON_PAPER_MODE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_NON_PAPER_MODE"
     BLOCKED_INVALID_SUBMIT_REQUEST = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_INVALID_SUBMIT_REQUEST"
+    BLOCKED_FEATURE_BUILDER = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_FEATURE_BUILDER"
     BLOCKED_STRATEGY_RULE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_STRATEGY_RULE"
     BLOCKED_READINESS = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_READINESS"
     PAPER_READY_NO_SUBMIT_REQUESTED = "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_READY_NO_SUBMIT_REQUESTED"
@@ -65,6 +72,9 @@ class TrackBStrategyPaperRunnerConfig:
     mode: str = "PAPER"
     input_event_json: Path | None = None
     input_event_payload: Mapping[str, object] | None = None
+    build_features_from_json: Path | None = None
+    build_features_from_payload: Mapping[str, object] | None = None
+    feature_event_json: Path | None = None
     inbox_dir: Path = Path("examples/track_b_shadow_listener/inbox")
     source_id: str = "track_b_strategy_paper_runner"
     strategy_id: str = "track_b_example_gold_shadow_v1"
@@ -108,6 +118,9 @@ class TrackBStrategyPaperRunnerConfig:
     request_timeout_seconds: float = 10.0
     quote_timeout_seconds: float = 3.0
     output_root: Path = DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT
+    feature_builder_output_root: Path = DEFAULT_TRACK_B_FEATURE_BUILDER_OUTPUT_ROOT
+    feature_builder_min_history_candles: int = 3
+    feature_builder_ema_span: int = 3
     strategy_rule_output_root: Path = DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT
     strategy_adapter_output_root: Path = DEFAULT_STRATEGY_SIGNAL_ADAPTER_OUTPUT_ROOT
     candle_producer_output_root: Path = DEFAULT_CANDLE_SIGNAL_PRODUCER_OUTPUT_ROOT
@@ -124,6 +137,7 @@ class TrackBStrategyPaperRunnerConfig:
 
 @dataclass(frozen=True)
 class TrackBStrategyPaperRunnerStages:
+    feature_builder: Callable[[TrackBStrategyPaperRunnerConfig], TrackBFeatureBuilderResult]
     strategy_rule: Callable[[TrackBStrategyPaperRunnerConfig], TrackBStrategyRuleRunnerResult]
     readiness: Callable[[TrackBStrategyPaperRunnerConfig], TrackBReadinessCheckRunnerResult]
     paper_proof: Callable[[TrackBStrategyPaperRunnerConfig], PaperProofResult]
@@ -135,6 +149,7 @@ class TrackBStrategyPaperRunnerResult:
     verdict: TrackBStrategyPaperRunnerVerdict
     report_json: Path
     report: dict[str, object]
+    feature_builder_result: TrackBFeatureBuilderResult | None = None
     strategy_rule_result: TrackBStrategyRuleRunnerResult | None = None
     readiness_result: TrackBReadinessCheckRunnerResult | None = None
     paper_proof_result: PaperProofResult | None = None
@@ -146,6 +161,7 @@ def default_stages(
     proof_runner: ProofRunner | None = None,
 ) -> TrackBStrategyPaperRunnerStages:
     return TrackBStrategyPaperRunnerStages(
+        feature_builder=_run_feature_builder,
         strategy_rule=_run_strategy_rule,
         readiness=lambda config: _run_readiness(config, readiness_stages=readiness_stages),
         paper_proof=lambda config: _run_paper_proof(config, proof_runner=proof_runner),
@@ -165,6 +181,7 @@ def run_track_b_strategy_paper(
     actual_runner_id = runner_id or f"track_b_strategy_paper_runner_{uuid.uuid4().hex}"
     report_json = Path(config.output_root) / actual_runner_id / "track_b_strategy_paper_runner_report.json"
     actual_stages = stages or default_stages()
+    feature_builder: TrackBFeatureBuilderResult | None = None
     strategy_rule: TrackBStrategyRuleRunnerResult | None = None
     readiness: TrackBReadinessCheckRunnerResult | None = None
     proof: PaperProofResult | None = None
@@ -178,6 +195,7 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_NON_PAPER_MODE,
+                feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
@@ -194,6 +212,7 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST,
+                feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
@@ -202,7 +221,29 @@ def run_track_b_strategy_paper(
                 operator_status_stage=actual_stages.operator_status,
         )
 
-        strategy_rule = actual_stages.strategy_rule(config)
+        strategy_config = config
+        if _feature_builder_requested(config):
+            feature_builder = actual_stages.feature_builder(config)
+            if feature_builder.verdict != TrackBFeatureBuilderVerdict.WROTE_FEATURE_EVENT or feature_builder.feature_event is None:
+                return _finalize(
+                    config=config,
+                    report_json=report_json,
+                    now=actual_now,
+                    runner_id=actual_runner_id,
+                    verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER,
+                    feature_builder=feature_builder,
+                    strategy_rule=strategy_rule,
+                    readiness=readiness,
+                    proof=proof,
+                    primary_blocker=feature_builder.report.get("primary_blocker") or "Feature builder did not produce a signal-ready event.",
+                    required_next_action=str(feature_builder.report.get("required_next_action") or "Resolve feature builder blocker before strategy evaluation."),
+                    operator_status_stage=actual_stages.operator_status,
+                )
+            strategy_config = replace(config, input_event_payload=feature_builder.feature_event, input_event_json=feature_builder.feature_event_json)
+        elif config.feature_event_json is not None:
+            strategy_config = replace(config, input_event_payload=None, input_event_json=config.feature_event_json)
+
+        strategy_rule = actual_stages.strategy_rule(strategy_config)
         strategy_verdict = str(strategy_rule.report.get("strategy_rule_runner_verdict") or "")
         if strategy_verdict.startswith("TRACK_B_STRATEGY_RULE_RUNNER_BLOCKED"):
             return _finalize(
@@ -211,6 +252,7 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_STRATEGY_RULE,
+                feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
@@ -231,6 +273,7 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=verdict,
+                feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
@@ -245,6 +288,7 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_STRATEGY_RULE,
+                feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
@@ -261,6 +305,7 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_READINESS,
+                feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
@@ -276,6 +321,7 @@ def run_track_b_strategy_paper(
                 now=actual_now,
                 runner_id=actual_runner_id,
                 verdict=TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED,
+                feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
@@ -311,6 +357,7 @@ def run_track_b_strategy_paper(
             now=actual_now,
             runner_id=actual_runner_id,
             verdict=verdict,
+            feature_builder=feature_builder,
             strategy_rule=strategy_rule,
             readiness=readiness,
             proof=proof,
@@ -326,6 +373,7 @@ def run_track_b_strategy_paper(
             now=actual_now,
             runner_id=actual_runner_id,
             verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_STAGE_ERROR,
+            feature_builder=feature_builder,
             strategy_rule=strategy_rule,
             readiness=readiness,
             proof=proof,
@@ -333,6 +381,20 @@ def run_track_b_strategy_paper(
             required_next_action="Review strategy PAPER runner diagnostics before retrying.",
             operator_status_stage=actual_stages.operator_status,
         )
+
+
+def _run_feature_builder(config: TrackBStrategyPaperRunnerConfig) -> TrackBFeatureBuilderResult:
+    payload = _feature_builder_source_payload(config)
+    return build_track_b_mgc_feature_event(
+        source_event_payload=payload,
+        source_event_path=config.build_features_from_json,
+        expected_account_id=config.expected_account_id,
+        rule_id=config.rule_id,
+        output_root=config.feature_builder_output_root,
+        source_id=config.source_id,
+        min_history_candles=config.feature_builder_min_history_candles,
+        ema_span=config.feature_builder_ema_span,
+    )
 
 
 def _run_strategy_rule(config: TrackBStrategyPaperRunnerConfig) -> TrackBStrategyRuleRunnerResult:
@@ -456,6 +518,7 @@ def _finalize(
     now: datetime,
     runner_id: str,
     verdict: TrackBStrategyPaperRunnerVerdict,
+    feature_builder: TrackBFeatureBuilderResult | None,
     strategy_rule: TrackBStrategyRuleRunnerResult | None,
     readiness: TrackBReadinessCheckRunnerResult | None,
     proof: PaperProofResult | None,
@@ -470,6 +533,7 @@ def _finalize(
         now=now,
         runner_id=runner_id,
         verdict=verdict,
+        feature_builder=feature_builder,
         strategy_rule=strategy_rule,
         readiness=readiness,
         proof=proof,
@@ -487,6 +551,7 @@ def _finalize(
         verdict=verdict,
         report_json=report_json,
         report=report,
+        feature_builder_result=feature_builder,
         strategy_rule_result=strategy_rule,
         readiness_result=readiness,
         paper_proof_result=proof,
@@ -500,6 +565,7 @@ def _build_report(
     now: datetime,
     runner_id: str,
     verdict: TrackBStrategyPaperRunnerVerdict,
+    feature_builder: TrackBFeatureBuilderResult | None,
     strategy_rule: TrackBStrategyRuleRunnerResult | None,
     readiness: TrackBReadinessCheckRunnerResult | None,
     proof: PaperProofResult | None,
@@ -507,6 +573,7 @@ def _build_report(
     required_next_action: str,
     proof_classification: str | None,
 ) -> dict[str, object]:
+    feature_report = feature_builder.report if feature_builder else {}
     strategy_report = strategy_rule.report if strategy_rule else {}
     readiness_report = readiness.report if readiness else {}
     proof_report = proof.report if proof else {}
@@ -524,14 +591,25 @@ def _build_report(
         "lane_id": config.lane_id,
         "rule_id": config.rule_id,
         "rule_mode": config.rule_mode,
+        "feature_builder_invoked": feature_builder is not None,
+        "feature_builder_verdict": feature_report.get("feature_builder_verdict"),
+        "feature_builder_report_path": str(feature_builder.report_json) if feature_builder else None,
+        "feature_event_path": (
+            str(feature_builder.feature_event_json)
+            if feature_builder and feature_builder.feature_event_json is not None
+            else str(config.feature_event_json) if config.feature_event_json is not None else None
+        ),
+        "feature_builder_signal_ready": feature_report.get("signal_ready") if feature_report else None,
         "rule_decision": strategy_report.get("decision") or "NOT_PROVIDED",
         "signal_emitted": strategy_report.get("signal_emitted") if strategy_report else False,
         "signal_direction": strategy_report.get("signal_direction"),
         "strategy_rule_runner_verdict": strategy_report.get("strategy_rule_runner_verdict"),
+        "strategy_rule_verdict": strategy_report.get("strategy_rule_runner_verdict"),
         "strategy_rule_report_path": str(strategy_rule.report_json) if strategy_rule else None,
         "strategy_rule_output_batch_path": strategy_report.get("output_batch_path"),
         "readiness_runner_verdict": readiness_report.get("runner_verdict"),
         "readiness_verdict": readiness_report.get("readiness_verdict"),
+        "readiness_invoked": readiness is not None,
         "readiness_runner_report_path": str(readiness.report_json) if readiness else None,
         "realtime_quote_received": readiness_report.get("realtime_quote_received"),
         "current_quote_available": readiness_report.get("current_quote_available"),
@@ -563,6 +641,12 @@ def _build_report(
         "report_json_path": str(report_json),
         "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_strategy_paper_runner_report.json"),
         "artifact_paths": {
+            "feature_builder_report_json": str(feature_builder.report_json) if feature_builder else None,
+            "feature_event_json": (
+                str(feature_builder.feature_event_json)
+                if feature_builder and feature_builder.feature_event_json is not None
+                else str(config.feature_event_json) if config.feature_event_json is not None else None
+            ),
             "strategy_rule_report_json": str(strategy_rule.report_json) if strategy_rule else None,
             "readiness_runner_report_json": str(readiness.report_json) if readiness else None,
             "paper_proof_report_json": str(proof.report_json) if proof else None,
@@ -590,6 +674,21 @@ def _input_event_payload(config: TrackBStrategyPaperRunnerConfig) -> Mapping[str
     if not isinstance(value, Mapping):
         raise ValueError("input event JSON must contain an object.")
     return value
+
+
+def _feature_builder_source_payload(config: TrackBStrategyPaperRunnerConfig) -> Mapping[str, object]:
+    if config.build_features_from_payload is not None:
+        return config.build_features_from_payload
+    if config.build_features_from_json is None:
+        raise ValueError("build_features_from_json or build_features_from_payload is required when feature building is requested.")
+    value = json.loads(Path(config.build_features_from_json).read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise ValueError("feature builder source JSON must contain an object.")
+    return value
+
+
+def _feature_builder_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    return config.build_features_from_json is not None or config.build_features_from_payload is not None
 
 
 def _mode_error(config: TrackBStrategyPaperRunnerConfig) -> str | None:

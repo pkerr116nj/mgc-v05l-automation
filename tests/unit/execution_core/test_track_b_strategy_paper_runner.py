@@ -10,6 +10,10 @@ from mgc_v05l.execution_core.track_b_readiness_check_runner import (
     TrackBReadinessCheckRunnerResult,
     TrackBReadinessCheckRunnerVerdict,
 )
+from mgc_v05l.execution_core.track_b_feature_builder import (
+    TrackBFeatureBuilderResult,
+    TrackBFeatureBuilderVerdict,
+)
 from mgc_v05l.execution_core.track_b_strategy_paper_runner import (
     TrackBStrategyPaperRunnerConfig,
     TrackBStrategyPaperRunnerStages,
@@ -29,6 +33,7 @@ def aware_now() -> datetime:
 
 class Calls:
     def __init__(self) -> None:
+        self.feature = 0
         self.strategy = 0
         self.readiness = 0
         self.proof = 0
@@ -61,6 +66,58 @@ def base_config(tmp_path: Path, **overrides: object) -> TrackBStrategyPaperRunne
     }
     payload.update(overrides)
     return TrackBStrategyPaperRunnerConfig(**payload)
+
+
+def feature_result(tmp_path: Path, *, ready: bool = True) -> TrackBFeatureBuilderResult:
+    report_json = tmp_path / "feature_builder_report.json"
+    event_json = tmp_path / "feature_event.json"
+    feature_event = {
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "strategy_id": "track_b_example_gold_shadow_v1",
+        "lane_id": "mgc_example_long_lmt_day",
+        "candle_timestamp": aware_now().isoformat(),
+        "observed_at": aware_now().isoformat(),
+        "close": "4575.3",
+        "quote_provider_mode": "REALTIME",
+        "realtime_quote_received": True,
+        "current_quote_available": True,
+        "metadata": {
+            "ema_momentum_features": {
+                "close": "4575.3",
+                "vwap": "4575.0",
+                "prior_close": "4574.8",
+                "momentum_norm": "0.18",
+                "momentum_acceleration": "0.03",
+                "momentum_turning_positive": True,
+            }
+        },
+    }
+    report = {
+        "feature_builder_verdict": (
+            TrackBFeatureBuilderVerdict.WROTE_FEATURE_EVENT.value
+            if ready
+            else TrackBFeatureBuilderVerdict.BLOCKED_INSUFFICIENT_FEATURE_HISTORY.value
+        ),
+        "signal_ready": ready,
+        "output_feature_event_path": str(event_json) if ready else None,
+        "primary_blocker": None if ready else "At least 3 candles are required; received 1.",
+        "required_next_action": "feature next",
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(json.dumps(report), encoding="utf-8")
+    if ready:
+        event_json.write_text(json.dumps(feature_event), encoding="utf-8")
+    return TrackBFeatureBuilderResult(
+        verdict=TrackBFeatureBuilderVerdict.WROTE_FEATURE_EVENT if ready else TrackBFeatureBuilderVerdict.BLOCKED_INSUFFICIENT_FEATURE_HISTORY,
+        report_json=report_json,
+        report=report,
+        feature_event_json=event_json if ready else None,
+        feature_event=feature_event if ready else None,
+    )
 
 
 def strategy_result(tmp_path: Path, *, verdict: str = "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL", decision: str = "LONG", emitted: bool = True) -> TrackBStrategyRuleRunnerResult:
@@ -164,11 +221,19 @@ def stages(
     *,
     calls: Calls,
     strategy: TrackBStrategyRuleRunnerResult,
+    feature: TrackBFeatureBuilderResult | None = None,
     readiness: TrackBReadinessCheckRunnerResult | None = None,
     proof: PaperProofResult | None = None,
 ) -> TrackBStrategyPaperRunnerStages:
+    def feature_stage(config: TrackBStrategyPaperRunnerConfig) -> TrackBFeatureBuilderResult:
+        calls.feature += 1
+        assert feature is not None
+        return feature
+
     def strategy_stage(config: TrackBStrategyPaperRunnerConfig) -> TrackBStrategyRuleRunnerResult:
         calls.strategy += 1
+        if feature is not None and feature.feature_event is not None:
+            assert config.input_event_payload == feature.feature_event
         return strategy
 
     def readiness_stage(config: TrackBStrategyPaperRunnerConfig) -> TrackBReadinessCheckRunnerResult:
@@ -185,6 +250,7 @@ def stages(
         calls.operator_status += 1
 
     return TrackBStrategyPaperRunnerStages(
+        feature_builder=feature_stage,
         strategy_rule=strategy_stage,
         readiness=readiness_stage,
         paper_proof=proof_stage,
@@ -202,6 +268,7 @@ def test_no_signal_stops_without_readiness_or_proof(tmp_path: Path) -> None:
     )
 
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.NO_SIGNAL
+    assert calls.feature == 0
     assert calls.strategy == 1
     assert calls.readiness == 0
     assert calls.proof == 0
@@ -219,6 +286,7 @@ def test_human_review_stops_without_readiness_or_proof(tmp_path: Path) -> None:
     )
 
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.HUMAN_REVIEW_NO_SIGNAL
+    assert calls.feature == 0
     assert calls.readiness == 0
     assert calls.proof == 0
     assert result.report["paper_proof_invoked"] is False
@@ -234,6 +302,7 @@ def test_signal_with_blocked_readiness_does_not_submit(tmp_path: Path) -> None:
     )
 
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_READINESS
+    assert calls.feature == 0
     assert calls.strategy == 1
     assert calls.readiness == 1
     assert calls.proof == 0
@@ -259,6 +328,7 @@ def test_blocked_strategy_rule_does_not_run_readiness_or_proof(tmp_path: Path) -
     )
 
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_STRATEGY_RULE
+    assert calls.feature == 0
     assert calls.strategy == 1
     assert calls.readiness == 0
     assert calls.proof == 0
@@ -276,6 +346,7 @@ def test_signal_and_green_readiness_without_submit_flags_stops_ready_no_submit(t
     )
 
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED
+    assert calls.feature == 0
     assert calls.readiness == 1
     assert calls.proof == 0
     assert result.report["paper_submit_requested"] is False
@@ -307,6 +378,7 @@ def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path
     )
 
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert calls.feature == 0
     assert calls.proof == 1
     assert result.report["paper_submit_requested"] is True
     assert result.report["paper_proof_invoked"] is True
@@ -315,6 +387,109 @@ def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path
     assert result.report["final_position_status"] == "CLEAN"
     assert result.report["submit_allowed"] is True
     assert result.report["submit_attempted"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_feature_builder_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            build_features_from_payload={"candle_items": []},
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-feature-proof-passed",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert calls.feature == 1
+    assert calls.strategy == 1
+    assert calls.readiness == 1
+    assert calls.proof == 1
+    assert result.report["feature_builder_invoked"] is True
+    assert result.report["feature_builder_verdict"] == "TRACK_B_FEATURE_BUILDER_WROTE_FEATURE_EVENT"
+    assert result.report["feature_event_path"]
+    assert result.report["strategy_rule_verdict"] == "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL"
+    assert result.report["readiness_invoked"] is True
+    assert result.report["readiness_verdict"] == "READY_FOR_PAPER_PROOF"
+    assert result.report["paper_submit_requested"] is True
+    assert result.report["paper_proof_invoked"] is True
+    assert result.report["submit_attempted"] is True
+    assert result.report["final_flat"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_feature_builder_signal_readiness_green_without_submit_flags_stays_no_submit(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            build_features_from_payload={"candle_items": []},
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-feature-ready-no-submit",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED
+    assert calls.feature == 1
+    assert calls.strategy == 1
+    assert calls.readiness == 1
+    assert calls.proof == 0
+    assert result.report["feature_builder_invoked"] is True
+    assert result.report["paper_submit_requested"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_feature_builder_blocked_stops_before_strategy_readiness_or_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            build_features_from_payload={"candle_items": []},
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            feature=feature_result(tmp_path, ready=False),
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-feature-blocked",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_FEATURE_BUILDER
+    assert calls.feature == 1
+    assert calls.strategy == 0
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["feature_builder_verdict"] == "TRACK_B_FEATURE_BUILDER_BLOCKED_INSUFFICIENT_FEATURE_HISTORY"
+    assert result.report["signal_emitted"] is False
+    assert result.report["readiness_invoked"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
 
 
@@ -387,6 +562,7 @@ def test_non_paper_mode_refuses_before_strategy(tmp_path: Path) -> None:
     )
 
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_NON_PAPER_MODE
+    assert calls.feature == 0
     assert calls.strategy == 0
     assert calls.proof == 0
     assert result.report["submit_attempted"] is False
@@ -424,6 +600,7 @@ def test_submit_requested_missing_manual_prices_or_quantity_refuses_before_strat
     assert "--quantity" in str(missing_quantity.report["primary_blocker"])
     assert missing_price.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST
     assert "--manual-close-limit-price" in str(missing_price.report["primary_blocker"])
+    assert calls.feature == 0
     assert calls.strategy == 0
     assert calls.proof == 0
     assert missing_price.report["submit_attempted"] is False

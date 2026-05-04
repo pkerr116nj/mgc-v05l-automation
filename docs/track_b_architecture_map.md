@@ -182,9 +182,11 @@ Dashboard implication:
   candle_signal_producer -> signal_batch_writer` and updates
   `outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json`.
 - `track_b_strategy_paper_runner` is the controlled Phase 2 PAPER handoff. It
-  composes `track_b_strategy_rule_runner -> track_b_readiness_check_runner ->
-  paper_proof_cli / paper proof lifecycle`. It defaults to dry-run/no-submit.
-  It can invoke paper proof only when `--mode PAPER`, `--submit-paper`,
+  can now compose `track_b_feature_builder -> track_b_strategy_rule_runner ->
+  track_b_readiness_check_runner -> paper_proof_cli / paper proof lifecycle` in
+  one artifacted command. It defaults to dry-run/no-submit. It can invoke paper
+  proof only when feature building succeeds, the strategy rule emits a signal,
+  readiness is `READY_FOR_PAPER_PROOF`, and `--mode PAPER`, `--submit-paper`,
   `--confirm-paper-submit`, explicit `--quantity`, and explicit manual open and
   close limit prices are supplied. It never supports live-money execution, UI
   authority, hidden submit, inferred prices, inferred quantity, market orders,

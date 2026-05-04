@@ -330,14 +330,19 @@ The first controlled handoff boundary is `track_b_strategy_paper_runner`:
 
 ```text
 realtime Databento event
+-> track_b_feature_builder
 -> track_b_strategy_rule_runner
 -> track_b_readiness_check_runner
 -> paper_proof_cli / paper proof lifecycle
 ```
 
-It defaults to dry-run/no-submit. PAPER proof is invoked only when all explicit
-submit gates are present:
+It defaults to dry-run/no-submit. It may build features and continue directly
+to PAPER proof in a single command, but PAPER proof is invoked only when all
+upstream stages and explicit submit gates are present:
 
+- feature builder succeeds or an existing feature event is supplied;
+- strategy rule emits a signal;
+- readiness returns `READY_FOR_PAPER_PROOF`;
 - `--mode PAPER`
 - `--submit-paper`
 - `--confirm-paper-submit`
@@ -346,8 +351,11 @@ submit gates are present:
 - `--manual-close-limit-price`
 
 The runner refuses non-PAPER mode, missing quantity, missing manual prices, and
-missing submit confirmation flags before strategy/readiness/proof stages can
-mutate broker state. It reports `PAPER_READY_NO_SUBMIT_REQUESTED` when strategy
-signal and readiness are green but submit flags are absent. If proof is invoked,
-the report records proof classification, proof report path, final flat status
-when available, `submit_attempted=true`, and `live_money_readiness=false`.
+missing submit confirmation flags before proof can mutate broker state. If
+feature building blocks, strategy/readiness/proof are not invoked. If the rule
+emits no signal, readiness/proof are not invoked. It reports
+`PAPER_READY_NO_SUBMIT_REQUESTED` when feature building, strategy signal, and
+readiness are green but submit flags are absent. If proof is invoked, the report
+records feature builder verdict/path, strategy verdict, readiness verdict, proof
+classification, proof report path, final flat status when available,
+`submit_attempted=true`, and `live_money_readiness=false`.

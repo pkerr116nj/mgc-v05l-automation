@@ -22,7 +22,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run Track B strategy rule -> readiness -> explicit PAPER proof handoff. Defaults to no-submit."
     )
     parser.add_argument("--mode", default="PAPER")
-    parser.add_argument("--input-event-json", required=True, type=Path)
+    parser.add_argument("--input-event-json", type=Path, help="Existing strategy-rule input event JSON. Use --feature-event-json for an existing built feature event.")
+    parser.add_argument("--build-features-from", type=Path, help="Source MGC candle/quote history JSON to run through track_b_feature_builder before strategy evaluation.")
+    parser.add_argument("--feature-event-json", type=Path, help="Existing track_b_feature_builder output event JSON to pass to the strategy rule.")
     parser.add_argument("--inbox-dir", required=True, type=Path)
     parser.add_argument("--source-id", default="track_b_strategy_paper_runner")
     parser.add_argument("--strategy-id", default="track_b_example_gold_shadow_v1")
@@ -66,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--quote-timeout-seconds", type=float, default=3.0)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT)
+    parser.add_argument("--feature-builder-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_feature_builder"))
+    parser.add_argument("--feature-builder-min-history-candles", type=int, default=3)
+    parser.add_argument("--feature-builder-ema-span", type=int, default=3)
     parser.add_argument("--strategy-rule-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_strategy_rule_runner"))
     parser.add_argument("--strategy-adapter-output-root", type=Path, default=Path("outputs/track_b_execution_core/strategy_signal_adapter"))
     parser.add_argument("--candle-producer-output-root", type=Path, default=Path("outputs/track_b_execution_core/candle_signal_producer"))
@@ -87,6 +92,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         config=TrackBStrategyPaperRunnerConfig(
             mode=args.mode,
             input_event_json=args.input_event_json,
+            build_features_from_json=args.build_features_from,
+            feature_event_json=args.feature_event_json,
             inbox_dir=args.inbox_dir,
             source_id=args.source_id,
             strategy_id=args.strategy_id,
@@ -130,6 +137,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             request_timeout_seconds=args.request_timeout_seconds,
             quote_timeout_seconds=args.quote_timeout_seconds,
             output_root=args.output_root,
+            feature_builder_output_root=args.feature_builder_output_root,
+            feature_builder_min_history_candles=args.feature_builder_min_history_candles,
+            feature_builder_ema_span=args.feature_builder_ema_span,
             strategy_rule_output_root=args.strategy_rule_output_root,
             strategy_adapter_output_root=args.strategy_adapter_output_root,
             candle_producer_output_root=args.candle_producer_output_root,
@@ -149,9 +159,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "strategy_paper_runner_verdict": result.report["strategy_paper_runner_verdict"],
                 "mode": result.report["mode"],
+                "feature_builder_invoked": result.report["feature_builder_invoked"],
+                "feature_builder_verdict": result.report["feature_builder_verdict"],
+                "feature_event_path": result.report["feature_event_path"],
+                "strategy_rule_verdict": result.report["strategy_rule_verdict"],
                 "rule_decision": result.report["rule_decision"],
                 "signal_emitted": result.report["signal_emitted"],
                 "signal_direction": result.report["signal_direction"],
+                "readiness_invoked": result.report["readiness_invoked"],
                 "readiness_runner_verdict": result.report["readiness_runner_verdict"],
                 "readiness_verdict": result.report["readiness_verdict"],
                 "paper_submit_requested": result.report["paper_submit_requested"],
