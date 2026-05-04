@@ -8,7 +8,9 @@ provider modes and remains no-submit evidence.
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import json
+import sys
 import threading
 import uuid
 from dataclasses import dataclass
@@ -51,6 +53,12 @@ class DatabentoCurrentQuoteTransport(Protocol):
         schema: str,
         contract_key: str,
     ) -> Mapping[str, Any] | None: ...
+
+
+class DatabentoRealtimeProviderError(RuntimeError):
+    def __init__(self, message: str, *, diagnostics: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
 
 
 @dataclass(frozen=True)
@@ -112,6 +120,7 @@ class DatabentoCurrentQuoteProvider:
         actual_run_id = run_id or f"databento_current_quote_{uuid.uuid4().hex}"
         report_json = Path(self.config.output_root) / actual_run_id / "current_quote_report.json"
         symbol = self.config.selector_symbol()
+        transport_diagnostics = dict(getattr(self.transport, "last_diagnostics", {}) or {})
         try:
             raw_quote = self.transport.get_current_quote(
                 dataset=self.config.dataset,
@@ -121,6 +130,8 @@ class DatabentoCurrentQuoteProvider:
                 contract_key=self.config.contract_key,
             )
         except Exception as exc:  # noqa: BLE001 - provider errors must become operator reports.
+            diagnostics = dict(transport_diagnostics)
+            diagnostics.update(_provider_diagnostics_from_exception(exc))
             return self._write_report(
                 report_json=report_json,
                 classification=CurrentQuoteClassification.PROVIDER_ERROR,
@@ -128,10 +139,11 @@ class DatabentoCurrentQuoteProvider:
                 raw_quote=None,
                 quote=None,
                 provider_error=str(exc),
-                provider_diagnostics=_provider_diagnostics_from_exception(exc),
+                provider_diagnostics=diagnostics,
                 no_records_reason=None,
             )
         if raw_quote is None:
+            diagnostics = dict(getattr(self.transport, "last_diagnostics", {}) or {})
             return self._write_report(
                 report_json=report_json,
                 classification=CurrentQuoteClassification.MARKET_CLOSED_OR_NO_RECORDS,
@@ -139,7 +151,7 @@ class DatabentoCurrentQuoteProvider:
                 raw_quote=None,
                 quote=None,
                 provider_error=None,
-                provider_diagnostics=None,
+                provider_diagnostics=diagnostics,
                 no_records_reason="MARKET_CLOSED_OR_NO_RECORDS",
             )
         try:
@@ -247,6 +259,9 @@ class DatabentoCurrentQuoteProvider:
         )
         realtime_subscription_attempted = bool(diagnostics.get("realtime_subscription_attempted")) or quote_provider_mode == QuoteProviderMode.REALTIME
         realtime_quote_received = bool(diagnostics.get("realtime_quote_received")) or (quote_provider_mode == QuoteProviderMode.REALTIME and quote is not None)
+        databento_package_version = diagnostics.get("databento_package_version")
+        if quote_provider_mode == QuoteProviderMode.REALTIME and databento_package_version is None:
+            databento_package_version = _installed_package_version("databento")
         report = {
             "schema_version": "track_b_databento_current_quote_v1",
             "classification": effective_classification.value,
@@ -284,6 +299,14 @@ class DatabentoCurrentQuoteProvider:
             "realtime_subscription_attempted": realtime_subscription_attempted,
             "realtime_quote_received": realtime_quote_received,
             "realtime_receive_timestamp": diagnostics.get("realtime_receive_timestamp"),
+            "databento_dependency_status": diagnostics.get("databento_dependency_status"),
+            "databento_package_version": databento_package_version,
+            "databento_live_api_available": diagnostics.get("databento_live_api_available"),
+            "databento_import_path_shadowed": diagnostics.get("databento_import_path_shadowed", False),
+            "databento_import_error": diagnostics.get("databento_import_error"),
+            "provider_error_category": diagnostics.get("provider_error_category"),
+            "symbol_subscription_attempted": diagnostics.get("symbol_subscription_attempted", False),
+            "symbol_subscription_succeeded": diagnostics.get("symbol_subscription_succeeded", False),
             "historical_available_end_diagnostic": quote_provider_mode == QuoteProviderMode.HISTORICAL_AVAILABLE_END,
             "provider_error": provider_error,
             "no_records_reason": no_records_reason,
@@ -413,6 +436,13 @@ class DatabentoRealtimeCurrentQuoteTransport:
         self.receive_timeout_seconds = float(receive_timeout_seconds)
         self.live_client_factory = live_client_factory
         self.now_func = now_func or (lambda: datetime.now(UTC))
+        self.last_diagnostics: dict[str, Any] = {
+            "quote_provider_mode": QuoteProviderMode.REALTIME.value,
+            "realtime_subscription_attempted": False,
+            "realtime_quote_received": False,
+            "symbol_subscription_attempted": False,
+            "symbol_subscription_succeeded": False,
+        }
 
     def get_current_quote(
         self,
@@ -425,14 +455,49 @@ class DatabentoRealtimeCurrentQuoteTransport:
     ) -> Mapping[str, Any] | None:
         del contract_key
         if not str(self.api_key or "").strip():
-            raise RuntimeError("DATABENTO_API_KEY is required for Databento realtime quote subscription.")
+            diagnostics = self._base_diagnostics()
+            diagnostics.update(
+                {
+                    "databento_dependency_status": "DATABENTO_API_KEY_MISSING",
+                    "provider_error_category": "DATABENTO_API_KEY_MISSING",
+                }
+            )
+            self.last_diagnostics = diagnostics
+            raise DatabentoRealtimeProviderError(
+                "DATABENTO_API_KEY is required for Databento realtime quote subscription.",
+                diagnostics=diagnostics,
+            )
         if self.receive_timeout_seconds <= 0:
             raise RuntimeError("receive_timeout_seconds must be positive for Databento realtime quote subscription.")
 
         quote_ready = threading.Event()
         errors: list[Exception] = []
         quotes: list[dict[str, Any]] = []
+        diagnostics = self._base_diagnostics()
+        diagnostics.update(
+            {
+                "realtime_subscription_attempted": True,
+                "symbol_subscription_attempted": True,
+                "dataset": dataset,
+                "schema": schema,
+                "symbol_selector": symbol,
+                "stype_in": stype_in,
+            }
+        )
+        self.last_diagnostics = dict(diagnostics)
         client = self._create_live_client()
+        diagnostics.update(dict(self.last_diagnostics))
+        diagnostics.update(
+            {
+                "realtime_subscription_attempted": True,
+                "symbol_subscription_attempted": True,
+                "dataset": dataset,
+                "schema": schema,
+                "symbol_selector": symbol,
+                "stype_in": stype_in,
+            }
+        )
+        self.last_diagnostics = dict(diagnostics)
 
         def record_callback(record: Any) -> None:
             try:
@@ -447,6 +512,9 @@ class DatabentoRealtimeCurrentQuoteTransport:
             except ValueError:
                 return
             quotes.append(quote)
+            diagnostics["realtime_quote_received"] = True
+            diagnostics["realtime_receive_timestamp"] = quote["raw"].get("realtime_receive_timestamp")
+            self.last_diagnostics = dict(diagnostics)
             quote_ready.set()
 
         def exception_callback(exc: Exception) -> None:
@@ -456,33 +524,174 @@ class DatabentoRealtimeCurrentQuoteTransport:
         try:
             client.add_callback(record_callback, exception_callback)
             client.subscribe(dataset=dataset, schema=schema, symbols=[symbol], stype_in=stype_in)
+            diagnostics["symbol_subscription_succeeded"] = True
+            self.last_diagnostics = dict(diagnostics)
             client.start()
             quote_ready.wait(self.receive_timeout_seconds)
         except Exception as exc:  # noqa: BLE001 - provider errors become explicit reports.
-            raise RuntimeError(f"Databento realtime subscription error: {_sanitize_exception(exc)}") from exc
+            diagnostics.update(
+                {
+                    "provider_error_category": "DATABENTO_REALTIME_SUBSCRIPTION_ERROR",
+                    "databento_dependency_status": "DATABENTO_REALTIME_SUBSCRIPTION_ERROR",
+                    "native_databento_error_message": _sanitize_exception(exc),
+                }
+            )
+            self.last_diagnostics = dict(diagnostics)
+            raise DatabentoRealtimeProviderError(
+                f"Databento realtime subscription error: {_sanitize_exception(exc)}",
+                diagnostics=diagnostics,
+            ) from exc
         finally:
             with contextlib.suppress(Exception):
                 client.terminate()
 
         if errors:
-            raise RuntimeError(f"Databento realtime callback error: {_sanitize_exception(errors[0])}")
+            diagnostics.update(
+                {
+                    "provider_error_category": "DATABENTO_REALTIME_CALLBACK_ERROR",
+                    "databento_dependency_status": "DATABENTO_REALTIME_CALLBACK_ERROR",
+                    "native_databento_error_message": _sanitize_exception(errors[0]),
+                }
+            )
+            self.last_diagnostics = dict(diagnostics)
+            raise DatabentoRealtimeProviderError(
+                f"Databento realtime callback error: {_sanitize_exception(errors[0])}",
+                diagnostics=diagnostics,
+            )
         if not quotes:
+            diagnostics.update(
+                {
+                    "provider_error_category": "DATABENTO_REALTIME_NO_QUOTE_WITHIN_BOUNDED_WAIT",
+                    "databento_dependency_status": "DATABENTO_REALTIME_CLIENT_READY",
+                    "realtime_quote_received": False,
+                }
+            )
+            self.last_diagnostics = dict(diagnostics)
             return None
+        self.last_diagnostics = dict(diagnostics)
         return quotes[-1]
+
+    def _base_diagnostics(self) -> dict[str, Any]:
+        return {
+            "quote_provider_mode": QuoteProviderMode.REALTIME.value,
+            "realtime_subscription_attempted": False,
+            "realtime_quote_received": False,
+            "symbol_subscription_attempted": False,
+            "symbol_subscription_succeeded": False,
+            "databento_package_version": _installed_package_version("databento"),
+            "databento_live_api_available": None,
+            "databento_dependency_status": None,
+            "databento_import_path_shadowed": False,
+        }
 
     def _create_live_client(self) -> Any:
         if self.live_client_factory is not None:
             return self.live_client_factory(self.api_key)
-        try:
-            import databento as db  # type: ignore[import-not-found]
-        except Exception as exc:  # noqa: BLE001 - import/runtime errors must be operator-visible.
-            raise RuntimeError(
-                "Databento live client is unavailable; verify the optional databento dependency and local Python path."
-            ) from exc
+        db = _import_databento_live_module()
+        if not hasattr(db, "Live"):
+            diagnostics = self._base_diagnostics()
+            diagnostics.update(
+                {
+                    "databento_dependency_status": "DATABENTO_LIVE_API_MISSING",
+                    "databento_live_api_available": False,
+                    "provider_error_category": "DATABENTO_LIVE_API_MISSING",
+                }
+            )
+            self.last_diagnostics = diagnostics
+            raise DatabentoRealtimeProviderError(
+                "Installed databento package does not expose databento.Live; verify databento live client API version.",
+                diagnostics=diagnostics,
+            )
+        diagnostics = self._base_diagnostics()
+        diagnostics.update(
+            {
+                "databento_dependency_status": "DATABENTO_LIVE_API_AVAILABLE",
+                "databento_live_api_available": True,
+                "databento_import_path_shadowed": bool(getattr(db, "_track_b_import_path_shadowed", False)),
+            }
+        )
+        self.last_diagnostics = diagnostics
         try:
             return db.Live(key=self.api_key, ts_out=True)
         except TypeError:
             return db.Live(self.api_key, ts_out=True)
+
+
+def _installed_package_version(package_name: str) -> str | None:
+    try:
+        return importlib.metadata.version(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _import_databento_live_module() -> Any:
+    try:
+        import databento as db  # type: ignore[import-not-found]
+
+        setattr(db, "_track_b_import_path_shadowed", False)
+        return db
+    except ModuleNotFoundError as exc:
+        if exc.name == "databento":
+            raise DatabentoRealtimeProviderError(
+                "Databento package is not installed; install the project databento optional dependency.",
+                diagnostics={
+                    "databento_dependency_status": "DATABENTO_PACKAGE_MISSING",
+                    "databento_package_version": None,
+                    "databento_live_api_available": False,
+                    "provider_error_category": "DATABENTO_PACKAGE_MISSING",
+                    "databento_import_error": _sanitize_exception(exc),
+                },
+            ) from exc
+        raise _databento_import_failed_error(exc) from exc
+    except Exception as exc:  # noqa: BLE001 - import/runtime errors must be operator-visible.
+        recovered = _retry_import_databento_without_local_src()
+        if recovered is not None:
+            setattr(recovered, "_track_b_import_path_shadowed", True)
+            return recovered
+        raise _databento_import_failed_error(exc) from exc
+
+
+def _retry_import_databento_without_local_src() -> Any | None:
+    local_src = str(Path(__file__).resolve().parents[2])
+    original_path = list(sys.path)
+    removed = False
+    for module_name in tuple(sys.modules):
+        if module_name == "databento" or module_name.startswith("databento."):
+            sys.modules.pop(module_name, None)
+        elif module_name == "pandas" or module_name.startswith("pandas."):
+            sys.modules.pop(module_name, None)
+        elif module_name == "pytz" or module_name.startswith("pytz."):
+            sys.modules.pop(module_name, None)
+    try:
+        filtered_path = []
+        for path_item in original_path:
+            if Path(path_item or ".").resolve() == Path(local_src).resolve():
+                removed = True
+                continue
+            filtered_path.append(path_item)
+        if not removed:
+            return None
+        sys.path = filtered_path
+        import databento as db  # type: ignore[import-not-found]
+
+        return db
+    except Exception:
+        return None
+    finally:
+        sys.path = original_path
+
+
+def _databento_import_failed_error(exc: Exception) -> DatabentoRealtimeProviderError:
+    return DatabentoRealtimeProviderError(
+        "Databento package is installed but failed to import; check optional dependencies and local Python path shadowing.",
+        diagnostics={
+            "databento_dependency_status": "DATABENTO_IMPORT_FAILED",
+            "databento_package_version": _installed_package_version("databento"),
+            "databento_live_api_available": None,
+            "provider_error_category": "DATABENTO_IMPORT_FAILED",
+            "databento_import_error": _sanitize_exception(exc),
+        },
+    )
 
 
 def _provider_diagnostics_from_exception(exc: Exception) -> dict[str, Any]:
@@ -538,6 +747,8 @@ def _live_record_to_raw_quote(
         "quote_provider_mode": QuoteProviderMode.REALTIME.value,
         "realtime_subscription_attempted": True,
         "realtime_quote_received": True,
+        "symbol_subscription_attempted": True,
+        "symbol_subscription_succeeded": True,
         "realtime_receive_timestamp": require_aware_datetime(received_at, "received_at").isoformat(),
         "dataset": dataset,
         "schema": schema,

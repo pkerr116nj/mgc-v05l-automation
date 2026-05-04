@@ -13,6 +13,7 @@ from mgc_v05l.execution_core.databento_current_quote import (
     DatabentoRealtimeCurrentQuoteTransport,
     QuoteProviderMode,
 )
+import mgc_v05l.execution_core.databento_current_quote as current_quote_module
 from mgc_v05l.execution_core.quote_provider import QuoteSnapshot
 
 
@@ -332,6 +333,8 @@ def test_realtime_quote_received_is_current_available(tmp_path: Path) -> None:
     assert payload["current_quote_available"] is True
     assert payload["realtime_subscription_attempted"] is True
     assert payload["realtime_quote_received"] is True
+    assert payload["symbol_subscription_attempted"] is True
+    assert payload["symbol_subscription_succeeded"] is True
     assert payload["bid"] == "4623.1"
     assert payload["ask"] == "4623.3"
     assert payload["realtime_receive_timestamp"] == aware_now().isoformat()
@@ -370,6 +373,8 @@ def test_realtime_no_quote_within_bounded_wait_blocks(tmp_path: Path) -> None:
     assert payload["current_quote_available"] is False
     assert payload["realtime_subscription_attempted"] is True
     assert payload["realtime_quote_received"] is False
+    assert payload["provider_error_category"] == "DATABENTO_REALTIME_NO_QUOTE_WITHIN_BOUNDED_WAIT"
+    assert payload["databento_dependency_status"] == "DATABENTO_REALTIME_CLIENT_READY"
     assert payload["submit_attempted"] is False
 
 
@@ -395,8 +400,60 @@ def test_realtime_entitlement_or_api_error_is_explicit(tmp_path: Path) -> None:
     assert "entitlement denied" in payload["provider_error"]
     assert payload["realtime_subscription_attempted"] is True
     assert payload["realtime_quote_received"] is False
+    assert payload["provider_error_category"] == "DATABENTO_REALTIME_SUBSCRIPTION_ERROR"
+    assert payload["symbol_subscription_attempted"] is True
+    assert payload["symbol_subscription_succeeded"] is False
     assert payload["submit_attempted"] is False
     assert payload["live_money_readiness"] is False
+
+
+def test_realtime_missing_api_key_has_precise_dependency_diagnostics(tmp_path: Path) -> None:
+    transport = DatabentoRealtimeCurrentQuoteTransport(
+        api_key="",
+        receive_timeout_seconds=0.01,
+        now_func=aware_now,
+    )
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path, quote_provider_mode=QuoteProviderMode.REALTIME.value),
+        transport=transport,
+    )
+
+    result = provider.fetch_current_quote(run_id="realtime-missing-key", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.PROVIDER_ERROR
+    assert payload["provider_error_category"] == "DATABENTO_API_KEY_MISSING"
+    assert payload["databento_dependency_status"] == "DATABENTO_API_KEY_MISSING"
+    assert payload["realtime_subscription_attempted"] is True
+    assert payload["realtime_quote_received"] is False
+    assert payload["current_quote_available"] is False
+    assert payload["submit_attempted"] is False
+
+
+def test_realtime_installed_package_missing_live_api_has_precise_diagnostics(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class FakeDatabentoModule:
+        __version__ = "0.77.0"
+
+    monkeypatch.setattr(current_quote_module, "_import_databento_live_module", lambda: FakeDatabentoModule())
+    transport = DatabentoRealtimeCurrentQuoteTransport(
+        api_key="not-printed",
+        receive_timeout_seconds=0.01,
+        now_func=aware_now,
+    )
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path, quote_provider_mode=QuoteProviderMode.REALTIME.value),
+        transport=transport,
+    )
+
+    result = provider.fetch_current_quote(run_id="realtime-missing-live-api", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.PROVIDER_ERROR
+    assert payload["provider_error_category"] == "DATABENTO_LIVE_API_MISSING"
+    assert payload["databento_dependency_status"] == "DATABENTO_LIVE_API_MISSING"
+    assert payload["databento_live_api_available"] is False
+    assert payload["current_quote_available"] is False
+    assert payload["submit_attempted"] is False
 
 
 def test_available_end_fallback_outside_explicit_freshness_tolerance_blocks(tmp_path: Path) -> None:

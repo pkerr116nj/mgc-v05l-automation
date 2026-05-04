@@ -148,7 +148,13 @@ Dashboard implication:
   historical quotes into readiness. Its current quote report must make
   `quote_provider_mode`, `realtime_subscription_attempted`,
   `realtime_quote_received`, `quote_age_seconds`, `quote_freshness_verdict`, and
-  `current_quote_available` visible.
+  `current_quote_available` visible. Dependency/runtime diagnostics are also
+  explicit: `databento_dependency_status`, `databento_package_version`,
+  `databento_live_api_available`, `provider_error_category`,
+  `symbol_subscription_attempted`, and `symbol_subscription_succeeded` identify
+  missing package, missing Live API, missing API key, subscription/entitlement
+  failures, and bounded-wait no-quote outcomes without falling back to
+  historical readiness.
 - `signal_intent_proposal` may create a proposed no-submit strategy intent from
   a validated signal under an explicit policy. It does not authorize a lane,
   create an order plan, summarize readiness, or submit.

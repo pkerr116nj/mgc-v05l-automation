@@ -284,6 +284,16 @@ reports. If the key, entitlement, window, or quote data is unavailable, the
 observer writes an explicit blocked/no-data report instead of silently treating
 the state as OK.
 
+Realtime dependency failures are explicit in the current quote and observer
+reports. Check `databento_dependency_status`, `databento_package_version`,
+`databento_live_api_available`, `provider_error_category`,
+`symbol_subscription_attempted`, and `symbol_subscription_succeeded` to
+distinguish a missing Databento package, installed package without the Live API,
+missing API key, subscription/entitlement failure, and no quote within the
+bounded wait. The Databento client is declared as the project’s optional
+`databento` dependency; for a fresh venv install it with
+`./.venv/bin/pip install -e '.[databento]'`.
+
 The older `HISTORICAL_AVAILABLE_END` provider mode remains diagnostic/backfill
 only. If Databento historical reports that a requested window is after
 `available_end`, Track B preserves `requested_quote_end`,

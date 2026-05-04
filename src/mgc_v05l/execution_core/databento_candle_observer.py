@@ -377,6 +377,13 @@ def _write_report(
         "quote_provider_mode": market_data_payload.get("quote_provider_mode"),
         "realtime_subscription_attempted": market_data_payload.get("realtime_subscription_attempted"),
         "realtime_quote_received": market_data_payload.get("realtime_quote_received"),
+        "databento_dependency_status": market_data_payload.get("databento_dependency_status"),
+        "databento_package_version": market_data_payload.get("databento_package_version"),
+        "databento_live_api_available": market_data_payload.get("databento_live_api_available"),
+        "databento_import_path_shadowed": market_data_payload.get("databento_import_path_shadowed"),
+        "provider_error_category": market_data_payload.get("provider_error_category"),
+        "symbol_subscription_attempted": market_data_payload.get("symbol_subscription_attempted"),
+        "symbol_subscription_succeeded": market_data_payload.get("symbol_subscription_succeeded"),
         "max_current_quote_age_seconds": market_data_payload.get("max_current_quote_age_seconds"),
         "quote_age_seconds": market_data_payload.get("quote_age_seconds"),
         "quote_freshness_verdict": market_data_payload.get("quote_freshness_verdict"),
@@ -780,6 +787,10 @@ def _write_wait_heartbeat(
     quote_provider_mode = last_payload.get("quote_provider_mode")
     realtime_subscription_attempted = last_payload.get("realtime_subscription_attempted")
     realtime_quote_received = last_payload.get("realtime_quote_received")
+    databento_dependency_status = last_payload.get("databento_dependency_status")
+    provider_error_category = last_payload.get("provider_error_category")
+    symbol_subscription_attempted = last_payload.get("symbol_subscription_attempted")
+    symbol_subscription_succeeded = last_payload.get("symbol_subscription_succeeded")
     max_current_quote_age_seconds = last_payload.get("max_current_quote_age_seconds")
     quote_age_seconds = last_payload.get("quote_age_seconds")
     quote_freshness_verdict = last_payload.get("quote_freshness_verdict")
@@ -821,6 +832,10 @@ def _write_wait_heartbeat(
         "quote_provider_mode": quote_provider_mode,
         "realtime_subscription_attempted": realtime_subscription_attempted,
         "realtime_quote_received": realtime_quote_received,
+        "databento_dependency_status": databento_dependency_status,
+        "provider_error_category": provider_error_category,
+        "symbol_subscription_attempted": symbol_subscription_attempted,
+        "symbol_subscription_succeeded": symbol_subscription_succeeded,
         "wait_exited_normally": wait_exited_normally,
         "watch_exited_normally": wait_exited_normally,
         "wait_succeeded": wait_succeeded,
