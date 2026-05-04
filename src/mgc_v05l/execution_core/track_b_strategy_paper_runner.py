@@ -125,6 +125,7 @@ class TrackBStrategyPaperRunnerConfig:
     databento_continuous_symbol: str = "MGC.v.0"
     dataset: str = "GLBX.MDP3"
     allowlisted_local_symbol: str = "MGCM6"
+    con_id: int | None = 712565978
     tick_size: str = "0.1"
     exchange: str = "COMEX"
     currency: str = "USD"
@@ -893,6 +894,7 @@ def _build_report(
     paper_proof_invoked = proof is not None
     submit_allowed = _paper_submit_requested(config) and proof is not None
     maintained_history_status = _maintained_history_status(config, now=now)
+    runtime_candle_status = _runtime_candle_context_status(config)
     required_next_action_text = (
         f"{required_next_action} Maintained-history stale-age override was used for PAPER diagnostics only; "
         "do not treat this as real strategy freshness or live-money readiness."
@@ -906,6 +908,11 @@ def _build_report(
         "strategy_paper_runner_verdict": verdict.value,
         "mode": config.mode,
         "source_id": config.source_id,
+        "account_id": config.account_id,
+        "expected_account_id": config.expected_account_id,
+        "contract_key": config.contract_key,
+        "local_symbol": config.allowlisted_local_symbol,
+        "con_id": config.con_id,
         "strategy_id": config.strategy_id,
         "lane_id": config.lane_id,
         "rule_id": config.rule_id,
@@ -913,6 +920,10 @@ def _build_report(
         "maintained_history_path": str(config.maintained_history_json) if config.maintained_history_json is not None else None,
         "runtime_candle_context_path": str(config.runtime_candle_context_json) if config.runtime_candle_context_json is not None else None,
         "runtime_candle_context_requested": _runtime_candle_context_requested(config),
+        "runtime_candle_context_ready": runtime_candle_status.get("runtime_candle_context_ready"),
+        "runtime_candle_context_bars_available": runtime_candle_status.get("runtime_candle_context_bars_available"),
+        "runtime_candle_context_gap_count": runtime_candle_status.get("runtime_candle_context_gap_count"),
+        "runtime_candle_context_source_mode": runtime_candle_status.get("runtime_candle_context_source_mode"),
         "data_maintenance_history_requested": _maintained_history_requested(config),
         "maintained_history_age_seconds": maintained_history_status.get("maintained_history_age_seconds"),
         "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
@@ -951,6 +962,7 @@ def _build_report(
         ),
         "feature_builder_signal_ready": feature_report.get("signal_ready") if feature_report else None,
         "rule_decision": strategy_report.get("decision") or "NOT_PROVIDED",
+        "strategy_rule_evaluated": strategy_rule is not None,
         "signal_emitted": strategy_report.get("signal_emitted") if strategy_report else False,
         "signal_direction": strategy_report.get("signal_direction"),
         "strategy_rule_runner_verdict": strategy_report.get("strategy_rule_runner_verdict"),
@@ -1115,6 +1127,38 @@ def _runtime_candle_context_request_error(config: TrackBStrategyPaperRunnerConfi
     if payload.get("gap_count") not in {None, 0}:
         return f"Runtime candle context has detected gaps: {payload.get('gap_count')}."
     return None
+
+
+def _runtime_candle_context_status(config: TrackBStrategyPaperRunnerConfig) -> dict[str, object]:
+    if not _runtime_candle_context_requested(config):
+        return {
+            "runtime_candle_context_requested": False,
+            "runtime_candle_context_ready": None,
+            "runtime_candle_context_bars_available": None,
+            "runtime_candle_context_gap_count": None,
+            "runtime_candle_context_source_mode": None,
+        }
+    try:
+        payload = _runtime_candle_context_payload(config)
+    except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        return {
+            "runtime_candle_context_requested": True,
+            "runtime_candle_context_ready": False,
+            "runtime_candle_context_bars_available": None,
+            "runtime_candle_context_gap_count": None,
+            "runtime_candle_context_source_mode": None,
+            "primary_blocker": f"Runtime candle context JSON could not be read: {exc}",
+        }
+    candles = payload.get("candles") or payload.get("candle_history")
+    bars_available = len(candles) if isinstance(candles, list) else payload.get("bars_available")
+    return {
+        "runtime_candle_context_requested": True,
+        "runtime_candle_context_ready": payload.get("runtime_candle_context_ready") is True,
+        "runtime_candle_context_bars_available": bars_available,
+        "runtime_candle_context_gap_count": payload.get("gap_count"),
+        "runtime_candle_context_source_mode": payload.get("candle_source_mode"),
+        "primary_blocker": payload.get("primary_blocker"),
+    }
 
 
 def _maintained_history_request_error(config: TrackBStrategyPaperRunnerConfig, *, now: datetime) -> str | None:
@@ -1402,6 +1446,14 @@ def _submit_request_error(config: TrackBStrategyPaperRunnerConfig) -> str | None
         return None
     if not (config.submit_paper and config.confirm_paper_submit):
         return "--submit-paper and --confirm-paper-submit are both required for PAPER submit."
+    if config.account_id != config.expected_account_id:
+        return f"--account-id {config.account_id} must match --expected-account-id {config.expected_account_id} for PAPER submit."
+    if config.account_id != "DUM882026" or config.expected_account_id != "DUM882026":
+        return "Track B strategy PAPER submit is currently restricted to PAPER account DUM882026."
+    if config.contract_key != "MGC-202606":
+        return "Track B strategy PAPER submit is currently restricted to contract_key MGC-202606."
+    if config.allowlisted_local_symbol != "MGCM6":
+        return "Track B strategy PAPER submit is currently restricted to local symbol MGCM6."
     if config.quantity is None:
         return "--quantity is required for PAPER submit."
     if int(config.quantity) != 1:

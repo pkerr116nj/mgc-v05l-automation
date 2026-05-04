@@ -521,6 +521,16 @@ If runtime candles are missing/insufficient/gappy, if the rule emits
 separate dry-run command is required when the explicit PAPER submit flags are
 present.
 
+A `NO_SIGNAL` result is a valid combined runtime-context proof outcome. The
+runner report should show `runtime_candle_context_supplied=true`,
+`runtime_candle_context_required=true`, `runtime_candle_context_ready=true`,
+`feature_builder_invoked=true`, `strategy_rule_evaluated=true`,
+`rule_decision=NO_SIGNAL`, `signal_emitted=false`,
+`paper_proof_invoked=false`, `submit_attempted=false`, and
+`broker_state_mutated=false`. Do not force the real rule into a PAPER proof;
+use PAPER proof only when the rule naturally emits a signal and every explicit
+PAPER submit flag and readiness gate is present.
+
 Maintained weekly history is historical context. It may be many hours or days
 old and still be valid if `complete_through_cutoff=true`. The runner reports
 `historical_context_ready`, `runtime_candle_context_required`,

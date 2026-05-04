@@ -61,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--databento-continuous-symbol", default="MGC.v.0")
     parser.add_argument("--dataset", default="GLBX.MDP3")
     parser.add_argument("--allowlisted-local-symbol", default="MGCM6")
+    parser.add_argument("--con-id", type=int, default=712565978)
     parser.add_argument("--tick-size", default="0.1")
     parser.add_argument("--exchange", default="COMEX")
     parser.add_argument("--currency", default="USD")
@@ -158,6 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             databento_continuous_symbol=args.databento_continuous_symbol,
             dataset=args.dataset,
             allowlisted_local_symbol=args.allowlisted_local_symbol,
+            con_id=args.con_id,
             tick_size=args.tick_size,
             exchange=args.exchange,
             currency=args.currency,
@@ -214,6 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "runtime_intraday_freshness_policy": result.report["runtime_intraday_freshness_policy"],
                 "runtime_candle_context_required": result.report["runtime_candle_context_required"],
                 "runtime_candle_context_requested": result.report["runtime_candle_context_requested"],
+                "runtime_candle_context_ready": result.report["runtime_candle_context_ready"],
                 "historical_context_ready": result.report["historical_context_ready"],
                 "maintained_history_ready": result.report["maintained_history_ready"],
                 "maintained_history_stale_override_requested": result.report["maintained_history_stale_override_requested"],
@@ -228,6 +231,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "feature_builder_verdict": result.report["feature_builder_verdict"],
                 "feature_event_path": result.report["feature_event_path"],
                 "strategy_rule_verdict": result.report["strategy_rule_verdict"],
+                "strategy_rule_evaluated": result.report["strategy_rule_evaluated"],
                 "rule_decision": result.report["rule_decision"],
                 "signal_emitted": result.report["signal_emitted"],
                 "signal_direction": result.report["signal_direction"],

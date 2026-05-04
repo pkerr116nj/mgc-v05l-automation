@@ -1146,11 +1146,54 @@ def test_runtime_candle_context_can_feed_feature_builder_and_rule(tmp_path: Path
     assert result.report["runtime_candle_context_required"] is True
     assert result.report["runtime_candle_context_requested"] is True
     assert result.report["runtime_candle_context_supplied"] is True
+    assert result.report["runtime_candle_context_ready"] is True
+    assert result.report["runtime_candle_context_bars_available"] == 3
     assert result.report["runtime_candle_context_path"] == str(runtime_context_json)
     assert result.report["market_history_collector_invoked"] is True
     assert result.report["feature_builder_invoked"] is True
+    assert result.report["strategy_rule_evaluated"] is True
     assert result.report["paper_proof_invoked"] is False
     assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_runtime_candle_context_no_signal_does_not_invoke_readiness_or_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    runtime_context_json = tmp_path / "latest_runtime_mgc_1m_candles_no_signal.json"
+    runtime_context_json.write_text(json.dumps(runtime_candle_context_payload()), encoding="utf-8")
+
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload=None,
+            runtime_candle_context_json=runtime_context_json,
+            runtime_candle_context_required=True,
+            emit_signal=True,
+        ),
+        stages=stages(
+            calls=calls,
+            market_history=market_history_result(tmp_path),
+            feature=feature_result(tmp_path),
+            strategy=strategy_result(tmp_path, decision="NO_SIGNAL", emitted=False),
+            readiness=readiness_result(tmp_path),
+        ),
+        runner_id="paper-runtime-candle-context-no-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.NO_SIGNAL
+    assert result.report["runtime_candle_context_supplied"] is True
+    assert result.report["runtime_candle_context_required"] is True
+    assert result.report["runtime_candle_context_ready"] is True
+    assert result.report["feature_builder_invoked"] is True
+    assert result.report["strategy_rule_evaluated"] is True
+    assert result.report["rule_decision"] == "NO_SIGNAL"
+    assert result.report["signal_emitted"] is False
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
     assert result.report["live_money_readiness"] is False
 
 
@@ -1494,6 +1537,64 @@ def test_submit_requested_missing_manual_prices_or_quantity_refuses_before_strat
     assert calls.strategy == 0
     assert calls.proof == 0
     assert missing_price.report["submit_attempted"] is False
+
+
+def test_explicit_submit_requires_paper_account_contract_guards(tmp_path: Path) -> None:
+    calls = Calls()
+    wrong_account = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+            account_id="NOT_DUM882026",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-submit-wrong-account-blocked",
+        now=aware_now(),
+    )
+    wrong_contract = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+            contract_key="MES-202606",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-submit-wrong-contract-blocked",
+        now=aware_now(),
+    )
+
+    assert wrong_account.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST
+    assert "DUM882026" in str(wrong_account.report["primary_blocker"])
+    assert wrong_contract.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST
+    assert "MGC-202606" in str(wrong_contract.report["primary_blocker"])
+    assert calls.strategy == 0
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert wrong_account.report["paper_proof_invoked"] is False
+    assert wrong_contract.report["paper_proof_invoked"] is False
+    assert wrong_account.report["submit_attempted"] is False
+    assert wrong_contract.report["submit_attempted"] is False
+    assert wrong_account.report["live_money_readiness"] is False
+    assert wrong_contract.report["live_money_readiness"] is False
 
 
 def test_cli_dry_run_no_signal_does_not_submit(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
