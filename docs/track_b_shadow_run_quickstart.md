@@ -237,6 +237,7 @@ set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
   --live-current-quote \
   --quote-provider-mode REALTIME \
+  --use-databento-realtime-quote \
   --contract-key MGC-202606 \
   --databento-continuous-symbol MGC.v.0 \
   --dataset GLBX.MDP3 \
@@ -311,6 +312,7 @@ set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
   --live-current-quote \
   --quote-provider-mode REALTIME \
+  --use-databento-realtime-quote \
   --wait-for-current-quote \
   --max-wait-cycles 10 \
   --wait-poll-seconds 15 \
@@ -431,6 +433,13 @@ Stable producer artifacts:
 outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json
 outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_producer_report.json
 ```
+
+Use
+`outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json`
+as the `--candle-history-json` value for
+`track_b_strategy_paper_runner_cli`. The required current quote report for that
+same runner is
+`outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json`.
 
 Then normalize that input into the market-history event consumed by the feature
 builder:

@@ -382,10 +382,60 @@ proof classification, proof report path, final flat status when available,
 
 One-command no-submit review from bounded MGC history:
 
+First produce the realtime quote report and bounded MGC 1m history input. The
+history input command writes
+`outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json`,
+which is the value to pass as `--candle-history-json`:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
+  --live-current-quote \
+  --quote-provider-mode REALTIME \
+  --use-databento-realtime-quote \
+  --wait-for-current-quote \
+  --max-wait-cycles 10 \
+  --wait-poll-seconds 15 \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id track_b_phase2_current_quote \
+  --output-root outputs/track_b_execution_core/databento_candle_observer
+
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_mgc_candle_history_producer_cli \
+  --fetch-databento-history \
+  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --databento-symbol MGCM6 \
+  --dataset GLBX.MDP3 \
+  --schema ohlcv-1m \
+  --allowlisted-local-symbol MGCM6 \
+  --timeframe 1m \
+  --lookback-minutes 60 \
+  --max-candles 50 \
+  --min-candles 20 \
+  --source-id track_b_phase2_mgc_1m_history \
+  --output-root outputs/track_b_execution_core/track_b_mgc_candle_history_producer
+```
+
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --candle-history-json <BOUNDED_MGC_1M_HISTORY_JSON> \
+  --candle-history-json outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json \
   --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
@@ -405,7 +455,7 @@ operator-owned submit gates:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --candle-history-json <BOUNDED_MGC_1M_HISTORY_JSON> \
+  --candle-history-json outputs/track_b_execution_core/track_b_mgc_candle_history_producer/latest_track_b_mgc_candle_history_input.json \
   --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
