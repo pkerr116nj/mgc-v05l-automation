@@ -174,7 +174,15 @@ Dashboard implication:
   this slice (`MGC-202606`, `MGCM6`, `MGC.v.0`, `GLBX.MDP3`, `ohlcv-1m` /
   `1m`). Broader Track A-style symbols are represented as disabled planning
   entries for future research/runtime migration and are not fetched or
-  maintained by default.
+  maintained by default. Databento historical `available_end` is acceptable for
+  this maintenance boundary only: if a requested OHLCV window is ahead of
+  provider availability, the maintenance fetch may retry ending at
+  `provider_available_end`, label the result `history_provider_mode =
+  HISTORICAL_AVAILABLE_END`, and report `requested_history_end`,
+  `provider_available_end`, `history_end_used`, `available_end_lag_seconds`,
+  and `history_freshness_seconds`. Maintained bars are not realtime quote
+  evidence; strategy/paper execution still requires a separate realtime current
+  quote report.
 - `track_b_mgc_candle_history_producer` is the bounded upstream producer for
   the MGC 1m history JSON consumed by `track_b_market_history`. It can
   normalize a supplied Databento-like OHLCV history artifact, or make an

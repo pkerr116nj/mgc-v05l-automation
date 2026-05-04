@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import mgc_v05l.execution_core.track_b_data_maintenance as data_maintenance_module
+import mgc_v05l.execution_core.track_b_data_maintenance_cli as data_maintenance_cli_module
+from mgc_v05l.execution_core.databento_quote_provider import DatabentoAvailableEndError
 from mgc_v05l.execution_core.track_b_data_maintenance import (
     TrackBDataMaintenanceVerdict,
     maintain_track_b_mgc_1m_history,
@@ -54,6 +56,23 @@ def history_payload(candles: list[dict[str, object]]) -> dict[str, object]:
         "timeframe": "1m",
         "candles": candles,
     }
+
+
+class FakeAvailableEndTransport:
+    def __init__(self, *, available_end: datetime, response_bars: list[dict[str, object]]) -> None:
+        self.available_end = available_end
+        self.response_bars = response_bars
+        self.requests: list[dict[str, object]] = []
+
+    def request_records(self, **kwargs: object) -> list[dict[str, object]]:
+        self.requests.append(dict(kwargs))
+        if len(self.requests) == 1:
+            raise DatabentoAvailableEndError(
+                "requested history window is after available_end",
+                provider_available_end=self.available_end,
+                detail="data_start_after_available_end",
+            )
+        return self.response_bars
 
 
 def test_registry_loads_mgc_and_preserves_runtime_defaults() -> None:
@@ -231,6 +250,72 @@ def test_stale_or_insufficient_history_blocks(tmp_path: Path) -> None:
     assert "requires at least 3" in str(insufficient.report["primary_blocker"])
 
 
+def test_available_end_history_payload_succeeds_when_fresh_enough(tmp_path: Path) -> None:
+    result = maintain_track_b_mgc_1m_history(
+        incoming_history_payload={
+            **history_payload(
+                bars(
+                    "2026-05-04T15:28:00+00:00",
+                    "2026-05-04T15:29:00+00:00",
+                    "2026-05-04T15:30:00+00:00",
+                )
+            ),
+            "history_provider_mode": "HISTORICAL_AVAILABLE_END",
+            "requested_history_end": "2026-05-04T15:34:00+00:00",
+            "provider_available_end": "2026-05-04T15:30:00+00:00",
+            "history_end_used": "2026-05-04T15:30:00+00:00",
+            "available_end_lag_seconds": 240,
+        },
+        output_root=tmp_path / "maintenance_available_end",
+        min_bars=3,
+        export_bars=3,
+        max_history_age_seconds=300,
+        maintenance_id="maintenance-available-end",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_READY
+    assert result.report["history_provider_mode"] == "HISTORICAL_AVAILABLE_END"
+    assert result.report["requested_history_end"] == "2026-05-04T15:34:00+00:00"
+    assert result.report["provider_available_end"] == "2026-05-04T15:30:00+00:00"
+    assert result.report["history_end_used"] == "2026-05-04T15:30:00+00:00"
+    assert result.report["available_end_lag_seconds"] == 240
+    assert result.report["history_freshness_seconds"] == 0
+    assert result.report["history_ready"] is True
+    assert result.latest_good_history is not None
+    assert result.latest_good_history["history_provider_mode"] == "HISTORICAL_AVAILABLE_END"
+
+
+def test_available_end_history_too_stale_blocks(tmp_path: Path) -> None:
+    result = maintain_track_b_mgc_1m_history(
+        incoming_history_payload={
+            **history_payload(
+                bars(
+                    "2026-05-04T15:00:00+00:00",
+                    "2026-05-04T15:01:00+00:00",
+                    "2026-05-04T15:02:00+00:00",
+                )
+            ),
+            "history_provider_mode": "HISTORICAL_AVAILABLE_END",
+            "requested_history_end": "2026-05-04T15:30:00+00:00",
+            "provider_available_end": "2026-05-04T15:02:00+00:00",
+            "history_end_used": "2026-05-04T15:02:00+00:00",
+            "available_end_lag_seconds": 1680,
+        },
+        output_root=tmp_path / "maintenance_available_end_stale",
+        min_bars=3,
+        export_bars=3,
+        max_history_age_seconds=300,
+        maintenance_id="maintenance-available-end-stale",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_STALE_OR_INSUFFICIENT
+    assert result.report["history_provider_mode"] == "HISTORICAL_AVAILABLE_END"
+    assert result.report["history_ready"] is False
+    assert "stale" in str(result.report["primary_blocker"])
+
+
 def test_latest_good_history_can_feed_feature_builder_when_current_quote_is_separate(tmp_path: Path) -> None:
     result = maintain_track_b_mgc_1m_history(
         incoming_history_payload=history_payload(
@@ -383,6 +468,52 @@ def test_data_maintenance_cli_disabled_or_unknown_instrument_fails_cleanly(tmp_p
     assert "Unknown Track B data-maintenance instrument" in unknown_output["primary_blocker"]
     assert disabled_output["submit_attempted"] is False
     assert unknown_output["live_money_readiness"] is False
+
+
+def test_data_maintenance_cli_retries_at_provider_available_end_when_requested_end_lags(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    transport = FakeAvailableEndTransport(
+        available_end=datetime(2026, 5, 4, 15, 30, tzinfo=timezone.utc),
+        response_bars=bars(
+            "2026-05-04T15:28:00+00:00",
+            "2026-05-04T15:29:00+00:00",
+            "2026-05-04T15:30:00+00:00",
+        ),
+    )
+    monkeypatch.setenv("DATABENTO_API_KEY", "fake-key")
+    monkeypatch.setattr(data_maintenance_cli_module, "NativeDatabentoQuoteTransport", lambda: transport)
+
+    exit_code = data_maintenance_cli_main(
+        [
+            "--fetch-databento-history",
+            "--history-end",
+            "2026-05-04T15:34:00+00:00",
+            "--lookback-minutes",
+            "10",
+            "--min-bars",
+            "3",
+            "--export-bars",
+            "3",
+            "--max-history-age-seconds",
+            "999999",
+            "--output-root",
+            str(tmp_path / "maintenance_cli_available_end"),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert len(transport.requests) == 2
+    assert output["history_provider_mode"] == "HISTORICAL_AVAILABLE_END"
+    assert output["requested_history_end"] == "2026-05-04T15:34:00+00:00"
+    assert output["provider_available_end"] == "2026-05-04T15:30:00+00:00"
+    assert output["history_end_used"] == "2026-05-04T15:30:00+00:00"
+    assert output["available_end_lag_seconds"] == 240
+    assert output["history_ready"] is True
+    assert output["latest_good_history_path"] is not None
 
 
 def test_no_broker_or_proof_paths_are_invoked_by_data_maintenance() -> None:

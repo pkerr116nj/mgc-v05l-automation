@@ -419,6 +419,16 @@ outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_histo
 outputs/track_b_execution_core/track_b_data_maintenance/latest_track_b_data_maintenance_report.json
 ```
 
+The data-maintenance fetch may use Databento historical `available_end` safely.
+If the requested history end is later than the provider's available end, the
+CLI retries the OHLCV request ending at `provider_available_end` and labels the
+artifact `history_provider_mode=HISTORICAL_AVAILABLE_END`. The report exposes
+`requested_history_end`, `provider_available_end`, `history_end_used`,
+`available_end_lag_seconds`, and `history_freshness_seconds`. `history_ready`
+is true only when enough bars are present, gaps are acceptable, and the latest
+bar is within `--max-history-age-seconds`; these maintained bars are still not
+realtime quote evidence.
+
 On-demand historical fetch through `track_b_mgc_candle_history_producer_cli`
 remains available for diagnostics and maintenance inputs, but it is not the
 normal trade-decision path.

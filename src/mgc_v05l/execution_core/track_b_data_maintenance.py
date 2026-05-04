@@ -74,6 +74,11 @@ def maintain_track_b_mgc_1m_history(
     store_json = actual_output_root / "store" / "mgc_1m_history.json"
     latest_good_history_json = actual_output_root / "latest_good_mgc_1m_history.json"
     actual_source_id = source_id or _source_id(incoming_history_payload) or "track_b_data_maintenance"
+    history_provider_mode = _history_provider_mode(incoming_history_payload)
+    requested_history_end = _optional_timestamp_from_payload(incoming_history_payload, "requested_history_end")
+    provider_available_end = _optional_timestamp_from_payload(incoming_history_payload, "provider_available_end")
+    history_end_used = _optional_timestamp_from_payload(incoming_history_payload, "history_end_used")
+    available_end_lag_seconds = _optional_int_from_payload(incoming_history_payload, "available_end_lag_seconds")
 
     try:
         if max_bars <= 0:
@@ -117,6 +122,11 @@ def maintain_track_b_mgc_1m_history(
                 duplicate_count=0,
                 gap_count=0,
                 history_freshness_seconds=None,
+                requested_history_end=requested_history_end,
+                provider_available_end=provider_available_end,
+                history_end_used=history_end_used,
+                available_end_lag_seconds=available_end_lag_seconds,
+                history_provider_mode=history_provider_mode,
                 latest_good_history=None,
                 primary_blocker=input_blocker,
                 required_next_action="Fix the incoming MGC 1m history input before updating Track B data maintenance.",
@@ -152,6 +162,11 @@ def maintain_track_b_mgc_1m_history(
             gap_count=gap_count,
             duplicate_count=duplicate_count,
             history_freshness_seconds=history_freshness_seconds,
+            requested_history_end=requested_history_end,
+            provider_available_end=provider_available_end,
+            history_end_used=history_end_used,
+            available_end_lag_seconds=available_end_lag_seconds,
+            history_provider_mode=history_provider_mode,
             history_ready=blocker is None,
             primary_blocker=blocker,
         )
@@ -184,11 +199,16 @@ def maintain_track_b_mgc_1m_history(
             duplicate_count=duplicate_count,
             gap_count=gap_count,
             history_freshness_seconds=history_freshness_seconds,
+            requested_history_end=requested_history_end,
+            provider_available_end=provider_available_end,
+            history_end_used=history_end_used,
+            available_end_lag_seconds=available_end_lag_seconds,
+            history_provider_mode=history_provider_mode,
             latest_good_history=latest_good_history,
             primary_blocker=blocker,
-            required_next_action="Run the Track B feature builder with the latest-good maintained history and a separate realtime quote report."
+            required_next_action="Latest-good maintained history is ready; run the Track B feature builder with separate realtime quote evidence."
             if blocker is None
-            else "Update maintained MGC 1m history before evaluating Track B strategy rules.",
+            else "Wait and rerun Track B data maintenance, or widen the diagnostic-only history age threshold before evaluating strategy rules.",
         )
     except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
         return _write_result(
@@ -218,6 +238,11 @@ def maintain_track_b_mgc_1m_history(
             duplicate_count=0,
             gap_count=0,
             history_freshness_seconds=None,
+            requested_history_end=requested_history_end,
+            provider_available_end=provider_available_end,
+            history_end_used=history_end_used,
+            available_end_lag_seconds=available_end_lag_seconds,
+            history_provider_mode=history_provider_mode,
             latest_good_history=None,
             primary_blocker=str(exc),
             required_next_action="Fix Track B data maintenance input schema before retrying.",
@@ -239,6 +264,11 @@ def write_data_maintenance_provider_error(
     timeframe: str = "1m",
     source_id: str | None = None,
     maintenance_id: str | None = None,
+    requested_history_end: datetime | None = None,
+    provider_available_end: datetime | None = None,
+    history_end_used: datetime | None = None,
+    available_end_lag_seconds: int | None = None,
+    history_provider_mode: str | None = None,
     now: datetime | None = None,
 ) -> TrackBDataMaintenanceResult:
     actual_now = now or datetime.now(UTC)
@@ -276,6 +306,11 @@ def write_data_maintenance_provider_error(
         duplicate_count=0,
         gap_count=0,
         history_freshness_seconds=None,
+        requested_history_end=requested_history_end,
+        provider_available_end=provider_available_end,
+        history_end_used=history_end_used,
+        available_end_lag_seconds=available_end_lag_seconds,
+        history_provider_mode=history_provider_mode or "NOT_PROVIDED",
         latest_good_history=None,
         primary_blocker=primary_blocker,
         required_next_action=required_next_action,
@@ -297,6 +332,30 @@ def _raw_bars(payload: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> Seque
         if not isinstance(item, Mapping):
             raise ValueError(f"bars[{index}] must be an object.")
     return raw
+
+
+def _history_provider_mode(payload: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> str:
+    if isinstance(payload, Mapping):
+        return _optional_text(payload.get("history_provider_mode")) or "DATABENTO_MAINTAINED_LOCAL_1M"
+    return "DATABENTO_MAINTAINED_LOCAL_1M"
+
+
+def _optional_timestamp_from_payload(payload: Mapping[str, Any] | Sequence[Mapping[str, Any]], key: str) -> datetime | None:
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get(key)
+    if value in {None, ""}:
+        return None
+    return _parse_timestamp(str(value))
+
+
+def _optional_int_from_payload(payload: Mapping[str, Any] | Sequence[Mapping[str, Any]], key: str) -> int | None:
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get(key)
+    if value in {None, ""}:
+        return None
+    return int(value)
 
 
 def _normalize_bar(item: Mapping[str, Any], *, index: int) -> dict[str, Any]:
@@ -404,6 +463,11 @@ def _history_export(
     gap_count: int,
     duplicate_count: int,
     history_freshness_seconds: int | None,
+    requested_history_end: datetime | None,
+    provider_available_end: datetime | None,
+    history_end_used: datetime | None,
+    available_end_lag_seconds: int | None,
+    history_provider_mode: str,
     history_ready: bool,
     primary_blocker: str | None,
 ) -> dict[str, Any]:
@@ -434,8 +498,12 @@ def _history_export(
         "volume": latest.get("volume"),
         "candles": list(candles),
         "candle_history": list(candles),
-        "history_provider_mode": "DATABENTO_MAINTAINED_LOCAL_1M",
+        "history_provider_mode": history_provider_mode,
         "source_provider": "DATABENTO",
+        "requested_history_end": None if requested_history_end is None else requested_history_end.isoformat(),
+        "provider_available_end": None if provider_available_end is None else provider_available_end.isoformat(),
+        "history_end_used": None if history_end_used is None else history_end_used.isoformat(),
+        "available_end_lag_seconds": available_end_lag_seconds,
         "history_ready": history_ready,
         "history_freshness_seconds": history_freshness_seconds,
         "gap_count": gap_count,
@@ -446,7 +514,7 @@ def _history_export(
             "track_b_data_maintenance_id": maintenance_id,
             "market_data_role": "MAINTAINED_HISTORY_ONLY",
             "source_provider": "DATABENTO",
-            "history_provider_mode": "DATABENTO_MAINTAINED_LOCAL_1M",
+            "history_provider_mode": history_provider_mode,
             "source_payload_path": None if source_payload_path is None else str(source_payload_path),
             "realtime_current_quote_is_separate": True,
             "databento_is_execution_authority": False,
@@ -486,6 +554,11 @@ def _write_result(
     duplicate_count: int,
     gap_count: int,
     history_freshness_seconds: int | None,
+    requested_history_end: datetime | None,
+    provider_available_end: datetime | None,
+    history_end_used: datetime | None,
+    available_end_lag_seconds: int | None,
+    history_provider_mode: str,
     latest_good_history: dict[str, Any] | None,
     primary_blocker: str | None,
     required_next_action: str,
@@ -512,6 +585,11 @@ def _write_result(
         "export_bars": export_bars,
         "min_bars": min_bars,
         "max_history_age_seconds": max_history_age_seconds,
+        "requested_history_end": None if requested_history_end is None else requested_history_end.isoformat(),
+        "provider_available_end": None if provider_available_end is None else provider_available_end.isoformat(),
+        "history_end_used": None if history_end_used is None else history_end_used.isoformat(),
+        "available_end_lag_seconds": available_end_lag_seconds,
+        "history_provider_mode": history_provider_mode,
         "bars_available": len(export_candles),
         "store_bars_available": len(store_candles),
         "first_bar_timestamp": first_bar_timestamp,

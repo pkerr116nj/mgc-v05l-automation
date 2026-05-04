@@ -299,6 +299,13 @@ append/update, duplicate handling, monotonic timestamp ordering, gap detection,
 and latest-good bounded history export. The strategy path should consume
 `latest_good_mgc_1m_history.json` plus separate realtime current quote evidence
 rather than fetching Databento historical bars during the trade decision.
+Historical `available_end` can be used by data maintenance without becoming
+realtime evidence: if Databento has not published bars through the requested
+history end, the maintenance CLI may retry ending at `provider_available_end`
+and mark the report `history_provider_mode=HISTORICAL_AVAILABLE_END`.
+`history_ready=true` still requires enough bars, acceptable gaps, and
+`history_freshness_seconds <= --max-history-age-seconds`. Paper execution
+continues to require a separate realtime current quote report.
 
 `track_b_mgc_candle_history_producer` remains available for diagnostics and
 maintenance inputs. On-demand historical fetch is not the normal trade-decision

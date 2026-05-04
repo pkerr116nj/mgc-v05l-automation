@@ -8,8 +8,9 @@ import os
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
+from .databento_quote_provider import DatabentoAvailableEndError
 from .databento_quote_provider import NativeDatabentoQuoteTransport
 from .track_b_data_maintenance import (
     DEFAULT_TRACK_B_DATA_MAINTENANCE_OUTPUT_ROOT,
@@ -104,38 +105,61 @@ def main(argv: Sequence[str] | None = None) -> int:
             start = _parse_time(args.history_start) if args.history_start else end - timedelta(minutes=max(int(args.lookback_minutes), 1))
             symbol = args.databento_symbol or args.databento_continuous_symbol
             stype_in = "raw_symbol" if args.databento_symbol else args.stype_in
-            records = fetch_databento_ohlcv_1m_records(
-                transport=NativeDatabentoQuoteTransport(),
-                api_key=raw_api_key,
-                dataset=args.dataset,
-                symbol=symbol,
-                stype_in=stype_in,
-                schema=args.schema,
-                start=start,
-                end=end,
-                max_candles=args.export_bars,
-                base_url=args.base_url,
+            transport = NativeDatabentoQuoteTransport()
+            requested_history_end = end
+            history_end_used = end
+            provider_available_end = None
+            available_end_lag_seconds = None
+            history_provider_mode = "DATABENTO_DATA_MAINTENANCE_FETCH"
+            try:
+                records = fetch_databento_ohlcv_1m_records(
+                    transport=transport,
+                    api_key=raw_api_key,
+                    dataset=args.dataset,
+                    symbol=symbol,
+                    stype_in=stype_in,
+                    schema=args.schema,
+                    start=start,
+                    end=end,
+                    max_candles=args.export_bars,
+                    base_url=args.base_url,
+                )
+            except DatabentoAvailableEndError as exc:
+                if exc.provider_available_end is None:
+                    raise
+                provider_available_end = exc.provider_available_end.astimezone(UTC)
+                if provider_available_end <= start:
+                    raise
+                history_end_used = provider_available_end
+                available_end_lag_seconds = max(int((requested_history_end.astimezone(UTC) - provider_available_end).total_seconds()), 0)
+                history_provider_mode = "HISTORICAL_AVAILABLE_END"
+                fallback_start = history_end_used - timedelta(minutes=max(int(args.lookback_minutes), 1))
+                records = fetch_databento_ohlcv_1m_records(
+                    transport=transport,
+                    api_key=raw_api_key,
+                    dataset=args.dataset,
+                    symbol=symbol,
+                    stype_in=stype_in,
+                    schema=args.schema,
+                    start=fallback_start,
+                    end=history_end_used,
+                    max_candles=args.export_bars,
+                    base_url=args.base_url,
+                )
+            history_payload: dict[str, object] = _history_payload_from_records(
+                records=records,
+                args=args,
+                requested_history_end=requested_history_end,
+                provider_available_end=provider_available_end,
+                history_end_used=history_end_used,
+                available_end_lag_seconds=available_end_lag_seconds,
+                history_provider_mode=history_provider_mode,
             )
-            history_payload: dict[str, object] = {
-                "schema_version": "track_b_databento_ohlcv_history_raw_v1",
-                "source_id": args.source_id or "track_b_data_maintenance_databento_fetch",
-                "account_id": args.expected_account_id,
-                "contract_key": args.contract_key,
-                "instrument_family": "MGC",
-                "strategy_id": args.strategy_id,
-                "lane_id": args.lane_id,
-                "dataset": args.dataset,
-                "databento_continuous_symbol": args.databento_continuous_symbol,
-                "symbol": args.allowlisted_local_symbol,
-                "timeframe": args.timeframe,
-                "history_provider_mode": "DATABENTO_DATA_MAINTENANCE_FETCH",
-                "candles": list(records),
-            }
             source_payload_path = None
         except Exception as exc:  # noqa: BLE001 - provider failures become explicit maintenance artifacts.
             result = write_data_maintenance_provider_error(
                 primary_blocker=provider_error_message(exc),
-                required_next_action="Retry with a bounded history window, valid Databento entitlement, or provide --history-json.",
+                required_next_action="Retry after Databento historical available_end advances, use a bounded earlier history window, or provide --history-json.",
                 output_root=args.output_root,
                 expected_account_id=args.expected_account_id,
                 strategy_id=args.strategy_id,
@@ -146,6 +170,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dataset=args.dataset,
                 timeframe=args.timeframe,
                 source_id=args.source_id,
+                requested_history_end=end if "end" in locals() else None,
+                provider_available_end=getattr(exc, "provider_available_end", None),
+                history_end_used=None,
+                available_end_lag_seconds=None,
+                history_provider_mode="HISTORICAL_AVAILABLE_END"
+                if isinstance(exc, DatabentoAvailableEndError)
+                else "DATABENTO_DATA_MAINTENANCE_FETCH",
             )
             _print_result(result)
             return 2
@@ -172,6 +203,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     _print_result(result)
     return 0 if result.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_READY else 2
+
+
+def _history_payload_from_records(
+    *,
+    records: Sequence[Mapping[str, object]],
+    args: argparse.Namespace,
+    requested_history_end: datetime,
+    provider_available_end: datetime | None,
+    history_end_used: datetime,
+    available_end_lag_seconds: int | None,
+    history_provider_mode: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": "track_b_databento_ohlcv_history_raw_v1",
+        "source_id": args.source_id or "track_b_data_maintenance_databento_fetch",
+        "account_id": args.expected_account_id,
+        "contract_key": args.contract_key,
+        "instrument_family": "MGC",
+        "strategy_id": args.strategy_id,
+        "lane_id": args.lane_id,
+        "dataset": args.dataset,
+        "databento_continuous_symbol": args.databento_continuous_symbol,
+        "symbol": args.allowlisted_local_symbol,
+        "timeframe": args.timeframe,
+        "history_provider_mode": history_provider_mode,
+        "requested_history_end": requested_history_end.astimezone(UTC).isoformat(),
+        "provider_available_end": None if provider_available_end is None else provider_available_end.astimezone(UTC).isoformat(),
+        "history_end_used": history_end_used.astimezone(UTC).isoformat(),
+        "available_end_lag_seconds": available_end_lag_seconds,
+        "candles": list(records),
+    }
 
 
 def _apply_registry_defaults(args: argparse.Namespace) -> str | None:
@@ -209,6 +271,11 @@ def _print_result(result) -> None:  # type: ignore[no-untyped-def]
                 "gap_count": result.report["gap_count"],
                 "duplicate_count": result.report["duplicate_count"],
                 "latest_good_history_path": result.report["latest_good_history_path"],
+                "requested_history_end": result.report["requested_history_end"],
+                "provider_available_end": result.report["provider_available_end"],
+                "history_end_used": result.report["history_end_used"],
+                "available_end_lag_seconds": result.report["available_end_lag_seconds"],
+                "history_provider_mode": result.report["history_provider_mode"],
                 "history_freshness_seconds": result.report["history_freshness_seconds"],
                 "history_ready": result.report["history_ready"],
                 "submit_allowed": result.report["submit_allowed"],
