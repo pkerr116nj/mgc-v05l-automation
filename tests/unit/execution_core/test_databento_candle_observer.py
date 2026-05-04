@@ -124,6 +124,9 @@ def test_valid_databento_quote_writes_candle_event_and_latest_report(tmp_path: P
     assert result.report["observer_mode"] == "one_shot"
     assert result.report["observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert result.report["output_candle_event_path"] == str(result.candle_event_json)
+    assert result.report["source_schema_version"] == "track_b_databento_current_quote_v1"
+    assert result.report["source_report_path"] == "outputs/track_b_execution_core/quotes/example_quote_report.json"
+    assert result.report["current_quote_report_json"] == "outputs/track_b_execution_core/quotes/example_quote_report.json"
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False

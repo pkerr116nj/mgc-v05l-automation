@@ -342,6 +342,13 @@ def _write_report(
     market_data_payload: Mapping[str, Any] | None = None,
 ) -> DatabentoCandleObserverResult:
     market_data_payload = market_data_payload or {}
+    source_schema_version = market_data_payload.get("schema_version")
+    source_report_path = market_data_payload.get("report_json_path")
+    current_quote_report_json = (
+        source_report_path
+        if str(source_schema_version or "").strip() == "track_b_databento_current_quote_v1"
+        else market_data_payload.get("current_quote_report_json")
+    )
     if candle_event is not None:
         event_json.parent.mkdir(parents=True, exist_ok=True)
         event_payload = json.dumps(to_jsonable(candle_event), indent=2, sort_keys=True)
@@ -374,6 +381,9 @@ def _write_report(
         "provider_available_end": market_data_payload.get("provider_available_end"),
         "provider_available_end_final": market_data_payload.get("provider_available_end_final"),
         "available_end_fallback_used": market_data_payload.get("available_end_fallback_used"),
+        "source_schema_version": source_schema_version,
+        "source_report_path": source_report_path,
+        "current_quote_report_json": current_quote_report_json,
         "open": None if candle_event is None else candle_event.get("open"),
         "high": None if candle_event is None else candle_event.get("high"),
         "low": None if candle_event is None else candle_event.get("low"),

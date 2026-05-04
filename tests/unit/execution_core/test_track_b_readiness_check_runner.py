@@ -226,6 +226,95 @@ def test_all_clean_path_produces_readiness_check_runner_report(tmp_path: Path) -
     assert json.loads(latest.read_text(encoding="utf-8"))["track_b_readiness_check_runner_id"] == "runner-clean"
 
 
+def test_observer_metadata_quote_report_path_produces_readiness_summary(tmp_path: Path) -> None:
+    seen_quote_paths: list[Path] = []
+
+    def observer_style_quote_stage(config: TrackBReadinessCheckRunnerConfig) -> StageResult:
+        quote_payload: dict[str, object] = {
+            "schema_version": "track_b_databento_current_quote_v1",
+            "classification": "CURRENT_QUOTE_AVAILABLE",
+            "quote_status": "CURRENT_QUOTE_AVAILABLE",
+            "current_quote_available": True,
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        }
+        quote_report = write_json(tmp_path / "nested_current_quote_report.json", quote_payload)
+        payload: dict[str, object] = {
+            "observer_verdict": "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
+            "current_quote_available": True,
+            "wait_succeeded": True,
+            "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_AVAILABLE_END_WITHIN_TOLERANCE",
+            "quote_candle_source_metadata": {
+                "source_schema_version": "track_b_databento_current_quote_v1",
+                "source_report_path": str(quote_report),
+            },
+            "primary_blocker": None,
+            "required_next_action": "Run explicit downstream no-submit steps if needed.",
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        }
+        observer_report = write_json(config.databento_observer_output_root / "latest_databento_candle_observer_report.json", payload)
+        payload["report_json_path"] = str(observer_report)
+        return StageResult(name="databento_quote", exit_code=0, report_json=observer_report, payload=payload)
+
+    def readiness_asserts_quote_path(
+        _config: TrackBReadinessCheckRunnerConfig,
+        _recovery_json: Path,
+        _preflight_json: Path,
+        quote_json: Path,
+    ) -> StageResult:
+        seen_quote_paths.append(quote_json)
+        return readiness_stage(tmp_path)(_config, _recovery_json, _preflight_json, quote_json)
+
+    result = run_track_b_readiness_check(
+        config=config(tmp_path),
+        stages=stages(tmp_path, quote=observer_style_quote_stage, readiness=readiness_asserts_quote_path),
+        runner_id="runner-observer-metadata-quote",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBReadinessCheckRunnerVerdict.READY_FOR_PAPER_PROOF_REVIEW
+    assert seen_quote_paths == [tmp_path / "nested_current_quote_report.json"]
+    assert result.report["artifact_paths"]["current_quote_report_json"] == str(tmp_path / "nested_current_quote_report.json")
+    assert result.report["artifact_paths"]["readiness_summary_json"] is not None
+
+
+def test_missing_quote_report_path_still_blocks_explicitly(tmp_path: Path) -> None:
+    def readiness_should_not_run(
+        _config: TrackBReadinessCheckRunnerConfig,
+        _recovery_json: Path,
+        _preflight_json: Path,
+        _quote_json: Path,
+    ) -> StageResult:
+        raise AssertionError("readiness summary should not run without a current quote report path")
+
+    result = run_track_b_readiness_check(
+        config=config(tmp_path),
+        stages=stages(
+            tmp_path,
+            quote=quote_stage(
+                tmp_path,
+                source_report_path=None,
+                current_quote_report_json=None,
+                quote_report_json=None,
+            ),
+            readiness=readiness_should_not_run,
+        ),
+        runner_id="runner-missing-quote-path",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBReadinessCheckRunnerVerdict.BLOCKED_STAGE_ERROR
+    assert result.report["primary_blocker"] == "A required report path was not produced by recovery, preflight, or quote stages."
+    assert result.report["artifact_paths"]["current_quote_report_json"] is None
+    assert result.report["artifact_paths"]["readiness_summary_json"] is None
+    assert result.report["readiness_verdict"] == "NOT_PROVIDED"
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
 def test_recovery_blocked_stops_safely(tmp_path: Path) -> None:
     def preflight_should_not_run(_config: TrackBReadinessCheckRunnerConfig) -> StageResult:
         raise AssertionError("preflight should not run after recovery blocks")

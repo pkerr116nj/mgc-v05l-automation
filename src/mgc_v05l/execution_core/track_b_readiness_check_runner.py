@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .databento_candle_observer_cli import main as databento_candle_observer_cli_main
 from .models import to_jsonable
@@ -574,14 +574,28 @@ def _preflight_verdict(payload: dict[str, object]) -> str:
 
 
 def _current_quote_report_path(result: StageResult) -> Path | None:
-    for key in ("source_report_path", "quote_report_json", "current_quote_report_json"):
-        value = result.payload.get(key)
-        if value:
-            return Path(str(value))
+    for key in ("current_quote_report_json", "source_report_path", "quote_report_json"):
+        path = _payload_path(result.payload.get(key))
+        if path is not None:
+            return path
+    source_metadata = result.payload.get("quote_candle_source_metadata")
+    if isinstance(source_metadata, Mapping):
+        for key in ("source_report_path", "current_quote_report_json", "quote_report_json"):
+            path = _payload_path(source_metadata.get(key))
+            if path is not None:
+                return path
     diagnostics_path = result.payload.get("report_json_path")
-    if diagnostics_path and str(result.payload.get("schema_version")) == "track_b_databento_current_quote_v1":
-        return Path(str(diagnostics_path))
+    if str(result.payload.get("schema_version")) == "track_b_databento_current_quote_v1":
+        return _payload_path(diagnostics_path)
     return None
+
+
+def _payload_path(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    path = Path(text)
+    return path if path.exists() else None
 
 
 def _primary_blocker(payload: dict[str, object], fallback: str) -> str:
