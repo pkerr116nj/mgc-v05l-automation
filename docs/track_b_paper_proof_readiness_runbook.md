@@ -267,6 +267,7 @@ Current Phase 2 chain:
 
 ```text
 Databento realtime quote/event
+-> track_b_feature_builder
 -> track_b_strategy_rule_runner
 -> strategy_signal_adapter
 -> candle_signal_producer
@@ -289,6 +290,16 @@ metadata. It emits LONG only when:
   defaulting to zero;
 - `--rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG --emit-signal` is explicitly
   supplied.
+
+`track_b_feature_builder` is the Track B-native producer for those fields. It
+accepts explicit MGC candle/quote history and writes
+`latest_track_b_feature_event.json` plus
+`latest_track_b_feature_builder_report.json`. If fewer than the required
+history candles are present, it reports
+`TRACK_B_FEATURE_BUILDER_BLOCKED_INSUFFICIENT_FEATURE_HISTORY`. If evidence is
+historical, stale, or not explicitly realtime/current, it reports a blocked
+diagnostic state. It does not emit signals, call paper proof, connect to broker
+paths, or infer execution authority.
 
 Without `--emit-signal`, the runner writes HUMAN_REVIEW / NO_SIGNAL artifacts
 and no listener inbox work. Historical/fallback Databento evidence remains

@@ -365,6 +365,7 @@ signal batch only when rule emission is explicit:
 
 ```text
 Databento realtime quote/event
+-> track_b_feature_builder
 -> track_b_strategy_rule_runner
 -> strategy_signal_adapter
 -> candle_signal_producer
@@ -372,13 +373,34 @@ Databento realtime quote/event
 -> shadow_listener / operator_status / Track B Status UI
 ```
 
+The feature builder is the upstream no-submit artifact producer for
+`mgc_ema_momentum_reclaim_long_v1`. It takes explicit MGC candle/quote history,
+requires current realtime Databento evidence, and writes the EMA/VWAP momentum
+fields consumed by the rule. If history is insufficient or evidence is stale,
+it blocks explicitly and does not fake a signal-ready event:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_feature_builder_cli \
+  --source-event-json <MGC_CANDLE_HISTORY_OR_EVENT_JSON> \
+  --expected-account-id DUM882026 \
+  --rule-id mgc_ema_momentum_reclaim_long_v1 \
+  --output-root outputs/track_b_execution_core/track_b_feature_builder
+```
+
+Stable feature builder artifacts:
+
+```text
+outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json
+outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_builder_report.json
+```
+
 Default behavior is review/no-signal. This command evaluates the latest
-realtime Databento event with the current default rule but does not emit
+feature event with the current default rule but does not emit
 listener inbox work:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
-  --input-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --input-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --source-id track_b_phase2_rule_review \
@@ -396,7 +418,7 @@ directly, or submit:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
-  --input-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --input-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --source-id track_b_phase2_rule_demo \
@@ -467,7 +489,7 @@ are present:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --input-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --input-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \
@@ -485,7 +507,7 @@ PAPER submit requires all explicit gates. Prices and quantity are not inferred:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
   --mode PAPER \
-  --input-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --input-event-json outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \

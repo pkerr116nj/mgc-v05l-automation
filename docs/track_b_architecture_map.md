@@ -157,6 +157,16 @@ Dashboard implication:
   flows, create order plans, or submit. It updates
   `outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json`
   as a read-model convenience.
+- `track_b_feature_builder` is the no-submit feature/event producer for the
+  first real Track B MGC rule. It consumes explicit MGC quote/candle history,
+  requires current realtime Databento evidence, and writes an enriched feature
+  event containing the EMA/VWAP momentum fields used by
+  `mgc_ema_momentum_reclaim_long_v1`. If history is insufficient or evidence
+  is non-realtime/stale, it writes a blocked report instead of fake features or
+  signals. It updates
+  `outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_event.json`
+  and
+  `outputs/track_b_execution_core/track_b_feature_builder/latest_track_b_feature_builder_report.json`.
 - `track_b_strategy_rule_runner` is the first Track B Phase 2 strategy-rule
   runner. The current default rule is
   `mgc_ema_momentum_reclaim_long_v1`, a narrow MGC-only LONG rule that consumes
