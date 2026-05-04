@@ -292,6 +292,9 @@ def readiness_check_runner_report(tmp_path: Path, **overrides: object) -> Path:
         "preflight_verdict": "READY_READ_ONLY",
         "databento_observer_verdict": "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
         "current_quote_available": True,
+        "quote_provider_mode": "REALTIME",
+        "realtime_quote_received": True,
+        "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
         "wait_succeeded": True,
         "readiness_verdict": "READY_FOR_PAPER_PROOF",
         "required_next_action": "paper_proof_cli remains a separate explicit operator decision and was not called.",
@@ -550,21 +553,34 @@ def test_readiness_check_runner_report_is_summarized(tmp_path: Path) -> None:
         now=aware_now(),
     )
 
+    assert result.verdict == OperatorStatusVerdict.READY_FOR_PAPER_PROOF_REVIEW
+    assert result.report["status_verdict"] == "OPERATOR_STATUS_READY_FOR_PAPER_PROOF_REVIEW"
     assert result.report["readiness_check_runner_verdict"] == "TRACK_B_READINESS_CHECK_READY_FOR_PAPER_PROOF_REVIEW"
     assert result.report["readiness_check_runner_recovery_verdict"] == "RECOVERY_READY_CLEAN"
     assert result.report["readiness_check_runner_preflight_verdict"] == "READY_READ_ONLY"
     assert result.report["readiness_check_runner_databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert result.report["readiness_check_runner_current_quote_available"] is True
+    assert result.report["readiness_check_runner_quote_provider_mode"] == "REALTIME"
+    assert result.report["readiness_check_runner_realtime_quote_received"] is True
+    assert result.report["readiness_check_runner_quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE"
     assert result.report["readiness_check_runner_wait_succeeded"] is True
     assert result.report["readiness_check_runner_readiness_verdict"] == "READY_FOR_PAPER_PROOF"
     assert result.report["readiness_check_runner_required_next_action"].startswith("paper_proof_cli remains")
     assert result.report["readiness_check_runner_latest_report_path"].endswith("latest_track_b_readiness_check_runner_report.json")
     assert result.report["readiness_check_runner_submit_allowed"] is False
     assert result.report["readiness_check_runner_submit_attempted"] is False
+    assert result.report["readiness_check_runner_paper_proof_cli_called"] is False
     assert result.report["readiness_check_runner_live_money_readiness"] is False
     assert result.report["latest_output_paths"]["track_b_readiness_check_runner"] == "track_b_readiness_check_runner_report.json"
     assert "track_b_readiness_check_runner" not in result.report["reports_missing"]
+    assert "listener_health" in result.report["reports_missing"]
+    assert result.report["primary_blocker"] is None
+    assert result.report["required_next_action"].startswith("paper_proof_cli remains")
+    assert result.report["submit_attempted"] is False
+    assert result.report["paper_proof_cli_called"] is False
+    assert result.report["live_money_readiness"] is False
     latest = json.loads((tmp_path / "operator_status" / "latest_operator_status_summary.json").read_text(encoding="utf-8"))
+    assert latest["status_verdict"] == "OPERATOR_STATUS_READY_FOR_PAPER_PROOF_REVIEW"
     assert latest["readiness_check_runner_verdict"] == "TRACK_B_READINESS_CHECK_READY_FOR_PAPER_PROOF_REVIEW"
 
 
@@ -591,6 +607,26 @@ def test_blocked_readiness_check_runner_degrades_operator_status(tmp_path: Path)
     assert result.report["primary_blocker"] == "Current quote unavailable after bounded wait."
     assert result.report["required_next_action"] == "Wait for a current quote before paper proof review."
     assert result.report["submit_allowed"] is False
+
+
+def test_missing_readiness_check_runner_report_remains_explicit(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_health_json=listener_health(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-missing-readiness-check-runner",
+        now=aware_now(),
+    )
+
+    assert result.report["status_verdict"] == "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW"
+    assert result.report["readiness_check_runner_verdict"] == "NOT_PROVIDED"
+    assert result.report["readiness_check_runner_current_quote_available"] == "NOT_PROVIDED"
+    assert result.report["readiness_check_runner_realtime_quote_received"] == "NOT_PROVIDED"
+    assert "track_b_readiness_check_runner" in result.report["reports_missing"]
+    assert result.report["reports_considered"]["track_b_readiness_check_runner"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["paper_proof_cli_called"] is False
 
 
 def test_missing_databento_observer_reports_are_explicit(tmp_path: Path) -> None:

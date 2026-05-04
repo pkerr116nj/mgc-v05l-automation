@@ -24,6 +24,7 @@ NOT_PROVIDED = "NOT_PROVIDED"
 
 class OperatorStatusVerdict(str, Enum):
     OK_FOR_SHADOW_REVIEW = "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW"
+    READY_FOR_PAPER_PROOF_REVIEW = "OPERATOR_STATUS_READY_FOR_PAPER_PROOF_REVIEW"
     DEGRADED_SHADOW_FAILURES = "OPERATOR_STATUS_DEGRADED_SHADOW_FAILURES"
     BLOCKED_READINESS = "OPERATOR_STATUS_BLOCKED_READINESS"
     BLOCKED_BROKER_STATE = "OPERATOR_STATUS_BLOCKED_BROKER_STATE"
@@ -168,6 +169,15 @@ def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[Operator
             str(track_b_readiness_check_runner.get("primary_blocker") or f"Readiness check runner is blocked: {readiness_check_verdict}"),
             str(track_b_readiness_check_runner.get("required_next_action") or "Resolve readiness check runner blocker before paper proof review."),
         )
+    if _readiness_check_runner_ready_for_paper_proof_review(track_b_readiness_check_runner):
+        return (
+            OperatorStatusVerdict.READY_FOR_PAPER_PROOF_REVIEW,
+            None,
+            str(
+                track_b_readiness_check_runner.get("required_next_action")
+                or "paper_proof_cli remains a separate explicit operator decision and was not called."
+            ),
+        )
 
     health_verdict = str(listener_health.get("health_verdict") or listener_heartbeat.get("last_health_verdict") or "")
     if health_verdict == "SHADOW_LISTENER_HEALTH_DEGRADED_FAILURES":
@@ -291,6 +301,11 @@ def _report(
         "readiness_check_runner_current_quote_available": (
             track_b_readiness_check_runner.get("current_quote_available") if track_b_readiness_check_runner else NOT_PROVIDED
         ),
+        "readiness_check_runner_quote_provider_mode": track_b_readiness_check_runner.get("quote_provider_mode") or NOT_PROVIDED,
+        "readiness_check_runner_realtime_quote_received": (
+            track_b_readiness_check_runner.get("realtime_quote_received") if track_b_readiness_check_runner else NOT_PROVIDED
+        ),
+        "readiness_check_runner_quote_freshness_verdict": track_b_readiness_check_runner.get("quote_freshness_verdict") or NOT_PROVIDED,
         "readiness_check_runner_wait_succeeded": (
             track_b_readiness_check_runner.get("wait_succeeded") if track_b_readiness_check_runner else NOT_PROVIDED
         ),
@@ -299,6 +314,9 @@ def _report(
         "readiness_check_runner_latest_report_path": track_b_readiness_check_runner.get("latest_report_json_path") or NOT_PROVIDED,
         "readiness_check_runner_submit_allowed": track_b_readiness_check_runner.get("submit_allowed") if track_b_readiness_check_runner else NOT_PROVIDED,
         "readiness_check_runner_submit_attempted": track_b_readiness_check_runner.get("submit_attempted") if track_b_readiness_check_runner else NOT_PROVIDED,
+        "readiness_check_runner_paper_proof_cli_called": (
+            track_b_readiness_check_runner.get("paper_proof_cli_called") if track_b_readiness_check_runner else NOT_PROVIDED
+        ),
         "readiness_check_runner_live_money_readiness": (
             track_b_readiness_check_runner.get("live_money_readiness") if track_b_readiness_check_runner else NOT_PROVIDED
         ),
@@ -382,6 +400,23 @@ def _secondary_blockers(reports: Mapping[str, Mapping[str, Any] | None], missing
 
 def _recovery_verdict(report: Mapping[str, Any]) -> str:
     return str(report.get("final_readiness_verdict") or report.get("classification") or "")
+
+
+def _readiness_check_runner_ready_for_paper_proof_review(report: Mapping[str, Any]) -> bool:
+    if not report:
+        return False
+    return (
+        report.get("runner_verdict") == "TRACK_B_READINESS_CHECK_READY_FOR_PAPER_PROOF_REVIEW"
+        and report.get("recovery_verdict") == "RECOVERY_READY_CLEAN"
+        and report.get("preflight_verdict") == "READY_READ_ONLY"
+        and report.get("quote_provider_mode") == "REALTIME"
+        and report.get("realtime_quote_received") is True
+        and report.get("current_quote_available") is True
+        and report.get("readiness_verdict") == "READY_FOR_PAPER_PROOF"
+        and report.get("submit_attempted") is False
+        and report.get("paper_proof_cli_called") is False
+        and report.get("live_money_readiness") is False
+    )
 
 
 def _all_missing(reports: Mapping[str, Mapping[str, Any] | None]) -> bool:

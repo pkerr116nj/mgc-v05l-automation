@@ -192,7 +192,12 @@ Dashboard implication:
   `outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json`
   as the stable latest read-model artifact. It can summarize the Databento
   candle observer report/heartbeat so the UI can display market-data observer
-  state without reading Databento artifacts directly.
+  state without reading Databento artifacts directly. A clean
+  `track_b_readiness_check_runner` report may produce
+  `OPERATOR_STATUS_READY_FOR_PAPER_PROOF_REVIEW`, which means recovery,
+  preflight, realtime quote, and readiness-summary evidence are clean enough for
+  operator review only. It still does not call `paper_proof_cli` or authorize
+  submit.
 - `attrition_report` explains where candidates dropped out across supplied
   no-submit summaries. It is explanatory only and treats missing stages as
   explicit `NOT_PROVIDED` inputs instead of silently reporting zero.

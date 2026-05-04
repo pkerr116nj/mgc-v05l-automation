@@ -491,7 +491,11 @@ track_b_readiness_check_runner
 It answers whether the current artifacts are clean enough to consider a
 separate paper proof decision. It does not run `paper_proof_cli`, submit,
 cancel, place orders, create order plans, or mutate broker state. A clean
-runner verdict is not automatic submit authority.
+runner verdict is not automatic submit authority. When only the readiness-check
+runner report is supplied, `operator_status` may report
+`OPERATOR_STATUS_READY_FOR_PAPER_PROOF_REVIEW`; missing listener/shadow replay
+reports remain explicit but do not downgrade that readiness-review view to
+unknown.
 
 ```bash
 set -a
