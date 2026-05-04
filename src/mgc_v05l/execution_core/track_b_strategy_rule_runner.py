@@ -533,6 +533,8 @@ def _write_report(
         "strategy_rule_id": rule_id,
         "rule_name": rule_evaluation.get("rule_name") or "NOT_PROVIDED",
         "rule_mode": rule_mode.value,
+        "signal_source": _signal_source(rule_mode),
+        "real_strategy_signal": _real_strategy_signal(rule_mode),
         "rule_inputs": rule_evaluation.get("rule_inputs") or {},
         "rule_conditions": rule_evaluation.get("rule_conditions") or {},
         "rule_blockers": rule_blockers,
@@ -608,6 +610,18 @@ def _writer_verdict(adapter: StrategySignalAdapterResult | None) -> str | None:
     except (OSError, json.JSONDecodeError):
         return None
     return writer.get("signal_batch_writer_verdict")
+
+
+def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
+    if rule_mode == TrackBStrategyRuleMode.DEMO_LONG_ONLY:
+        return "DEMO_WIRING_PROOF"
+    if rule_mode == TrackBStrategyRuleMode.HUMAN_REVIEW_ONLY:
+        return "HUMAN_REVIEW_ONLY"
+    return "REAL_STRATEGY_RULE"
+
+
+def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
+    return rule_mode == TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG
 
 
 def _rule_mode(value: str | TrackBStrategyRuleMode) -> TrackBStrategyRuleMode:

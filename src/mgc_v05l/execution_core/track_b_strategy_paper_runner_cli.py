@@ -232,6 +232,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "feature_event_path": result.report["feature_event_path"],
                 "strategy_rule_verdict": result.report["strategy_rule_verdict"],
                 "strategy_rule_evaluated": result.report["strategy_rule_evaluated"],
+                "signal_source": result.report["signal_source"],
+                "real_strategy_signal": result.report["real_strategy_signal"],
                 "rule_decision": result.report["rule_decision"],
                 "signal_emitted": result.report["signal_emitted"],
                 "signal_direction": result.report["signal_direction"],

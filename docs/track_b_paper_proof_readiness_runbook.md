@@ -531,6 +531,42 @@ runner report should show `runtime_candle_context_supplied=true`,
 use PAPER proof only when the rule naturally emits a signal and every explicit
 PAPER submit flag and readiness gate is present.
 
+For bounded PAPER plumbing validation, keep the real rule honest and use the
+explicit wiring/proof mode instead:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
+  --mode PAPER \
+  --runtime-candle-context-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
+  --runtime-candle-context-required \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --rule-id mgc_ema_momentum_reclaim_long_v1 \
+  --rule-mode DEMO_LONG_ONLY \
+  --emit-signal \
+  --quantity 1 \
+  --manual-open-limit-price <OPEN_LIMIT_PRICE> \
+  --manual-close-limit-price <CLOSE_LIMIT_PRICE> \
+  --submit-paper \
+  --confirm-paper-submit \
+  --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
+```
+
+This path must be reported as `signal_source=DEMO_WIRING_PROOF` and
+`real_strategy_signal=false`. It proves the strategy runner -> readiness ->
+paper-proof branch only; it must not be interpreted as
+`mgc_ema_momentum_reclaim_long_v1` producing a real strategy signal. A valid
+PAPER pass still requires `TRACK_B_PAPER_PROOF_PASSED` and
+`PROOF_COMPLETE_FLAT`. Flat without Track B-owned close provenance remains
+review/provenance-incomplete, and contradictory broker truth remains
+review-required.
+
 Maintained weekly history is historical context. It may be many hours or days
 old and still be valid if `complete_through_cutoff=true`. The runner reports
 `historical_context_ready`, `runtime_candle_context_required`,

@@ -308,6 +308,8 @@ def strategy_result(tmp_path: Path, *, verdict: str = "TRACK_B_STRATEGY_RULE_RUN
     report_json = tmp_path / "strategy_rule_report.json"
     report = {
         "strategy_rule_runner_verdict": verdict,
+        "signal_source": "REAL_STRATEGY_RULE",
+        "real_strategy_signal": True,
         "decision": decision,
         "signal_emitted": emitted,
         "signal_direction": "LONG" if emitted else None,
@@ -329,6 +331,15 @@ def strategy_result(tmp_path: Path, *, verdict: str = "TRACK_B_STRATEGY_RULE_RUN
         downstream_signal_batch_writer_report_json=None,
         output_batch_json=Path(str(report["output_batch_path"])) if emitted else None,
     )
+
+
+def demo_strategy_result(tmp_path: Path, *, emitted: bool = True) -> TrackBStrategyRuleRunnerResult:
+    result = strategy_result(tmp_path, emitted=emitted)
+    result.report["signal_source"] = "DEMO_WIRING_PROOF"
+    result.report["real_strategy_signal"] = False
+    result.report["rule_mode"] = "DEMO_LONG_ONLY"
+    result.report_json.write_text(json.dumps(result.report), encoding="utf-8")
+    return result
 
 
 def readiness_result(tmp_path: Path, *, ready: bool = True) -> TrackBReadinessCheckRunnerResult:
@@ -374,7 +385,22 @@ def proof_result(tmp_path: Path, classification: TerminalClassification) -> Pape
     proof_payload = {
         "classification": classification.value,
         "proof_lifecycle_status": lifecycle_status,
+        "open_intent": {"side": "BUY", "quantity": 1},
+        "open_submit_attempt": {"submitted": True},
+        "open_fill": {"filled_quantity": 1},
+        "close_intent": {"side": "SELL", "quantity": 1},
+        "close_submit_attempt": {"submitted": classification == TerminalClassification.PASSED},
+        "close_fill": {"filled_quantity": 1} if classification == TerminalClassification.PASSED else None,
         "final_reconciliation": final_reconciliation,
+        "flat_after_close_guard_reports": [
+            {
+                "flat_clean": classification == TerminalClassification.PASSED,
+                "position": {"account_id": "DUM882026", "contract_key": "MGC-202606", "signed_quantity": 0},
+                "working_orders": [],
+            }
+        ]
+        if classification == TerminalClassification.PASSED
+        else [],
         "failure_or_ambiguity": failure_or_ambiguity,
         "required_manual_action": required_manual_action,
     }
@@ -602,6 +628,17 @@ def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path
     assert result.report["paper_submit_requested"] is True
     assert result.report["paper_proof_invoked"] is True
     assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert result.report["signal_source"] == "REAL_STRATEGY_RULE"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["paper_proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
+    assert result.report["open_intent"] is not None
+    assert result.report["open_submit_attempt"] is not None
+    assert result.report["open_fill"] is not None
+    assert result.report["close_intent"] is not None
+    assert result.report["close_submit_attempt"] is not None
+    assert result.report["close_fill"] is not None
+    assert result.report["final_position_snapshot"] == {"account_id": "DUM882026", "contract_key": "MGC-202606", "signed_quantity": 0}
+    assert result.report["final_open_orders_snapshot"] == []
     assert result.report["final_flat"] is True
     assert result.report["final_position_status"] == "CLEAN"
     assert result.report["submit_allowed"] is True
@@ -1188,12 +1225,72 @@ def test_runtime_candle_context_no_signal_does_not_invoke_readiness_or_proof(tmp
     assert result.report["feature_builder_invoked"] is True
     assert result.report["strategy_rule_evaluated"] is True
     assert result.report["rule_decision"] == "NO_SIGNAL"
+    assert result.report["signal_source"] == "REAL_STRATEGY_RULE"
+    assert result.report["real_strategy_signal"] is True
     assert result.report["signal_emitted"] is False
     assert calls.readiness == 0
     assert calls.proof == 0
     assert result.report["paper_proof_invoked"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_demo_wiring_signal_is_explicitly_labeled_and_can_invoke_paper_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_mode="DEMO_LONG_ONLY",
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=demo_strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-demo-wiring-proof-passed",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert result.report["rule_mode"] == "DEMO_LONG_ONLY"
+    assert result.report["signal_source"] == "DEMO_WIRING_PROOF"
+    assert result.report["real_strategy_signal"] is False
+    assert result.report["paper_proof_invoked"] is True
+    assert result.report["submit_attempted"] is True
+    assert result.report["broker_state_mutated"] is True
+    assert result.report["final_flat"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_demo_wiring_signal_stays_no_submit_without_explicit_flags(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(tmp_path, rule_mode="DEMO_LONG_ONLY", emit_signal=True),
+        stages=stages(
+            calls=calls,
+            strategy=demo_strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-demo-wiring-no-submit",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED
+    assert result.report["signal_source"] == "DEMO_WIRING_PROOF"
+    assert result.report["real_strategy_signal"] is False
+    assert calls.readiness == 1
+    assert calls.proof == 0
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
 
 

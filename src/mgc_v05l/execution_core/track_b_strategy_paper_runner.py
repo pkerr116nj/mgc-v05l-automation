@@ -890,7 +890,7 @@ def _build_report(
     strategy_report = strategy_rule.report if strategy_rule else {}
     readiness_report = readiness.report if readiness else {}
     proof_report = proof.report if proof else {}
-    proof_payload = proof_report.get("proof_payload") if isinstance(proof_report.get("proof_payload"), Mapping) else {}
+    proof_payload = proof_report.get("proof_payload") if isinstance(proof_report.get("proof_payload"), Mapping) else proof_report
     paper_proof_invoked = proof is not None
     submit_allowed = _paper_submit_requested(config) and proof is not None
     maintained_history_status = _maintained_history_status(config, now=now)
@@ -917,6 +917,12 @@ def _build_report(
         "lane_id": config.lane_id,
         "rule_id": config.rule_id,
         "rule_mode": config.rule_mode,
+        "signal_source": strategy_report.get("signal_source") or _signal_source_from_rule_mode(config.rule_mode),
+        "real_strategy_signal": (
+            bool(strategy_report.get("real_strategy_signal"))
+            if strategy_report
+            else _real_strategy_signal_from_rule_mode(config.rule_mode)
+        ),
         "maintained_history_path": str(config.maintained_history_json) if config.maintained_history_json is not None else None,
         "runtime_candle_context_path": str(config.runtime_candle_context_json) if config.runtime_candle_context_json is not None else None,
         "runtime_candle_context_requested": _runtime_candle_context_requested(config),
@@ -982,6 +988,19 @@ def _build_report(
         "paper_proof_classification": proof_classification or (proof.classification.value if proof else None),
         "paper_proof_report_path": str(proof.report_json) if proof else None,
         "paper_proof_lifecycle_status": proof_payload.get("proof_lifecycle_status"),
+        "open_intent": proof_payload.get("open_intent"),
+        "open_submit_attempt": proof_payload.get("open_submit_attempt"),
+        "open_broker_order": proof_payload.get("open_broker_order"),
+        "open_fill": proof_payload.get("open_fill"),
+        "close_intent": proof_payload.get("close_intent"),
+        "close_submit_attempt": proof_payload.get("close_submit_attempt"),
+        "close_broker_order": proof_payload.get("close_broker_order"),
+        "close_fill": proof_payload.get("close_fill"),
+        "close_only_guard_reports": proof_payload.get("close_only_guard_reports"),
+        "flat_after_close_guard_reports": proof_payload.get("flat_after_close_guard_reports"),
+        "final_reconciliation": proof_payload.get("final_reconciliation"),
+        "final_position_snapshot": _final_position_snapshot(proof_payload),
+        "final_open_orders_snapshot": _final_open_orders_snapshot(proof_payload),
         "final_position_status": _final_position_status(proof_payload),
         "final_flat": _final_flat(proof_payload, proof),
         "quantity": config.quantity,
@@ -1497,6 +1516,37 @@ def _final_position_status(proof_payload: Mapping[str, object]) -> str | None:
     return None
 
 
+def _final_open_orders_snapshot(proof_payload: Mapping[str, object]) -> object | None:
+    final = proof_payload.get("final_reconciliation")
+    if isinstance(final, Mapping):
+        if "working_orders" in final:
+            return final.get("working_orders")
+        if "open_orders" in final:
+            return final.get("open_orders")
+        if "working_order_count" in final:
+            return final.get("working_order_count")
+    guard_reports = proof_payload.get("flat_after_close_guard_reports")
+    if isinstance(guard_reports, list) and guard_reports:
+        latest = guard_reports[-1]
+        if isinstance(latest, Mapping):
+            if "working_orders" in latest:
+                return latest.get("working_orders")
+            if "open_orders" in latest:
+                return latest.get("open_orders")
+            if "working_order_count" in latest:
+                return latest.get("working_order_count")
+    return None
+
+
+def _final_position_snapshot(proof_payload: Mapping[str, object]) -> object | None:
+    guard_reports = proof_payload.get("flat_after_close_guard_reports")
+    if isinstance(guard_reports, list) and guard_reports:
+        latest = guard_reports[-1]
+        if isinstance(latest, Mapping) and latest.get("position") is not None:
+            return latest.get("position")
+    return proof_payload.get("final_reconciliation")
+
+
 def _final_flat(proof_payload: Mapping[str, object], proof: PaperProofResult | None) -> bool | None:
     if proof is None:
         return None
@@ -1506,6 +1556,18 @@ def _final_flat(proof_payload: Mapping[str, object], proof: PaperProofResult | N
         proof.classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
         and proof_payload.get("proof_lifecycle_status") == "PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE"
     )
+
+
+def _signal_source_from_rule_mode(rule_mode: str) -> str:
+    if str(rule_mode or "").upper() == "DEMO_LONG_ONLY":
+        return "DEMO_WIRING_PROOF"
+    if str(rule_mode or "").upper() == "HUMAN_REVIEW_ONLY":
+        return "HUMAN_REVIEW_ONLY"
+    return "REAL_STRATEGY_RULE"
+
+
+def _real_strategy_signal_from_rule_mode(rule_mode: str) -> bool:
+    return str(rule_mode or "").upper() == "MGC_EMA_MOMENTUM_RECLAIM_LONG"
 
 
 def _secondary_blockers(*reports: Mapping[str, object]) -> list[str]:
