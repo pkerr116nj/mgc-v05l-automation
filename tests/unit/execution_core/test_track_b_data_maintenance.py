@@ -133,6 +133,58 @@ def test_initial_backfill_creates_latest_good_history(tmp_path: Path) -> None:
     assert result.report["live_money_readiness"] is False
 
 
+def test_weekly_historical_maintenance_complete_through_cutoff_passes_even_days_old(tmp_path: Path) -> None:
+    result = maintain_track_b_mgc_1m_history(
+        incoming_history_payload=history_payload(
+            bars(
+                "2026-05-01T19:58:00+00:00",
+                "2026-05-01T19:59:00+00:00",
+                "2026-05-01T20:00:00+00:00",
+            )
+        ),
+        output_root=tmp_path / "maintenance_weekly_cutoff",
+        min_bars=3,
+        export_bars=3,
+        max_history_age_seconds=900,
+        historical_maintenance_cutoff_policy="WEEKLY_FRIDAY_CLOSE",
+        intended_cutoff_timestamp=datetime(2026, 5, 1, 20, 0, tzinfo=timezone.utc),
+        maintenance_id="maintenance-weekly-cutoff",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_READY
+    assert result.report["historical_maintenance_cutoff_policy"] == "WEEKLY_FRIDAY_CLOSE"
+    assert result.report["complete_through_cutoff"] is True
+    assert result.report["latest_bar_timestamp"] == "2026-05-01T20:00:00+00:00"
+    assert result.report["intended_cutoff_timestamp"] == "2026-05-01T20:00:00+00:00"
+    assert result.report["history_freshness_seconds"] > 100000
+    assert result.report["historical_context_ready"] is True
+
+
+def test_weekly_historical_maintenance_missing_cutoff_blocks(tmp_path: Path) -> None:
+    result = maintain_track_b_mgc_1m_history(
+        incoming_history_payload=history_payload(
+            bars(
+                "2026-05-01T19:57:00+00:00",
+                "2026-05-01T19:58:00+00:00",
+                "2026-05-01T19:59:00+00:00",
+            )
+        ),
+        output_root=tmp_path / "maintenance_weekly_cutoff_missing",
+        min_bars=3,
+        export_bars=3,
+        historical_maintenance_cutoff_policy="WEEKLY_FRIDAY_CLOSE",
+        intended_cutoff_timestamp=datetime(2026, 5, 1, 20, 0, tzinfo=timezone.utc),
+        maintenance_id="maintenance-weekly-cutoff-missing",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_STALE_OR_INSUFFICIENT
+    assert result.report["complete_through_cutoff"] is False
+    assert result.report["missing_bars"] == 0
+    assert "cutoff" in str(result.report["primary_blocker"])
+
+
 def test_incremental_append_adds_newer_bars_and_dedupes(tmp_path: Path) -> None:
     output_root = tmp_path / "maintenance"
     first = maintain_track_b_mgc_1m_history(
@@ -219,8 +271,8 @@ def test_gaps_are_detected_and_block_readiness(tmp_path: Path) -> None:
     assert "gaps" in str(result.report["primary_blocker"])
 
 
-def test_stale_or_insufficient_history_blocks(tmp_path: Path) -> None:
-    stale = maintain_track_b_mgc_1m_history(
+def test_historical_history_can_be_old_without_intraday_freshness_policy(tmp_path: Path) -> None:
+    old_history = maintain_track_b_mgc_1m_history(
         incoming_history_payload=history_payload(
             bars(
                 "2026-05-04T15:00:00+00:00",
@@ -244,10 +296,35 @@ def test_stale_or_insufficient_history_blocks(tmp_path: Path) -> None:
         now=aware_now(),
     )
 
-    assert stale.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_STALE_OR_INSUFFICIENT
-    assert "stale" in str(stale.report["primary_blocker"])
+    assert old_history.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_READY
+    assert old_history.report["history_freshness_seconds"] == 1680
+    assert old_history.report["runtime_intraday_freshness_policy"] == "NOT_REQUESTED"
+    assert old_history.report["historical_context_ready"] is True
     assert insufficient.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_STALE_OR_INSUFFICIENT
     assert "requires at least 3" in str(insufficient.report["primary_blocker"])
+
+
+def test_intraday_freshness_policy_blocks_old_history_when_explicit(tmp_path: Path) -> None:
+    stale = maintain_track_b_mgc_1m_history(
+        incoming_history_payload=history_payload(
+            bars(
+                "2026-05-04T15:00:00+00:00",
+                "2026-05-04T15:01:00+00:00",
+                "2026-05-04T15:02:00+00:00",
+            )
+        ),
+        output_root=tmp_path / "maintenance_intraday_stale",
+        min_bars=3,
+        export_bars=3,
+        max_history_age_seconds=60,
+        runtime_intraday_freshness_policy="REQUIRE_MAX_AGE",
+        maintenance_id="maintenance-intraday-stale",
+        now=aware_now(),
+    )
+
+    assert stale.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_STALE_OR_INSUFFICIENT
+    assert stale.report["runtime_intraday_freshness_policy"] == "REQUIRE_MAX_AGE"
+    assert "stale" in str(stale.report["primary_blocker"])
 
 
 def test_available_end_history_payload_succeeds_when_fresh_enough(tmp_path: Path) -> None:
@@ -286,7 +363,7 @@ def test_available_end_history_payload_succeeds_when_fresh_enough(tmp_path: Path
     assert result.latest_good_history["history_provider_mode"] == "HISTORICAL_AVAILABLE_END"
 
 
-def test_available_end_history_too_stale_blocks(tmp_path: Path) -> None:
+def test_available_end_history_old_but_complete_is_historical_context_ready(tmp_path: Path) -> None:
     result = maintain_track_b_mgc_1m_history(
         incoming_history_payload={
             **history_payload(
@@ -310,10 +387,11 @@ def test_available_end_history_too_stale_blocks(tmp_path: Path) -> None:
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_STALE_OR_INSUFFICIENT
+    assert result.verdict == TrackBDataMaintenanceVerdict.UPDATED_HISTORY_READY
     assert result.report["history_provider_mode"] == "HISTORICAL_AVAILABLE_END"
-    assert result.report["history_ready"] is False
-    assert "stale" in str(result.report["primary_blocker"])
+    assert result.report["history_ready"] is True
+    assert result.report["historical_context_ready"] is True
+    assert result.report["history_freshness_seconds"] == 1680
 
 
 def test_latest_good_history_can_feed_feature_builder_when_current_quote_is_separate(tmp_path: Path) -> None:

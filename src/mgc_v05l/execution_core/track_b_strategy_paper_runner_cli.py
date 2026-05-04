@@ -74,6 +74,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-maintenance-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_data_maintenance"))
     parser.add_argument("--max-maintained-history-age-seconds", type=int, default=900)
     parser.add_argument(
+        "--runtime-intraday-freshness-policy",
+        default="NOT_REQUESTED",
+        choices=["NOT_REQUESTED", "REQUIRE_MAX_AGE"],
+        help="Apply intraday max-age checking only when explicitly set to REQUIRE_MAX_AGE.",
+    )
+    parser.add_argument(
+        "--runtime-candle-context-required",
+        action="store_true",
+        help="Block maintained-history-only execution when the rule requires live runtime candle context.",
+    )
+    parser.add_argument(
         "--allow-stale-maintained-history-paper",
         action="store_true",
         help="PAPER-only diagnostic override for maintained-history age. Does not override missing bars, gaps, quote evidence, or live-money safety.",
@@ -158,6 +169,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root=args.output_root,
             data_maintenance_output_root=args.data_maintenance_output_root,
             max_maintained_history_age_seconds=args.max_maintained_history_age_seconds,
+            runtime_intraday_freshness_policy=args.runtime_intraday_freshness_policy,
+            runtime_candle_context_required=args.runtime_candle_context_required,
             allow_stale_maintained_history_paper=args.allow_stale_maintained_history_paper,
             candle_history_producer_output_root=args.candle_history_producer_output_root,
             candle_history_max_candles=args.candle_history_max_candles,
@@ -191,6 +204,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "data_maintenance_history_requested": result.report["data_maintenance_history_requested"],
                 "maintained_history_age_seconds": result.report["maintained_history_age_seconds"],
                 "max_maintained_history_age_seconds": result.report["max_maintained_history_age_seconds"],
+                "runtime_intraday_freshness_policy": result.report["runtime_intraday_freshness_policy"],
+                "runtime_candle_context_required": result.report["runtime_candle_context_required"],
+                "historical_context_ready": result.report["historical_context_ready"],
                 "maintained_history_ready": result.report["maintained_history_ready"],
                 "maintained_history_stale_override_requested": result.report["maintained_history_stale_override_requested"],
                 "maintained_history_stale_override_used": result.report["maintained_history_stale_override_used"],

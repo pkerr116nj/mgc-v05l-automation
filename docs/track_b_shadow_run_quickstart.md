@@ -377,12 +377,18 @@ Databento realtime quote/event
 -> shadow_listener / operator_status / Track B Status UI
 ```
 
+Track B now has two separate data lanes. Historical/replay data maintenance is
+the Track A-style scheduled process: it pulls official Databento historical 1m
+bars, normally weekly, intended through Friday close, for research, replay,
+backtesting, and historical base data. Runtime live candle/quote capture is
+separate and should be added when an execution rule needs same-session candle
+context. Realtime quote evidence remains separate in all cases.
+
 The realtime observer's latest candle event is only a single snapshot. The
-EMA/VWAP rule needs a maintained 1m history foundation. The normal path is to
-run Track B data maintenance independently of strategy execution, then pass the
-latest-good maintained history to the feature/rule runner with a separate
-realtime current quote report. Historical bars and realtime quote evidence stay
-separately labeled; no single snapshot is expanded into fake history.
+EMA/VWAP rule can use maintained history as historical context, but that should
+not be confused with live runtime candle capture. Historical bars and realtime
+quote evidence stay separately labeled; no single snapshot is expanded into
+fake history.
 
 Maintain the local rolling MGC 1m history from a bounded Databento fetch:
 
@@ -407,7 +413,9 @@ set +a
   --max-bars 5000 \
   --export-bars 50 \
   --min-bars 20 \
-  --max-history-age-seconds 900 \
+  --historical-maintenance-cutoff-policy WEEKLY_FRIDAY_CLOSE \
+  --intended-cutoff-timestamp <FRIDAY_CLOSE_UTC> \
+  --runtime-intraday-freshness-policy NOT_REQUESTED \
   --source-id track_b_data_maintenance_mgc_1m \
   --output-root outputs/track_b_execution_core/track_b_data_maintenance
 ```
@@ -424,10 +432,15 @@ If the requested history end is later than the provider's available end, the
 CLI retries the OHLCV request ending at `provider_available_end` and labels the
 artifact `history_provider_mode=HISTORICAL_AVAILABLE_END`. The report exposes
 `requested_history_end`, `provider_available_end`, `history_end_used`,
-`available_end_lag_seconds`, and `history_freshness_seconds`. `history_ready`
-is true only when enough bars are present, gaps are acceptable, and the latest
-bar is within `--max-history-age-seconds`; these maintained bars are still not
-realtime quote evidence.
+`available_end_lag_seconds`, `history_freshness_seconds`,
+`intended_cutoff_timestamp`, `latest_bar_timestamp`,
+`complete_through_cutoff`, and `missing_bars`. Historical maintenance is ready
+when enough bars are present, gaps are acceptable, and the history is complete
+through the intended cutoff. It does not fail merely because Friday-close
+history is older than the current minute. Use
+`--runtime-intraday-freshness-policy REQUIRE_MAX_AGE` only for an explicit
+runtime intraday freshness check; these maintained bars are still not realtime
+quote evidence.
 
 On-demand historical fetch through `track_b_mgc_candle_history_producer_cli`
 remains available for diagnostics and maintenance inputs, but it is not the
@@ -660,7 +673,6 @@ are present:
   --rule-id mgc_ema_momentum_reclaim_long_v1 \
   --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
   --emit-signal \
-  --max-maintained-history-age-seconds 900 \
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
@@ -694,7 +706,6 @@ PAPER submit requires all explicit gates. Prices and quantity are not inferred:
   --manual-close-limit-price <CLOSE_LIMIT_PRICE> \
   --submit-paper \
   --confirm-paper-submit \
-  --max-maintained-history-age-seconds 900 \
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
@@ -703,19 +714,17 @@ orders, UI authority, hidden submit, inferred direction, inferred prices, or
 broker mutation outside the Track B paper proof lifecycle. If the real rule
 emits `NO_SIGNAL`, if candle history/features are insufficient or non-realtime,
 or if readiness blocks, the runner stops cleanly and `paper_proof_invoked=false`.
-Align `--max-maintained-history-age-seconds` with the threshold used by
-`track_b_data_maintenance_cli`. For paper plumbing checks, an operator may use
-a wider explicit threshold such as `1200`; for real strategy validation, use a
-tighter threshold appropriate to the rule. Maintained 1m bars are historical
-context, not realtime quote evidence, so the runner still requires the separate
-realtime current quote report.
-For PAPER integration testing only, an operator may add
-`--allow-stale-maintained-history-paper` to bypass the maintained-history age
-gate while keeping missing bars, insufficient bars, gaps, and missing realtime
-quote evidence blocked. Reports show `maintained_history_ready=false`,
-`maintained_history_stale_override_used=true`, the actual age/threshold, and a
-paper-diagnostic warning. This is not real trading readiness and never enables
-live-money execution.
+Maintained 1m bars are historical context, not realtime quote evidence, so the
+runner still requires the separate realtime current quote report. If an
+execution rule requires same-session candles, add
+`--runtime-candle-context-required`; maintained historical context alone will
+then block until a runtime live candle context artifact is supplied. If an
+operator explicitly wants an intraday max-age check, use
+`--runtime-intraday-freshness-policy REQUIRE_MAX_AGE` together with
+`--max-maintained-history-age-seconds <SECONDS>`. The PAPER-only
+`--allow-stale-maintained-history-paper` override applies only to that explicit
+intraday age check; it does not override missing bars, insufficient bars, gaps,
+or missing realtime quote evidence, and it never enables live-money execution.
 The latest report is:
 
 ```text

@@ -294,18 +294,24 @@ metadata. It emits LONG only when:
   supplied.
 
 `track_b_data_maintenance` is the upstream foundation for MGC 1m history. It
-maintains a local rolling store, handles initial backfill, incremental
-append/update, duplicate handling, monotonic timestamp ordering, gap detection,
-and latest-good bounded history export. The strategy path should consume
-`latest_good_mgc_1m_history.json` plus separate realtime current quote evidence
-rather than fetching Databento historical bars during the trade decision.
+maintains a local rolling historical store for research/replay/backtesting,
+handles initial bounded backfill, incremental append/update, duplicate
+handling, monotonic timestamp ordering, gap detection, cutoff-completeness
+checks, and latest-good bounded history export. Its default shape is weekly
+Databento historical maintenance through Friday close. The strategy path should
+consume `latest_good_mgc_1m_history.json` plus separate realtime current quote
+evidence rather than fetching Databento historical bars during the trade
+decision.
 Historical `available_end` can be used by data maintenance without becoming
 realtime evidence: if Databento has not published bars through the requested
 history end, the maintenance CLI may retry ending at `provider_available_end`
 and mark the report `history_provider_mode=HISTORICAL_AVAILABLE_END`.
-`history_ready=true` still requires enough bars, acceptable gaps, and
-`history_freshness_seconds <= --max-history-age-seconds`. Paper execution
-continues to require a separate realtime current quote report.
+`history_ready=true` requires enough bars, acceptable gaps, and
+`complete_through_cutoff=true`; it does not require the historical base to be
+fresh to the present minute. If an execution rule needs same-session candle
+context, use a separate runtime live candle capture path or explicitly require
+runtime candle context in the strategy runner. Paper execution continues to
+require a separate realtime current quote report.
 
 `track_b_mgc_candle_history_producer` remains available for diagnostics and
 maintenance inputs. On-demand historical fetch is not the normal trade-decision
@@ -464,7 +470,6 @@ planning entries only; they are not runtime-maintained in this slice.
   --rule-id mgc_ema_momentum_reclaim_long_v1 \
   --rule-mode MGC_EMA_MOMENTUM_RECLAIM_LONG \
   --emit-signal \
-  --max-maintained-history-age-seconds 900 \
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
@@ -490,31 +495,23 @@ operator-owned submit gates:
   --manual-close-limit-price <CLOSE_LIMIT_PRICE> \
   --submit-paper \
   --confirm-paper-submit \
-  --max-maintained-history-age-seconds 900 \
   --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
 ```
 
-If the maintained history is stale/insufficient, if the rule emits
-`NO_SIGNAL`, or if readiness blocks, the runner stops with
+If the maintained history is insufficient, gappy, incomplete through cutoff, if
+the rule emits `NO_SIGNAL`, or if readiness blocks, the runner stops with
 `paper_proof_invoked=false`. A clean runner report is the audit trail; no
 separate dry-run command is required when the explicit PAPER submit flags are
 present.
 
-Keep the maintained-history freshness policy aligned between data maintenance
-and the strategy paper runner. The maintenance CLI writes `history_ready` using
-its `--max-history-age-seconds` threshold, while the runner applies
-`--max-maintained-history-age-seconds` and reports
-`maintained_history_age_seconds`, `max_maintained_history_age_seconds`, and
-`maintained_history_ready`. For paper plumbing tests, an explicit wider value
-such as `1200` can be used; for real strategy validation, prefer a tighter
-threshold. This does not make maintained bars realtime: separate realtime quote
-evidence remains required.
-
-For PAPER integration diagnostics only, the runner also supports
-`--allow-stale-maintained-history-paper`. This override relaxes only the
-maintained-history age gate; missing files, insufficient bars, detected gaps,
-and missing realtime quote evidence still block. The runner report must show
-`maintained_history_ready=false`,
-`maintained_history_stale_override_used=true`, the age/threshold fields, and a
-paper-diagnostic required-next-action note. Do not use this as real strategy
+Maintained weekly history is historical context. It may be many hours or days
+old and still be valid if `complete_through_cutoff=true`. The runner reports
+`historical_context_ready`, `runtime_candle_context_required`,
+`runtime_candle_context_supplied`, and `runtime_intraday_freshness_policy`.
+Use `--runtime-candle-context-required` when the strategy rule needs
+same-session live candle context. Use
+`--runtime-intraday-freshness-policy REQUIRE_MAX_AGE` and
+`--max-maintained-history-age-seconds <SECONDS>` only for an explicit intraday
+freshness check. The PAPER-only `--allow-stale-maintained-history-paper`
+override applies only to that explicit age policy and is not real strategy
 freshness or live-money readiness.

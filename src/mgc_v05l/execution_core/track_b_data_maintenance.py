@@ -61,6 +61,9 @@ def maintain_track_b_mgc_1m_history(
     export_bars: int = 50,
     min_bars: int = 20,
     max_history_age_seconds: int = 900,
+    historical_maintenance_cutoff_policy: str = "EXPLICIT_OR_HISTORY_END",
+    runtime_intraday_freshness_policy: str = "NOT_REQUESTED",
+    intended_cutoff_timestamp: datetime | None = None,
     maintenance_id: str | None = None,
     source_id: str | None = None,
     now: datetime | None = None,
@@ -79,6 +82,10 @@ def maintain_track_b_mgc_1m_history(
     provider_available_end = _optional_timestamp_from_payload(incoming_history_payload, "provider_available_end")
     history_end_used = _optional_timestamp_from_payload(incoming_history_payload, "history_end_used")
     available_end_lag_seconds = _optional_int_from_payload(incoming_history_payload, "available_end_lag_seconds")
+    payload_cutoff = _optional_timestamp_from_payload(incoming_history_payload, "intended_cutoff_timestamp")
+    actual_intended_cutoff = intended_cutoff_timestamp or payload_cutoff or history_end_used or provider_available_end or requested_history_end
+    actual_historical_policy = str(historical_maintenance_cutoff_policy or "EXPLICIT_OR_HISTORY_END").upper()
+    actual_runtime_policy = str(runtime_intraday_freshness_policy or "NOT_REQUESTED").upper()
 
     try:
         if max_bars <= 0:
@@ -117,6 +124,10 @@ def maintain_track_b_mgc_1m_history(
                 export_bars=export_bars,
                 min_bars=min_bars,
                 max_history_age_seconds=max_history_age_seconds,
+                historical_maintenance_cutoff_policy=actual_historical_policy,
+                runtime_intraday_freshness_policy=actual_runtime_policy,
+                intended_cutoff_timestamp=actual_intended_cutoff,
+                complete_through_cutoff=False,
                 store_candles=[],
                 export_candles=[],
                 duplicate_count=0,
@@ -138,12 +149,18 @@ def maintain_track_b_mgc_1m_history(
         export_candles = bounded_store[-export_bars:]
         gap_count = _gap_count(bounded_store)
         history_freshness_seconds = _history_freshness_seconds(export_candles, actual_now)
+        latest_bar_timestamp = _latest_bar_timestamp(export_candles)
+        complete_through_cutoff = _complete_through_cutoff(latest_bar_timestamp, actual_intended_cutoff)
         blocker = _readiness_blocker(
             export_candles=export_candles,
             min_bars=min_bars,
             gap_count=gap_count,
             history_freshness_seconds=history_freshness_seconds,
             max_history_age_seconds=max_history_age_seconds,
+            runtime_intraday_freshness_policy=actual_runtime_policy,
+            latest_bar_timestamp=latest_bar_timestamp,
+            intended_cutoff_timestamp=actual_intended_cutoff,
+            complete_through_cutoff=complete_through_cutoff,
         )
         latest_good_history = _history_export(
             generated_at=actual_now,
@@ -162,6 +179,10 @@ def maintain_track_b_mgc_1m_history(
             gap_count=gap_count,
             duplicate_count=duplicate_count,
             history_freshness_seconds=history_freshness_seconds,
+            historical_maintenance_cutoff_policy=actual_historical_policy,
+            runtime_intraday_freshness_policy=actual_runtime_policy,
+            intended_cutoff_timestamp=actual_intended_cutoff,
+            complete_through_cutoff=complete_through_cutoff,
             requested_history_end=requested_history_end,
             provider_available_end=provider_available_end,
             history_end_used=history_end_used,
@@ -194,6 +215,10 @@ def maintain_track_b_mgc_1m_history(
             export_bars=export_bars,
             min_bars=min_bars,
             max_history_age_seconds=max_history_age_seconds,
+            historical_maintenance_cutoff_policy=actual_historical_policy,
+            runtime_intraday_freshness_policy=actual_runtime_policy,
+            intended_cutoff_timestamp=actual_intended_cutoff,
+            complete_through_cutoff=complete_through_cutoff,
             store_candles=bounded_store,
             export_candles=export_candles,
             duplicate_count=duplicate_count,
@@ -206,9 +231,9 @@ def maintain_track_b_mgc_1m_history(
             history_provider_mode=history_provider_mode,
             latest_good_history=latest_good_history,
             primary_blocker=blocker,
-            required_next_action="Latest-good maintained history is ready; run the Track B feature builder with separate realtime quote evidence."
+            required_next_action="Historical maintained history is complete through cutoff; use it as historical context with separate realtime quote/runtime candle evidence as required."
             if blocker is None
-            else "Wait and rerun Track B data maintenance, or widen the diagnostic-only history age threshold before evaluating strategy rules.",
+            else "Resolve historical maintenance gaps/cutoff coverage, or explicitly request runtime intraday freshness only in the runtime data lane.",
         )
     except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
         return _write_result(
@@ -233,6 +258,10 @@ def maintain_track_b_mgc_1m_history(
             export_bars=export_bars,
             min_bars=min_bars,
             max_history_age_seconds=max_history_age_seconds,
+            historical_maintenance_cutoff_policy=actual_historical_policy,
+            runtime_intraday_freshness_policy=actual_runtime_policy,
+            intended_cutoff_timestamp=actual_intended_cutoff,
+            complete_through_cutoff=False,
             store_candles=[],
             export_candles=[],
             duplicate_count=0,
@@ -269,6 +298,9 @@ def write_data_maintenance_provider_error(
     history_end_used: datetime | None = None,
     available_end_lag_seconds: int | None = None,
     history_provider_mode: str | None = None,
+    historical_maintenance_cutoff_policy: str = "EXPLICIT_OR_HISTORY_END",
+    runtime_intraday_freshness_policy: str = "NOT_REQUESTED",
+    intended_cutoff_timestamp: datetime | None = None,
     now: datetime | None = None,
 ) -> TrackBDataMaintenanceResult:
     actual_now = now or datetime.now(UTC)
@@ -301,6 +333,10 @@ def write_data_maintenance_provider_error(
         export_bars=0,
         min_bars=0,
         max_history_age_seconds=0,
+        historical_maintenance_cutoff_policy=historical_maintenance_cutoff_policy,
+        runtime_intraday_freshness_policy=runtime_intraday_freshness_policy,
+        intended_cutoff_timestamp=intended_cutoff_timestamp,
+        complete_through_cutoff=False,
         store_candles=[],
         export_candles=[],
         duplicate_count=0,
@@ -423,6 +459,20 @@ def _history_freshness_seconds(candles: Sequence[Mapping[str, Any]], now: dateti
     return max(int((now.astimezone(UTC) - latest).total_seconds()), 0)
 
 
+def _latest_bar_timestamp(candles: Sequence[Mapping[str, Any]]) -> datetime | None:
+    if not candles:
+        return None
+    return _parse_timestamp(str(candles[-1]["candle_timestamp"]))
+
+
+def _complete_through_cutoff(latest_bar_timestamp: datetime | None, intended_cutoff_timestamp: datetime | None) -> bool:
+    if intended_cutoff_timestamp is None:
+        return latest_bar_timestamp is not None
+    if latest_bar_timestamp is None:
+        return False
+    return latest_bar_timestamp >= intended_cutoff_timestamp.astimezone(UTC)
+
+
 def _readiness_blocker(
     *,
     export_candles: Sequence[Mapping[str, Any]],
@@ -430,16 +480,23 @@ def _readiness_blocker(
     gap_count: int,
     history_freshness_seconds: int | None,
     max_history_age_seconds: int,
+    runtime_intraday_freshness_policy: str,
+    latest_bar_timestamp: datetime | None,
+    intended_cutoff_timestamp: datetime | None,
+    complete_through_cutoff: bool,
 ) -> str | None:
     if len(export_candles) < min_bars:
         return f"Maintained MGC 1m history has {len(export_candles)} bars; requires at least {min_bars}."
     if gap_count > 0:
         return f"Maintained MGC 1m history has {gap_count} detected 1m gaps."
-    if history_freshness_seconds is None:
+    if latest_bar_timestamp is None:
         return "Maintained MGC 1m history has no latest bar timestamp."
-    if history_freshness_seconds > max_history_age_seconds:
+    if not complete_through_cutoff:
+        cutoff = None if intended_cutoff_timestamp is None else intended_cutoff_timestamp.isoformat()
+        return f"Maintained MGC 1m history is not complete through intended cutoff {cutoff}."
+    if runtime_intraday_freshness_policy == "REQUIRE_MAX_AGE" and history_freshness_seconds is not None and history_freshness_seconds > max_history_age_seconds:
         return (
-            f"Maintained MGC 1m history is stale: {history_freshness_seconds}s old, "
+            f"Runtime intraday MGC 1m history is stale: {history_freshness_seconds}s old, "
             f"max allowed {max_history_age_seconds}s."
         )
     return None
@@ -463,6 +520,10 @@ def _history_export(
     gap_count: int,
     duplicate_count: int,
     history_freshness_seconds: int | None,
+    historical_maintenance_cutoff_policy: str,
+    runtime_intraday_freshness_policy: str,
+    intended_cutoff_timestamp: datetime | None,
+    complete_through_cutoff: bool,
     requested_history_end: datetime | None,
     provider_available_end: datetime | None,
     history_end_used: datetime | None,
@@ -500,6 +561,13 @@ def _history_export(
         "candle_history": list(candles),
         "history_provider_mode": history_provider_mode,
         "source_provider": "DATABENTO",
+        "historical_context_ready": history_ready,
+        "historical_maintenance_cutoff_policy": historical_maintenance_cutoff_policy,
+        "runtime_intraday_freshness_policy": runtime_intraday_freshness_policy,
+        "intended_cutoff_timestamp": None if intended_cutoff_timestamp is None else intended_cutoff_timestamp.isoformat(),
+        "complete_through_cutoff": complete_through_cutoff,
+        "latest_bar_timestamp": latest.get("candle_timestamp"),
+        "missing_bars": gap_count,
         "requested_history_end": None if requested_history_end is None else requested_history_end.isoformat(),
         "provider_available_end": None if provider_available_end is None else provider_available_end.isoformat(),
         "history_end_used": None if history_end_used is None else history_end_used.isoformat(),
@@ -514,6 +582,8 @@ def _history_export(
             "track_b_data_maintenance_id": maintenance_id,
             "market_data_role": "MAINTAINED_HISTORY_ONLY",
             "source_provider": "DATABENTO",
+            "historical_maintenance_cutoff_policy": historical_maintenance_cutoff_policy,
+            "runtime_intraday_freshness_policy": runtime_intraday_freshness_policy,
             "history_provider_mode": history_provider_mode,
             "source_payload_path": None if source_payload_path is None else str(source_payload_path),
             "realtime_current_quote_is_separate": True,
@@ -549,6 +619,10 @@ def _write_result(
     export_bars: int,
     min_bars: int,
     max_history_age_seconds: int,
+    historical_maintenance_cutoff_policy: str,
+    runtime_intraday_freshness_policy: str,
+    intended_cutoff_timestamp: datetime | None,
+    complete_through_cutoff: bool,
     store_candles: Sequence[Mapping[str, Any]],
     export_candles: Sequence[Mapping[str, Any]],
     duplicate_count: int,
@@ -585,6 +659,10 @@ def _write_result(
         "export_bars": export_bars,
         "min_bars": min_bars,
         "max_history_age_seconds": max_history_age_seconds,
+        "historical_maintenance_cutoff_policy": historical_maintenance_cutoff_policy,
+        "runtime_intraday_freshness_policy": runtime_intraday_freshness_policy,
+        "intended_cutoff_timestamp": None if intended_cutoff_timestamp is None else intended_cutoff_timestamp.isoformat(),
+        "complete_through_cutoff": complete_through_cutoff,
         "requested_history_end": None if requested_history_end is None else requested_history_end.isoformat(),
         "provider_available_end": None if provider_available_end is None else provider_available_end.isoformat(),
         "history_end_used": None if history_end_used is None else history_end_used.isoformat(),
@@ -594,11 +672,14 @@ def _write_result(
         "store_bars_available": len(store_candles),
         "first_bar_timestamp": first_bar_timestamp,
         "last_bar_timestamp": last_bar_timestamp,
+        "latest_bar_timestamp": last_bar_timestamp,
+        "missing_bars": gap_count,
         "gap_count": gap_count,
         "duplicate_count": duplicate_count,
         "latest_good_history_path": str(latest_good_history_json) if latest_good_history is not None else None,
         "history_freshness_seconds": history_freshness_seconds,
         "history_ready": history_ready,
+        "historical_context_ready": history_ready,
         "primary_blocker": primary_blocker,
         "secondary_blockers": [],
         "required_next_action": required_next_action,

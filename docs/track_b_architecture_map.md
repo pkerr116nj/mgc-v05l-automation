@@ -162,10 +162,13 @@ Dashboard implication:
   `outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json`
   as a read-model convenience.
 - `track_b_data_maintenance` owns the Track B local rolling MGC 1m history
-  foundation. It supports initial bounded backfill, incremental append/update,
-  duplicate handling, monotonic ordering, gap detection, stale/insufficient
-  readiness classification, and a latest-good bounded export for the feature
-  builder. It writes
+  foundation for research/replay historical data. It is the Track A-style
+  maintenance lane: default cadence is weekly, the intended cutoff is normally
+  Friday close, and the purpose is research, replay, backtesting, and maintained
+  historical base data. It supports initial bounded backfill, incremental
+  append/update, duplicate handling, monotonic ordering, gap detection,
+  cutoff-completeness classification, and a latest-good bounded export for the
+  feature builder. It writes
   `outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json`
   and
   `outputs/track_b_execution_core/track_b_data_maintenance/latest_track_b_data_maintenance_report.json`.
@@ -180,24 +183,23 @@ Dashboard implication:
   `provider_available_end`, label the result `history_provider_mode =
   HISTORICAL_AVAILABLE_END`, and report `requested_history_end`,
   `provider_available_end`, `history_end_used`, `available_end_lag_seconds`,
-  and `history_freshness_seconds`. Maintained bars are not realtime quote
-  evidence; strategy/paper execution still requires a separate realtime current
-  quote report.
-- `track_b_strategy_paper_runner` applies an explicit maintained-history
-  freshness policy when consuming
-  `latest_good_mgc_1m_history.json`. The CLI exposes
-  `--max-maintained-history-age-seconds` and reports
-  `maintained_history_age_seconds`, `max_maintained_history_age_seconds`, and
-  `maintained_history_ready`. Operators should align this with the data
-  maintenance `--max-history-age-seconds` threshold: wider values are useful
-  for paper plumbing checks, while real strategy validation should use tighter
-  rule-appropriate limits. Realtime current quote evidence remains separate.
-  A PAPER-only diagnostic flag,
-  `--allow-stale-maintained-history-paper`, can relax only the maintained
-  history age gate for integration testing. It does not override missing bars,
-  insufficient bars, gaps, missing realtime quote evidence, non-PAPER mode, or
-  live-money safety; reports must mark
-  `maintained_history_stale_override_used=true`.
+  and `history_freshness_seconds`. Historical maintenance reports
+  `historical_maintenance_cutoff_policy`, `intended_cutoff_timestamp`,
+  `latest_bar_timestamp`, `complete_through_cutoff`, and `missing_bars`. It
+  does not fail merely because the latest historical bar is older than 900 or
+  1200 seconds from now. Maintained bars are not realtime quote evidence;
+  strategy/paper execution still requires a separate realtime current quote
+  report, and same-session candle context belongs to a separate runtime live
+  candle/quote capture lane.
+- `track_b_strategy_paper_runner` distinguishes historical context from runtime
+  intraday context when consuming `latest_good_mgc_1m_history.json`. It reports
+  `historical_context_ready`, `runtime_candle_context_required`,
+  `runtime_candle_context_supplied`, and `runtime_intraday_freshness_policy`.
+  The 900/1200-second age threshold is only an intraday runtime policy when
+  explicitly requested with `runtime_intraday_freshness_policy =
+  REQUIRE_MAX_AGE`; weekly historical maintenance can be many hours or days old
+  while still being complete through its cutoff. Realtime current quote
+  evidence remains separate.
 - `track_b_mgc_candle_history_producer` is the bounded upstream producer for
   the MGC 1m history JSON consumed by `track_b_market_history`. It can
   normalize a supplied Databento-like OHLCV history artifact, or make an

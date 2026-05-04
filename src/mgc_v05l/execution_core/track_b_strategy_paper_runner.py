@@ -141,6 +141,8 @@ class TrackBStrategyPaperRunnerConfig:
     data_maintenance_output_root: Path = DEFAULT_TRACK_B_DATA_MAINTENANCE_OUTPUT_ROOT
     max_maintained_history_age_seconds: int = 900
     allow_stale_maintained_history_paper: bool = False
+    runtime_intraday_freshness_policy: str = "NOT_REQUESTED"
+    runtime_candle_context_required: bool = False
     candle_history_producer_output_root: Path = DEFAULT_TRACK_B_MGC_CANDLE_HISTORY_PRODUCER_OUTPUT_ROOT
     candle_history_max_candles: int = 50
     candle_history_min_candles: int = 3
@@ -867,6 +869,10 @@ def _build_report(
         "data_maintenance_history_requested": _maintained_history_requested(config),
         "maintained_history_age_seconds": maintained_history_status.get("maintained_history_age_seconds"),
         "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        "runtime_intraday_freshness_policy": config.runtime_intraday_freshness_policy,
+        "runtime_candle_context_required": config.runtime_candle_context_required,
+        "runtime_candle_context_supplied": _runtime_candle_context_supplied(config),
+        "historical_context_ready": maintained_history_status.get("historical_context_ready"),
         "maintained_history_ready": maintained_history_status.get("maintained_history_ready"),
         "maintained_history_effective_ready": maintained_history_status.get("maintained_history_effective_ready"),
         "maintained_history_stale_override_requested": config.allow_stale_maintained_history_paper,
@@ -1040,6 +1046,7 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
     if not _maintained_history_requested(config):
         return {
             "maintained_history_requested": False,
+            "historical_context_ready": None,
             "maintained_history_ready": None,
             "primary_blocker": None,
         }
@@ -1047,6 +1054,7 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
     if not has_current_quote:
         return {
             "maintained_history_requested": True,
+            "historical_context_ready": False,
             "maintained_history_ready": False,
             "primary_blocker": "Maintained-history PAPER path requires a separate current quote report JSON/payload.",
             "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
@@ -1056,6 +1064,7 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
     except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
         return {
             "maintained_history_requested": True,
+            "historical_context_ready": False,
             "maintained_history_ready": False,
             "primary_blocker": f"Maintained history JSON could not be read: {exc}",
             "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
@@ -1064,10 +1073,12 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
     reported_freshness = payload.get("history_freshness_seconds")
     reported_blocker = str(payload.get("primary_blocker") or "")
     history_provider_mode = payload.get("history_provider_mode")
+    runtime_policy = str(config.runtime_intraday_freshness_policy or "NOT_REQUESTED").upper()
     candles = payload.get("candles") or payload.get("candle_history")
     if not isinstance(candles, list) or not candles:
         return {
             "maintained_history_requested": True,
+            "historical_context_ready": False,
             "maintained_history_ready": False,
             "maintained_history_reported_ready": reported_ready,
             "maintained_history_reported_freshness_seconds": reported_freshness,
@@ -1080,6 +1091,7 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
     if len(candles) < min_bars:
         return {
             "maintained_history_requested": True,
+            "historical_context_ready": False,
             "maintained_history_ready": False,
             "maintained_history_reported_ready": reported_ready,
             "maintained_history_reported_freshness_seconds": reported_freshness,
@@ -1092,6 +1104,7 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
     if gap_count is not None and gap_count > 0:
         return {
             "maintained_history_requested": True,
+            "historical_context_ready": False,
             "maintained_history_ready": False,
             "maintained_history_reported_ready": reported_ready,
             "maintained_history_reported_freshness_seconds": reported_freshness,
@@ -1105,6 +1118,7 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
     if latest_timestamp is None:
         return {
             "maintained_history_requested": True,
+            "historical_context_ready": False,
             "maintained_history_ready": False,
             "maintained_history_reported_ready": reported_ready,
             "maintained_history_reported_freshness_seconds": reported_freshness,
@@ -1115,10 +1129,26 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
             "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
         }
     history_age_seconds = max(int((now.astimezone(UTC) - latest_timestamp).total_seconds()), 0)
-    if history_age_seconds > config.max_maintained_history_age_seconds:
+    if config.runtime_candle_context_required:
+        return {
+            "maintained_history_requested": True,
+            "historical_context_ready": True,
+            "maintained_history_ready": False,
+            "maintained_history_effective_ready": False,
+            "maintained_history_reported_ready": reported_ready,
+            "maintained_history_reported_freshness_seconds": reported_freshness,
+            "maintained_history_bar_count": len(candles),
+            "maintained_history_gap_count": gap_count,
+            "maintained_history_age_seconds": history_age_seconds,
+            "history_provider_mode": history_provider_mode,
+            "primary_blocker": "Runtime candle context is required; maintained historical context is not a live runtime candle capture.",
+            "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
+        }
+    if runtime_policy == "REQUIRE_MAX_AGE" and history_age_seconds > config.max_maintained_history_age_seconds:
         if _allow_stale_maintained_history_paper(config):
             return {
                 "maintained_history_requested": True,
+                "historical_context_ready": True,
                 "maintained_history_ready": False,
                 "maintained_history_effective_ready": True,
                 "maintained_history_stale_override_used": True,
@@ -1133,6 +1163,7 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
             }
         return {
             "maintained_history_requested": True,
+            "historical_context_ready": True,
             "maintained_history_ready": False,
             "maintained_history_effective_ready": False,
             "maintained_history_reported_ready": reported_ready,
@@ -1147,9 +1178,10 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
             ),
             "max_maintained_history_age_seconds": config.max_maintained_history_age_seconds,
         }
-    if payload.get("history_ready") is not True:
+    if payload.get("history_ready") is not True and not _reported_blocker_is_age_only(reported_blocker):
         return {
             "maintained_history_requested": True,
+            "historical_context_ready": False,
             "maintained_history_ready": False,
             "maintained_history_effective_ready": False,
             "maintained_history_reported_ready": reported_ready,
@@ -1163,6 +1195,7 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
         }
     return {
         "maintained_history_requested": True,
+        "historical_context_ready": True,
         "maintained_history_ready": True,
         "maintained_history_effective_ready": True,
         "maintained_history_stale_override_used": False,
@@ -1179,6 +1212,25 @@ def _maintained_history_status(config: TrackBStrategyPaperRunnerConfig, *, now: 
 
 def _allow_stale_maintained_history_paper(config: TrackBStrategyPaperRunnerConfig) -> bool:
     return bool(config.allow_stale_maintained_history_paper and str(config.mode).upper() == "PAPER")
+
+
+def _reported_blocker_is_age_only(blocker: str) -> bool:
+    lowered = blocker.lower()
+    return "stale" in lowered or "old" in lowered or "max allowed" in lowered
+
+
+def _runtime_candle_context_supplied(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    if _maintained_history_requested(config):
+        return False
+    return bool(
+        config.candle_history_json is not None
+        or config.candle_history_payload is not None
+        or config.build_features_from_json is not None
+        or config.build_features_from_payload is not None
+        or config.feature_event_json is not None
+        or config.input_event_json is not None
+        or config.input_event_payload is not None
+    )
 
 
 def _maintained_history_market_payload(config: TrackBStrategyPaperRunnerConfig, *, now: datetime) -> Mapping[str, object]:

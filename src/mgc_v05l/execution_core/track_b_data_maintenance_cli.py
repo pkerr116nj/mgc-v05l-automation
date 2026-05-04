@@ -55,6 +55,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export-bars", type=int, default=50)
     parser.add_argument("--min-bars", type=int, default=20)
     parser.add_argument("--max-history-age-seconds", type=int, default=900)
+    parser.add_argument("--historical-maintenance-cutoff-policy", default="EXPLICIT_OR_HISTORY_END")
+    parser.add_argument("--intended-cutoff-timestamp", help="Historical maintenance cutoff, such as Friday close. If omitted, the fetch/history end is used.")
+    parser.add_argument(
+        "--runtime-intraday-freshness-policy",
+        default="NOT_REQUESTED",
+        choices=["NOT_REQUESTED", "REQUIRE_MAX_AGE"],
+        help="Only REQUIRE_MAX_AGE applies --max-history-age-seconds as an intraday runtime freshness gate.",
+    )
     parser.add_argument("--source-id")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_DATA_MAINTENANCE_OUTPUT_ROOT)
     return parser
@@ -81,6 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_result(result)
         return 2
     source_payload_path = args.history_json
+    intended_cutoff_timestamp = _parse_time(args.intended_cutoff_timestamp) if args.intended_cutoff_timestamp else None
     if args.fetch_databento_history:
         raw_api_key = str(os.environ.get("DATABENTO_API_KEY") or "").strip()
         if not raw_api_key:
@@ -154,6 +163,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 history_end_used=history_end_used,
                 available_end_lag_seconds=available_end_lag_seconds,
                 history_provider_mode=history_provider_mode,
+                intended_cutoff_timestamp=intended_cutoff_timestamp,
             )
             source_payload_path = None
         except Exception as exc:  # noqa: BLE001 - provider failures become explicit maintenance artifacts.
@@ -199,6 +209,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         export_bars=args.export_bars,
         min_bars=args.min_bars,
         max_history_age_seconds=args.max_history_age_seconds,
+        historical_maintenance_cutoff_policy=args.historical_maintenance_cutoff_policy,
+        runtime_intraday_freshness_policy=args.runtime_intraday_freshness_policy,
+        intended_cutoff_timestamp=intended_cutoff_timestamp,
         source_id=args.source_id,
     )
     _print_result(result)
@@ -214,6 +227,7 @@ def _history_payload_from_records(
     history_end_used: datetime,
     available_end_lag_seconds: int | None,
     history_provider_mode: str,
+    intended_cutoff_timestamp: datetime | None,
 ) -> dict[str, object]:
     return {
         "schema_version": "track_b_databento_ohlcv_history_raw_v1",
@@ -228,6 +242,9 @@ def _history_payload_from_records(
         "symbol": args.allowlisted_local_symbol,
         "timeframe": args.timeframe,
         "history_provider_mode": history_provider_mode,
+        "historical_maintenance_cutoff_policy": args.historical_maintenance_cutoff_policy,
+        "runtime_intraday_freshness_policy": args.runtime_intraday_freshness_policy,
+        "intended_cutoff_timestamp": None if intended_cutoff_timestamp is None else intended_cutoff_timestamp.astimezone(UTC).isoformat(),
         "requested_history_end": requested_history_end.astimezone(UTC).isoformat(),
         "provider_available_end": None if provider_available_end is None else provider_available_end.astimezone(UTC).isoformat(),
         "history_end_used": history_end_used.astimezone(UTC).isoformat(),
@@ -271,6 +288,12 @@ def _print_result(result) -> None:  # type: ignore[no-untyped-def]
                 "gap_count": result.report["gap_count"],
                 "duplicate_count": result.report["duplicate_count"],
                 "latest_good_history_path": result.report["latest_good_history_path"],
+                "historical_maintenance_cutoff_policy": result.report["historical_maintenance_cutoff_policy"],
+                "runtime_intraday_freshness_policy": result.report["runtime_intraday_freshness_policy"],
+                "intended_cutoff_timestamp": result.report["intended_cutoff_timestamp"],
+                "complete_through_cutoff": result.report["complete_through_cutoff"],
+                "latest_bar_timestamp": result.report["latest_bar_timestamp"],
+                "missing_bars": result.report["missing_bars"],
                 "requested_history_end": result.report["requested_history_end"],
                 "provider_available_end": result.report["provider_available_end"],
                 "history_end_used": result.report["history_end_used"],
@@ -278,6 +301,7 @@ def _print_result(result) -> None:  # type: ignore[no-untyped-def]
                 "history_provider_mode": result.report["history_provider_mode"],
                 "history_freshness_seconds": result.report["history_freshness_seconds"],
                 "history_ready": result.report["history_ready"],
+                "historical_context_ready": result.report["historical_context_ready"],
                 "submit_allowed": result.report["submit_allowed"],
                 "submit_attempted": result.report["submit_attempted"],
                 "live_money_readiness": result.report["live_money_readiness"],
