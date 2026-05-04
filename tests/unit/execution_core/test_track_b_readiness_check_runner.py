@@ -81,6 +81,11 @@ def quote_stage(tmp_path: Path, **overrides: object):
             "quote_status": "CURRENT_QUOTE_AVAILABLE",
             "current_quote_available": True,
             "available_end_fallback_used": False,
+            "max_current_quote_age_seconds": 300,
+            "quote_age_seconds": "120.0",
+            "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_WITHIN_TOLERANCE",
+            "requested_quote_end": "2026-05-01T21:00:00+00:00",
+            "provider_available_end": "2026-05-01T20:58:00+00:00",
             "submit_allowed": False,
             "submit_attempted": False,
             "live_money_readiness": False,
@@ -90,6 +95,11 @@ def quote_stage(tmp_path: Path, **overrides: object):
             "observer_verdict": "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
             "current_quote_available": True,
             "wait_succeeded": True,
+            "max_current_quote_age_seconds": 300,
+            "quote_age_seconds": "120.0",
+            "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_WITHIN_TOLERANCE",
+            "requested_quote_end": "2026-05-01T21:00:00+00:00",
+            "provider_available_end": "2026-05-01T20:58:00+00:00",
             "source_report_path": str(quote_report),
             "primary_blocker": None,
             "required_next_action": "Run explicit downstream no-submit steps if needed.",
@@ -105,6 +115,11 @@ def quote_stage(tmp_path: Path, **overrides: object):
                 "observer_mode": "wait_for_current_quote",
                 "current_quote_available": payload.get("current_quote_available"),
                 "wait_succeeded": payload.get("wait_succeeded"),
+                "max_current_quote_age_seconds": payload.get("max_current_quote_age_seconds"),
+                "quote_age_seconds": payload.get("quote_age_seconds"),
+                "quote_freshness_verdict": payload.get("quote_freshness_verdict"),
+                "last_requested_quote_end": payload.get("requested_quote_end"),
+                "last_provider_available_end": payload.get("provider_available_end"),
                 "submit_allowed": False,
                 "submit_attempted": False,
                 "live_money_readiness": False,
@@ -195,6 +210,11 @@ def test_all_clean_path_produces_readiness_check_runner_report(tmp_path: Path) -
     assert result.report["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert result.report["current_quote_available"] is True
     assert result.report["wait_succeeded"] is True
+    assert result.report["max_current_quote_age_seconds"] == 300
+    assert result.report["quote_age_seconds"] == "120.0"
+    assert result.report["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_ACCEPTED_WITHIN_TOLERANCE"
+    assert result.report["requested_quote_end"] == "2026-05-01T21:00:00+00:00"
+    assert result.report["provider_available_end"] == "2026-05-01T20:58:00+00:00"
     assert result.report["readiness_verdict"] == "READY_FOR_PAPER_PROOF"
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False

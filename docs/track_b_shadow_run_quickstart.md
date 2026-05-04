@@ -290,6 +290,17 @@ For historical evidence only, rerun with `--allow-available-end-fallback`; that
 may anchor the request to Databento `available_end`, but it must not be treated
 as paper pricing readiness, live-money readiness, or submit authority.
 
+Current quote freshness tolerance is separate and explicit. When
+`--max-current-quote-age-seconds 300` is supplied, Track B may accept the latest
+provider-available Databento quote as current-enough for paper-readiness
+diagnostics only if `provider_available_end` is within 300 seconds of
+`requested_quote_end`. Reports expose `requested_quote_end`,
+`provider_available_end`, `quote_age_seconds`,
+`max_current_quote_age_seconds`, `quote_freshness_verdict`, and
+`current_quote_available`. Without that explicit tolerance,
+available-end fallback remains historical evidence only and readiness stays
+blocked.
+
 To wait safely for Databento `available_end` to catch up enough for a current
 quote artifact, use explicit bounded wait mode:
 
@@ -314,6 +325,7 @@ set +a
   --lane-id mgc_example_long_lmt_day \
   --timeframe quote_snapshot \
   --source-id wait_for_current_quote_check \
+  --max-current-quote-age-seconds 300 \
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
 
@@ -322,7 +334,8 @@ This writes `latest_databento_candle_observer_heartbeat.json` with
 `available_end_lag_cycles`, the last requested/available-end timestamps, and
 `wait_succeeded`. It waits for market-data availability only; it does not
 submit, authorize paper proof, run the listener, or turn fallback/historical
-quotes into readiness.
+quotes into readiness unless the explicit freshness tolerance accepts the
+provider-available quote as current-enough.
 
 The output event is already compatible with `strategy_signal_adapter_cli`; no
 extra bridge command is required in this slice. Direction is explicit, not
@@ -509,6 +522,7 @@ set +a
   --proof-timing-status ACTIVE_SESSION \
   --max-wait-cycles 10 \
   --wait-poll-seconds 15 \
+  --max-current-quote-age-seconds 300 \
   --output-root outputs/track_b_execution_core/track_b_readiness_check_runner
 ```
 
@@ -526,6 +540,8 @@ Failure is explicit and fail-closed:
 - current quote unavailable after bounded wait stops with quote blocker.
 - fallback/historical Databento quotes do not count as current readiness.
 - readiness-summary blockers are surfaced without calling paper proof.
+- current quote freshness tolerance is explicit in artifacts and never implies
+  live-money readiness or submit authority.
 
 ## Observation Runner
 

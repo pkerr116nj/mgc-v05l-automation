@@ -48,6 +48,7 @@ def quote_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, Any] = {
         "classification": "CURRENT_QUOTE_AVAILABLE",
         "quote_status": "CURRENT_QUOTE_AVAILABLE",
+        "current_quote_available": True,
         "quote_usable_for_paper_pricing": True,
         "quote_usable_for_live_money_readiness": False,
     }
@@ -139,12 +140,19 @@ def test_quote_unavailable_is_distinct_from_broker_state_block(tmp_path: Path) -
             tmp_path,
             classification="CURRENT_QUOTE_UNAVAILABLE",
             quote_status="CURRENT_QUOTE_UNAVAILABLE",
+            current_quote_available=False,
+            quote_freshness_verdict="CURRENT_QUOTE_FRESHNESS_BLOCKED_OUTSIDE_TOLERANCE",
+            quote_age_seconds="600.0",
+            max_current_quote_age_seconds=300,
             quote_usable_for_paper_pricing=False,
         ),
     )
 
     assert result.report["final_readiness_verdict"] == "BLOCKED_MARKET_DATA_MODE_OR_QUOTE_UNAVAILABLE"
     assert "Quote is not currently available" in result.report["primary_blocker"]
+    assert result.report["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_BLOCKED_OUTSIDE_TOLERANCE"
+    assert result.report["quote_age_seconds"] == "600.0"
+    assert result.report["max_current_quote_age_seconds"] == 300
     assert result.report["submit_allowed"] is False
     assert result.report["production_live_money_readiness"] is False
 

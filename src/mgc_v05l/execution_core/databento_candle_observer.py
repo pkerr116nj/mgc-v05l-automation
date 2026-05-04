@@ -100,6 +100,7 @@ def observe_databento_candle_event(
                 market_data_connection_attempted=market_data_connection_attempted,
                 primary_blocker=_market_data_blocker(market_data_payload),
                 required_next_action=_market_data_required_next_action(market_data_payload),
+                market_data_payload=market_data_payload,
             )
 
         candle = _extract_candle(market_data_payload)
@@ -155,6 +156,7 @@ def observe_databento_candle_event(
             market_data_connection_attempted=market_data_connection_attempted,
             primary_blocker=None,
             required_next_action="Run strategy_signal_adapter_cli explicitly if this no-submit market-data event should enter the listener inbox.",
+            market_data_payload=market_data_payload,
         )
     except (TypeError, ValueError, OSError) as exc:
         return _write_report(
@@ -172,6 +174,7 @@ def observe_databento_candle_event(
             market_data_connection_attempted=market_data_connection_attempted,
             primary_blocker=str(exc),
             required_next_action="Fix Databento candle observer input before retrying.",
+            market_data_payload=market_data_payload,
         )
 
 
@@ -209,6 +212,7 @@ def write_databento_candle_observer_blocked_report(
         market_data_connection_attempted=market_data_connection_attempted,
         primary_blocker=primary_blocker,
         required_next_action=required_next_action,
+        market_data_payload=None,
     )
 
 
@@ -238,6 +242,16 @@ def _market_data_blocker(payload: Mapping[str, Any]) -> str:
             )
         return f"Databento market-data provider error: {provider_error}"
     if requested_end and available_end and payload.get("current_quote_available") is False:
+        freshness_verdict = _optional_text(payload.get("quote_freshness_verdict"))
+        quote_age = _optional_text(payload.get("quote_age_seconds"))
+        max_age = _optional_text(payload.get("max_current_quote_age_seconds"))
+        if freshness_verdict:
+            return (
+                "Databento current quote is not currently available under the explicit freshness policy; "
+                f"requested_quote_end={requested_end}; provider_available_end={available_end}; "
+                f"quote_freshness_verdict={freshness_verdict}; quote_age_seconds={quote_age}; "
+                f"max_current_quote_age_seconds={max_age}"
+            )
         return (
             "Databento current quote is not currently available for the requested window; "
             f"requested_quote_end={requested_end}; provider_available_end={available_end}"
@@ -325,7 +339,9 @@ def _write_report(
     market_data_connection_attempted: bool,
     primary_blocker: str | None,
     required_next_action: str,
+    market_data_payload: Mapping[str, Any] | None = None,
 ) -> DatabentoCandleObserverResult:
+    market_data_payload = market_data_payload or {}
     if candle_event is not None:
         event_json.parent.mkdir(parents=True, exist_ok=True)
         event_payload = json.dumps(to_jsonable(candle_event), indent=2, sort_keys=True)
@@ -350,6 +366,14 @@ def _write_report(
         "timeframe": timeframe,
         "event_timestamp": None if candle_event is None else candle_event.get("candle_timestamp"),
         "candle_timestamp": None if candle_event is None else candle_event.get("candle_timestamp"),
+        "current_quote_available": market_data_payload.get("current_quote_available"),
+        "max_current_quote_age_seconds": market_data_payload.get("max_current_quote_age_seconds"),
+        "quote_age_seconds": market_data_payload.get("quote_age_seconds"),
+        "quote_freshness_verdict": market_data_payload.get("quote_freshness_verdict"),
+        "requested_quote_end": market_data_payload.get("requested_quote_end"),
+        "provider_available_end": market_data_payload.get("provider_available_end"),
+        "provider_available_end_final": market_data_payload.get("provider_available_end_final"),
+        "available_end_fallback_used": market_data_payload.get("available_end_fallback_used"),
         "open": None if candle_event is None else candle_event.get("open"),
         "high": None if candle_event is None else candle_event.get("high"),
         "low": None if candle_event is None else candle_event.get("low"),
@@ -740,6 +764,9 @@ def _write_wait_heartbeat(
     heartbeat_json = output_root / wait_id / "databento_candle_observer_heartbeat.json"
     latest_heartbeat_json = output_root / "latest_databento_candle_observer_heartbeat.json"
     current_quote_available = last_payload.get("current_quote_available")
+    max_current_quote_age_seconds = last_payload.get("max_current_quote_age_seconds")
+    quote_age_seconds = last_payload.get("quote_age_seconds")
+    quote_freshness_verdict = last_payload.get("quote_freshness_verdict")
     requested_quote_end = _optional_text(last_payload.get("requested_quote_end"))
     provider_available_end = _optional_text(last_payload.get("provider_available_end") or last_payload.get("provider_available_end_final"))
     required_next_action = (
@@ -769,6 +796,9 @@ def _write_wait_heartbeat(
         "error_cycles": error_cycles,
         "last_requested_quote_end": requested_quote_end,
         "last_provider_available_end": provider_available_end,
+        "max_current_quote_age_seconds": max_current_quote_age_seconds,
+        "quote_age_seconds": quote_age_seconds,
+        "quote_freshness_verdict": quote_freshness_verdict,
         "last_observer_verdict": last_result.verdict.value,
         "last_event_timestamp": last_result.report.get("event_timestamp"),
         "current_quote_available": current_quote_available,

@@ -57,6 +57,7 @@ class DatabentoCurrentQuoteConfig:
     exchange: str = "COMEX"
     currency: str = "USD"
     max_age_seconds: int = 15
+    max_current_quote_age_seconds: int | None = None
     output_root: Path = DEFAULT_CURRENT_QUOTE_OUTPUT_ROOT
 
     def selector_symbol(self) -> str:
@@ -138,10 +139,17 @@ class DatabentoCurrentQuoteProvider:
                 provider_diagnostics=_provider_diagnostics_from_raw(raw_quote),
                 no_records_reason="UNAVAILABLE_OR_INCOMPLETE_QUOTE",
             )
-        age_seconds = quote.age_seconds(actual_now)
+        diagnostics = _provider_diagnostics_from_raw(raw_quote)
+        freshness = _quote_freshness_fields(
+            quote=quote,
+            now=actual_now,
+            diagnostics=diagnostics,
+            max_age_seconds=self.config.max_age_seconds,
+            max_current_quote_age_seconds=self.config.max_current_quote_age_seconds,
+        )
         classification = (
             CurrentQuoteClassification.AVAILABLE
-            if Decimal("0") <= age_seconds <= Decimal(str(self.config.max_age_seconds))
+            if freshness["current_quote_available"] is True
             else CurrentQuoteClassification.STALE
         )
         return self._write_report(
@@ -151,7 +159,7 @@ class DatabentoCurrentQuoteProvider:
             raw_quote=raw_quote,
             quote=quote,
             provider_error=None,
-            provider_diagnostics=_provider_diagnostics_from_raw(raw_quote),
+            provider_diagnostics=diagnostics,
             no_records_reason=None,
         )
 
@@ -201,8 +209,15 @@ class DatabentoCurrentQuoteProvider:
         no_records_reason: str | None,
     ) -> CurrentQuoteResult:
         diagnostics = dict(provider_diagnostics or {})
-        quote_age_seconds = str(quote.age_seconds(now)) if quote is not None else None
-        quote_available = classification == CurrentQuoteClassification.AVAILABLE
+        freshness = _quote_freshness_fields(
+            quote=quote,
+            now=now,
+            diagnostics=diagnostics,
+            max_age_seconds=self.config.max_age_seconds,
+            max_current_quote_age_seconds=self.config.max_current_quote_age_seconds,
+        )
+        quote_age_seconds = freshness["quote_age_seconds"]
+        quote_available = classification == CurrentQuoteClassification.AVAILABLE and freshness["current_quote_available"] is True
         report = {
             "schema_version": "track_b_databento_current_quote_v1",
             "classification": classification.value,
@@ -229,6 +244,8 @@ class DatabentoCurrentQuoteProvider:
             "timestamp": quote.timestamp.isoformat() if quote is not None else None,
             "quote_age_seconds": quote_age_seconds,
             "max_age_seconds": int(self.config.max_age_seconds),
+            "max_current_quote_age_seconds": self.config.max_current_quote_age_seconds,
+            "quote_freshness_verdict": freshness["quote_freshness_verdict"],
             "current_quote_available": quote_available,
             "current_executable_quote": quote_available,
             "quote_usable_for_paper_pricing": quote_available,
@@ -256,8 +273,11 @@ class DatabentoCurrentQuoteProvider:
             "native_databento_error_message": diagnostics.get("native_databento_error_message"),
             "raw_quote_keys": sorted(str(key) for key in raw_quote.keys()) if raw_quote is not None else [],
             "submit_enabled": False,
+            "submit_allowed": False,
             "place_order_called": False,
             "cancel_called": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
         }
         report_json.parent.mkdir(parents=True, exist_ok=True)
         report["report_json_path"] = str(report_json)
@@ -280,6 +300,7 @@ class DatabentoQuoteProviderCurrentQuoteTransport:
         lookback_seconds: int = 300,
         allow_available_end_fallback: bool = False,
         available_end_buffer_seconds: int = 300,
+        max_current_quote_age_seconds: int | None = None,
         base_url: str = "https://hist.databento.com/v0",
         quote_provider_factory: Any | None = None,
     ) -> None:
@@ -291,7 +312,8 @@ class DatabentoQuoteProviderCurrentQuoteTransport:
         self.max_age_seconds = int(max_age_seconds)
         self.lookback_seconds = int(lookback_seconds)
         self.allow_available_end_fallback = bool(allow_available_end_fallback)
-        self.available_end_buffer_seconds = int(available_end_buffer_seconds)
+        self.max_current_quote_age_seconds = max_current_quote_age_seconds
+        self.available_end_buffer_seconds = 0 if max_current_quote_age_seconds is not None else int(available_end_buffer_seconds)
         self.base_url = base_url
         self.quote_provider_factory = quote_provider_factory
 
@@ -319,7 +341,7 @@ class DatabentoQuoteProviderCurrentQuoteTransport:
             stype_in=stype_in,
             bbo_schema=schema,
             lookback_seconds=self.lookback_seconds,
-            allow_available_end_fallback=self.allow_available_end_fallback,
+            allow_available_end_fallback=self.allow_available_end_fallback or self.max_current_quote_age_seconds is not None,
             available_end_buffer_seconds=self.available_end_buffer_seconds,
             base_url=self.base_url,
             realtime_max_age_seconds=self.max_age_seconds,
@@ -352,6 +374,79 @@ def _provider_diagnostics_from_raw(raw_quote: Mapping[str, Any] | None) -> dict[
     return dict(raw) if isinstance(raw, Mapping) else {}
 
 
+def _quote_freshness_fields(
+    *,
+    quote: QuoteSnapshot | None,
+    now: datetime,
+    diagnostics: Mapping[str, Any],
+    max_age_seconds: int,
+    max_current_quote_age_seconds: int | None,
+) -> dict[str, Any]:
+    if quote is None:
+        return {
+            "quote_age_seconds": None,
+            "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_BLOCKED_NO_QUOTE",
+            "current_quote_available": False,
+        }
+
+    fallback_used = bool(diagnostics.get("available_end_fallback_used"))
+    requested_end = _optional_datetime_from_value(diagnostics.get("requested_quote_end")) or now
+    provider_available_end = _optional_datetime_from_value(
+        diagnostics.get("provider_available_end_final") or diagnostics.get("provider_available_end")
+    )
+    observed_age = max(Decimal("0"), Decimal(str((now - quote.timestamp).total_seconds())))
+
+    if max_current_quote_age_seconds is None:
+        if fallback_used:
+            return {
+                "quote_age_seconds": str(observed_age),
+                "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_BLOCKED_FALLBACK_WITHOUT_EXPLICIT_TOLERANCE",
+                "current_quote_available": False,
+            }
+        accepted = Decimal("0") <= observed_age <= Decimal(str(max_age_seconds))
+        return {
+            "quote_age_seconds": str(observed_age),
+            "quote_freshness_verdict": (
+                "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE"
+                if accepted
+                else "CURRENT_QUOTE_FRESHNESS_BLOCKED_STRICT_MAX_AGE"
+            ),
+            "current_quote_available": accepted,
+        }
+
+    max_current_age = Decimal(str(max_current_quote_age_seconds))
+    if fallback_used:
+        if provider_available_end is None:
+            return {
+                "quote_age_seconds": str(observed_age),
+                "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_BLOCKED_MISSING_PROVIDER_AVAILABLE_END",
+                "current_quote_available": False,
+            }
+        provider_lag = max(Decimal("0"), Decimal(str((requested_end - provider_available_end).total_seconds())))
+        accepted = provider_lag <= max_current_age
+        return {
+            "quote_age_seconds": str(provider_lag),
+            "quote_freshness_verdict": (
+                "CURRENT_QUOTE_FRESHNESS_ACCEPTED_AVAILABLE_END_WITHIN_TOLERANCE"
+                if accepted
+                else "CURRENT_QUOTE_FRESHNESS_BLOCKED_AVAILABLE_END_OUTSIDE_TOLERANCE"
+            ),
+            "current_quote_available": accepted,
+        }
+
+    requested_age = max(Decimal("0"), Decimal(str((requested_end - quote.timestamp).total_seconds())))
+    accepted = requested_age <= max_current_age
+    return {
+        "quote_age_seconds": str(requested_age),
+        "quote_freshness_verdict": (
+            "CURRENT_QUOTE_FRESHNESS_ACCEPTED_WITHIN_TOLERANCE"
+            if accepted
+            else "CURRENT_QUOTE_FRESHNESS_BLOCKED_OUTSIDE_TOLERANCE"
+        ),
+        "current_quote_available": accepted,
+    }
+
+
 def _parse_timestamp(value: Any) -> datetime:
     if value is None:
         raise ValueError("timestamp is required")
@@ -359,6 +454,18 @@ def _parse_timestamp(value: Any) -> datetime:
         return require_aware_datetime(value, "timestamp")
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return require_aware_datetime(parsed, "timestamp")
+
+
+def _optional_datetime_from_value(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return require_aware_datetime(value, "datetime value").astimezone(UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return require_aware_datetime(parsed, "datetime value").astimezone(UTC)
 
 
 def _required_decimal(value: Any, field_name: str) -> Decimal:

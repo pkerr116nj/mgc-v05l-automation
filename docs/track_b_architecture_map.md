@@ -144,7 +144,10 @@ Dashboard implication:
   It answers whether paper proof may be considered as a separate operator
   decision. It does not call `paper_proof_cli`, submit, cancel, place orders,
   create order plans, mutate broker state, infer direction, or turn fallback
-  historical quotes into readiness.
+  historical quotes into readiness. If configured, its current-quote freshness
+  tolerance must be explicit and visible as `max_current_quote_age_seconds`,
+  `quote_age_seconds`, `quote_freshness_verdict`, `requested_quote_end`, and
+  `provider_available_end`.
 - `signal_intent_proposal` may create a proposed no-submit strategy intent from
   a validated signal under an explicit policy. It does not authorize a lane,
   create an order plan, summarize readiness, or submit.
@@ -395,6 +398,15 @@ the current quote report must surface `requested_quote_end`,
 result remains blocked for current readiness and never implies paper/live submit
 authority.
 
+Track B also supports an explicit current-quote freshness tolerance. With
+`--max-current-quote-age-seconds 300`, a provider available-end quote may be
+classified current-enough for paper-readiness diagnostics only when
+`provider_available_end` is within 300 seconds of `requested_quote_end`. This is
+not silent fallback: reports must show `max_current_quote_age_seconds`,
+`quote_age_seconds`, `quote_freshness_verdict`, `current_quote_available`,
+`provider_available_end`, and `requested_quote_end`. Without the explicit
+tolerance, available-end fallback remains historical evidence only.
+
 Bounded wait-for-current-quote mode:
 
 ```bash
@@ -418,6 +430,7 @@ set +a
   --lane-id mgc_example_long_lmt_day \
   --timeframe quote_snapshot \
   --source-id wait_for_current_quote_check \
+  --max-current-quote-age-seconds 300 \
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
 
@@ -582,6 +595,7 @@ set +a
   --proof-timing-status ACTIVE_SESSION \
   --max-wait-cycles 10 \
   --wait-poll-seconds 15 \
+  --max-current-quote-age-seconds 300 \
   --output-root outputs/track_b_execution_core/track_b_readiness_check_runner
 ```
 

@@ -44,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exchange", default="COMEX")
     parser.add_argument("--currency", default="USD")
     parser.add_argument("--max-age-seconds", type=int, default=15)
+    parser.add_argument(
+        "--max-current-quote-age-seconds",
+        type=int,
+        help="Explicit tolerance for accepting Databento provider available_end as current-enough for paper-readiness diagnostics.",
+    )
     parser.add_argument("--quote-lookback-seconds", type=int, default=300)
     parser.add_argument("--allow-available-end-fallback", action="store_true")
     parser.add_argument("--available-end-buffer-seconds", type=int, default=300)
@@ -177,6 +182,7 @@ def _run_live_current_quote(args: argparse.Namespace) -> int:
         exchange=args.exchange,
         currency=args.currency,
         max_age_seconds=args.max_age_seconds,
+        max_current_quote_age_seconds=args.max_current_quote_age_seconds,
         output_root=args.current_quote_output_root,
     )
     transport = DatabentoQuoteProviderCurrentQuoteTransport(
@@ -189,6 +195,7 @@ def _run_live_current_quote(args: argparse.Namespace) -> int:
         lookback_seconds=args.quote_lookback_seconds,
         allow_available_end_fallback=args.allow_available_end_fallback,
         available_end_buffer_seconds=args.available_end_buffer_seconds,
+        max_current_quote_age_seconds=args.max_current_quote_age_seconds,
     )
     provider = DatabentoCurrentQuoteProvider(config=config, transport=transport)
 
@@ -229,6 +236,9 @@ def _run_live_current_quote(args: argparse.Namespace) -> int:
                     "last_provider_available_end": result.heartbeat["last_provider_available_end"],
                     "last_observer_verdict": result.heartbeat["last_observer_verdict"],
                     "current_quote_available": result.heartbeat["current_quote_available"],
+                    "max_current_quote_age_seconds": result.heartbeat["max_current_quote_age_seconds"],
+                    "quote_age_seconds": result.heartbeat["quote_age_seconds"],
+                    "quote_freshness_verdict": result.heartbeat["quote_freshness_verdict"],
                     "wait_exited_normally": result.heartbeat["wait_exited_normally"],
                     "wait_succeeded": result.heartbeat["wait_succeeded"],
                     "required_next_action": result.heartbeat["required_next_action"],

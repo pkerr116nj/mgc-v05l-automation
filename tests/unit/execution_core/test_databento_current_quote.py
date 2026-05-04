@@ -221,6 +221,95 @@ def test_available_end_fallback_diagnostics_are_preserved_without_readiness(tmp_
     assert payload["active_session_quote"] is False
     assert payload["quote_usable_for_paper_pricing"] is False
     assert payload["quote_usable_for_live_money_readiness"] is False
+    assert payload["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_BLOCKED_FALLBACK_WITHOUT_EXPLICIT_TOLERANCE"
+
+
+def test_available_end_fallback_within_explicit_freshness_tolerance_is_current_enough(tmp_path: Path) -> None:
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path, max_age_seconds=15, max_current_quote_age_seconds=300),
+        transport=FakeCurrentQuoteTransport(
+            raw_quote(
+                timestamp=(aware_now() - timedelta(minutes=5)).isoformat(),
+                raw={
+                    "requested_quote_end": "2026-05-01T20:00:00+00:00",
+                    "actual_quote_end": "2026-05-01T19:56:00+00:00",
+                    "provider_available_end": "2026-05-01T19:56:00+00:00",
+                    "provider_available_end_final": "2026-05-01T19:56:00+00:00",
+                    "available_end_fallback_used": True,
+                    "allow_available_end_fallback_requested": True,
+                    "quote_temporal_scope": "CURRENT_AVAILABLE_END",
+                    "active_session_quote": False,
+                },
+            )
+        ),
+    )
+
+    result = provider.fetch_current_quote(run_id="current-available-end-fresh-enough", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.AVAILABLE
+    assert payload["classification"] == "CURRENT_QUOTE_AVAILABLE"
+    assert payload["current_quote_available"] is True
+    assert payload["quote_usable_for_paper_pricing"] is True
+    assert payload["quote_usable_for_live_money_readiness"] is False
+    assert payload["max_current_quote_age_seconds"] == 300
+    assert payload["quote_age_seconds"] == "240.0"
+    assert payload["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_ACCEPTED_AVAILABLE_END_WITHIN_TOLERANCE"
+    assert payload["provider_available_end"] == "2026-05-01T19:56:00+00:00"
+    assert payload["requested_quote_end"] == "2026-05-01T20:00:00+00:00"
+    assert payload["submit_attempted"] is False
+    assert payload["live_money_readiness"] is False
+
+
+def test_available_end_fallback_outside_explicit_freshness_tolerance_blocks(tmp_path: Path) -> None:
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path, max_age_seconds=15, max_current_quote_age_seconds=300),
+        transport=FakeCurrentQuoteTransport(
+            raw_quote(
+                timestamp=(aware_now() - timedelta(minutes=8)).isoformat(),
+                raw={
+                    "requested_quote_end": "2026-05-01T20:00:00+00:00",
+                    "actual_quote_end": "2026-05-01T19:54:00+00:00",
+                    "provider_available_end": "2026-05-01T19:54:00+00:00",
+                    "provider_available_end_final": "2026-05-01T19:54:00+00:00",
+                    "available_end_fallback_used": True,
+                    "allow_available_end_fallback_requested": True,
+                },
+            )
+        ),
+    )
+
+    result = provider.fetch_current_quote(run_id="current-available-end-too-old", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.STALE
+    assert payload["current_quote_available"] is False
+    assert payload["quote_age_seconds"] == "360.0"
+    assert payload["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_BLOCKED_AVAILABLE_END_OUTSIDE_TOLERANCE"
+    assert payload["quote_usable_for_paper_pricing"] is False
+
+
+def test_available_end_fallback_with_missing_available_end_blocks_even_with_tolerance(tmp_path: Path) -> None:
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path, max_age_seconds=15, max_current_quote_age_seconds=300),
+        transport=FakeCurrentQuoteTransport(
+            raw_quote(
+                timestamp=(aware_now() - timedelta(minutes=1)).isoformat(),
+                raw={
+                    "requested_quote_end": "2026-05-01T20:00:00+00:00",
+                    "available_end_fallback_used": True,
+                    "allow_available_end_fallback_requested": True,
+                },
+            )
+        ),
+    )
+
+    result = provider.fetch_current_quote(run_id="current-available-end-missing", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.STALE
+    assert payload["current_quote_available"] is False
+    assert payload["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_BLOCKED_MISSING_PROVIDER_AVAILABLE_END"
 
 
 def test_incomplete_current_quote_is_unavailable_without_crashing(tmp_path: Path) -> None:

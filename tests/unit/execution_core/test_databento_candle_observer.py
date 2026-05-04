@@ -843,6 +843,75 @@ def test_databento_candle_observer_cli_wait_for_current_quote_fallback_does_not_
     assert latest_heartbeat["live_money_readiness"] is False
 
 
+def test_databento_candle_observer_cli_wait_for_current_quote_accepts_explicit_freshness_tolerance(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    quote_transport = FakeCurrentQuoteTransport(
+        [
+            quote_report(
+                last="4625.0",
+                timestamp=(aware_now() - timedelta(minutes=5)).isoformat(),
+                raw={
+                    "requested_quote_end": "2026-05-01T20:00:00+00:00",
+                    "actual_quote_end": "2026-05-01T19:56:00+00:00",
+                    "provider_available_end": "2026-05-01T19:56:00+00:00",
+                    "provider_available_end_final": "2026-05-01T19:56:00+00:00",
+                    "available_end_fallback_used": True,
+                    "allow_available_end_fallback_requested": True,
+                    "quote_temporal_scope": "CURRENT_AVAILABLE_END",
+                    "active_session_quote": False,
+                },
+            )
+        ]
+    )
+    monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
+    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+
+    exit_code = databento_candle_observer_cli_main(
+        [
+            "--live-current-quote",
+            "--wait-for-current-quote",
+            "--max-wait-cycles",
+            "1",
+            "--contract-key",
+            "MGC-202606",
+            "--databento-continuous-symbol",
+            "MGC.v.0",
+            "--dataset",
+            "GLBX.MDP3",
+            "--expected-account-id",
+            "DUM882026",
+            "--strategy-id",
+            "track_b_test_strategy",
+            "--lane-id",
+            "paper_review_lane",
+            "--output-root",
+            str(tmp_path / "observer_reports"),
+            "--current-quote-output-root",
+            str(tmp_path / "current_quotes"),
+            "--max-current-quote-age-seconds",
+            "300",
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    latest_heartbeat = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_heartbeat.json").read_text(encoding="utf-8"))
+    latest_report = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_report.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert output["wait_succeeded"] is True
+    assert output["current_quote_available"] is True
+    assert output["quote_age_seconds"] == "240.0"
+    assert output["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_ACCEPTED_AVAILABLE_END_WITHIN_TOLERANCE"
+    assert latest_heartbeat["max_current_quote_age_seconds"] == 300
+    assert latest_report["current_quote_available"] is True
+    assert latest_report["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_ACCEPTED_AVAILABLE_END_WITHIN_TOLERANCE"
+    assert latest_report["submit_allowed"] is False
+    assert latest_report["submit_attempted"] is False
+    assert latest_report["live_money_readiness"] is False
+
+
 def test_watch_mode_runs_bounded_cycles_and_updates_latest_artifacts(tmp_path: Path) -> None:
     payloads = [
         quote_report(last="4623.0", timestamp=aware_now().isoformat()),

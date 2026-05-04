@@ -44,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--proof-timing-detail")
     parser.add_argument("--max-wait-cycles", type=int, default=1)
     parser.add_argument("--wait-poll-seconds", type=float, default=0.0)
+    parser.add_argument(
+        "--max-current-quote-age-seconds",
+        type=int,
+        help="Explicit tolerance for Databento provider available_end lag when classifying current-enough paper-readiness quote evidence.",
+    )
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--quote-timeout-seconds", type=float, default=3.0)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_READINESS_CHECK_RUNNER_OUTPUT_ROOT)
@@ -84,6 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         proof_timing_detail=args.proof_timing_detail,
         max_wait_cycles=args.max_wait_cycles,
         wait_poll_seconds=args.wait_poll_seconds,
+        max_current_quote_age_seconds=args.max_current_quote_age_seconds,
         request_timeout_seconds=args.request_timeout_seconds,
         quote_timeout_seconds=args.quote_timeout_seconds,
         output_root=args.output_root,
@@ -104,6 +110,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "databento_observer_verdict": result.report["databento_observer_verdict"],
                 "current_quote_available": result.report["current_quote_available"],
                 "wait_succeeded": result.report["wait_succeeded"],
+                "max_current_quote_age_seconds": result.report["max_current_quote_age_seconds"],
+                "quote_age_seconds": result.report["quote_age_seconds"],
+                "quote_freshness_verdict": result.report["quote_freshness_verdict"],
+                "requested_quote_end": result.report["requested_quote_end"],
+                "provider_available_end": result.report["provider_available_end"],
                 "readiness_verdict": result.report["readiness_verdict"],
                 "primary_blocker": result.report["primary_blocker"],
                 "required_next_action": result.report["required_next_action"],

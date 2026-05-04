@@ -61,6 +61,12 @@ def run_readiness_summary(*, config: ReadinessSummaryConfig, run_id: str | None 
         "proof_timing_allowed": timing.allowed,
         "quote_classification": quote.get("classification") if quote is not None else None,
         "quote_status": quote.get("quote_status") if quote is not None else None,
+        "current_quote_available": quote.get("current_quote_available") if quote is not None else None,
+        "requested_quote_end": quote.get("requested_quote_end") if quote is not None else None,
+        "provider_available_end": quote.get("provider_available_end") if quote is not None else None,
+        "quote_age_seconds": quote.get("quote_age_seconds") if quote is not None else None,
+        "max_current_quote_age_seconds": quote.get("max_current_quote_age_seconds") if quote is not None else None,
+        "quote_freshness_verdict": quote.get("quote_freshness_verdict") if quote is not None else None,
         "production_live_money_readiness": False,
         "paper_proof_cli_explicit_flags_still_required": True,
         "submit_enabled": False,
@@ -140,10 +146,18 @@ def _summarize(
             proof_timing_allowed=False,
         )
 
-    if quote is not None and str(quote.get("classification") or quote.get("quote_status") or "") != "CURRENT_QUOTE_AVAILABLE":
+    if quote is not None and (
+        str(quote.get("classification") or quote.get("quote_status") or "") != "CURRENT_QUOTE_AVAILABLE"
+        or quote.get("current_quote_available") is not True
+    ):
         return blocked_readiness(
             verdict=FinalReadinessVerdict.BLOCKED_MARKET_DATA_MODE_OR_QUOTE_UNAVAILABLE,
-            primary_blocker=f"Quote is not currently available: {quote.get('classification') or quote.get('quote_status')}",
+            primary_blocker=(
+                f"Quote is not currently available: {quote.get('classification') or quote.get('quote_status')}; "
+                f"quote_freshness_verdict={quote.get('quote_freshness_verdict')}; "
+                f"quote_age_seconds={quote.get('quote_age_seconds')}; "
+                f"max_current_quote_age_seconds={quote.get('max_current_quote_age_seconds')}"
+            ),
             required_next_action="Obtain a usable current quote or use explicitly acknowledged manual paper-only limit prices.",
             account_id=account_id,
             contract_key=contract_key,

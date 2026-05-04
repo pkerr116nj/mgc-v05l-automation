@@ -64,6 +64,7 @@ class TrackBReadinessCheckRunnerConfig:
     proof_timing_detail: str | None = None
     max_wait_cycles: int = 1
     wait_poll_seconds: float = 0.0
+    max_current_quote_age_seconds: int | None = None
     request_timeout_seconds: float = 10.0
     quote_timeout_seconds: float = 3.0
     output_root: Path = DEFAULT_READINESS_CHECK_RUNNER_OUTPUT_ROOT
@@ -391,6 +392,11 @@ def _build_report(
         "databento_observer_verdict": _value(quote.payload if quote else {}, "observer_verdict", "last_observer_verdict"),
         "current_quote_available": bool(quote and quote.payload.get("current_quote_available") is True),
         "wait_succeeded": bool(quote and quote.payload.get("wait_succeeded") is True),
+        "max_current_quote_age_seconds": _value(quote.payload if quote else {}, "max_current_quote_age_seconds"),
+        "quote_age_seconds": _value(quote.payload if quote else {}, "quote_age_seconds"),
+        "quote_freshness_verdict": _value(quote.payload if quote else {}, "quote_freshness_verdict"),
+        "requested_quote_end": _value(quote.payload if quote else {}, "requested_quote_end", "last_requested_quote_end"),
+        "provider_available_end": _value(quote.payload if quote else {}, "provider_available_end", "provider_available_end_final", "last_provider_available_end"),
         "readiness_verdict": _value(readiness.payload if readiness else {}, "final_readiness_verdict"),
         "operator_status_verdict": _value(operator_status.payload if operator_status else {}, "status_verdict"),
         "primary_blocker": primary_blocker,
@@ -475,6 +481,8 @@ def _run_databento_cli(config: TrackBReadinessCheckRunnerConfig) -> StageResult:
         "--current-quote-output-root", str(config.current_quote_output_root),
         "--output-root", str(config.databento_observer_output_root),
     ]
+    if config.max_current_quote_age_seconds is not None:
+        args.extend(["--max-current-quote-age-seconds", str(config.max_current_quote_age_seconds)])
     result = _call_cli("databento_quote", databento_candle_observer_cli_main, args)
     observer_report = Path(config.databento_observer_output_root) / "latest_databento_candle_observer_report.json"
     if observer_report.exists():
