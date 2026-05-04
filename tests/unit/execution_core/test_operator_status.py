@@ -282,6 +282,43 @@ def observation_runner_report(tmp_path: Path, **overrides: object) -> Path:
     return write_json(tmp_path / "track_b_observation_runner_report.json", payload)
 
 
+def strategy_rule_runner_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_strategy_rule_runner_v1",
+        "generated_at": aware_now().isoformat(),
+        "track_b_strategy_rule_runner_id": "strategy-rule-runner-001",
+        "strategy_rule_runner_verdict": "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL",
+        "strategy_rule_id": "mgc_realtime_quote_demo_long_v1",
+        "rule_name": "mgc_realtime_quote_momentum_reclaim_demo",
+        "rule_mode": "DEMO_LONG_ONLY",
+        "source_id": "unit_test_strategy_rule",
+        "input_event_path": "latest_databento_candle_event.json",
+        "input_quote_provider_mode": "REALTIME",
+        "realtime_quote_received": True,
+        "current_quote_available": True,
+        "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+        "decision": "LONG",
+        "decision_reason": "DEMO_LONG_ONLY emitted explicit LONG from valid realtime Databento MGC quote evidence with --emit-signal.",
+        "signal_emitted": True,
+        "signal_direction": "LONG",
+        "downstream_strategy_adapter_report_path": "strategy_adapter_report.json",
+        "downstream_candle_producer_report_path": "candle_signal_producer_report.json",
+        "downstream_signal_batch_writer_report_path": "signal_batch_writer_report.json",
+        "output_batch_path": str(tmp_path / "inbox" / "strategy_rule_batch.json"),
+        "paper_proof_cli_called": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "report_json_path": "track_b_strategy_rule_runner_report.json",
+        "latest_report_json_path": str(tmp_path / "track_b_strategy_rule_runner" / "latest_track_b_strategy_rule_runner_report.json"),
+        "primary_blocker": None,
+        "secondary_blockers": [],
+        "required_next_action": "Let shadow_listener process the no-submit strategy-rule signal batch.",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "track_b_strategy_rule_runner_report.json", payload)
+
+
 def readiness_check_runner_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, object] = {
         "schema_version": "track_b_readiness_check_runner_v1",
@@ -543,6 +580,40 @@ def test_observation_runner_report_is_summarized(tmp_path: Path) -> None:
     assert latest["observation_runner_verdict"] == "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW"
 
 
+def test_strategy_rule_runner_report_is_summarized(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            track_b_strategy_rule_runner_report_json=strategy_rule_runner_report(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-strategy-rule-runner",
+        now=aware_now(),
+    )
+
+    assert result.report["strategy_rule_runner_verdict"] == "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL"
+    assert result.report["strategy_rule_id"] == "mgc_realtime_quote_demo_long_v1"
+    assert result.report["strategy_rule_name"] == "mgc_realtime_quote_momentum_reclaim_demo"
+    assert result.report["strategy_rule_mode"] == "DEMO_LONG_ONLY"
+    assert result.report["strategy_rule_decision"] == "LONG"
+    assert result.report["strategy_rule_signal_emitted"] is True
+    assert result.report["strategy_rule_signal_direction"] == "LONG"
+    assert result.report["strategy_rule_input_quote_provider_mode"] == "REALTIME"
+    assert result.report["strategy_rule_realtime_quote_received"] is True
+    assert result.report["strategy_rule_current_quote_available"] is True
+    assert result.report["strategy_rule_downstream_strategy_adapter_report_path"] == "strategy_adapter_report.json"
+    assert result.report["strategy_rule_downstream_candle_producer_report_path"] == "candle_signal_producer_report.json"
+    assert result.report["strategy_rule_downstream_signal_batch_writer_report_path"] == "signal_batch_writer_report.json"
+    assert result.report["strategy_rule_output_batch_path"].endswith("strategy_rule_batch.json")
+    assert result.report["strategy_rule_paper_proof_cli_called"] is False
+    assert result.report["strategy_rule_submit_allowed"] is False
+    assert result.report["strategy_rule_submit_attempted"] is False
+    assert result.report["strategy_rule_live_money_readiness"] is False
+    assert result.report["latest_output_paths"]["track_b_strategy_rule_runner"] == "track_b_strategy_rule_runner_report.json"
+    latest = json.loads((tmp_path / "operator_status" / "latest_operator_status_summary.json").read_text(encoding="utf-8"))
+    assert latest["strategy_rule_runner_verdict"] == "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL"
+
+
 def test_readiness_check_runner_report_is_summarized(tmp_path: Path) -> None:
     result = create_operator_status_summary(
         inputs=OperatorStatusInputs(
@@ -722,11 +793,15 @@ def test_missing_upstream_reports_are_explicit(tmp_path: Path) -> None:
     )
 
     assert result.report["strategy_adapter_verdict"] == "NOT_PROVIDED"
+    assert result.report["strategy_rule_runner_verdict"] == "NOT_PROVIDED"
     assert result.report["candle_producer_verdict"] == "NOT_PROVIDED"
+    assert result.report["strategy_rule_output_batch_path"] == "NOT_PROVIDED"
     assert result.report["strategy_output_batch_path"] == "NOT_PROVIDED"
     assert result.report["candle_output_batch_path"] == "NOT_PROVIDED"
+    assert "track_b_strategy_rule_runner" in result.report["reports_missing"]
     assert "strategy_signal_adapter" in result.report["reports_missing"]
     assert "candle_signal_producer" in result.report["reports_missing"]
+    assert result.report["reports_considered"]["track_b_strategy_rule_runner"] is False
     assert result.report["reports_considered"]["strategy_signal_adapter"] is False
     assert result.report["reports_considered"]["candle_signal_producer"] is False
 
@@ -825,6 +900,8 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
             str(listener_health(tmp_path)),
             "--track-b-observation-runner-report-json",
             str(observation_runner_report(tmp_path)),
+            "--track-b-strategy-rule-runner-report-json",
+            str(strategy_rule_runner_report(tmp_path)),
             "--databento-candle-observer-report-json",
             str(databento_candle_observer_report(tmp_path)),
             "--databento-candle-observer-heartbeat-json",
@@ -849,6 +926,11 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
     assert output["observation_runner_mode"] == "watch"
     assert output["observation_runner_current_cycle"] == 2
     assert output["observation_runner_watch_exited_normally"] is True
+    assert output["strategy_rule_runner_verdict"] == "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL"
+    assert output["strategy_rule_id"] == "mgc_realtime_quote_demo_long_v1"
+    assert output["strategy_rule_decision"] == "LONG"
+    assert output["strategy_rule_signal_emitted"] is True
+    assert output["strategy_rule_signal_direction"] == "LONG"
     assert output["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert output["databento_observer_mode"] == "watch"
     assert output["databento_observer_current_cycle"] == 3

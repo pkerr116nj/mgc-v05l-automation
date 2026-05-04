@@ -11,6 +11,7 @@ The current Track B no-submit chain is:
 ```text
 Databento market-data observer, optionally
 -> candle/event JSON
+-> track_b_strategy_rule_runner, optionally
 -> candle_signal_producer or strategy_signal_adapter, optionally
 -> shadow_signal
 -> signal_intent_proposal
@@ -69,8 +70,9 @@ Mode-aware flow must keep candidates separated by authority:
 Current implementation status:
 
 - The current Track B replay runner is shadow/no-submit orchestration.
-- The paper proof path exists, but the known unresolved broker order blocks new
-  proof submits for `DUM882026` / `MGC-202606`.
+- The paper proof path exists and has passed one full open/guarded-close/flat
+  lifecycle for `DUM882026` / `MGC-202606`; future paper proof remains a
+  separate explicit operator action.
 - Live trading is not implemented and not implied.
 - Current no-submit artifacts keep `live_money_readiness=false`.
 
@@ -130,6 +132,17 @@ Dashboard implication:
   flows, create order plans, or submit. It updates
   `outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json`
   as a read-model convenience.
+- `track_b_strategy_rule_runner` is the first Track B Phase 2 strategy-rule
+  wiring proof. It evaluates one MGC-only demo rule against realtime Databento
+  quote/candle evidence and emits a no-submit LONG signal only when
+  `--rule-mode DEMO_LONG_ONLY --emit-signal` is explicitly supplied and the
+  input is proven realtime/current. Without the emit flag it writes HUMAN_REVIEW
+  or NO_SIGNAL artifacts. It does not infer direction from candle shape, call
+  paper proof, invoke the listener, create order plans, authorize lanes, or
+  submit. It delegates actual signal batch production to
+  `strategy_signal_adapter -> candle_signal_producer -> signal_batch_writer` and
+  updates
+  `outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json`.
 - `track_b_observation_runner` is a bounded operator convenience wrapper around
   the existing no-submit observation chain. It can run one cycle or bounded
   watch cycles from a fixture quote/candle artifact or explicit current
@@ -616,6 +629,7 @@ set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
   --track-b-readiness-check-runner-report-json outputs/track_b_execution_core/track_b_readiness_check_runner/latest_track_b_readiness_check_runner_report.json \
   --track-b-observation-runner-report-json outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json \
+  --track-b-strategy-rule-runner-report-json outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json \
   --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --databento-candle-observer-heartbeat-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json \
   --listener-heartbeat-json <LISTENER_OUTPUT_ROOT>/<LISTENER_ID>/latest_shadow_listener_heartbeat.json \

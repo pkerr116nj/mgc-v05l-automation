@@ -226,3 +226,37 @@ Do not proceed if any of these are true:
 - Live-money readiness is not proven by delayed IBKR data, historical Databento diagnostics, or a paper proof.
 
 IBKR broker truth remains authority for account, contract qualification, positions, open orders, order status, fills, and final reconciliation. Databento continuous symbols are market-data selectors only. The IBKR allowlist remains execution authority.
+
+## Phase 2 Strategy Signal Wiring
+
+After the successful Track B Phase 1 paper-proof lifecycle, Phase 2 begins with
+a no-submit strategy-rule runner. This runner evaluates realtime Databento
+quote/candle evidence and may write a Track B signal batch for shadow/listener
+review. It is deliberately separate from paper proof readiness and does not
+call `paper_proof_cli`.
+
+Current Phase 2 chain:
+
+```text
+Databento realtime quote/event
+-> track_b_strategy_rule_runner
+-> strategy_signal_adapter
+-> candle_signal_producer
+-> signal_batch_writer
+-> shadow_listener / operator_status / Track B Status UI
+```
+
+The first rule is `mgc_realtime_quote_demo_long_v1`, an auditable MGC-only demo
+rule. It emits LONG only when:
+
+- the input event is for `MGC-202606`;
+- the referenced quote report proves `quote_provider_mode=REALTIME`;
+- `realtime_quote_received=true`;
+- `current_quote_available=true`;
+- `--rule-mode DEMO_LONG_ONLY --emit-signal` is explicitly supplied.
+
+Without `--emit-signal`, the runner writes HUMAN_REVIEW / NO_SIGNAL artifacts
+and no listener inbox work. Historical/fallback Databento evidence remains
+diagnostic only and cannot become a strategy signal without an explicit fixture
+demo flag. A strategy signal remains evidence/proposal input only; readiness
+and any future paper proof remain separate operator decisions.

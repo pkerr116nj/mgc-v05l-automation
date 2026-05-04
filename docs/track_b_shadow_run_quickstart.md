@@ -356,6 +356,70 @@ operator step:
   --output-root outputs/track_b_execution_core/strategy_signal_adapter
 ```
 
+## Phase 2 Strategy Rule Runner
+
+The first Track B strategy-rule runner is a no-submit MGC-only wiring proof. It
+evaluates realtime Databento quote/candle evidence and emits a Track B signal
+batch only when rule emission is explicit:
+
+```text
+Databento realtime quote/event
+-> track_b_strategy_rule_runner
+-> strategy_signal_adapter
+-> candle_signal_producer
+-> signal_batch_writer
+-> shadow_listener / operator_status / Track B Status UI
+```
+
+Default behavior is review/no-signal. This command evaluates the latest
+realtime Databento event but does not emit listener inbox work:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
+  --input-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id track_b_phase2_rule_review \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --rule-id mgc_realtime_quote_demo_long_v1 \
+  --rule-mode DEMO_LONG_ONLY \
+  --output-root outputs/track_b_execution_core/track_b_strategy_rule_runner
+```
+
+For the first explicit wiring proof, add `--emit-signal`. The rule still only
+creates no-submit signal batch work; it does not call `paper_proof_cli`, create
+order plans, run lane authorization directly, or submit:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
+  --input-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id track_b_phase2_rule_demo \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --rule-id mgc_realtime_quote_demo_long_v1 \
+  --rule-mode DEMO_LONG_ONLY \
+  --emit-signal \
+  --output-root outputs/track_b_execution_core/track_b_strategy_rule_runner
+```
+
+The runner requires explicit realtime evidence fields from the Databento quote
+report referenced by the event:
+
+- `quote_provider_mode=REALTIME`
+- `realtime_quote_received=true`
+- `current_quote_available=true`
+
+Historical `available_end`, fallback, or fixture evidence cannot produce a
+strategy signal unless `--allow-fixture-input` is intentionally supplied for a
+test/demo. The latest runner read model is:
+
+```text
+outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json
+```
+
 Translate an explicit candle/event input into listener inbox work:
 
 ```bash
@@ -444,6 +508,7 @@ Create an operator status summary from observer reports:
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
   --track-b-readiness-check-runner-report-json outputs/track_b_execution_core/track_b_readiness_check_runner/latest_track_b_readiness_check_runner_report.json \
   --track-b-observation-runner-report-json outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json \
+  --track-b-strategy-rule-runner-report-json outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json \
   --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --databento-candle-observer-heartbeat-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json \
   --listener-heartbeat-json outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_heartbeat.json \

@@ -41,6 +41,7 @@ class OperatorStatusInputs:
     attrition_report_json: Path | None = None
     track_b_observation_runner_report_json: Path | None = None
     track_b_readiness_check_runner_report_json: Path | None = None
+    track_b_strategy_rule_runner_report_json: Path | None = None
     databento_candle_observer_report_json: Path | None = None
     databento_candle_observer_heartbeat_json: Path | None = None
     strategy_signal_adapter_report_json: Path | None = None
@@ -99,6 +100,7 @@ def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | No
         "attrition": _read_json(inputs.attrition_report_json),
         "track_b_observation_runner": _read_json(inputs.track_b_observation_runner_report_json),
         "track_b_readiness_check_runner": _read_json(inputs.track_b_readiness_check_runner_report_json),
+        "track_b_strategy_rule_runner": _read_json(inputs.track_b_strategy_rule_runner_report_json),
         "databento_candle_observer": _read_json(inputs.databento_candle_observer_report_json),
         "databento_candle_observer_heartbeat": _read_json(inputs.databento_candle_observer_heartbeat_json),
         "strategy_signal_adapter": _read_json(inputs.strategy_signal_adapter_report_json),
@@ -230,6 +232,7 @@ def _report(
     attrition = reports.get("attrition") or {}
     track_b_observation_runner = reports.get("track_b_observation_runner") or {}
     track_b_readiness_check_runner = reports.get("track_b_readiness_check_runner") or {}
+    track_b_strategy_rule_runner = reports.get("track_b_strategy_rule_runner") or {}
     databento_candle_observer = reports.get("databento_candle_observer") or {}
     databento_candle_observer_heartbeat = reports.get("databento_candle_observer_heartbeat") or {}
     strategy_signal_adapter = reports.get("strategy_signal_adapter") or {}
@@ -247,6 +250,7 @@ def _report(
         "attrition": attrition.get("report_json_path"),
         "track_b_observation_runner": track_b_observation_runner.get("report_json_path"),
         "track_b_readiness_check_runner": track_b_readiness_check_runner.get("report_json_path"),
+        "track_b_strategy_rule_runner": track_b_strategy_rule_runner.get("report_json_path"),
         "databento_candle_observer": databento_candle_observer.get("report_json_path"),
         "databento_candle_observer_heartbeat": databento_candle_observer_heartbeat.get("heartbeat_json_path"),
         "strategy_signal_adapter": strategy_signal_adapter.get("report_json_path"),
@@ -319,6 +323,39 @@ def _report(
         ),
         "readiness_check_runner_live_money_readiness": (
             track_b_readiness_check_runner.get("live_money_readiness") if track_b_readiness_check_runner else NOT_PROVIDED
+        ),
+        "strategy_rule_runner_verdict": track_b_strategy_rule_runner.get("strategy_rule_runner_verdict") or NOT_PROVIDED,
+        "strategy_rule_id": track_b_strategy_rule_runner.get("strategy_rule_id") or NOT_PROVIDED,
+        "strategy_rule_name": track_b_strategy_rule_runner.get("rule_name") or NOT_PROVIDED,
+        "strategy_rule_mode": track_b_strategy_rule_runner.get("rule_mode") or NOT_PROVIDED,
+        "strategy_rule_decision": track_b_strategy_rule_runner.get("decision") or NOT_PROVIDED,
+        "strategy_rule_decision_reason": track_b_strategy_rule_runner.get("decision_reason") or NOT_PROVIDED,
+        "strategy_rule_signal_emitted": track_b_strategy_rule_runner.get("signal_emitted") if track_b_strategy_rule_runner else NOT_PROVIDED,
+        "strategy_rule_signal_direction": track_b_strategy_rule_runner.get("signal_direction") or NOT_PROVIDED,
+        "strategy_rule_input_quote_provider_mode": track_b_strategy_rule_runner.get("input_quote_provider_mode") or NOT_PROVIDED,
+        "strategy_rule_realtime_quote_received": (
+            track_b_strategy_rule_runner.get("realtime_quote_received") if track_b_strategy_rule_runner else NOT_PROVIDED
+        ),
+        "strategy_rule_current_quote_available": (
+            track_b_strategy_rule_runner.get("current_quote_available") if track_b_strategy_rule_runner else NOT_PROVIDED
+        ),
+        "strategy_rule_downstream_strategy_adapter_report_path": (
+            track_b_strategy_rule_runner.get("downstream_strategy_adapter_report_path") or NOT_PROVIDED
+        ),
+        "strategy_rule_downstream_candle_producer_report_path": (
+            track_b_strategy_rule_runner.get("downstream_candle_producer_report_path") or NOT_PROVIDED
+        ),
+        "strategy_rule_downstream_signal_batch_writer_report_path": (
+            track_b_strategy_rule_runner.get("downstream_signal_batch_writer_report_path") or NOT_PROVIDED
+        ),
+        "strategy_rule_output_batch_path": track_b_strategy_rule_runner.get("output_batch_path") or NOT_PROVIDED,
+        "strategy_rule_paper_proof_cli_called": (
+            track_b_strategy_rule_runner.get("paper_proof_cli_called") if track_b_strategy_rule_runner else NOT_PROVIDED
+        ),
+        "strategy_rule_submit_allowed": track_b_strategy_rule_runner.get("submit_allowed") if track_b_strategy_rule_runner else NOT_PROVIDED,
+        "strategy_rule_submit_attempted": track_b_strategy_rule_runner.get("submit_attempted") if track_b_strategy_rule_runner else NOT_PROVIDED,
+        "strategy_rule_live_money_readiness": (
+            track_b_strategy_rule_runner.get("live_money_readiness") if track_b_strategy_rule_runner else NOT_PROVIDED
         ),
         "databento_observer_verdict": databento_candle_observer.get("observer_verdict") or NOT_PROVIDED,
         "databento_contract_key": databento_candle_observer.get("contract_key") or databento_candle_observer_heartbeat.get("contract_key") or NOT_PROVIDED,

@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--attrition-report-json", type=Path)
     parser.add_argument("--track-b-observation-runner-report-json", type=Path)
     parser.add_argument("--track-b-readiness-check-runner-report-json", type=Path)
+    parser.add_argument("--track-b-strategy-rule-runner-report-json", type=Path)
     parser.add_argument("--databento-candle-observer-report-json", type=Path)
     parser.add_argument("--databento-candle-observer-heartbeat-json", type=Path)
     parser.add_argument("--strategy-signal-adapter-report-json", type=Path)
@@ -44,6 +45,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             attrition_report_json=args.attrition_report_json,
             track_b_observation_runner_report_json=args.track_b_observation_runner_report_json,
             track_b_readiness_check_runner_report_json=args.track_b_readiness_check_runner_report_json,
+            track_b_strategy_rule_runner_report_json=args.track_b_strategy_rule_runner_report_json,
             databento_candle_observer_report_json=args.databento_candle_observer_report_json,
             databento_candle_observer_heartbeat_json=args.databento_candle_observer_heartbeat_json,
             strategy_signal_adapter_report_json=args.strategy_signal_adapter_report_json,
@@ -76,6 +78,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "readiness_check_runner_wait_succeeded": result.report["readiness_check_runner_wait_succeeded"],
                 "readiness_check_runner_readiness_verdict": result.report["readiness_check_runner_readiness_verdict"],
                 "readiness_check_runner_paper_proof_cli_called": result.report["readiness_check_runner_paper_proof_cli_called"],
+                "strategy_rule_runner_verdict": result.report["strategy_rule_runner_verdict"],
+                "strategy_rule_id": result.report["strategy_rule_id"],
+                "strategy_rule_decision": result.report["strategy_rule_decision"],
+                "strategy_rule_signal_emitted": result.report["strategy_rule_signal_emitted"],
+                "strategy_rule_signal_direction": result.report["strategy_rule_signal_direction"],
+                "strategy_rule_output_batch_path": result.report["strategy_rule_output_batch_path"],
                 "databento_observer_verdict": result.report["databento_observer_verdict"],
                 "databento_observer_mode": result.report["databento_observer_mode"],
                 "databento_observer_current_cycle": result.report["databento_observer_current_cycle"],
