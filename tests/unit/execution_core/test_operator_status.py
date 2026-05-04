@@ -245,6 +245,43 @@ def databento_candle_observer_heartbeat(tmp_path: Path, **overrides: object) -> 
     return write_json(tmp_path / "databento_candle_observer_heartbeat.json", payload)
 
 
+def observation_runner_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_observation_runner_v1",
+        "generated_at": aware_now().isoformat(),
+        "track_b_observation_runner_id": "observation-runner-001",
+        "source_id": "unit_test_observation_runner",
+        "runner_verdict": "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW",
+        "mode": "watch",
+        "current_cycle": 2,
+        "watch_exited_normally": True,
+        "databento_observer_verdict": "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
+        "strategy_adapter_verdict": "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH",
+        "candle_producer_verdict": "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH",
+        "signal_batch_writer_verdict": "SIGNAL_BATCH_WRITER_WROTE_BATCH",
+        "listener_verdict": "SHADOW_LISTENER_CYCLE_COMPLETED",
+        "listener_health_verdict": "SHADOW_LISTENER_HEALTH_OK",
+        "operator_status_verdict": "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW",
+        "latest_operator_status_path": str(tmp_path / "operator_status" / "latest_operator_status_summary.json"),
+        "required_next_action": "Review Track B Status UI and latest no-submit artifacts.",
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+        "broker_connection_attempted": False,
+        "tws_connection_attempted": False,
+        "ibkr_connection_attempted": False,
+        "paper_proof_cli_called": False,
+        "place_order_called": False,
+        "cancel_called": False,
+        "report_json_path": "track_b_observation_runner_report.json",
+        "latest_report_json_path": str(tmp_path / "track_b_observation_runner" / "latest_track_b_observation_runner_report.json"),
+        "primary_blocker": None,
+        "secondary_blockers": [],
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "track_b_observation_runner_report.json", payload)
+
+
 def recovery_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, object] = {
         "classification": "RECOVERY_READY_CLEAN",
@@ -439,6 +476,42 @@ def test_databento_observer_report_and_heartbeat_are_summarized(tmp_path: Path) 
     assert latest["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
 
 
+def test_observation_runner_report_is_summarized(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            track_b_observation_runner_report_json=observation_runner_report(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-observation-runner",
+        now=aware_now(),
+    )
+
+    assert result.report["observation_runner_verdict"] == "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW"
+    assert result.report["observation_runner_mode"] == "watch"
+    assert result.report["observation_runner_source_id"] == "unit_test_observation_runner"
+    assert result.report["observation_runner_current_cycle"] == 2
+    assert result.report["observation_runner_watch_exited_normally"] is True
+    assert result.report["observation_runner_required_next_action"] == "Review Track B Status UI and latest no-submit artifacts."
+    assert result.report["observation_runner_latest_report_path"].endswith("latest_track_b_observation_runner_report.json")
+    assert result.report["observation_runner_latest_operator_status_path"].endswith("latest_operator_status_summary.json")
+    assert result.report["observation_runner_databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
+    assert result.report["observation_runner_strategy_adapter_verdict"] == "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH"
+    assert result.report["observation_runner_candle_producer_verdict"] == "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH"
+    assert result.report["observation_runner_signal_batch_writer_verdict"] == "SIGNAL_BATCH_WRITER_WROTE_BATCH"
+    assert result.report["observation_runner_listener_verdict"] == "SHADOW_LISTENER_CYCLE_COMPLETED"
+    assert result.report["observation_runner_listener_health_verdict"] == "SHADOW_LISTENER_HEALTH_OK"
+    assert result.report["observation_runner_submit_allowed"] is False
+    assert result.report["observation_runner_submit_attempted"] is False
+    assert result.report["observation_runner_live_money_readiness"] is False
+    assert result.report["latest_output_paths"]["track_b_observation_runner"] == "track_b_observation_runner_report.json"
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+    latest = json.loads((tmp_path / "operator_status" / "latest_operator_status_summary.json").read_text(encoding="utf-8"))
+    assert latest["observation_runner_verdict"] == "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW"
+
+
 def test_missing_databento_observer_reports_are_explicit(tmp_path: Path) -> None:
     result = create_operator_status_summary(
         inputs=OperatorStatusInputs(
@@ -457,6 +530,24 @@ def test_missing_databento_observer_reports_are_explicit(tmp_path: Path) -> None
     assert "databento_candle_observer_heartbeat" in result.report["reports_missing"]
     assert result.report["reports_considered"]["databento_candle_observer"] is False
     assert result.report["reports_considered"]["databento_candle_observer_heartbeat"] is False
+
+
+def test_missing_observation_runner_report_is_explicit(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_heartbeat_json=listener_heartbeat(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-missing-observation-runner",
+        now=aware_now(),
+    )
+
+    assert result.report["observation_runner_verdict"] == "NOT_PROVIDED"
+    assert result.report["observation_runner_mode"] == "NOT_PROVIDED"
+    assert result.report["observation_runner_current_cycle"] == "NOT_PROVIDED"
+    assert result.report["observation_runner_latest_operator_status_path"] == "NOT_PROVIDED"
+    assert "track_b_observation_runner" in result.report["reports_missing"]
+    assert result.report["reports_considered"]["track_b_observation_runner"] is False
 
 
 def test_operator_status_latest_pointer_updates_without_overwriting_canonical_reports(tmp_path: Path) -> None:
@@ -615,6 +706,8 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
             str(listener_heartbeat(tmp_path)),
             "--listener-health-json",
             str(listener_health(tmp_path)),
+            "--track-b-observation-runner-report-json",
+            str(observation_runner_report(tmp_path)),
             "--databento-candle-observer-report-json",
             str(databento_candle_observer_report(tmp_path)),
             "--databento-candle-observer-heartbeat-json",
@@ -635,6 +728,10 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
     assert output["status_verdict"] == "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW"
     assert output["listener_mode"] == "watch"
     assert output["listener_current_cycle_number"] == 3
+    assert output["observation_runner_verdict"] == "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW"
+    assert output["observation_runner_mode"] == "watch"
+    assert output["observation_runner_current_cycle"] == 2
+    assert output["observation_runner_watch_exited_normally"] is True
     assert output["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert output["databento_observer_mode"] == "watch"
     assert output["databento_observer_current_cycle"] == 3

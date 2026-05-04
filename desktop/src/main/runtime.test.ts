@@ -465,6 +465,18 @@ test("Track B read-only status loads latest operator status artifact without inv
       {
         status_verdict: "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW",
         required_next_action: "Review no-submit artifacts.",
+        observation_runner_verdict: "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW",
+        observation_runner_mode: "watch",
+        observation_runner_current_cycle: 2,
+        observation_runner_watch_exited_normally: true,
+        observation_runner_required_next_action: "Review Track B Status UI.",
+        observation_runner_databento_observer_verdict: "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
+        observation_runner_strategy_adapter_verdict: "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH",
+        observation_runner_signal_batch_writer_verdict: "SIGNAL_BATCH_WRITER_WROTE_BATCH",
+        observation_runner_listener_verdict: "SHADOW_LISTENER_CYCLE_COMPLETED",
+        observation_runner_submit_allowed: false,
+        observation_runner_submit_attempted: false,
+        observation_runner_live_money_readiness: false,
         databento_observer_verdict: "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
         databento_observer_mode: "watch",
         databento_observer_current_cycle: 2,
@@ -488,6 +500,8 @@ test("Track B read-only status loads latest operator status artifact without inv
     assert.equal(trackB.malformed, false);
     assert.equal(trackB.operatorStatusPath, tempPath);
     assert.equal(trackB.status?.status_verdict, "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW");
+    assert.equal(trackB.status?.observation_runner_verdict, "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW");
+    assert.equal(trackB.status?.observation_runner_mode, "watch");
     assert.equal(trackB.status?.databento_observer_verdict, "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT");
     assert.equal(trackB.status?.databento_observer_mode, "watch");
     assert.equal(trackB.status?.strategy_adapter_verdict, "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH");
@@ -533,6 +547,9 @@ test("Track B status renderer is display-only and no-submit", () => {
 
   assert.match(appTsx, /TrackBStatusPage/);
   assert.match(appTsx, /NO-SUBMIT \/ SHADOW REVIEW/);
+  assert.match(appTsx, /Observation Runner/);
+  assert.match(appTsx, /observation_runner_verdict/);
+  assert.match(appTsx, /observation_runner_latest_operator_status_path/);
   assert.match(appTsx, /Market Data Observer/);
   assert.match(appTsx, /databento_observer_verdict/);
   assert.match(appTsx, /databento_observer_last_verdict/);

@@ -25,6 +25,9 @@ artifact.
 Recommended first sections:
 
 - Top status card: `operator_status` verdict and `required_next_action`
+- Observation runner card: one-command runner verdict, mode, source id, cycle,
+  watch exit state, component verdicts, and latest operator status path when
+  summarized by operator status
 - Market data observer card: Databento observer mode, verdict, cycle counts,
   contract, symbol, dataset, event timestamp, and event path when summarized by
   operator status
@@ -49,6 +52,7 @@ The app may read these Track B artifacts:
 - `latest_shadow_listener_heartbeat.json`
 - `latest_databento_candle_observer_report.json`
 - `latest_databento_candle_observer_heartbeat.json`
+- `latest_track_b_observation_runner_report.json`
 - `latest_strategy_signal_adapter_report.json`
 - `latest_candle_signal_producer_report.json`
 - `latest_signal_batch_writer_report.json`
@@ -76,6 +80,20 @@ The UI should display, when present:
 - `listener_verdict`
 - `runner_verdict`
 - `attrition_report_verdict`
+- `observation_runner_verdict`
+- `observation_runner_mode`
+- `observation_runner_source_id`
+- `observation_runner_current_cycle`
+- `observation_runner_watch_exited_normally`
+- `observation_runner_required_next_action`
+- `observation_runner_latest_report_path`
+- `observation_runner_latest_operator_status_path`
+- `observation_runner_databento_observer_verdict`
+- `observation_runner_strategy_adapter_verdict`
+- `observation_runner_candle_producer_verdict`
+- `observation_runner_signal_batch_writer_verdict`
+- `observation_runner_listener_verdict`
+- `observation_runner_listener_health_verdict`
 - `strategy_adapter_verdict`
 - `strategy_id`
 - `signal_family`
@@ -110,12 +128,14 @@ Missing reports must remain visible. Do not collapse missing reports into OK.
 The visible no-submit origin chain is:
 
 ```text
-databento_candle_observer
+track_b_observation_runner
+-> databento_candle_observer
 -> latest Databento candle event
-strategy_signal_adapter
+-> strategy_signal_adapter
 -> candle_signal_producer
 -> signal_batch_writer
 -> shadow_listener
+-> shadow_replay_runner
 -> operator_status
 -> Track B Status UI
 ```

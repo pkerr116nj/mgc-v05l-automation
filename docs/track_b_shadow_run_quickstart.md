@@ -388,6 +388,7 @@ Create an operator status summary from observer reports:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
+  --track-b-observation-runner-report-json outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json \
   --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --databento-candle-observer-heartbeat-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json \
   --listener-heartbeat-json outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_heartbeat.json \
@@ -406,13 +407,13 @@ Create an operator status summary from observer reports:
 ```
 
 The operator status summary is a dashboard-ready read model. It lists supplied
-and missing reports explicitly, summarizes Databento observer watch state,
-listener heartbeat/watch state, upstream strategy adapter and candle producer
-origins, recent writer output when provided, surfaces listener degradation,
-readiness blocks, and broker-state blocks distinctly, and keeps
-`submit_allowed=false`. Future dashboard screens should read this artifact
-instead of inventing state, but the artifact itself is still not truth authority
-or submit authority. Each run also updates:
+and missing reports explicitly, summarizes the one-command observation runner,
+Databento observer watch state, listener heartbeat/watch state, upstream
+strategy adapter and candle producer origins, recent writer output when
+provided, surfaces listener degradation, readiness blocks, and broker-state
+blocks distinctly, and keeps `submit_allowed=false`. Future dashboard screens
+should read this artifact instead of inventing state, but the artifact itself is
+still not truth authority or submit authority. Each run also updates:
 
 ```text
 outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json

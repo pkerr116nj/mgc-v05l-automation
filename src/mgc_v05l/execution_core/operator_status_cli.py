@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listener-cycle-json", type=Path)
     parser.add_argument("--shadow-runner-summary-json", type=Path)
     parser.add_argument("--attrition-report-json", type=Path)
+    parser.add_argument("--track-b-observation-runner-report-json", type=Path)
     parser.add_argument("--databento-candle-observer-report-json", type=Path)
     parser.add_argument("--databento-candle-observer-heartbeat-json", type=Path)
     parser.add_argument("--strategy-signal-adapter-report-json", type=Path)
@@ -40,6 +41,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             listener_cycle_json=args.listener_cycle_json,
             shadow_runner_summary_json=args.shadow_runner_summary_json,
             attrition_report_json=args.attrition_report_json,
+            track_b_observation_runner_report_json=args.track_b_observation_runner_report_json,
             databento_candle_observer_report_json=args.databento_candle_observer_report_json,
             databento_candle_observer_heartbeat_json=args.databento_candle_observer_heartbeat_json,
             strategy_signal_adapter_report_json=args.strategy_signal_adapter_report_json,
@@ -60,6 +62,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "listener_current_cycle_number": result.report["listener_current_cycle_number"],
                 "listener_last_health_verdict": result.report["listener_last_health_verdict"],
                 "shadow_listener_health_verdict": result.report["shadow_listener_health_verdict"],
+                "observation_runner_verdict": result.report["observation_runner_verdict"],
+                "observation_runner_mode": result.report["observation_runner_mode"],
+                "observation_runner_current_cycle": result.report["observation_runner_current_cycle"],
+                "observation_runner_watch_exited_normally": result.report["observation_runner_watch_exited_normally"],
                 "databento_observer_verdict": result.report["databento_observer_verdict"],
                 "databento_observer_mode": result.report["databento_observer_mode"],
                 "databento_observer_current_cycle": result.report["databento_observer_current_cycle"],

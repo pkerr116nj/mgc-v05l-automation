@@ -3155,6 +3155,39 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null }) {
         </div>
       </Section>
 
+      <Section title="Observation Runner" subtitle="One-command bounded no-submit loop state from operator_status">
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Runner State</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Verdict" value={formatValue(status.observation_runner_verdict)} tone={statusTone(status.observation_runner_verdict)} />
+              <MetricCard label="Mode" value={formatValue(status.observation_runner_mode)} tone={statusTone(status.observation_runner_mode)} />
+              <MetricCard label="Source" value={formatValue(status.observation_runner_source_id)} />
+              <MetricCard label="Cycle" value={formatValue(status.observation_runner_current_cycle)} />
+              <MetricCard label="Exited Normally" value={formatValue(status.observation_runner_watch_exited_normally)} />
+              <MetricCard label="Submit Allowed" value={formatValue(status.observation_runner_submit_allowed)} tone={status.observation_runner_submit_allowed === false ? "good" : "warn"} />
+              <MetricCard label="Submit Attempted" value={formatValue(status.observation_runner_submit_attempted)} tone={status.observation_runner_submit_attempted === false ? "good" : "warn"} />
+              <MetricCard label="Live Money" value={formatValue(status.observation_runner_live_money_readiness)} tone={status.observation_runner_live_money_readiness === false ? "good" : "warn"} />
+            </div>
+            <h3 className="subsection-title">Runner Action</h3>
+            <div className="placeholder-note">{formatValue(status.observation_runner_required_next_action)}</div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Loop Components</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Databento" value={formatValue(status.observation_runner_databento_observer_verdict)} tone={statusTone(status.observation_runner_databento_observer_verdict)} />
+              <MetricCard label="Strategy Adapter" value={formatValue(status.observation_runner_strategy_adapter_verdict)} tone={statusTone(status.observation_runner_strategy_adapter_verdict)} />
+              <MetricCard label="Candle Producer" value={formatValue(status.observation_runner_candle_producer_verdict)} tone={statusTone(status.observation_runner_candle_producer_verdict)} />
+              <MetricCard label="Writer" value={formatValue(status.observation_runner_signal_batch_writer_verdict)} tone={statusTone(status.observation_runner_signal_batch_writer_verdict)} />
+              <MetricCard label="Listener" value={formatValue(status.observation_runner_listener_verdict)} tone={statusTone(status.observation_runner_listener_verdict)} />
+              <MetricCard label="Health" value={formatValue(status.observation_runner_listener_health_verdict)} tone={statusTone(status.observation_runner_listener_health_verdict)} />
+            </div>
+            <h3 className="subsection-title">Latest Operator Status From Runner</h3>
+            <div className="placeholder-note">{formatValue(status.observation_runner_latest_operator_status_path)}</div>
+          </div>
+        </div>
+      </Section>
+
       <Section title="Market Data Observer" subtitle="Databento evidence layer from operator_status; market data only, no execution authority">
         <div className="split-panel">
           <div>
