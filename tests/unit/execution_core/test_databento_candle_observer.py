@@ -368,7 +368,7 @@ def test_databento_candle_observer_cli_live_current_quote_writes_event(
 ) -> None:  # type: ignore[no-untyped-def]
     quote_transport = FakeCurrentQuoteTransport([quote_report()])
     monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
-    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+    monkeypatch.setattr(observer_cli_module, "DatabentoRealtimeCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
 
     exit_code = databento_candle_observer_cli_main(
         [
@@ -429,7 +429,7 @@ def test_databento_candle_observer_cli_live_current_quote_provider_error_blocks_
 ) -> None:  # type: ignore[no-untyped-def]
     quote_transport = FakeCurrentQuoteTransport(error=RuntimeError("Databento provider unavailable"))
     monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
-    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+    monkeypatch.setattr(observer_cli_module, "DatabentoRealtimeCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
 
     exit_code = databento_candle_observer_cli_main(
         [
@@ -571,7 +571,7 @@ def test_databento_candle_observer_cli_live_current_quote_watch_is_bounded(
         ]
     )
     monkeypatch.setenv("DATABENTO_API_KEY", "not-printed")
-    monkeypatch.setattr(observer_cli_module, "DatabentoQuoteProviderCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
+    monkeypatch.setattr(observer_cli_module, "DatabentoRealtimeCurrentQuoteTransport", FakeCurrentQuoteTransportFactory(quote_transport))
 
     exit_code = databento_candle_observer_cli_main(
         [
@@ -619,7 +619,7 @@ def test_databento_candle_observer_cli_live_current_quote_watch_is_bounded(
     assert latest_heartbeat["live_money_readiness"] is False
 
 
-def test_databento_candle_observer_cli_wait_for_current_quote_succeeds_after_available_end_catches_up(
+def test_databento_candle_observer_cli_historical_quote_after_available_end_remains_diagnostic(
     tmp_path: Path,
     capsys,
     monkeypatch,
@@ -636,9 +636,11 @@ def test_databento_candle_observer_cli_wait_for_current_quote_succeeds_after_ava
     exit_code = databento_candle_observer_cli_main(
         [
             "--live-current-quote",
+            "--quote-provider-mode",
+            "HISTORICAL_AVAILABLE_END",
             "--wait-for-current-quote",
             "--max-wait-cycles",
-            "3",
+            "2",
             "--wait-poll-seconds",
             "0",
             "--contract-key",
@@ -662,17 +664,16 @@ def test_databento_candle_observer_cli_wait_for_current_quote_succeeds_after_ava
         ]
     )
     output = json.loads(capsys.readouterr().out)
-    latest_event = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_event.json").read_text(encoding="utf-8"))
     latest_heartbeat = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_heartbeat.json").read_text(encoding="utf-8"))
 
-    assert exit_code == 0
+    assert exit_code == 2
     assert quote_transport.calls == 2
     assert output["observer_mode"] == "wait_for_current_quote"
-    assert output["wait_succeeded"] is True
-    assert output["successful_current_quote_cycles"] == 1
+    assert output["wait_succeeded"] is False
+    assert output["successful_current_quote_cycles"] == 0
     assert output["available_end_lag_cycles"] == 1
-    assert output["current_quote_available"] is True
-    assert latest_event["close"] == "4625.0"
+    assert output["current_quote_available"] is False
+    assert output["quote_provider_mode"] == "HISTORICAL_AVAILABLE_END"
     assert latest_heartbeat["wait_exited_normally"] is True
     assert latest_heartbeat["submit_allowed"] is False
     assert latest_heartbeat["submit_attempted"] is False
@@ -693,6 +694,8 @@ def test_databento_candle_observer_cli_wait_for_current_quote_exhausts_available
     exit_code = databento_candle_observer_cli_main(
         [
             "--live-current-quote",
+            "--quote-provider-mode",
+            "HISTORICAL_AVAILABLE_END",
             "--wait-for-current-quote",
             "--max-wait-cycles",
             "2",
@@ -747,6 +750,8 @@ def test_databento_candle_observer_cli_wait_for_current_quote_provider_error_fai
     exit_code = databento_candle_observer_cli_main(
         [
             "--live-current-quote",
+            "--quote-provider-mode",
+            "HISTORICAL_AVAILABLE_END",
             "--wait-for-current-quote",
             "--max-wait-cycles",
             "1",
@@ -812,6 +817,8 @@ def test_databento_candle_observer_cli_wait_for_current_quote_fallback_does_not_
     exit_code = databento_candle_observer_cli_main(
         [
             "--live-current-quote",
+            "--quote-provider-mode",
+            "HISTORICAL_AVAILABLE_END",
             "--wait-for-current-quote",
             "--max-wait-cycles",
             "1",
@@ -846,7 +853,7 @@ def test_databento_candle_observer_cli_wait_for_current_quote_fallback_does_not_
     assert latest_heartbeat["live_money_readiness"] is False
 
 
-def test_databento_candle_observer_cli_wait_for_current_quote_accepts_explicit_freshness_tolerance(
+def test_databento_candle_observer_cli_historical_freshness_tolerance_still_blocks_readiness(
     tmp_path: Path,
     capsys,
     monkeypatch,
@@ -875,6 +882,8 @@ def test_databento_candle_observer_cli_wait_for_current_quote_accepts_explicit_f
     exit_code = databento_candle_observer_cli_main(
         [
             "--live-current-quote",
+            "--quote-provider-mode",
+            "HISTORICAL_AVAILABLE_END",
             "--wait-for-current-quote",
             "--max-wait-cycles",
             "1",
@@ -902,13 +911,15 @@ def test_databento_candle_observer_cli_wait_for_current_quote_accepts_explicit_f
     latest_heartbeat = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_heartbeat.json").read_text(encoding="utf-8"))
     latest_report = json.loads((tmp_path / "observer_reports" / "latest_databento_candle_observer_report.json").read_text(encoding="utf-8"))
 
-    assert exit_code == 0
-    assert output["wait_succeeded"] is True
-    assert output["current_quote_available"] is True
+    assert exit_code == 2
+    assert output["wait_succeeded"] is False
+    assert output["current_quote_available"] is False
+    assert output["quote_provider_mode"] == "HISTORICAL_AVAILABLE_END"
     assert output["quote_age_seconds"] == "240.0"
     assert output["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_ACCEPTED_AVAILABLE_END_WITHIN_TOLERANCE"
     assert latest_heartbeat["max_current_quote_age_seconds"] == 300
-    assert latest_report["current_quote_available"] is True
+    assert latest_report["current_quote_available"] is False
+    assert latest_report["quote_provider_mode"] == "HISTORICAL_AVAILABLE_END"
     assert latest_report["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_ACCEPTED_AVAILABLE_END_WITHIN_TOLERANCE"
     assert latest_report["submit_allowed"] is False
     assert latest_report["submit_attempted"] is False

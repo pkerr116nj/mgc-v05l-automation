@@ -13,6 +13,7 @@ from .track_b_readiness_check_runner import (
     TrackBReadinessCheckRunnerConfig,
     run_track_b_readiness_check,
 )
+from .databento_current_quote import QuoteProviderMode
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Explicit tolerance for Databento provider available_end lag when classifying current-enough paper-readiness quote evidence.",
     )
+    parser.add_argument("--quote-provider-mode", choices=[item.value for item in QuoteProviderMode], default=QuoteProviderMode.REALTIME.value)
+    parser.add_argument("--use-databento-realtime-quote", action="store_true")
+    parser.add_argument("--realtime-receive-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--request-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--quote-timeout-seconds", type=float, default=3.0)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_READINESS_CHECK_RUNNER_OUTPUT_ROOT)
@@ -90,6 +94,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_wait_cycles=args.max_wait_cycles,
         wait_poll_seconds=args.wait_poll_seconds,
         max_current_quote_age_seconds=args.max_current_quote_age_seconds,
+        quote_provider_mode=QuoteProviderMode.REALTIME.value if args.use_databento_realtime_quote else args.quote_provider_mode,
+        realtime_receive_timeout_seconds=args.realtime_receive_timeout_seconds,
         request_timeout_seconds=args.request_timeout_seconds,
         quote_timeout_seconds=args.quote_timeout_seconds,
         output_root=args.output_root,
@@ -108,6 +114,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "recovery_verdict": result.report["recovery_verdict"],
                 "preflight_verdict": result.report["preflight_verdict"],
                 "databento_observer_verdict": result.report["databento_observer_verdict"],
+                "quote_provider_mode": result.report["quote_provider_mode"],
+                "realtime_subscription_attempted": result.report["realtime_subscription_attempted"],
+                "realtime_quote_received": result.report["realtime_quote_received"],
                 "current_quote_available": result.report["current_quote_available"],
                 "wait_succeeded": result.report["wait_succeeded"],
                 "max_current_quote_age_seconds": result.report["max_current_quote_age_seconds"],

@@ -11,6 +11,7 @@ from mgc_v05l.execution_core.track_b_readiness_check_runner import (
     TrackBReadinessCheckRunnerVerdict,
     run_track_b_readiness_check,
 )
+import mgc_v05l.execution_core.track_b_readiness_check_runner as runner_module
 
 
 def aware_now() -> datetime:
@@ -80,6 +81,9 @@ def quote_stage(tmp_path: Path, **overrides: object):
             "classification": "CURRENT_QUOTE_AVAILABLE",
             "quote_status": "CURRENT_QUOTE_AVAILABLE",
             "current_quote_available": True,
+            "quote_provider_mode": "REALTIME",
+            "realtime_subscription_attempted": True,
+            "realtime_quote_received": True,
             "available_end_fallback_used": False,
             "max_current_quote_age_seconds": 300,
             "quote_age_seconds": "120.0",
@@ -94,6 +98,9 @@ def quote_stage(tmp_path: Path, **overrides: object):
         payload: dict[str, object] = {
             "observer_verdict": "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
             "current_quote_available": True,
+            "quote_provider_mode": "REALTIME",
+            "realtime_subscription_attempted": True,
+            "realtime_quote_received": True,
             "wait_succeeded": True,
             "max_current_quote_age_seconds": 300,
             "quote_age_seconds": "120.0",
@@ -114,6 +121,9 @@ def quote_stage(tmp_path: Path, **overrides: object):
             {
                 "observer_mode": "wait_for_current_quote",
                 "current_quote_available": payload.get("current_quote_available"),
+                "quote_provider_mode": payload.get("quote_provider_mode"),
+                "realtime_subscription_attempted": payload.get("realtime_subscription_attempted"),
+                "realtime_quote_received": payload.get("realtime_quote_received"),
                 "wait_succeeded": payload.get("wait_succeeded"),
                 "max_current_quote_age_seconds": payload.get("max_current_quote_age_seconds"),
                 "quote_age_seconds": payload.get("quote_age_seconds"),
@@ -209,6 +219,9 @@ def test_all_clean_path_produces_readiness_check_runner_report(tmp_path: Path) -
     assert result.report["preflight_verdict"] == "READY_READ_ONLY"
     assert result.report["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert result.report["current_quote_available"] is True
+    assert result.report["quote_provider_mode"] == "REALTIME"
+    assert result.report["realtime_subscription_attempted"] is True
+    assert result.report["realtime_quote_received"] is True
     assert result.report["wait_succeeded"] is True
     assert result.report["max_current_quote_age_seconds"] == 300
     assert result.report["quote_age_seconds"] == "120.0"
@@ -313,6 +326,38 @@ def test_missing_quote_report_path_still_blocks_explicitly(tmp_path: Path) -> No
     assert result.report["readiness_verdict"] == "NOT_PROVIDED"
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_default_databento_stage_requests_realtime_provider_mode(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    captured_args: list[str] = []
+
+    def fake_databento_cli(argv: list[str]) -> int:
+        captured_args.extend(argv)
+        output_root = Path(argv[argv.index("--output-root") + 1])
+        report_payload = {
+            "observer_verdict": "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT",
+            "current_quote_available": True,
+            "quote_provider_mode": "REALTIME",
+            "realtime_subscription_attempted": True,
+            "realtime_quote_received": True,
+            "source_report_path": str(write_json(tmp_path / "current_quote_report.json", {"schema_version": "track_b_databento_current_quote_v1"})),
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        }
+        report = write_json(output_root / "latest_databento_candle_observer_report.json", report_payload)
+        print(json.dumps({"report_json": str(report), "current_quote_available": True, "quote_provider_mode": "REALTIME"}))
+        return 0
+
+    monkeypatch.setattr(runner_module, "databento_candle_observer_cli_main", fake_databento_cli)
+
+    result = runner_module._run_databento_cli(config(tmp_path))
+
+    assert result.exit_code == 0
+    assert captured_args[captured_args.index("--quote-provider-mode") + 1] == "REALTIME"
+    assert result.payload["quote_provider_mode"] == "REALTIME"
+    assert result.payload["realtime_subscription_attempted"] is True
+    assert result.payload["realtime_quote_received"] is True
 
 
 def test_recovery_blocked_stops_safely(tmp_path: Path) -> None:

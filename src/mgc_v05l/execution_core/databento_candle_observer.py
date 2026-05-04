@@ -374,6 +374,9 @@ def _write_report(
         "event_timestamp": None if candle_event is None else candle_event.get("candle_timestamp"),
         "candle_timestamp": None if candle_event is None else candle_event.get("candle_timestamp"),
         "current_quote_available": market_data_payload.get("current_quote_available"),
+        "quote_provider_mode": market_data_payload.get("quote_provider_mode"),
+        "realtime_subscription_attempted": market_data_payload.get("realtime_subscription_attempted"),
+        "realtime_quote_received": market_data_payload.get("realtime_quote_received"),
         "max_current_quote_age_seconds": market_data_payload.get("max_current_quote_age_seconds"),
         "quote_age_seconds": market_data_payload.get("quote_age_seconds"),
         "quote_freshness_verdict": market_data_payload.get("quote_freshness_verdict"),
@@ -774,6 +777,9 @@ def _write_wait_heartbeat(
     heartbeat_json = output_root / wait_id / "databento_candle_observer_heartbeat.json"
     latest_heartbeat_json = output_root / "latest_databento_candle_observer_heartbeat.json"
     current_quote_available = last_payload.get("current_quote_available")
+    quote_provider_mode = last_payload.get("quote_provider_mode")
+    realtime_subscription_attempted = last_payload.get("realtime_subscription_attempted")
+    realtime_quote_received = last_payload.get("realtime_quote_received")
     max_current_quote_age_seconds = last_payload.get("max_current_quote_age_seconds")
     quote_age_seconds = last_payload.get("quote_age_seconds")
     quote_freshness_verdict = last_payload.get("quote_freshness_verdict")
@@ -812,6 +818,9 @@ def _write_wait_heartbeat(
         "last_observer_verdict": last_result.verdict.value,
         "last_event_timestamp": last_result.report.get("event_timestamp"),
         "current_quote_available": current_quote_available,
+        "quote_provider_mode": quote_provider_mode,
+        "realtime_subscription_attempted": realtime_subscription_attempted,
+        "realtime_quote_received": realtime_quote_received,
         "wait_exited_normally": wait_exited_normally,
         "watch_exited_normally": wait_exited_normally,
         "wait_succeeded": wait_succeeded,

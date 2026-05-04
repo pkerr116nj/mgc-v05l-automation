@@ -10,6 +10,8 @@ from mgc_v05l.execution_core.databento_current_quote import (
     DatabentoCurrentQuoteConfig,
     DatabentoCurrentQuoteProvider,
     DatabentoQuoteProviderCurrentQuoteTransport,
+    DatabentoRealtimeCurrentQuoteTransport,
+    QuoteProviderMode,
 )
 from mgc_v05l.execution_core.quote_provider import QuoteSnapshot
 
@@ -78,6 +80,7 @@ def test_fresh_current_quote_is_provider_agnostic_and_available(tmp_path: Path) 
     assert payload["market_data_provider"] == "DATABENTO"
     assert payload["market_data_mode"] == "REALTIME"
     assert payload["market_data_role"] == "PRIMARY"
+    assert payload["quote_provider_mode"] == "FIXTURE"
     assert payload["current_quote_available"] is True
     assert payload["quote_usable_for_paper_pricing"] is True
     assert payload["quote_usable_for_live_money_readiness"] is False
@@ -224,9 +227,14 @@ def test_available_end_fallback_diagnostics_are_preserved_without_readiness(tmp_
     assert payload["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_BLOCKED_FALLBACK_WITHOUT_EXPLICIT_TOLERANCE"
 
 
-def test_available_end_fallback_within_explicit_freshness_tolerance_is_current_enough(tmp_path: Path) -> None:
+def test_historical_available_end_fallback_within_tolerance_remains_diagnostic_not_ready(tmp_path: Path) -> None:
     provider = DatabentoCurrentQuoteProvider(
-        config=config(tmp_path, max_age_seconds=15, max_current_quote_age_seconds=300),
+        config=config(
+            tmp_path,
+            max_age_seconds=15,
+            max_current_quote_age_seconds=300,
+            quote_provider_mode=QuoteProviderMode.HISTORICAL_AVAILABLE_END.value,
+        ),
         transport=FakeCurrentQuoteTransport(
             raw_quote(
                 timestamp=(aware_now() - timedelta(minutes=5)).isoformat(),
@@ -247,16 +255,146 @@ def test_available_end_fallback_within_explicit_freshness_tolerance_is_current_e
     result = provider.fetch_current_quote(run_id="current-available-end-fresh-enough", now=aware_now())
     payload = read_report(result)
 
-    assert result.classification == CurrentQuoteClassification.AVAILABLE
-    assert payload["classification"] == "CURRENT_QUOTE_AVAILABLE"
-    assert payload["current_quote_available"] is True
-    assert payload["quote_usable_for_paper_pricing"] is True
+    assert result.classification == CurrentQuoteClassification.STALE
+    assert payload["classification"] == "CURRENT_QUOTE_STALE"
+    assert payload["quote_provider_mode"] == "HISTORICAL_AVAILABLE_END"
+    assert payload["current_quote_available"] is False
+    assert payload["quote_usable_for_paper_pricing"] is False
     assert payload["quote_usable_for_live_money_readiness"] is False
     assert payload["max_current_quote_age_seconds"] == 300
     assert payload["quote_age_seconds"] == "240.0"
     assert payload["quote_freshness_verdict"] == "CURRENT_QUOTE_FRESHNESS_ACCEPTED_AVAILABLE_END_WITHIN_TOLERANCE"
+    assert payload["historical_available_end_diagnostic"] is True
     assert payload["provider_available_end"] == "2026-05-01T19:56:00+00:00"
     assert payload["requested_quote_end"] == "2026-05-01T20:00:00+00:00"
+    assert payload["submit_attempted"] is False
+
+
+class FakeRealtimeLevel:
+    pretty_bid_px = 4623.1
+    pretty_ask_px = 4623.3
+    bid_px = 4623100000000
+    ask_px = 4623300000000
+
+
+class FakeRealtimeRecord:
+    levels = [FakeRealtimeLevel()]
+    pretty_ts_recv = aware_now()
+    instrument_id = 712565978
+
+
+class FakeRealtimeLiveClient:
+    def __init__(self, *, records: list[object] | None = None, error: Exception | None = None) -> None:
+        self.records = records or []
+        self.error = error
+        self.callback = None
+        self.exception_callback = None
+        self.subscriptions: list[dict[str, object]] = []
+        self.started = False
+        self.terminated = False
+
+    def add_callback(self, callback, exception_callback=None) -> None:  # type: ignore[no-untyped-def]
+        self.callback = callback
+        self.exception_callback = exception_callback
+
+    def subscribe(self, **kwargs: object) -> None:
+        if self.error is not None:
+            raise self.error
+        self.subscriptions.append(dict(kwargs))
+
+    def start(self) -> None:
+        self.started = True
+        for record in self.records:
+            self.callback(record)
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
+def test_realtime_quote_received_is_current_available(tmp_path: Path) -> None:
+    live_client = FakeRealtimeLiveClient(records=[FakeRealtimeRecord()])
+    transport = DatabentoRealtimeCurrentQuoteTransport(
+        api_key="not-printed",
+        receive_timeout_seconds=0.01,
+        live_client_factory=lambda _key: live_client,
+        now_func=aware_now,
+    )
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path, quote_provider_mode=QuoteProviderMode.REALTIME.value),
+        transport=transport,
+    )
+
+    result = provider.fetch_current_quote(run_id="realtime-current", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.AVAILABLE
+    assert payload["quote_provider_mode"] == "REALTIME"
+    assert payload["current_quote_available"] is True
+    assert payload["realtime_subscription_attempted"] is True
+    assert payload["realtime_quote_received"] is True
+    assert payload["bid"] == "4623.1"
+    assert payload["ask"] == "4623.3"
+    assert payload["realtime_receive_timestamp"] == aware_now().isoformat()
+    assert live_client.subscriptions == [
+        {
+            "dataset": "GLBX.MDP3",
+            "schema": "mbp-1",
+            "symbols": ["MGC.v.0"],
+            "stype_in": "continuous",
+        }
+    ]
+    assert live_client.started is True
+    assert live_client.terminated is True
+    assert payload["submit_attempted"] is False
+    assert payload["live_money_readiness"] is False
+
+
+def test_realtime_no_quote_within_bounded_wait_blocks(tmp_path: Path) -> None:
+    live_client = FakeRealtimeLiveClient(records=[])
+    transport = DatabentoRealtimeCurrentQuoteTransport(
+        api_key="not-printed",
+        receive_timeout_seconds=0.01,
+        live_client_factory=lambda _key: live_client,
+        now_func=aware_now,
+    )
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path, quote_provider_mode=QuoteProviderMode.REALTIME.value),
+        transport=transport,
+    )
+
+    result = provider.fetch_current_quote(run_id="realtime-no-quote", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.MARKET_CLOSED_OR_NO_RECORDS
+    assert payload["quote_provider_mode"] == "REALTIME"
+    assert payload["current_quote_available"] is False
+    assert payload["realtime_subscription_attempted"] is True
+    assert payload["realtime_quote_received"] is False
+    assert payload["submit_attempted"] is False
+
+
+def test_realtime_entitlement_or_api_error_is_explicit(tmp_path: Path) -> None:
+    live_client = FakeRealtimeLiveClient(error=RuntimeError("entitlement denied for GLBX.MDP3"))
+    transport = DatabentoRealtimeCurrentQuoteTransport(
+        api_key="not-printed",
+        receive_timeout_seconds=0.01,
+        live_client_factory=lambda _key: live_client,
+        now_func=aware_now,
+    )
+    provider = DatabentoCurrentQuoteProvider(
+        config=config(tmp_path, quote_provider_mode=QuoteProviderMode.REALTIME.value),
+        transport=transport,
+    )
+
+    result = provider.fetch_current_quote(run_id="realtime-error", now=aware_now())
+    payload = read_report(result)
+
+    assert result.classification == CurrentQuoteClassification.PROVIDER_ERROR
+    assert payload["quote_provider_mode"] == "REALTIME"
+    assert payload["current_quote_available"] is False
+    assert "entitlement denied" in payload["provider_error"]
+    assert payload["realtime_subscription_attempted"] is True
+    assert payload["realtime_quote_received"] is False
     assert payload["submit_attempted"] is False
     assert payload["live_money_readiness"] is False
 

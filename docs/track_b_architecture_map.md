@@ -94,12 +94,13 @@ Dashboard implication:
   but it is not an intent and cannot authorize a lane or submit.
 - `databento_candle_observer` is a market-data evidence bridge only. It accepts
   a supplied Databento quote/candle artifact or an explicit bounded
-  live/current Databento quote pull, writes a Track B candle/event JSON file,
+  realtime Databento quote pull, writes a Track B candle/event JSON file,
   and stops. It does not connect to IBKR/TWS, authorize trades, infer submit
   readiness, invoke the listener/runner/operator status, create order plans, or
-  submit. The bounded live/current pull reuses the Track B Databento quote
-  boundary and remains market-data evidence only; it is not live trading or
-  Databento streaming. Databento symbols remain market-data selectors only; the
+  submit. The bounded realtime pull uses Databento Live subscription capability
+  long enough to receive a quote, then closes the market-data session. It is not
+  live trading. Historical `available_end` quote windows remain diagnostic only
+  and must not count as readiness. Databento symbols remain market-data selectors only; the
   local execution contract key and IBKR allowlist remain execution authority. It
   updates
   `outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json`
@@ -131,7 +132,7 @@ Dashboard implication:
   as a read-model convenience.
 - `track_b_observation_runner` is a bounded operator convenience wrapper around
   the existing no-submit observation chain. It can run one cycle or bounded
-  watch cycles from a fixture quote/candle artifact or explicit live/current
+  watch cycles from a fixture quote/candle artifact or explicit current
   Databento quote pull, then update operator status for the Track B Status UI.
   It creates no new authority: direction remains explicit, Databento remains
   market-data evidence only, and submit stays impossible in this path. It
@@ -139,15 +140,15 @@ Dashboard implication:
   `outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json`.
 - `track_b_readiness_check_runner` is a bounded no-submit pre-proof evidence
   wrapper. It runs read-only recovery status, read-only preflight, Databento
-  wait-for-current quote, readiness summary, and operator status, then writes
+  realtime wait-for-current quote, readiness summary, and operator status, then writes
   `outputs/track_b_execution_core/track_b_readiness_check_runner/latest_track_b_readiness_check_runner_report.json`.
   It answers whether paper proof may be considered as a separate operator
   decision. It does not call `paper_proof_cli`, submit, cancel, place orders,
   create order plans, mutate broker state, infer direction, or turn fallback
-  historical quotes into readiness. If configured, its current-quote freshness
-  tolerance must be explicit and visible as `max_current_quote_age_seconds`,
-  `quote_age_seconds`, `quote_freshness_verdict`, `requested_quote_end`, and
-  `provider_available_end`.
+  historical quotes into readiness. Its current quote report must make
+  `quote_provider_mode`, `realtime_subscription_attempted`,
+  `realtime_quote_received`, `quote_age_seconds`, `quote_freshness_verdict`, and
+  `current_quote_available` visible.
 - `signal_intent_proposal` may create a proposed no-submit strategy intent from
   a validated signal under an explicit policy. It does not authorize a lane,
   create an order plan, summarize readiness, or submit.
@@ -368,7 +369,7 @@ Example command chain:
   --poll-seconds 10
 ```
 
-Bounded live/current quote pull path:
+Bounded realtime current quote pull path:
 
 ```bash
 set -a
@@ -376,6 +377,7 @@ source .env.local
 set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
   --live-current-quote \
+  --quote-provider-mode REALTIME \
   --contract-key MGC-202606 \
   --databento-continuous-symbol MGC.v.0 \
   --dataset GLBX.MDP3 \
@@ -391,21 +393,13 @@ set +a
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
 
-When Databento `available_end` is behind the requested current quote window,
-the current quote report must surface `requested_quote_end`,
-`provider_available_end`, and fallback diagnostics. Track B may use
-`--allow-available-end-fallback` for explicitly historical evidence, but the
-result remains blocked for current readiness and never implies paper/live submit
-authority.
-
-Track B also supports an explicit current-quote freshness tolerance. With
-`--max-current-quote-age-seconds 300`, a provider available-end quote may be
-classified current-enough for paper-readiness diagnostics only when
-`provider_available_end` is within 300 seconds of `requested_quote_end`. This is
-not silent fallback: reports must show `max_current_quote_age_seconds`,
-`quote_age_seconds`, `quote_freshness_verdict`, `current_quote_available`,
-`provider_available_end`, and `requested_quote_end`. Without the explicit
-tolerance, available-end fallback remains historical evidence only.
+When using `quote_provider_mode=REALTIME`, the current quote report must show
+`realtime_subscription_attempted`, `realtime_quote_received`,
+`quote_age_seconds`, `quote_freshness_verdict`, and
+`current_quote_available`. Historical `available_end` reports remain explicit
+diagnostic/backfill evidence only. They can preserve `requested_quote_end`,
+`provider_available_end`, and fallback diagnostics, but readiness must stay
+blocked for `quote_provider_mode=HISTORICAL_AVAILABLE_END`.
 
 Bounded wait-for-current-quote mode:
 
@@ -415,6 +409,7 @@ source .env.local
 set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
   --live-current-quote \
+  --quote-provider-mode REALTIME \
   --wait-for-current-quote \
   --max-wait-cycles 10 \
   --wait-poll-seconds 15 \
@@ -430,12 +425,11 @@ set +a
   --lane-id mgc_example_long_lmt_day \
   --timeframe quote_snapshot \
   --source-id wait_for_current_quote_check \
-  --max-current-quote-age-seconds 300 \
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
 
 Wait mode is a bounded market-data availability loop only. It writes heartbeat
-state with `observer_mode=wait_for_current_quote`, available-end lag counts, and
+state with `observer_mode=wait_for_current_quote`, realtime quote counts, and
 `wait_succeeded`; it does not run strategy/listener/operator steps, submit, or
 authorize paper proof.
 
@@ -595,7 +589,7 @@ set +a
   --proof-timing-status ACTIVE_SESSION \
   --max-wait-cycles 10 \
   --wait-poll-seconds 15 \
-  --max-current-quote-age-seconds 300 \
+  --quote-provider-mode REALTIME \
   --output-root outputs/track_b_execution_core/track_b_readiness_check_runner
 ```
 

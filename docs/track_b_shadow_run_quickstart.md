@@ -224,8 +224,8 @@ No-data or malformed cycles are counted explicitly in the heartbeat. Watch mode
 does not run the strategy adapter, listener, runner, operator status, broker,
 or Databento live streaming, and it does not mean trading mode.
 
-For a bounded live/current Databento quote pull, explicitly enable the current
-quote path. This reuses the Track B Databento quote boundary, writes a current
+For a bounded realtime Databento quote pull, explicitly enable the current
+quote path. This uses Databento Live subscription capability, writes a current
 quote report under `outputs/track_b_execution_core/current_quotes`, then writes
 the normal observer event/report artifacts. It still does not infer direction,
 authorize trades, invoke the listener, or submit:
@@ -236,6 +236,7 @@ source .env.local
 set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
   --live-current-quote \
+  --quote-provider-mode REALTIME \
   --contract-key MGC-202606 \
   --databento-continuous-symbol MGC.v.0 \
   --dataset GLBX.MDP3 \
@@ -259,6 +260,7 @@ source .env.local
 set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
   --live-current-quote \
+  --quote-provider-mode REALTIME \
   --contract-key MGC-202606 \
   --databento-continuous-symbol MGC.v.0 \
   --dataset GLBX.MDP3 \
@@ -282,27 +284,15 @@ reports. If the key, entitlement, window, or quote data is unavailable, the
 observer writes an explicit blocked/no-data report instead of silently treating
 the state as OK.
 
-If Databento reports that the requested current quote window is after
+The older `HISTORICAL_AVAILABLE_END` provider mode remains diagnostic/backfill
+only. If Databento historical reports that a requested window is after
 `available_end`, Track B preserves `requested_quote_end`,
-`provider_available_end`, and fallback diagnostics in the current quote and
-observer reports. The no-submit observer remains blocked for current readiness.
-For historical evidence only, rerun with `--allow-available-end-fallback`; that
-may anchor the request to Databento `available_end`, but it must not be treated
-as paper pricing readiness, live-money readiness, or submit authority.
+`provider_available_end`, and fallback diagnostics, but readiness stays blocked
+even when the available-end quote is recent. Do not use
+`--allow-available-end-fallback` or `--max-current-quote-age-seconds` as a
+substitute for the realtime feed.
 
-Current quote freshness tolerance is separate and explicit. When
-`--max-current-quote-age-seconds 300` is supplied, Track B may accept the latest
-provider-available Databento quote as current-enough for paper-readiness
-diagnostics only if `provider_available_end` is within 300 seconds of
-`requested_quote_end`. Reports expose `requested_quote_end`,
-`provider_available_end`, `quote_age_seconds`,
-`max_current_quote_age_seconds`, `quote_freshness_verdict`, and
-`current_quote_available`. Without that explicit tolerance,
-available-end fallback remains historical evidence only and readiness stays
-blocked.
-
-To wait safely for Databento `available_end` to catch up enough for a current
-quote artifact, use explicit bounded wait mode:
+To wait safely for a realtime quote artifact, use explicit bounded wait mode:
 
 ```bash
 set -a
@@ -310,6 +300,7 @@ source .env.local
 set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.databento_candle_observer_cli \
   --live-current-quote \
+  --quote-provider-mode REALTIME \
   --wait-for-current-quote \
   --max-wait-cycles 10 \
   --wait-poll-seconds 15 \
@@ -325,17 +316,15 @@ set +a
   --lane-id mgc_example_long_lmt_day \
   --timeframe quote_snapshot \
   --source-id wait_for_current_quote_check \
-  --max-current-quote-age-seconds 300 \
   --output-root outputs/track_b_execution_core/databento_candle_observer
 ```
 
 This writes `latest_databento_candle_observer_heartbeat.json` with
 `observer_mode=wait_for_current_quote`, current/max cycle counts,
-`available_end_lag_cycles`, the last requested/available-end timestamps, and
+`realtime_subscription_attempted`, `realtime_quote_received`, and
 `wait_succeeded`. It waits for market-data availability only; it does not
 submit, authorize paper proof, run the listener, or turn fallback/historical
-quotes into readiness unless the explicit freshness tolerance accepts the
-provider-available quote as current-enough.
+quotes into readiness.
 
 The output event is already compatible with `strategy_signal_adapter_cli`; no
 extra bridge command is required in this slice. Direction is explicit, not
@@ -522,7 +511,7 @@ set +a
   --proof-timing-status ACTIVE_SESSION \
   --max-wait-cycles 10 \
   --wait-poll-seconds 15 \
-  --max-current-quote-age-seconds 300 \
+  --quote-provider-mode REALTIME \
   --output-root outputs/track_b_execution_core/track_b_readiness_check_runner
 ```
 
@@ -537,10 +526,10 @@ Failure is explicit and fail-closed:
 
 - recovery not clean stops before preflight/quote readiness.
 - preflight not clean stops before quote readiness.
-- current quote unavailable after bounded wait stops with quote blocker.
+- realtime current quote unavailable after bounded wait stops with quote blocker.
 - fallback/historical Databento quotes do not count as current readiness.
 - readiness-summary blockers are surfaced without calling paper proof.
-- current quote freshness tolerance is explicit in artifacts and never implies
+- current quote provider mode is explicit in artifacts and never implies
   live-money readiness or submit authority.
 
 ## Observation Runner
@@ -581,7 +570,7 @@ Fixture/report mode:
   --output-root outputs/track_b_execution_core/track_b_observation_runner
 ```
 
-Bounded live/current Databento quote mode:
+Bounded current Databento quote mode:
 
 ```bash
 set -a

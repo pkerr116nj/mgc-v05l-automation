@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from .databento_candle_observer_cli import main as databento_candle_observer_cli_main
+from .databento_current_quote import QuoteProviderMode
 from .models import to_jsonable
 from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatusInputs, create_operator_status_summary
 from .preflight_cli import main as preflight_cli_main
@@ -65,6 +66,8 @@ class TrackBReadinessCheckRunnerConfig:
     max_wait_cycles: int = 1
     wait_poll_seconds: float = 0.0
     max_current_quote_age_seconds: int | None = None
+    quote_provider_mode: str = QuoteProviderMode.REALTIME.value
+    realtime_receive_timeout_seconds: float = 10.0
     request_timeout_seconds: float = 10.0
     quote_timeout_seconds: float = 3.0
     output_root: Path = DEFAULT_READINESS_CHECK_RUNNER_OUTPUT_ROOT
@@ -391,6 +394,9 @@ def _build_report(
         "preflight_verdict": _value(preflight.payload if preflight else {}, "classification", "final_readiness_verdict"),
         "databento_observer_verdict": _value(quote.payload if quote else {}, "observer_verdict", "last_observer_verdict"),
         "current_quote_available": bool(quote and quote.payload.get("current_quote_available") is True),
+        "quote_provider_mode": _value(quote.payload if quote else {}, "quote_provider_mode"),
+        "realtime_subscription_attempted": _value(quote.payload if quote else {}, "realtime_subscription_attempted"),
+        "realtime_quote_received": _value(quote.payload if quote else {}, "realtime_quote_received"),
         "wait_succeeded": bool(quote and quote.payload.get("wait_succeeded") is True),
         "max_current_quote_age_seconds": _value(quote.payload if quote else {}, "max_current_quote_age_seconds"),
         "quote_age_seconds": _value(quote.payload if quote else {}, "quote_age_seconds"),
@@ -478,6 +484,8 @@ def _run_databento_cli(config: TrackBReadinessCheckRunnerConfig) -> StageResult:
         "--lane-id", config.lane_id,
         "--timeframe", config.timeframe,
         "--source-id", config.source_id,
+        "--quote-provider-mode", str(config.quote_provider_mode),
+        "--realtime-receive-timeout-seconds", str(config.realtime_receive_timeout_seconds),
         "--current-quote-output-root", str(config.current_quote_output_root),
         "--output-root", str(config.databento_observer_output_root),
     ]

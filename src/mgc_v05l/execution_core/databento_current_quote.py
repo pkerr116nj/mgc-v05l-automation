@@ -1,19 +1,22 @@
 """Track B Databento current quote boundary.
 
 This module is intentionally transport-injected. Tests use fakes; real Databento
-network access must be added behind an explicit operator path.
+network access is only available through explicit operator-selected market-data
+provider modes and remains no-submit evidence.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from .databento_quote_provider import DatabentoQuoteProvider, DatabentoQuoteProviderConfig
 from .models import require_aware_datetime, to_jsonable
@@ -27,6 +30,12 @@ class CurrentQuoteClassification(str, Enum):
     STALE = "CURRENT_QUOTE_STALE"
     PROVIDER_ERROR = "CURRENT_QUOTE_PROVIDER_ERROR"
     MARKET_CLOSED_OR_NO_RECORDS = "CURRENT_QUOTE_MARKET_CLOSED_OR_NO_RECORDS"
+
+
+class QuoteProviderMode(str, Enum):
+    REALTIME = "REALTIME"
+    HISTORICAL_AVAILABLE_END = "HISTORICAL_AVAILABLE_END"
+    FIXTURE = "FIXTURE"
 
 
 DEFAULT_CURRENT_QUOTE_OUTPUT_ROOT = Path("outputs/track_b_execution_core/current_quotes")
@@ -58,6 +67,7 @@ class DatabentoCurrentQuoteConfig:
     currency: str = "USD"
     max_age_seconds: int = 15
     max_current_quote_age_seconds: int | None = None
+    quote_provider_mode: str = QuoteProviderMode.FIXTURE.value
     output_root: Path = DEFAULT_CURRENT_QUOTE_OUTPUT_ROOT
 
     def selector_symbol(self) -> str:
@@ -68,6 +78,12 @@ class DatabentoCurrentQuoteConfig:
 
     def selector_source(self) -> str:
         return "DATABENTO_CONTINUOUS_SYMBOL" if self.databento_continuous_symbol else "DATABENTO_RAW_SYMBOL_OVERRIDE"
+
+    def normalized_quote_provider_mode(self) -> QuoteProviderMode:
+        try:
+            return QuoteProviderMode(str(self.quote_provider_mode).strip().upper())
+        except ValueError as exc:
+            raise ValueError(f"unsupported quote_provider_mode: {self.quote_provider_mode}") from exc
 
 
 @dataclass(frozen=True)
@@ -208,6 +224,7 @@ class DatabentoCurrentQuoteProvider:
         provider_diagnostics: Mapping[str, Any] | None,
         no_records_reason: str | None,
     ) -> CurrentQuoteResult:
+        quote_provider_mode = self.config.normalized_quote_provider_mode()
         diagnostics = dict(provider_diagnostics or {})
         freshness = _quote_freshness_fields(
             quote=quote,
@@ -217,15 +234,28 @@ class DatabentoCurrentQuoteProvider:
             max_current_quote_age_seconds=self.config.max_current_quote_age_seconds,
         )
         quote_age_seconds = freshness["quote_age_seconds"]
-        quote_available = classification == CurrentQuoteClassification.AVAILABLE and freshness["current_quote_available"] is True
+        mode_allows_current_readiness = quote_provider_mode != QuoteProviderMode.HISTORICAL_AVAILABLE_END
+        effective_classification = (
+            CurrentQuoteClassification.STALE
+            if classification == CurrentQuoteClassification.AVAILABLE and not mode_allows_current_readiness
+            else classification
+        )
+        quote_available = (
+            effective_classification == CurrentQuoteClassification.AVAILABLE
+            and freshness["current_quote_available"] is True
+            and mode_allows_current_readiness
+        )
+        realtime_subscription_attempted = bool(diagnostics.get("realtime_subscription_attempted")) or quote_provider_mode == QuoteProviderMode.REALTIME
+        realtime_quote_received = bool(diagnostics.get("realtime_quote_received")) or (quote_provider_mode == QuoteProviderMode.REALTIME and quote is not None)
         report = {
             "schema_version": "track_b_databento_current_quote_v1",
-            "classification": classification.value,
-            "quote_status": classification.value,
+            "classification": effective_classification.value,
+            "quote_status": effective_classification.value,
             "generated_at": now.isoformat(),
             "market_data_provider": self.provider_name,
             "market_data_mode": MarketDataMode.REALTIME if quote is not None else MarketDataMode.UNKNOWN,
             "market_data_role": MarketDataRole.PRIMARY,
+            "quote_provider_mode": quote_provider_mode.value,
             "dataset": self.config.dataset,
             "schema": self.config.schema,
             "contract_key": self.config.contract_key,
@@ -251,6 +281,10 @@ class DatabentoCurrentQuoteProvider:
             "quote_usable_for_paper_pricing": quote_available,
             "quote_usable_for_live_money_readiness": False,
             "production_live_money_readiness": False,
+            "realtime_subscription_attempted": realtime_subscription_attempted,
+            "realtime_quote_received": realtime_quote_received,
+            "realtime_receive_timestamp": diagnostics.get("realtime_receive_timestamp"),
+            "historical_available_end_diagnostic": quote_provider_mode == QuoteProviderMode.HISTORICAL_AVAILABLE_END,
             "provider_error": provider_error,
             "no_records_reason": no_records_reason,
             "requested_quote_start": diagnostics.get("requested_quote_start"),
@@ -282,7 +316,7 @@ class DatabentoCurrentQuoteProvider:
         report_json.parent.mkdir(parents=True, exist_ok=True)
         report["report_json_path"] = str(report_json)
         report_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
-        return CurrentQuoteResult(classification=classification, report_json=report_json, report=report, quote=quote)
+        return CurrentQuoteResult(classification=effective_classification, report_json=report_json, report=report, quote=quote)
 
 
 class DatabentoQuoteProviderCurrentQuoteTransport:
@@ -359,6 +393,98 @@ class DatabentoQuoteProviderCurrentQuoteTransport:
         }
 
 
+class DatabentoRealtimeCurrentQuoteTransport:
+    """Bounded Databento Live transport for one current quote observation.
+
+    This transport subscribes only long enough to receive one quote-shaped
+    record, then terminates the Databento Live session. It is market-data
+    evidence only and does not touch broker or submit paths.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        receive_timeout_seconds: float = 10.0,
+        live_client_factory: Callable[[str], Any] | None = None,
+        now_func: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.receive_timeout_seconds = float(receive_timeout_seconds)
+        self.live_client_factory = live_client_factory
+        self.now_func = now_func or (lambda: datetime.now(UTC))
+
+    def get_current_quote(
+        self,
+        *,
+        dataset: str,
+        symbol: str,
+        stype_in: str,
+        schema: str,
+        contract_key: str,
+    ) -> Mapping[str, Any] | None:
+        del contract_key
+        if not str(self.api_key or "").strip():
+            raise RuntimeError("DATABENTO_API_KEY is required for Databento realtime quote subscription.")
+        if self.receive_timeout_seconds <= 0:
+            raise RuntimeError("receive_timeout_seconds must be positive for Databento realtime quote subscription.")
+
+        quote_ready = threading.Event()
+        errors: list[Exception] = []
+        quotes: list[dict[str, Any]] = []
+        client = self._create_live_client()
+
+        def record_callback(record: Any) -> None:
+            try:
+                quote = _live_record_to_raw_quote(
+                    record=record,
+                    dataset=dataset,
+                    symbol=symbol,
+                    stype_in=stype_in,
+                    schema=schema,
+                    received_at=self.now_func(),
+                )
+            except ValueError:
+                return
+            quotes.append(quote)
+            quote_ready.set()
+
+        def exception_callback(exc: Exception) -> None:
+            errors.append(exc)
+            quote_ready.set()
+
+        try:
+            client.add_callback(record_callback, exception_callback)
+            client.subscribe(dataset=dataset, schema=schema, symbols=[symbol], stype_in=stype_in)
+            client.start()
+            quote_ready.wait(self.receive_timeout_seconds)
+        except Exception as exc:  # noqa: BLE001 - provider errors become explicit reports.
+            raise RuntimeError(f"Databento realtime subscription error: {_sanitize_exception(exc)}") from exc
+        finally:
+            with contextlib.suppress(Exception):
+                client.terminate()
+
+        if errors:
+            raise RuntimeError(f"Databento realtime callback error: {_sanitize_exception(errors[0])}")
+        if not quotes:
+            return None
+        return quotes[-1]
+
+    def _create_live_client(self) -> Any:
+        if self.live_client_factory is not None:
+            return self.live_client_factory(self.api_key)
+        try:
+            import databento as db  # type: ignore[import-not-found]
+        except Exception as exc:  # noqa: BLE001 - import/runtime errors must be operator-visible.
+            raise RuntimeError(
+                "Databento live client is unavailable; verify the optional databento dependency and local Python path."
+            ) from exc
+        try:
+            return db.Live(key=self.api_key, ts_out=True)
+        except TypeError:
+            return db.Live(self.api_key, ts_out=True)
+
+
 def _provider_diagnostics_from_exception(exc: Exception) -> dict[str, Any]:
     diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
     provider_available_end = getattr(exc, "provider_available_end", None)
@@ -372,6 +498,119 @@ def _provider_diagnostics_from_raw(raw_quote: Mapping[str, Any] | None) -> dict[
         return {}
     raw = raw_quote.get("raw")
     return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _live_record_to_raw_quote(
+    *,
+    record: Any,
+    dataset: str,
+    symbol: str,
+    stype_in: str,
+    schema: str,
+    received_at: datetime,
+) -> dict[str, Any]:
+    timestamp = _timestamp_from_live_record(record)
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    last: Decimal | None = None
+
+    levels = getattr(record, "levels", None)
+    if levels:
+        first_level = levels[0]
+        bid = _optional_decimal_from_live_price(
+            _attribute_or_call(first_level, "pretty_bid_px"),
+            raw_value=getattr(first_level, "bid_px", None),
+        )
+        ask = _optional_decimal_from_live_price(
+            _attribute_or_call(first_level, "pretty_ask_px"),
+            raw_value=getattr(first_level, "ask_px", None),
+        )
+
+    last = _optional_decimal_from_live_price(
+        _attribute_or_call(record, "pretty_price"),
+        raw_value=getattr(record, "price", None),
+    )
+
+    if bid is None or ask is None:
+        raise ValueError("Databento realtime record did not contain a complete top-of-book quote.")
+
+    raw: dict[str, Any] = {
+        "quote_provider_mode": QuoteProviderMode.REALTIME.value,
+        "realtime_subscription_attempted": True,
+        "realtime_quote_received": True,
+        "realtime_receive_timestamp": require_aware_datetime(received_at, "received_at").isoformat(),
+        "dataset": dataset,
+        "schema": schema,
+        "symbol_selector": symbol,
+        "stype_in": stype_in,
+        "instrument_id": getattr(record, "instrument_id", None),
+        "record_type": type(record).__name__,
+        "databento_live_subscription": True,
+        "available_end_fallback_used": False,
+        "quote_temporal_scope": "REALTIME_LIVE_SUBSCRIPTION",
+        "active_session_quote": True,
+    }
+    return {
+        "provider_symbol": symbol,
+        "bid": str(bid),
+        "ask": str(ask),
+        "last": str(last) if last is not None else None,
+        "timestamp": timestamp.isoformat(),
+        "provider_warnings": [],
+        "raw": raw,
+    }
+
+
+def _timestamp_from_live_record(record: Any) -> datetime:
+    for attr in ("pretty_ts_recv", "pretty_ts_event", "pretty_ts_out"):
+        value = _attribute_or_call(record, attr)
+        if isinstance(value, datetime):
+            return require_aware_datetime(value, attr).astimezone(UTC)
+    for attr in ("ts_recv", "ts_event", "ts_out"):
+        value = getattr(record, attr, None)
+        timestamp = _datetime_from_nanoseconds(value)
+        if timestamp is not None:
+            return timestamp
+    raise ValueError("Databento realtime record did not contain a timestamp.")
+
+
+def _attribute_or_call(value: Any, attr: str) -> Any:
+    candidate = getattr(value, attr, None)
+    return candidate() if callable(candidate) else candidate
+
+
+def _optional_decimal_from_live_price(value: Any, *, raw_value: Any) -> Decimal | None:
+    candidate = value if value not in {None, ""} else raw_value
+    if candidate in {None, ""}:
+        return None
+    try:
+        parsed = Decimal(str(candidate))
+    except (InvalidOperation, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    if isinstance(candidate, int) and parsed > Decimal("1000000"):
+        parsed = parsed / Decimal("1000000000")
+    return parsed
+
+
+def _datetime_from_nanoseconds(value: Any) -> datetime | None:
+    if value in {None, ""}:
+        return None
+    try:
+        nanoseconds = int(value)
+    except (TypeError, ValueError):
+        return None
+    if nanoseconds <= 0:
+        return None
+    seconds, remainder = divmod(nanoseconds, 1_000_000_000)
+    return datetime.fromtimestamp(seconds, tz=UTC).replace(microsecond=remainder // 1000)
+
+
+def _sanitize_exception(exc: Exception) -> str:
+    text = str(exc).strip() or type(exc).__name__
+    api_key = str(getattr(exc, "api_key", "") or "").strip()
+    return text.replace(api_key, "<redacted>") if api_key else text
 
 
 def _quote_freshness_fields(

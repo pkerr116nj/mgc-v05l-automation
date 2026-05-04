@@ -61,7 +61,10 @@ def run_readiness_summary(*, config: ReadinessSummaryConfig, run_id: str | None 
         "proof_timing_allowed": timing.allowed,
         "quote_classification": quote.get("classification") if quote is not None else None,
         "quote_status": quote.get("quote_status") if quote is not None else None,
+        "quote_provider_mode": quote.get("quote_provider_mode") if quote is not None else None,
         "current_quote_available": quote.get("current_quote_available") if quote is not None else None,
+        "realtime_subscription_attempted": quote.get("realtime_subscription_attempted") if quote is not None else None,
+        "realtime_quote_received": quote.get("realtime_quote_received") if quote is not None else None,
         "requested_quote_end": quote.get("requested_quote_end") if quote is not None else None,
         "provider_available_end": quote.get("provider_available_end") if quote is not None else None,
         "quote_age_seconds": quote.get("quote_age_seconds") if quote is not None else None,
@@ -144,6 +147,25 @@ def _summarize(
             position_qty=position_qty,
             proof_timing_classification=timing_classification,
             proof_timing_allowed=False,
+        )
+
+    quote_provider_mode = str(quote.get("quote_provider_mode") or "").strip().upper() if quote is not None else ""
+    if quote is not None and quote_provider_mode != "REALTIME":
+        mode_label = quote_provider_mode or "NOT_PROVIDED"
+        return blocked_readiness(
+            verdict=FinalReadinessVerdict.BLOCKED_MARKET_DATA_MODE_OR_QUOTE_UNAVAILABLE,
+            primary_blocker=(
+                f"Quote report came from {mode_label} provider mode, not the realtime Databento feed; "
+                f"quote_freshness_verdict={quote.get('quote_freshness_verdict')}; "
+                f"quote_age_seconds={quote.get('quote_age_seconds')}; "
+                f"max_current_quote_age_seconds={quote.get('max_current_quote_age_seconds')}"
+            ),
+            required_next_action="Run the realtime Databento quote provider path before considering paper proof readiness.",
+            account_id=account_id,
+            contract_key=contract_key,
+            position_qty=position_qty,
+            proof_timing_classification=timing_classification,
+            proof_timing_allowed=True,
         )
 
     if quote is not None and (

@@ -48,7 +48,10 @@ def quote_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, Any] = {
         "classification": "CURRENT_QUOTE_AVAILABLE",
         "quote_status": "CURRENT_QUOTE_AVAILABLE",
+        "quote_provider_mode": "REALTIME",
         "current_quote_available": True,
+        "realtime_subscription_attempted": True,
+        "realtime_quote_received": True,
         "quote_usable_for_paper_pricing": True,
         "quote_usable_for_live_money_readiness": False,
     }
@@ -155,6 +158,41 @@ def test_quote_unavailable_is_distinct_from_broker_state_block(tmp_path: Path) -
     assert result.report["max_current_quote_age_seconds"] == 300
     assert result.report["submit_allowed"] is False
     assert result.report["production_live_money_readiness"] is False
+
+
+def test_historical_available_end_quote_report_blocks_readiness(tmp_path: Path) -> None:
+    result = run_summary(
+        tmp_path,
+        quote_report_json=quote_report(
+            tmp_path,
+            classification="CURRENT_QUOTE_AVAILABLE",
+            quote_status="CURRENT_QUOTE_AVAILABLE",
+            quote_provider_mode="HISTORICAL_AVAILABLE_END",
+            current_quote_available=True,
+            quote_freshness_verdict="CURRENT_QUOTE_FRESHNESS_ACCEPTED_AVAILABLE_END_WITHIN_TOLERANCE",
+            quote_age_seconds="240.0",
+            max_current_quote_age_seconds=300,
+        ),
+    )
+
+    assert result.report["final_readiness_verdict"] == "BLOCKED_MARKET_DATA_MODE_OR_QUOTE_UNAVAILABLE"
+    assert "HISTORICAL_AVAILABLE_END provider mode" in result.report["primary_blocker"]
+    assert result.report["quote_provider_mode"] == "HISTORICAL_AVAILABLE_END"
+    assert result.report["submit_allowed"] is False
+    assert result.report["production_live_money_readiness"] is False
+
+
+def test_missing_quote_provider_mode_blocks_readiness(tmp_path: Path) -> None:
+    quote_path = quote_report(tmp_path)
+    payload = json.loads(quote_path.read_text(encoding="utf-8"))
+    payload.pop("quote_provider_mode", None)
+    quote_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    result = run_summary(tmp_path, quote_report_json=quote_path)
+
+    assert result.report["final_readiness_verdict"] == "BLOCKED_MARKET_DATA_MODE_OR_QUOTE_UNAVAILABLE"
+    assert "NOT_PROVIDED provider mode" in result.report["primary_blocker"]
+    assert result.report["submit_allowed"] is False
 
 
 def test_cli_writes_no_submit_summary(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]

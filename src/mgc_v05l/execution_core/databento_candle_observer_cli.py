@@ -23,6 +23,8 @@ from .databento_current_quote import (
     DatabentoCurrentQuoteConfig,
     DatabentoCurrentQuoteProvider,
     DatabentoQuoteProviderCurrentQuoteTransport,
+    DatabentoRealtimeCurrentQuoteTransport,
+    QuoteProviderMode,
 )
 
 
@@ -50,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit tolerance for accepting Databento provider available_end as current-enough for paper-readiness diagnostics.",
     )
     parser.add_argument("--quote-lookback-seconds", type=int, default=300)
+    parser.add_argument("--quote-provider-mode", choices=[item.value for item in QuoteProviderMode], default=QuoteProviderMode.REALTIME.value)
+    parser.add_argument("--use-databento-realtime-quote", action="store_true")
+    parser.add_argument("--realtime-receive-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--allow-available-end-fallback", action="store_true")
     parser.add_argument("--available-end-buffer-seconds", type=int, default=300)
     parser.add_argument("--current-quote-output-root", type=Path, default=DEFAULT_CURRENT_QUOTE_OUTPUT_ROOT)
@@ -170,6 +175,7 @@ def _run_live_current_quote(args: argparse.Namespace) -> int:
         _print_one_shot_result(result)
         return 2
 
+    quote_provider_mode = QuoteProviderMode.REALTIME if args.use_databento_realtime_quote else QuoteProviderMode(args.quote_provider_mode)
     config = DatabentoCurrentQuoteConfig(
         contract_key=args.contract_key,
         dataset=args.dataset,
@@ -183,20 +189,27 @@ def _run_live_current_quote(args: argparse.Namespace) -> int:
         currency=args.currency,
         max_age_seconds=args.max_age_seconds,
         max_current_quote_age_seconds=args.max_current_quote_age_seconds,
+        quote_provider_mode=quote_provider_mode.value,
         output_root=args.current_quote_output_root,
     )
-    transport = DatabentoQuoteProviderCurrentQuoteTransport(
-        api_key=raw_api_key,
-        allowlisted_local_symbol=args.allowlisted_local_symbol,
-        tick_size=args.tick_size,
-        exchange=args.exchange,
-        currency=args.currency,
-        max_age_seconds=args.max_age_seconds,
-        lookback_seconds=args.quote_lookback_seconds,
-        allow_available_end_fallback=args.allow_available_end_fallback,
-        available_end_buffer_seconds=args.available_end_buffer_seconds,
-        max_current_quote_age_seconds=args.max_current_quote_age_seconds,
-    )
+    if quote_provider_mode == QuoteProviderMode.REALTIME:
+        transport = DatabentoRealtimeCurrentQuoteTransport(
+            api_key=raw_api_key,
+            receive_timeout_seconds=args.realtime_receive_timeout_seconds,
+        )
+    else:
+        transport = DatabentoQuoteProviderCurrentQuoteTransport(
+            api_key=raw_api_key,
+            allowlisted_local_symbol=args.allowlisted_local_symbol,
+            tick_size=args.tick_size,
+            exchange=args.exchange,
+            currency=args.currency,
+            max_age_seconds=args.max_age_seconds,
+            lookback_seconds=args.quote_lookback_seconds,
+            allow_available_end_fallback=args.allow_available_end_fallback,
+            available_end_buffer_seconds=args.available_end_buffer_seconds,
+            max_current_quote_age_seconds=args.max_current_quote_age_seconds,
+        )
     provider = DatabentoCurrentQuoteProvider(config=config, transport=transport)
 
     def read_current_quote_report() -> dict[str, object]:
@@ -236,6 +249,9 @@ def _run_live_current_quote(args: argparse.Namespace) -> int:
                     "last_provider_available_end": result.heartbeat["last_provider_available_end"],
                     "last_observer_verdict": result.heartbeat["last_observer_verdict"],
                     "current_quote_available": result.heartbeat["current_quote_available"],
+                    "quote_provider_mode": result.heartbeat["quote_provider_mode"],
+                    "realtime_subscription_attempted": result.heartbeat["realtime_subscription_attempted"],
+                    "realtime_quote_received": result.heartbeat["realtime_quote_received"],
                     "max_current_quote_age_seconds": result.heartbeat["max_current_quote_age_seconds"],
                     "quote_age_seconds": result.heartbeat["quote_age_seconds"],
                     "quote_freshness_verdict": result.heartbeat["quote_freshness_verdict"],
