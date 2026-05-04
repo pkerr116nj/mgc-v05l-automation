@@ -418,6 +418,95 @@ or submit authority. Each run also updates:
 outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json
 ```
 
+## Observation Runner
+
+The Track B observation runner is a bounded operator convenience wrapper around
+the already-proven no-submit chain:
+
+```text
+Databento quote/candle evidence
+-> databento_candle_observer
+-> strategy_signal_adapter
+-> candle_signal_producer
+-> signal_batch_writer
+-> shadow_listener
+-> operator_status
+-> Track B Status UI
+```
+
+It is not an engine, scheduler, or trading authority. It does not infer
+direction from candle shape, does not call broker/TWS/IBKR, does not run
+`paper_proof_cli`, and does not submit/cancel/placeOrder.
+
+Fixture/report mode:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_observation_runner_cli \
+  --quote-report-json examples/track_b_databento_candle_observer/databento_quote_report_fixture.json \
+  --listener-config-json examples/track_b_shadow_listener/listener_config.json \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id track_b_observation_demo \
+  --signal-direction LONG \
+  --output-root outputs/track_b_execution_core/track_b_observation_runner
+```
+
+Bounded live/current Databento quote mode:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_observation_runner_cli \
+  --live-current-quote \
+  --listener-config-json examples/track_b_shadow_listener/listener_config.json \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --allowlisted-local-symbol MGCM6 \
+  --tick-size 0.1 \
+  --exchange COMEX \
+  --currency USD \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --timeframe quote_snapshot \
+  --source-id track_b_observation_live_demo \
+  --signal-direction LONG \
+  --output-root outputs/track_b_execution_core/track_b_observation_runner
+```
+
+Bounded watch mode repeats the same no-submit sequence:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_observation_runner_cli \
+  --quote-report-json examples/track_b_databento_candle_observer/databento_quote_report_fixture.json \
+  --listener-config-json examples/track_b_shadow_listener/listener_config.json \
+  --contract-key MGC-202606 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --expected-account-id DUM882026 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --source-id track_b_observation_watch_demo \
+  --signal-direction LONG \
+  --watch \
+  --max-cycles 5 \
+  --poll-seconds 10
+```
+
+Each run updates:
+
+```text
+outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json
+outputs/track_b_execution_core/operator_status/latest_operator_status_summary.json
+```
+
 ## Shadow Run Command
 
 Run the committed golden example with:
