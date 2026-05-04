@@ -509,3 +509,12 @@ its `--max-history-age-seconds` threshold, while the runner applies
 such as `1200` can be used; for real strategy validation, prefer a tighter
 threshold. This does not make maintained bars realtime: separate realtime quote
 evidence remains required.
+
+For PAPER integration diagnostics only, the runner also supports
+`--allow-stale-maintained-history-paper`. This override relaxes only the
+maintained-history age gate; missing files, insufficient bars, detected gaps,
+and missing realtime quote evidence still block. The runner report must show
+`maintained_history_ready=false`,
+`maintained_history_stale_override_used=true`, the age/threshold fields, and a
+paper-diagnostic required-next-action note. Do not use this as real strategy
+freshness or live-money readiness.

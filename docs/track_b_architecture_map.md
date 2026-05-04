@@ -192,6 +192,12 @@ Dashboard implication:
   maintenance `--max-history-age-seconds` threshold: wider values are useful
   for paper plumbing checks, while real strategy validation should use tighter
   rule-appropriate limits. Realtime current quote evidence remains separate.
+  A PAPER-only diagnostic flag,
+  `--allow-stale-maintained-history-paper`, can relax only the maintained
+  history age gate for integration testing. It does not override missing bars,
+  insufficient bars, gaps, missing realtime quote evidence, non-PAPER mode, or
+  live-money safety; reports must mark
+  `maintained_history_stale_override_used=true`.
 - `track_b_mgc_candle_history_producer` is the bounded upstream producer for
   the MGC 1m history JSON consumed by `track_b_market_history`. It can
   normalize a supplied Databento-like OHLCV history artifact, or make an

@@ -709,6 +709,13 @@ a wider explicit threshold such as `1200`; for real strategy validation, use a
 tighter threshold appropriate to the rule. Maintained 1m bars are historical
 context, not realtime quote evidence, so the runner still requires the separate
 realtime current quote report.
+For PAPER integration testing only, an operator may add
+`--allow-stale-maintained-history-paper` to bypass the maintained-history age
+gate while keeping missing bars, insufficient bars, gaps, and missing realtime
+quote evidence blocked. Reports show `maintained_history_ready=false`,
+`maintained_history_stale_override_used=true`, the actual age/threshold, and a
+paper-diagnostic warning. This is not real trading readiness and never enables
+live-money execution.
 The latest report is:
 
 ```text
