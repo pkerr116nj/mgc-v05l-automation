@@ -319,6 +319,40 @@ def strategy_rule_runner_report(tmp_path: Path, **overrides: object) -> Path:
     return write_json(tmp_path / "track_b_strategy_rule_runner_report.json", payload)
 
 
+def strategy_paper_runner_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_strategy_paper_runner_v1",
+        "generated_at": aware_now().isoformat(),
+        "track_b_strategy_paper_runner_id": "strategy-paper-runner-001",
+        "strategy_paper_runner_verdict": "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED",
+        "mode": "PAPER",
+        "source_id": "unit_test_strategy_paper",
+        "strategy_id": "track_b_test_strategy",
+        "lane_id": "paper_proof_lane",
+        "rule_id": "mgc_realtime_quote_demo_long_v1",
+        "rule_mode": "DEMO_LONG_ONLY",
+        "rule_decision": "LONG",
+        "signal_emitted": True,
+        "signal_direction": "LONG",
+        "readiness_runner_verdict": "TRACK_B_READINESS_CHECK_READY_FOR_PAPER_PROOF_REVIEW",
+        "readiness_verdict": "READY_FOR_PAPER_PROOF",
+        "paper_submit_requested": True,
+        "paper_proof_invoked": True,
+        "paper_proof_classification": "TRACK_B_PAPER_PROOF_PASSED",
+        "paper_proof_report_path": "proof_report.json",
+        "final_flat": True,
+        "submit_allowed": True,
+        "submit_attempted": True,
+        "live_money_readiness": False,
+        "primary_blocker": None,
+        "secondary_blockers": [],
+        "required_next_action": "PAPER strategy proof lifecycle passed and final broker state is flat.",
+        "report_json_path": "track_b_strategy_paper_runner_report.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "track_b_strategy_paper_runner_report.json", payload)
+
+
 def readiness_check_runner_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, object] = {
         "schema_version": "track_b_readiness_check_runner_v1",
@@ -614,6 +648,35 @@ def test_strategy_rule_runner_report_is_summarized(tmp_path: Path) -> None:
     assert latest["strategy_rule_runner_verdict"] == "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL"
 
 
+def test_strategy_paper_runner_report_is_summarized(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            track_b_strategy_paper_runner_report_json=strategy_paper_runner_report(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-strategy-paper-runner",
+        now=aware_now(),
+    )
+
+    assert result.report["strategy_paper_runner_verdict"] == "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED"
+    assert result.report["strategy_paper_rule_decision"] == "LONG"
+    assert result.report["strategy_paper_signal_emitted"] is True
+    assert result.report["strategy_paper_signal_direction"] == "LONG"
+    assert result.report["strategy_paper_readiness_runner_verdict"] == "TRACK_B_READINESS_CHECK_READY_FOR_PAPER_PROOF_REVIEW"
+    assert result.report["strategy_paper_readiness_verdict"] == "READY_FOR_PAPER_PROOF"
+    assert result.report["strategy_paper_submit_requested"] is True
+    assert result.report["strategy_paper_proof_invoked"] is True
+    assert result.report["strategy_paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert result.report["strategy_paper_proof_report_path"] == "proof_report.json"
+    assert result.report["strategy_paper_final_flat"] is True
+    assert result.report["strategy_paper_submit_allowed"] is True
+    assert result.report["strategy_paper_submit_attempted"] is True
+    assert result.report["strategy_paper_live_money_readiness"] is False
+    assert result.report["latest_output_paths"]["track_b_strategy_paper_runner"] == "track_b_strategy_paper_runner_report.json"
+    latest = json.loads((tmp_path / "operator_status" / "latest_operator_status_summary.json").read_text(encoding="utf-8"))
+    assert latest["strategy_paper_runner_verdict"] == "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED"
+
+
 def test_readiness_check_runner_report_is_summarized(tmp_path: Path) -> None:
     result = create_operator_status_summary(
         inputs=OperatorStatusInputs(
@@ -902,6 +965,8 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
             str(observation_runner_report(tmp_path)),
             "--track-b-strategy-rule-runner-report-json",
             str(strategy_rule_runner_report(tmp_path)),
+            "--track-b-strategy-paper-runner-report-json",
+            str(strategy_paper_runner_report(tmp_path)),
             "--databento-candle-observer-report-json",
             str(databento_candle_observer_report(tmp_path)),
             "--databento-candle-observer-heartbeat-json",
@@ -931,6 +996,12 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
     assert output["strategy_rule_decision"] == "LONG"
     assert output["strategy_rule_signal_emitted"] is True
     assert output["strategy_rule_signal_direction"] == "LONG"
+    assert output["strategy_paper_runner_verdict"] == "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED"
+    assert output["strategy_paper_rule_decision"] == "LONG"
+    assert output["strategy_paper_readiness_verdict"] == "READY_FOR_PAPER_PROOF"
+    assert output["strategy_paper_proof_invoked"] is True
+    assert output["strategy_paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert output["strategy_paper_final_flat"] is True
     assert output["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert output["databento_observer_mode"] == "watch"
     assert output["databento_observer_current_cycle"] == 3

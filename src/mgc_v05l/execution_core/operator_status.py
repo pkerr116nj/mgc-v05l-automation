@@ -42,6 +42,7 @@ class OperatorStatusInputs:
     track_b_observation_runner_report_json: Path | None = None
     track_b_readiness_check_runner_report_json: Path | None = None
     track_b_strategy_rule_runner_report_json: Path | None = None
+    track_b_strategy_paper_runner_report_json: Path | None = None
     databento_candle_observer_report_json: Path | None = None
     databento_candle_observer_heartbeat_json: Path | None = None
     strategy_signal_adapter_report_json: Path | None = None
@@ -101,6 +102,7 @@ def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | No
         "track_b_observation_runner": _read_json(inputs.track_b_observation_runner_report_json),
         "track_b_readiness_check_runner": _read_json(inputs.track_b_readiness_check_runner_report_json),
         "track_b_strategy_rule_runner": _read_json(inputs.track_b_strategy_rule_runner_report_json),
+        "track_b_strategy_paper_runner": _read_json(inputs.track_b_strategy_paper_runner_report_json),
         "databento_candle_observer": _read_json(inputs.databento_candle_observer_report_json),
         "databento_candle_observer_heartbeat": _read_json(inputs.databento_candle_observer_heartbeat_json),
         "strategy_signal_adapter": _read_json(inputs.strategy_signal_adapter_report_json),
@@ -181,6 +183,27 @@ def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[Operator
             ),
         )
 
+    track_b_strategy_paper_runner = reports.get("track_b_strategy_paper_runner") or {}
+    paper_runner_verdict = str(track_b_strategy_paper_runner.get("strategy_paper_runner_verdict") or "")
+    if paper_runner_verdict in {
+        "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_READINESS",
+        "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_BLOCKED",
+        "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_INVALID_SUBMIT_REQUEST",
+        "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_NON_PAPER_MODE",
+        "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_STAGE_ERROR",
+    }:
+        return (
+            OperatorStatusVerdict.BLOCKED_READINESS,
+            str(track_b_strategy_paper_runner.get("primary_blocker") or f"Strategy PAPER runner is blocked: {paper_runner_verdict}"),
+            str(track_b_strategy_paper_runner.get("required_next_action") or "Resolve strategy PAPER runner blocker before retrying."),
+        )
+    if paper_runner_verdict == "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED":
+        return (
+            OperatorStatusVerdict.BLOCKED_READINESS,
+            str(track_b_strategy_paper_runner.get("primary_blocker") or "Strategy PAPER proof is ambiguous and requires manual review."),
+            str(track_b_strategy_paper_runner.get("required_next_action") or "Reconcile broker state before any further PAPER submit."),
+        )
+
     health_verdict = str(listener_health.get("health_verdict") or listener_heartbeat.get("last_health_verdict") or "")
     if health_verdict == "SHADOW_LISTENER_HEALTH_DEGRADED_FAILURES":
         return (
@@ -233,6 +256,7 @@ def _report(
     track_b_observation_runner = reports.get("track_b_observation_runner") or {}
     track_b_readiness_check_runner = reports.get("track_b_readiness_check_runner") or {}
     track_b_strategy_rule_runner = reports.get("track_b_strategy_rule_runner") or {}
+    track_b_strategy_paper_runner = reports.get("track_b_strategy_paper_runner") or {}
     databento_candle_observer = reports.get("databento_candle_observer") or {}
     databento_candle_observer_heartbeat = reports.get("databento_candle_observer_heartbeat") or {}
     strategy_signal_adapter = reports.get("strategy_signal_adapter") or {}
@@ -251,6 +275,7 @@ def _report(
         "track_b_observation_runner": track_b_observation_runner.get("report_json_path"),
         "track_b_readiness_check_runner": track_b_readiness_check_runner.get("report_json_path"),
         "track_b_strategy_rule_runner": track_b_strategy_rule_runner.get("report_json_path"),
+        "track_b_strategy_paper_runner": track_b_strategy_paper_runner.get("report_json_path"),
         "databento_candle_observer": databento_candle_observer.get("report_json_path"),
         "databento_candle_observer_heartbeat": databento_candle_observer_heartbeat.get("heartbeat_json_path"),
         "strategy_signal_adapter": strategy_signal_adapter.get("report_json_path"),
@@ -357,6 +382,21 @@ def _report(
         "strategy_rule_live_money_readiness": (
             track_b_strategy_rule_runner.get("live_money_readiness") if track_b_strategy_rule_runner else NOT_PROVIDED
         ),
+        "strategy_paper_runner_verdict": track_b_strategy_paper_runner.get("strategy_paper_runner_verdict") or NOT_PROVIDED,
+        "strategy_paper_rule_decision": track_b_strategy_paper_runner.get("rule_decision") or NOT_PROVIDED,
+        "strategy_paper_signal_emitted": track_b_strategy_paper_runner.get("signal_emitted") if track_b_strategy_paper_runner else NOT_PROVIDED,
+        "strategy_paper_signal_direction": track_b_strategy_paper_runner.get("signal_direction") or NOT_PROVIDED,
+        "strategy_paper_readiness_runner_verdict": track_b_strategy_paper_runner.get("readiness_runner_verdict") or NOT_PROVIDED,
+        "strategy_paper_readiness_verdict": track_b_strategy_paper_runner.get("readiness_verdict") or NOT_PROVIDED,
+        "strategy_paper_submit_requested": track_b_strategy_paper_runner.get("paper_submit_requested") if track_b_strategy_paper_runner else NOT_PROVIDED,
+        "strategy_paper_proof_invoked": track_b_strategy_paper_runner.get("paper_proof_invoked") if track_b_strategy_paper_runner else NOT_PROVIDED,
+        "strategy_paper_proof_classification": track_b_strategy_paper_runner.get("paper_proof_classification") or NOT_PROVIDED,
+        "strategy_paper_proof_report_path": track_b_strategy_paper_runner.get("paper_proof_report_path") or NOT_PROVIDED,
+        "strategy_paper_final_flat": track_b_strategy_paper_runner.get("final_flat") if track_b_strategy_paper_runner else NOT_PROVIDED,
+        "strategy_paper_required_next_action": track_b_strategy_paper_runner.get("required_next_action") or NOT_PROVIDED,
+        "strategy_paper_submit_allowed": track_b_strategy_paper_runner.get("submit_allowed") if track_b_strategy_paper_runner else NOT_PROVIDED,
+        "strategy_paper_submit_attempted": track_b_strategy_paper_runner.get("submit_attempted") if track_b_strategy_paper_runner else NOT_PROVIDED,
+        "strategy_paper_live_money_readiness": track_b_strategy_paper_runner.get("live_money_readiness") if track_b_strategy_paper_runner else NOT_PROVIDED,
         "databento_observer_verdict": databento_candle_observer.get("observer_verdict") or NOT_PROVIDED,
         "databento_contract_key": databento_candle_observer.get("contract_key") or databento_candle_observer_heartbeat.get("contract_key") or NOT_PROVIDED,
         "databento_symbol": databento_candle_observer.get("databento_continuous_symbol") or databento_candle_observer_heartbeat.get("databento_continuous_symbol") or NOT_PROVIDED,

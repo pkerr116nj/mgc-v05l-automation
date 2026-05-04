@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--track-b-observation-runner-report-json", type=Path)
     parser.add_argument("--track-b-readiness-check-runner-report-json", type=Path)
     parser.add_argument("--track-b-strategy-rule-runner-report-json", type=Path)
+    parser.add_argument("--track-b-strategy-paper-runner-report-json", type=Path)
     parser.add_argument("--databento-candle-observer-report-json", type=Path)
     parser.add_argument("--databento-candle-observer-heartbeat-json", type=Path)
     parser.add_argument("--strategy-signal-adapter-report-json", type=Path)
@@ -46,6 +47,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             track_b_observation_runner_report_json=args.track_b_observation_runner_report_json,
             track_b_readiness_check_runner_report_json=args.track_b_readiness_check_runner_report_json,
             track_b_strategy_rule_runner_report_json=args.track_b_strategy_rule_runner_report_json,
+            track_b_strategy_paper_runner_report_json=args.track_b_strategy_paper_runner_report_json,
             databento_candle_observer_report_json=args.databento_candle_observer_report_json,
             databento_candle_observer_heartbeat_json=args.databento_candle_observer_heartbeat_json,
             strategy_signal_adapter_report_json=args.strategy_signal_adapter_report_json,
@@ -84,6 +86,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "strategy_rule_signal_emitted": result.report["strategy_rule_signal_emitted"],
                 "strategy_rule_signal_direction": result.report["strategy_rule_signal_direction"],
                 "strategy_rule_output_batch_path": result.report["strategy_rule_output_batch_path"],
+                "strategy_paper_runner_verdict": result.report["strategy_paper_runner_verdict"],
+                "strategy_paper_rule_decision": result.report["strategy_paper_rule_decision"],
+                "strategy_paper_readiness_verdict": result.report["strategy_paper_readiness_verdict"],
+                "strategy_paper_proof_invoked": result.report["strategy_paper_proof_invoked"],
+                "strategy_paper_proof_classification": result.report["strategy_paper_proof_classification"],
+                "strategy_paper_final_flat": result.report["strategy_paper_final_flat"],
                 "databento_observer_verdict": result.report["databento_observer_verdict"],
                 "databento_observer_mode": result.report["databento_observer_mode"],
                 "databento_observer_current_cycle": result.report["databento_observer_current_cycle"],

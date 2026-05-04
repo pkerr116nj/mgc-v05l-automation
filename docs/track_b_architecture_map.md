@@ -12,6 +12,7 @@ The current Track B no-submit chain is:
 Databento market-data observer, optionally
 -> candle/event JSON
 -> track_b_strategy_rule_runner, optionally
+-> track_b_strategy_paper_runner, explicitly for PAPER handoff
 -> candle_signal_producer or strategy_signal_adapter, optionally
 -> shadow_signal
 -> signal_intent_proposal
@@ -29,7 +30,7 @@ Databento market-data observer, optionally
 -> readiness_summary
 -> track_b_readiness_check_runner for bounded no-submit pre-proof evidence
 -> recovery / preflight / proof timing
--> paper_proof_cli later, only when broker state is clean
+-> paper_proof_cli / paper proof lifecycle, only through explicit PAPER gates
 ```
 
 The chain is file/report driven today. It is not a strategy engine, scheduler,
@@ -169,6 +170,16 @@ Dashboard implication:
   `strategy_signal_adapter -> candle_signal_producer -> signal_batch_writer` and
   updates
   `outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json`.
+- `track_b_strategy_paper_runner` is the controlled Phase 2 PAPER handoff. It
+  composes `track_b_strategy_rule_runner -> track_b_readiness_check_runner ->
+  paper_proof_cli / paper proof lifecycle`. It defaults to dry-run/no-submit.
+  It can invoke paper proof only when `--mode PAPER`, `--submit-paper`,
+  `--confirm-paper-submit`, explicit `--quantity`, and explicit manual open and
+  close limit prices are supplied. It never supports live-money execution, UI
+  authority, hidden submit, inferred prices, inferred quantity, market orders,
+  or broker mutation outside the Track B paper proof lifecycle. It writes
+  `outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json`
+  with rule, readiness, paper proof, and final broker-state classification.
 - `track_b_observation_runner` is a bounded operator convenience wrapper around
   the existing no-submit observation chain. It can run one cycle or bounded
   watch cycles from a fixture quote/candle artifact or explicit current
@@ -656,6 +667,7 @@ set +a
   --track-b-readiness-check-runner-report-json outputs/track_b_execution_core/track_b_readiness_check_runner/latest_track_b_readiness_check_runner_report.json \
   --track-b-observation-runner-report-json outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json \
   --track-b-strategy-rule-runner-report-json outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json \
+  --track-b-strategy-paper-runner-report-json outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json \
   --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --databento-candle-observer-heartbeat-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json \
   --listener-heartbeat-json <LISTENER_OUTPUT_ROOT>/<LISTENER_ID>/latest_shadow_listener_heartbeat.json \
@@ -673,9 +685,10 @@ set +a
   --output-root outputs/track_b_execution_core/operator_status
 ```
 
-All example commands are no-submit and do not connect to TWS or IBKR. Commands
-that use `--live-current-quote` make a bounded Databento market-data request
-only; Databento remains evidence, not execution authority.
+Example commands are no-submit unless they explicitly include PAPER submit
+flags such as `--submit-paper --confirm-paper-submit`. Commands that use
+`--live-current-quote` make a bounded Databento market-data request only;
+Databento remains evidence, not execution authority.
 
 Attrition reports are intended to avoid Track A-style unexplained trade count
 loss across competing layers. They can consume signal batch, shadow run, and

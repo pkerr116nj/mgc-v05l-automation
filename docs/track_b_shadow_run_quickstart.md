@@ -428,6 +428,68 @@ flags/config request that handoff. This quickstart command remains no-submit by
 default and does not create hidden submit authority. Every future PAPER
 execution must write artifacts and a final broker-state classification.
 
+## Phase 2 Strategy Paper Runner
+
+The controlled strategy PAPER runner wires:
+
+```text
+realtime Databento event
+-> track_b_strategy_rule_runner
+-> track_b_readiness_check_runner
+-> paper_proof_cli / paper proof lifecycle
+```
+
+Default mode is dry-run/no-submit. This evaluates the rule and, if a signal is
+emitted, checks readiness, but stops before paper proof because no submit flags
+are present:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
+  --mode PAPER \
+  --input-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --rule-id mgc_realtime_quote_demo_long_v1 \
+  --rule-mode DEMO_LONG_ONLY \
+  --emit-signal \
+  --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
+```
+
+PAPER submit requires all explicit gates. Prices and quantity are not inferred:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
+  --mode PAPER \
+  --input-event-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_event.json \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --strategy-id track_b_example_gold_shadow_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --rule-id mgc_realtime_quote_demo_long_v1 \
+  --rule-mode DEMO_LONG_ONLY \
+  --emit-signal \
+  --quantity 1 \
+  --manual-open-limit-price <OPEN_LIMIT_PRICE> \
+  --manual-close-limit-price <CLOSE_LIMIT_PRICE> \
+  --submit-paper \
+  --confirm-paper-submit \
+  --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
+```
+
+This path remains PAPER-only. It does not support live-money execution, market
+orders, UI authority, hidden submit, inferred direction, inferred prices, or
+broker mutation outside the Track B paper proof lifecycle. The latest report is:
+
+```text
+outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json
+```
+
 Translate an explicit candle/event input into listener inbox work:
 
 ```bash
@@ -517,6 +579,7 @@ Create an operator status summary from observer reports:
   --track-b-readiness-check-runner-report-json outputs/track_b_execution_core/track_b_readiness_check_runner/latest_track_b_readiness_check_runner_report.json \
   --track-b-observation-runner-report-json outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json \
   --track-b-strategy-rule-runner-report-json outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json \
+  --track-b-strategy-paper-runner-report-json outputs/track_b_execution_core/track_b_strategy_paper_runner/latest_track_b_strategy_paper_runner_report.json \
   --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
   --databento-candle-observer-heartbeat-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json \
   --listener-heartbeat-json outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_heartbeat.json \

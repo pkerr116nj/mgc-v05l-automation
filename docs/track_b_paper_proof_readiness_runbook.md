@@ -282,3 +282,29 @@ The UI must not initiate hidden submits or infer authority from a healthy
 strategy/listener/operator-status report. Any future UI control must call an
 explicit Track B API/CLI and display the resulting report. Live-money readiness
 remains false unless a future live-readiness phase explicitly changes it.
+
+The first controlled handoff boundary is `track_b_strategy_paper_runner`:
+
+```text
+realtime Databento event
+-> track_b_strategy_rule_runner
+-> track_b_readiness_check_runner
+-> paper_proof_cli / paper proof lifecycle
+```
+
+It defaults to dry-run/no-submit. PAPER proof is invoked only when all explicit
+submit gates are present:
+
+- `--mode PAPER`
+- `--submit-paper`
+- `--confirm-paper-submit`
+- `--quantity 1`
+- `--manual-open-limit-price`
+- `--manual-close-limit-price`
+
+The runner refuses non-PAPER mode, missing quantity, missing manual prices, and
+missing submit confirmation flags before strategy/readiness/proof stages can
+mutate broker state. It reports `PAPER_READY_NO_SUBMIT_REQUESTED` when strategy
+signal and readiness are green but submit flags are absent. If proof is invoked,
+the report records proof classification, proof report path, final flat status
+when available, `submit_attempted=true`, and `live_money_readiness=false`.
