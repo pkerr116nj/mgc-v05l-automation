@@ -47,11 +47,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stype-out", default="instrument_id")
     parser.add_argument(
         "--runtime-data-source",
+        "--runtime-decision-source",
+        dest="runtime_data_source",
         choices=[item.value for item in TrackBRuntimeDataSource],
         default=TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value,
         help="Live artifact is the default execution-runtime source. HTTP is explicit backfill/recovery only.",
     )
     parser.add_argument("--live-runtime-feed-output-root", type=Path, default=DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT)
+    parser.add_argument("--manage-live-feed", choices=["true", "false"], default="true")
+    parser.add_argument("--live-feed-warmup-timeout-seconds", type=float, default=3600.0)
+    parser.add_argument("--leave-live-feed-running", action="store_true")
+    parser.add_argument("--force-stop-owned-feed", action="store_true")
+    parser.add_argument("--live-feed-restart-backoff-seconds", type=float, default=60.0)
+    parser.add_argument("--live-feed-max-records", type=int, default=1_000_000)
+    parser.add_argument("--live-feed-max-seconds", type=float, default=86400.0)
+    parser.add_argument("--live-feed-min-bars", type=int, default=40)
     parser.add_argument("--use-continuous-symbol-for-runtime-fetch", action="store_true")
     parser.add_argument("--disable-fresh-runtime-artifact-fallback", action="store_true")
     parser.add_argument("--max-latest-1m-age-seconds", type=int, default=900)
@@ -126,6 +136,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             provider_stype_out=args.stype_out,
             runtime_data_source=args.runtime_data_source,
             live_runtime_feed_output_root=args.live_runtime_feed_output_root,
+            manage_live_feed=args.manage_live_feed == "true",
+            live_feed_warmup_timeout_seconds=args.live_feed_warmup_timeout_seconds,
+            leave_live_feed_running=args.leave_live_feed_running,
+            force_stop_owned_feed=args.force_stop_owned_feed,
+            live_feed_restart_backoff_seconds=args.live_feed_restart_backoff_seconds,
+            live_feed_max_records=args.live_feed_max_records,
+            live_feed_max_seconds=args.live_feed_max_seconds,
+            live_feed_min_bars=args.live_feed_min_bars,
             prefer_raw_local_symbol_for_runtime_fetch=not args.use_continuous_symbol_for_runtime_fetch,
             allow_fresh_runtime_artifact_fallback=not args.disable_fresh_runtime_artifact_fallback,
             max_latest_1m_age_seconds=args.max_latest_1m_age_seconds,
@@ -163,6 +181,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "instrument_families": result.report.get("instrument_families", []),
                 "evaluated_strategy_count": result.report.get("evaluated_strategy_count"),
                 "runtime_data_source": result.report.get("runtime_data_source"),
+                "runtime_decision_source": result.report.get("runtime_decision_source"),
+                "live_feed_managed": result.report.get("live_feed_managed"),
+                "runtime_data_freshness_by_instrument": result.report.get("runtime_data_freshness_by_instrument"),
                 "candidate_signals": result.report.get("candidate_signals", []),
                 "suppressed_signals": result.report.get("suppressed_signals", []),
                 "decision_journal_tier_counts": result.report.get("decision_journal_tier_counts", {}),

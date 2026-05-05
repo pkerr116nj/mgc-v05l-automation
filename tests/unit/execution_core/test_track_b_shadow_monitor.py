@@ -89,6 +89,55 @@ def runtime_payload_for_now() -> dict[str, object]:
     }
 
 
+def completed_5m_payload_for_now(count: int = 8) -> dict[str, object]:
+    candles: list[dict[str, object]] = []
+    for index in range(count):
+        minute = 20 + index * 5
+        candles.append(
+            {
+                "candle_timestamp": f"2026-05-05T11:{minute:02d}:00+00:00" if minute < 60 else "2026-05-05T12:00:00+00:00",
+                "open": str(3400 + index / 10),
+                "high": str(3400.2 + index / 10),
+                "low": str(3399.8 + index / 10),
+                "close": str(3400.1 + index / 10),
+                "volume": "5",
+            }
+        )
+    return {
+        "schema_version": "track_b_databento_live_mgc_completed_5m_candles_v1",
+        "generated_at": now().isoformat(),
+        "candles": candles,
+        "bars_available": len(candles),
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+
+
+class FakeLiveFeedProcess:
+    def __init__(self, pid: int = 4242) -> None:
+        self.pid = pid
+        self.terminated = False
+        self.killed = False
+        self.returncode = None
+
+    def poll(self):  # type: ignore[no-untyped-def]
+        return None if not self.terminated and not self.killed else 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = 0
+
+    def wait(self, timeout=None):  # type: ignore[no-untyped-def]
+        self.terminated = True
+        self.returncode = 0
+        return 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
 def config(tmp_path: Path, **overrides: object) -> TrackBShadowMonitorConfig:
     values = {
         "max_cycles": 1,
@@ -425,6 +474,13 @@ def test_default_runtime_capture_requires_live_feed_artifact(tmp_path: Path) -> 
 
 def test_default_monitor_reports_live_feed_not_ready_when_artifact_missing(tmp_path: Path) -> None:
     fake = FakeStages(tmp_path)
+    started: list[FakeLiveFeedProcess] = []
+
+    def start_live_feed(_cfg, _instrument, _source_id, _now):  # type: ignore[no-untyped-def]
+        process = FakeLiveFeedProcess()
+        started.append(process)
+        return process
+
     stages = TrackBShadowMonitorStages(
         runtime_candle_capture=_run_runtime_candle_capture,
         asian_drift_watch_chain=fake.asian,
@@ -434,28 +490,51 @@ def test_default_monitor_reports_live_feed_not_ready_when_artifact_missing(tmp_p
         operator_status=fake.operator,
         sleep=fake.sleep,
         pid_is_alive=lambda _pid: False,
+        live_feed_starter=start_live_feed,
     )
 
     result = run_track_b_shadow_monitor(config=config(tmp_path), stages=stages, monitor_id="monitor-live-missing", now_func=now)
 
-    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY
+    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
+    assert started and started[0].terminated is True
     assert fake.calls["multi"] == 0
+    assert result.report["instrument_reports"][0]["live_feed_managed"] is True
+    assert result.report["instrument_reports"][0]["live_feed_pid"] == 4242
     assert result.report["instrument_reports"][0]["runtime_data_source"] == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
 
 
 def test_default_monitor_evaluates_from_live_feed_artifact(tmp_path: Path) -> None:
-    cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live")
+    cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", live_feed_min_bars=8)
     live_payload = runtime_payload_for_now()
     live_payload["candle_source_mode"] = "DATABENTO_LIVE_RUNTIME_FEED"
     write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", live_payload)
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now())
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+            "bars_available": 20,
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        },
+    )
     write_json(
         cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
         {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
             "live_feed_connected": True,
             "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
             "live_runtime_feed_verdict": "TRACK_B_DATABENTO_LIVE_FEED_DATA_WRITTEN_EXECUTION_FRESH",
+            "fresh_for_execution": True,
             "latest_record_ts_event": "2026-05-05T11:59:00+00:00",
             "latest_record_ts_recv": "2026-05-05T11:59:01+00:00",
             "latency_ms": 1000,
@@ -481,8 +560,165 @@ def test_default_monitor_evaluates_from_live_feed_artifact(tmp_path: Path) -> No
     assert instrument_report["runtime_data_source"] == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
     assert instrument_report["monitor_runtime_candle_source"] == "DATABENTO_LIVE_RUNTIME_FEED_ARTIFACT"
     assert instrument_report["live_feed_connected"] is True
+    assert instrument_report["live_feed_strategy_ready"] is True
     assert instrument_report["submit_attempted"] is False
     assert instrument_report["live_money_readiness"] is False
+
+
+def test_monitor_reports_live_feed_warming_up_when_bars_are_insufficient(tmp_path: Path) -> None:
+    cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", manage_live_feed=False)
+    live_payload = runtime_payload_for_now()
+    live_payload["candles"] = live_payload["candles"][:5]  # type: ignore[index]
+    live_payload["candle_history"] = live_payload["candles"]
+    live_payload["bars_available"] = 5
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", live_payload)
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now(1))
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+            "bars_available": 5,
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+        },
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-live-warmup", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["live_feed_warmup_1m_count"] == 5
+    assert instrument_report["live_feed_warmup_completed_5m_count"] == 1
+    assert instrument_report["live_feed_strategy_ready"] is False
+    assert fake.calls["multi"] == 0
+    assert result.report["submit_attempted"] is False
+
+
+def test_monitor_restarts_stale_live_feed_and_reports_warmup(tmp_path: Path) -> None:
+    cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", live_feed_min_bars=8)
+    stale_generated_at = datetime(2026, 5, 5, 11, 0, tzinfo=UTC).isoformat()
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", runtime_payload_for_now())
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now())
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": stale_generated_at,
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+            "bars_available": 20,
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+        },
+    )
+    started: list[FakeLiveFeedProcess] = []
+
+    def start_live_feed(_cfg, _instrument, _source_id, _now):  # type: ignore[no-untyped-def]
+        process = FakeLiveFeedProcess(4243)
+        started.append(process)
+        return process
+
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+        live_feed_starter=start_live_feed,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-live-stale", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
+    assert started and started[0].terminated is True
+    assert result.report["instrument_reports"][0]["live_feed_status"] == "LIVE_FEED_WARMING_UP"
+    assert "previous_heartbeat_age_seconds" in str(result.report["instrument_reports"][0]["live_feed_blocker"])
+    assert fake.calls["multi"] == 0
+    assert result.report["broker_state_mutated"] is False
+
+
+def test_monitor_blocks_stale_live_feed_when_management_is_disabled(tmp_path: Path) -> None:
+    cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", live_feed_min_bars=8, manage_live_feed=False)
+    stale_generated_at = datetime(2026, 5, 5, 11, 0, tzinfo=UTC).isoformat()
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", runtime_payload_for_now())
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now())
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": stale_generated_at,
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+            "bars_available": 20,
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+        },
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-live-stale-no-manage", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_STALE
+    assert result.report["instrument_reports"][0]["live_feed_status"] == "LIVE_FEED_STALE"
+    assert fake.calls["multi"] == 0
 
 
 def test_http_backfill_source_does_not_drive_strategy_evaluation(tmp_path: Path) -> None:

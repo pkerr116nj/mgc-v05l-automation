@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import time
 import uuid
@@ -97,6 +98,9 @@ class TrackBShadowMonitorVerdict(str, Enum):
     NOT_READY_UNWIRED_INSTRUMENT = "TRACK_B_SHADOW_MONITOR_NOT_READY_UNWIRED_INSTRUMENT"
     NOT_READY_STALE_RUNTIME_CONTEXT = "TRACK_B_SHADOW_MONITOR_NOT_READY_STALE_RUNTIME_CONTEXT"
     LIVE_FEED_NOT_READY = "TRACK_B_SHADOW_MONITOR_LIVE_FEED_NOT_READY"
+    LIVE_FEED_WARMING_UP = "TRACK_B_SHADOW_MONITOR_LIVE_FEED_WARMING_UP"
+    LIVE_FEED_STALE = "TRACK_B_SHADOW_MONITOR_LIVE_FEED_STALE"
+    LIVE_FEED_DISCONNECTED = "TRACK_B_SHADOW_MONITOR_LIVE_FEED_DISCONNECTED"
     BLOCKED_PROVIDER_ERROR = "TRACK_B_SHADOW_MONITOR_BLOCKED_PROVIDER_ERROR"
     BLOCKED_PRODUCER_ERROR = "TRACK_B_SHADOW_MONITOR_BLOCKED_PRODUCER_ERROR"
     CRITICAL_UNEXPECTED_MUTATION_FLAG = "TRACK_B_SHADOW_MONITOR_CRITICAL_UNEXPECTED_MUTATION_FLAG"
@@ -147,6 +151,14 @@ class TrackBShadowMonitorConfig:
     max_completed_5m_age_seconds: int = 900
     runtime_data_source: TrackBRuntimeDataSource | str = TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT
     live_runtime_feed_output_root: Path = DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
+    manage_live_feed: bool = True
+    live_feed_warmup_timeout_seconds: float = 3600.0
+    leave_live_feed_running: bool = False
+    force_stop_owned_feed: bool = False
+    live_feed_restart_backoff_seconds: float = 60.0
+    live_feed_max_records: int = 1_000_000
+    live_feed_max_seconds: float = 86_400.0
+    live_feed_min_bars: int = 40
     current_quote_report_json: Path | None = DEFAULT_CURRENT_QUOTE_REPORT_JSON
     env_file: Path | None = None
     base_url: str = "https://hist.databento.com/v0"
@@ -206,6 +218,11 @@ class TrackBShadowMonitorStages:
     operator_status: Callable[[TrackBShadowMonitorConfig, Path, Path | None, datetime], OperatorStatusResult]
     sleep: Callable[[float], None]
     pid_is_alive: Callable[[int], bool]
+    live_feed_starter: Callable[
+        [TrackBShadowMonitorConfig, TrackBShadowMonitorInstrumentConfig, str, datetime],
+        subprocess.Popen[Any],
+    ] | None = None
+    live_feed_terminator: Callable[[subprocess.Popen[Any]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -225,6 +242,41 @@ class TrackBShadowMonitorLock:
     stale_lock_takeover: bool = False
     force_takeover_used: bool = False
     blocker: str | None = None
+
+
+@dataclass
+class TrackBLiveFeedProcessState:
+    instrument_family: str
+    managed: bool
+    owned_by_monitor: bool = False
+    process: subprocess.Popen[Any] | None = None
+    pid: int | None = None
+    status: str = "NOT_STARTED"
+    started_at: datetime | None = None
+    last_start_attempt_at: datetime | None = None
+    blocker: str | None = None
+
+
+@dataclass(frozen=True)
+class TrackBLiveFeedReadiness:
+    managed: bool
+    owned_by_monitor: bool
+    pid: int | None
+    status: str
+    verdict: TrackBShadowMonitorVerdict | None
+    live_feed_connected: bool | None
+    subscription_status: str | None
+    heartbeat_age_seconds: float | None
+    strategy_ready: bool
+    warmup_1m_count: int
+    warmup_completed_5m_count: int
+    required_1m_count: int
+    required_completed_5m_count: int
+    blocker: str | None
+    report_path: Path | None
+    heartbeat_path: Path | None
+    event_path: Path | None
+    completed_5m_path: Path | None
 
 
 def default_instruments(config: TrackBShadowMonitorConfig | None = None) -> tuple[TrackBShadowMonitorInstrumentConfig, ...]:
@@ -347,6 +399,7 @@ def run_track_b_shadow_monitor(
     consecutive_failures = 0
     last_evaluated_completed_5m: dict[str, str] = {}
     last_runtime_fetch_attempt_at: dict[str, datetime] = {}
+    live_feed_processes: dict[str, TrackBLiveFeedProcessState] = {}
     shutdown_reason: str | None = None
     try:
         for cycle_index in range(1, config.max_cycles + 1):
@@ -376,6 +429,7 @@ def run_track_b_shadow_monitor(
                 now_func=clock,
                 last_evaluated_completed_5m=last_evaluated_completed_5m,
                 last_runtime_fetch_attempt_at=last_runtime_fetch_attempt_at,
+                live_feed_processes=live_feed_processes,
                 lock=lock,
             )
             cycle_reports.append(report)
@@ -413,6 +467,11 @@ def run_track_b_shadow_monitor(
     except KeyboardInterrupt:
         shutdown_reason = "KeyboardInterrupt"
     finally:
+        _shutdown_owned_live_feeds(
+            config=config,
+            stages=actual_stages,
+            live_feed_processes=live_feed_processes,
+        )
         _write_final_heartbeat(
             config=config,
             monitor_id=actual_monitor_id,
@@ -525,6 +584,7 @@ def _run_one_cycle(
     now_func: Callable[[], datetime],
     last_evaluated_completed_5m: dict[str, str],
     last_runtime_fetch_attempt_at: dict[str, datetime],
+    live_feed_processes: dict[str, TrackBLiveFeedProcessState],
     lock: TrackBShadowMonitorLock,
 ) -> dict[str, Any]:
     report_json = Path(config.output_root) / cycle_id / "track_b_shadow_monitor_report.json"
@@ -541,6 +601,7 @@ def _run_one_cycle(
                 now_func=now_func,
                 last_evaluated_completed_5m=last_evaluated_completed_5m,
                 last_runtime_fetch_attempt_at=last_runtime_fetch_attempt_at,
+                live_feed_processes=live_feed_processes,
             )
             instrument_reports.append(instrument_report)
             if maybe_runtime_cycle_report_json is not None:
@@ -594,6 +655,7 @@ def _run_instrument_cycle(
     now_func: Callable[[], datetime],
     last_evaluated_completed_5m: dict[str, str],
     last_runtime_fetch_attempt_at: dict[str, datetime],
+    live_feed_processes: dict[str, TrackBLiveFeedProcessState] | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     if not instrument.enabled_strategies:
         return (
@@ -616,6 +678,33 @@ def _run_instrument_cycle(
             None,
         )
 
+    live_feed_readiness: TrackBLiveFeedReadiness | None = None
+    if (
+        _runtime_data_source(config) == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT
+        and stages.runtime_candle_capture is _run_runtime_candle_capture
+    ):
+        live_feed_readiness = _ensure_live_feed_for_instrument(
+            config=config,
+            stages=stages,
+            instrument=instrument,
+            now=started_at,
+            live_feed_processes=live_feed_processes if live_feed_processes is not None else {},
+        )
+        if not live_feed_readiness.strategy_ready:
+            report = _instrument_report_base(
+                instrument=instrument,
+                verdict=live_feed_readiness.verdict or TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY,
+                primary_blocker=live_feed_readiness.blocker or "Databento Live feed is not strategy-ready.",
+                required_next_action="Keep the managed Databento Live feed running until strategy_ready=true.",
+                live_feed=live_feed_readiness,
+            )
+            report["runtime_data_source"] = TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
+            report["runtime_decision_source"] = TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
+            return (
+                report,
+                None,
+            )
+
     runtime = _runtime_for_refresh_cadence(
         config=config,
         stages=stages,
@@ -635,6 +724,7 @@ def _run_instrument_cycle(
                 instrument=instrument,
                 verdict=verdict,
                 runtime=runtime,
+                live_feed=live_feed_readiness,
                 primary_blocker=str(runtime.report.get("primary_blocker") or "Runtime candle capture did not write data."),
                 required_next_action=str(runtime.report.get("required_next_action") or "Repair runtime candle provider before evaluation."),
             ),
@@ -646,6 +736,7 @@ def _run_instrument_cycle(
                 instrument=instrument,
                 verdict=TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT,
                 runtime=runtime,
+                live_feed=live_feed_readiness,
                 primary_blocker="Databento HTTP/historical data is backfill/recovery context only and is not a live runtime source.",
                 required_next_action="Start the Databento Live runtime feed writer before Track B SHADOW strategy evaluation.",
             ),
@@ -657,6 +748,7 @@ def _run_instrument_cycle(
                 instrument=instrument,
                 verdict=TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT,
                 runtime=runtime,
+                live_feed=live_feed_readiness,
                 primary_blocker=str(
                     runtime.report.get("execution_freshness_blocker")
                     or runtime.report.get("primary_blocker")
@@ -678,6 +770,7 @@ def _run_instrument_cycle(
                 instrument=instrument,
                 verdict=TrackBShadowMonitorVerdict.HEARTBEAT_NO_NEW_COMPLETED_BAR,
                 runtime=runtime,
+                live_feed=live_feed_readiness,
                 primary_blocker=None,
                 required_next_action="No new completed 5m bar; heartbeat only for completed-bar strategies.",
             ),
@@ -691,6 +784,7 @@ def _run_instrument_cycle(
                 instrument=instrument,
                 verdict=TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR,
                 runtime=runtime,
+                live_feed=live_feed_readiness,
                 asian=asian,
                 primary_blocker=str(asian.report.get("primary_blocker") or "Asian Drift watch chain blocked."),
                 required_next_action=str(asian.report.get("required_next_action") or "Resolve Asian Drift producer blocker."),
@@ -705,6 +799,7 @@ def _run_instrument_cycle(
                 instrument=instrument,
                 verdict=TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR,
                 runtime=runtime,
+                live_feed=live_feed_readiness,
                 asian=asian,
                 snap=snap,
                 primary_blocker=str(snap.report.get("primary_blocker") or "Snap-turn envelope producer blocked."),
@@ -720,6 +815,7 @@ def _run_instrument_cycle(
                 instrument=instrument,
                 verdict=TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR,
                 runtime=runtime,
+                live_feed=live_feed_readiness,
                 asian=asian,
                 snap=snap,
                 session=session,
@@ -739,6 +835,7 @@ def _run_instrument_cycle(
             instrument=instrument,
             verdict=verdict,
             runtime=runtime,
+            live_feed=live_feed_readiness,
             asian=asian,
             snap=snap,
             session=session,
@@ -763,6 +860,331 @@ def _run_runtime_candle_capture(
     if _runtime_data_source(config) == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT:
         return _run_live_runtime_artifact_capture(config, instrument, cycle_index, now)
     return _run_http_backfill_runtime_candle_capture(config, instrument, cycle_index, now)
+
+
+def _ensure_live_feed_for_instrument(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    now: datetime,
+    live_feed_processes: dict[str, TrackBLiveFeedProcessState],
+) -> TrackBLiveFeedReadiness:
+    state = live_feed_processes.get(instrument.instrument_family)
+    if state is not None and state.owned_by_monitor and state.process is not None and state.process.poll() is not None:
+        state.status = "LIVE_FEED_DISCONNECTED"
+        state.blocker = f"Managed Databento Live feed exited with code {state.process.returncode}."
+
+    readiness = _read_live_feed_readiness(config=config, instrument=instrument, state=state, now=now)
+    if readiness.strategy_ready:
+        return readiness
+    if not config.manage_live_feed:
+        return readiness
+
+    already_alive = state is not None and state.process is not None and state.process.poll() is None
+    if already_alive:
+        return readiness
+    last_attempt = state.last_start_attempt_at if state is not None else None
+    if last_attempt is not None:
+        elapsed = max(0.0, (now.astimezone(UTC) - last_attempt.astimezone(UTC)).total_seconds())
+        if elapsed < config.live_feed_restart_backoff_seconds:
+            return readiness
+
+    try:
+        process = _start_live_feed_process(
+            config=config,
+            stages=stages,
+            instrument=instrument,
+            now=now,
+        )
+    except Exception as exc:  # noqa: BLE001 - supervision errors must become readiness artifacts.
+        new_state = TrackBLiveFeedProcessState(
+            instrument_family=instrument.instrument_family,
+            managed=True,
+            owned_by_monitor=False,
+            pid=None,
+            status="LIVE_FEED_START_FAILED",
+            started_at=None,
+            last_start_attempt_at=now,
+            blocker=f"Managed Databento Live feed start failed: {exc}",
+        )
+        live_feed_processes[instrument.instrument_family] = new_state
+        _write_live_feed_process_status(config=config, instrument=instrument, state=new_state, generated_at=now)
+        return _read_live_feed_readiness(config=config, instrument=instrument, state=new_state, now=now)
+
+    new_state = TrackBLiveFeedProcessState(
+        instrument_family=instrument.instrument_family,
+        managed=True,
+        owned_by_monitor=True,
+        process=process,
+        pid=process.pid,
+        status="LIVE_FEED_STARTED",
+        started_at=now,
+        last_start_attempt_at=now,
+    )
+    live_feed_processes[instrument.instrument_family] = new_state
+    _write_live_feed_process_status(config=config, instrument=instrument, state=new_state, generated_at=now)
+    return _read_live_feed_readiness(config=config, instrument=instrument, state=new_state, now=now)
+
+
+def _read_live_feed_readiness(
+    *,
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    state: TrackBLiveFeedProcessState | None,
+    now: datetime,
+) -> TrackBLiveFeedReadiness:
+    root = Path(config.live_runtime_feed_output_root)
+    event_path = root / "latest_live_mgc_1m_candles.json"
+    completed_path = root / "latest_live_mgc_completed_5m_candles.json"
+    report_path = root / "latest_databento_live_runtime_feed_report.json"
+    heartbeat_path = root / "latest_databento_live_runtime_feed_heartbeat.json"
+    report = _read_json_optional(report_path)
+    heartbeat = _read_json_optional(heartbeat_path)
+    event = _read_json_optional(event_path)
+    completed = _read_json_optional(completed_path)
+
+    heartbeat_age = _age_seconds_from_payload(heartbeat, now)
+    live_connected = _bool_or_none((heartbeat or {}).get("live_feed_connected"))
+    if live_connected is None and report is not None:
+        live_connected = _bool_or_none(report.get("live_feed_connected"))
+    subscription_status = str((heartbeat or {}).get("subscription_status") or (report or {}).get("subscription_status") or "")
+    if not subscription_status:
+        subscription_status = None
+
+    warmup_1m_count = _bars_available(event)
+    warmup_completed_5m_count = _bars_available(completed)
+    required_1m_count = max(int(config.live_feed_min_bars), int(config.min_bars))
+    required_completed_5m_count = max(8, int(config.min_bars))
+    heartbeat_fresh = heartbeat_age is not None and heartbeat_age <= max(float(config.max_latest_1m_age_seconds), config.poll_seconds * 3)
+    owned_warmup_elapsed = None if state is None or state.started_at is None else (
+        now.astimezone(UTC) - state.started_at.astimezone(UTC)
+    ).total_seconds()
+    owned_feed_is_warming = bool(
+        state is not None
+        and state.owned_by_monitor
+        and state.process is not None
+        and state.process.poll() is None
+        and owned_warmup_elapsed is not None
+        and owned_warmup_elapsed <= config.live_feed_warmup_timeout_seconds
+    )
+    artifact_matches = _live_feed_artifact_matches(report=report, event=event, instrument=instrument)
+    strategy_ready = (
+        artifact_matches is None
+        and heartbeat_fresh
+        and live_connected is True
+        and bool((heartbeat or report or {}).get("fresh_for_execution")) is True
+        and warmup_1m_count >= required_1m_count
+        and warmup_completed_5m_count >= required_completed_5m_count
+    )
+
+    managed = bool(config.manage_live_feed)
+    owned = bool(state and state.owned_by_monitor)
+    pid = state.pid if state is not None else None
+    blocker: str | None = None
+    verdict: TrackBShadowMonitorVerdict | None = None
+    status = state.status if state is not None else "LIVE_FEED_EXTERNAL_OR_MISSING"
+    if not event_path.exists() or not heartbeat_path.exists():
+        status = "LIVE_FEED_WARMING_UP" if state and state.owned_by_monitor else "LIVE_FEED_NOT_READY"
+        verdict = TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP if state and state.owned_by_monitor else TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY
+        blocker = "Databento Live feed hot artifacts are not available yet."
+    elif artifact_matches:
+        status = "LIVE_FEED_NOT_READY"
+        verdict = TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY
+        blocker = artifact_matches
+    elif heartbeat_age is None:
+        status = "LIVE_FEED_NOT_READY"
+        verdict = TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY
+        blocker = "Databento Live feed heartbeat has no generated_at timestamp."
+    elif not heartbeat_fresh:
+        if owned_feed_is_warming:
+            status = "LIVE_FEED_WARMING_UP"
+            verdict = TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
+            blocker = (
+                "Managed Databento Live feed was started and is waiting for a fresh heartbeat; "
+                f"previous_heartbeat_age_seconds={round(heartbeat_age, 3)}."
+            )
+        else:
+            status = "LIVE_FEED_STALE"
+            verdict = TrackBShadowMonitorVerdict.LIVE_FEED_STALE
+            blocker = f"Databento Live feed heartbeat is stale: age_seconds={round(heartbeat_age, 3)}."
+    elif live_connected is not True:
+        status = "LIVE_FEED_DISCONNECTED"
+        verdict = TrackBShadowMonitorVerdict.LIVE_FEED_DISCONNECTED
+        blocker = "Databento Live feed is not connected."
+    elif warmup_1m_count < required_1m_count or warmup_completed_5m_count < required_completed_5m_count:
+        warmup_elapsed = owned_warmup_elapsed
+        if warmup_elapsed is not None and warmup_elapsed > config.live_feed_warmup_timeout_seconds:
+            status = "LIVE_FEED_WARMUP_TIMEOUT"
+            verdict = TrackBShadowMonitorVerdict.LIVE_FEED_STALE
+            blocker = (
+                "Databento Live feed warmup exceeded timeout: "
+                f"elapsed_seconds={round(warmup_elapsed, 3)}, "
+                f"1m={warmup_1m_count}/{required_1m_count}, "
+                f"completed_5m={warmup_completed_5m_count}/{required_completed_5m_count}."
+            )
+        else:
+            status = "LIVE_FEED_WARMING_UP"
+            verdict = TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
+            blocker = (
+                "Databento Live feed is warming up: "
+                f"1m={warmup_1m_count}/{required_1m_count}, "
+                f"completed_5m={warmup_completed_5m_count}/{required_completed_5m_count}."
+            )
+    elif bool((heartbeat or report or {}).get("fresh_for_execution")) is not True:
+        status = "LIVE_FEED_STALE"
+        verdict = TrackBShadowMonitorVerdict.LIVE_FEED_STALE
+        blocker = "Databento Live feed artifacts are present but not fresh_for_execution=true."
+    else:
+        status = "LIVE_FEED_STRATEGY_READY"
+
+    if state is not None and state.blocker and blocker is None:
+        blocker = state.blocker
+    return TrackBLiveFeedReadiness(
+        managed=managed,
+        owned_by_monitor=owned,
+        pid=pid,
+        status=status,
+        verdict=verdict,
+        live_feed_connected=live_connected,
+        subscription_status=subscription_status,
+        heartbeat_age_seconds=None if heartbeat_age is None else round(heartbeat_age, 3),
+        strategy_ready=strategy_ready,
+        warmup_1m_count=warmup_1m_count,
+        warmup_completed_5m_count=warmup_completed_5m_count,
+        required_1m_count=required_1m_count,
+        required_completed_5m_count=required_completed_5m_count,
+        blocker=blocker,
+        report_path=report_path if report_path.exists() else None,
+        heartbeat_path=heartbeat_path if heartbeat_path.exists() else None,
+        event_path=event_path if event_path.exists() else None,
+        completed_5m_path=completed_path if completed_path.exists() else None,
+    )
+
+
+def _start_live_feed_process(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    now: datetime,
+) -> subprocess.Popen[Any]:
+    if stages.live_feed_starter is not None:
+        return stages.live_feed_starter(config, instrument, config.source_id, now)
+    root = Path(config.live_runtime_feed_output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "mgc_v05l.execution_core.track_b_databento_live_runtime_feed_cli",
+        "--expected-account-id",
+        instrument.expected_account_id,
+        "--account-id",
+        instrument.execution_account_id,
+        "--contract-key",
+        instrument.contract_key,
+        "--instrument-family",
+        instrument.instrument_family,
+        "--local-symbol",
+        instrument.local_symbol,
+        "--databento-continuous-symbol",
+        instrument.databento_continuous_symbol,
+        "--dataset",
+        instrument.dataset,
+        "--schema",
+        config.schema,
+        "--stype-in",
+        config.stype_in,
+        "--max-records",
+        str(config.live_feed_max_records),
+        "--max-bars",
+        str(config.max_bars),
+        "--min-bars",
+        str(config.min_bars),
+        "--max-seconds",
+        str(config.live_feed_max_seconds),
+        "--max-latest-1m-age-seconds",
+        str(config.max_latest_1m_age_seconds),
+        "--max-completed-5m-age-seconds",
+        str(config.max_completed_5m_age_seconds),
+        "--source-id",
+        f"{config.source_id}_managed_live_feed",
+        "--output-root",
+        str(root),
+    ]
+    if config.provider_stype_out:
+        cmd.extend(["--stype-out", config.provider_stype_out])
+    if config.env_file is not None:
+        cmd.extend(["--env-file", str(config.env_file)])
+    stdout = open(root / "track_b_live_feed_stdout.log", "ab", buffering=0)  # noqa: SIM115 - Popen needs file handles.
+    stderr = open(root / "track_b_live_feed_stderr.log", "ab", buffering=0)  # noqa: SIM115
+    try:
+        process = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
+    finally:
+        stdout.close()
+        stderr.close()
+    return process
+
+
+def _shutdown_owned_live_feeds(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    live_feed_processes: Mapping[str, TrackBLiveFeedProcessState],
+) -> None:
+    if config.leave_live_feed_running:
+        return
+    for state in live_feed_processes.values():
+        if not state.owned_by_monitor or state.process is None:
+            continue
+        _terminate_live_feed_process(stages=stages, process=state.process)
+
+
+def _terminate_live_feed_process(*, stages: TrackBShadowMonitorStages, process: subprocess.Popen[Any]) -> None:
+    if stages.live_feed_terminator is not None:
+        stages.live_feed_terminator(process)
+        return
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _write_live_feed_process_status(
+    *,
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    state: TrackBLiveFeedProcessState,
+    generated_at: datetime,
+) -> None:
+    payload = {
+        "schema_version": "track_b_managed_live_feed_process_status_v1",
+        "generated_at": generated_at.astimezone(UTC).isoformat(),
+        "instrument_family": instrument.instrument_family,
+        "contract_key": instrument.contract_key,
+        "local_symbol": instrument.local_symbol,
+        "databento_continuous_symbol": instrument.databento_continuous_symbol,
+        "dataset": instrument.dataset,
+        "managed": state.managed,
+        "owned_by_monitor": state.owned_by_monitor,
+        "pid": state.pid,
+        "status": state.status,
+        "started_at": None if state.started_at is None else state.started_at.astimezone(UTC).isoformat(),
+        "last_start_attempt_at": None
+        if state.last_start_attempt_at is None
+        else state.last_start_attempt_at.astimezone(UTC).isoformat(),
+        "blocker": state.blocker,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+    }
+    _write_json_file(Path(config.live_runtime_feed_output_root) / "latest_live_feed_process_status.json", payload)
 
 
 def _runtime_data_source(config: TrackBShadowMonitorConfig) -> TrackBRuntimeDataSource:
@@ -1441,6 +1863,7 @@ def _instrument_report_base(
     verdict: TrackBShadowMonitorVerdict,
     primary_blocker: str | None,
     required_next_action: str,
+    live_feed: TrackBLiveFeedReadiness | None = None,
 ) -> dict[str, Any]:
     family = instrument.instrument_family if instrument else str(instrument_family)
     return {
@@ -1457,8 +1880,23 @@ def _instrument_report_base(
         "runtime_chain_wired": instrument.runtime_chain_wired if instrument else False,
         "runtime_candle_capture_verdict": None,
         "runtime_data_source": None,
-        "live_feed_connected": None,
-        "live_feed_subscription_status": None,
+        "runtime_decision_source": None,
+        "live_feed_managed": None if live_feed is None else live_feed.managed,
+        "live_feed_owned_by_monitor": None if live_feed is None else live_feed.owned_by_monitor,
+        "live_feed_pid": None if live_feed is None else live_feed.pid,
+        "live_feed_status": None if live_feed is None else live_feed.status,
+        "live_feed_connected": None if live_feed is None else live_feed.live_feed_connected,
+        "live_feed_subscription_status": None if live_feed is None else live_feed.subscription_status,
+        "live_feed_heartbeat_age_seconds": None if live_feed is None else live_feed.heartbeat_age_seconds,
+        "live_feed_strategy_ready": None if live_feed is None else live_feed.strategy_ready,
+        "live_feed_warmup_1m_count": None if live_feed is None else live_feed.warmup_1m_count,
+        "live_feed_warmup_completed_5m_count": None if live_feed is None else live_feed.warmup_completed_5m_count,
+        "live_feed_required_1m_count": None if live_feed is None else live_feed.required_1m_count,
+        "live_feed_required_completed_5m_count": None if live_feed is None else live_feed.required_completed_5m_count,
+        "live_feed_blocker": None if live_feed is None else live_feed.blocker,
+        "live_feed_report_path": None if live_feed is None or live_feed.report_path is None else str(live_feed.report_path),
+        "live_feed_heartbeat_path": None if live_feed is None or live_feed.heartbeat_path is None else str(live_feed.heartbeat_path),
+        "live_feed_event_path": None if live_feed is None or live_feed.event_path is None else str(live_feed.event_path),
         "data_written": False,
         "fresh_for_execution": False,
         "latest_1m_timestamp": None,
@@ -1492,6 +1930,7 @@ def _instrument_report_from_stages(
     snap: TrackBSnapTurnEnvelopeProducerResult | None = None,
     session: TrackBSessionStrategyEnvelopeProducerResult | None = None,
     runtime_cycle: TrackBMultiStrategyRuntimeCycleResult | None = None,
+    live_feed: TrackBLiveFeedReadiness | None = None,
     primary_blocker: object | None = None,
     required_next_action: str,
 ) -> dict[str, Any]:
@@ -1500,6 +1939,7 @@ def _instrument_report_from_stages(
         verdict=verdict,
         primary_blocker=None if primary_blocker is None else str(primary_blocker),
         required_next_action=required_next_action,
+        live_feed=live_feed,
     )
     runtime_report = runtime.report if runtime is not None else {}
     runtime_cycle_report = runtime_cycle.report if runtime_cycle is not None else {}
@@ -1518,13 +1958,29 @@ def _instrument_report_from_stages(
         {
             "runtime_candle_capture_verdict": runtime_report.get("runtime_candle_capture_verdict"),
             "runtime_data_source": runtime_report.get("runtime_data_source"),
+            "runtime_decision_source": runtime_report.get("runtime_data_source"),
             "runtime_candle_capture_report_path": str(runtime.report_json) if runtime is not None else None,
             "runtime_provider_status_category": _provider_failure_category(runtime_report),
             "monitor_runtime_candle_source": runtime_report.get("monitor_runtime_candle_source") or "PROVIDER_FETCH",
-            "live_feed_report_path": runtime_report.get("live_feed_report_path"),
-            "live_feed_event_path": runtime_report.get("live_feed_event_path"),
-            "live_feed_connected": runtime_report.get("live_feed_connected"),
-            "live_feed_subscription_status": runtime_report.get("live_feed_subscription_status"),
+            "live_feed_managed": base.get("live_feed_managed"),
+            "live_feed_owned_by_monitor": base.get("live_feed_owned_by_monitor"),
+            "live_feed_pid": base.get("live_feed_pid"),
+            "live_feed_status": base.get("live_feed_status"),
+            "live_feed_report_path": runtime_report.get("live_feed_report_path") or base.get("live_feed_report_path"),
+            "live_feed_heartbeat_path": base.get("live_feed_heartbeat_path"),
+            "live_feed_event_path": runtime_report.get("live_feed_event_path") or base.get("live_feed_event_path"),
+            "live_feed_connected": runtime_report.get("live_feed_connected")
+            if runtime_report.get("live_feed_connected") is not None
+            else base.get("live_feed_connected"),
+            "live_feed_subscription_status": runtime_report.get("live_feed_subscription_status")
+            or base.get("live_feed_subscription_status"),
+            "live_feed_heartbeat_age_seconds": base.get("live_feed_heartbeat_age_seconds"),
+            "live_feed_strategy_ready": base.get("live_feed_strategy_ready"),
+            "live_feed_warmup_1m_count": base.get("live_feed_warmup_1m_count"),
+            "live_feed_warmup_completed_5m_count": base.get("live_feed_warmup_completed_5m_count"),
+            "live_feed_required_1m_count": base.get("live_feed_required_1m_count"),
+            "live_feed_required_completed_5m_count": base.get("live_feed_required_completed_5m_count"),
+            "live_feed_blocker": base.get("live_feed_blocker"),
             "live_feed_verdict": runtime_report.get("live_feed_verdict"),
             "latest_record_ts_event": runtime_report.get("latest_record_ts_event"),
             "latest_record_ts_recv": runtime_report.get("latest_record_ts_recv"),
@@ -1600,6 +2056,8 @@ def _report_for_cycle(
         "cycle_id": cycle_id,
         "mode": "SHADOW",
         "runtime_data_source": _runtime_data_source(config).value,
+        "runtime_decision_source": _runtime_data_source(config).value,
+        "live_feed_managed": config.manage_live_feed,
         "started_at": started_at.astimezone(UTC).isoformat(),
         "completed_at": completed_at.isoformat(),
         "cycle_elapsed_seconds": round(max(0.0, (completed_at - started_at.astimezone(UTC)).total_seconds()), 3),
@@ -1625,8 +2083,19 @@ def _report_for_cycle(
             str(item.get("instrument_family")): {
                 "data_written": item.get("data_written"),
                 "runtime_data_source": item.get("runtime_data_source"),
+                "runtime_decision_source": item.get("runtime_decision_source"),
+                "live_feed_managed": item.get("live_feed_managed"),
+                "live_feed_pid": item.get("live_feed_pid"),
+                "live_feed_status": item.get("live_feed_status"),
                 "live_feed_connected": item.get("live_feed_connected"),
                 "live_feed_subscription_status": item.get("live_feed_subscription_status"),
+                "live_feed_heartbeat_age_seconds": item.get("live_feed_heartbeat_age_seconds"),
+                "live_feed_strategy_ready": item.get("live_feed_strategy_ready"),
+                "live_feed_warmup_1m_count": item.get("live_feed_warmup_1m_count"),
+                "live_feed_warmup_completed_5m_count": item.get("live_feed_warmup_completed_5m_count"),
+                "live_feed_required_1m_count": item.get("live_feed_required_1m_count"),
+                "live_feed_required_completed_5m_count": item.get("live_feed_required_completed_5m_count"),
+                "live_feed_blocker": item.get("live_feed_blocker"),
                 "fresh_for_execution": item.get("fresh_for_execution"),
                 "latest_1m_timestamp": item.get("latest_1m_timestamp"),
                 "latest_completed_5m_timestamp": item.get("latest_completed_5m_timestamp"),
@@ -1829,6 +2298,12 @@ def _cycle_verdict(instrument_reports: Sequence[Mapping[str, Any]]) -> TrackBSha
         return TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT
     if TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value in verdicts:
         return TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR
+    if TrackBShadowMonitorVerdict.LIVE_FEED_DISCONNECTED.value in verdicts:
+        return TrackBShadowMonitorVerdict.LIVE_FEED_DISCONNECTED
+    if TrackBShadowMonitorVerdict.LIVE_FEED_STALE.value in verdicts:
+        return TrackBShadowMonitorVerdict.LIVE_FEED_STALE
+    if TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP.value in verdicts:
+        return TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
     if TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY.value in verdicts:
         return TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY
     if TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value in verdicts:
@@ -1863,6 +2338,9 @@ def _must_stop(report: Mapping[str, Any], config: TrackBShadowMonitorConfig) -> 
     if config.stop_on_error and report.get("monitor_verdict") in {
         TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
         TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_STALE.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_DISCONNECTED.value,
         TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value,
         TrackBShadowMonitorVerdict.ERROR.value,
     }:
@@ -1874,6 +2352,9 @@ def _failure_counts_for_backoff(report: Mapping[str, Any]) -> bool:
     return str(report.get("monitor_verdict") or "") in {
         TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
         TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_STALE.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_DISCONNECTED.value,
         TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT.value,
         TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value,
         TrackBShadowMonitorVerdict.ERROR.value,
@@ -1978,6 +2459,70 @@ def _read_json_optional(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _write_json_file(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(to_jsonable(dict(payload)), indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _age_seconds_from_payload(payload: Mapping[str, Any] | None, now: datetime) -> float | None:
+    if not payload:
+        return None
+    raw = payload.get("generated_at") or payload.get("completed_at") or payload.get("wall_clock_time")
+    if not raw:
+        return None
+    try:
+        generated_at = _parse_time(str(raw))
+    except ValueError:
+        return None
+    return max(0.0, (now.astimezone(UTC) - generated_at.astimezone(UTC)).total_seconds())
+
+
+def _bars_available(payload: Mapping[str, Any] | None) -> int:
+    if not payload:
+        return 0
+    for key in ("bars_available", "completed_5m_bar_count", "valid_ohlcv_1m_record_count"):
+        value = _int_or_none(payload.get(key))
+        if value is not None:
+            return value
+    candles = payload.get("candles") or payload.get("candle_history") or payload.get("bars")
+    return len(candles) if isinstance(candles, Sequence) and not isinstance(candles, (str, bytes)) else 0
+
+
+def _bool_or_none(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _live_feed_artifact_matches(
+    *,
+    report: Mapping[str, Any] | None,
+    event: Mapping[str, Any] | None,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+) -> str | None:
+    payload = report or event or {}
+    if not payload:
+        return None
+    expected = {
+        "contract_key": instrument.contract_key,
+        "local_symbol": instrument.local_symbol,
+        "databento_continuous_symbol": instrument.databento_continuous_symbol,
+        "dataset": instrument.dataset,
+    }
+    for key, expected_value in expected.items():
+        observed = payload.get(key)
+        if observed is not None and str(observed) != str(expected_value):
+            return f"Databento Live feed artifact {key} mismatch: expected {expected_value}, observed {observed}."
+    return None
+
+
 def _path_from_report(report: Mapping[str, Any], key: str) -> Path | None:
     value = report.get(key)
     return Path(str(value)) if value else None
@@ -2052,6 +2597,9 @@ def _primary_blocker(instrument_reports: Sequence[Mapping[str, Any]]) -> str | N
     priority = (
         TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG.value,
         TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_DISCONNECTED.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_STALE.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP.value,
         TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY.value,
         TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value,
         TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT.value,
@@ -2075,6 +2623,12 @@ def _required_next_action(verdict: TrackBShadowMonitorVerdict) -> str:
         return "Repair provider/runtime candle capture; monitor may continue with bounded backoff."
     if verdict == TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY:
         return "Start or repair Databento Live runtime feed; do not evaluate strategies from HTTP backfill as live."
+    if verdict == TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP:
+        return "Keep Databento Live feed running until required runtime bars are accumulated."
+    if verdict == TrackBShadowMonitorVerdict.LIVE_FEED_STALE:
+        return "Reconnect or wait for fresh Databento Live heartbeat before strategy evaluation."
+    if verdict == TrackBShadowMonitorVerdict.LIVE_FEED_DISCONNECTED:
+        return "Restart Databento Live feed; monitor may retry with bounded backoff."
     if verdict == TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT:
         return "Wait for fresh runtime candles; do not evaluate strategies on stale context."
     if verdict == TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT:
