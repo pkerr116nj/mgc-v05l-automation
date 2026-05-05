@@ -50,6 +50,8 @@ def cycle_config(tmp_path: Path, **overrides: object) -> TrackBMultiStrategyRunt
         "asian_drift_event_payload": base_event("asian_drift_v1"),
         "pause_resume_short_event_payload": base_event("ASIA_EARLY_PAUSE_RESUME_SHORT_V1"),
         "breakout_retest_hold_long_event_payload": base_event("ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"),
+        "first_bull_snap_turn_event_payload": base_event("FIRST_BULL_SNAP_TURN_V1"),
+        "first_bear_snap_turn_event_payload": base_event("FIRST_BEAR_SNAP_TURN_V1"),
         "inbox_dir": tmp_path / "inbox",
         "output_root": tmp_path / "cycle",
         "strategy_rule_output_root": tmp_path / "rules",
@@ -178,10 +180,12 @@ def default_reports() -> dict[str, dict[str, object]]:
             "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
             rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
         ),
+        "FIRST_BULL_SNAP_TURN_V1": rule_report("FIRST_BULL_SNAP_TURN_V1", rule_mode="FIRST_BULL_SNAP_TURN_V1"),
+        "FIRST_BEAR_SNAP_TURN_V1": rule_report("FIRST_BEAR_SNAP_TURN_V1", rule_mode="FIRST_BEAR_SNAP_TURN_V1"),
     }
 
 
-def test_all_three_no_signal_no_mutation(tmp_path: Path) -> None:
+def test_all_registered_strategies_no_signal_no_mutation(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_multi_strategy_runtime_cycle(
         config=cycle_config(tmp_path),
@@ -191,7 +195,13 @@ def test_all_three_no_signal_no_mutation(tmp_path: Path) -> None:
     )
 
     assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION
-    assert calls.strategy == ["asian_drift_v1", "ASIA_EARLY_PAUSE_RESUME_SHORT_V1", "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"]
+    assert calls.strategy == [
+        "asian_drift_v1",
+        "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "FIRST_BULL_SNAP_TURN_V1",
+        "FIRST_BEAR_SNAP_TURN_V1",
+    ]
     assert calls.paper == 0
     assert result.report["candidate_signals"] == []
     assert result.report["readiness_invoked"] is False
@@ -253,9 +263,9 @@ def test_runtime_cycle_can_refresh_operator_status_latest(tmp_path: Path) -> Non
 def test_one_signal_without_paper_flags_reports_ready_no_submit(tmp_path: Path) -> None:
     calls = Calls()
     reports = default_reports()
-    reports["ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"] = rule_report(
-        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
-        rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    reports["FIRST_BULL_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BULL_SNAP_TURN_V1",
+        rule_mode="FIRST_BULL_SNAP_TURN_V1",
         decision="LONG",
         emitted=True,
         direction="LONG",
@@ -269,7 +279,7 @@ def test_one_signal_without_paper_flags_reports_ready_no_submit(tmp_path: Path) 
     )
 
     assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.SIGNAL_READY_NO_SUBMIT
-    assert result.report["chosen_strategy_id"] == "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
+    assert result.report["chosen_strategy_id"] == "FIRST_BULL_SNAP_TURN_V1"
     assert calls.paper == 0
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
@@ -278,9 +288,9 @@ def test_one_signal_without_paper_flags_reports_ready_no_submit(tmp_path: Path) 
 def test_one_signal_with_paper_flags_delegates_once(tmp_path: Path) -> None:
     calls = Calls()
     reports = default_reports()
-    reports["ASIA_EARLY_PAUSE_RESUME_SHORT_V1"] = rule_report(
-        "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
-        rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+    reports["FIRST_BEAR_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BEAR_SNAP_TURN_V1",
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
         decision="SHORT",
         emitted=True,
         direction="SHORT",
@@ -302,7 +312,7 @@ def test_one_signal_with_paper_flags_delegates_once(tmp_path: Path) -> None:
 
     assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
     assert calls.paper == 1
-    assert result.report["chosen_strategy_id"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    assert result.report["chosen_strategy_id"] == "FIRST_BEAR_SNAP_TURN_V1"
     assert result.report["paper_proof_invoked"] is True
     assert result.report["submit_attempted"] is True
     assert result.report["broker_state_mutated"] is True

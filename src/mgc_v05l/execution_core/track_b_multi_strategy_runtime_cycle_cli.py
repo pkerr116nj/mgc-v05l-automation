@@ -23,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--asian-drift-event-json", type=Path)
     parser.add_argument("--pause-resume-short-event-json", type=Path)
     parser.add_argument("--breakout-retest-hold-long-event-json", type=Path)
+    parser.add_argument("--first-bull-snap-turn-event-json", type=Path)
+    parser.add_argument("--first-bear-snap-turn-event-json", type=Path)
     parser.add_argument("--inbox-dir", required=True, type=Path)
     parser.add_argument("--expected-account-id", default="DUM882026")
     parser.add_argument("--source-id", default="track_b_multi_strategy_runtime_cycle")
@@ -63,6 +65,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             asian_drift_event_json=args.asian_drift_event_json,
             pause_resume_short_event_json=args.pause_resume_short_event_json,
             breakout_retest_hold_long_event_json=args.breakout_retest_hold_long_event_json,
+            first_bull_snap_turn_event_json=args.first_bull_snap_turn_event_json,
+            first_bear_snap_turn_event_json=args.first_bear_snap_turn_event_json,
             inbox_dir=args.inbox_dir,
             expected_account_id=args.expected_account_id,
             source_id=args.source_id,

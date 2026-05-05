@@ -155,6 +155,72 @@ ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",),
 )
 
+FIRST_BULL_SNAP_TURN_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="FIRST_BULL_SNAP_TURN_V1",
+    rule_id="FIRST_BULL_SNAP_TURN_V1",
+    rule_mode="FIRST_BULL_SNAP_TURN_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.first_bull_snap_turn_features.bull_snap_downside_stretch_ok",
+        "metadata.first_bull_snap_turn_features.bull_snap_range_ok",
+        "metadata.first_bull_snap_turn_features.bull_snap_body_ok",
+        "metadata.first_bull_snap_turn_features.bull_snap_close_strong",
+        "metadata.first_bull_snap_turn_features.bull_snap_velocity_ok",
+        "metadata.first_bull_snap_turn_features.bull_snap_reversal_bar",
+        "metadata.first_bull_snap_turn_features.bull_snap_location_ok",
+        "metadata.first_bull_snap_turn_features.bull_snap_raw",
+        "metadata.first_bull_snap_turn_features.bull_snap_turn_candidate",
+        "metadata.first_bull_snap_turn_features.first_bull_snap_turn",
+        "metadata.first_bull_snap_turn_features.feature_version",
+        "metadata.first_bull_snap_turn_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.first_bull_snap_turn_state.session_allowed",
+        "metadata.first_bull_snap_turn_state.prior_bars_since_bull_snap_gt_cooldown",
+        "metadata.first_bull_snap_turn_state.derivative_phase",
+    ),
+    feature_version="first_bull_snap_turn_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=True,
+    live_money_eligible=False,
+    accepted_strategy_ids=("FIRST_BULL_SNAP_TURN_V1",),
+    accepted_rule_ids=("FIRST_BULL_SNAP_TURN_V1",),
+)
+
+FIRST_BEAR_SNAP_TURN_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="FIRST_BEAR_SNAP_TURN_V1",
+    rule_id="FIRST_BEAR_SNAP_TURN_V1",
+    rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.first_bear_snap_turn_features.bear_snap_up_stretch_ok",
+        "metadata.first_bear_snap_turn_features.bear_snap_range_ok",
+        "metadata.first_bear_snap_turn_features.bear_snap_body_ok",
+        "metadata.first_bear_snap_turn_features.bear_snap_close_weak",
+        "metadata.first_bear_snap_turn_features.bear_snap_velocity_ok",
+        "metadata.first_bear_snap_turn_features.bear_snap_reversal_bar",
+        "metadata.first_bear_snap_turn_features.bear_snap_location_ok",
+        "metadata.first_bear_snap_turn_features.bear_snap_raw",
+        "metadata.first_bear_snap_turn_features.bear_snap_turn_candidate",
+        "metadata.first_bear_snap_turn_features.first_bear_snap_turn",
+        "metadata.first_bear_snap_turn_features.feature_version",
+        "metadata.first_bear_snap_turn_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.first_bear_snap_turn_state.session_allowed",
+        "metadata.first_bear_snap_turn_state.prior_bars_since_bear_snap_gt_cooldown",
+        "metadata.first_bear_snap_turn_state.derivative_phase",
+    ),
+    feature_version="first_bear_snap_turn_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=True,
+    live_money_eligible=False,
+    accepted_strategy_ids=("FIRST_BEAR_SNAP_TURN_V1",),
+    accepted_rule_ids=("FIRST_BEAR_SNAP_TURN_V1",),
+)
+
 DEMO_WIRING_PROOF = TrackBStrategyRegistryEntry(
     strategy_id="track_b_demo_wiring_proof",
     rule_id="mgc_realtime_quote_demo_long_v1",
@@ -192,6 +258,8 @@ TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     ASIAN_DRIFT_V1,
     ASIA_EARLY_PAUSE_RESUME_SHORT_V1,
     ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1,
+    FIRST_BULL_SNAP_TURN_V1,
+    FIRST_BEAR_SNAP_TURN_V1,
     DEMO_WIRING_PROOF,
     HUMAN_REVIEW_ONLY,
 )

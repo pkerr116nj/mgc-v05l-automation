@@ -201,6 +201,80 @@ def asia_early_normal_breakout_retest_hold_long_event(tmp_path: Path, **override
     return event
 
 
+def first_bull_snap_turn_event(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    event = realtime_event(
+        tmp_path,
+        strategy_id="FIRST_BULL_SNAP_TURN_V1",
+        lane_id="mgc_first_bull_snap_turn",
+        timeframe="5m",
+        open="4574.8",
+        high="4576.2",
+        low="4573.6",
+        close="4575.9",
+    )
+    metadata = dict(event["metadata"])
+    metadata["first_bull_snap_turn_state"] = {
+        "derivative_phase": "LONDON_OPEN",
+        "session_allowed": True,
+        "prior_bars_since_bull_snap_gt_cooldown": True,
+        "timeframe": "5m",
+    }
+    metadata["first_bull_snap_turn_features"] = {
+        "feature_version": "first_bull_snap_turn_v1_phase1",
+        "calibration_profile": "probationary_baseline_v1",
+        "bull_snap_downside_stretch_ok": True,
+        "bull_snap_range_ok": True,
+        "bull_snap_body_ok": True,
+        "bull_snap_close_strong": True,
+        "bull_snap_velocity_ok": True,
+        "bull_snap_reversal_bar": True,
+        "bull_snap_location_ok": True,
+        "bull_snap_raw": True,
+        "bull_snap_turn_candidate": True,
+        "first_bull_snap_turn": True,
+    }
+    event["metadata"] = metadata
+    event.update(overrides)
+    return event
+
+
+def first_bear_snap_turn_event(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    event = realtime_event(
+        tmp_path,
+        strategy_id="FIRST_BEAR_SNAP_TURN_V1",
+        lane_id="mgc_first_bear_snap_turn",
+        timeframe="5m",
+        open="4576.1",
+        high="4577.0",
+        low="4574.4",
+        close="4574.9",
+    )
+    metadata = dict(event["metadata"])
+    metadata["first_bear_snap_turn_state"] = {
+        "derivative_phase": "LONDON_OPEN",
+        "session_allowed": True,
+        "prior_bars_since_bear_snap_gt_cooldown": True,
+        "timeframe": "5m",
+    }
+    metadata["first_bear_snap_turn_features"] = {
+        "feature_version": "first_bear_snap_turn_v1_phase1",
+        "calibration_profile": "probationary_baseline_v1",
+        "bear_snap_up_stretch_ok": True,
+        "bear_snap_range_ok": True,
+        "bear_snap_body_ok": True,
+        "bear_snap_close_weak": True,
+        "bear_snap_velocity_ok": True,
+        "bear_snap_reversal_bar": True,
+        "bear_snap_location_ok": True,
+        "bear_snap_raw": True,
+        "bear_snap_turn_candidate": True,
+        "first_bear_snap_turn": True,
+    }
+    event["metadata"] = metadata
+    event.update(overrides)
+    return event
+
+
 def test_valid_realtime_quote_demo_long_emit_writes_no_submit_signal_batch(tmp_path: Path) -> None:
     result = run_track_b_strategy_rule(
         input_event_payload=realtime_event(tmp_path),
@@ -700,6 +774,148 @@ def test_asia_early_normal_breakout_retest_hold_long_signal_ready_no_submit(tmp_
     assert result.output_batch_json is not None
     batch = json.loads(result.output_batch_json.read_text(encoding="utf-8"))
     assert batch["signal_items"][0]["signal"]["signal_direction"] == "LONG"
+
+
+def test_first_bull_snap_turn_missing_required_features_not_ready(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=realtime_event(
+            tmp_path,
+            strategy_id="FIRST_BULL_SNAP_TURN_V1",
+            lane_id="mgc_first_bull_snap_turn",
+            timeframe="5m",
+        ),
+        input_event_path=None,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        rule_id="FIRST_BULL_SNAP_TURN_V1",
+        rule_mode="FIRST_BULL_SNAP_TURN_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        runner_id="rule-runner-first-bull-missing",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT
+    assert result.report["first_bull_snap_turn_watch_verdict"] == "FIRST_BULL_SNAP_TURN_NOT_READY"
+    assert "NOT_READY" in str(result.report["primary_blocker"])
+    assert "first_bull_snap_turn_features.bull_snap_downside_stretch_ok" in str(result.report["primary_blocker"])
+    assert result.report["signal_emitted"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_first_bull_snap_turn_no_signal_no_mutation(tmp_path: Path) -> None:
+    event = first_bull_snap_turn_event(tmp_path)
+    metadata = dict(event["metadata"])
+    features = dict(metadata["first_bull_snap_turn_features"])
+    features["first_bull_snap_turn"] = False
+    metadata["first_bull_snap_turn_features"] = features
+    event["metadata"] = metadata
+
+    result = run_track_b_strategy_rule(
+        input_event_payload=event,
+        input_event_path=tmp_path / "first_bull_snap_turn_state.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_first_bull_snap_turn",
+        rule_id="FIRST_BULL_SNAP_TURN_V1",
+        rule_mode="FIRST_BULL_SNAP_TURN_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        runner_id="rule-runner-first-bull-no-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert result.report["strategy_registry_id"] == "FIRST_BULL_SNAP_TURN_V1"
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert result.report["first_bull_snap_turn_watch_verdict"] == "FIRST_BULL_SNAP_TURN_NO_SIGNAL_NO_MUTATION"
+    assert result.report["signal_source"] == "FIRST_BULL_SNAP_TURN_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["decision"] == "NO_SIGNAL"
+    assert result.report["signal_emitted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+    assert result.output_batch_json is None
+
+
+def test_first_bull_snap_turn_signal_ready_no_submit(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=first_bull_snap_turn_event(tmp_path),
+        input_event_path=tmp_path / "first_bull_snap_turn_state.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_first_bull_snap_turn",
+        rule_id="FIRST_BULL_SNAP_TURN_V1",
+        rule_mode="FIRST_BULL_SNAP_TURN_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        strategy_adapter_output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        runner_id="rule-runner-first-bull-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert result.report["rule_name"] == "first_bull_snap_turn_v1"
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert result.report["first_bull_snap_turn_watch_verdict"] == "FIRST_BULL_SNAP_TURN_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["signal_source"] == "FIRST_BULL_SNAP_TURN_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["decision"] == "LONG"
+    assert result.report["signal_emitted"] is True
+    assert result.report["signal_direction"] == "LONG"
+    assert result.report["paper_proof_cli_called"] is False
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+    assert result.output_batch_json is not None
+    batch = json.loads(result.output_batch_json.read_text(encoding="utf-8"))
+    assert batch["signal_items"][0]["signal"]["signal_direction"] == "LONG"
+
+
+def test_first_bear_snap_turn_signal_ready_no_submit(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=first_bear_snap_turn_event(tmp_path),
+        input_event_path=tmp_path / "first_bear_snap_turn_state.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_first_bear_snap_turn",
+        rule_id="FIRST_BEAR_SNAP_TURN_V1",
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        strategy_adapter_output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        runner_id="rule-runner-first-bear-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert result.report["rule_name"] == "first_bear_snap_turn_v1"
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert result.report["first_bear_snap_turn_watch_verdict"] == "FIRST_BEAR_SNAP_TURN_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["signal_source"] == "FIRST_BEAR_SNAP_TURN_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["decision"] == "SHORT"
+    assert result.report["signal_emitted"] is True
+    assert result.report["signal_direction"] == "SHORT"
+    assert result.report["paper_proof_cli_called"] is False
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+    assert result.output_batch_json is not None
+    batch = json.loads(result.output_batch_json.read_text(encoding="utf-8"))
+    assert batch["signal_items"][0]["signal"]["signal_direction"] == "SHORT"
 
 
 def test_human_review_only_mode_does_not_emit_signal(tmp_path: Path) -> None:

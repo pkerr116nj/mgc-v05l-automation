@@ -76,6 +76,12 @@ class TrackBStrategyPaperRunnerVerdict(str, Enum):
     ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY"
     ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION"
     ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT"
+    FIRST_BULL_SNAP_TURN_NOT_READY = "TRACK_B_STRATEGY_PAPER_RUNNER_FIRST_BULL_SNAP_TURN_NOT_READY"
+    FIRST_BULL_SNAP_TURN_NO_SIGNAL_NO_MUTATION = "TRACK_B_STRATEGY_PAPER_RUNNER_FIRST_BULL_SNAP_TURN_NO_SIGNAL_NO_MUTATION"
+    FIRST_BULL_SNAP_TURN_SIGNAL_READY_NO_SUBMIT = "TRACK_B_STRATEGY_PAPER_RUNNER_FIRST_BULL_SNAP_TURN_SIGNAL_READY_NO_SUBMIT"
+    FIRST_BEAR_SNAP_TURN_NOT_READY = "TRACK_B_STRATEGY_PAPER_RUNNER_FIRST_BEAR_SNAP_TURN_NOT_READY"
+    FIRST_BEAR_SNAP_TURN_NO_SIGNAL_NO_MUTATION = "TRACK_B_STRATEGY_PAPER_RUNNER_FIRST_BEAR_SNAP_TURN_NO_SIGNAL_NO_MUTATION"
+    FIRST_BEAR_SNAP_TURN_SIGNAL_READY_NO_SUBMIT = "TRACK_B_STRATEGY_PAPER_RUNNER_FIRST_BEAR_SNAP_TURN_SIGNAL_READY_NO_SUBMIT"
     BLOCKED_NON_PAPER_MODE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_NON_PAPER_MODE"
     BLOCKED_INVALID_SUBMIT_REQUEST = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_INVALID_SUBMIT_REQUEST"
     BLOCKED_DATA_MAINTENANCE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_DATA_MAINTENANCE_STALE_OR_INSUFFICIENT"
@@ -499,6 +505,10 @@ def run_track_b_strategy_paper(
                 verdict = TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION
             elif _is_breakout_retest_hold_long_rule(config):
                 verdict = TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION
+            elif _is_first_bull_snap_turn_rule(config):
+                verdict = TrackBStrategyPaperRunnerVerdict.FIRST_BULL_SNAP_TURN_NO_SIGNAL_NO_MUTATION
+            elif _is_first_bear_snap_turn_rule(config):
+                verdict = TrackBStrategyPaperRunnerVerdict.FIRST_BEAR_SNAP_TURN_NO_SIGNAL_NO_MUTATION
             else:
                 verdict = (
                     TrackBStrategyPaperRunnerVerdict.HUMAN_REVIEW_NO_SIGNAL
@@ -999,6 +1009,8 @@ def _build_report(
             verdict,
             strategy_report,
         ),
+        "first_bull_snap_turn_watch_verdict": _first_bull_snap_turn_runner_verdict(verdict, strategy_report),
+        "first_bear_snap_turn_watch_verdict": _first_bear_snap_turn_runner_verdict(verdict, strategy_report),
         "strategy_registry_id": strategy_report.get("strategy_registry_id"),
         "strategy_registry_rule_id": strategy_report.get("strategy_registry_rule_id"),
         "strategy_registry_rule_mode": strategy_report.get("strategy_registry_rule_mode"),
@@ -1662,6 +1674,10 @@ def _signal_source_from_rule_mode(rule_mode: str) -> str:
         return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     if str(rule_mode or "").upper() == "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1":
         return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
+    if str(rule_mode or "").upper() == "FIRST_BULL_SNAP_TURN_V1":
+        return "FIRST_BULL_SNAP_TURN_V1"
+    if str(rule_mode or "").upper() == "FIRST_BEAR_SNAP_TURN_V1":
+        return "FIRST_BEAR_SNAP_TURN_V1"
     return "REAL_STRATEGY_RULE"
 
 
@@ -1671,6 +1687,8 @@ def _real_strategy_signal_from_rule_mode(rule_mode: str) -> bool:
         "ASIAN_DRIFT_V1",
         "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
         "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "FIRST_BULL_SNAP_TURN_V1",
+        "FIRST_BEAR_SNAP_TURN_V1",
     }
 
 
@@ -1688,8 +1706,24 @@ def _is_breakout_retest_hold_long_rule(config: TrackBStrategyPaperRunnerConfig) 
     return str(config.rule_mode or "").upper() == value or str(config.rule_id or "").upper() == value
 
 
+def _is_first_bull_snap_turn_rule(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    value = "FIRST_BULL_SNAP_TURN_V1"
+    return str(config.rule_mode or "").upper() == value or str(config.rule_id or "").upper() == value
+
+
+def _is_first_bear_snap_turn_rule(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    value = "FIRST_BEAR_SNAP_TURN_V1"
+    return str(config.rule_mode or "").upper() == value or str(config.rule_id or "").upper() == value
+
+
 def _is_watch_only_until_submit_rule(config: TrackBStrategyPaperRunnerConfig) -> bool:
-    return _is_asian_drift_rule(config) or _is_pause_resume_short_rule(config) or _is_breakout_retest_hold_long_rule(config)
+    return (
+        _is_asian_drift_rule(config)
+        or _is_pause_resume_short_rule(config)
+        or _is_breakout_retest_hold_long_rule(config)
+        or _is_first_bull_snap_turn_rule(config)
+        or _is_first_bear_snap_turn_rule(config)
+    )
 
 
 def _strategy_specific_not_ready_verdict(config: TrackBStrategyPaperRunnerConfig) -> TrackBStrategyPaperRunnerVerdict | None:
@@ -1699,6 +1733,10 @@ def _strategy_specific_not_ready_verdict(config: TrackBStrategyPaperRunnerConfig
         return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY
     if _is_breakout_retest_hold_long_rule(config):
         return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY
+    if _is_first_bull_snap_turn_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.FIRST_BULL_SNAP_TURN_NOT_READY
+    if _is_first_bear_snap_turn_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.FIRST_BEAR_SNAP_TURN_NOT_READY
     return None
 
 
@@ -1709,6 +1747,10 @@ def _strategy_specific_signal_ready_no_submit_verdict(config: TrackBStrategyPape
         return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT
     if _is_breakout_retest_hold_long_rule(config):
         return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT
+    if _is_first_bull_snap_turn_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.FIRST_BULL_SNAP_TURN_SIGNAL_READY_NO_SUBMIT
+    if _is_first_bear_snap_turn_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.FIRST_BEAR_SNAP_TURN_SIGNAL_READY_NO_SUBMIT
     return None
 
 
@@ -1719,6 +1761,10 @@ def _expected_signal_source(config: TrackBStrategyPaperRunnerConfig) -> str:
         return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     if _is_breakout_retest_hold_long_rule(config):
         return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
+    if _is_first_bull_snap_turn_rule(config):
+        return "FIRST_BULL_SNAP_TURN_V1"
+    if _is_first_bear_snap_turn_rule(config):
+        return "FIRST_BEAR_SNAP_TURN_V1"
     return _signal_source_from_rule_mode(config.rule_mode)
 
 
@@ -1729,6 +1775,10 @@ def _strategy_specific_real_signal_next_action(config: TrackBStrategyPaperRunner
         return "Use an actual ASIA_EARLY_PAUSE_RESUME_SHORT_V1 feature/state envelope; DEMO/proof signals cannot drive this path."
     if _is_breakout_retest_hold_long_rule(config):
         return "Use an actual ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 feature/state envelope; DEMO/proof signals cannot drive this path."
+    if _is_first_bull_snap_turn_rule(config):
+        return "Use an actual FIRST_BULL_SNAP_TURN_V1 feature/state envelope; DEMO/proof signals cannot drive this path."
+    if _is_first_bear_snap_turn_rule(config):
+        return "Use an actual FIRST_BEAR_SNAP_TURN_V1 feature/state envelope; DEMO/proof signals cannot drive this path."
     return "Use a registered real strategy signal before PAPER handoff."
 
 
@@ -1739,6 +1789,10 @@ def _strategy_specific_signal_ready_next_action(config: TrackBStrategyPaperRunne
         return "Pause-resume short real strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
     if _is_breakout_retest_hold_long_rule(config):
         return "Breakout-retest-hold long real strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
+    if _is_first_bull_snap_turn_rule(config):
+        return "First bull snap-turn real strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
+    if _is_first_bear_snap_turn_rule(config):
+        return "First bear snap-turn real strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
     return "Strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
 
 
@@ -1797,6 +1851,32 @@ def _breakout_retest_hold_long_runner_verdict(
     if verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT:
         return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT"
     return strategy_report.get("asia_early_normal_breakout_retest_hold_long_watch_verdict") if strategy_report else None
+
+
+def _first_bull_snap_turn_runner_verdict(
+    verdict: TrackBStrategyPaperRunnerVerdict,
+    strategy_report: Mapping[str, object],
+) -> str | None:
+    if verdict == TrackBStrategyPaperRunnerVerdict.FIRST_BULL_SNAP_TURN_NOT_READY:
+        return "FIRST_BULL_SNAP_TURN_NOT_READY"
+    if verdict == TrackBStrategyPaperRunnerVerdict.FIRST_BULL_SNAP_TURN_NO_SIGNAL_NO_MUTATION:
+        return "FIRST_BULL_SNAP_TURN_NO_SIGNAL_NO_MUTATION"
+    if verdict == TrackBStrategyPaperRunnerVerdict.FIRST_BULL_SNAP_TURN_SIGNAL_READY_NO_SUBMIT:
+        return "FIRST_BULL_SNAP_TURN_SIGNAL_READY_NO_SUBMIT"
+    return strategy_report.get("first_bull_snap_turn_watch_verdict") if strategy_report else None
+
+
+def _first_bear_snap_turn_runner_verdict(
+    verdict: TrackBStrategyPaperRunnerVerdict,
+    strategy_report: Mapping[str, object],
+) -> str | None:
+    if verdict == TrackBStrategyPaperRunnerVerdict.FIRST_BEAR_SNAP_TURN_NOT_READY:
+        return "FIRST_BEAR_SNAP_TURN_NOT_READY"
+    if verdict == TrackBStrategyPaperRunnerVerdict.FIRST_BEAR_SNAP_TURN_NO_SIGNAL_NO_MUTATION:
+        return "FIRST_BEAR_SNAP_TURN_NO_SIGNAL_NO_MUTATION"
+    if verdict == TrackBStrategyPaperRunnerVerdict.FIRST_BEAR_SNAP_TURN_SIGNAL_READY_NO_SUBMIT:
+        return "FIRST_BEAR_SNAP_TURN_SIGNAL_READY_NO_SUBMIT"
+    return strategy_report.get("first_bear_snap_turn_watch_verdict") if strategy_report else None
 
 
 def _asian_drift_state_snapshot_path(config: TrackBStrategyPaperRunnerConfig) -> str | None:

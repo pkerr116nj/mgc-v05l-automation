@@ -39,6 +39,8 @@ DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID = "mgc_ema_momentum_reclaim_long_v
 DEFAULT_ASIAN_DRIFT_RULE_ID = "asian_drift_v1"
 DEFAULT_ASIA_EARLY_PAUSE_RESUME_SHORT_RULE_ID = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
 DEFAULT_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_RULE_ID = "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
+DEFAULT_FIRST_BULL_SNAP_TURN_RULE_ID = "FIRST_BULL_SNAP_TURN_V1"
+DEFAULT_FIRST_BEAR_SNAP_TURN_RULE_ID = "FIRST_BEAR_SNAP_TURN_V1"
 
 
 class TrackBStrategyRuleRunnerVerdict(str, Enum):
@@ -57,6 +59,8 @@ class TrackBStrategyRuleMode(str, Enum):
     ASIAN_DRIFT_V1 = "ASIAN_DRIFT_V1"
     ASIA_EARLY_PAUSE_RESUME_SHORT_V1 = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 = "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
+    FIRST_BULL_SNAP_TURN_V1 = "FIRST_BULL_SNAP_TURN_V1"
+    FIRST_BEAR_SNAP_TURN_V1 = "FIRST_BEAR_SNAP_TURN_V1"
     HUMAN_REVIEW_ONLY = "HUMAN_REVIEW_ONLY"
 
 
@@ -400,6 +404,22 @@ def _validate_input(
         return _validate_asia_early_pause_resume_short_snapshot(event)
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
         return _validate_asia_early_normal_breakout_retest_hold_long_snapshot(event)
+    if rule_mode == TrackBStrategyRuleMode.FIRST_BULL_SNAP_TURN_V1:
+        return _validate_first_snap_turn_snapshot(
+            event,
+            state_key="first_bull_snap_turn_state",
+            features_key="first_bull_snap_turn_features",
+            feature_version="first_bull_snap_turn_v1_phase1",
+            label="First Bull Snap Turn v1",
+        )
+    if rule_mode == TrackBStrategyRuleMode.FIRST_BEAR_SNAP_TURN_V1:
+        return _validate_first_snap_turn_snapshot(
+            event,
+            state_key="first_bear_snap_turn_state",
+            features_key="first_bear_snap_turn_features",
+            feature_version="first_bear_snap_turn_v1_phase1",
+            label="First Bear Snap Turn v1",
+        )
     return None
 
 
@@ -455,6 +475,29 @@ def _validate_asia_early_normal_breakout_retest_hold_long_snapshot(event: Mappin
     return None
 
 
+def _validate_first_snap_turn_snapshot(
+    event: Mapping[str, Any],
+    *,
+    state_key: str,
+    features_key: str,
+    feature_version: str,
+    label: str,
+) -> str | None:
+    metadata = event.get("metadata") if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = metadata.get(state_key)
+    features = metadata.get(features_key)
+    if not isinstance(state, Mapping) or not isinstance(features, Mapping):
+        return f"{label} requires explicit state and feature envelopes."
+    timeframe = _optional_text(event.get("timeframe") or state.get("timeframe") or metadata.get("timeframe"))
+    if timeframe != "5m":
+        return f"{label} Track B watch requires completed 5m decision-bar state."
+    if _optional_text(features.get("feature_version")) != feature_version:
+        return f"{label} requires feature_version={feature_version}."
+    if _optional_text(features.get("calibration_profile")) != "probationary_baseline_v1":
+        return f"{label} requires calibration_profile=probationary_baseline_v1."
+    return None
+
+
 def _evaluate_rule_decision(
     *,
     event: Mapping[str, Any],
@@ -480,6 +523,28 @@ def _evaluate_rule_decision(
         return _evaluate_asia_early_pause_resume_short_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
         return _evaluate_asia_early_normal_breakout_retest_hold_long_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
+    if rule_mode == TrackBStrategyRuleMode.FIRST_BULL_SNAP_TURN_V1:
+        return _evaluate_first_snap_turn_v1(
+            event=event,
+            quote_evidence=quote_evidence,
+            rule_id=rule_id,
+            direction=TrackBStrategyRuleDecision.LONG,
+            state_key="first_bull_snap_turn_state",
+            features_key="first_bull_snap_turn_features",
+            predicate_prefix="bull",
+            rule_name="first_bull_snap_turn_v1",
+        )
+    if rule_mode == TrackBStrategyRuleMode.FIRST_BEAR_SNAP_TURN_V1:
+        return _evaluate_first_snap_turn_v1(
+            event=event,
+            quote_evidence=quote_evidence,
+            rule_id=rule_id,
+            direction=TrackBStrategyRuleDecision.SHORT,
+            state_key="first_bear_snap_turn_state",
+            features_key="first_bear_snap_turn_features",
+            predicate_prefix="bear",
+            rule_name="first_bear_snap_turn_v1",
+        )
     raise ValueError(f"Unsupported rule mode: {rule_mode.value}")
 
 
@@ -786,6 +851,73 @@ def _evaluate_asia_early_normal_breakout_retest_hold_long_v1(
     }
 
 
+def _evaluate_first_snap_turn_v1(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+    direction: TrackBStrategyRuleDecision,
+    state_key: str,
+    features_key: str,
+    predicate_prefix: str,
+    rule_name: str,
+) -> dict[str, Any]:
+    metadata = dict(event.get("metadata") or {}) if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = metadata.get(state_key) if isinstance(metadata.get(state_key) or {}, Mapping) else {}
+    features = metadata.get(features_key) if isinstance(metadata.get(features_key) or {}, Mapping) else {}
+    is_bull = predicate_prefix == "bull"
+    stretch_key = "bull_snap_downside_stretch_ok" if is_bull else "bear_snap_up_stretch_ok"
+    close_key = "bull_snap_close_strong" if is_bull else "bear_snap_close_weak"
+    cooldown_key = "prior_bars_since_bull_snap_gt_cooldown" if is_bull else "prior_bars_since_bear_snap_gt_cooldown"
+    candidate_key = f"{predicate_prefix}_snap_turn_candidate"
+    first_key = f"first_{predicate_prefix}_snap_turn"
+
+    conditions: dict[str, bool | None] = {
+        "session_allowed": _bool_field(state, "session_allowed") is True,
+        cooldown_key: _bool_field(state, cooldown_key) is True,
+        stretch_key: _bool_field(features, stretch_key) is True,
+        f"{predicate_prefix}_snap_range_ok": _bool_field(features, f"{predicate_prefix}_snap_range_ok") is True,
+        f"{predicate_prefix}_snap_body_ok": _bool_field(features, f"{predicate_prefix}_snap_body_ok") is True,
+        close_key: _bool_field(features, close_key) is True,
+        f"{predicate_prefix}_snap_velocity_ok": _bool_field(features, f"{predicate_prefix}_snap_velocity_ok") is True,
+        f"{predicate_prefix}_snap_reversal_bar": _bool_field(features, f"{predicate_prefix}_snap_reversal_bar") is True,
+        f"{predicate_prefix}_snap_location_ok": _bool_field(features, f"{predicate_prefix}_snap_location_ok") is True,
+        f"{predicate_prefix}_snap_raw": _bool_field(features, f"{predicate_prefix}_snap_raw") is True,
+        candidate_key: _bool_field(features, candidate_key) is True,
+        first_key: _bool_field(features, first_key) is True,
+    }
+    failed = [name for name, passed in conditions.items() if passed is not True]
+    blockers = [f"{name}=false_or_missing" for name in failed]
+    if failed:
+        decision = TrackBStrategyRuleDecision.NO_SIGNAL
+        decision_reason = f"{rule_name} conditions did not pass: " + ", ".join(failed)
+    else:
+        decision = direction
+        decision_reason = f"{rule_name} explicit feature/state snapshot is entry-ready for {direction.value}."
+    return {
+        "rule_name": rule_name,
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "rule_inputs": {
+            "strategy_id": event.get("strategy_id"),
+            "derivative_phase": state.get("derivative_phase"),
+            "session_allowed": state.get("session_allowed"),
+            cooldown_key: state.get(cooldown_key),
+            "feature_version": features.get("feature_version"),
+            "calibration_profile": features.get("calibration_profile"),
+            "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
+        },
+        "rule_conditions": conditions,
+        "rule_blockers": blockers,
+        "research_lineage": (
+            f"Mirrors the explicit {rule_name} predicates from src/mgc_v05l/signals/"
+            f"{'bull_snap.py' if is_bull else 'bear_snap.py'} and the core SignalPacket first snap turn fields. "
+            "Track B consumes a precomputed state/feature envelope and does not infer these fields from raw candles."
+        ),
+        "rule_id": rule_id,
+    }
+
+
 def _strategy_event_for_adapter(
     *,
     event: Mapping[str, Any],
@@ -889,6 +1021,22 @@ def _write_report(
                 signal_emitted,
                 primary_blocker,
             )
+        ),
+        "first_bull_snap_turn_watch_verdict": _first_snap_turn_watch_verdict(
+            rule_mode,
+            verdict,
+            signal_emitted,
+            primary_blocker,
+            expected_mode=TrackBStrategyRuleMode.FIRST_BULL_SNAP_TURN_V1,
+            prefix="FIRST_BULL_SNAP_TURN",
+        ),
+        "first_bear_snap_turn_watch_verdict": _first_snap_turn_watch_verdict(
+            rule_mode,
+            verdict,
+            signal_emitted,
+            primary_blocker,
+            expected_mode=TrackBStrategyRuleMode.FIRST_BEAR_SNAP_TURN_V1,
+            prefix="FIRST_BEAR_SNAP_TURN",
         ),
         "rule_inputs": rule_evaluation.get("rule_inputs") or {},
         "rule_conditions": rule_evaluation.get("rule_conditions") or {},
@@ -1011,6 +1159,10 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
         return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
         return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
+    if rule_mode == TrackBStrategyRuleMode.FIRST_BULL_SNAP_TURN_V1:
+        return "FIRST_BULL_SNAP_TURN_V1"
+    if rule_mode == TrackBStrategyRuleMode.FIRST_BEAR_SNAP_TURN_V1:
+        return "FIRST_BEAR_SNAP_TURN_V1"
     return "REAL_STRATEGY_RULE"
 
 
@@ -1020,6 +1172,8 @@ def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
         TrackBStrategyRuleMode.ASIAN_DRIFT_V1,
         TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1,
         TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1,
+        TrackBStrategyRuleMode.FIRST_BULL_SNAP_TURN_V1,
+        TrackBStrategyRuleMode.FIRST_BEAR_SNAP_TURN_V1,
     }
 
 
@@ -1081,6 +1235,29 @@ def _asia_early_normal_breakout_retest_hold_long_watch_verdict(
     if signal_emitted:
         return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT"
     return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION"
+
+
+def _first_snap_turn_watch_verdict(
+    rule_mode: TrackBStrategyRuleMode,
+    verdict: TrackBStrategyRuleRunnerVerdict,
+    signal_emitted: bool,
+    primary_blocker: str | None,
+    *,
+    expected_mode: TrackBStrategyRuleMode,
+    prefix: str,
+) -> str | None:
+    if rule_mode != expected_mode:
+        return None
+    if primary_blocker or verdict in {
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_NON_REALTIME_INPUT,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_SCHEMA_ERROR,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_DOWNSTREAM_REJECTED,
+    }:
+        return f"{prefix}_NOT_READY"
+    if signal_emitted:
+        return f"{prefix}_SIGNAL_READY_NO_SUBMIT"
+    return f"{prefix}_NO_SIGNAL_NO_MUTATION"
 
 
 def _rule_mode(value: str | TrackBStrategyRuleMode) -> TrackBStrategyRuleMode:

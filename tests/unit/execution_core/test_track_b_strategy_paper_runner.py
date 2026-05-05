@@ -467,6 +467,35 @@ def breakout_retest_hold_long_strategy_result(
     return result
 
 
+def first_snap_turn_strategy_result(
+    tmp_path: Path,
+    *,
+    strategy_id: str,
+    decision: str = "NO_SIGNAL",
+    emitted: bool = False,
+    signal_direction: str | None = None,
+    paper_eligible: bool = True,
+) -> TrackBStrategyRuleRunnerResult:
+    result = strategy_result(tmp_path, decision=decision, emitted=emitted)
+    result.report["signal_source"] = strategy_id
+    result.report["real_strategy_signal"] = True
+    result.report["rule_mode"] = strategy_id
+    result.report["rule_name"] = strategy_id.lower()
+    result.report["signal_direction"] = signal_direction or (decision if emitted else None)
+    result.report["strategy_registry_id"] = strategy_id
+    result.report["strategy_registry_rule_id"] = strategy_id
+    result.report["strategy_registry_rule_mode"] = strategy_id
+    result.report["strategy_registry_instrument_family"] = "MGC"
+    result.report["strategy_registry_timeframe"] = "5m"
+    result.report["strategy_registry_paper_eligible"] = paper_eligible
+    result.report["strategy_registry_live_money_eligible"] = False
+    watch_key = "first_bull_snap_turn_watch_verdict" if strategy_id == "FIRST_BULL_SNAP_TURN_V1" else "first_bear_snap_turn_watch_verdict"
+    prefix = "FIRST_BULL_SNAP_TURN" if strategy_id == "FIRST_BULL_SNAP_TURN_V1" else "FIRST_BEAR_SNAP_TURN"
+    result.report[watch_key] = f"{prefix}_SIGNAL_READY_NO_SUBMIT" if emitted else f"{prefix}_NO_SIGNAL_NO_MUTATION"
+    result.report_json.write_text(json.dumps(result.report), encoding="utf-8")
+    return result
+
+
 def readiness_result(tmp_path: Path, *, ready: bool = True) -> TrackBReadinessCheckRunnerResult:
     report_json = tmp_path / "readiness_report.json"
     verdict = (
@@ -1600,6 +1629,171 @@ def test_demo_wiring_signal_cannot_drive_asian_drift_paper_path(tmp_path: Path) 
     assert result.report["signal_source"] == "DEMO_WIRING_PROOF"
     assert result.report["real_strategy_signal"] is False
     assert "DEMO/proof signals cannot drive this path" in result.report["required_next_action"]
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_first_bull_snap_turn_signal_without_paper_flags_reports_signal_ready_no_submit(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="FIRST_BULL_SNAP_TURN_V1",
+            rule_mode="FIRST_BULL_SNAP_TURN_V1",
+            emit_signal=True,
+            strategy_id="FIRST_BULL_SNAP_TURN_V1",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=first_snap_turn_strategy_result(
+                tmp_path,
+                strategy_id="FIRST_BULL_SNAP_TURN_V1",
+                decision="LONG",
+                emitted=True,
+                signal_direction="LONG",
+            ),
+        ),
+        runner_id="paper-first-bull-signal-no-submit",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.FIRST_BULL_SNAP_TURN_SIGNAL_READY_NO_SUBMIT
+    assert result.report["first_bull_snap_turn_watch_verdict"] == "FIRST_BULL_SNAP_TURN_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["signal_source"] == "FIRST_BULL_SNAP_TURN_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_first_bear_snap_turn_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="FIRST_BEAR_SNAP_TURN_V1",
+            rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+            emit_signal=True,
+            strategy_id="FIRST_BEAR_SNAP_TURN_V1",
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=first_snap_turn_strategy_result(
+                tmp_path,
+                strategy_id="FIRST_BEAR_SNAP_TURN_V1",
+                decision="SHORT",
+                emitted=True,
+                signal_direction="SHORT",
+            ),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-first-bear-proof-passed",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert result.report["first_bear_snap_turn_watch_verdict"] == "FIRST_BEAR_SNAP_TURN_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["signal_source"] == "FIRST_BEAR_SNAP_TURN_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert calls.readiness == 1
+    assert calls.proof == 1
+    assert result.report["readiness_invoked"] is True
+    assert result.report["paper_proof_invoked"] is True
+    assert result.report["submit_attempted"] is True
+    assert result.report["broker_state_mutated"] is True
+    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert result.report["paper_proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
+    assert result.report["final_flat"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_demo_wiring_signal_cannot_drive_first_bull_snap_turn_paper_path(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="FIRST_BULL_SNAP_TURN_V1",
+            rule_mode="FIRST_BULL_SNAP_TURN_V1",
+            emit_signal=True,
+            strategy_id="FIRST_BULL_SNAP_TURN_V1",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=demo_strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-first-bull-reject-demo",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.FIRST_BULL_SNAP_TURN_NOT_READY
+    assert result.report["signal_source"] == "DEMO_WIRING_PROOF"
+    assert result.report["real_strategy_signal"] is False
+    assert "DEMO/proof signals cannot drive this path" in result.report["required_next_action"]
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_first_bull_snap_turn_long_signal_requires_buy_side_for_paper_submit(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="FIRST_BULL_SNAP_TURN_V1",
+            rule_mode="FIRST_BULL_SNAP_TURN_V1",
+            emit_signal=True,
+            strategy_id="FIRST_BULL_SNAP_TURN_V1",
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=first_snap_turn_strategy_result(
+                tmp_path,
+                strategy_id="FIRST_BULL_SNAP_TURN_V1",
+                decision="LONG",
+                emitted=True,
+                signal_direction="LONG",
+            ),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-first-bull-side-mismatch",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST
+    assert "requires --side BUY" in str(result.report["primary_blocker"])
     assert calls.readiness == 0
     assert calls.proof == 0
     assert result.report["submit_attempted"] is False

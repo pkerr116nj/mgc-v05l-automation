@@ -96,6 +96,42 @@ def test_asia_early_normal_breakout_retest_hold_long_registry_metadata_is_valid(
     assert "metadata.asia_early_normal_breakout_retest_hold_long_state.asia_early_or_gc_mgc_london_open" in entry.required_state_schema
 
 
+def test_first_bull_snap_turn_registry_metadata_is_valid() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="FIRST_BULL_SNAP_TURN_V1",
+        rule_id="FIRST_BULL_SNAP_TURN_V1",
+        strategy_id="FIRST_BULL_SNAP_TURN_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert entry.feature_version == "first_bull_snap_turn_v1_phase1"
+    assert entry.calibration_profile == "probationary_baseline_v1"
+    assert "metadata.first_bull_snap_turn_features.first_bull_snap_turn" in entry.required_feature_schema
+    assert "metadata.first_bull_snap_turn_state.session_allowed" in entry.required_state_schema
+
+
+def test_first_bear_snap_turn_registry_metadata_is_valid() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+        rule_id="FIRST_BEAR_SNAP_TURN_V1",
+        strategy_id="FIRST_BEAR_SNAP_TURN_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert entry.feature_version == "first_bear_snap_turn_v1_phase1"
+    assert entry.calibration_profile == "probationary_baseline_v1"
+    assert "metadata.first_bear_snap_turn_features.first_bear_snap_turn" in entry.required_feature_schema
+    assert "metadata.first_bear_snap_turn_state.session_allowed" in entry.required_state_schema
+
+
 def test_missing_required_state_fields_are_not_ready() -> None:
     entry, blocker = validate_strategy_event_against_registry(
         event={
