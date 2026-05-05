@@ -454,9 +454,6 @@ overwrites stable latest artifacts, keeps only a small number of run folders,
 and does not create an unbounded raw stream:
 
 ```bash
-set -a
-source .env.local
-set +a
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_runtime_candle_capture_cli \
   --fetch-databento-history \
   --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
@@ -466,9 +463,12 @@ set +a
   --local-symbol MGCM6 \
   --databento-continuous-symbol MGC.v.0 \
   --dataset GLBX.MDP3 \
+  --provider-transport http \
+  --stype-out instrument_id \
+  --provider-timeout-seconds 20 \
   --timeframe 1m \
-  --lookback-minutes 90 \
-  --max-bars 120 \
+  --lookback-minutes 60 \
+  --max-bars 90 \
   --min-bars 8 \
   --max-latest-1m-age-seconds 900 \
   --max-completed-5m-age-seconds 900 \
@@ -480,6 +480,13 @@ The CLI also loads `DATABENTO_API_KEY` directly from the repo `.env.local` for
 this Databento fetch mode if the key is not already present in the process
 environment. Reports include only credential status/source, never the key
 value.
+
+For service monitor runtime capture, prefer the HTTP transport with
+`stype_out=instrument_id`. That path gives Track B direct timeout control and
+avoids unsupported GLBX continuous/raw-symbol output mappings. The report
+records the requested provider symbol, `stype_in`, `stype_out`, transport, and
+timeout so provider timeouts, credential failures, no-data responses, stale
+`available_end`, and not-execution-fresh writes can be distinguished.
 
 For fixture/demo input:
 
@@ -957,6 +964,11 @@ Start the monitor in SHADOW mode:
   --local-symbol MGCM6 \
   --databento-continuous-symbol MGC.v.0 \
   --dataset GLBX.MDP3 \
+  --provider-transport http \
+  --stype-out instrument_id \
+  --provider-timeout-seconds 20 \
+  --lookback-minutes 60 \
+  --max-bars 90 \
   --update-operator-status
 ```
 

@@ -4,6 +4,9 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import mgc_v05l.execution_core.track_b_shadow_monitor as shadow_monitor_module
+import mgc_v05l.execution_core.track_b_runtime_candle_capture_cli as runtime_cli
+from mgc_v05l.execution_core.track_b_runtime_candle_capture import capture_track_b_runtime_mgc_1m_candles
 from mgc_v05l.execution_core.operator_status import OperatorStatusResult, OperatorStatusVerdict
 from mgc_v05l.execution_core.track_b_asian_drift_watch_chain import (
     TrackBAsianDriftWatchChainResult,
@@ -31,6 +34,7 @@ from mgc_v05l.execution_core.track_b_shadow_monitor import (
     default_instruments,
     release_monitor_lock,
     run_track_b_shadow_monitor,
+    _run_runtime_candle_capture,
 )
 from mgc_v05l.execution_core.track_b_snap_turn_envelope_producer import (
     TrackBSnapTurnEnvelopeProducerResult,
@@ -46,6 +50,42 @@ def write_json(path: Path, payload: dict[str, object]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
+
+
+def runtime_payload_for_now() -> dict[str, object]:
+    candles: list[dict[str, object]] = []
+    for index in range(20):
+        minute = 41 + index
+        candles.append(
+            {
+                "candle_timestamp": f"2026-05-05T11:{minute:02d}:00+00:00" if minute < 60 else "2026-05-05T12:00:00+00:00",
+                "open": str(3400 + index / 10),
+                "high": str(3400.2 + index / 10),
+                "low": str(3399.8 + index / 10),
+                "close": str(3400.1 + index / 10),
+                "volume": "1",
+            }
+        )
+    return {
+        "source_id": "fresh_runtime_fixture",
+        "account_id": "DUM882026",
+        "expected_account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "instrument_family": "MGC",
+        "symbol": "MGCM6",
+        "local_symbol": "MGCM6",
+        "databento_continuous_symbol": "MGC.v.0",
+        "dataset": "GLBX.MDP3",
+        "timeframe": "1m",
+        "quote_provider_mode": "REALTIME",
+        "realtime_quote_received": True,
+        "current_quote_available": True,
+        "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+        "candles": candles,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
 
 
 def config(tmp_path: Path, **overrides: object) -> TrackBShadowMonitorConfig:
@@ -323,6 +363,40 @@ def test_provider_failure_blocks_strategy_evaluation_and_continues_as_artifact(t
     assert fake.calls["multi"] == 0
     assert result.report["instrument_reports"][0]["data_written"] is False
     assert result.report["submit_attempted"] is False
+
+
+def test_runtime_capture_uses_fresh_runtime_artifact_after_provider_timeout(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    cfg = config(tmp_path)
+    capture_track_b_runtime_mgc_1m_candles(
+        runtime_candle_payload=runtime_payload_for_now(),
+        output_root=cfg.runtime_candle_capture_output_root,
+        max_bars=20,
+        min_bars=8,
+        max_latest_1m_age_seconds=900,
+        max_completed_5m_age_seconds=900,
+        now=now(),
+    )
+
+    def timeout_fetch(**_kwargs):  # type: ignore[no-untyped-def]
+        raise TimeoutError("provider timed out")
+
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    monkeypatch.setattr(shadow_monitor_module, "_fetch_records", timeout_fetch)
+
+    result = _run_runtime_candle_capture(
+        cfg,
+        cfg.instruments[0],
+        1,
+        now(),
+    )
+
+    assert result.report["fresh_for_execution"] is True
+    assert result.report["monitor_runtime_candle_source"] == "FRESH_EXISTING_RUNTIME_ARTIFACT_AFTER_PROVIDER_FAILURE"
+    assert result.report["provider_fetch_failed_before_fallback"] is True
+    assert result.report["provider_fetch_failure_category"] == "PROVIDER_TIMEOUT"
+    assert result.report["source_lineage"]["fallback_source_event_path"].endswith("latest_runtime_mgc_1m_candles.json")
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
 
 
 def test_stale_runtime_context_blocks_strategy_evaluation(tmp_path: Path) -> None:

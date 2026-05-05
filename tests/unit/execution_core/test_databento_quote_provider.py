@@ -6,6 +6,7 @@ from io import BytesIO
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -795,6 +796,83 @@ def test_http_422_available_end_error_is_caught_and_structured(monkeypatch: pyte
 
     assert exc_info.value.provider_available_end == datetime(2026, 5, 1, 23, 59, tzinfo=timezone.utc)
     assert "allow-available-end-fallback" in str(exc_info.value)
+
+
+def test_http_available_end_parser_prefers_payload_available_end_over_requested_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    detail = (
+        b'{"detail":{"case":"data_end_after_available_end","message":"The dataset GLBX.MDP3 has data available up to '
+        b"'2026-05-05 12:50:00+00:00'. The `end` in the query ('2026-05-05 12:56:00+00:00') is after the available range.\","
+        b'"payload":{"dataset":"GLBX.MDP3","start":"2026-05-05T11:56:00.000000000Z",'
+        b'"end":"2026-05-05T12:56:00.000000000Z","available_end":"2026-05-05T12:50:00.000000000Z"}}}'
+    )
+
+    def fake_urlopen(*args: object, **kwargs: object) -> object:
+        raise HTTPError(
+            url="https://hist.databento.com/v0/timeseries.get_range",
+            code=422,
+            msg="Unprocessable Entity",
+            hdrs={},
+            fp=BytesIO(detail),
+        )
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    transport = provider_module.UrllibDatabentoQuoteTransport(stype_out="instrument_id")
+
+    with pytest.raises(DatabentoAvailableEndError) as exc_info:
+        transport.request_records(
+            base_url="https://hist.databento.com/v0",
+            api_key="test-key",
+            dataset="GLBX.MDP3",
+            symbol="MGC.v.0",
+            schema="ohlcv-1m",
+            start=datetime(2026, 5, 5, 11, 56, tzinfo=timezone.utc),
+            end=datetime(2026, 5, 5, 12, 56, tzinfo=timezone.utc),
+            stype_in="continuous",
+            limit=90,
+        )
+
+    assert exc_info.value.provider_available_end == datetime(2026, 5, 5, 12, 50, tzinfo=timezone.utc)
+
+
+def test_http_transport_can_request_instrument_id_stype_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, list[str]] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ts_event":"2026-05-02T12:00:00+00:00","open":"1","high":"1","low":"1","close":"1"}\n'
+
+    def fake_urlopen(request: object, **kwargs: object) -> FakeResponse:
+        del kwargs
+        data = getattr(request, "data")
+        assert data is not None
+        observed.update(parse_qs(data.decode("utf-8")))
+        return FakeResponse()
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    transport = provider_module.UrllibDatabentoQuoteTransport(timeout_seconds=7.5, stype_out="instrument_id")
+
+    records = transport.request_records(
+        base_url="https://hist.databento.com/v0",
+        api_key="test-key",
+        dataset="GLBX.MDP3",
+        symbol="MGCM6",
+        schema="ohlcv-1m",
+        start=aware_now(),
+        end=aware_now() + timedelta(minutes=1),
+        stype_in="raw_symbol",
+        limit=1,
+    )
+
+    assert records
+    assert observed["stype_out"] == ["instrument_id"]
+    assert observed["stype_in"] == ["raw_symbol"]
+    assert observed["schema"] == ["ohlcv-1m"]
 
 
 def test_default_resolution_date_is_applied_from_provider_clock() -> None:

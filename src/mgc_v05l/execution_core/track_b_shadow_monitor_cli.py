@@ -36,10 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--databento-continuous-symbol", default="MGC.v.0")
     parser.add_argument("--dataset", default="GLBX.MDP3")
     parser.add_argument("--timeframe", default="1m")
-    parser.add_argument("--lookback-minutes", type=int, default=90)
-    parser.add_argument("--max-bars", type=int, default=120)
+    parser.add_argument("--lookback-minutes", type=int, default=60)
+    parser.add_argument("--max-bars", type=int, default=90)
     parser.add_argument("--min-bars", type=int, default=8)
-    parser.add_argument("--provider-fetch-timeout-seconds", type=float, default=20.0)
+    parser.add_argument("--provider-timeout-seconds", "--provider-fetch-timeout-seconds", dest="provider_timeout_seconds", type=float, default=20.0)
+    parser.add_argument("--provider-transport", choices=["native", "http"], default="http")
+    parser.add_argument("--stype-out", default="instrument_id")
+    parser.add_argument("--use-continuous-symbol-for-runtime-fetch", action="store_true")
+    parser.add_argument("--disable-fresh-runtime-artifact-fallback", action="store_true")
     parser.add_argument("--max-latest-1m-age-seconds", type=int, default=900)
     parser.add_argument("--max-completed-5m-age-seconds", type=int, default=900)
     parser.add_argument("--current-quote-report-json", type=Path, default=DEFAULT_CURRENT_QUOTE_REPORT_JSON)
@@ -106,7 +110,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             lookback_minutes=args.lookback_minutes,
             max_bars=args.max_bars,
             min_bars=args.min_bars,
-            provider_fetch_timeout_seconds=args.provider_fetch_timeout_seconds,
+            provider_timeout_seconds=args.provider_timeout_seconds,
+            provider_transport=args.provider_transport,
+            provider_stype_out=args.stype_out,
+            prefer_raw_local_symbol_for_runtime_fetch=not args.use_continuous_symbol_for_runtime_fetch,
+            allow_fresh_runtime_artifact_fallback=not args.disable_fresh_runtime_artifact_fallback,
             max_latest_1m_age_seconds=args.max_latest_1m_age_seconds,
             max_completed_5m_age_seconds=args.max_completed_5m_age_seconds,
             current_quote_report_json=args.current_quote_report_json,

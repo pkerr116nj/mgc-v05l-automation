@@ -182,8 +182,9 @@ class DatabentoRecordDiagnosticResult:
 
 
 class UrllibDatabentoQuoteTransport:
-    def __init__(self, *, timeout_seconds: float = 10.0) -> None:
+    def __init__(self, *, timeout_seconds: float = 10.0, stype_out: str | None = "raw_symbol") -> None:
         self.timeout_seconds = float(timeout_seconds)
+        self.stype_out = stype_out
 
     def request_records(
         self,
@@ -205,13 +206,14 @@ class UrllibDatabentoQuoteTransport:
             "start": start.astimezone(UTC).isoformat(),
             "end": end.astimezone(UTC).isoformat(),
             "stype_in": stype_in,
-            "stype_out": "raw_symbol",
             "encoding": "json",
             "compression": "none",
             "pretty_px": "true",
             "pretty_ts": "true",
             "limit": str(int(limit)),
         }
+        if self.stype_out:
+            form["stype_out"] = self.stype_out
         request = Request(
             url=f"{base_url.rstrip('/')}/timeseries.get_range",
             method="POST",
@@ -1442,7 +1444,7 @@ def _walk_available_end_values(value: Any) -> tuple[Any, ...]:
     if isinstance(value, Mapping):
         values: list[Any] = []
         for key, item in value.items():
-            if str(key).lower() in {"available_end", "available end", "end"}:
+            if str(key).lower() in {"available_end", "available end"}:
                 values.append(item)
             elif isinstance(item, Mapping):
                 values.extend(_walk_available_end_values(item))

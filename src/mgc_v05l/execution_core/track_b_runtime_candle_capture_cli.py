@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Sequence
 
-from .databento_quote_provider import DatabentoAvailableEndError, NativeDatabentoQuoteTransport
+from .databento_quote_provider import DatabentoAvailableEndError, NativeDatabentoQuoteTransport, UrllibDatabentoQuoteTransport
 from .track_b_mgc_candle_history_producer import fetch_databento_ohlcv_1m_records, provider_error_message
 from .track_b_runtime_candle_capture import (
     DEFAULT_TRACK_B_RUNTIME_CANDLE_CAPTURE_OUTPUT_ROOT,
@@ -47,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--history-end")
     parser.add_argument("--env-file", type=Path, help="Optional dotenv file containing DATABENTO_API_KEY. Defaults to repo .env.local for Databento fetch mode.")
     parser.add_argument("--base-url", default="https://hist.databento.com/v0")
+    parser.add_argument("--provider-timeout-seconds", type=float, default=20.0)
+    parser.add_argument("--provider-transport", choices=["native", "http"], default="native")
+    parser.add_argument(
+        "--stype-out",
+        default="instrument_id",
+        help="Databento output symbology for HTTP transport. instrument_id avoids unsupported raw_symbol mappings for GLBX OHLCV.",
+    )
     parser.add_argument("--max-bars", type=int, default=250)
     parser.add_argument("--min-bars", type=int, default=3)
     parser.add_argument("--candle-source-mode", default="SUPPLIED_RUNTIME_CANDLES")
@@ -149,6 +156,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         provider_available_end=provider_available_end,
         history_end_used=history_end_used,
         available_end_lag_seconds=available_end_lag_seconds,
+        provider_transport=args.provider_transport,
+        provider_request_symbol=args.databento_symbol or args.databento_continuous_symbol,
+        provider_request_stype_in="raw_symbol" if args.databento_symbol else args.stype_in,
+        provider_request_stype_out=args.stype_out if args.provider_transport == "http" else None,
         max_latest_1m_age_seconds=args.max_latest_1m_age_seconds,
         max_completed_5m_age_seconds=args.max_completed_5m_age_seconds,
         provider_credential_status=credential_status,
@@ -174,7 +185,7 @@ def _fetch_records(
     stype_in = "raw_symbol" if args.databento_symbol else args.stype_in
     try:
         records = fetch_databento_ohlcv_1m_records(
-            transport=NativeDatabentoQuoteTransport(),
+            transport=_transport_for_args(args),
             api_key=api_key,
             dataset=args.dataset,
             symbol=symbol,
@@ -190,21 +201,42 @@ def _fetch_records(
         provider_available_end = None if exc.provider_available_end is None else exc.provider_available_end.astimezone(UTC)
         if provider_available_end is None or provider_available_end <= requested_window_start:
             raise
-        fallback_start = provider_available_end - timedelta(minutes=max(int(args.lookback_minutes), 1))
+        history_end_used = _safe_ohlcv_1m_available_end(provider_available_end)
+        if history_end_used <= requested_window_start:
+            raise
+        fallback_start = history_end_used - timedelta(minutes=max(int(args.lookback_minutes), 1))
         records = fetch_databento_ohlcv_1m_records(
-            transport=NativeDatabentoQuoteTransport(),
+            transport=_transport_for_args(args),
             api_key=api_key,
             dataset=args.dataset,
             symbol=symbol,
             stype_in=stype_in,
             schema=args.schema,
             start=fallback_start,
-            end=provider_available_end,
+            end=history_end_used,
             max_candles=args.max_bars,
             base_url=args.base_url,
         )
         lag = max(int((requested_window_end - provider_available_end).total_seconds()), 0)
-        return records, provider_available_end, provider_available_end, lag, "DATABENTO_HISTORICAL_AVAILABLE_END_RECENT"
+        return records, provider_available_end, history_end_used, lag, "DATABENTO_HISTORICAL_AVAILABLE_END_RECENT"
+
+
+def _transport_for_args(args: argparse.Namespace):
+    if getattr(args, "provider_transport", "native") == "http":
+        return UrllibDatabentoQuoteTransport(
+            timeout_seconds=float(getattr(args, "provider_timeout_seconds", 20.0)),
+            stype_out=getattr(args, "stype_out", "instrument_id"),
+        )
+    return NativeDatabentoQuoteTransport()
+
+
+def _safe_ohlcv_1m_available_end(provider_available_end: datetime) -> datetime:
+    """Use a minute-boundary end timestamp for historical OHLCV-1m retries."""
+
+    safe = provider_available_end.astimezone(UTC).replace(second=0, microsecond=0)
+    if safe >= provider_available_end.astimezone(UTC):
+        safe = safe - timedelta(minutes=1)
+    return safe
 
 
 def _provider_error_result(
@@ -233,6 +265,10 @@ def _provider_error_result(
         requested_window_start=requested_window_start,
         requested_window_end=requested_window_end,
         provider_available_end=provider_available_end,
+        provider_transport=args.provider_transport,
+        provider_request_symbol=args.databento_symbol or args.databento_continuous_symbol,
+        provider_request_stype_in="raw_symbol" if args.databento_symbol else args.stype_in,
+        provider_request_stype_out=args.stype_out if args.provider_transport == "http" else None,
         max_bars=args.max_bars,
         min_bars=args.min_bars,
         max_latest_1m_age_seconds=args.max_latest_1m_age_seconds,
@@ -269,6 +305,10 @@ def _runtime_payload_from_records(
         "dataset": args.dataset,
         "timeframe": args.timeframe,
         "candle_source_mode": candle_source_mode,
+        "provider_transport": args.provider_transport,
+        "provider_request_symbol": args.databento_symbol or args.databento_continuous_symbol,
+        "provider_request_stype_in": "raw_symbol" if args.databento_symbol else args.stype_in,
+        "provider_request_stype_out": args.stype_out if args.provider_transport == "http" else None,
         "requested_window_start": requested_window_start.isoformat(),
         "requested_window_end": requested_window_end.isoformat(),
         "provider_available_end": None if provider_available_end is None else provider_available_end.isoformat(),
@@ -368,6 +408,10 @@ def _print_result(result: TrackBRuntimeCandleCaptureResult) -> None:
                 "completed_5m_lag_vs_wall_clock_seconds": report.get("completed_5m_lag_vs_wall_clock_seconds"),
                 "provider_credential_status": report.get("provider_credential_status"),
                 "provider_credential_source": report.get("provider_credential_source"),
+                "provider_transport": report.get("provider_transport"),
+                "provider_request_symbol": report.get("provider_request_symbol"),
+                "provider_request_stype_in": report.get("provider_request_stype_in"),
+                "provider_request_stype_out": report.get("provider_request_stype_out"),
                 "latest_1m_timestamp": report.get("latest_1m_timestamp"),
                 "latest_completed_5m_timestamp": report.get("latest_completed_5m_timestamp"),
                 "latest_1m_candle_timestamp": report.get("latest_1m_candle_timestamp"),

@@ -127,10 +127,14 @@ class TrackBShadowMonitorConfig:
     databento_continuous_symbol: str = MGC_CONTINUOUS_SYMBOL
     dataset: str = MGC_DATASET
     timeframe: str = "1m"
-    lookback_minutes: int = 90
-    max_bars: int = 120
+    lookback_minutes: int = 60
+    max_bars: int = 90
     min_bars: int = 8
-    provider_fetch_timeout_seconds: float = 20.0
+    provider_timeout_seconds: float = 20.0
+    provider_transport: str = "http"
+    provider_stype_out: str = "instrument_id"
+    prefer_raw_local_symbol_for_runtime_fetch: bool = True
+    allow_fresh_runtime_artifact_fallback: bool = True
     max_latest_1m_age_seconds: int = 900
     max_completed_5m_age_seconds: int = 900
     current_quote_report_json: Path | None = DEFAULT_CURRENT_QUOTE_REPORT_JSON
@@ -736,17 +740,24 @@ def _run_runtime_candle_capture(
             max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
             provider_credential_status=credential_status,
             provider_credential_source=credential_source,
+            provider_transport=config.provider_transport,
+            provider_request_symbol=instrument.local_symbol if config.prefer_raw_local_symbol_for_runtime_fetch else instrument.databento_continuous_symbol,
+            provider_request_stype_in="raw_symbol" if config.prefer_raw_local_symbol_for_runtime_fetch else config.stype_in,
+            provider_request_stype_out=config.provider_stype_out if config.provider_transport == "http" else None,
             output_root=config.runtime_candle_capture_output_root,
             capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_{uuid.uuid4().hex}",
             now=now,
         )
     args = SimpleNamespace(
-        databento_symbol=None,
+        databento_symbol=instrument.local_symbol if config.prefer_raw_local_symbol_for_runtime_fetch else None,
         databento_continuous_symbol=instrument.databento_continuous_symbol,
         stype_in=config.stype_in,
         dataset=instrument.dataset,
         schema=config.schema,
         max_bars=config.max_bars,
+        provider_timeout_seconds=config.provider_timeout_seconds,
+        provider_transport=config.provider_transport,
+        stype_out=config.provider_stype_out,
         base_url=config.base_url,
         lookback_minutes=config.lookback_minutes,
         source_id=f"{config.source_id}_runtime_candle_capture_cycle_{cycle_index}",
@@ -759,7 +770,7 @@ def _run_runtime_candle_capture(
         timeframe=config.timeframe,
     )
     try:
-        with _provider_fetch_deadline(config.provider_fetch_timeout_seconds):
+        with _provider_fetch_deadline(config.provider_timeout_seconds):
             records, provider_available_end, history_end_used, available_end_lag_seconds, candle_source_mode = _fetch_records(
                 args=args,
                 api_key=raw_api_key,
@@ -767,7 +778,11 @@ def _run_runtime_candle_capture(
                 requested_window_end=requested_window_end,
             )
     except Exception as exc:  # noqa: BLE001
-        return write_runtime_candle_capture_provider_error(
+        fallback_candidate_report_json = Path(config.runtime_candle_capture_output_root) / "latest_runtime_candle_capture_report.json"
+        fallback_candidate_event_json = Path(config.runtime_candle_capture_output_root) / "latest_runtime_mgc_1m_candles.json"
+        fallback_candidate_report = _read_json_optional(fallback_candidate_report_json)
+        fallback_candidate_payload = _read_json_optional(fallback_candidate_event_json)
+        provider_error = write_runtime_candle_capture_provider_error(
             primary_blocker=f"Track B SHADOW Databento runtime candle fetch failed: {exc}",
             required_next_action="Retry after provider availability/entitlement is healthy, or inspect Databento runtime diagnostics.",
             verdict=TrackBRuntimeCandleCaptureVerdict.FETCH_FAILED,
@@ -791,6 +806,18 @@ def _run_runtime_candle_capture(
             capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_{uuid.uuid4().hex}",
             now=now,
         )
+        fallback = _fresh_runtime_artifact_fallback(
+            config=config,
+            instrument=instrument,
+            provider_result=provider_error,
+            cycle_index=cycle_index,
+            now=now,
+            latest_report_json=fallback_candidate_report_json,
+            latest_event_json=fallback_candidate_event_json,
+            latest_report=fallback_candidate_report,
+            latest_payload=fallback_candidate_payload,
+        )
+        return fallback or provider_error
     quote_payload = _safe_quote_payload(config.current_quote_report_json)
     payload = _runtime_payload_from_records(
         records=records,
@@ -821,6 +848,10 @@ def _run_runtime_candle_capture(
         provider_available_end=provider_available_end,
         history_end_used=history_end_used,
         available_end_lag_seconds=available_end_lag_seconds,
+        provider_transport=config.provider_transport,
+        provider_request_symbol=instrument.local_symbol if config.prefer_raw_local_symbol_for_runtime_fetch else instrument.databento_continuous_symbol,
+        provider_request_stype_in="raw_symbol" if config.prefer_raw_local_symbol_for_runtime_fetch else config.stype_in,
+        provider_request_stype_out=config.provider_stype_out if config.provider_transport == "http" else None,
         max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
         max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
         provider_credential_status=credential_status,
@@ -830,6 +861,126 @@ def _run_runtime_candle_capture(
         capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_{uuid.uuid4().hex}",
         now=now,
     )
+
+
+def _fresh_runtime_artifact_fallback(
+    *,
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    provider_result: TrackBRuntimeCandleCaptureResult,
+    cycle_index: int,
+    now: datetime,
+    latest_report_json: Path | None = None,
+    latest_event_json: Path | None = None,
+    latest_report: Mapping[str, Any] | None = None,
+    latest_payload: Mapping[str, Any] | None = None,
+) -> TrackBRuntimeCandleCaptureResult | None:
+    if not config.allow_fresh_runtime_artifact_fallback:
+        return None
+    actual_report_json = latest_report_json or Path(config.runtime_candle_capture_output_root) / "latest_runtime_candle_capture_report.json"
+    actual_event_json = latest_event_json or Path(config.runtime_candle_capture_output_root) / "latest_runtime_mgc_1m_candles.json"
+    actual_report = latest_report or _read_json_optional(actual_report_json)
+    if not actual_report or not actual_event_json.exists():
+        return None
+    if actual_report.get("data_written") is not True or actual_report.get("fresh_for_execution") is not True:
+        return None
+    mismatch = _runtime_artifact_mismatch(report=actual_report, instrument=instrument, dataset=instrument.dataset)
+    if mismatch:
+        return None
+    payload = dict(latest_payload or {})
+    if not payload:
+        try:
+            payload = _read_json_required(actual_event_json)
+        except Exception:  # noqa: BLE001
+            return None
+    fallback_source_mode = f"{actual_report.get('candle_source_mode') or 'RUNTIME_CANDLES'}_FRESH_ARTIFACT_FALLBACK"
+    fallback = capture_track_b_runtime_mgc_1m_candles(
+        runtime_candle_payload=payload,
+        source_payload_path=actual_event_json,
+        expected_account_id=instrument.expected_account_id,
+        account_id=instrument.execution_account_id,
+        contract_key=instrument.contract_key,
+        local_symbol=instrument.local_symbol,
+        databento_continuous_symbol=instrument.databento_continuous_symbol,
+        dataset=instrument.dataset,
+        timeframe=config.timeframe,
+        max_bars=config.max_bars,
+        min_bars=config.min_bars,
+        candle_source_mode=fallback_source_mode,
+        provider_transport=config.provider_transport,
+        provider_request_symbol=instrument.local_symbol if config.prefer_raw_local_symbol_for_runtime_fetch else instrument.databento_continuous_symbol,
+        provider_request_stype_in="raw_symbol" if config.prefer_raw_local_symbol_for_runtime_fetch else config.stype_in,
+        provider_request_stype_out=config.provider_stype_out if config.provider_transport == "http" else None,
+        max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
+        max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+        source_id=f"{config.source_id}_runtime_candle_capture_cycle_{cycle_index}_fresh_artifact_fallback",
+        output_root=config.runtime_candle_capture_output_root,
+        capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_fallback_{uuid.uuid4().hex}",
+        now=now,
+    )
+    _annotate_runtime_fallback_report(
+        fallback=fallback,
+        provider_result=provider_result,
+        latest_report_json=actual_report_json,
+        latest_event_json=actual_event_json,
+        fallback_source_mode=fallback_source_mode,
+    )
+    return fallback if fallback.report.get("fresh_for_execution") is True else None
+
+
+def _runtime_artifact_mismatch(
+    *,
+    report: Mapping[str, Any],
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    dataset: str,
+) -> str | None:
+    expected = {
+        "contract_key": instrument.contract_key,
+        "local_symbol": instrument.local_symbol,
+        "databento_continuous_symbol": instrument.databento_continuous_symbol,
+        "dataset": dataset,
+    }
+    for key, value in expected.items():
+        if str(report.get(key) or "") != str(value):
+            return f"{key} mismatch: expected {value}, observed {report.get(key)}"
+    return None
+
+
+def _annotate_runtime_fallback_report(
+    *,
+    fallback: TrackBRuntimeCandleCaptureResult,
+    provider_result: TrackBRuntimeCandleCaptureResult,
+    latest_report_json: Path,
+    latest_event_json: Path,
+    fallback_source_mode: str,
+) -> None:
+    fallback.report.update(
+        {
+            "monitor_runtime_candle_source": "FRESH_EXISTING_RUNTIME_ARTIFACT_AFTER_PROVIDER_FAILURE",
+            "provider_fetch_failed_before_fallback": True,
+            "provider_fetch_failure_report_path": str(provider_result.report_json),
+            "provider_fetch_failure_verdict": provider_result.report.get("runtime_candle_capture_verdict"),
+            "provider_fetch_failure_category": _provider_failure_category(provider_result.report),
+            "provider_fetch_failure_blocker": provider_result.report.get("primary_blocker"),
+            "fallback_source_report_path": str(latest_report_json),
+            "fallback_source_event_path": str(latest_event_json),
+            "candle_source_mode": fallback_source_mode,
+            "source_lineage": {
+                "provider_fetch_failure_report_path": str(provider_result.report_json),
+                "fallback_source_report_path": str(latest_report_json),
+                "fallback_source_event_path": str(latest_event_json),
+            },
+        }
+    )
+    _rewrite_runtime_result_files(fallback)
+
+
+def _rewrite_runtime_result_files(result: TrackBRuntimeCandleCaptureResult) -> None:
+    payload = json.dumps(to_jsonable(result.report), indent=2, sort_keys=True)
+    result.report_json.write_text(payload, encoding="utf-8")
+    latest = result.report.get("latest_report_json_path")
+    if latest:
+        Path(str(latest)).write_text(payload, encoding="utf-8")
 
 
 def _run_asian_drift_watch_chain(
@@ -1033,6 +1184,12 @@ def _instrument_report_from_stages(
         {
             "runtime_candle_capture_verdict": runtime_report.get("runtime_candle_capture_verdict"),
             "runtime_candle_capture_report_path": str(runtime.report_json) if runtime is not None else None,
+            "runtime_provider_status_category": _provider_failure_category(runtime_report),
+            "monitor_runtime_candle_source": runtime_report.get("monitor_runtime_candle_source") or "PROVIDER_FETCH",
+            "provider_fetch_failed_before_fallback": runtime_report.get("provider_fetch_failed_before_fallback", False),
+            "provider_fetch_failure_category": runtime_report.get("provider_fetch_failure_category"),
+            "provider_fetch_failure_report_path": runtime_report.get("provider_fetch_failure_report_path"),
+            "source_lineage": runtime_report.get("source_lineage") or {},
             "data_written": runtime_report.get("data_written", False),
             "fresh_for_execution": runtime_report.get("fresh_for_execution", False),
             "latest_1m_timestamp": runtime_report.get("latest_1m_timestamp"),
@@ -1101,7 +1258,10 @@ def _report_for_cycle(
         "completed_at": completed_at.isoformat(),
         "cycle_elapsed_seconds": round(max(0.0, (completed_at - started_at.astimezone(UTC)).total_seconds()), 3),
         "poll_seconds": config.poll_seconds,
-        "provider_fetch_timeout_seconds": config.provider_fetch_timeout_seconds,
+        "provider_timeout_seconds": config.provider_timeout_seconds,
+        "provider_transport": config.provider_transport,
+        "provider_stype_out": config.provider_stype_out,
+        "prefer_raw_local_symbol_for_runtime_fetch": config.prefer_raw_local_symbol_for_runtime_fetch,
         "max_cycles": config.max_cycles,
         "cycle_index": cycle_index,
         "lockfile_path": str(lock.lockfile),
@@ -1121,6 +1281,9 @@ def _report_for_cycle(
                 "latest_completed_5m_timestamp": item.get("latest_completed_5m_timestamp"),
                 "runtime_candle_age_seconds": item.get("runtime_candle_age_seconds"),
                 "runtime_candle_capture_verdict": item.get("runtime_candle_capture_verdict"),
+                "runtime_provider_status_category": item.get("runtime_provider_status_category"),
+                "monitor_runtime_candle_source": item.get("monitor_runtime_candle_source"),
+                "provider_fetch_failed_before_fallback": item.get("provider_fetch_failed_before_fallback"),
             }
             for item in instrument_reports
         },
@@ -1381,6 +1544,28 @@ def _safe_quote_payload(path: Path | None) -> dict[str, object]:
         "quote_freshness_verdict": "NOT_PROVIDED",
         "report_json_path": None if path is None else str(path),
     }
+
+
+def _provider_failure_category(report: Mapping[str, Any]) -> str:
+    if not report:
+        return "NOT_PROVIDED"
+    if report.get("provider_credential_status") == "MISSING":
+        return "PROVIDER_CREDENTIAL_MISSING"
+    if report.get("data_written") is True and report.get("fresh_for_execution") is True:
+        return "DATA_WRITTEN_EXECUTION_FRESH"
+    if report.get("data_written") is True and report.get("fresh_for_execution") is not True:
+        return "DATA_WRITTEN_NOT_EXECUTION_FRESH"
+    blocker = str(report.get("primary_blocker") or report.get("execution_freshness_blocker") or "").lower()
+    if "timed out" in blocker or "timeout" in blocker:
+        return "PROVIDER_TIMEOUT"
+    if "available_end" in blocker or "available end" in blocker or report.get("provider_available_end"):
+        return "PROVIDER_STALE_AVAILABLE_END"
+    if "no data" in blocker or "insufficient" in blocker or "at least" in blocker:
+        return "PROVIDER_RETURNED_NO_DATA"
+    verdict = str(report.get("runtime_candle_capture_verdict") or "")
+    if "FETCH_FAILED" in verdict or "PROVIDER_ERROR" in verdict:
+        return "PROVIDER_ERROR"
+    return "UNKNOWN"
 
 
 class _ProviderFetchTimeout(TimeoutError):

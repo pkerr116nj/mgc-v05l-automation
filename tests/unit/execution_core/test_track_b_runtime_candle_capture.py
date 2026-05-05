@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import mgc_v05l.execution_core.track_b_runtime_candle_capture_cli as runtime_cli
+from mgc_v05l.execution_core.databento_quote_provider import DatabentoAvailableEndError
 from mgc_v05l.execution_core.track_b_feature_builder import TrackBFeatureBuilderVerdict, build_track_b_mgc_feature_event
 from mgc_v05l.execution_core.track_b_runtime_candle_capture import (
     TrackBRuntimeCandleCaptureVerdict,
@@ -132,6 +133,34 @@ def test_runtime_capture_output_feeds_feature_builder(tmp_path: Path) -> None:
     assert feature.report["live_money_readiness"] is False
 
 
+def test_runtime_capture_accepts_databento_http_header_timestamp(tmp_path: Path) -> None:
+    payload = runtime_payload(candle_count=0)
+    payload["candles"] = [
+        {
+            "hd": {"ts_event": f"2026-05-04T14:{26 + index:02d}:00.000000000Z", "instrument_id": 42008160},
+            "open": str(4574 + index / 10),
+            "high": str(4574.2 + index / 10),
+            "low": str(4573.9 + index / 10),
+            "close": str(4574.1 + index / 10),
+            "volume": str(100 + index),
+        }
+        for index in range(5)
+    ]
+
+    result = capture_track_b_runtime_mgc_1m_candles(
+        runtime_candle_payload=payload,
+        max_bars=5,
+        min_bars=5,
+        max_latest_1m_age_seconds=999999,
+        max_completed_5m_age_seconds=999999,
+        output_root=tmp_path,
+        now=aware_now(),
+    )
+
+    assert result.report["data_written"] is True
+    assert result.report["latest_1m_timestamp"] == "2026-05-04T14:30:00+00:00"
+
+
 def test_runtime_capture_blocks_stale_candles_when_freshness_required(tmp_path: Path) -> None:
     result = capture_track_b_runtime_mgc_1m_candles(
         runtime_candle_payload=runtime_payload(candle_count=5),
@@ -233,6 +262,126 @@ def test_runtime_capture_cli_fetches_bounded_databento_history(monkeypatch, tmp_
     assert output["submit_attempted"] is False
     assert output["live_money_readiness"] is False
     assert (tmp_path / "capture" / "latest_runtime_mgc_1m_candles.json").exists()
+
+
+def test_runtime_capture_cli_passes_provider_timeout_to_transport(monkeypatch, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    quote_path = tmp_path / "quote.json"
+    quote_path.write_text(
+        json.dumps(
+            {
+                "quote_provider_mode": "REALTIME",
+                "realtime_quote_received": True,
+                "current_quote_available": True,
+                "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+                "report_json_path": str(quote_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    observed: dict[str, object] = {}
+
+    class FakeTransport:
+        def __init__(self, *, timeout_seconds: float, stype_out: str | None = None) -> None:
+            observed["timeout_seconds"] = timeout_seconds
+            observed["stype_out"] = stype_out
+
+    def fake_fetch(**kwargs):  # type: ignore[no-untyped-def]
+        observed["transport_type"] = type(kwargs["transport"]).__name__
+        return runtime_payload(candle_count=5)["candles"]
+
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    monkeypatch.setattr(runtime_cli, "UrllibDatabentoQuoteTransport", FakeTransport)
+    monkeypatch.setattr(runtime_cli, "fetch_databento_ohlcv_1m_records", fake_fetch)
+
+    exit_code = runtime_cli.main(
+        [
+            "--fetch-databento-history",
+            "--current-quote-report-json",
+            str(quote_path),
+            "--provider-timeout-seconds",
+            "7.5",
+            "--provider-transport",
+            "http",
+            "--history-end",
+            "2026-05-04T14:31:00+00:00",
+            "--lookback-minutes",
+            "5",
+            "--max-bars",
+            "5",
+            "--max-latest-1m-age-seconds",
+            "999999",
+            "--max-completed-5m-age-seconds",
+            "999999",
+            "--output-root",
+            str(tmp_path / "capture"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed["timeout_seconds"] == 7.5
+    assert observed["stype_out"] == "instrument_id"
+    assert observed["transport_type"] == "FakeTransport"
+    assert json.loads(capsys.readouterr().out)["data_written"] is True
+
+
+def test_runtime_capture_available_end_retry_uses_safe_minute_boundary(monkeypatch, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    quote_path = tmp_path / "quote.json"
+    quote_path.write_text(
+        json.dumps(
+            {
+                "quote_provider_mode": "REALTIME",
+                "realtime_quote_received": True,
+                "current_quote_available": True,
+                "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+                "report_json_path": str(quote_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    provider_available_end = datetime(2026, 5, 4, 14, 31, 27, 123456, tzinfo=timezone.utc)
+    observed_ends: list[datetime] = []
+
+    def fake_fetch(**kwargs):  # type: ignore[no-untyped-def]
+        observed_ends.append(kwargs["end"])
+        if len(observed_ends) == 1:
+            raise DatabentoAvailableEndError(
+                "after available_end",
+                provider_available_end=provider_available_end,
+                detail="available_end",
+            )
+        return runtime_payload(candle_count=5)["candles"]
+
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    monkeypatch.setattr(runtime_cli, "fetch_databento_ohlcv_1m_records", fake_fetch)
+
+    exit_code = runtime_cli.main(
+        [
+            "--fetch-databento-history",
+            "--current-quote-report-json",
+            str(quote_path),
+            "--history-end",
+            "2026-05-04T14:32:00+00:00",
+            "--lookback-minutes",
+            "5",
+            "--max-bars",
+            "5",
+            "--max-latest-1m-age-seconds",
+            "999999",
+            "--max-completed-5m-age-seconds",
+            "999999",
+            "--output-root",
+            str(tmp_path / "capture"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed_ends == [
+        datetime(2026, 5, 4, 14, 32, tzinfo=timezone.utc),
+        datetime(2026, 5, 4, 14, 31, tzinfo=timezone.utc),
+    ]
+    output = json.loads(capsys.readouterr().out)
+    assert output["history_end_used"] == "2026-05-04T14:31:00+00:00"
+    assert output["provider_available_end"] == provider_available_end.isoformat()
 
 
 def test_runtime_capture_cli_loads_databento_key_from_env_file(monkeypatch, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
