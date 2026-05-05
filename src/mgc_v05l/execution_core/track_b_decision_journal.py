@@ -317,7 +317,7 @@ def _is_tier_4(
     previous_state: Mapping[str, Any],
 ) -> bool:
     strategy_id = str(detail.get("strategy_id") or "")
-    previous = previous_state.get(strategy_id) if isinstance(previous_state.get(strategy_id) or {}, Mapping) else {}
+    previous = previous_state.get(strategy_id) if isinstance(previous_state.get(strategy_id), Mapping) else {}
     runtime_verdict = str(detail.get("strategy_runtime_verdict") or "")
     primary_blocker = str(detail.get("primary_blocker") or "")
     if runtime_cycle_report.get("live_money_readiness") is True:
@@ -345,7 +345,7 @@ def _is_near_miss(detail: Mapping[str, Any], config: TrackBDecisionJournalConfig
     passed = int(detail.get("passed_predicates") or 0)
     if total >= 4 and passed >= total - 1:
         return True
-    nearest = detail.get("nearest_failed_predicate") if isinstance(detail.get("nearest_failed_predicate") or {}, Mapping) else {}
+    nearest = detail.get("nearest_failed_predicate") if isinstance(detail.get("nearest_failed_predicate"), Mapping) else {}
     distance = _decimal_or_none(nearest.get("distance_to_pass"))
     return distance is not None and distance <= config.near_miss_distance_threshold
 
