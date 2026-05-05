@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import gzip
 import sqlite3
 import subprocess
 from dataclasses import dataclass
@@ -2637,6 +2638,99 @@ def test_api_dashboard_returns_minimal_degraded_payload_without_cache_or_cold_sn
     assert payload["cold_snapshot_skipped_for_latency"] is True
     assert payload["action_log"] == []
     assert payload["track_b_operator_status"] == {}
+
+
+def test_operator_action_log_below_threshold_does_not_rotate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MGC_OPERATOR_ACTION_LOG_MAX_BYTES", "1000")
+    service = OperatorDashboardService(tmp_path)
+    service._action_log_path.write_text('{"existing":true}\n', encoding="utf-8")  # noqa: SLF001
+
+    service._log_action({"action": "unit-test", "ok": True})  # noqa: SLF001
+
+    assert service._action_log_path.exists()  # noqa: SLF001
+    assert len(service._rotated_action_log_paths()) == 0  # noqa: SLF001
+    rows = operator_dashboard_module._tail_jsonl(service._action_log_path, 5)  # noqa: SLF001
+    assert rows[-1]["action"] == "unit-test"
+
+
+def test_operator_action_log_rotates_and_compresses_above_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MGC_OPERATOR_ACTION_LOG_MAX_BYTES", "20")
+    monkeypatch.setenv("MGC_OPERATOR_ACTION_LOG_COMPRESS_ROTATED", "true")
+    service = OperatorDashboardService(tmp_path)
+    service._action_log_path.write_text('{"old":"payload"}\n' * 3, encoding="utf-8")  # noqa: SLF001
+
+    service._log_action({"action": "fresh-write", "ok": True})  # noqa: SLF001
+
+    rotated = service._rotated_action_log_paths()  # noqa: SLF001
+    assert service._action_log_path.exists()  # noqa: SLF001
+    assert len(rotated) == 1
+    assert rotated[0].suffix == ".gz"
+    with gzip.open(rotated[0], "rt", encoding="utf-8") as handle:
+        assert '{"old":"payload"}' in handle.read()
+    rows = operator_dashboard_module._tail_jsonl(service._action_log_path, 5)  # noqa: SLF001
+    assert rows == [{"action": "fresh-write", "ok": True}]
+
+
+def test_operator_action_log_rotation_enforces_local_retention_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MGC_OPERATOR_ACTION_LOG_MAX_BYTES", "20")
+    monkeypatch.setenv("MGC_OPERATOR_ACTION_LOG_ROTATED_KEEP", "2")
+    monkeypatch.setenv("MGC_OPERATOR_ACTION_LOG_COMPRESS_ROTATED", "true")
+    outside_file = tmp_path / "action_log.19990101-000000.jsonl.gz"
+    outside_file.write_text("outside", encoding="utf-8")
+    service = OperatorDashboardService(tmp_path)
+
+    for index in range(5):
+        service._log_action({"action": "large", "index": index, "payload": "x" * 80})  # noqa: SLF001
+
+    rotated = service._rotated_action_log_paths()  # noqa: SLF001
+    assert len(rotated) == 2
+    assert service._action_log_path.exists()  # noqa: SLF001
+    assert outside_file.exists()
+    status = service.action_log_rotation_status()
+    assert status["rotated_file_count"] == 2
+    assert status["archive_enabled"] is False
+    assert status["would_delete_by_retention"] == []
+
+
+def test_operator_action_log_archive_root_is_not_dashboard_hot_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_root = tmp_path / "cold_archive"
+    archive_root.mkdir()
+    (archive_root / "action_log.20260101-000000.jsonl").write_text("not-json\n" * 1000, encoding="utf-8")
+    monkeypatch.setenv("MGC_OPERATOR_ARCHIVE_ROOT", str(archive_root))
+    service = OperatorDashboardService(tmp_path)
+    service._server_info = DashboardServerInfo(
+        host="127.0.0.1",
+        port=8790,
+        url="http://127.0.0.1:8790/",
+        pid=12345,
+        started_at="2026-04-09T12:00:00+00:00",
+        build_stamp="abc123def456",
+        instance_id="instance-current",
+        info_file=str(tmp_path / "dashboard.json"),
+    )
+    service.dashboard_snapshot = lambda: (_ for _ in ()).throw(AssertionError("unexpected cold snapshot"))  # type: ignore[method-assign]
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes[0][0] == HTTPStatus.OK
+    assert writes[0][1]["dashboard_payload_mode"] == "degraded"
+    assert service.action_log_rotation_status()["archive_root"] == str(archive_root)
 
 
 def test_api_dashboard_reports_stale_runtime_config_paths_without_chasing_them(tmp_path: Path) -> None:

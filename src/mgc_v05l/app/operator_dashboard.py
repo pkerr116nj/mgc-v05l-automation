@@ -6,6 +6,7 @@ import csv
 import concurrent.futures
 import contextvars
 import errno
+import gzip
 import hashlib
 import html
 import json
@@ -13,6 +14,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import sqlite3
 import statistics
 import subprocess
@@ -100,6 +102,13 @@ DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT = 2000
 DEFAULT_DASHBOARD_API_CACHE_MAX_AGE_SECONDS = 60.0
 DEFAULT_DASHBOARD_API_CACHE_SOURCE_LAG_GRACE_SECONDS = 30.0
 DEFAULT_DASHBOARD_API_DEGRADED_CACHE_MAX_AGE_SECONDS = 60.0 * 60.0
+DEFAULT_OPERATOR_ACTION_LOG_MAX_BYTES = 50 * 1024 * 1024
+DEFAULT_OPERATOR_ACTION_LOG_ROTATED_KEEP = 10
+DEFAULT_OPERATOR_ACTION_LOG_COMPRESS_ROTATED = True
+OPERATOR_ACTION_LOG_MAX_BYTES_ENV = "MGC_OPERATOR_ACTION_LOG_MAX_BYTES"
+OPERATOR_ACTION_LOG_ROTATED_KEEP_ENV = "MGC_OPERATOR_ACTION_LOG_ROTATED_KEEP"
+OPERATOR_ACTION_LOG_COMPRESS_ROTATED_ENV = "MGC_OPERATOR_ACTION_LOG_COMPRESS_ROTATED"
+OPERATOR_ARCHIVE_ROOT_ENV = "MGC_OPERATOR_ARCHIVE_ROOT"
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_FRESHNESS_SECONDS = 30.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_MAX_STALE_SECONDS = 300.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_RUNTIME_UPDATE_GRACE_SECONDS = 60.0
@@ -209,6 +218,16 @@ def _env_flag_enabled(name: str, *, default: bool = False) -> bool:
     return raw_value in {"1", "true", "yes", "on"}
 
 
+def _env_int_value(name: str, *, default: int, minimum: int = 0) -> int:
+    raw_value = str(os.environ.get(name) or "").strip()
+    if not raw_value:
+        return default
+    try:
+        return max(int(raw_value), minimum)
+    except ValueError:
+        return default
+
+
 def _historical_strategy_study_status(
     strategy_study_payload: dict[str, Any] | None,
     *,
@@ -313,6 +332,22 @@ class OperatorDashboardService:
         self._auth_cache_path = self._dashboard_artifacts_dir / "auth_gate_latest.json"
         self._local_operator_auth_state_path = self._dashboard_artifacts_dir / "local_operator_auth_state.json"
         self._action_log_path = self._dashboard_artifacts_dir / "action_log.jsonl"
+        self._action_log_max_bytes = _env_int_value(
+            OPERATOR_ACTION_LOG_MAX_BYTES_ENV,
+            default=DEFAULT_OPERATOR_ACTION_LOG_MAX_BYTES,
+            minimum=0,
+        )
+        self._action_log_rotated_keep = _env_int_value(
+            OPERATOR_ACTION_LOG_ROTATED_KEEP_ENV,
+            default=DEFAULT_OPERATOR_ACTION_LOG_ROTATED_KEEP,
+            minimum=0,
+        )
+        self._action_log_compress_rotated = _env_flag_enabled(
+            OPERATOR_ACTION_LOG_COMPRESS_ROTATED_ENV,
+            default=DEFAULT_OPERATOR_ACTION_LOG_COMPRESS_ROTATED,
+        )
+        archive_root_raw = str(os.environ.get(OPERATOR_ARCHIVE_ROOT_ENV) or "").strip()
+        self._operator_archive_root = Path(archive_root_raw).expanduser() if archive_root_raw else None
         self._risk_ack_path = self._dashboard_artifacts_dir / "paper_risk_ack.json"
         self._review_state_path = self._dashboard_artifacts_dir / "paper_review_state.json"
         self._session_signoff_path = self._dashboard_artifacts_dir / "paper_session_signoff.json"
@@ -15727,9 +15762,100 @@ class OperatorDashboardService:
         return result
 
     def _log_action(self, payload: dict[str, Any]) -> None:
+        line = json.dumps(_json_ready(payload), sort_keys=True) + "\n"
+        self._rotate_action_log_if_needed(incoming_bytes=len(line.encode("utf-8")))
         with self._action_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(_json_ready(payload), sort_keys=True))
-            handle.write("\n")
+            handle.write(line)
+
+    def _rotate_action_log_if_needed(self, *, incoming_bytes: int = 0) -> Path | None:
+        if self._action_log_max_bytes <= 0 or not self._action_log_path.exists():
+            return None
+        try:
+            active_size = self._action_log_path.stat().st_size
+        except OSError as exc:
+            _record_snapshot_warning(self._action_log_path, reader="action-log-rotation", detail=f"{type(exc).__name__}: {exc}")
+            return None
+        if active_size <= 0 or active_size + max(incoming_bytes, 0) <= self._action_log_max_bytes:
+            return None
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        rotated_path = self._dashboard_artifacts_dir / f"action_log.{timestamp}.jsonl"
+        if rotated_path.exists() or rotated_path.with_suffix(rotated_path.suffix + ".gz").exists():
+            rotated_path = self._dashboard_artifacts_dir / f"action_log.{timestamp}.{uuid.uuid4().hex[:8]}.jsonl"
+        try:
+            self._action_log_path.replace(rotated_path)
+            self._action_log_path.touch()
+            final_path = self._compress_rotated_action_log(rotated_path) if self._action_log_compress_rotated else rotated_path
+            self._enforce_action_log_retention()
+            return final_path
+        except OSError as exc:
+            _record_snapshot_warning(self._action_log_path, reader="action-log-rotation", detail=f"{type(exc).__name__}: {exc}")
+            if not self._action_log_path.exists():
+                self._action_log_path.touch()
+            return None
+
+    def _compress_rotated_action_log(self, rotated_path: Path) -> Path:
+        compressed_path = rotated_path.with_suffix(rotated_path.suffix + ".gz")
+        try:
+            with rotated_path.open("rb") as source, gzip.open(compressed_path, "wb") as target:
+                shutil.copyfileobj(source, target)
+            rotated_path.unlink()
+            return compressed_path
+        except OSError as exc:
+            _record_snapshot_warning(rotated_path, reader="action-log-compression", detail=f"{type(exc).__name__}: {exc}")
+            return rotated_path
+
+    def _rotated_action_log_paths(self) -> list[Path]:
+        candidates = [
+            *self._dashboard_artifacts_dir.glob("action_log.*.jsonl"),
+            *self._dashboard_artifacts_dir.glob("action_log.*.jsonl.gz"),
+        ]
+        return sorted(
+            (path for path in candidates if path.is_file() and path.parent == self._dashboard_artifacts_dir),
+            key=lambda path: (path.stat().st_mtime, path.name),
+            reverse=True,
+        )
+
+    def _enforce_action_log_retention(self) -> list[Path]:
+        if self._action_log_rotated_keep < 0:
+            return []
+        deleted: list[Path] = []
+        for path in self._rotated_action_log_paths()[self._action_log_rotated_keep :]:
+            if path == self._action_log_path or path.parent != self._dashboard_artifacts_dir:
+                continue
+            try:
+                path.unlink()
+                deleted.append(path)
+            except OSError as exc:
+                _record_snapshot_warning(path, reader="action-log-retention", detail=f"{type(exc).__name__}: {exc}")
+        return deleted
+
+    def action_log_rotation_status(self) -> dict[str, Any]:
+        active_size = self._action_log_path.stat().st_size if self._action_log_path.exists() else 0
+        rotated_paths = self._rotated_action_log_paths()
+        rotated_rows = [
+            {
+                "path": str(path),
+                "size_bytes": path.stat().st_size,
+                "compressed": path.suffix == ".gz",
+            }
+            for path in rotated_paths
+        ]
+        retained = rotated_rows[: self._action_log_rotated_keep]
+        would_delete = rotated_rows[self._action_log_rotated_keep :]
+        return {
+            "active_log_path": str(self._action_log_path),
+            "active_log_size_bytes": active_size,
+            "max_active_log_bytes": self._action_log_max_bytes,
+            "rotated_keep": self._action_log_rotated_keep,
+            "compress_rotated": self._action_log_compress_rotated,
+            "archive_root": str(self._operator_archive_root) if self._operator_archive_root else None,
+            "archive_enabled": False,
+            "rotated_files": rotated_rows,
+            "rotated_file_count": len(rotated_rows),
+            "total_local_retained_size_bytes": active_size + sum(int(row["size_bytes"]) for row in retained),
+            "would_delete_by_retention": would_delete,
+        }
 
     def _market_index_debug_payload(self, market_context: dict[str, Any]) -> dict[str, Any]:
         diagnostics = market_context.get("diagnostics", {}) if isinstance(market_context, dict) else {}
