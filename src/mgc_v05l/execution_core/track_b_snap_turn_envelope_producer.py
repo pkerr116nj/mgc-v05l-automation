@@ -75,6 +75,7 @@ class TrackBSnapTurnEnvelopeProducerVerdict(str, Enum):
     BLOCKED_NO_5M_CANDLES = "TRACK_B_SNAP_TURN_ENVELOPE_PRODUCER_BLOCKED_NO_5M_CANDLES"
     BLOCKED_INCOMPLETE_5M_CANDLE = "TRACK_B_SNAP_TURN_ENVELOPE_PRODUCER_BLOCKED_INCOMPLETE_5M_CANDLE"
     BLOCKED_INSUFFICIENT_5M_CANDLES = "TRACK_B_SNAP_TURN_ENVELOPE_PRODUCER_BLOCKED_INSUFFICIENT_5M_CANDLES"
+    BLOCKED_STALE_RUNTIME_CONTEXT = "TRACK_B_SNAP_TURN_ENVELOPE_PRODUCER_BLOCKED_STALE_RUNTIME_CONTEXT"
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ def produce_track_b_snap_turn_envelopes(
     min_completed_bars: int = MIN_COMPLETED_5M_BARS,
     prior_bars_since_bull_snap: int | None = None,
     prior_bars_since_bear_snap: int | None = None,
+    max_completed_5m_age_seconds: int | None = None,
     now: datetime | None = None,
     producer_id: str | None = None,
 ) -> TrackBSnapTurnEnvelopeProducerResult:
@@ -147,6 +149,32 @@ def produce_track_b_snap_turn_envelopes(
                 input_payload_path=runtime_5m_payload_path,
                 candles=candles,
                 primary_blocker=blocker,
+                max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+            )
+
+        freshness = _runtime_candle_freshness(
+            candles=candles,
+            now=actual_now,
+            max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+        )
+        if freshness["runtime_candle_context_stale"] is True:
+            return _write_blocked_result(
+                verdict=TrackBSnapTurnEnvelopeProducerVerdict.BLOCKED_STALE_RUNTIME_CONTEXT,
+                report_json=report_json,
+                output_root=output_root,
+                now=actual_now,
+                producer_id=actual_producer_id,
+                source_id=source_id,
+                input_payload=runtime_5m_payload,
+                input_payload_path=runtime_5m_payload_path,
+                candles=candles,
+                primary_blocker=(
+                    "Track B snap-turn runtime candle context is stale: latest completed 5m candle age "
+                    f"{freshness.get('latest_completed_5m_candle_age_seconds')}s exceeds "
+                    f"max {freshness.get('max_completed_5m_candle_age_seconds')}s."
+                ),
+                required_next_action="Refresh bounded Track B runtime 5m candles before producing snap-turn envelopes.",
+                max_completed_5m_age_seconds=max_completed_5m_age_seconds,
             )
 
         features = _compute_features(candles)
@@ -237,6 +265,7 @@ def produce_track_b_snap_turn_envelopes(
             candles=candles,
             primary_blocker=None,
             required_next_action="Run the multi-strategy runtime cycle with the produced snap-turn envelopes.",
+            max_completed_5m_age_seconds=max_completed_5m_age_seconds,
         )
         report.update(
             {
@@ -279,6 +308,7 @@ def produce_track_b_snap_turn_envelopes(
             input_payload_path=runtime_5m_payload_path,
             candles=[],
             primary_blocker=f"Track B snap-turn envelope producer invalid input: {exc}",
+            max_completed_5m_age_seconds=max_completed_5m_age_seconds,
         )
 
 
@@ -569,8 +599,9 @@ def _base_report(
     candles: Sequence[_RuntimeCandle],
     primary_blocker: str | None,
     required_next_action: str,
+    max_completed_5m_age_seconds: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    report = {
         "snap_turn_envelope_producer_verdict": verdict.value,
         "producer_id": producer_id,
         "source_id": source_id,
@@ -598,6 +629,14 @@ def _base_report(
         "broker_state_mutated": False,
         "live_money_readiness": False,
     }
+    report.update(
+        _runtime_candle_freshness(
+            candles=candles,
+            now=now,
+            max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+        )
+    )
+    return report
 
 
 def _write_blocked_result(
@@ -612,6 +651,8 @@ def _write_blocked_result(
     input_payload_path: Path | None,
     candles: Sequence[_RuntimeCandle],
     primary_blocker: str,
+    required_next_action: str = "Provide bounded completed realtime MGC 5m candles before producing snap-turn envelopes.",
+    max_completed_5m_age_seconds: int | None = None,
 ) -> TrackBSnapTurnEnvelopeProducerResult:
     report = _base_report(
         verdict=verdict,
@@ -623,7 +664,8 @@ def _write_blocked_result(
         input_payload_path=input_payload_path,
         candles=candles,
         primary_blocker=primary_blocker,
-        required_next_action="Provide bounded completed realtime MGC 5m candles before producing snap-turn envelopes.",
+        required_next_action=required_next_action,
+        max_completed_5m_age_seconds=max_completed_5m_age_seconds,
     )
     _write_json(report_json, report)
     _write_json(output_root / "latest_snap_turn_envelope_producer_report.json", report)
@@ -636,6 +678,28 @@ def _write_blocked_result(
         first_bull_snap_turn_event=None,
         first_bear_snap_turn_event=None,
     )
+
+
+def _runtime_candle_freshness(
+    *,
+    candles: Sequence[_RuntimeCandle],
+    now: datetime,
+    max_completed_5m_age_seconds: int | None,
+) -> dict[str, Any]:
+    latest_5m_timestamp = candles[-1].timestamp if candles else None
+    latest_5m_age = None if latest_5m_timestamp is None else max(0.0, (now - latest_5m_timestamp).total_seconds())
+    stale = (
+        max_completed_5m_age_seconds is not None
+        and (latest_5m_age is None or latest_5m_age > max_completed_5m_age_seconds)
+    )
+    return {
+        "latest_completed_5m_candle_timestamp": None if latest_5m_timestamp is None else latest_5m_timestamp.isoformat(),
+        "latest_completed_5m_candle_age_seconds": None if latest_5m_age is None else round(latest_5m_age, 3),
+        "latest_completed_5m_candle_age_minutes": None if latest_5m_age is None else round(latest_5m_age / 60.0, 3),
+        "max_completed_5m_candle_age_seconds": max_completed_5m_age_seconds,
+        "runtime_candle_context_stale": stale,
+        "runtime_candle_context_fresh": None if max_completed_5m_age_seconds is None else not stale,
+    }
 
 
 def _feature_diagnostics(features: _FeaturePacket) -> dict[str, Any]:

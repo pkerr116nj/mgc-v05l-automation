@@ -41,6 +41,7 @@ from .track_b_snap_turn_envelope_producer import (
     _compute_features,
     _feature_diagnostics,
     _optional_text,
+    _runtime_candle_freshness,
 )
 
 
@@ -92,6 +93,7 @@ class TrackBSessionStrategyEnvelopeProducerVerdict(str, Enum):
     BLOCKED_NO_5M_CANDLES = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_BLOCKED_NO_5M_CANDLES"
     BLOCKED_INCOMPLETE_5M_CANDLE = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_BLOCKED_INCOMPLETE_5M_CANDLE"
     BLOCKED_INSUFFICIENT_5M_CANDLES = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_BLOCKED_INSUFFICIENT_5M_CANDLES"
+    BLOCKED_STALE_RUNTIME_CONTEXT = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_BLOCKED_STALE_RUNTIME_CONTEXT"
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,7 @@ def produce_track_b_session_strategy_envelopes(
     prior_bars_since_short_setup: int | None = None,
     prior_bars_since_bull_snap: int | None = None,
     prior_bars_since_bear_snap: int | None = None,
+    max_completed_5m_age_seconds: int | None = None,
     now: datetime | None = None,
     producer_id: str | None = None,
 ) -> TrackBSessionStrategyEnvelopeProducerResult:
@@ -145,6 +148,32 @@ def produce_track_b_session_strategy_envelopes(
                 input_payload_path=runtime_5m_payload_path,
                 candles=candles,
                 primary_blocker=blocker,
+                max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+            )
+
+        freshness = _runtime_candle_freshness(
+            candles=candles,
+            now=actual_now,
+            max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+        )
+        if freshness["runtime_candle_context_stale"] is True:
+            return _write_blocked_result(
+                verdict=TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_STALE_RUNTIME_CONTEXT,
+                report_json=report_json,
+                output_root=output_root,
+                now=actual_now,
+                producer_id=actual_producer_id,
+                source_id=source_id,
+                input_payload=runtime_5m_payload,
+                input_payload_path=runtime_5m_payload_path,
+                candles=candles,
+                primary_blocker=(
+                    "Track B session-strategy runtime candle context is stale: latest completed 5m candle age "
+                    f"{freshness.get('latest_completed_5m_candle_age_seconds')}s exceeds "
+                    f"max {freshness.get('max_completed_5m_candle_age_seconds')}s."
+                ),
+                required_next_action="Refresh bounded Track B runtime 5m candles before producing session-strategy envelopes.",
+                max_completed_5m_age_seconds=max_completed_5m_age_seconds,
             )
 
         feature_history = [_compute_features(candles[: index + 1]) for index in range(len(candles))]
@@ -236,6 +265,7 @@ def produce_track_b_session_strategy_envelopes(
             candles=candles,
             primary_blocker=None,
             required_next_action="Run the multi-strategy runtime cycle with the produced session strategy envelopes.",
+            max_completed_5m_age_seconds=max_completed_5m_age_seconds,
         )
         report.update(
             {
@@ -281,6 +311,7 @@ def produce_track_b_session_strategy_envelopes(
             input_payload_path=runtime_5m_payload_path,
             candles=[],
             primary_blocker=f"Track B session-strategy envelope producer invalid input: {exc}",
+            max_completed_5m_age_seconds=max_completed_5m_age_seconds,
         )
 
 
@@ -791,8 +822,9 @@ def _base_report(
     candles: Sequence[_RuntimeCandle],
     primary_blocker: str | None,
     required_next_action: str,
+    max_completed_5m_age_seconds: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    report = {
         "session_strategy_envelope_producer_verdict": verdict.value,
         "producer_id": producer_id,
         "source_id": source_id,
@@ -822,6 +854,14 @@ def _base_report(
         "broker_state_mutated": False,
         "live_money_readiness": False,
     }
+    report.update(
+        _runtime_candle_freshness(
+            candles=candles,
+            now=now,
+            max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+        )
+    )
+    return report
 
 
 def _write_blocked_result(
@@ -836,6 +876,8 @@ def _write_blocked_result(
     input_payload_path: Path | None,
     candles: Sequence[_RuntimeCandle],
     primary_blocker: str,
+    required_next_action: str = "Provide bounded completed realtime MGC 5m candles before producing session-strategy envelopes.",
+    max_completed_5m_age_seconds: int | None = None,
 ) -> TrackBSessionStrategyEnvelopeProducerResult:
     report = _base_report(
         verdict=verdict,
@@ -847,7 +889,8 @@ def _write_blocked_result(
         input_payload_path=input_payload_path,
         candles=candles,
         primary_blocker=primary_blocker,
-        required_next_action="Provide bounded completed realtime MGC 5m candles before producing session-strategy envelopes.",
+        required_next_action=required_next_action,
+        max_completed_5m_age_seconds=max_completed_5m_age_seconds,
     )
     _write_json(report_json, report)
     _write_json(output_root / "latest_session_strategy_envelope_producer_report.json", report)

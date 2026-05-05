@@ -35,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--strategy-id", default="asian_drift_v1")
     parser.add_argument("--lane-id", default="mgc_example_long_lmt_day")
     parser.add_argument("--max-source-bars", type=int, default=250)
+    parser.add_argument(
+        "--max-completed-5m-age-seconds",
+        type=int,
+        default=900,
+        help="Reject runtime context when the latest completed 5m candle is older than this threshold.",
+    )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_ASIAN_DRIFT_WATCH_CHAIN_OUTPUT_ROOT)
     return parser
 
@@ -64,6 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         strategy_id=args.strategy_id,
         lane_id=args.lane_id,
         max_source_bars=args.max_source_bars,
+        max_completed_5m_age_seconds=args.max_completed_5m_age_seconds,
         inbox_dir=args.inbox_dir,
         output_root=args.output_root,
     )
@@ -73,10 +80,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "asian_drift_watch_chain_verdict": result.report["asian_drift_watch_chain_verdict"],
                 "asian_drift_watch_verdict": result.report["asian_drift_watch_verdict"],
                 "completed_5m_bars_available": result.report["completed_5m_bars_available"],
-                "feature_rows_available": result.report["feature_rows_available"],
-                "asian_drift_state_ready": result.report["asian_drift_state_ready"],
-                "rule_decision": result.report["rule_decision"],
-                "signal_emitted": result.report["signal_emitted"],
+                "latest_1m_candle_timestamp": result.report.get("latest_1m_candle_timestamp"),
+                "latest_completed_5m_candle_timestamp": result.report.get("latest_completed_5m_candle_timestamp"),
+                "latest_completed_5m_candle_age_seconds": result.report.get("latest_completed_5m_candle_age_seconds"),
+                "max_completed_5m_candle_age_seconds": result.report.get("max_completed_5m_candle_age_seconds"),
+                "runtime_candle_context_stale": result.report.get("runtime_candle_context_stale"),
+                "feature_rows_available": result.report.get("feature_rows_available"),
+                "asian_drift_state_ready": result.report.get("asian_drift_state_ready"),
+                "rule_decision": result.report.get("rule_decision"),
+                "signal_emitted": result.report.get("signal_emitted"),
                 "signal_side": result.report["signal_side"],
                 "readiness_invoked": result.report["readiness_invoked"],
                 "paper_proof_invoked": result.report["paper_proof_invoked"],

@@ -97,6 +97,23 @@ def test_producer_blocks_when_input_contains_incomplete_5m_bars(tmp_path: Path) 
     assert "incomplete" in str(result.report["primary_blocker"])
 
 
+def test_producer_blocks_stale_runtime_5m_context_when_freshness_required(tmp_path: Path) -> None:
+    result = produce_track_b_session_strategy_envelopes(
+        runtime_5m_payload=runtime_5m_payload(bars=9),
+        output_root=tmp_path / "session",
+        now=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        max_completed_5m_age_seconds=900,
+    )
+
+    assert result.verdict == TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_STALE_RUNTIME_CONTEXT
+    assert result.london_late_pause_resume_short_event_json is None
+    assert result.asia_late_flat_pullback_pause_resume_long_event_json is None
+    assert result.report["runtime_candle_context_stale"] is True
+    assert result.report["latest_completed_5m_candle_age_seconds"] > 900
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+
+
 def test_producer_emits_valid_session_strategy_envelopes(tmp_path: Path) -> None:
     result = produce_track_b_session_strategy_envelopes(
         runtime_5m_payload=runtime_5m_payload(bars=9),

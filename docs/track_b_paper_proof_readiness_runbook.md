@@ -670,13 +670,14 @@ semantics without importing broad research code. The live-state producer still
 does not infer state from raw candles; raw OHLC-only input at that boundary
 blocks as not ready.
 
-For the full no-submit watch chain from accumulated bounded 1m history, use the
-watch-chain wrapper. It writes completed 5m bars, feature rows, state snapshot,
-and rule-watch report artifacts, but never invokes readiness or paper proof:
+For the full no-submit watch chain from bounded runtime 1m candle context, use
+the watch-chain wrapper. It writes completed 5m bars, feature rows, state
+snapshot, and rule-watch report artifacts, but never invokes readiness or paper
+proof:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_watch_chain_cli \
-  --source-candles-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
+  --source-candles-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
   --current-quote-report-json <REALTIME_CURRENT_QUOTE_REPORT_JSON> \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
@@ -689,8 +690,19 @@ and rule-watch report artifacts, but never invokes readiness or paper proof:
   --strategy-id asian_drift_v1 \
   --lane-id mgc_example_long_lmt_day \
   --max-source-bars 50 \
+  --max-completed-5m-age-seconds 900 \
   --output-root outputs/track_b_execution_core/asian_drift_state
 ```
+
+The report includes the runtime candle source path, latest 1m timestamp, latest
+completed 5m timestamp, completed 5m age, and
+`runtime_candle_context_stale`. When the completed 5m bar is older than the
+configured threshold, the watch chain blocks with
+`TRACK_B_ASIAN_DRIFT_WATCH_CHAIN_STALE_RUNTIME_CONTEXT_NOT_READY` rather than
+evaluating stale maintained history as if it were live runtime context.
+Historical maintenance remains the research/replay lane; live strategy watch
+cycles should use bounded runtime candle capture plus separate realtime quote
+evidence.
 
 Valid no-submit outcomes are `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`,
 `ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION`, and

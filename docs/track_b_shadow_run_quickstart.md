@@ -809,14 +809,35 @@ adapters:
   --runtime-5m-candles-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_candles.json \
   --expected-account-id DUM882026 \
   --source-id asia_session_strategy_envelope_watch \
+  --max-completed-5m-age-seconds 900 \
   --output-root outputs/track_b_execution_core/session_strategy_state
 ```
+
+Produce the snap-turn envelopes from the same fresh completed realtime MGC 5m
+context:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_snap_turn_envelope_producer_cli \
+  --runtime-5m-candles-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_candles.json \
+  --expected-account-id DUM882026 \
+  --source-id snap_turn_envelope_watch \
+  --max-completed-5m-age-seconds 900 \
+  --output-root outputs/track_b_execution_core/snap_turn_state
+```
+
+Both envelope producers block with a stale-runtime-context verdict if the
+latest completed 5m candle is older than the configured threshold. Do not feed
+`latest_good_mgc_1m_history.json` into these producer commands for live shadow
+watching unless that artifact has first passed the same runtime freshness
+check.
 
 The stable Asia Early envelope paths are:
 
 ```text
 outputs/track_b_execution_core/session_strategy_state/latest_asia_early_pause_resume_short_event_envelope.json
 outputs/track_b_execution_core/session_strategy_state/latest_asia_early_normal_breakout_retest_hold_long_event_envelope.json
+outputs/track_b_execution_core/snap_turn_state/latest_first_bull_snap_turn_event_envelope.json
+outputs/track_b_execution_core/snap_turn_state/latest_first_bear_snap_turn_event_envelope.json
 ```
 
 ```bash
@@ -826,6 +847,8 @@ outputs/track_b_execution_core/session_strategy_state/latest_asia_early_normal_b
   --breakout-retest-hold-long-event-json outputs/track_b_execution_core/session_strategy_state/latest_asia_early_normal_breakout_retest_hold_long_event_envelope.json \
   --london-late-pause-resume-short-event-json outputs/track_b_execution_core/session_strategy_state/latest_london_late_pause_resume_short_event_envelope.json \
   --asia-late-flat-pullback-pause-resume-long-event-json outputs/track_b_execution_core/session_strategy_state/latest_asia_late_flat_pullback_pause_resume_long_event_envelope.json \
+  --first-bull-snap-turn-event-json outputs/track_b_execution_core/snap_turn_state/latest_first_bull_snap_turn_event_envelope.json \
+  --first-bear-snap-turn-event-json outputs/track_b_execution_core/snap_turn_state/latest_first_bear_snap_turn_event_envelope.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --source-id asia_multi_strategy_watch \
@@ -1127,11 +1150,11 @@ Stable outputs:
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_live_state_report.json`
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_watch_chain_report.json`
 
-For the full no-submit watch chain from accumulated bounded 1m history, run:
+For the full no-submit watch chain from bounded runtime 1m candle context, run:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_watch_chain_cli \
-  --source-candles-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
+  --source-candles-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
   --current-quote-report-json <REALTIME_CURRENT_QUOTE_REPORT_JSON> \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
@@ -1144,15 +1167,24 @@ For the full no-submit watch chain from accumulated bounded 1m history, run:
   --strategy-id asian_drift_v1 \
   --lane-id mgc_example_long_lmt_day \
   --max-source-bars 50 \
+  --max-completed-5m-age-seconds 900 \
   --output-root outputs/track_b_execution_core/asian_drift_state
 ```
 
 The watch-chain report surfaces `completed_5m_bars_available`,
-`feature_rows_available`, `asian_drift_state_ready`,
-`asian_drift_watch_verdict`, `rule_decision`, `signal_emitted`,
-`signal_side`, `readiness_invoked=false`, `paper_proof_invoked=false`,
-`submit_attempted=false`, `broker_state_mutated=false`, and
-`live_money_readiness=false`.
+`runtime_candle_source_path`, `latest_1m_candle_timestamp`,
+`latest_completed_5m_candle_timestamp`, `latest_completed_5m_candle_age_seconds`,
+`runtime_candle_context_stale`, `feature_rows_available`,
+`asian_drift_state_ready`, `asian_drift_watch_verdict`, `rule_decision`,
+`signal_emitted`, `signal_side`, `readiness_invoked=false`,
+`paper_proof_invoked=false`, `submit_attempted=false`,
+`broker_state_mutated=false`, and `live_money_readiness=false`.
+If the latest completed 5m candle is older than the configured threshold, the
+watch chain returns `TRACK_B_ASIAN_DRIFT_WATCH_CHAIN_STALE_RUNTIME_CONTEXT_NOT_READY`
+instead of silently evaluating stale historical context. The weekly
+`latest_good_mgc_1m_history.json` artifact is still useful for research,
+replay, diagnostics, and maintenance validation, but it is not the default live
+runtime candle input unless its freshness is explicitly verified.
 
 If an explicit state snapshot already exists, write/validate it directly:
 

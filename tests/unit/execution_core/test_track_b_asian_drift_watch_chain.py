@@ -125,6 +125,48 @@ def test_watch_chain_blocks_on_incomplete_source_bars(tmp_path: Path) -> None:
     assert result.report["broker_state_mutated"] is False
 
 
+def test_watch_chain_blocks_stale_runtime_candles_when_freshness_required(tmp_path: Path) -> None:
+    result = run_track_b_asian_drift_watch_chain(
+        candle_payload=one_minute_payload(flat_1m_closes(40)),
+        output_root=tmp_path / "asian_drift_state",
+        feature_rows_output_root=tmp_path / "asian_drift_state",
+        inbox_dir=tmp_path / "inbox",
+        chain_id="stale-runtime-chain",
+        now=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        max_completed_5m_age_seconds=900,
+    )
+
+    assert result.verdict == TrackBAsianDriftWatchChainVerdict.STALE_RUNTIME_CONTEXT
+    assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_NOT_READY_FOR_TONIGHT"
+    assert result.report["runtime_candle_context_stale"] is True
+    assert result.report["latest_1m_candle_timestamp"] is not None
+    assert result.report["latest_completed_5m_candle_timestamp"] is not None
+    assert result.report["latest_completed_5m_candle_age_seconds"] > 900
+    assert result.report["rule_evaluated"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+
+
+def test_watch_chain_accepts_fresh_runtime_candles_when_freshness_required(tmp_path: Path) -> None:
+    result = run_track_b_asian_drift_watch_chain(
+        candle_payload=one_minute_payload(flat_1m_closes(40)),
+        output_root=tmp_path / "asian_drift_state",
+        feature_rows_output_root=tmp_path / "asian_drift_state",
+        strategy_rule_output_root=tmp_path / "rule",
+        inbox_dir=tmp_path / "inbox",
+        chain_id="fresh-runtime-chain",
+        now=aware_now(),
+        max_completed_5m_age_seconds=18000,
+    )
+
+    assert result.verdict == TrackBAsianDriftWatchChainVerdict.NO_SIGNAL_NO_MUTATION
+    assert result.report["runtime_candle_context_stale"] is False
+    assert result.report["runtime_candle_context_fresh"] is True
+    assert result.report["latest_completed_5m_candle_age_seconds"] <= 18000
+    assert result.report["rule_evaluated"] is True
+    assert result.report["submit_attempted"] is False
+
+
 def test_watch_chain_reaches_signal_ready_no_submit_without_mutation(tmp_path: Path) -> None:
     result = run_track_b_asian_drift_watch_chain(
         candle_payload=one_minute_payload(long_signal_1m_closes()),

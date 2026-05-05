@@ -26,6 +26,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-account-id", default="DUM882026")
     parser.add_argument("--source-id", default="track_b_snap_turn_envelope_producer")
     parser.add_argument("--min-completed-bars", type=int, default=8)
+    parser.add_argument(
+        "--max-completed-5m-age-seconds",
+        type=int,
+        default=900,
+        help="Reject runtime context when the latest completed 5m candle is older than this threshold.",
+    )
     parser.add_argument("--prior-bars-since-bull-snap", type=int)
     parser.add_argument("--prior-bars-since-bear-snap", type=int)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_SNAP_TURN_ENVELOPE_OUTPUT_ROOT)
@@ -44,6 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_id=args.source_id,
         output_root=args.output_root,
         min_completed_bars=args.min_completed_bars,
+        max_completed_5m_age_seconds=args.max_completed_5m_age_seconds,
         prior_bars_since_bull_snap=args.prior_bars_since_bull_snap,
         prior_bars_since_bear_snap=args.prior_bars_since_bear_snap,
     )
@@ -53,6 +60,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "snap_turn_envelope_producer_verdict": result.verdict.value,
                 "first_bull_snap_turn_envelope_ready": result.report.get("first_bull_snap_turn_envelope_ready"),
                 "first_bear_snap_turn_envelope_ready": result.report.get("first_bear_snap_turn_envelope_ready"),
+                "latest_completed_5m_candle_timestamp": result.report.get("latest_completed_5m_candle_timestamp"),
+                "latest_completed_5m_candle_age_seconds": result.report.get("latest_completed_5m_candle_age_seconds"),
+                "max_completed_5m_candle_age_seconds": result.report.get("max_completed_5m_candle_age_seconds"),
+                "runtime_candle_context_stale": result.report.get("runtime_candle_context_stale"),
                 "first_bull_snap_turn_event_json": (
                     None if result.first_bull_snap_turn_event_json is None else str(result.first_bull_snap_turn_event_json)
                 ),
