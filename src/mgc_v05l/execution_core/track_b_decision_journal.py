@@ -21,8 +21,22 @@ from typing import Any, Mapping
 
 from .models import require_aware_datetime, to_jsonable
 from .track_b_snap_turn_envelope_producer import (
+    BEAR_SNAP_MIN_CLOSE_VS_SLOW_EMA_ATR,
+    BEAR_SNAP_REQUIRE_CLOSE_ABOVE_SLOW_EMA,
+    BEAR_SNAP_COOLDOWN_BARS,
+    BULL_SNAP_MAX_CLOSE_VS_SLOW_EMA_ATR,
+    BULL_SNAP_REQUIRE_CLOSE_BELOW_SLOW_EMA,
     MAX_BEAR_SNAP_CLOSE_LOCATION,
+    MIN_BEAR_SNAP_BAR_RANGE_ATR,
+    MIN_BEAR_SNAP_BODY_ATR,
+    MIN_BEAR_SNAP_UP_STRETCH_ATR,
+    MIN_BEAR_SNAP_VELOCITY_DELTA_ATR,
+    MIN_SNAP_BAR_RANGE_ATR,
+    MIN_SNAP_BODY_ATR,
     MIN_SNAP_CLOSE_LOCATION,
+    MIN_SNAP_DOWN_STRETCH_ATR,
+    MIN_SNAP_VELOCITY_DELTA_ATR,
+    SNAP_COOLDOWN_BARS,
 )
 
 
@@ -155,6 +169,7 @@ def record_track_b_decision_journal_cycle(
         "rotated_files": rotated_files,
         "evaluated_strategy_count": len(strategy_details),
         "evaluated_strategy_ids": [detail.get("strategy_id") for detail in strategy_details],
+        "strategy_decision_summaries": [_strategy_decision_summary(detail) for detail in strategy_details],
         "submit_attempted": bool(runtime_cycle_report.get("submit_attempted")),
         "broker_state_mutated": bool(runtime_cycle_report.get("broker_state_mutated")),
         "paper_proof_invoked": bool(runtime_cycle_report.get("paper_proof_invoked")),
@@ -226,11 +241,18 @@ def _detail_from_strategy_report(strategy_report: Mapping[str, Any], input_event
     passed_conditions = sum(1 for value in conditions.values() if value is True)
     failed_conditions = [str(name) for name, value in conditions.items() if value is not True]
     near_miss_score = Decimal(passed_conditions) / Decimal(total_conditions) if total_conditions else Decimal("0")
+    predicate_attributions = _snap_turn_predicate_attributions(
+        strategy_id=str(strategy_report.get("strategy_registry_id") or strategy_report.get("strategy_id") or ""),
+        conditions=conditions,
+        input_event=input_event,
+    )
     nearest_failed = _nearest_failed_predicate(
         strategy_id=str(strategy_report.get("strategy_registry_id") or strategy_report.get("strategy_id") or ""),
         failed_conditions=failed_conditions,
         input_event=input_event,
+        predicate_attributions=predicate_attributions,
     )
+    nearest_numeric = _nearest_failed_numeric_predicate(predicate_attributions)
     input_event_path = strategy_report.get("input_event_path")
     return {
         "rule_conditions": dict(conditions),
@@ -242,6 +264,11 @@ def _detail_from_strategy_report(strategy_report: Mapping[str, Any], input_event
         "passed_predicates": passed_conditions,
         "failed_predicates": failed_conditions,
         "nearest_failed_predicate": nearest_failed,
+        "predicate_attributions": predicate_attributions,
+        "nearest_failed_numeric_predicate": nearest_numeric,
+        "nearest_failed_numeric_distance": None if nearest_numeric is None else nearest_numeric.get("distance_to_pass"),
+        "passed_required_predicate_count": passed_conditions,
+        "failed_required_predicate_count": len(failed_conditions),
         "input_event_path": input_event_path,
         "input_event_sha256": _sha256_file(input_event_path),
         "strategy_report_sha256": _sha256_file(strategy_report.get("report_json_path")),
@@ -256,7 +283,19 @@ def _nearest_failed_predicate(
     strategy_id: str,
     failed_conditions: list[str],
     input_event: Mapping[str, Any],
+    predicate_attributions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
+    nearest_numeric = _nearest_failed_numeric_predicate(predicate_attributions or [])
+    if nearest_numeric is not None:
+        return {
+            "predicate": nearest_numeric.get("predicate_name"),
+            "category": nearest_numeric.get("category"),
+            "actual": nearest_numeric.get("actual_value"),
+            "required": nearest_numeric.get("required_value"),
+            "comparator": nearest_numeric.get("comparator"),
+            "distance_to_pass": nearest_numeric.get("distance_to_pass"),
+            "normalized_distance_to_pass": nearest_numeric.get("normalized_distance_to_pass"),
+        }
     if strategy_id not in {"FIRST_BULL_SNAP_TURN_V1", "FIRST_BEAR_SNAP_TURN_V1"}:
         return {"predicate": failed_conditions[0]} if failed_conditions else None
     metadata = input_event.get("metadata") if isinstance(input_event.get("metadata"), Mapping) else {}
@@ -283,6 +322,283 @@ def _nearest_failed_predicate(
             "distance_to_pass": str(distance),
         }
     return {"predicate": failed_conditions[0]} if failed_conditions else None
+
+
+def _snap_turn_predicate_attributions(
+    *,
+    strategy_id: str,
+    conditions: Mapping[str, Any],
+    input_event: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if strategy_id not in {"FIRST_BULL_SNAP_TURN_V1", "FIRST_BEAR_SNAP_TURN_V1"}:
+        return []
+    metadata = input_event.get("metadata") if isinstance(input_event.get("metadata"), Mapping) else {}
+    diagnostics = metadata.get("feature_diagnostics") if isinstance(metadata.get("feature_diagnostics"), Mapping) else {}
+    close = _decimal_or_none(input_event.get("close"))
+    atr = _decimal_or_none(diagnostics.get("atr"))
+    close_location = _decimal_or_none(diagnostics.get("close_location"))
+    if strategy_id == "FIRST_BULL_SNAP_TURN_V1":
+        features = (
+            metadata.get("first_bull_snap_turn_features")
+            if isinstance(metadata.get("first_bull_snap_turn_features"), Mapping)
+            else {}
+        )
+        state = (
+            metadata.get("first_bull_snap_turn_state")
+            if isinstance(metadata.get("first_bull_snap_turn_state"), Mapping)
+            else {}
+        )
+        return _compact_attributions(
+            [
+                _numeric_attribution(
+                    conditions,
+                    "bull_snap_downside_stretch_ok",
+                    "stretch",
+                    diagnostics.get("downside_stretch"),
+                    _threshold_times_atr(features.get("bull_snap_min_downside_stretch_atr"), atr, MIN_SNAP_DOWN_STRETCH_ATR),
+                    "gte",
+                    "high",
+                ),
+                _numeric_attribution(
+                    conditions,
+                    "bull_snap_range_ok",
+                    "range",
+                    diagnostics.get("bar_range"),
+                    _threshold_times_atr(features.get("bull_snap_range_threshold_atr"), atr, MIN_SNAP_BAR_RANGE_ATR),
+                    "gte",
+                    "medium",
+                ),
+                _numeric_attribution(
+                    conditions,
+                    "bull_snap_body_ok",
+                    "body",
+                    diagnostics.get("body_size"),
+                    _threshold_times_atr(features.get("bull_snap_body_threshold_atr"), atr, MIN_SNAP_BODY_ATR),
+                    "gte",
+                    "medium",
+                ),
+                _numeric_attribution(
+                    conditions,
+                    "bull_snap_close_strong",
+                    "close",
+                    close_location,
+                    MIN_SNAP_CLOSE_LOCATION,
+                    "gte",
+                    "high",
+                ),
+                _numeric_attribution(
+                    conditions,
+                    "bull_snap_velocity_ok",
+                    "velocity",
+                    diagnostics.get("velocity_delta"),
+                    _threshold_times_atr(features.get("bull_snap_velocity_threshold_atr"), atr, MIN_SNAP_VELOCITY_DELTA_ATR),
+                    "gte",
+                    "high",
+                ),
+                _numeric_attribution(
+                    conditions,
+                    "bull_snap_location_ok",
+                    "location",
+                    close,
+                    _bull_location_required(diagnostics),
+                    "lte",
+                    "medium",
+                ),
+                _numeric_attribution(
+                    conditions,
+                    "prior_bars_since_bull_snap_gt_cooldown",
+                    "cooldown",
+                    state.get("prior_bars_since_bull_snap"),
+                    SNAP_COOLDOWN_BARS,
+                    "gt",
+                    "medium",
+                ),
+                _categorical_attribution(conditions, "session_allowed", "session", state.get("session_allowed"), True, "high"),
+            ]
+        )
+    features = (
+        metadata.get("first_bear_snap_turn_features")
+        if isinstance(metadata.get("first_bear_snap_turn_features"), Mapping)
+        else {}
+    )
+    state = (
+        metadata.get("first_bear_snap_turn_state")
+        if isinstance(metadata.get("first_bear_snap_turn_state"), Mapping)
+        else {}
+    )
+    return _compact_attributions(
+        [
+            _numeric_attribution(
+                conditions,
+                "bear_snap_up_stretch_ok",
+                "stretch",
+                diagnostics.get("upside_stretch"),
+                _threshold_times_atr(features.get("bear_snap_min_upside_stretch_atr"), atr, MIN_BEAR_SNAP_UP_STRETCH_ATR),
+                "gte",
+                "high",
+            ),
+            _numeric_attribution(
+                conditions,
+                "bear_snap_range_ok",
+                "range",
+                diagnostics.get("bar_range"),
+                _threshold_times_atr(features.get("bear_snap_range_threshold_atr"), atr, MIN_BEAR_SNAP_BAR_RANGE_ATR),
+                "gte",
+                "medium",
+            ),
+            _numeric_attribution(
+                conditions,
+                "bear_snap_body_ok",
+                "body",
+                diagnostics.get("body_size"),
+                _threshold_times_atr(features.get("bear_snap_body_threshold_atr"), atr, MIN_BEAR_SNAP_BODY_ATR),
+                "gte",
+                "medium",
+            ),
+            _numeric_attribution(
+                conditions,
+                "bear_snap_close_weak",
+                "close",
+                close_location,
+                MAX_BEAR_SNAP_CLOSE_LOCATION,
+                "lte",
+                "high",
+            ),
+            _numeric_attribution(
+                conditions,
+                "bear_snap_velocity_ok",
+                "velocity",
+                diagnostics.get("velocity_delta"),
+                -_threshold_times_atr(
+                    features.get("bear_snap_velocity_threshold_atr"),
+                    atr,
+                    MIN_BEAR_SNAP_VELOCITY_DELTA_ATR,
+                )
+                if atr is not None
+                else None,
+                "lte",
+                "high",
+            ),
+            _numeric_attribution(
+                conditions,
+                "bear_snap_location_ok",
+                "location",
+                close,
+                _bear_location_required(diagnostics),
+                "gte",
+                "medium",
+            ),
+            _numeric_attribution(
+                conditions,
+                "prior_bars_since_bear_snap_gt_cooldown",
+                "cooldown",
+                state.get("prior_bars_since_bear_snap"),
+                BEAR_SNAP_COOLDOWN_BARS,
+                "gt",
+                "medium",
+            ),
+            _categorical_attribution(conditions, "session_allowed", "session", state.get("session_allowed"), True, "high"),
+        ]
+    )
+
+
+def _compact_attributions(items: list[dict[str, Any] | None]) -> list[dict[str, Any]]:
+    return [item for item in items if item is not None]
+
+
+def _numeric_attribution(
+    conditions: Mapping[str, Any],
+    predicate_name: str,
+    category: str,
+    actual_value: object,
+    required_value: object,
+    comparator: str,
+    importance: str,
+) -> dict[str, Any] | None:
+    actual = _decimal_or_none(actual_value)
+    required = _decimal_or_none(required_value)
+    if actual is None or required is None:
+        return None
+    if comparator == "gte":
+        distance = max(Decimal("0"), required - actual)
+    elif comparator == "lte":
+        distance = max(Decimal("0"), actual - required)
+    elif comparator == "gt":
+        distance = Decimal("0") if actual > required else required - actual + Decimal("1")
+    else:
+        return None
+    normalized = Decimal("0") if distance == 0 else distance / max(abs(required), Decimal("1"))
+    return {
+        "predicate_name": predicate_name,
+        "category": category,
+        "passed": conditions.get(predicate_name) is True,
+        "actual_value": str(actual),
+        "required_value": str(required),
+        "comparator": comparator,
+        "distance_to_pass": str(distance),
+        "normalized_distance_to_pass": str(normalized),
+        "importance": importance,
+    }
+
+
+def _categorical_attribution(
+    conditions: Mapping[str, Any],
+    predicate_name: str,
+    category: str,
+    actual_value: object,
+    required_value: object,
+    importance: str,
+) -> dict[str, Any]:
+    return {
+        "predicate_name": predicate_name,
+        "category": category,
+        "passed": conditions.get(predicate_name) is True,
+        "actual_value": actual_value,
+        "required_value": required_value,
+        "comparator": "equals",
+        "distance_to_pass": None,
+        "normalized_distance_to_pass": None,
+        "importance": importance,
+    }
+
+
+def _threshold_times_atr(value: object, atr: Decimal | None, default: Decimal) -> Decimal | None:
+    if atr is None:
+        return None
+    return (_decimal_or_none(value) or default) * atr
+
+
+def _bull_location_required(diagnostics: Mapping[str, Any]) -> Decimal | None:
+    slow = _decimal_or_none(diagnostics.get("turn_ema_slow"))
+    atr = _decimal_or_none(diagnostics.get("atr"))
+    if slow is None:
+        return None
+    if BULL_SNAP_REQUIRE_CLOSE_BELOW_SLOW_EMA:
+        return slow
+    return slow + BULL_SNAP_MAX_CLOSE_VS_SLOW_EMA_ATR * atr if atr is not None else slow
+
+
+def _bear_location_required(diagnostics: Mapping[str, Any]) -> Decimal | None:
+    slow = _decimal_or_none(diagnostics.get("turn_ema_slow"))
+    atr = _decimal_or_none(diagnostics.get("atr"))
+    if slow is None:
+        return None
+    if BEAR_SNAP_REQUIRE_CLOSE_ABOVE_SLOW_EMA:
+        return slow + BEAR_SNAP_MIN_CLOSE_VS_SLOW_EMA_ATR * atr if atr is not None else slow
+    if BEAR_SNAP_MIN_CLOSE_VS_SLOW_EMA_ATR > 0 and atr is not None:
+        return slow - BEAR_SNAP_MIN_CLOSE_VS_SLOW_EMA_ATR * atr
+    return slow
+
+
+def _nearest_failed_numeric_predicate(predicate_attributions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    failed_numeric = [
+        item
+        for item in predicate_attributions
+        if item.get("passed") is False and item.get("distance_to_pass") is not None
+    ]
+    if not failed_numeric:
+        return None
+    return min(failed_numeric, key=lambda item: _decimal_or_none(item.get("distance_to_pass")) or Decimal("Infinity"))
 
 
 def _classify_strategy_detail(
@@ -351,6 +667,20 @@ def _is_near_miss(detail: Mapping[str, Any], config: TrackBDecisionJournalConfig
     return distance is not None and distance <= config.near_miss_distance_threshold
 
 
+def _strategy_decision_summary(detail: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "strategy_id": detail.get("strategy_id"),
+        "strategy_runtime_verdict": detail.get("strategy_runtime_verdict"),
+        "tier_selected": detail.get("journal_tier"),
+        "passed_required_predicate_count": detail.get("passed_required_predicate_count") or detail.get("passed_predicates"),
+        "failed_required_predicate_count": detail.get("failed_required_predicate_count"),
+        "near_miss_score": detail.get("near_miss_score"),
+        "nearest_failed_numeric_predicate": detail.get("nearest_failed_numeric_predicate"),
+        "nearest_failed_numeric_distance": detail.get("nearest_failed_numeric_distance"),
+        "latest_evaluated_bar_timestamp": detail.get("latest_evaluated_bar_timestamp"),
+    }
+
+
 def _update_no_setup_aggregate(
     aggregates: dict[str, Any],
     detail: Mapping[str, Any],
@@ -370,6 +700,12 @@ def _update_no_setup_aggregate(
         "count": count,
         "top_coarse_blocker": detail.get("primary_blocker") or "conditions_not_met",
         "max_near_miss_score": max_score,
+        "latest_near_miss_score": detail.get("near_miss_score"),
+        "passed_required_predicate_count": detail.get("passed_required_predicate_count") or detail.get("passed_predicates"),
+        "failed_required_predicate_count": detail.get("failed_required_predicate_count"),
+        "nearest_failed_numeric_predicate": detail.get("nearest_failed_numeric_predicate"),
+        "nearest_failed_numeric_distance": detail.get("nearest_failed_numeric_distance"),
+        "tier_selected": detail.get("journal_tier"),
         "latest_evaluated_bar": detail.get("latest_evaluated_bar_timestamp"),
         "latest_strategy_report_json": detail.get("strategy_report_json"),
     }
@@ -404,6 +740,9 @@ def _full_record(
         "total_predicates": detail.get("total_predicates"),
         "failed_predicates": detail.get("failed_predicates"),
         "nearest_failed_predicate": detail.get("nearest_failed_predicate"),
+        "nearest_failed_numeric_predicate": detail.get("nearest_failed_numeric_predicate"),
+        "nearest_failed_numeric_distance": detail.get("nearest_failed_numeric_distance"),
+        "predicate_attributions": detail.get("predicate_attributions"),
         "rule_blockers": detail.get("rule_blockers"),
         "primary_blocker": detail.get("primary_blocker"),
         "strategy_report_json": detail.get("strategy_report_json"),

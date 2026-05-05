@@ -116,6 +116,56 @@ def strategy_summary(
     }
 
 
+def snap_turn_input_event(strategy_id: str, *, close_location: str = "0.1915", bar_range: str = "4.7") -> dict[str, object]:
+    feature_diagnostics = {
+        "atr": "4.5",
+        "bar_range": bar_range,
+        "body_size": "2.3",
+        "close_location": close_location,
+        "downside_stretch": "10.8",
+        "upside_stretch": "4.4",
+        "velocity_delta": "0.83",
+        "turn_ema_slow": "4557.8",
+    }
+    if strategy_id == "FIRST_BULL_SNAP_TURN_V1":
+        return {
+            "close": "4557.0",
+            "candle_timestamp": aware_now().isoformat(),
+            "metadata": {
+                "feature_diagnostics": feature_diagnostics,
+                "first_bull_snap_turn_state": {
+                    "session_allowed": True,
+                    "prior_bars_since_bull_snap": 1000,
+                    "prior_bars_since_bull_snap_gt_cooldown": True,
+                },
+                "first_bull_snap_turn_features": {
+                    "bull_snap_min_downside_stretch_atr": "1.20",
+                    "bull_snap_range_threshold_atr": "1.00",
+                    "bull_snap_body_threshold_atr": "0.45",
+                    "bull_snap_velocity_threshold_atr": "0.18",
+                },
+            },
+        }
+    return {
+        "close": "4558.8",
+        "candle_timestamp": aware_now().isoformat(),
+        "metadata": {
+            "feature_diagnostics": feature_diagnostics,
+            "first_bear_snap_turn_state": {
+                "session_allowed": True,
+                "prior_bars_since_bear_snap": 1000,
+                "prior_bars_since_bear_snap_gt_cooldown": True,
+            },
+            "first_bear_snap_turn_features": {
+                "bear_snap_min_upside_stretch_atr": "1.00",
+                "bear_snap_range_threshold_atr": "0.90",
+                "bear_snap_body_threshold_atr": "0.40",
+                "bear_snap_velocity_threshold_atr": "0.16",
+            },
+        },
+    }
+
+
 def journal_config(**overrides: object) -> TrackBDecisionJournalConfig:
     payload = {
         "near_miss_score_threshold": Decimal("0.80"),
@@ -216,6 +266,154 @@ def test_near_miss_writes_full_compact_record(tmp_path: Path) -> None:
     assert records[0]["journal_tier"] == "TIER_2_NEAR_MISS"
     assert records[0]["nearest_failed_predicate"]["predicate"] == "bull_snap_close_strong"
     assert records[0]["nearest_failed_predicate"]["distance_to_pass"] == "0.02"
+
+
+def test_bull_snap_far_miss_remains_tier1_with_nearest_numeric_summary(tmp_path: Path) -> None:
+    conditions = {
+        "session_allowed": True,
+        "prior_bars_since_bull_snap_gt_cooldown": True,
+        "bull_snap_downside_stretch_ok": True,
+        "bull_snap_range_ok": True,
+        "bull_snap_body_ok": True,
+        "bull_snap_close_strong": False,
+        "bull_snap_velocity_ok": True,
+        "bull_snap_reversal_bar": False,
+        "bull_snap_location_ok": True,
+        "bull_snap_raw": False,
+        "bull_snap_turn_candidate": False,
+        "first_bull_snap_turn": False,
+    }
+    report_path = strategy_report(
+        tmp_path,
+        "FIRST_BULL_SNAP_TURN_V1",
+        conditions=conditions,
+        input_event=snap_turn_input_event("FIRST_BULL_SNAP_TURN_V1", close_location="0.1915"),
+    )
+    report, runtime_path = runtime_report(
+        tmp_path,
+        strategies=[strategy_summary("FIRST_BULL_SNAP_TURN_V1", report_path)],
+    )
+
+    result = record_track_b_decision_journal_cycle(
+        runtime_cycle_report=report,
+        runtime_cycle_report_json=runtime_path,
+        output_root=tmp_path / "journal",
+        config=journal_config(),
+        now=aware_now(),
+    )
+
+    assert read_jsonl(result.active_journal_jsonl) == []
+    aggregate = next(iter(json.loads(result.aggregate_json.read_text(encoding="utf-8")).values()))
+    assert aggregate["tier_selected"] == "TIER_1_NO_SETUP_AGGREGATE"
+    assert aggregate["passed_required_predicate_count"] == 7
+    assert aggregate["failed_required_predicate_count"] == 5
+    assert aggregate["nearest_failed_numeric_predicate"]["predicate_name"] == "bull_snap_close_strong"
+    assert aggregate["nearest_failed_numeric_predicate"]["actual_value"] == "0.1915"
+    assert aggregate["nearest_failed_numeric_predicate"]["required_value"] == "0.72"
+    assert aggregate["nearest_failed_numeric_predicate"]["distance_to_pass"] == "0.5285"
+    summary = result.summary["strategy_decision_summaries"][0]
+    assert summary["tier_selected"] == "TIER_1_NO_SETUP_AGGREGATE"
+    assert summary["nearest_failed_numeric_distance"] == "0.5285"
+
+
+def test_bear_snap_far_miss_remains_tier1_with_nearest_numeric_summary(tmp_path: Path) -> None:
+    conditions = {
+        "session_allowed": True,
+        "prior_bars_since_bear_snap_gt_cooldown": True,
+        "bear_snap_up_stretch_ok": False,
+        "bear_snap_range_ok": True,
+        "bear_snap_body_ok": True,
+        "bear_snap_close_weak": True,
+        "bear_snap_velocity_ok": False,
+        "bear_snap_reversal_bar": True,
+        "bear_snap_location_ok": False,
+        "bear_snap_raw": False,
+        "bear_snap_turn_candidate": False,
+        "first_bear_snap_turn": False,
+    }
+    report_path = strategy_report(
+        tmp_path,
+        "FIRST_BEAR_SNAP_TURN_V1",
+        conditions=conditions,
+        input_event=snap_turn_input_event("FIRST_BEAR_SNAP_TURN_V1"),
+    )
+    report, runtime_path = runtime_report(
+        tmp_path,
+        strategies=[strategy_summary("FIRST_BEAR_SNAP_TURN_V1", report_path)],
+    )
+
+    result = record_track_b_decision_journal_cycle(
+        runtime_cycle_report=report,
+        runtime_cycle_report_json=runtime_path,
+        output_root=tmp_path / "journal",
+        config=journal_config(),
+        now=aware_now(),
+    )
+
+    assert read_jsonl(result.active_journal_jsonl) == []
+    aggregate = next(iter(json.loads(result.aggregate_json.read_text(encoding="utf-8")).values()))
+    assert aggregate["tier_selected"] == "TIER_1_NO_SETUP_AGGREGATE"
+    assert aggregate["passed_required_predicate_count"] == 6
+    assert aggregate["failed_required_predicate_count"] == 6
+    assert aggregate["nearest_failed_numeric_predicate"]["predicate_name"] == "bear_snap_up_stretch_ok"
+    assert aggregate["nearest_failed_numeric_predicate"]["actual_value"] == "4.4"
+    assert aggregate["nearest_failed_numeric_predicate"]["required_value"] == "4.500"
+    assert aggregate["nearest_failed_numeric_predicate"]["distance_to_pass"] == "0.100"
+
+
+def test_non_close_numeric_near_miss_writes_tier2(tmp_path: Path) -> None:
+    conditions = {
+        "session_allowed": True,
+        "prior_bars_since_bull_snap_gt_cooldown": True,
+        "bull_snap_downside_stretch_ok": True,
+        "bull_snap_range_ok": False,
+        "bull_snap_body_ok": True,
+        "bull_snap_close_strong": True,
+        "bull_snap_velocity_ok": True,
+        "bull_snap_reversal_bar": False,
+        "bull_snap_location_ok": True,
+        "bull_snap_raw": False,
+        "bull_snap_turn_candidate": False,
+        "first_bull_snap_turn": False,
+    }
+    report_path = strategy_report(
+        tmp_path,
+        "FIRST_BULL_SNAP_TURN_V1",
+        conditions=conditions,
+        input_event=snap_turn_input_event("FIRST_BULL_SNAP_TURN_V1", close_location="0.75", bar_range="4.47"),
+    )
+    report, runtime_path = runtime_report(
+        tmp_path,
+        strategies=[strategy_summary("FIRST_BULL_SNAP_TURN_V1", report_path)],
+    )
+
+    result = record_track_b_decision_journal_cycle(
+        runtime_cycle_report=report,
+        runtime_cycle_report_json=runtime_path,
+        output_root=tmp_path / "journal",
+        config=journal_config(),
+        now=aware_now(),
+    )
+
+    records = read_jsonl(result.active_journal_jsonl)
+    assert records[0]["journal_tier"] == "TIER_2_NEAR_MISS"
+    nearest = records[0]["nearest_failed_numeric_predicate"]
+    assert nearest["predicate_name"] == "bull_snap_range_ok"
+    assert nearest["category"] == "range"
+    assert nearest["actual_value"] == "4.47"
+    assert nearest["required_value"] == "4.500"
+    assert nearest["distance_to_pass"] == "0.030"
+    predicates = {item["predicate_name"]: item for item in records[0]["predicate_attributions"]}
+    for name in (
+        "bull_snap_downside_stretch_ok",
+        "bull_snap_range_ok",
+        "bull_snap_body_ok",
+        "bull_snap_close_strong",
+        "bull_snap_velocity_ok",
+    ):
+        assert predicates[name]["actual_value"] is not None
+        assert predicates[name]["required_value"] is not None
+        assert predicates[name]["distance_to_pass"] is not None
 
 
 def test_signal_writes_full_decision_record(tmp_path: Path) -> None:
