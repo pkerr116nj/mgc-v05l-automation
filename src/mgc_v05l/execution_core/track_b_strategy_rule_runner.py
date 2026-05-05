@@ -37,6 +37,7 @@ MGC_CONTRACT_KEY = "MGC-202606"
 MGC_INSTRUMENT_FAMILY = "MGC"
 DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID = "mgc_ema_momentum_reclaim_long_v1"
 DEFAULT_ASIAN_DRIFT_RULE_ID = "asian_drift_v1"
+DEFAULT_ASIA_EARLY_PAUSE_RESUME_SHORT_RULE_ID = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
 
 
 class TrackBStrategyRuleRunnerVerdict(str, Enum):
@@ -53,6 +54,7 @@ class TrackBStrategyRuleMode(str, Enum):
     DEMO_LONG_ONLY = "DEMO_LONG_ONLY"
     MGC_EMA_MOMENTUM_RECLAIM_LONG = "MGC_EMA_MOMENTUM_RECLAIM_LONG"
     ASIAN_DRIFT_V1 = "ASIAN_DRIFT_V1"
+    ASIA_EARLY_PAUSE_RESUME_SHORT_V1 = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     HUMAN_REVIEW_ONLY = "HUMAN_REVIEW_ONLY"
 
 
@@ -392,6 +394,8 @@ def _validate_input(
         return "Input current_quote_available is not true."
     if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
         return _validate_asian_drift_snapshot(event)
+    if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
+        return _validate_asia_early_pause_resume_short_snapshot(event)
     return None
 
 
@@ -412,6 +416,22 @@ def _validate_asian_drift_snapshot(event: Mapping[str, Any]) -> str | None:
         return "Asian Drift v1 requires explicit research state/feature snapshot fields: " + ", ".join(missing)
     if required["timeframe"] != "5m":
         return "Asian Drift v1 Track B watch requires completed 5m decision-bar state."
+    return None
+
+
+def _validate_asia_early_pause_resume_short_snapshot(event: Mapping[str, Any]) -> str | None:
+    metadata = event.get("metadata") if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = metadata.get("asia_early_pause_resume_short_state")
+    features = metadata.get("asia_early_pause_resume_short_features")
+    if not isinstance(state, Mapping) or not isinstance(features, Mapping):
+        return "Asia Early pause-resume short v1 requires explicit state and feature envelopes."
+    timeframe = _optional_text(event.get("timeframe") or state.get("timeframe") or metadata.get("timeframe"))
+    if timeframe != "5m":
+        return "Asia Early pause-resume short v1 Track B watch requires completed 5m decision-bar state."
+    if _optional_text(features.get("feature_version")) != "asia_early_pause_resume_short_v1_phase1":
+        return "Asia Early pause-resume short v1 requires feature_version=asia_early_pause_resume_short_v1_phase1."
+    if _optional_text(features.get("calibration_profile")) != "probationary_baseline_v1":
+        return "Asia Early pause-resume short v1 requires calibration_profile=probationary_baseline_v1."
     return None
 
 
@@ -436,6 +456,8 @@ def _evaluate_rule_decision(
         return _evaluate_mgc_ema_momentum_reclaim_long(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
         return _evaluate_asian_drift_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
+    if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
+        return _evaluate_asia_early_pause_resume_short_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     raise ValueError(f"Unsupported rule mode: {rule_mode.value}")
 
 
@@ -581,6 +603,91 @@ def _evaluate_mgc_ema_momentum_reclaim_long(
     }
 
 
+def _evaluate_asia_early_pause_resume_short_v1(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+) -> dict[str, Any]:
+    metadata = dict(event.get("metadata") or {}) if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = metadata.get("asia_early_pause_resume_short_state") if isinstance(metadata.get("asia_early_pause_resume_short_state") or {}, Mapping) else {}
+    features = metadata.get("asia_early_pause_resume_short_features") if isinstance(metadata.get("asia_early_pause_resume_short_features") or {}, Mapping) else {}
+
+    normalized_curvature = _decimal_field(features, "normalized_curvature")
+    max_normalized_curvature = _decimal_field(features, "max_normalized_curvature") or Decimal("-0.15")
+    signal_range_expansion_ratio = _decimal_field(features, "signal_range_expansion_ratio")
+    max_range_expansion_ratio = _decimal_field(features, "max_range_expansion_ratio") or Decimal("1.25")
+    close = _decimal_field(event, features, "close")
+    open_price = _decimal_field(event, features, "open")
+    previous_close = _decimal_field(features, "previous_close", "prior_close")
+
+    conditions: dict[str, bool | None] = {
+        "rule_is_watch_only": True,
+        "allow_asia": _bool_field(state, "allow_asia") is True,
+        "session_asia": _bool_field(state, "session_asia") is True,
+        "derivative_phase_asia_early": _optional_text(state.get("derivative_phase")) == "ASIA_EARLY",
+        "close_below_open": close < open_price if close is not None and open_price is not None else None,
+        "close_below_previous_close": close < previous_close if close is not None and previous_close is not None else None,
+        "derivative_bear_close_weak": _bool_field(features, "derivative_bear_close_weak") is True,
+        "derivative_bear_range_ok": _bool_field(features, "derivative_bear_range_ok") is True,
+        "derivative_bear_body_ok": _bool_field(features, "derivative_bear_body_ok") is True,
+        "derivative_bear_stretch_ok": _bool_field(features, "derivative_bear_stretch_ok") is True,
+        "normalized_curvature_at_or_below_threshold": (
+            normalized_curvature <= max_normalized_curvature
+            if normalized_curvature is not None and max_normalized_curvature is not None
+            else None
+        ),
+        "setup_bar_curvature_is_flat": _bool_field(features, "setup_bar_curvature_is_flat") is True,
+        "signal_range_expansion_below_threshold": (
+            signal_range_expansion_ratio < max_range_expansion_ratio
+            if signal_range_expansion_ratio is not None and max_range_expansion_ratio is not None
+            else None
+        ),
+        "one_bar_rebound_before_signal": _bool_field(features, "one_bar_rebound_before_signal") is True,
+        "signal_breaks_prior_1_low": _bool_field(features, "signal_breaks_prior_1_low") is True,
+        "close_below_fast_ema": _bool_field(features, "close_below_fast_ema") is True,
+        "derivative_bear_cooldown_ok": _bool_field(features, "derivative_bear_cooldown_ok") is True,
+        "no_competing_bear_short_candidate": _bool_field(features, "no_competing_bear_short_candidate") is True,
+    }
+    failed = [name for name, passed in conditions.items() if passed is not True]
+    blockers = [f"{name}=false_or_missing" for name in failed]
+    if failed:
+        decision = TrackBStrategyRuleDecision.NO_SIGNAL
+        decision_reason = "Asia Early pause-resume short v1 conditions did not pass: " + ", ".join(failed)
+    else:
+        decision = TrackBStrategyRuleDecision.SHORT
+        decision_reason = "Asia Early pause-resume short v1 explicit feature/state snapshot is entry-ready for SHORT."
+    return {
+        "rule_name": "asia_early_pause_resume_short_v1",
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "rule_inputs": {
+            "strategy_id": event.get("strategy_id"),
+            "derivative_phase": state.get("derivative_phase"),
+            "session_asia": state.get("session_asia"),
+            "allow_asia": state.get("allow_asia"),
+            "close": None if close is None else str(close),
+            "open": None if open_price is None else str(open_price),
+            "previous_close": None if previous_close is None else str(previous_close),
+            "normalized_curvature": None if normalized_curvature is None else str(normalized_curvature),
+            "max_normalized_curvature": str(max_normalized_curvature),
+            "signal_range_expansion_ratio": None if signal_range_expansion_ratio is None else str(signal_range_expansion_ratio),
+            "max_range_expansion_ratio": str(max_range_expansion_ratio),
+            "feature_version": features.get("feature_version"),
+            "calibration_profile": features.get("calibration_profile"),
+            "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
+        },
+        "rule_conditions": conditions,
+        "rule_blockers": blockers,
+        "research_lineage": (
+            "Mirrors the explicit asiaEarlyPauseResumeShortTurn predicates in "
+            "src/mgc_v05l/signals/bear_snap.py and config/replay.asia_early_pause_resume_short_pattern_v1.yaml. "
+            "Track B consumes a precomputed state/feature envelope and does not infer these fields from raw candles."
+        ),
+        "rule_id": rule_id,
+    }
+
+
 def _strategy_event_for_adapter(
     *,
     event: Mapping[str, Any],
@@ -671,6 +778,12 @@ def _write_report(
         "signal_source": _signal_source(rule_mode),
         "real_strategy_signal": _real_strategy_signal(rule_mode),
         "asian_drift_watch_verdict": _asian_drift_watch_verdict(rule_mode, verdict, signal_emitted, primary_blocker),
+        "asia_early_pause_resume_short_watch_verdict": _asia_early_pause_resume_short_watch_verdict(
+            rule_mode,
+            verdict,
+            signal_emitted,
+            primary_blocker,
+        ),
         "rule_inputs": rule_evaluation.get("rule_inputs") or {},
         "rule_conditions": rule_evaluation.get("rule_conditions") or {},
         "rule_blockers": rule_blockers,
@@ -788,11 +901,17 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
         return "HUMAN_REVIEW_ONLY"
     if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
         return "ASIAN_DRIFT_V1"
+    if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
+        return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     return "REAL_STRATEGY_RULE"
 
 
 def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
-    return rule_mode in {TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG, TrackBStrategyRuleMode.ASIAN_DRIFT_V1}
+    return rule_mode in {
+        TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG,
+        TrackBStrategyRuleMode.ASIAN_DRIFT_V1,
+        TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1,
+    }
 
 
 def _asian_drift_watch_verdict(
@@ -813,6 +932,26 @@ def _asian_drift_watch_verdict(
     if signal_emitted:
         return "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT"
     return "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
+
+
+def _asia_early_pause_resume_short_watch_verdict(
+    rule_mode: TrackBStrategyRuleMode,
+    verdict: TrackBStrategyRuleRunnerVerdict,
+    signal_emitted: bool,
+    primary_blocker: str | None,
+) -> str | None:
+    if rule_mode != TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
+        return None
+    if primary_blocker or verdict in {
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_NON_REALTIME_INPUT,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_SCHEMA_ERROR,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_DOWNSTREAM_REJECTED,
+    }:
+        return "ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY"
+    if signal_emitted:
+        return "ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
+    return "ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION"
 
 
 def _rule_mode(value: str | TrackBStrategyRuleMode) -> TrackBStrategyRuleMode:

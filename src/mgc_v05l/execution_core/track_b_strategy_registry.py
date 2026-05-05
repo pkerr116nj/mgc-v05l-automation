@@ -92,6 +92,41 @@ ASIAN_DRIFT_V1 = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("asian_drift_v1",),
 )
 
+ASIA_EARLY_PAUSE_RESUME_SHORT_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+    rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+    rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.asia_early_pause_resume_short_features.normalized_curvature",
+        "metadata.asia_early_pause_resume_short_features.signal_range_expansion_ratio",
+        "metadata.asia_early_pause_resume_short_features.setup_bar_curvature_is_flat",
+        "metadata.asia_early_pause_resume_short_features.one_bar_rebound_before_signal",
+        "metadata.asia_early_pause_resume_short_features.signal_breaks_prior_1_low",
+        "metadata.asia_early_pause_resume_short_features.close_below_fast_ema",
+        "metadata.asia_early_pause_resume_short_features.derivative_bear_close_weak",
+        "metadata.asia_early_pause_resume_short_features.derivative_bear_range_ok",
+        "metadata.asia_early_pause_resume_short_features.derivative_bear_body_ok",
+        "metadata.asia_early_pause_resume_short_features.derivative_bear_stretch_ok",
+        "metadata.asia_early_pause_resume_short_features.derivative_bear_cooldown_ok",
+        "metadata.asia_early_pause_resume_short_features.no_competing_bear_short_candidate",
+        "metadata.asia_early_pause_resume_short_features.feature_version",
+        "metadata.asia_early_pause_resume_short_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.asia_early_pause_resume_short_state.derivative_phase",
+        "metadata.asia_early_pause_resume_short_state.session_asia",
+        "metadata.asia_early_pause_resume_short_state.allow_asia",
+    ),
+    feature_version="asia_early_pause_resume_short_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=False,
+    live_money_eligible=False,
+    accepted_strategy_ids=("ASIA_EARLY_PAUSE_RESUME_SHORT_V1",),
+    accepted_rule_ids=("ASIA_EARLY_PAUSE_RESUME_SHORT_V1",),
+)
+
 DEMO_WIRING_PROOF = TrackBStrategyRegistryEntry(
     strategy_id="track_b_demo_wiring_proof",
     rule_id="mgc_realtime_quote_demo_long_v1",
@@ -127,6 +162,7 @@ HUMAN_REVIEW_ONLY = TrackBStrategyRegistryEntry(
 TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     MGC_EMA_MOMENTUM_RECLAIM_LONG,
     ASIAN_DRIFT_V1,
+    ASIA_EARLY_PAUSE_RESUME_SHORT_V1,
     DEMO_WIRING_PROOF,
     HUMAN_REVIEW_ONLY,
 )

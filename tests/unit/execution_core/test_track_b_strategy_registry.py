@@ -5,6 +5,7 @@ from mgc_v05l.execution_core.track_b_strategy_registry import (
     TrackBStrategyRegistryVerdict,
     arbitrate_track_b_strategy_candidates,
     get_track_b_strategy_registry,
+    resolve_track_b_strategy_registry_entry,
     validate_strategy_event_against_registry,
     validate_track_b_strategy_registry,
 )
@@ -51,6 +52,32 @@ def test_unregistered_strategy_is_rejected() -> None:
     assert entry is None
     assert blocker is not None
     assert "not registered" in blocker
+
+
+def test_unregistered_rule_mode_is_rejected() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_V1",
+        rule_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_V1",
+        strategy_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_V1",
+    )
+
+    assert entry is None
+
+
+def test_asia_early_pause_resume_short_registry_metadata_is_valid() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is False
+    assert entry.live_money_eligible is False
+    assert "metadata.asia_early_pause_resume_short_features.normalized_curvature" in entry.required_feature_schema
+    assert "metadata.asia_early_pause_resume_short_state.derivative_phase" in entry.required_state_schema
 
 
 def test_missing_required_state_fields_are_not_ready() -> None:

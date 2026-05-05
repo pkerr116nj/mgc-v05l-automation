@@ -118,6 +118,50 @@ def asian_drift_event(tmp_path: Path, **overrides: object) -> dict[str, object]:
     return event
 
 
+def asia_early_pause_resume_short_event(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    event = realtime_event(
+        tmp_path,
+        strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        lane_id="mgc_asia_early_pause_resume_short",
+        timeframe="5m",
+        open="4576.0",
+        high="4576.4",
+        low="4574.7",
+        close="4575.0",
+    )
+    metadata = dict(event["metadata"])
+    metadata["asia_early_pause_resume_short_state"] = {
+        "derivative_phase": "ASIA_EARLY",
+        "session_asia": True,
+        "allow_asia": True,
+        "timeframe": "5m",
+    }
+    metadata["asia_early_pause_resume_short_features"] = {
+        "feature_version": "asia_early_pause_resume_short_v1_phase1",
+        "calibration_profile": "probationary_baseline_v1",
+        "normalized_curvature": "-0.20",
+        "max_normalized_curvature": "-0.15",
+        "signal_range_expansion_ratio": "1.05",
+        "max_range_expansion_ratio": "1.25",
+        "setup_bar_curvature_is_flat": True,
+        "one_bar_rebound_before_signal": True,
+        "signal_breaks_prior_1_low": True,
+        "close_below_fast_ema": True,
+        "derivative_bear_close_weak": True,
+        "derivative_bear_range_ok": True,
+        "derivative_bear_body_ok": True,
+        "derivative_bear_stretch_ok": True,
+        "derivative_bear_cooldown_ok": True,
+        "no_competing_bear_short_candidate": True,
+        "previous_close": "4575.8",
+        "open": "4576.0",
+        "close": "4575.0",
+    }
+    event["metadata"] = metadata
+    event.update(overrides)
+    return event
+
+
 def test_valid_realtime_quote_demo_long_emit_writes_no_submit_signal_batch(tmp_path: Path) -> None:
     result = run_track_b_strategy_rule(
         input_event_payload=realtime_event(tmp_path),
@@ -398,6 +442,115 @@ def test_asian_drift_v1_missing_snapshot_fields_not_ready_for_tonight(tmp_path: 
     assert result.report["signal_emitted"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_asia_early_pause_resume_short_missing_required_features_not_ready(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=realtime_event(
+            tmp_path,
+            strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            lane_id="mgc_asia_early_pause_resume_short",
+            timeframe="5m",
+        ),
+        input_event_path=None,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        runner_id="rule-runner-pause-resume-missing",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT
+    assert result.report["asia_early_pause_resume_short_watch_verdict"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY"
+    assert "NOT_READY" in str(result.report["primary_blocker"])
+    assert "asia_early_pause_resume_short_features.normalized_curvature" in str(result.report["primary_blocker"])
+    assert result.report["signal_emitted"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_asia_early_pause_resume_short_no_signal_no_mutation(tmp_path: Path) -> None:
+    event = asia_early_pause_resume_short_event(tmp_path)
+    metadata = dict(event["metadata"])
+    features = dict(metadata["asia_early_pause_resume_short_features"])
+    features["signal_breaks_prior_1_low"] = False
+    metadata["asia_early_pause_resume_short_features"] = features
+    event["metadata"] = metadata
+
+    result = run_track_b_strategy_rule(
+        input_event_payload=event,
+        input_event_path=tmp_path / "pause_resume_short_state.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_pause_resume_short",
+        rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        runner_id="rule-runner-pause-resume-no-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert result.report["strategy_registry_id"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    assert result.report["strategy_registry_paper_eligible"] is False
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert result.report["asia_early_pause_resume_short_watch_verdict"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION"
+    assert result.report["signal_source"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["decision"] == "NO_SIGNAL"
+    assert result.report["signal_emitted"] is False
+    assert result.report["readiness_invoked"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+    assert result.output_batch_json is None
+
+
+def test_asia_early_pause_resume_short_signal_ready_no_submit(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=asia_early_pause_resume_short_event(tmp_path),
+        input_event_path=tmp_path / "pause_resume_short_state.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_pause_resume_short",
+        rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        strategy_adapter_output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        runner_id="rule-runner-pause-resume-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert result.report["rule_name"] == "asia_early_pause_resume_short_v1"
+    assert result.report["strategy_registry_paper_eligible"] is False
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert result.report["asia_early_pause_resume_short_watch_verdict"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["signal_source"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["decision"] == "SHORT"
+    assert result.report["signal_emitted"] is True
+    assert result.report["signal_direction"] == "SHORT"
+    assert result.report["readiness_invoked"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["paper_proof_cli_called"] is False
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+    assert result.output_batch_json is not None
+    batch = json.loads(result.output_batch_json.read_text(encoding="utf-8"))
+    assert batch["signal_items"][0]["signal"]["signal_direction"] == "SHORT"
 
 
 def test_human_review_only_mode_does_not_emit_signal(tmp_path: Path) -> None:

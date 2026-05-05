@@ -295,6 +295,18 @@ Dashboard implication:
   candidate per cycle; conflicting signals require explicit arbitration or no
   trade. Broker mutation remains exclusively through the guarded Track B PAPER
   proof lifecycle.
+- `ASIA_EARLY_PAUSE_RESUME_SHORT_V1` is the first post-guardrail Asia strategy
+  migration. It is registered as MGC/5m, `paper_eligible=false`, and
+  `live_money_eligible=false`. The runner consumes only an explicit
+  `metadata.asia_early_pause_resume_short_state` plus
+  `metadata.asia_early_pause_resume_short_features` envelope mirroring the
+  research-defined `asiaEarlyPauseResumeShortTurn` predicates from
+  `src/mgc_v05l/signals/bear_snap.py` and
+  `config/replay.asia_early_pause_resume_short_pattern_v1.yaml`. Missing fields
+  block as NOT_READY; valid non-setups produce
+  `ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION`; valid setups produce
+  `ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT`. This adapter is
+  watch-only and cannot trigger readiness or broker mutation.
 - `track_b_asian_drift_state` is the explicit 5m state snapshot boundary for
   the Asian Drift watch path. It validates and writes
   `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json`
