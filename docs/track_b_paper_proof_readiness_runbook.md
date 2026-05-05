@@ -670,6 +670,34 @@ semantics without importing broad research code. The live-state producer still
 does not infer state from raw candles; raw OHLC-only input at that boundary
 blocks as not ready.
 
+For the full no-submit watch chain from accumulated bounded 1m history, use the
+watch-chain wrapper. It writes completed 5m bars, feature rows, state snapshot,
+and rule-watch report artifacts, but never invokes readiness or paper proof:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_watch_chain_cli \
+  --source-candles-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
+  --current-quote-report-json <REALTIME_CURRENT_QUOTE_REPORT_JSON> \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --instrument-family MGC \
+  --local-symbol MGCM6 \
+  --dataset GLBX.MDP3 \
+  --source-id asian_drift_track_b_watch_chain \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --max-source-bars 50 \
+  --output-root outputs/track_b_execution_core/asian_drift_state
+```
+
+Valid no-submit outcomes are `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`,
+`ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION`, and
+`ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT`. A PAPER lifecycle can only be considered
+after `ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT`, with explicit PAPER flags through
+the guarded strategy paper runner.
+
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_feature_rows_cli \
   --runtime-5m-candles-json <BOUNDED_COMPLETED_MGC_5M_CANDLES_JSON> \

@@ -304,6 +304,16 @@ Dashboard implication:
   final snapshot write to `track_b_asian_drift_state`. Missing feature rows,
   missing realtime quote evidence, or raw candles without the explicit feature
   contract produce `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT` and no broker mutation.
+- `track_b_asian_drift_watch_chain` is the no-submit bounded operator wrapper
+  for the Asian Drift watch path. It can derive completed 5m bars from a
+  bounded accumulated 1m MGC artifact, run
+  `track_b_asian_drift_feature_rows -> track_b_asian_drift_live_state ->
+  track_b_strategy_rule_runner --rule-mode ASIAN_DRIFT_V1`, and write
+  `latest_asian_drift_5m_candles.json` plus
+  `latest_asian_drift_watch_chain_report.json`. The wrapper never invokes
+  readiness, paper proof, or broker mutation; any PAPER execution remains the
+  separate guarded strategy paper runner path after a real `ASIAN_DRIFT_V1`
+  signal.
 - `track_b_strategy_paper_runner` is the controlled Phase 2 PAPER handoff. It
   can now compose `track_b_data_maintenance` latest-good history with a
   separate realtime current quote report, then run `track_b_market_history ->

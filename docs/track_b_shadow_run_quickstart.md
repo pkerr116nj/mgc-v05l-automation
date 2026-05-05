@@ -889,11 +889,40 @@ Asia Drift feature fields. Raw OHLC-only input at this boundary blocks as
 
 Stable outputs:
 
+- `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_candles.json`
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_feature_rows.json`
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_feature_rows_report.json`
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json`
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_state_builder_report.json`
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_live_state_report.json`
+- `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_watch_chain_report.json`
+
+For the full no-submit watch chain from accumulated bounded 1m history, run:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_watch_chain_cli \
+  --source-candles-json outputs/track_b_execution_core/track_b_data_maintenance/latest_good_mgc_1m_history.json \
+  --current-quote-report-json <REALTIME_CURRENT_QUOTE_REPORT_JSON> \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --instrument-family MGC \
+  --local-symbol MGCM6 \
+  --dataset GLBX.MDP3 \
+  --source-id asian_drift_track_b_watch_chain \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --max-source-bars 50 \
+  --output-root outputs/track_b_execution_core/asian_drift_state
+```
+
+The watch-chain report surfaces `completed_5m_bars_available`,
+`feature_rows_available`, `asian_drift_state_ready`,
+`asian_drift_watch_verdict`, `rule_decision`, `signal_emitted`,
+`signal_side`, `readiness_invoked=false`, `paper_proof_invoked=false`,
+`submit_attempted=false`, `broker_state_mutated=false`, and
+`live_money_readiness=false`.
 
 If an explicit state snapshot already exists, write/validate it directly:
 
