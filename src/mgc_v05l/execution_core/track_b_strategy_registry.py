@@ -1,0 +1,271 @@
+"""Track B strategy registry and migration guardrails.
+
+The registry is the contract for plugging additional strategy adapters into the
+single Track B runner path. It is intentionally metadata-only: it does not
+submit, create order plans, invoke broker APIs, or evaluate strategy logic.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Mapping, Sequence
+
+
+class TrackBStrategyRegistryVerdict(str, Enum):
+    READY = "TRACK_B_STRATEGY_REGISTRY_READY"
+    NOT_READY = "TRACK_B_STRATEGY_REGISTRY_NOT_READY"
+    REJECTED_UNREGISTERED = "TRACK_B_STRATEGY_REGISTRY_REJECTED_UNREGISTERED"
+    REJECTED_METADATA = "TRACK_B_STRATEGY_REGISTRY_REJECTED_METADATA"
+    BLOCKED_CONFLICTING_SIGNALS = "TRACK_B_STRATEGY_REGISTRY_BLOCKED_CONFLICTING_SIGNALS"
+    BLOCKED_MULTIPLE_PAPER_CANDIDATES = "TRACK_B_STRATEGY_REGISTRY_BLOCKED_MULTIPLE_PAPER_CANDIDATES"
+    NO_PAPER_CANDIDATE = "TRACK_B_STRATEGY_REGISTRY_NO_PAPER_CANDIDATE"
+
+
+@dataclass(frozen=True)
+class TrackBStrategyRegistryEntry:
+    strategy_id: str
+    rule_mode: str
+    instrument_family: str
+    timeframe: str
+    required_feature_schema: tuple[str, ...]
+    required_state_schema: tuple[str, ...]
+    feature_version: str
+    calibration_profile: str
+    paper_eligible: bool
+    live_money_eligible: bool = False
+    rule_id: str | None = None
+    accepted_strategy_ids: tuple[str, ...] = ()
+    accepted_rule_ids: tuple[str, ...] = ()
+
+    def report_metadata(self) -> dict[str, Any]:
+        return {
+            "strategy_registry_id": self.strategy_id,
+            "strategy_registry_rule_id": self.rule_id,
+            "strategy_registry_rule_mode": self.rule_mode,
+            "strategy_registry_instrument_family": self.instrument_family,
+            "strategy_registry_timeframe": self.timeframe,
+            "strategy_registry_required_feature_schema": list(self.required_feature_schema),
+            "strategy_registry_required_state_schema": list(self.required_state_schema),
+            "strategy_registry_feature_version": self.feature_version,
+            "strategy_registry_calibration_profile": self.calibration_profile,
+            "strategy_registry_paper_eligible": self.paper_eligible,
+            "strategy_registry_live_money_eligible": self.live_money_eligible,
+        }
+
+
+MGC_EMA_MOMENTUM_RECLAIM_LONG = TrackBStrategyRegistryEntry(
+    strategy_id="mgc_ema_momentum_reclaim_long_v1",
+    rule_id="mgc_ema_momentum_reclaim_long_v1",
+    rule_mode="MGC_EMA_MOMENTUM_RECLAIM_LONG",
+    instrument_family="MGC",
+    timeframe="1m",
+    required_feature_schema=("metadata.ema_momentum_features",),
+    required_state_schema=(),
+    feature_version="track_b_mgc_ema_momentum_features_v1",
+    calibration_profile="track_b_phase2_initial",
+    paper_eligible=True,
+    live_money_eligible=False,
+    accepted_strategy_ids=("mgc_ema_momentum_reclaim_long_v1", "track_b_example_gold_shadow_v1"),
+    accepted_rule_ids=("mgc_ema_momentum_reclaim_long_v1",),
+)
+
+ASIAN_DRIFT_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="asian_drift_v1",
+    rule_id="asian_drift_v1",
+    rule_mode="ASIAN_DRIFT_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=("feature_version", "calibration_profile"),
+    required_state_schema=(
+        "asia_drift_state",
+        "asia_drift_regime",
+        "hypothetical_entry_ready",
+        "entry_window_open",
+        "in_scope",
+    ),
+    feature_version="asia_drift_v1_phase1",
+    calibration_profile="recovery_confirmed",
+    paper_eligible=True,
+    live_money_eligible=False,
+    accepted_strategy_ids=("asian_drift_v1",),
+    accepted_rule_ids=("asian_drift_v1",),
+)
+
+DEMO_WIRING_PROOF = TrackBStrategyRegistryEntry(
+    strategy_id="track_b_demo_wiring_proof",
+    rule_id="mgc_realtime_quote_demo_long_v1",
+    rule_mode="DEMO_LONG_ONLY",
+    instrument_family="MGC",
+    timeframe="quote_snapshot",
+    required_feature_schema=(),
+    required_state_schema=(),
+    feature_version="demo_wiring_proof_v1",
+    calibration_profile="demo_wiring_proof",
+    paper_eligible=True,
+    live_money_eligible=False,
+    accepted_strategy_ids=("track_b_demo_wiring_proof", "track_b_example_gold_shadow_v1"),
+    accepted_rule_ids=("mgc_realtime_quote_demo_long_v1", "mgc_ema_momentum_reclaim_long_v1"),
+)
+
+HUMAN_REVIEW_ONLY = TrackBStrategyRegistryEntry(
+    strategy_id="human_review_only",
+    rule_id="human_review_only",
+    rule_mode="HUMAN_REVIEW_ONLY",
+    instrument_family="MGC",
+    timeframe="quote_snapshot",
+    required_feature_schema=(),
+    required_state_schema=(),
+    feature_version="human_review_only_v1",
+    calibration_profile="manual_review",
+    paper_eligible=False,
+    live_money_eligible=False,
+    accepted_strategy_ids=("human_review_only", "track_b_example_gold_shadow_v1"),
+    accepted_rule_ids=("human_review_only", "mgc_ema_momentum_reclaim_long_v1"),
+)
+
+TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
+    MGC_EMA_MOMENTUM_RECLAIM_LONG,
+    ASIAN_DRIFT_V1,
+    DEMO_WIRING_PROOF,
+    HUMAN_REVIEW_ONLY,
+)
+
+
+def get_track_b_strategy_registry() -> tuple[TrackBStrategyRegistryEntry, ...]:
+    return TRACK_B_STRATEGY_REGISTRY
+
+
+def validate_track_b_strategy_registry(
+    entries: Sequence[TrackBStrategyRegistryEntry] = TRACK_B_STRATEGY_REGISTRY,
+) -> list[str]:
+    blockers: list[str] = []
+    required_text_fields = (
+        "strategy_id",
+        "rule_mode",
+        "instrument_family",
+        "timeframe",
+        "feature_version",
+        "calibration_profile",
+    )
+    for index, entry in enumerate(entries):
+        for field_name in required_text_fields:
+            if not _text(getattr(entry, field_name)):
+                blockers.append(f"registry entry {index} is missing required metadata field {field_name}.")
+        if entry.live_money_eligible is not False:
+            blockers.append(f"registry entry {entry.strategy_id or index} must keep live_money_eligible=false.")
+    return blockers
+
+
+def resolve_track_b_strategy_registry_entry(
+    *,
+    rule_mode: str,
+    rule_id: str | None,
+    strategy_id: str | None,
+) -> TrackBStrategyRegistryEntry | None:
+    normalized_mode = _upper(rule_mode)
+    normalized_rule_id = _text(rule_id)
+    normalized_strategy_id = _text(strategy_id)
+    mode_entries = [entry for entry in TRACK_B_STRATEGY_REGISTRY if entry.rule_mode == normalized_mode]
+    for entry in mode_entries:
+        rule_ids = set(entry.accepted_rule_ids or ())
+        strategy_ids = set(entry.accepted_strategy_ids or ())
+        rule_ok = normalized_rule_id is None or normalized_rule_id == entry.rule_id or normalized_rule_id in rule_ids
+        strategy_ok = normalized_strategy_id is None or normalized_strategy_id == entry.strategy_id or normalized_strategy_id in strategy_ids
+        if rule_ok and strategy_ok:
+            return entry
+    return None
+
+
+def validate_strategy_event_against_registry(
+    *,
+    event: Mapping[str, Any],
+    rule_mode: str,
+    rule_id: str | None,
+    strategy_id: str | None = None,
+) -> tuple[TrackBStrategyRegistryEntry | None, str | None]:
+    registry_blockers = validate_track_b_strategy_registry()
+    if registry_blockers:
+        return None, "; ".join(registry_blockers)
+    actual_strategy_id = _text(strategy_id) or _text(event.get("strategy_id") or event.get("signal_family"))
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode=rule_mode,
+        rule_id=rule_id,
+        strategy_id=actual_strategy_id,
+    )
+    if entry is None:
+        return None, f"Track B strategy is not registered for rule_mode={rule_mode}, rule_id={rule_id}, strategy_id={actual_strategy_id}."
+    if entry.live_money_eligible is not False:
+        return entry, f"Track B strategy registry entry {entry.strategy_id} must keep live_money_eligible=false."
+    missing = _missing_required_fields(event, entry.required_feature_schema + entry.required_state_schema)
+    if missing:
+        return entry, f"Track B strategy {entry.strategy_id} is NOT_READY; missing required feature/state fields: {', '.join(missing)}."
+    return entry, None
+
+
+def arbitrate_track_b_strategy_candidates(candidates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    signal_candidates = [dict(candidate) for candidate in candidates if candidate.get("signal_emitted") is True]
+    if not signal_candidates:
+        return {
+            "strategy_arbitration_verdict": TrackBStrategyRegistryVerdict.NO_PAPER_CANDIDATE.value,
+            "chosen_candidate": None,
+            "suppressed_candidates": [],
+            "paper_candidate_count": 0,
+            "primary_blocker": None,
+            "required_next_action": "Continue bounded no-submit watch until exactly one registered strategy emits a paper-eligible signal.",
+        }
+    sides = {_upper(candidate.get("signal_side") or candidate.get("signal_direction") or candidate.get("decision")) for candidate in signal_candidates}
+    sides.discard("")
+    if len(sides) > 1:
+        return {
+            "strategy_arbitration_verdict": TrackBStrategyRegistryVerdict.BLOCKED_CONFLICTING_SIGNALS.value,
+            "chosen_candidate": None,
+            "suppressed_candidates": signal_candidates,
+            "paper_candidate_count": len(signal_candidates),
+            "primary_blocker": "Conflicting strategy signals require explicit arbitration; no Track B paper candidate is selected.",
+            "required_next_action": "Resolve strategy arbitration before any PAPER handoff.",
+        }
+    paper_candidates = [candidate for candidate in signal_candidates if candidate.get("paper_eligible") is True]
+    if len(paper_candidates) != 1:
+        return {
+            "strategy_arbitration_verdict": TrackBStrategyRegistryVerdict.BLOCKED_MULTIPLE_PAPER_CANDIDATES.value,
+            "chosen_candidate": None,
+            "suppressed_candidates": signal_candidates,
+            "paper_candidate_count": len(paper_candidates),
+            "primary_blocker": "Track B permits at most one paper-eligible strategy candidate per cycle.",
+            "required_next_action": "Add explicit arbitration before allowing a PAPER handoff.",
+        }
+    chosen = paper_candidates[0]
+    suppressed = [candidate for candidate in signal_candidates if candidate is not chosen]
+    return {
+        "strategy_arbitration_verdict": TrackBStrategyRegistryVerdict.READY.value,
+        "chosen_candidate": chosen,
+        "suppressed_candidates": suppressed,
+        "paper_candidate_count": 1,
+        "primary_blocker": None,
+        "required_next_action": "Exactly one registered strategy paper candidate is available; PAPER submit still requires explicit Track B flags.",
+    }
+
+
+def _missing_required_fields(event: Mapping[str, Any], required_paths: Sequence[str]) -> list[str]:
+    return [path for path in required_paths if _value_at_path(event, path) is None]
+
+
+def _value_at_path(payload: Mapping[str, Any], path: str) -> Any:
+    current: Any = payload
+    for part in path.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        if part not in current:
+            return None
+        current = current.get(part)
+    return current
+
+
+def _upper(value: object) -> str:
+    return str(value or "").strip().upper()
+
+
+def _text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None

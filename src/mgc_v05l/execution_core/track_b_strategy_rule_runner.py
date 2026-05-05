@@ -26,6 +26,10 @@ from .strategy_signal_adapter import (
     StrategySignalAdapterVerdict,
     adapt_demo_candle_direction_signal,
 )
+from .track_b_strategy_registry import (
+    TrackBStrategyRegistryEntry,
+    validate_strategy_event_against_registry,
+)
 
 
 DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT = Path("outputs/track_b_execution_core/track_b_strategy_rule_runner")
@@ -95,10 +99,39 @@ def run_track_b_strategy_rule(
     actual_runner_id = runner_id or f"track_b_strategy_rule_runner_{uuid.uuid4().hex}"
     report_json = Path(output_root) / actual_runner_id / "track_b_strategy_rule_runner_report.json"
     actual_source_id = source_id or _optional_text(input_event_payload.get("source_id")) or "track_b_strategy_rule_runner"
+    registry_entry: TrackBStrategyRegistryEntry | None = None
 
     try:
         actual_rule_mode = _rule_mode(rule_mode)
         quote_evidence = _quote_evidence_from_event(input_event_payload)
+        registry_entry, registry_blocker = validate_strategy_event_against_registry(
+            event=input_event_payload,
+            rule_mode=actual_rule_mode.value,
+            rule_id=rule_id,
+            strategy_id=strategy_id,
+        )
+        if registry_blocker:
+            return _write_report(
+                report_json=report_json,
+                verdict=TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT,
+                now=actual_now,
+                runner_id=actual_runner_id,
+                source_id=actual_source_id,
+                rule_id=rule_id,
+                rule_mode=actual_rule_mode,
+                registry_entry=registry_entry,
+                input_event_path=input_event_path,
+                input_event=input_event_payload,
+                quote_evidence=quote_evidence,
+                rule_evaluation={},
+                decision=TrackBStrategyRuleDecision.NO_SIGNAL,
+                decision_reason=registry_blocker,
+                signal_emitted=False,
+                signal_direction=None,
+                downstream_adapter=None,
+                primary_blocker=registry_blocker,
+                required_next_action="Provide an explicitly registered Track B strategy payload with all required feature/state fields before evaluation.",
+            )
         validation_blocker = _validate_input(
             event=input_event_payload,
             quote_evidence=quote_evidence,
@@ -120,6 +153,7 @@ def run_track_b_strategy_rule(
                 source_id=actual_source_id,
                 rule_id=rule_id,
                 rule_mode=actual_rule_mode,
+                registry_entry=registry_entry,
                 input_event_path=input_event_path,
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
@@ -142,6 +176,7 @@ def run_track_b_strategy_rule(
                 source_id=actual_source_id,
                 rule_id=rule_id,
                 rule_mode=actual_rule_mode,
+                registry_entry=registry_entry,
                 input_event_path=input_event_path,
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
@@ -169,6 +204,7 @@ def run_track_b_strategy_rule(
                 source_id=actual_source_id,
                 rule_id=rule_id,
                 rule_mode=actual_rule_mode,
+                registry_entry=registry_entry,
                 input_event_path=input_event_path,
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
@@ -191,6 +227,7 @@ def run_track_b_strategy_rule(
                 source_id=actual_source_id,
                 rule_id=rule_id,
                 rule_mode=actual_rule_mode,
+                registry_entry=registry_entry,
                 input_event_path=input_event_path,
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
@@ -234,6 +271,7 @@ def run_track_b_strategy_rule(
                 source_id=actual_source_id,
                 rule_id=rule_id,
                 rule_mode=actual_rule_mode,
+                registry_entry=registry_entry,
                 input_event_path=input_event_path,
                 input_event=input_event_payload,
                 quote_evidence=quote_evidence,
@@ -254,6 +292,7 @@ def run_track_b_strategy_rule(
             source_id=actual_source_id,
             rule_id=rule_id,
             rule_mode=actual_rule_mode,
+            registry_entry=registry_entry,
             input_event_path=input_event_path,
             input_event=input_event_payload,
             quote_evidence=quote_evidence,
@@ -275,6 +314,7 @@ def run_track_b_strategy_rule(
             source_id=actual_source_id,
             rule_id=rule_id,
             rule_mode=_rule_mode_or_default(rule_mode),
+            registry_entry=registry_entry,
             input_event_path=input_event_path,
             input_event=input_event_payload,
             quote_evidence={},
@@ -602,6 +642,7 @@ def _write_report(
     source_id: str,
     rule_id: str,
     rule_mode: TrackBStrategyRuleMode,
+    registry_entry: TrackBStrategyRegistryEntry | None,
     input_event_path: Path | None,
     input_event: Mapping[str, Any],
     quote_evidence: Mapping[str, Any],
@@ -616,12 +657,15 @@ def _write_report(
 ) -> TrackBStrategyRuleRunnerResult:
     raw_rule_blockers = rule_evaluation.get("rule_blockers")
     rule_blockers = raw_rule_blockers if isinstance(raw_rule_blockers, list) else []
+    registry_metadata = registry_entry.report_metadata() if registry_entry is not None else _missing_registry_metadata()
     report = {
         "schema_version": "track_b_strategy_rule_runner_v1",
         "generated_at": now.isoformat(),
         "track_b_strategy_rule_runner_id": runner_id,
         "strategy_rule_runner_verdict": verdict.value,
         "strategy_rule_id": rule_id,
+        "strategy_registry_verdict": _strategy_registry_report_verdict(registry_entry, primary_blocker),
+        **registry_metadata,
         "rule_name": rule_evaluation.get("rule_name") or "NOT_PROVIDED",
         "rule_mode": rule_mode.value,
         "signal_source": _signal_source(rule_mode),
@@ -705,6 +749,36 @@ def _writer_verdict(adapter: StrategySignalAdapterResult | None) -> str | None:
     except (OSError, json.JSONDecodeError):
         return None
     return writer.get("signal_batch_writer_verdict")
+
+
+def _missing_registry_metadata() -> dict[str, Any]:
+    return {
+        "strategy_registry_id": "NOT_REGISTERED",
+        "strategy_registry_rule_id": "NOT_REGISTERED",
+        "strategy_registry_rule_mode": "NOT_REGISTERED",
+        "strategy_registry_instrument_family": "NOT_REGISTERED",
+        "strategy_registry_timeframe": "NOT_REGISTERED",
+        "strategy_registry_required_feature_schema": [],
+        "strategy_registry_required_state_schema": [],
+        "strategy_registry_feature_version": "NOT_REGISTERED",
+        "strategy_registry_calibration_profile": "NOT_REGISTERED",
+        "strategy_registry_paper_eligible": False,
+        "strategy_registry_live_money_eligible": False,
+    }
+
+
+def _strategy_registry_report_verdict(
+    registry_entry: TrackBStrategyRegistryEntry | None,
+    primary_blocker: str | None,
+) -> str:
+    if registry_entry is None:
+        return "TRACK_B_STRATEGY_REGISTRY_NOT_READY"
+    blocker = str(primary_blocker or "")
+    if "Track B strategy" in blocker and ("NOT_READY" in blocker or "not registered" in blocker):
+        return "TRACK_B_STRATEGY_REGISTRY_NOT_READY"
+    if "strategy registry" in blocker.lower():
+        return "TRACK_B_STRATEGY_REGISTRY_NOT_READY"
+    return "TRACK_B_STRATEGY_REGISTRY_READY"
 
 
 def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:

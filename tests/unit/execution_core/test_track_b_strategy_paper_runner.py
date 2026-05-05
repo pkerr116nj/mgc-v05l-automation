@@ -1986,7 +1986,16 @@ def test_cli_dry_run_no_signal_does_not_submit(tmp_path: Path, capsys) -> None: 
                 "candle_timestamp": aware_now().isoformat(),
                 "observed_at": aware_now().isoformat(),
                 "close": "4575.3",
-                "metadata": {"fixture": True},
+                "metadata": {
+                    "fixture": True,
+                    "ema_momentum_features": {
+                        "vwap": "4576.0",
+                        "prior_close": "4575.8",
+                        "momentum_norm": "0.01",
+                        "momentum_acceleration": "0.0",
+                        "momentum_turning_positive": True,
+                    },
+                },
             }
         ),
         encoding="utf-8",

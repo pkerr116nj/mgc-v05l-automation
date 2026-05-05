@@ -256,7 +256,7 @@ def test_mgc_ema_momentum_reclaim_long_no_signal_when_conditions_fail(tmp_path: 
     assert result.report["submit_attempted"] is False
 
 
-def test_mgc_ema_momentum_reclaim_long_missing_features_no_signal(tmp_path: Path) -> None:
+def test_mgc_ema_momentum_reclaim_long_missing_features_blocks_not_ready(tmp_path: Path) -> None:
     result = run_track_b_strategy_rule(
         input_event_payload=realtime_event(tmp_path),
         input_event_path=None,
@@ -270,12 +270,36 @@ def test_mgc_ema_momentum_reclaim_long_missing_features_no_signal(tmp_path: Path
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT
     assert result.report["signal_emitted"] is False
-    assert "missing required EMA momentum rule field" in result.report["decision_reason"]
-    assert "missing required EMA momentum rule field: vwap" in result.report["rule_blockers"]
-    assert result.report["secondary_blockers"] == result.report["rule_blockers"]
+    assert "NOT_READY" in result.report["decision_reason"]
+    assert "metadata.ema_momentum_features" in result.report["decision_reason"]
+    assert result.report["strategy_registry_verdict"] == "TRACK_B_STRATEGY_REGISTRY_NOT_READY"
+    assert result.report["strategy_registry_live_money_eligible"] is False
     assert result.report["submit_allowed"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_unregistered_strategy_rule_is_rejected(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=realtime_event(tmp_path, strategy_id="unregistered_strategy"),
+        input_event_path=None,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        rule_id="unregistered_rule",
+        rule_mode="DEMO_LONG_ONLY",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        runner_id="rule-runner-unregistered",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT
+    assert result.report["strategy_registry_id"] == "NOT_REGISTERED"
+    assert "not registered" in str(result.report["primary_blocker"])
+    assert result.report["signal_emitted"] is False
+    assert result.report["paper_proof_cli_called"] is False
+    assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
 
 
@@ -369,7 +393,8 @@ def test_asian_drift_v1_missing_snapshot_fields_not_ready_for_tonight(tmp_path: 
 
     assert result.verdict == TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT
     assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_NOT_READY_FOR_TONIGHT"
-    assert "explicit research state/feature snapshot fields" in str(result.report["primary_blocker"])
+    assert "NOT_READY" in str(result.report["primary_blocker"])
+    assert "asia_drift_state" in str(result.report["primary_blocker"])
     assert result.report["signal_emitted"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False

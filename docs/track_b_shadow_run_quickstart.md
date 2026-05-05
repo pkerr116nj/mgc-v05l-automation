@@ -655,8 +655,16 @@ It also requires these event/metadata fields, typically under
 The initial LONG condition is intentionally narrow: close must reclaim VWAP
 after a prior close below VWAP, momentum must be turning positive, and momentum
 norm/acceleration must be at or above the configured thresholds, defaulting to
-zero. Missing fields or failed conditions produce NO_SIGNAL artifacts, not
-execution.
+zero. Missing registered feature/state schema blocks as NOT_READY; present
+fields with failed conditions produce NO_SIGNAL artifacts, not execution.
+
+Track B strategy migration now runs through a registry guardrail. Each strategy
+adapter must declare its `strategy_id`, `rule_mode`, instrument/timeframe,
+required feature/state schema, `feature_version`, `calibration_profile`,
+`paper_eligible`, and `live_money_eligible=false`. Unregistered strategies are
+rejected, adapters never submit, and multi-strategy watch permits at most one
+PAPER candidate per cycle. Conflicting signals require explicit arbitration or
+no trade.
 
 Historical `available_end`, fallback, or fixture evidence cannot produce a
 strategy signal unless `--allow-fixture-input` is intentionally supplied for a

@@ -282,6 +282,19 @@ Dashboard implication:
   produce `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`; no-submit non-setups produce
   `ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION`; explicit entry-ready snapshots produce
   `ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT`.
+- `track_b_strategy_registry` is the migration guardrail for adding more Asia
+  strategies. Track B uses one runner with many registered adapters; adapters
+  may emit signal/state decisions only and must never submit. Each registry
+  entry must declare `strategy_id`, `rule_mode`, `instrument_family`,
+  `timeframe`, `required_feature_schema`, optional `required_state_schema`,
+  `feature_version`, `calibration_profile`, `paper_eligible`, and
+  `live_money_eligible=false`. The rule runner rejects unregistered strategies
+  and blocks missing required feature/state fields as NOT_READY instead of
+  guessing or falling back to raw candles. Multi-strategy watch/arbitration may
+  report chosen and suppressed candidates, but it permits at most one PAPER
+  candidate per cycle; conflicting signals require explicit arbitration or no
+  trade. Broker mutation remains exclusively through the guarded Track B PAPER
+  proof lifecycle.
 - `track_b_asian_drift_state` is the explicit 5m state snapshot boundary for
   the Asian Drift watch path. It validates and writes
   `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json`
