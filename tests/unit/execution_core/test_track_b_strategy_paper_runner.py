@@ -313,6 +313,13 @@ def strategy_result(tmp_path: Path, *, verdict: str = "TRACK_B_STRATEGY_RULE_RUN
         "decision": decision,
         "signal_emitted": emitted,
         "signal_direction": "LONG" if emitted else None,
+        "strategy_registry_id": "mgc_ema_momentum_reclaim_long_v1",
+        "strategy_registry_rule_id": "mgc_ema_momentum_reclaim_long_v1",
+        "strategy_registry_rule_mode": "MGC_EMA_MOMENTUM_RECLAIM_LONG",
+        "strategy_registry_instrument_family": "MGC",
+        "strategy_registry_timeframe": "1m",
+        "strategy_registry_paper_eligible": True,
+        "strategy_registry_live_money_eligible": False,
         "output_batch_path": str(tmp_path / "inbox" / "signal_batch.json") if emitted else None,
         "primary_blocker": None,
         "required_next_action": "strategy next",
@@ -386,8 +393,45 @@ def asian_strategy_result(
     result.report["rule_mode"] = "ASIAN_DRIFT_V1"
     result.report["rule_name"] = "asian_drift_v1_state_snapshot"
     result.report["signal_direction"] = signal_direction or ("LONG" if emitted else None)
+    result.report["strategy_registry_id"] = "asian_drift_v1"
+    result.report["strategy_registry_rule_id"] = "asian_drift_v1"
+    result.report["strategy_registry_rule_mode"] = "ASIAN_DRIFT_V1"
+    result.report["strategy_registry_instrument_family"] = "MGC"
+    result.report["strategy_registry_timeframe"] = "5m"
+    result.report["strategy_registry_paper_eligible"] = True
+    result.report["strategy_registry_live_money_eligible"] = False
     result.report["asian_drift_watch_verdict"] = (
         "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT" if emitted else "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
+    )
+    result.report_json.write_text(json.dumps(result.report), encoding="utf-8")
+    return result
+
+
+def pause_resume_short_strategy_result(
+    tmp_path: Path,
+    *,
+    decision: str = "NO_SIGNAL",
+    emitted: bool = False,
+    signal_direction: str | None = None,
+    paper_eligible: bool = True,
+) -> TrackBStrategyRuleRunnerResult:
+    result = strategy_result(tmp_path, decision=decision, emitted=emitted)
+    result.report["signal_source"] = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    result.report["real_strategy_signal"] = True
+    result.report["rule_mode"] = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    result.report["rule_name"] = "asiaEarlyPauseResumeShortTurn"
+    result.report["signal_direction"] = signal_direction or ("SHORT" if emitted else None)
+    result.report["strategy_registry_id"] = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    result.report["strategy_registry_rule_id"] = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    result.report["strategy_registry_rule_mode"] = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    result.report["strategy_registry_instrument_family"] = "MGC"
+    result.report["strategy_registry_timeframe"] = "5m"
+    result.report["strategy_registry_paper_eligible"] = paper_eligible
+    result.report["strategy_registry_live_money_eligible"] = False
+    result.report["asia_early_pause_resume_short_watch_verdict"] = (
+        "ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
+        if emitted
+        else "ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION"
     )
     result.report_json.write_text(json.dumps(result.report), encoding="utf-8")
     return result
@@ -1562,6 +1606,246 @@ def test_asian_drift_short_signal_requires_sell_side_for_paper_submit(tmp_path: 
             proof=proof_result(tmp_path, TerminalClassification.PASSED),
         ),
         runner_id="paper-asian-drift-short-side-mismatch",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST
+    assert "requires --side SELL" in str(result.report["primary_blocker"])
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_pause_resume_short_missing_fields_reports_not_ready_and_no_mutation(tmp_path: Path) -> None:
+    calls = Calls()
+    blocked_strategy = strategy_result(
+        tmp_path,
+        verdict="TRACK_B_STRATEGY_RULE_RUNNER_BLOCKED_INVALID_INPUT",
+        decision="NO_SIGNAL",
+        emitted=False,
+    )
+    blocked_strategy.report["primary_blocker"] = "Asia Early pause-resume short v1 requires explicit state and feature envelopes."
+    blocked_strategy.report["asia_early_pause_resume_short_watch_verdict"] = "ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY"
+    blocked_strategy.report_json.write_text(json.dumps(blocked_strategy.report), encoding="utf-8")
+
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_payload={"account_id": "DUM882026", "contract_key": "MGC-202606", "close": "4575.3"},
+            rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            emit_signal=True,
+            strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        ),
+        stages=stages(calls=calls, strategy=blocked_strategy),
+        runner_id="paper-pause-resume-not-ready",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY
+    assert result.report["asia_early_pause_resume_short_watch_verdict"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY"
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_pause_resume_short_no_signal_reports_no_mutation(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            emit_signal=True,
+            strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        ),
+        stages=stages(calls=calls, strategy=pause_resume_short_strategy_result(tmp_path, decision="NO_SIGNAL", emitted=False)),
+        runner_id="paper-pause-resume-no-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION
+    assert result.report["asia_early_pause_resume_short_watch_verdict"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION"
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert result.report["signal_emitted"] is False
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_pause_resume_short_signal_without_paper_flags_reports_signal_ready_no_submit(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            emit_signal=True,
+            strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        ),
+        stages=stages(calls=calls, strategy=pause_resume_short_strategy_result(tmp_path, decision="SHORT", emitted=True)),
+        runner_id="paper-pause-resume-signal-no-submit",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT
+    assert result.report["asia_early_pause_resume_short_watch_verdict"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["signal_source"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_pause_resume_short_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            emit_signal=True,
+            strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=pause_resume_short_strategy_result(tmp_path, decision="SHORT", emitted=True),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-pause-resume-proof-passed",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert result.report["signal_source"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    assert result.report["real_strategy_signal"] is True
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert calls.readiness == 1
+    assert calls.proof == 1
+    assert result.report["readiness_invoked"] is True
+    assert result.report["paper_proof_invoked"] is True
+    assert result.report["submit_attempted"] is True
+    assert result.report["broker_state_mutated"] is True
+    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert result.report["paper_proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
+    assert result.report["final_flat"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_demo_wiring_signal_cannot_drive_pause_resume_short_paper_path(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            emit_signal=True,
+            strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=demo_strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-pause-resume-reject-demo",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY
+    assert result.report["signal_source"] == "DEMO_WIRING_PROOF"
+    assert result.report["real_strategy_signal"] is False
+    assert "DEMO/proof signals cannot drive this path" in result.report["required_next_action"]
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_pause_resume_short_signal_requires_registry_paper_eligible(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            emit_signal=True,
+            strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=pause_resume_short_strategy_result(tmp_path, decision="SHORT", emitted=True, paper_eligible=False),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-pause-resume-reject-paper-ineligible",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY
+    assert "paper_eligible=true" in str(result.report["primary_blocker"])
+    assert calls.readiness == 0
+    assert calls.proof == 0
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+
+
+def test_pause_resume_short_signal_requires_sell_side_for_paper_submit(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            emit_signal=True,
+            strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            side="BUY",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=pause_resume_short_strategy_result(tmp_path, decision="SHORT", emitted=True),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-pause-resume-short-side-mismatch",
         now=aware_now(),
     )
 

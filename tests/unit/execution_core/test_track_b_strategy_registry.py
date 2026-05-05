@@ -74,7 +74,7 @@ def test_asia_early_pause_resume_short_registry_metadata_is_valid() -> None:
     assert entry is not None
     assert entry.instrument_family == "MGC"
     assert entry.timeframe == "5m"
-    assert entry.paper_eligible is False
+    assert entry.paper_eligible is True
     assert entry.live_money_eligible is False
     assert "metadata.asia_early_pause_resume_short_features.normalized_curvature" in entry.required_feature_schema
     assert "metadata.asia_early_pause_resume_short_state.derivative_phase" in entry.required_state_schema

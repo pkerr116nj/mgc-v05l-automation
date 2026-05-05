@@ -121,7 +121,7 @@ ASIA_EARLY_PAUSE_RESUME_SHORT_V1 = TrackBStrategyRegistryEntry(
     ),
     feature_version="asia_early_pause_resume_short_v1_phase1",
     calibration_profile="probationary_baseline_v1",
-    paper_eligible=False,
+    paper_eligible=True,
     live_money_eligible=False,
     accepted_strategy_ids=("ASIA_EARLY_PAUSE_RESUME_SHORT_V1",),
     accepted_rule_ids=("ASIA_EARLY_PAUSE_RESUME_SHORT_V1",),

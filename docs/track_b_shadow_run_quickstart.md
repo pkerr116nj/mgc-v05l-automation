@@ -666,8 +666,9 @@ rejected, adapters never submit, and multi-strategy watch permits at most one
 PAPER candidate per cycle. Conflicting signals require explicit arbitration or
 no trade.
 
-`ASIA_EARLY_PAUSE_RESUME_SHORT_V1` is currently registered as watch-only
-(`paper_eligible=false`). It requires an explicit 5m feature/state envelope
+`ASIA_EARLY_PAUSE_RESUME_SHORT_V1` is registered as guarded PAPER eligible
+(`paper_eligible=true`, `live_money_eligible=false`). It requires an explicit
+5m feature/state envelope
 under `metadata.asia_early_pause_resume_short_features` and
 `metadata.asia_early_pause_resume_short_state`; Track B does not infer the
 pause/resume short setup from raw candles. Use the same rule runner shape:
@@ -693,6 +694,40 @@ Valid watch-only outcomes are
 `readiness_invoked=false`, `paper_proof_invoked=false`,
 `submit_attempted=false`, `broker_state_mutated=false`, and
 `live_money_readiness=false`.
+
+If and only if that real strategy report emits
+`signal_source=ASIA_EARLY_PAUSE_RESUME_SHORT_V1`,
+`real_strategy_signal=true`, and the operator explicitly authorizes a bounded
+PAPER test, use the guarded strategy paper runner. The order side must match
+the real short signal (`SHORT -> SELL`):
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
+  --mode PAPER \
+  --input-event-json <EXPLICIT_ASIA_EARLY_PAUSE_RESUME_SHORT_5M_STATE_JSON> \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --strategy-id ASIA_EARLY_PAUSE_RESUME_SHORT_V1 \
+  --lane-id mgc_asia_early_pause_resume_short \
+  --rule-id ASIA_EARLY_PAUSE_RESUME_SHORT_V1 \
+  --rule-mode ASIA_EARLY_PAUSE_RESUME_SHORT_V1 \
+  --emit-signal \
+  --side SELL \
+  --submit-paper \
+  --confirm-paper-submit \
+  --quantity 1 \
+  --manual-open-limit-price <SAFE_PAPER_OPEN_LIMIT> \
+  --manual-close-limit-price <SAFE_PAPER_CLOSE_LIMIT> \
+  --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
+```
+
+The strategy adapter still never submits. The paper runner rejects demo/proof
+signals, missing registry metadata, side mismatches, and any live-money mode;
+all broker mutation stays inside the Track B paper-proof lifecycle.
 
 Historical `available_end`, fallback, or fixture evidence cannot produce a
 strategy signal unless `--allow-fixture-input` is intentionally supplied for a

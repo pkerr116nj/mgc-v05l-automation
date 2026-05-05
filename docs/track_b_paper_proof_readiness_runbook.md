@@ -806,6 +806,19 @@ direction: `LONG -> BUY`, `SHORT -> SELL`. Passing paper proof still requires
 Track B-owned open/close/final-flat provenance; flat without close provenance
 or contradictory broker truth remains review-required.
 
+`ASIA_EARLY_PAUSE_RESUME_SHORT_V1` uses the same guarded PAPER handoff after a
+real pause/resume short state/feature envelope emits a signal. The registry
+marks it `paper_eligible=true` and `live_money_eligible=false`; the adapter is
+still signal-only and cannot submit. PAPER handoff requires
+`signal_source=ASIA_EARLY_PAUSE_RESUME_SHORT_V1`,
+`real_strategy_signal=true`, explicit PAPER submit flags, and a side matching
+the short signal (`SHORT -> SELL`). Missing fields produce
+`ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY`, no-signal states produce
+`ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION`, and signal states
+without submit flags produce
+`ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT` with no readiness or
+broker mutation.
+
 Maintained weekly history is historical context. It may be many hours or days
 old and still be valid if `complete_through_cutoff=true`. The runner reports
 `historical_context_ready`, `runtime_candle_context_required`,

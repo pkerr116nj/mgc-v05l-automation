@@ -70,6 +70,9 @@ class TrackBStrategyPaperRunnerVerdict(str, Enum):
     ASIAN_DRIFT_NOT_READY_FOR_TONIGHT = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIAN_DRIFT_NOT_READY_FOR_TONIGHT"
     ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
     ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT"
+    ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY"
+    ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION"
+    ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
     BLOCKED_NON_PAPER_MODE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_NON_PAPER_MODE"
     BLOCKED_INVALID_SUBMIT_REQUEST = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_INVALID_SUBMIT_REQUEST"
     BLOCKED_DATA_MAINTENANCE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_DATA_MAINTENANCE_STALE_OR_INSUFFICIENT"
@@ -468,11 +471,7 @@ def run_track_b_strategy_paper(
         strategy_rule = actual_stages.strategy_rule(strategy_config)
         strategy_verdict = str(strategy_rule.report.get("strategy_rule_runner_verdict") or "")
         if strategy_verdict.startswith("TRACK_B_STRATEGY_RULE_RUNNER_BLOCKED"):
-            blocked_verdict = (
-                TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NOT_READY_FOR_TONIGHT
-                if _is_asian_drift_rule(config)
-                else TrackBStrategyPaperRunnerVerdict.BLOCKED_STRATEGY_RULE
-            )
+            blocked_verdict = _strategy_specific_not_ready_verdict(config) or TrackBStrategyPaperRunnerVerdict.BLOCKED_STRATEGY_RULE
             return _finalize(
                 config=config,
                 report_json=report_json,
@@ -493,6 +492,8 @@ def run_track_b_strategy_paper(
             decision = str(strategy_rule.report.get("decision") or "")
             if _is_asian_drift_rule(config):
                 verdict = TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION
+            elif _is_pause_resume_short_rule(config):
+                verdict = TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION
             else:
                 verdict = (
                     TrackBStrategyPaperRunnerVerdict.HUMAN_REVIEW_NO_SIGNAL
@@ -533,34 +534,33 @@ def run_track_b_strategy_paper(
                 operator_status_stage=actual_stages.operator_status,
             )
 
-        if _is_asian_drift_rule(config) and (
-            strategy_rule.report.get("real_strategy_signal") is not True
-            or strategy_rule.report.get("signal_source") != "ASIAN_DRIFT_V1"
-        ):
+        strategy_guard_blocker = _registered_strategy_signal_blocker(config, strategy_rule.report)
+        if strategy_guard_blocker is not None:
             return _finalize(
                 config=config,
                 report_json=report_json,
                 now=actual_now,
                 runner_id=actual_runner_id,
-                verdict=TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NOT_READY_FOR_TONIGHT,
+                verdict=_strategy_specific_not_ready_verdict(config) or TrackBStrategyPaperRunnerVerdict.BLOCKED_STRATEGY_RULE,
                 candle_history_producer=candle_history_producer,
                 market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
-                primary_blocker="Asian Drift PAPER path requires signal_source=ASIAN_DRIFT_V1 and real_strategy_signal=true.",
-                required_next_action="Use an actual ASIAN_DRIFT_V1 state snapshot; DEMO/proof signals cannot drive this path.",
+                primary_blocker=strategy_guard_blocker,
+                required_next_action=_strategy_specific_real_signal_next_action(config),
                 operator_status_stage=actual_stages.operator_status,
             )
 
-        if _is_asian_drift_rule(config) and not _paper_submit_requested(config):
+        if _is_watch_only_until_submit_rule(config) and not _paper_submit_requested(config):
             return _finalize(
                 config=config,
                 report_json=report_json,
                 now=actual_now,
                 runner_id=actual_runner_id,
-                verdict=TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT,
+                verdict=_strategy_specific_signal_ready_no_submit_verdict(config)
+                or TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED,
                 candle_history_producer=candle_history_producer,
                 market_history=market_history,
                 feature_builder=feature_builder,
@@ -568,12 +568,12 @@ def run_track_b_strategy_paper(
                 readiness=readiness,
                 proof=proof,
                 primary_blocker=None,
-                required_next_action="Asian Drift real state signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted.",
+                required_next_action=_strategy_specific_signal_ready_next_action(config),
                 operator_status_stage=actual_stages.operator_status,
             )
 
-        asian_drift_side_blocker = _asian_drift_submit_side_blocker(config, strategy_rule.report)
-        if asian_drift_side_blocker is not None:
+        strategy_side_blocker = _registered_strategy_submit_side_blocker(config, strategy_rule.report)
+        if strategy_side_blocker is not None:
             return _finalize(
                 config=config,
                 report_json=report_json,
@@ -586,8 +586,8 @@ def run_track_b_strategy_paper(
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
-                primary_blocker=asian_drift_side_blocker,
-                required_next_action="Align --side with the explicit ASIAN_DRIFT_V1 signal direction before PAPER submit.",
+                primary_blocker=strategy_side_blocker,
+                required_next_action=f"Align --side with the explicit { _expected_signal_source(config) } signal direction before PAPER submit.",
                 operator_status_stage=actual_stages.operator_status,
             )
 
@@ -989,6 +989,18 @@ def _build_report(
         "asian_drift_watch_verdict": _asian_drift_runner_verdict(verdict, strategy_report),
         "asian_drift_state_snapshot_path": _asian_drift_state_snapshot_path(config),
         "asian_drift_state_ready": _asian_drift_state_ready(config),
+        "asia_early_pause_resume_short_watch_verdict": _pause_resume_short_runner_verdict(verdict, strategy_report),
+        "strategy_registry_id": strategy_report.get("strategy_registry_id"),
+        "strategy_registry_rule_id": strategy_report.get("strategy_registry_rule_id"),
+        "strategy_registry_rule_mode": strategy_report.get("strategy_registry_rule_mode"),
+        "strategy_registry_instrument_family": strategy_report.get("strategy_registry_instrument_family"),
+        "strategy_registry_timeframe": strategy_report.get("strategy_registry_timeframe"),
+        "strategy_registry_required_feature_schema": strategy_report.get("strategy_registry_required_feature_schema"),
+        "strategy_registry_required_state_schema": strategy_report.get("strategy_registry_required_state_schema"),
+        "strategy_registry_feature_version": strategy_report.get("strategy_registry_feature_version"),
+        "strategy_registry_calibration_profile": strategy_report.get("strategy_registry_calibration_profile"),
+        "strategy_registry_paper_eligible": strategy_report.get("strategy_registry_paper_eligible"),
+        "strategy_registry_live_money_eligible": strategy_report.get("strategy_registry_live_money_eligible"),
         "signal_source": strategy_report.get("signal_source") or _signal_source_from_rule_mode(config.rule_mode),
         "real_strategy_signal": (
             bool(strategy_report.get("real_strategy_signal"))
@@ -1637,15 +1649,88 @@ def _signal_source_from_rule_mode(rule_mode: str) -> str:
         return "HUMAN_REVIEW_ONLY"
     if str(rule_mode or "").upper() == "ASIAN_DRIFT_V1":
         return "ASIAN_DRIFT_V1"
+    if str(rule_mode or "").upper() == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1":
+        return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     return "REAL_STRATEGY_RULE"
 
 
 def _real_strategy_signal_from_rule_mode(rule_mode: str) -> bool:
-    return str(rule_mode or "").upper() in {"MGC_EMA_MOMENTUM_RECLAIM_LONG", "ASIAN_DRIFT_V1"}
+    return str(rule_mode or "").upper() in {
+        "MGC_EMA_MOMENTUM_RECLAIM_LONG",
+        "ASIAN_DRIFT_V1",
+        "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+    }
 
 
 def _is_asian_drift_rule(config: TrackBStrategyPaperRunnerConfig) -> bool:
     return str(config.rule_mode or "").upper() == "ASIAN_DRIFT_V1" or str(config.rule_id or "") == "asian_drift_v1"
+
+
+def _is_pause_resume_short_rule(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    value = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    return str(config.rule_mode or "").upper() == value or str(config.rule_id or "").upper() == value
+
+
+def _is_watch_only_until_submit_rule(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    return _is_asian_drift_rule(config) or _is_pause_resume_short_rule(config)
+
+
+def _strategy_specific_not_ready_verdict(config: TrackBStrategyPaperRunnerConfig) -> TrackBStrategyPaperRunnerVerdict | None:
+    if _is_asian_drift_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NOT_READY_FOR_TONIGHT
+    if _is_pause_resume_short_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY
+    return None
+
+
+def _strategy_specific_signal_ready_no_submit_verdict(config: TrackBStrategyPaperRunnerConfig) -> TrackBStrategyPaperRunnerVerdict | None:
+    if _is_asian_drift_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT
+    if _is_pause_resume_short_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT
+    return None
+
+
+def _expected_signal_source(config: TrackBStrategyPaperRunnerConfig) -> str:
+    if _is_asian_drift_rule(config):
+        return "ASIAN_DRIFT_V1"
+    if _is_pause_resume_short_rule(config):
+        return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    return _signal_source_from_rule_mode(config.rule_mode)
+
+
+def _strategy_specific_real_signal_next_action(config: TrackBStrategyPaperRunnerConfig) -> str:
+    if _is_asian_drift_rule(config):
+        return "Use an actual ASIAN_DRIFT_V1 state snapshot; DEMO/proof signals cannot drive this path."
+    if _is_pause_resume_short_rule(config):
+        return "Use an actual ASIA_EARLY_PAUSE_RESUME_SHORT_V1 feature/state envelope; DEMO/proof signals cannot drive this path."
+    return "Use a registered real strategy signal before PAPER handoff."
+
+
+def _strategy_specific_signal_ready_next_action(config: TrackBStrategyPaperRunnerConfig) -> str:
+    if _is_asian_drift_rule(config):
+        return "Asian Drift real state signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
+    if _is_pause_resume_short_rule(config):
+        return "Pause-resume short real strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
+    return "Strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
+
+
+def _registered_strategy_signal_blocker(
+    config: TrackBStrategyPaperRunnerConfig,
+    strategy_report: Mapping[str, object],
+) -> str | None:
+    if not _is_watch_only_until_submit_rule(config):
+        return None
+    expected_signal_source = _expected_signal_source(config)
+    if strategy_report.get("real_strategy_signal") is not True:
+        return f"{expected_signal_source} PAPER path requires real_strategy_signal=true."
+    if strategy_report.get("signal_source") != expected_signal_source:
+        return f"{expected_signal_source} PAPER path requires signal_source={expected_signal_source}."
+    if strategy_report.get("strategy_registry_paper_eligible") is not True:
+        return f"{expected_signal_source} PAPER path requires registry paper_eligible=true."
+    if strategy_report.get("strategy_registry_live_money_eligible") is not False:
+        return f"{expected_signal_source} PAPER path requires registry live_money_eligible=false."
+    return None
 
 
 def _asian_drift_runner_verdict(
@@ -1659,6 +1744,19 @@ def _asian_drift_runner_verdict(
     if verdict == TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT:
         return "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT"
     return strategy_report.get("asian_drift_watch_verdict") if strategy_report else None
+
+
+def _pause_resume_short_runner_verdict(
+    verdict: TrackBStrategyPaperRunnerVerdict,
+    strategy_report: Mapping[str, object],
+) -> str | None:
+    if verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY:
+        return "ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY"
+    if verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION:
+        return "ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION"
+    if verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT:
+        return "ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
+    return strategy_report.get("asia_early_pause_resume_short_watch_verdict") if strategy_report else None
 
 
 def _asian_drift_state_snapshot_path(config: TrackBStrategyPaperRunnerConfig) -> str | None:
@@ -1683,20 +1781,21 @@ def _asian_drift_state_ready(config: TrackBStrategyPaperRunnerConfig) -> bool | 
     )
 
 
-def _asian_drift_submit_side_blocker(
+def _registered_strategy_submit_side_blocker(
     config: TrackBStrategyPaperRunnerConfig,
     strategy_report: Mapping[str, object],
 ) -> str | None:
-    if not _is_asian_drift_rule(config) or not _paper_submit_requested(config):
+    if not _is_watch_only_until_submit_rule(config) or not _paper_submit_requested(config):
         return None
     direction = str(strategy_report.get("signal_direction") or strategy_report.get("decision") or "").upper()
     requested_side = str(config.side or "").upper()
     expected_side_by_direction = {"LONG": "BUY", "SHORT": "SELL"}
     expected_side = expected_side_by_direction.get(direction)
+    signal_source = _expected_signal_source(config)
     if expected_side is None:
-        return "Asian Drift PAPER submit requires explicit signal_direction LONG or SHORT."
+        return f"{signal_source} PAPER submit requires explicit signal_direction LONG or SHORT."
     if requested_side != expected_side:
-        return f"Asian Drift {direction} signal requires --side {expected_side}; received {requested_side or 'NOT_PROVIDED'}."
+        return f"{signal_source} {direction} signal requires --side {expected_side}; received {requested_side or 'NOT_PROVIDED'}."
     return None
 
 

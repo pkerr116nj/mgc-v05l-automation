@@ -498,7 +498,7 @@ def test_asia_early_pause_resume_short_no_signal_no_mutation(tmp_path: Path) -> 
 
     assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
     assert result.report["strategy_registry_id"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
-    assert result.report["strategy_registry_paper_eligible"] is False
+    assert result.report["strategy_registry_paper_eligible"] is True
     assert result.report["strategy_registry_live_money_eligible"] is False
     assert result.report["asia_early_pause_resume_short_watch_verdict"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION"
     assert result.report["signal_source"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
@@ -533,7 +533,7 @@ def test_asia_early_pause_resume_short_signal_ready_no_submit(tmp_path: Path) ->
 
     assert result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
     assert result.report["rule_name"] == "asia_early_pause_resume_short_v1"
-    assert result.report["strategy_registry_paper_eligible"] is False
+    assert result.report["strategy_registry_paper_eligible"] is True
     assert result.report["strategy_registry_live_money_eligible"] is False
     assert result.report["asia_early_pause_resume_short_watch_verdict"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
     assert result.report["signal_source"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"

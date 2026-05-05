@@ -296,7 +296,7 @@ Dashboard implication:
   trade. Broker mutation remains exclusively through the guarded Track B PAPER
   proof lifecycle.
 - `ASIA_EARLY_PAUSE_RESUME_SHORT_V1` is the first post-guardrail Asia strategy
-  migration. It is registered as MGC/5m, `paper_eligible=false`, and
+  migration. It is registered as MGC/5m, `paper_eligible=true`, and
   `live_money_eligible=false`. The runner consumes only an explicit
   `metadata.asia_early_pause_resume_short_state` plus
   `metadata.asia_early_pause_resume_short_features` envelope mirroring the
@@ -305,8 +305,12 @@ Dashboard implication:
   `config/replay.asia_early_pause_resume_short_pattern_v1.yaml`. Missing fields
   block as NOT_READY; valid non-setups produce
   `ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION`; valid setups produce
-  `ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT`. This adapter is
-  watch-only and cannot trigger readiness or broker mutation.
+  `ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT`. The adapter itself
+  remains signal-only and cannot submit. A valid real short signal can enter
+  the guarded PAPER lifecycle only through `track_b_strategy_paper_runner`
+  when explicit PAPER submit flags are supplied, registry
+  `paper_eligible=true`, registry `live_money_eligible=false`, and the
+  requested PAPER side matches the explicit short signal (`SHORT -> SELL`).
 - `track_b_asian_drift_state` is the explicit 5m state snapshot boundary for
   the Asian Drift watch path. It validates and writes
   `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json`
@@ -362,6 +366,11 @@ Dashboard implication:
   (`signal_source=ASIAN_DRIFT_V1`, `real_strategy_signal=true`); demo/proof
   signals are rejected, and the requested PAPER side must match the explicit
   signal direction (`LONG -> BUY`, `SHORT -> SELL`).
+  `ASIA_EARLY_PAUSE_RESUME_SHORT_V1` follows the same guarded handoff contract:
+  it only accepts `signal_source=ASIA_EARLY_PAUSE_RESUME_SHORT_V1`,
+  `real_strategy_signal=true`, registry `paper_eligible=true`, registry
+  `live_money_eligible=false`, and a side matching the strategy signal. The
+  adapter still has no private broker path.
 - `track_b_real_rule_wait_runner` is the bounded real-rule polling wrapper for
   eventual MGC PAPER signals. It repeatedly refreshes or reads bounded runtime
   candle context, delegates one cycle to `track_b_strategy_paper_runner` using
