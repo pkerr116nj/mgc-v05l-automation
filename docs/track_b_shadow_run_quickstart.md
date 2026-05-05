@@ -793,6 +793,58 @@ read model is:
 outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strategy_rule_runner_report.json
 ```
 
+### Multi-strategy Asia runtime cycle
+
+The bounded multi-strategy cycle evaluates the registered Asia strategy
+envelopes together and arbitrates at most one PAPER candidate:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_multi_strategy_runtime_cycle_cli \
+  --asian-drift-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
+  --pause-resume-short-event-json <EXPLICIT_ASIA_EARLY_PAUSE_RESUME_SHORT_5M_STATE_JSON> \
+  --breakout-retest-hold-long-event-json <EXPLICIT_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_5M_STATE_JSON> \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id asia_multi_strategy_watch \
+  --output-root outputs/track_b_execution_core/track_b_multi_strategy_runtime_cycle
+```
+
+The cycle never infers strategy state from raw candles. Missing envelopes are
+reported as NOT_READY. Zero real signals produces
+`TRACK_B_MULTI_STRATEGY_RUNTIME_NO_SIGNAL_NO_MUTATION`; exactly one real signal
+without PAPER flags produces `TRACK_B_MULTI_STRATEGY_RUNTIME_SIGNAL_READY_NO_SUBMIT`;
+multiple same-direction signals or conflicting LONG/SHORT signals block
+arbitration and do not mutate broker state. Suppressed candidates are included
+in the report.
+
+If exactly one real signal is chosen and a bounded PAPER test is explicitly
+authorized, add the same PAPER guards used by the strategy paper runner:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_multi_strategy_runtime_cycle_cli \
+  --asian-drift-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
+  --pause-resume-short-event-json <EXPLICIT_ASIA_EARLY_PAUSE_RESUME_SHORT_5M_STATE_JSON> \
+  --breakout-retest-hold-long-event-json <EXPLICIT_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_5M_STATE_JSON> \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --side <BUY_OR_SELL_MATCHING_CHOSEN_SIGNAL> \
+  --submit-paper \
+  --confirm-paper-submit \
+  --quantity 1 \
+  --manual-open-limit-price <SAFE_PAPER_OPEN_LIMIT> \
+  --manual-close-limit-price <SAFE_PAPER_CLOSE_LIMIT> \
+  --output-root outputs/track_b_execution_core/track_b_multi_strategy_runtime_cycle
+```
+
+The cycle delegates to `track_b_strategy_paper_runner` once for the chosen
+signal. Live-money remains prohibited, UI authority remains false, and final
+broker-state classification comes from the guarded Track B paper-proof
+lifecycle.
+
 Phase 2 paper execution stance: because Track B paper proof has passed the
 full PAPER open/guarded-close/flat lifecycle, PAPER execution is now allowed
 only through explicit Track B-controlled submit paths. The strategy paper

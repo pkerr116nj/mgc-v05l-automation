@@ -833,6 +833,34 @@ and signal states without submit flags produce
 `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT` with no
 readiness or broker mutation.
 
+### Multi-strategy Asia runtime cycle
+
+`track_b_multi_strategy_runtime_cycle` evaluates the registered Asia strategy
+envelopes together:
+
+- `ASIAN_DRIFT_V1`
+- `ASIA_EARLY_PAUSE_RESUME_SHORT_V1`
+- `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1`
+
+It is a one-cycle arbitration wrapper, not a new broker path. Each adapter must
+consume its explicit state/feature envelope and may only report NOT_READY,
+NO_SIGNAL, or SIGNAL_READY. Missing envelopes and missing required fields stay
+NOT_READY; the cycle does not infer state from raw candles or import broad
+research code.
+
+The cycle reports evaluated strategies, registry metadata, candidate signals,
+suppressed signals, the arbitration result, and whether readiness or paper proof
+was invoked. Zero real signals produces no mutation. Exactly one real signal
+without PAPER flags produces signal-ready/no-submit. Multiple same-direction
+signals and conflicting LONG/SHORT signals block until an explicit arbitration
+rule exists. If exactly one real signal is chosen and explicit PAPER flags are
+present, the cycle delegates once to `track_b_strategy_paper_runner`, which in
+turn uses the guarded Track B paper-proof lifecycle.
+
+Live money remains prohibited, UI authority remains false, and the final broker
+state classification still comes only from the guarded proof lifecycle. The
+cycle never calls a private submit/cancel/placeOrder path.
+
 Maintained weekly history is historical context. It may be many hours or days
 old and still be valid if `complete_through_cutoff=true`. The runner reports
 `historical_context_ready`, `runtime_candle_context_required`,

@@ -391,6 +391,18 @@ Dashboard implication:
   `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1` follows the same contract
   with `signal_source=ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1`; the
   requested PAPER side must match its explicit LONG signal (`LONG -> BUY`).
+- `track_b_multi_strategy_runtime_cycle` is the bounded one-cycle arbitration
+  layer for the registered Asia strategies: `ASIAN_DRIFT_V1`,
+  `ASIA_EARLY_PAUSE_RESUME_SHORT_V1`, and
+  `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1`. It evaluates supplied
+  explicit envelopes only, reports each strategy's registry metadata and
+  NOT_READY/NO_SIGNAL/SIGNAL_READY status, then uses the strategy registry
+  arbitration helper to choose at most one PAPER candidate. Zero signals means
+  no mutation. One signal without PAPER flags means `SIGNAL_READY_NO_SUBMIT`.
+  Multiple same-direction paper candidates and conflicting LONG/SHORT signals
+  block until explicit arbitration exists. If exactly one real signal is
+  chosen and explicit PAPER flags are present, it delegates once to
+  `track_b_strategy_paper_runner`; it has no private broker path.
 - `track_b_real_rule_wait_runner` is the bounded real-rule polling wrapper for
   eventual MGC PAPER signals. It repeatedly refreshes or reads bounded runtime
   candle context, delegates one cycle to `track_b_strategy_paper_runner` using
