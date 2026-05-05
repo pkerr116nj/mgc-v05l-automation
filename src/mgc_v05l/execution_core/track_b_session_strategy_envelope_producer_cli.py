@@ -74,6 +74,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "asia_early_normal_breakout_retest_hold_long_envelope_ready": result.report.get(
                     "asia_early_normal_breakout_retest_hold_long_envelope_ready"
                 ),
+                "us_derivative_bear_turn_envelope_ready": result.report.get("us_derivative_bear_turn_envelope_ready"),
+                "us_late_pause_resume_long_envelope_ready": result.report.get(
+                    "us_late_pause_resume_long_envelope_ready"
+                ),
                 "latest_completed_5m_candle_timestamp": result.report.get("latest_completed_5m_candle_timestamp"),
                 "latest_completed_5m_candle_age_seconds": result.report.get("latest_completed_5m_candle_age_seconds"),
                 "max_completed_5m_candle_age_seconds": result.report.get("max_completed_5m_candle_age_seconds"),
@@ -97,6 +101,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     None
                     if result.asia_early_normal_breakout_retest_hold_long_event_json is None
                     else str(result.asia_early_normal_breakout_retest_hold_long_event_json)
+                ),
+                "us_derivative_bear_turn_event_json": (
+                    None
+                    if result.us_derivative_bear_turn_event_json is None
+                    else str(result.us_derivative_bear_turn_event_json)
+                ),
+                "us_late_pause_resume_long_event_json": (
+                    None
+                    if result.us_late_pause_resume_long_event_json is None
+                    else str(result.us_late_pause_resume_long_event_json)
                 ),
                 "primary_blocker": result.report.get("primary_blocker"),
                 "required_next_action": result.report.get("required_next_action"),

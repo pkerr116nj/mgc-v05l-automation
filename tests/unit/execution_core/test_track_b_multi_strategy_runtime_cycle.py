@@ -56,6 +56,8 @@ def cycle_config(tmp_path: Path, **overrides: object) -> TrackBMultiStrategyRunt
         "asia_late_flat_pullback_pause_resume_long_event_payload": base_event(
             "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
         ),
+        "us_derivative_bear_turn_event_payload": base_event("US_DERIVATIVE_BEAR_TURN_V1"),
+        "us_late_pause_resume_long_event_payload": base_event("US_LATE_PAUSE_RESUME_LONG_V1"),
         "inbox_dir": tmp_path / "inbox",
         "output_root": tmp_path / "cycle",
         "strategy_rule_output_root": tmp_path / "rules",
@@ -194,6 +196,14 @@ def default_reports() -> dict[str, dict[str, object]]:
             "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
             rule_mode="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
         ),
+        "US_DERIVATIVE_BEAR_TURN_V1": rule_report(
+            "US_DERIVATIVE_BEAR_TURN_V1",
+            rule_mode="US_DERIVATIVE_BEAR_TURN_V1",
+        ),
+        "US_LATE_PAUSE_RESUME_LONG_V1": rule_report(
+            "US_LATE_PAUSE_RESUME_LONG_V1",
+            rule_mode="US_LATE_PAUSE_RESUME_LONG_V1",
+        ),
     }
 
 
@@ -215,6 +225,8 @@ def test_all_registered_strategies_no_signal_no_mutation(tmp_path: Path) -> None
         "FIRST_BEAR_SNAP_TURN_V1",
         "LONDON_LATE_PAUSE_RESUME_SHORT_V1",
         "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+        "US_DERIVATIVE_BEAR_TURN_V1",
+        "US_LATE_PAUSE_RESUME_LONG_V1",
     ]
     assert calls.paper == 0
     assert result.report["candidate_signals"] == []

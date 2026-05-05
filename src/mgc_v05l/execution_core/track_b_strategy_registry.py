@@ -34,6 +34,7 @@ class TrackBStrategyRegistryEntry:
     calibration_profile: str
     paper_eligible: bool
     live_money_eligible: bool = False
+    evaluation_mode: str = "COMPLETED_BAR_ONLY"
     rule_id: str | None = None
     accepted_strategy_ids: tuple[str, ...] = ()
     accepted_rule_ids: tuple[str, ...] = ()
@@ -51,6 +52,7 @@ class TrackBStrategyRegistryEntry:
             "strategy_registry_calibration_profile": self.calibration_profile,
             "strategy_registry_paper_eligible": self.paper_eligible,
             "strategy_registry_live_money_eligible": self.live_money_eligible,
+            "strategy_registry_evaluation_mode": self.evaluation_mode,
         }
 
 
@@ -289,6 +291,82 @@ ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1 = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",),
 )
 
+US_DERIVATIVE_BEAR_TURN_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="US_DERIVATIVE_BEAR_TURN_V1",
+    rule_id="US_DERIVATIVE_BEAR_TURN_V1",
+    rule_mode="US_DERIVATIVE_BEAR_TURN_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.us_derivative_bear_turn_features.normalized_slope",
+        "metadata.us_derivative_bear_turn_features.normalized_curvature",
+        "metadata.us_derivative_bear_turn_features.close_below_open",
+        "metadata.us_derivative_bear_turn_features.close_below_previous_close",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_close_weak",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_range_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_body_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_stretch_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_fast_ema_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_vwap_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_vwap_extension_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_open_late_extension_floor_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_open_late_body_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_open_late_close_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_open_late_fast_ema_extension_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_slow_ema_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_structure_ok",
+        "metadata.us_derivative_bear_turn_features.derivative_bear_cooldown_ok",
+        "metadata.us_derivative_bear_turn_features.feature_version",
+        "metadata.us_derivative_bear_turn_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.us_derivative_bear_turn_state.derivative_phase",
+        "metadata.us_derivative_bear_turn_state.session_us",
+        "metadata.us_derivative_bear_turn_state.allow_us",
+        "metadata.us_derivative_bear_turn_state.derivative_bear_window_ok",
+        "metadata.us_derivative_bear_turn_state.derivative_bear_phase_ok",
+    ),
+    feature_version="us_derivative_bear_turn_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=True,
+    live_money_eligible=False,
+    evaluation_mode="COMPLETED_BAR_ONLY",
+    accepted_strategy_ids=("US_DERIVATIVE_BEAR_TURN_V1",),
+    accepted_rule_ids=("US_DERIVATIVE_BEAR_TURN_V1",),
+)
+
+US_LATE_PAUSE_RESUME_LONG_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="US_LATE_PAUSE_RESUME_LONG_V1",
+    rule_id="US_LATE_PAUSE_RESUME_LONG_V1",
+    rule_mode="US_LATE_PAUSE_RESUME_LONG_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.us_late_pause_resume_long_features.bull_snap_close_strong",
+        "metadata.us_late_pause_resume_long_features.signal_range_expansion_ratio",
+        "metadata.us_late_pause_resume_long_features.one_bar_pullback_before_signal",
+        "metadata.us_late_pause_resume_long_features.signal_breaks_prior_1_high",
+        "metadata.us_late_pause_resume_long_features.signal_ema_location_ok",
+        "metadata.us_late_pause_resume_long_features.setup_bar_curvature_is_positive",
+        "metadata.us_late_pause_resume_long_features.prior_bars_since_long_setup_gt_anti_churn",
+        "metadata.us_late_pause_resume_long_features.feature_version",
+        "metadata.us_late_pause_resume_long_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.us_late_pause_resume_long_state.derivative_phase",
+        "metadata.us_late_pause_resume_long_state.session_us_late",
+        "metadata.us_late_pause_resume_long_state.allow_us",
+        "metadata.us_late_pause_resume_long_state.no_first_bull_snap_turn",
+    ),
+    feature_version="us_late_pause_resume_long_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=True,
+    live_money_eligible=False,
+    evaluation_mode="COMPLETED_BAR_ONLY",
+    accepted_strategy_ids=("US_LATE_PAUSE_RESUME_LONG_V1",),
+    accepted_rule_ids=("US_LATE_PAUSE_RESUME_LONG_V1",),
+)
+
 DEMO_WIRING_PROOF = TrackBStrategyRegistryEntry(
     strategy_id="track_b_demo_wiring_proof",
     rule_id="mgc_realtime_quote_demo_long_v1",
@@ -330,6 +408,8 @@ TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     FIRST_BEAR_SNAP_TURN_V1,
     LONDON_LATE_PAUSE_RESUME_SHORT_V1,
     ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1,
+    US_DERIVATIVE_BEAR_TURN_V1,
+    US_LATE_PAUSE_RESUME_LONG_V1,
     DEMO_WIRING_PROOF,
     HUMAN_REVIEW_ONLY,
 )

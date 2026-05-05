@@ -43,6 +43,8 @@ DEFAULT_FIRST_BULL_SNAP_TURN_RULE_ID = "FIRST_BULL_SNAP_TURN_V1"
 DEFAULT_FIRST_BEAR_SNAP_TURN_RULE_ID = "FIRST_BEAR_SNAP_TURN_V1"
 DEFAULT_LONDON_LATE_PAUSE_RESUME_SHORT_RULE_ID = "LONDON_LATE_PAUSE_RESUME_SHORT_V1"
 DEFAULT_ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_RULE_ID = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
+DEFAULT_US_DERIVATIVE_BEAR_TURN_RULE_ID = "US_DERIVATIVE_BEAR_TURN_V1"
+DEFAULT_US_LATE_PAUSE_RESUME_LONG_RULE_ID = "US_LATE_PAUSE_RESUME_LONG_V1"
 
 
 class TrackBStrategyRuleRunnerVerdict(str, Enum):
@@ -65,6 +67,8 @@ class TrackBStrategyRuleMode(str, Enum):
     FIRST_BEAR_SNAP_TURN_V1 = "FIRST_BEAR_SNAP_TURN_V1"
     LONDON_LATE_PAUSE_RESUME_SHORT_V1 = "LONDON_LATE_PAUSE_RESUME_SHORT_V1"
     ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1 = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
+    US_DERIVATIVE_BEAR_TURN_V1 = "US_DERIVATIVE_BEAR_TURN_V1"
+    US_LATE_PAUSE_RESUME_LONG_V1 = "US_LATE_PAUSE_RESUME_LONG_V1"
     HUMAN_REVIEW_ONLY = "HUMAN_REVIEW_ONLY"
 
 
@@ -440,6 +444,22 @@ def _validate_input(
             feature_version="asia_late_flat_pullback_pause_resume_long_v1_phase1",
             label="Asia Late flat-pullback pause-resume long v1",
         )
+    if rule_mode == TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1:
+        return _validate_session_strategy_snapshot(
+            event,
+            state_key="us_derivative_bear_turn_state",
+            features_key="us_derivative_bear_turn_features",
+            feature_version="us_derivative_bear_turn_v1_phase1",
+            label="US derivative bear turn v1",
+        )
+    if rule_mode == TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1:
+        return _validate_session_strategy_snapshot(
+            event,
+            state_key="us_late_pause_resume_long_state",
+            features_key="us_late_pause_resume_long_features",
+            feature_version="us_late_pause_resume_long_v1_phase1",
+            label="US Late pause-resume long v1",
+        )
     return None
 
 
@@ -600,6 +620,10 @@ def _evaluate_rule_decision(
             quote_evidence=quote_evidence,
             rule_id=rule_id,
         )
+    if rule_mode == TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1:
+        return _evaluate_us_derivative_bear_turn_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
+    if rule_mode == TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1:
+        return _evaluate_us_late_pause_resume_long_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     raise ValueError(f"Unsupported rule mode: {rule_mode.value}")
 
 
@@ -1169,6 +1193,179 @@ def _evaluate_asia_late_flat_pullback_pause_resume_long_v1(
     }
 
 
+def _evaluate_us_derivative_bear_turn_v1(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+) -> dict[str, Any]:
+    metadata = dict(event.get("metadata") or {}) if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = (
+        metadata.get("us_derivative_bear_turn_state")
+        if isinstance(metadata.get("us_derivative_bear_turn_state") or {}, Mapping)
+        else {}
+    )
+    features = (
+        metadata.get("us_derivative_bear_turn_features")
+        if isinstance(metadata.get("us_derivative_bear_turn_features") or {}, Mapping)
+        else {}
+    )
+    normalized_slope = _decimal_field(features, "normalized_slope")
+    min_slope = _decimal_field(features, "min_normalized_slope") or Decimal("-0.80")
+    max_slope = _decimal_field(features, "max_normalized_slope") or Decimal("-0.15")
+    normalized_curvature = _decimal_field(features, "normalized_curvature")
+    max_curvature = _decimal_field(features, "max_normalized_curvature") or Decimal("-0.35")
+
+    conditions: dict[str, bool | None] = {
+        "allow_us": _bool_field(state, "allow_us") is True,
+        "session_us": _bool_field(state, "session_us") is True,
+        "derivative_bear_window_ok": _bool_field(state, "derivative_bear_window_ok") is True,
+        "derivative_bear_phase_ok": _bool_field(state, "derivative_bear_phase_ok") is True,
+        "normalized_slope_in_range": (
+            min_slope <= normalized_slope <= max_slope
+            if normalized_slope is not None and min_slope is not None and max_slope is not None
+            else None
+        ),
+        "normalized_curvature_below_threshold": (
+            normalized_curvature <= max_curvature
+            if normalized_curvature is not None and max_curvature is not None
+            else None
+        ),
+        "close_below_open": _bool_field(features, "close_below_open") is True,
+        "close_below_previous_close": _bool_field(features, "close_below_previous_close") is True,
+        "derivative_bear_close_weak": _bool_field(features, "derivative_bear_close_weak") is True,
+        "derivative_bear_range_ok": _bool_field(features, "derivative_bear_range_ok") is True,
+        "derivative_bear_body_ok": _bool_field(features, "derivative_bear_body_ok") is True,
+        "derivative_bear_stretch_ok": _bool_field(features, "derivative_bear_stretch_ok") is True,
+        "derivative_bear_fast_ema_ok": _bool_field(features, "derivative_bear_fast_ema_ok") is True,
+        "derivative_bear_vwap_ok": _bool_field(features, "derivative_bear_vwap_ok") is True,
+        "derivative_bear_vwap_extension_ok": _bool_field(features, "derivative_bear_vwap_extension_ok") is True,
+        "derivative_bear_open_late_extension_floor_ok": (
+            _bool_field(features, "derivative_bear_open_late_extension_floor_ok") is True
+        ),
+        "derivative_bear_open_late_body_ok": _bool_field(features, "derivative_bear_open_late_body_ok") is True,
+        "derivative_bear_open_late_close_ok": _bool_field(features, "derivative_bear_open_late_close_ok") is True,
+        "derivative_bear_open_late_fast_ema_extension_ok": (
+            _bool_field(features, "derivative_bear_open_late_fast_ema_extension_ok") is True
+        ),
+        "derivative_bear_slow_ema_ok": _bool_field(features, "derivative_bear_slow_ema_ok") is True,
+        "derivative_bear_structure_ok": _bool_field(features, "derivative_bear_structure_ok") is True,
+        "derivative_bear_cooldown_ok": _bool_field(features, "derivative_bear_cooldown_ok") is True,
+    }
+    failed = [name for name, passed in conditions.items() if passed is not True]
+    blockers = [f"{name}=false_or_missing" for name in failed]
+    decision = TrackBStrategyRuleDecision.NO_SIGNAL if failed else TrackBStrategyRuleDecision.SHORT
+    decision_reason = (
+        "US derivative bear turn v1 conditions did not pass: " + ", ".join(failed)
+        if failed
+        else "US derivative bear turn v1 explicit feature/state snapshot is entry-ready for SHORT."
+    )
+    return {
+        "rule_name": "us_derivative_bear_turn_v1",
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "rule_inputs": {
+            "strategy_id": event.get("strategy_id"),
+            "derivative_phase": state.get("derivative_phase"),
+            "session_us": state.get("session_us"),
+            "allow_us": state.get("allow_us"),
+            "normalized_slope": None if normalized_slope is None else str(normalized_slope),
+            "normalized_curvature": None if normalized_curvature is None else str(normalized_curvature),
+            "vwap": features.get("vwap"),
+            "feature_version": features.get("feature_version"),
+            "calibration_profile": features.get("calibration_profile"),
+            "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
+        },
+        "rule_conditions": conditions,
+        "rule_blockers": blockers,
+        "research_lineage": (
+            "Mirrors the explicit usDerivativeBearTurn predicates in src/mgc_v05l/signals/bear_snap.py "
+            "and the MGC usDerivativeBearTurn validation packet. Track B consumes a precomputed state/feature "
+            "envelope and does not infer these fields from raw candles inside the adapter."
+        ),
+        "rule_id": rule_id,
+    }
+
+
+def _evaluate_us_late_pause_resume_long_v1(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+) -> dict[str, Any]:
+    metadata = dict(event.get("metadata") or {}) if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = (
+        metadata.get("us_late_pause_resume_long_state")
+        if isinstance(metadata.get("us_late_pause_resume_long_state") or {}, Mapping)
+        else {}
+    )
+    features = (
+        metadata.get("us_late_pause_resume_long_features")
+        if isinstance(metadata.get("us_late_pause_resume_long_features") or {}, Mapping)
+        else {}
+    )
+    close = _decimal_field(event, features, "close")
+    open_price = _decimal_field(event, features, "open")
+    previous_close = _decimal_field(features, "previous_close", "prior_close")
+    signal_ratio = _decimal_field(features, "signal_range_expansion_ratio")
+    max_signal_ratio = _decimal_field(features, "max_range_expansion_ratio") or Decimal("1.25")
+
+    conditions: dict[str, bool | None] = {
+        "allow_us": _bool_field(state, "allow_us") is True,
+        "session_us_late": _bool_field(state, "session_us_late") is True,
+        "derivative_phase_us_late": _optional_text(state.get("derivative_phase")) == "US_LATE",
+        "no_first_bull_snap_turn": _bool_field(state, "no_first_bull_snap_turn") is True,
+        "close_above_open": close > open_price if close is not None and open_price is not None else None,
+        "close_above_previous_close": close > previous_close if close is not None and previous_close is not None else None,
+        "bull_snap_close_strong": _bool_field(features, "bull_snap_close_strong") is True,
+        "signal_range_expansion_below_threshold": (
+            signal_ratio < max_signal_ratio if signal_ratio is not None and max_signal_ratio is not None else None
+        ),
+        "one_bar_pullback_before_signal": _bool_field(features, "one_bar_pullback_before_signal") is True,
+        "signal_breaks_prior_1_high": _bool_field(features, "signal_breaks_prior_1_high") is True,
+        "signal_ema_location_ok": _bool_field(features, "signal_ema_location_ok") is True,
+        "setup_bar_curvature_is_positive": _bool_field(features, "setup_bar_curvature_is_positive") is True,
+        "prior_bars_since_long_setup_gt_anti_churn": (
+            _bool_field(features, "prior_bars_since_long_setup_gt_anti_churn") is True
+        ),
+        "not_1755_carryover": _bool_field(features, "not_1755_carryover") is True,
+    }
+    failed = [name for name, passed in conditions.items() if passed is not True]
+    blockers = [f"{name}=false_or_missing" for name in failed]
+    decision = TrackBStrategyRuleDecision.NO_SIGNAL if failed else TrackBStrategyRuleDecision.LONG
+    decision_reason = (
+        "US Late pause-resume long v1 conditions did not pass: " + ", ".join(failed)
+        if failed
+        else "US Late pause-resume long v1 explicit feature/state snapshot is entry-ready for LONG."
+    )
+    return {
+        "rule_name": "us_late_pause_resume_long_v1",
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "rule_inputs": {
+            "strategy_id": event.get("strategy_id"),
+            "derivative_phase": state.get("derivative_phase"),
+            "session_us_late": state.get("session_us_late"),
+            "allow_us": state.get("allow_us"),
+            "close": None if close is None else str(close),
+            "open": None if open_price is None else str(open_price),
+            "previous_close": None if previous_close is None else str(previous_close),
+            "signal_range_expansion_ratio": None if signal_ratio is None else str(signal_ratio),
+            "feature_version": features.get("feature_version"),
+            "calibration_profile": features.get("calibration_profile"),
+            "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
+        },
+        "rule_conditions": conditions,
+        "rule_blockers": blockers,
+        "research_lineage": (
+            "Mirrors the explicit usLatePauseResumeLongTurn predicates in src/mgc_v05l/signals/bull_snap.py "
+            "and config/replay.us_late_pause_resume_long_pattern_v1.yaml. Track B consumes a precomputed "
+            "state/feature envelope and does not infer these fields from raw candles inside the adapter."
+        ),
+        "rule_id": rule_id,
+    }
+
+
 def _strategy_event_for_adapter(
     *,
     event: Mapping[str, Any],
@@ -1305,6 +1502,22 @@ def _write_report(
             expected_mode=TrackBStrategyRuleMode.ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1,
             prefix="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG",
         ),
+        "us_derivative_bear_turn_watch_verdict": _session_strategy_watch_verdict(
+            rule_mode,
+            verdict,
+            signal_emitted,
+            primary_blocker,
+            expected_mode=TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1,
+            prefix="US_DERIVATIVE_BEAR_TURN",
+        ),
+        "us_late_pause_resume_long_watch_verdict": _session_strategy_watch_verdict(
+            rule_mode,
+            verdict,
+            signal_emitted,
+            primary_blocker,
+            expected_mode=TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1,
+            prefix="US_LATE_PAUSE_RESUME_LONG",
+        ),
         "rule_inputs": rule_evaluation.get("rule_inputs") or {},
         "rule_conditions": rule_evaluation.get("rule_conditions") or {},
         "rule_blockers": rule_blockers,
@@ -1398,6 +1611,7 @@ def _missing_registry_metadata() -> dict[str, Any]:
         "strategy_registry_calibration_profile": "NOT_REGISTERED",
         "strategy_registry_paper_eligible": False,
         "strategy_registry_live_money_eligible": False,
+        "strategy_registry_evaluation_mode": "NOT_REGISTERED",
     }
 
 
@@ -1434,6 +1648,10 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
         return "LONDON_LATE_PAUSE_RESUME_SHORT_V1"
     if rule_mode == TrackBStrategyRuleMode.ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1:
         return "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
+    if rule_mode == TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1:
+        return "US_DERIVATIVE_BEAR_TURN_V1"
+    if rule_mode == TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1:
+        return "US_LATE_PAUSE_RESUME_LONG_V1"
     return "REAL_STRATEGY_RULE"
 
 
@@ -1447,6 +1665,8 @@ def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
         TrackBStrategyRuleMode.FIRST_BEAR_SNAP_TURN_V1,
         TrackBStrategyRuleMode.LONDON_LATE_PAUSE_RESUME_SHORT_V1,
         TrackBStrategyRuleMode.ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1,
+        TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1,
+        TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1,
     }
 
 

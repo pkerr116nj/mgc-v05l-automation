@@ -168,6 +168,44 @@ def test_asia_late_flat_pullback_pause_resume_long_registry_metadata_is_valid() 
     assert "metadata.asia_late_flat_pullback_pause_resume_long_state.derivative_phase" in entry.required_state_schema
 
 
+def test_us_derivative_bear_turn_registry_metadata_is_valid() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="US_DERIVATIVE_BEAR_TURN_V1",
+        rule_id="US_DERIVATIVE_BEAR_TURN_V1",
+        strategy_id="US_DERIVATIVE_BEAR_TURN_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert entry.evaluation_mode == "COMPLETED_BAR_ONLY"
+    assert entry.feature_version == "us_derivative_bear_turn_v1_phase1"
+    assert entry.calibration_profile == "probationary_baseline_v1"
+    assert "metadata.us_derivative_bear_turn_features.normalized_slope" in entry.required_feature_schema
+    assert "metadata.us_derivative_bear_turn_state.derivative_bear_phase_ok" in entry.required_state_schema
+
+
+def test_us_late_pause_resume_long_registry_metadata_is_valid() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="US_LATE_PAUSE_RESUME_LONG_V1",
+        rule_id="US_LATE_PAUSE_RESUME_LONG_V1",
+        strategy_id="US_LATE_PAUSE_RESUME_LONG_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert entry.evaluation_mode == "COMPLETED_BAR_ONLY"
+    assert entry.feature_version == "us_late_pause_resume_long_v1_phase1"
+    assert entry.calibration_profile == "probationary_baseline_v1"
+    assert "metadata.us_late_pause_resume_long_features.signal_ema_location_ok" in entry.required_feature_schema
+    assert "metadata.us_late_pause_resume_long_state.session_us_late" in entry.required_state_schema
+
+
 def test_missing_required_state_fields_are_not_ready() -> None:
     entry, blocker = validate_strategy_event_against_registry(
         event={

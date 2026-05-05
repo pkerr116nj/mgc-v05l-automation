@@ -55,6 +55,8 @@ ASIA_EARLY_PAUSE_RESUME_SHORT_STRATEGY_ID = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
 ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_STRATEGY_ID = (
     "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
 )
+US_DERIVATIVE_BEAR_TURN_STRATEGY_ID = "US_DERIVATIVE_BEAR_TURN_V1"
+US_LATE_PAUSE_RESUME_LONG_STRATEGY_ID = "US_LATE_PAUSE_RESUME_LONG_V1"
 LONDON_LATE_PAUSE_RESUME_SHORT_FEATURE_VERSION = "london_late_pause_resume_short_v1_phase1"
 ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_FEATURE_VERSION = (
     "asia_late_flat_pullback_pause_resume_long_v1_phase1"
@@ -63,6 +65,8 @@ ASIA_EARLY_PAUSE_RESUME_SHORT_FEATURE_VERSION = "asia_early_pause_resume_short_v
 ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURE_VERSION = (
     "asia_early_normal_breakout_retest_hold_long_v1_phase1"
 )
+US_DERIVATIVE_BEAR_TURN_FEATURE_VERSION = "us_derivative_bear_turn_v1_phase1"
+US_LATE_PAUSE_RESUME_LONG_FEATURE_VERSION = "us_late_pause_resume_long_v1_phase1"
 
 NY = ZoneInfo("America/New_York")
 MIN_COMPLETED_5M_BARS = 8
@@ -86,6 +90,23 @@ ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MIN_RANGE_EXPANSION_RATIO = Decimal("0.
 ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MAX_RANGE_EXPANSION_RATIO = Decimal("1.25")
 ANTI_CHURN_BARS = 5
 
+US_DERIVATIVE_BEAR_MIN_NORMALIZED_SLOPE = Decimal("-0.80")
+US_DERIVATIVE_BEAR_MAX_NORMALIZED_SLOPE = Decimal("-0.15")
+US_DERIVATIVE_BEAR_MAX_NORMALIZED_CURVATURE = Decimal("-0.35")
+US_DERIVATIVE_BEAR_MIN_BAR_RANGE_ATR = Decimal("1.00")
+US_DERIVATIVE_BEAR_MIN_BODY_ATR = Decimal("0.45")
+US_DERIVATIVE_BEAR_MAX_CLOSE_LOCATION = Decimal("0.28")
+US_DERIVATIVE_BEAR_MIN_UP_STRETCH_ATR = Decimal("1.00")
+US_DERIVATIVE_BEAR_MAX_DISTANCE_BELOW_VWAP_ATR = Decimal("1.80")
+US_DERIVATIVE_BEAR_OPEN_LATE_MIN_DISTANCE_BELOW_VWAP_ATR = Decimal("0.00")
+US_DERIVATIVE_BEAR_OPEN_LATE_MIN_BODY_ATR = Decimal("0.00")
+US_DERIVATIVE_BEAR_OPEN_LATE_MAX_CLOSE_LOCATION = Decimal("1.00")
+US_DERIVATIVE_BEAR_OPEN_LATE_MAX_DISTANCE_BELOW_FAST_EMA_ATR = Decimal("999")
+US_DERIVATIVE_BEAR_COOLDOWN_BARS = 20
+
+US_LATE_PAUSE_RESUME_LONG_SETUP_CURVATURE_MIN = Decimal("0.15")
+US_LATE_PAUSE_RESUME_LONG_MAX_RANGE_EXPANSION_RATIO = Decimal("1.25")
+
 
 class TrackBSessionStrategyEnvelopeProducerVerdict(str, Enum):
     WROTE_ENVELOPES = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_WROTE_ENVELOPES"
@@ -105,10 +126,14 @@ class TrackBSessionStrategyEnvelopeProducerResult:
     asia_late_flat_pullback_pause_resume_long_event_json: Path | None
     asia_early_pause_resume_short_event_json: Path | None
     asia_early_normal_breakout_retest_hold_long_event_json: Path | None
+    us_derivative_bear_turn_event_json: Path | None
+    us_late_pause_resume_long_event_json: Path | None
     london_late_pause_resume_short_event: dict[str, Any] | None
     asia_late_flat_pullback_pause_resume_long_event: dict[str, Any] | None
     asia_early_pause_resume_short_event: dict[str, Any] | None
     asia_early_normal_breakout_retest_hold_long_event: dict[str, Any] | None
+    us_derivative_bear_turn_event: dict[str, Any] | None
+    us_late_pause_resume_long_event: dict[str, Any] | None
 
 
 def produce_track_b_session_strategy_envelopes(
@@ -232,6 +257,27 @@ def produce_track_b_session_strategy_envelopes(
             bull_snap=dict(bull_snap),
             prior_bars_since_long_setup=prior_bars_since_long_setup,
         )
+        derivative_bear_event = _us_derivative_bear_turn_event(
+            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload_path=runtime_5m_payload_path,
+            expected_account_id=expected_account_id,
+            source_id=source_id,
+            now=actual_now,
+            candles=candles,
+            feature_history=feature_history,
+            prior_bars_since_short_setup=prior_bars_since_short_setup,
+        )
+        us_late_long_event = _us_late_pause_resume_long_event(
+            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload_path=runtime_5m_payload_path,
+            expected_account_id=expected_account_id,
+            source_id=source_id,
+            now=actual_now,
+            candles=candles,
+            feature_history=feature_history,
+            bull_snap=dict(bull_snap),
+            prior_bars_since_long_setup=prior_bars_since_long_setup,
+        )
 
         london_json = output_root / actual_producer_id / "london_late_pause_resume_short_event_envelope.json"
         asia_json = output_root / actual_producer_id / "asia_late_flat_pullback_pause_resume_long_event_envelope.json"
@@ -245,14 +291,22 @@ def produce_track_b_session_strategy_envelopes(
         latest_asia_early_long = (
             output_root / "latest_asia_early_normal_breakout_retest_hold_long_event_envelope.json"
         )
+        derivative_bear_json = output_root / actual_producer_id / "us_derivative_bear_turn_event_envelope.json"
+        us_late_long_json = output_root / actual_producer_id / "us_late_pause_resume_long_event_envelope.json"
+        latest_derivative_bear = output_root / "latest_us_derivative_bear_turn_event_envelope.json"
+        latest_us_late_long = output_root / "latest_us_late_pause_resume_long_event_envelope.json"
         _write_json(london_json, london_event)
         _write_json(asia_json, asia_event)
         _write_json(asia_early_short_json, asia_early_short_event)
         _write_json(asia_early_long_json, asia_early_long_event)
+        _write_json(derivative_bear_json, derivative_bear_event)
+        _write_json(us_late_long_json, us_late_long_event)
         _write_json(latest_london, london_event)
         _write_json(latest_asia, asia_event)
         _write_json(latest_asia_early_short, asia_early_short_event)
         _write_json(latest_asia_early_long, asia_early_long_event)
+        _write_json(latest_derivative_bear, derivative_bear_event)
+        _write_json(latest_us_late_long, us_late_long_event)
 
         report = _base_report(
             verdict=TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES,
@@ -273,14 +327,20 @@ def produce_track_b_session_strategy_envelopes(
                 "asia_late_flat_pullback_pause_resume_long_event_json": str(asia_json),
                 "asia_early_pause_resume_short_event_json": str(asia_early_short_json),
                 "asia_early_normal_breakout_retest_hold_long_event_json": str(asia_early_long_json),
+                "us_derivative_bear_turn_event_json": str(derivative_bear_json),
+                "us_late_pause_resume_long_event_json": str(us_late_long_json),
                 "latest_london_late_pause_resume_short_event_json": str(latest_london),
                 "latest_asia_late_flat_pullback_pause_resume_long_event_json": str(latest_asia),
                 "latest_asia_early_pause_resume_short_event_json": str(latest_asia_early_short),
                 "latest_asia_early_normal_breakout_retest_hold_long_event_json": str(latest_asia_early_long),
+                "latest_us_derivative_bear_turn_event_json": str(latest_derivative_bear),
+                "latest_us_late_pause_resume_long_event_json": str(latest_us_late_long),
                 "london_late_pause_resume_short_envelope_ready": True,
                 "asia_late_flat_pullback_pause_resume_long_envelope_ready": True,
                 "asia_early_pause_resume_short_envelope_ready": True,
                 "asia_early_normal_breakout_retest_hold_long_envelope_ready": True,
+                "us_derivative_bear_turn_envelope_ready": True,
+                "us_late_pause_resume_long_envelope_ready": True,
                 "feature_diagnostics": _feature_diagnostics(current_features),
             }
         )
@@ -294,10 +354,14 @@ def produce_track_b_session_strategy_envelopes(
             asia_late_flat_pullback_pause_resume_long_event_json=latest_asia,
             asia_early_pause_resume_short_event_json=latest_asia_early_short,
             asia_early_normal_breakout_retest_hold_long_event_json=latest_asia_early_long,
+            us_derivative_bear_turn_event_json=latest_derivative_bear,
+            us_late_pause_resume_long_event_json=latest_us_late_long,
             london_late_pause_resume_short_event=london_event,
             asia_late_flat_pullback_pause_resume_long_event=asia_event,
             asia_early_pause_resume_short_event=asia_early_short_event,
             asia_early_normal_breakout_retest_hold_long_event=asia_early_long_event,
+            us_derivative_bear_turn_event=derivative_bear_event,
+            us_late_pause_resume_long_event=us_late_long_event,
         )
     except Exception as exc:  # noqa: BLE001 - producer failures must become artifacts.
         return _write_blocked_result(
@@ -589,6 +653,172 @@ def _asia_early_normal_breakout_retest_hold_long_event(
     )
 
 
+def _us_derivative_bear_turn_event(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None,
+    expected_account_id: str,
+    source_id: str,
+    now: datetime,
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+    prior_bars_since_short_setup: int | None,
+) -> dict[str, Any]:
+    current = candles[-1]
+    previous = candles[-2]
+    features = feature_history[-1]
+    phase = _research_session_phase(current.timestamp)
+    local_time = current.timestamp.astimezone(NY).time()
+    prior_short = prior_bars_since_short_setup if prior_bars_since_short_setup is not None else 1000
+    normalized_slope = _normalized(features.velocity, features.atr)
+    normalized_curvature = _normalized(features.velocity_delta, features.atr)
+    close_below_fast_floor = current.close >= features.turn_ema_fast - US_DERIVATIVE_BEAR_OPEN_LATE_MAX_DISTANCE_BELOW_FAST_EMA_ATR * features.atr
+    state = {
+        "derivative_phase": phase,
+        "session_us": phase.startswith("US_"),
+        "allow_us": True,
+        "derivative_bear_window_ok": time(9, 0) <= local_time < time(10, 30),
+        "derivative_bear_phase_ok": phase in {"US_PREOPEN_OPENING", "US_CASH_OPEN_IMPULSE", "US_OPEN_LATE"},
+        "timeframe": "5m",
+    }
+    features_payload = {
+        "feature_version": US_DERIVATIVE_BEAR_TURN_FEATURE_VERSION,
+        "calibration_profile": DEFAULT_CALIBRATION_PROFILE,
+        "close": current.close,
+        "open": current.open,
+        "previous_close": previous.close,
+        "vwap": features.vwap,
+        "turn_ema_fast": features.turn_ema_fast,
+        "turn_ema_slow": features.turn_ema_slow,
+        "normalized_slope": normalized_slope,
+        "min_normalized_slope": US_DERIVATIVE_BEAR_MIN_NORMALIZED_SLOPE,
+        "max_normalized_slope": US_DERIVATIVE_BEAR_MAX_NORMALIZED_SLOPE,
+        "normalized_curvature": normalized_curvature,
+        "max_normalized_curvature": US_DERIVATIVE_BEAR_MAX_NORMALIZED_CURVATURE,
+        "close_below_open": current.close < current.open,
+        "close_below_previous_close": current.close < previous.close,
+        "derivative_bear_close_weak": _close_location_below_threshold(
+            current.low, current.close, features.bar_range, US_DERIVATIVE_BEAR_MAX_CLOSE_LOCATION
+        ),
+        "derivative_bear_range_ok": features.bar_range >= US_DERIVATIVE_BEAR_MIN_BAR_RANGE_ATR * features.atr,
+        "derivative_bear_body_ok": features.body_size >= US_DERIVATIVE_BEAR_MIN_BODY_ATR * features.atr,
+        "derivative_bear_stretch_ok": features.upside_stretch >= US_DERIVATIVE_BEAR_MIN_UP_STRETCH_ATR * features.atr,
+        "derivative_bear_fast_ema_ok": current.close <= features.turn_ema_fast,
+        "derivative_bear_vwap_ok": current.close <= features.vwap,
+        "derivative_bear_vwap_extension_ok": (
+            current.close >= features.vwap - US_DERIVATIVE_BEAR_MAX_DISTANCE_BELOW_VWAP_ATR * features.atr
+        ),
+        "derivative_bear_open_late_extension_floor_ok": (
+            True
+            if phase != "US_OPEN_LATE"
+            else current.close <= features.vwap - US_DERIVATIVE_BEAR_OPEN_LATE_MIN_DISTANCE_BELOW_VWAP_ATR * features.atr
+        ),
+        "derivative_bear_open_late_body_ok": (
+            True if phase != "US_OPEN_LATE" else features.body_size >= US_DERIVATIVE_BEAR_OPEN_LATE_MIN_BODY_ATR * features.atr
+        ),
+        "derivative_bear_open_late_close_ok": (
+            True
+            if phase != "US_OPEN_LATE"
+            else _close_location_below_threshold(
+                current.low,
+                current.close,
+                features.bar_range,
+                US_DERIVATIVE_BEAR_OPEN_LATE_MAX_CLOSE_LOCATION,
+            )
+        ),
+        "derivative_bear_open_late_fast_ema_extension_ok": True if phase != "US_OPEN_LATE" else close_below_fast_floor,
+        "derivative_bear_slow_ema_ok": True,
+        "derivative_bear_structure_ok": True,
+        "derivative_bear_cooldown_ok": prior_short > US_DERIVATIVE_BEAR_COOLDOWN_BARS,
+        "prior_bars_since_short_setup": prior_short,
+    }
+    return _event_envelope(
+        runtime_5m_payload=runtime_5m_payload,
+        runtime_5m_payload_path=runtime_5m_payload_path,
+        expected_account_id=expected_account_id,
+        source_id=source_id,
+        now=now,
+        candle=current,
+        strategy_id=US_DERIVATIVE_BEAR_TURN_STRATEGY_ID,
+        lane_id="mgc_us_derivative_bear_turn",
+        signal_side="SHORT",
+        state_key="us_derivative_bear_turn_state",
+        features_key="us_derivative_bear_turn_features",
+        feature_version=US_DERIVATIVE_BEAR_TURN_FEATURE_VERSION,
+        state=state,
+        features=features_payload,
+        feature_packet=features,
+        input_bar_count=len(candles),
+    )
+
+
+def _us_late_pause_resume_long_event(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None,
+    expected_account_id: str,
+    source_id: str,
+    now: datetime,
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+    bull_snap: Mapping[str, Any],
+    prior_bars_since_long_setup: int | None,
+) -> dict[str, Any]:
+    current = candles[-1]
+    previous = candles[-2]
+    features = feature_history[-1]
+    recent = _us_late_long_recent_context(candles, feature_history)
+    prior_long = prior_bars_since_long_setup if prior_bars_since_long_setup is not None else 1000
+    phase = _research_session_phase(current.timestamp)
+    local_time = current.timestamp.astimezone(NY).time()
+    state = {
+        "derivative_phase": phase,
+        "session_us_late": phase == "US_LATE",
+        "allow_us": True,
+        "no_first_bull_snap_turn": bull_snap.get("first_bull_snap_turn") is not True,
+        "timeframe": "5m",
+    }
+    features_payload = {
+        "feature_version": US_LATE_PAUSE_RESUME_LONG_FEATURE_VERSION,
+        "calibration_profile": DEFAULT_CALIBRATION_PROFILE,
+        "close": current.close,
+        "open": current.open,
+        "previous_close": previous.close,
+        "bull_snap_close_strong": _close_location_above_threshold(
+            current.low, current.close, features.bar_range, MIN_SNAP_CLOSE_LOCATION
+        ),
+        "signal_range_expansion_ratio": recent["signal_range_expansion_ratio"],
+        "max_range_expansion_ratio": US_LATE_PAUSE_RESUME_LONG_MAX_RANGE_EXPANSION_RATIO,
+        "one_bar_pullback_before_signal": recent["one_bar_pullback_before_signal"],
+        "signal_breaks_prior_1_high": recent["signal_breaks_prior_1_high"],
+        "signal_ema_location_ok": recent["signal_ema_location_ok"],
+        "setup_bar_normalized_curvature": recent["setup_bar_normalized_curvature"],
+        "setup_curvature_min": US_LATE_PAUSE_RESUME_LONG_SETUP_CURVATURE_MIN,
+        "setup_bar_curvature_is_positive": recent["setup_bar_curvature_is_positive"],
+        "prior_bars_since_long_setup": prior_long,
+        "prior_bars_since_long_setup_gt_anti_churn": prior_long > ANTI_CHURN_BARS,
+        "not_1755_carryover": local_time != time(16, 55),
+    }
+    return _event_envelope(
+        runtime_5m_payload=runtime_5m_payload,
+        runtime_5m_payload_path=runtime_5m_payload_path,
+        expected_account_id=expected_account_id,
+        source_id=source_id,
+        now=now,
+        candle=current,
+        strategy_id=US_LATE_PAUSE_RESUME_LONG_STRATEGY_ID,
+        lane_id="mgc_us_late_pause_resume_long",
+        signal_side="LONG",
+        state_key="us_late_pause_resume_long_state",
+        features_key="us_late_pause_resume_long_features",
+        feature_version=US_LATE_PAUSE_RESUME_LONG_FEATURE_VERSION,
+        state=state,
+        features=features_payload,
+        feature_packet=features,
+        input_bar_count=len(candles),
+    )
+
+
 def _bear_recent_context(
     candles: Sequence[_RuntimeCandle],
     feature_history: Sequence[_FeaturePacket],
@@ -688,6 +918,38 @@ def _asia_late_long_recent_context(
         "pullback_normalized_curvature": _normalized(pullback_features.velocity_delta, pullback_features.atr),
         "one_bar_pullback_before_signal": candles[-2].close < candles[-3].close,
         "signal_breaks_prior_1_high": candles[-1].high > candles[-2].high,
+    }
+
+
+def _us_late_long_recent_context(
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+) -> dict[str, Any]:
+    if len(candles) < 3 or len(feature_history) < 3:
+        return {
+            "signal_range_expansion_ratio": Decimal("0"),
+            "one_bar_pullback_before_signal": False,
+            "signal_breaks_prior_1_high": False,
+            "signal_ema_location_ok": False,
+            "setup_bar_normalized_curvature": Decimal("0"),
+            "setup_bar_curvature_is_positive": False,
+        }
+    current = candles[-1]
+    current_features = feature_history[-1]
+    setup_features = feature_history[-3]
+    setup_curvature = _normalized(setup_features.velocity_delta, setup_features.atr)
+    fast = current_features.turn_ema_fast
+    slow = current_features.turn_ema_slow
+    return {
+        "signal_range_expansion_ratio": _range_over_atr(current, current_features),
+        "one_bar_pullback_before_signal": candles[-2].close < candles[-3].close,
+        "signal_breaks_prior_1_high": current.high > candles[-2].high,
+        "signal_ema_location_ok": (
+            (fast < slow and current.close > fast and current.close <= slow)
+            or (fast > slow and current.close >= fast and current.close >= slow)
+        ),
+        "setup_bar_normalized_curvature": setup_curvature,
+        "setup_bar_curvature_is_positive": setup_curvature >= US_LATE_PAUSE_RESUME_LONG_SETUP_CURVATURE_MIN,
     }
 
 
@@ -846,6 +1108,8 @@ def _base_report(
         "asia_late_flat_pullback_pause_resume_long_envelope_ready": False,
         "asia_early_pause_resume_short_envelope_ready": False,
         "asia_early_normal_breakout_retest_hold_long_envelope_ready": False,
+        "us_derivative_bear_turn_envelope_ready": False,
+        "us_late_pause_resume_long_envelope_ready": False,
         "primary_blocker": primary_blocker,
         "required_next_action": required_next_action,
         "paper_proof_cli_called": False,
@@ -902,10 +1166,14 @@ def _write_blocked_result(
         asia_late_flat_pullback_pause_resume_long_event_json=None,
         asia_early_pause_resume_short_event_json=None,
         asia_early_normal_breakout_retest_hold_long_event_json=None,
+        us_derivative_bear_turn_event_json=None,
+        us_late_pause_resume_long_event_json=None,
         london_late_pause_resume_short_event=None,
         asia_late_flat_pullback_pause_resume_long_event=None,
         asia_early_pause_resume_short_event=None,
         asia_early_normal_breakout_retest_hold_long_event=None,
+        us_derivative_bear_turn_event=None,
+        us_late_pause_resume_long_event=None,
     )
 
 

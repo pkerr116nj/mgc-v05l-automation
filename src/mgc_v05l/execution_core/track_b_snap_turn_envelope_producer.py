@@ -109,6 +109,7 @@ class _FeaturePacket:
     turn_ema_slow: Decimal
     velocity: Decimal
     velocity_delta: Decimal
+    vwap: Decimal
     downside_stretch: Decimal
     upside_stretch: Decimal
     close_location: Decimal | None
@@ -402,6 +403,7 @@ def _compute_features(candles: Sequence[_RuntimeCandle]) -> _FeaturePacket:
         turn_ema_slow=slow,
         velocity=velocity,
         velocity_delta=velocity_delta,
+        vwap=_session_vwap(candles),
         downside_stretch=_downside_stretch(candles, TURN_STRETCH_LOOKBACK, current.close),
         upside_stretch=_upside_stretch(candles, TURN_STRETCH_LOOKBACK, current.close),
         close_location=close_location,
@@ -711,10 +713,27 @@ def _feature_diagnostics(features: _FeaturePacket) -> dict[str, Any]:
         "turn_ema_slow": features.turn_ema_slow,
         "velocity": features.velocity,
         "velocity_delta": features.velocity_delta,
+        "vwap": features.vwap,
         "downside_stretch": features.downside_stretch,
         "upside_stretch": features.upside_stretch,
         "close_location": features.close_location,
     }
+
+
+def _session_vwap(candles: Sequence[_RuntimeCandle]) -> Decimal:
+    if not candles:
+        return Decimal("0")
+    latest_session_date = candles[-1].timestamp.astimezone(NY).date()
+    total_volume = Decimal("0")
+    total_price_volume = Decimal("0")
+    for candle in candles:
+        if candle.timestamp.astimezone(NY).date() != latest_session_date:
+            continue
+        volume = candle.volume if candle.volume is not None else Decimal("0")
+        typical_price = (candle.high + candle.low + candle.close) / Decimal("3")
+        total_volume += volume
+        total_price_volume += typical_price * volume
+    return candles[-1].close if total_volume == 0 else total_price_volume / total_volume
 
 
 def _true_range_series(candles: Sequence[_RuntimeCandle]) -> list[Decimal]:
