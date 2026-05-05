@@ -99,6 +99,7 @@ DEFAULT_PAPER_AUDIT_RECENT_ROW_LIMIT = 2000
 # contract so we do not oscillate between healthy and stale in normal operation.
 DEFAULT_DASHBOARD_API_CACHE_MAX_AGE_SECONDS = 60.0
 DEFAULT_DASHBOARD_API_CACHE_SOURCE_LAG_GRACE_SECONDS = 30.0
+DEFAULT_DASHBOARD_API_DEGRADED_CACHE_MAX_AGE_SECONDS = 60.0 * 60.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_FRESHNESS_SECONDS = 30.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_MAX_STALE_SECONDS = 300.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_RUNTIME_UPDATE_GRACE_SECONDS = 60.0
@@ -385,6 +386,7 @@ class OperatorDashboardService:
             / "runtime"
             / "paper_runtime_config_paths.txt"
         )
+        self._paper_runtime_config_path_warnings: list[dict[str, Any]] = []
         self._strategy_analysis_path = self._dashboard_artifacts_dir / "strategy_analysis_snapshot.json"
         self._research_runtime_bridge_root = (
             self._repo_root / "outputs" / "research_runtime_bridge" / "default_warehouse_paper"
@@ -1294,6 +1296,7 @@ class OperatorDashboardService:
                 action_log = _dashboard_action_log_rows(_tail_jsonl(self._action_log_path, 20))
                 snapshot_warnings = list(_SNAPSHOT_WARNINGS.get() or [])
                 degraded_sections = _summarize_snapshot_warnings(snapshot_warnings)
+                runtime_config_warning_payload = self._paper_runtime_config_warning_payload()
                 dashboard_payload: dict[str, Any] = {
                     "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
                     "generated_at": generated_at,
@@ -1309,6 +1312,11 @@ class OperatorDashboardService:
                         "degraded": bool(degraded_sections),
                         "warning_count": len(snapshot_warnings),
                         "recovery": dashboard_recovery,
+                        "dashboard_payload_mode": "cold",
+                        "dashboard_snapshot_stale": False,
+                        "dashboard_snapshot_age_seconds": 0.0,
+                        "cold_snapshot_skipped_for_latency": False,
+                        **runtime_config_warning_payload,
                     },
                     "refresh": {
                         "default_interval_seconds": DEFAULT_REFRESH_INTERVAL_SECONDS,
@@ -1345,6 +1353,7 @@ class OperatorDashboardService:
                     "dashboard_recovery": dashboard_recovery,
                     "degraded_sections": degraded_sections,
                     "dashboard_warnings": snapshot_warnings,
+                    **runtime_config_warning_payload,
                     "bootstrap_prerequisites": self._dashboard_bootstrap_prerequisites_payload(),
                     "market_context": market_context,
                     "treasury_curve": treasury_curve,
@@ -1375,7 +1384,6 @@ class OperatorDashboardService:
                     "same_underlying_conflicts": same_underlying_conflicts,
                 }
                 _write_json_file(self._dashboard_snapshot_path, dashboard_payload)
-                self._write_desktop_dashboard_cache_mirror(dashboard_payload)
                 return dashboard_payload
             finally:
                 _SNAPSHOT_WARNINGS.reset(warning_token)
@@ -1502,6 +1510,203 @@ class OperatorDashboardService:
         degraded["supervised_paper_operability"] = supervised_paper_operability
         return degraded
 
+
+    def _paper_runtime_config_warning_payload(self) -> dict[str, Any]:
+        warnings = list(self._paper_runtime_config_path_warnings)
+        stale_paths = [
+            str(warning.get("path") or "")
+            for warning in warnings
+            if str(warning.get("code") or "") == "paper_runtime_config_override_outside_repo"
+            and str(warning.get("path") or "")
+        ]
+        return {
+            "paper_runtime_config_path_warnings": warnings,
+            "stale_runtime_config_paths_detected": bool(stale_paths),
+            "stale_runtime_config_paths_ignored": stale_paths,
+        }
+
+    def _annotate_dashboard_api_hot_path(
+        self,
+        payload: dict[str, Any],
+        *,
+        mode: str,
+        cold_snapshot_skipped_for_latency: bool,
+    ) -> dict[str, Any]:
+        annotated = dict(payload)
+        generated_at = _parse_iso_datetime(str(annotated.get("generated_at") or ""))
+        snapshot_age_seconds = (
+            max((datetime.now(timezone.utc) - generated_at.astimezone(timezone.utc)).total_seconds(), 0.0)
+            if generated_at is not None
+            else None
+        )
+        warning_payload = self._paper_runtime_config_warning_payload()
+        dashboard_meta = dict(annotated.get("dashboard_meta") or {})
+        dashboard_snapshot_stale = bool(
+            dashboard_meta.get("snapshot_instance_stale")
+            or dashboard_meta.get("snapshot_fallback_active")
+            or mode == "degraded"
+        )
+        if snapshot_age_seconds is not None and snapshot_age_seconds > DEFAULT_DASHBOARD_API_CACHE_MAX_AGE_SECONDS:
+            dashboard_snapshot_stale = True
+        dashboard_meta.update(
+            {
+                "dashboard_payload_mode": mode,
+                "dashboard_snapshot_stale": dashboard_snapshot_stale,
+                "dashboard_snapshot_age_seconds": snapshot_age_seconds,
+                "cold_snapshot_skipped_for_latency": cold_snapshot_skipped_for_latency,
+                **warning_payload,
+            }
+        )
+        annotated["dashboard_meta"] = dashboard_meta
+        annotated.update(
+            {
+                "dashboard_payload_mode": mode,
+                "dashboard_snapshot_stale": dashboard_snapshot_stale,
+                "dashboard_snapshot_age_seconds": snapshot_age_seconds,
+                "cold_snapshot_skipped_for_latency": cold_snapshot_skipped_for_latency,
+                **warning_payload,
+            }
+        )
+        return annotated
+
+    def _latest_track_b_operator_status_payload(self) -> dict[str, Any] | None:
+        return _load_json_file(
+            self._repo_root
+            / "outputs"
+            / "track_b_execution_core"
+            / "operator_status"
+            / "latest_operator_status_summary.json"
+        )
+
+    def _minimal_degraded_dashboard_payload(self, *, detail: str) -> dict[str, Any]:
+        generated_at = datetime.now(timezone.utc).isoformat()
+        with self._dashboard_probe_lock:
+            probe = dict(self._dashboard_probe)
+        track_b_operator_status = self._latest_track_b_operator_status_payload()
+        warning_payload = self._paper_runtime_config_warning_payload()
+        dashboard_recovery = {
+            "state": "DEGRADED",
+            "reason_code": "DASHBOARD_HOT_PATH_DEGRADED",
+            "reason": detail,
+            "active": False,
+        }
+        startup_control_plane = {
+            "overall_state": "DEGRADED",
+            "launch_allowed": False,
+            "launch_candidate": False,
+            "dependencies_aligned": False,
+            "primary_reason": detail,
+            "summary_line": detail,
+            "counts": {"degraded": 1, "needs_attention_now": 1},
+            "primary_dependency": {
+                "key": "dashboard_backend",
+                "title": "Dashboard / Backend",
+                "state": "DEGRADED",
+                "reason": detail,
+                "next_action_label": "Wait for recovery",
+                "next_action_kind": "refresh",
+                "authoritative_artifact": "/health",
+                "authoritative_artifact_label": "Dashboard health payload",
+            },
+        }
+        payload: dict[str, Any] = {
+            "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
+            "generated_at": generated_at,
+            "dashboard_meta": {
+                "build_stamp": self._build_stamp,
+                "version_label": f"dashboard-{self._build_stamp[:10]}",
+                "server_pid": self._server_info.pid if self._server_info else os.getpid(),
+                "server_instance_id": self._server_info.instance_id if self._server_info else None,
+                "server_started_at": self._server_info.started_at if self._server_info else None,
+                "server_url": self._server_info.url if self._server_info else None,
+                "server_host": self._server_info.host if self._server_info else None,
+                "server_port": self._server_info.port if self._server_info else None,
+                "degraded": True,
+                "source": "dashboard_hot_path_degraded",
+                "recovery": dashboard_recovery,
+                **warning_payload,
+            },
+            "dashboard_recovery": dashboard_recovery,
+            "global": {
+                "mode": "UNKNOWN",
+                "mode_label": "UNKNOWN",
+                "live_disabled": True,
+                "runtime_health": "DEGRADED",
+                "runtime_health_label": "DEGRADED",
+                "paper_running": False,
+                "shadow_running": False,
+            },
+            "operator_surface": {
+                "available": False,
+                "status": "DEGRADED",
+                "summary": detail,
+            },
+            "startup_control_plane": startup_control_plane,
+            "supervised_paper_operability": {
+                "state": "ATTENTION_REQUIRED",
+                "app_usable_for_supervised_paper": False,
+                "unusable_reason_code": "DASHBOARD_HOT_PATH_DEGRADED",
+                "unusable_reason": detail,
+                "summary_line": detail,
+                "primary_next_action": "Wait for recovery",
+            },
+            "track_b_operator_status": track_b_operator_status,
+            "shadow": {"running": False},
+            "paper": {"running": False},
+            "action_log": [],
+            "dashboard_warnings": [
+                {
+                    "section": "dashboard_backend",
+                    "reader": "hot_path",
+                    "path": str(self._dashboard_snapshot_path),
+                    "detail": detail,
+                }
+            ],
+            "degraded_sections": [
+                {
+                    "section": "dashboard_backend",
+                    "count": 1,
+                    "paths": [str(self._dashboard_snapshot_path)],
+                    "latest_detail": detail,
+                }
+            ],
+            "dashboard_probe": probe,
+            **warning_payload,
+        }
+        return self._annotate_dashboard_api_hot_path(
+            payload,
+            mode="degraded",
+            cold_snapshot_skipped_for_latency=True,
+        )
+
+    def dashboard_api_payload(self) -> dict[str, Any]:
+        # Detect stale persisted config overrides without loading or chasing them.
+        if self._paper_runtime_config_paths_override_path.exists():
+            self._persisted_paper_runtime_config_paths()
+        cached_payload = self.cached_dashboard_snapshot()
+        if cached_payload is not None:
+            return self._annotate_dashboard_api_hot_path(
+                cached_payload,
+                mode="cached",
+                cold_snapshot_skipped_for_latency=False,
+            )
+        degraded_cached_payload = self.cached_dashboard_snapshot(
+            allow_stale_instance=True,
+            max_age_seconds=DEFAULT_DASHBOARD_API_DEGRADED_CACHE_MAX_AGE_SECONDS,
+        )
+        if degraded_cached_payload is not None:
+            return self._annotate_dashboard_api_hot_path(
+                degraded_cached_payload,
+                mode="degraded",
+                cold_snapshot_skipped_for_latency=True,
+            )
+        return self._minimal_degraded_dashboard_payload(
+            detail=(
+                "No recent dashboard snapshot is available yet. The backend is returning a bounded degraded payload "
+                "while cold dashboard snapshot generation warms in the background."
+            )
+        )
+
     def _dashboard_snapshot_source_paths(self) -> list[Path]:
         paths = [
             self._repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "operator_status.json",
@@ -1529,7 +1734,12 @@ class OperatorDashboardService:
                 stale_sources.append(str(path))
         return stale_sources
 
-    def cached_dashboard_snapshot(self, *, allow_stale_instance: bool = False) -> dict[str, Any] | None:
+    def cached_dashboard_snapshot(
+        self,
+        *,
+        allow_stale_instance: bool = False,
+        max_age_seconds: float | None = None,
+    ) -> dict[str, Any] | None:
         payload = _load_json_file(self._dashboard_snapshot_path)
         if not payload:
             return None
@@ -1542,6 +1752,8 @@ class OperatorDashboardService:
             (datetime.now(timezone.utc) - generated_at.astimezone(timezone.utc)).total_seconds(),
             0.0,
         )
+        if max_age_seconds is not None and cache_age_seconds > max_age_seconds:
+            return None
         dashboard_meta = dict(payload.get("dashboard_meta") or {})
         current_instance_id = self._server_info.instance_id if self._server_info else None
         snapshot_instance_id = str(dashboard_meta.get("server_instance_id") or "").strip() or None
@@ -2719,6 +2931,7 @@ class OperatorDashboardService:
         payload["phase_detail"] = probe.get("phase_detail")
         payload["dashboard_attached"] = bool(probe.get("dashboard_attached"))
         payload["paper_runtime_ready"] = bool(probe.get("paper_runtime_ready"))
+        payload["paper_runtime_config_path_warnings"] = list(self._paper_runtime_config_path_warnings)
         if probe.get("error"):
             payload["error"] = probe["error"]
         return payload
@@ -14995,6 +15208,7 @@ class OperatorDashboardService:
         return _read_json(status_path)
 
     def _paper_runtime_config_paths(self) -> list[Path]:
+        self._paper_runtime_config_path_warnings = []
         raw_override = str(os.environ.get("MGC_PROBATIONARY_PAPER_CONFIG_PATHS") or "").strip()
         if raw_override:
             raw_parts = [part.strip() for part in re.split(rf"[,\n{re.escape(os.pathsep)}]+", raw_override) if part.strip()]
@@ -15007,15 +15221,7 @@ class OperatorDashboardService:
             if resolved_paths:
                 return resolved_paths
         if self._paper_runtime_config_paths_override_path.exists():
-            resolved_paths: list[Path] = []
-            for raw_line in self._paper_runtime_config_paths_override_path.read_text(encoding="utf-8").splitlines():
-                raw_part = raw_line.strip()
-                if not raw_part:
-                    continue
-                path = Path(raw_part)
-                if not path.is_absolute():
-                    path = (self._repo_root / path).resolve()
-                resolved_paths.append(path)
+            resolved_paths = self._persisted_paper_runtime_config_paths()
             if resolved_paths:
                 return resolved_paths
         return [
@@ -15031,6 +15237,60 @@ class OperatorDashboardService:
             self._repo_root / "config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us_production_track.yaml",
             self._repo_root / "config/probationary_pattern_engine_paper_atp_companion_shared_runtime.yaml",
         ]
+
+    def _persisted_paper_runtime_config_paths(self) -> list[Path]:
+        resolved_paths: list[Path] = []
+        warnings: list[dict[str, Any]] = []
+        repo_root_text = os.path.normpath(str(self._repo_root))
+        try:
+            raw_lines = self._paper_runtime_config_paths_override_path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            self._paper_runtime_config_path_warnings = [
+                {
+                    "code": "paper_runtime_config_override_unreadable",
+                    "path": str(self._paper_runtime_config_paths_override_path),
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            ]
+            return []
+        for raw_line in raw_lines:
+            raw_part = raw_line.strip()
+            if not raw_part:
+                continue
+            raw_path = Path(raw_part)
+            candidate = raw_path if raw_path.is_absolute() else self._repo_root / raw_path
+            candidate_text = os.path.normpath(str(candidate))
+            try:
+                common = os.path.commonpath([repo_root_text, candidate_text])
+            except ValueError:
+                common = ""
+            if common != repo_root_text:
+                _record_snapshot_warning(
+                    Path(raw_part),
+                    reader="runtime_config",
+                    detail="Ignoring persisted paper runtime config path outside the active repo.",
+                )
+                warnings.append(
+                    {
+                        "code": "paper_runtime_config_override_outside_repo",
+                        "path": raw_part,
+                        "detail": "Ignoring persisted paper runtime config path outside the active repo.",
+                    }
+                )
+                continue
+            candidate_path = Path(candidate_text)
+            if not candidate_path.exists():
+                warnings.append(
+                    {
+                        "code": "paper_runtime_config_override_missing",
+                        "path": str(candidate_path),
+                        "detail": "Ignoring missing persisted paper runtime config path.",
+                    }
+                )
+                continue
+            resolved_paths.append(candidate_path)
+        self._paper_runtime_config_path_warnings = warnings
+        return resolved_paths
 
     def _paper_runtime_config_args(self) -> list[str]:
         args: list[str] = []
@@ -15602,17 +15862,9 @@ def _build_handler(service: OperatorDashboardService):
                 self._serve_asset("operator_dashboard.js", "application/javascript; charset=utf-8")
                 return
             if parsed.path == "/api/dashboard":
-                cached_payload = service.cached_dashboard_snapshot()
-                if cached_payload is not None:
-                    self._write_json(HTTPStatus.OK, cached_payload)
-                    return
                 try:
-                    payload = service.dashboard_snapshot()
+                    payload = service.dashboard_api_payload()
                 except Exception as exc:
-                    degraded_cached_payload = service.cached_dashboard_snapshot(allow_stale_instance=True)
-                    if degraded_cached_payload is not None:
-                        self._write_json(HTTPStatus.OK, degraded_cached_payload)
-                        return
                     self._write_json(
                         HTTPStatus.SERVICE_UNAVAILABLE,
                         {
@@ -15620,6 +15872,8 @@ def _build_handler(service: OperatorDashboardService):
                             "message": f"{type(exc).__name__}: {exc}",
                             "build_stamp": service._build_stamp,
                             "generated_at": datetime.now(timezone.utc).isoformat(),
+                            "dashboard_payload_mode": "error",
+                            "cold_snapshot_skipped_for_latency": True,
                         },
                     )
                     return

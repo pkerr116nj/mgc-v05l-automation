@@ -2459,6 +2459,7 @@ def test_dashboard_bind_reports_permission_denied_truthfully(tmp_path: Path, mon
 
 
 def test_api_dashboard_serves_degraded_cached_snapshot_before_inline_live_generation(tmp_path: Path) -> None:
+    generated_at = datetime.now(timezone.utc).isoformat()
     service = OperatorDashboardService(tmp_path)
     service._server_info = DashboardServerInfo(
         host="127.0.0.1",
@@ -2474,7 +2475,7 @@ def test_api_dashboard_serves_degraded_cached_snapshot_before_inline_live_genera
         json.dumps(
             {
                 "payload_version": 2,
-                "generated_at": "2026-04-09T12:00:05+00:00",
+                "generated_at": generated_at,
                 "dashboard_meta": {"server_instance_id": "instance-stale"},
                 "operator_surface": {"ok": True},
                 "startup_control_plane": {"overall_state": "READY", "counts": {"ready": 1}},
@@ -2485,12 +2486,228 @@ def test_api_dashboard_serves_degraded_cached_snapshot_before_inline_live_genera
     )
     service._record_dashboard_probe(snapshot=None, error=RuntimeError("api dashboard still warming"))  # noqa: SLF001
 
+    def _unexpected_live_snapshot() -> dict[str, object]:
+        raise AssertionError("inline regeneration must not run on the /api/dashboard hot path")
+
+    service.dashboard_snapshot = _unexpected_live_snapshot  # type: ignore[method-assign]
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes
+    status, payload = writes[0]
+    assert status == HTTPStatus.OK
+    assert payload["dashboard_payload_mode"] == "degraded"
+    assert payload["cold_snapshot_skipped_for_latency"] is True
+    assert payload["dashboard_meta"]["snapshot_instance_stale"] is True
+
+
+def test_api_dashboard_returns_degraded_cache_instead_of_inline_regeneration(tmp_path: Path) -> None:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    service = OperatorDashboardService(tmp_path)
+    service._server_info = DashboardServerInfo(
+        host="127.0.0.1",
+        port=8790,
+        url="http://127.0.0.1:8790/",
+        pid=12345,
+        started_at="2026-04-09T12:00:00+00:00",
+        build_stamp="abc123def456",
+        instance_id="instance-current",
+        info_file=str(tmp_path / "dashboard.json"),
+    )
+    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
+        json.dumps(
+            {
+                "payload_version": 2,
+                "generated_at": generated_at,
+                "dashboard_meta": {"server_instance_id": "instance-stale"},
+                "operator_surface": {"ok": True},
+                "startup_control_plane": {"overall_state": "READY", "counts": {"ready": 1}},
+                "supervised_paper_operability": {"app_usable_for_supervised_paper": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    service._record_dashboard_probe(snapshot=None, error=RuntimeError("api dashboard still warming"))  # noqa: SLF001
+
+    service.dashboard_snapshot = lambda: (_ for _ in ()).throw(AssertionError("unexpected cold snapshot"))  # type: ignore[method-assign]
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes
+    status, payload = writes[0]
+    assert status == HTTPStatus.OK
+    assert payload["dashboard_payload_mode"] == "degraded"
+    assert payload["cold_snapshot_skipped_for_latency"] is True
+    assert payload["dashboard_meta"]["snapshot_instance_stale"] is True
+
+
+def test_api_dashboard_degraded_cache_does_not_require_inline_regeneration(tmp_path: Path) -> None:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    service = OperatorDashboardService(tmp_path)
+    service._server_info = DashboardServerInfo(
+        host="127.0.0.1",
+        port=8790,
+        url="http://127.0.0.1:8790/",
+        pid=12345,
+        started_at="2026-04-09T12:00:00+00:00",
+        build_stamp="abc123def456",
+        instance_id="instance-current",
+        info_file=str(tmp_path / "dashboard.json"),
+    )
+    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
+        json.dumps(
+            {
+                "payload_version": 2,
+                "generated_at": generated_at,
+                "dashboard_meta": {"server_instance_id": "instance-stale"},
+                "operator_surface": {"ok": True},
+                "startup_control_plane": {"overall_state": "READY", "counts": {"ready": 1}},
+                "supervised_paper_operability": {"app_usable_for_supervised_paper": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    service._record_dashboard_probe(snapshot=None, error=RuntimeError("api dashboard still warming"))  # noqa: SLF001
+
+    service.dashboard_snapshot = lambda: (_ for _ in ()).throw(AssertionError("unexpected cold snapshot"))  # type: ignore[method-assign]
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes
+    status, payload = writes[0]
+    assert status == HTTPStatus.OK
+    assert payload["dashboard_payload_mode"] == "degraded"
+    assert payload["cold_snapshot_skipped_for_latency"] is True
+    assert payload["dashboard_meta"]["snapshot_instance_stale"] is True
+
+
+def test_api_dashboard_returns_minimal_degraded_payload_without_cache_or_cold_snapshot(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    service._server_info = DashboardServerInfo(
+        host="127.0.0.1",
+        port=8790,
+        url="http://127.0.0.1:8790/",
+        pid=12345,
+        started_at="2026-04-09T12:00:00+00:00",
+        build_stamp="abc123def456",
+        instance_id="instance-current",
+        info_file=str(tmp_path / "dashboard.json"),
+    )
+    (service._action_log_path.parent).mkdir(parents=True, exist_ok=True)  # noqa: SLF001
+    service._action_log_path.write_text("x" * 1_000_000, encoding="utf-8")  # noqa: SLF001
+    service.dashboard_snapshot = lambda: (_ for _ in ()).throw(AssertionError("unexpected cold snapshot"))  # type: ignore[method-assign]
+    service._write_desktop_dashboard_cache_mirror = lambda _payload: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        AssertionError("mirror write must not run on the /api/dashboard hot path")
+    )
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes
+    status, payload = writes[0]
+    assert status == HTTPStatus.OK
+    assert payload["dashboard_payload_mode"] == "degraded"
+    assert payload["cold_snapshot_skipped_for_latency"] is True
+    assert payload["action_log"] == []
+    assert payload["track_b_operator_status"] == {}
+
+
+def test_api_dashboard_reports_stale_runtime_config_paths_without_chasing_them(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    override_file = service._paper_runtime_config_paths_override_path  # noqa: SLF001
+    override_file.parent.mkdir(parents=True, exist_ok=True)
+    override_file.write_text(
+        "/Users/patrick/Documents/MGC-v05l-automation/config/base.yaml\n",
+        encoding="utf-8",
+    )
+    service.dashboard_snapshot = lambda: (_ for _ in ()).throw(AssertionError("unexpected cold snapshot"))  # type: ignore[method-assign]
+    handler_cls = _build_handler(service)
+    handler = handler_cls.__new__(handler_cls)
+    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler.path = "/api/dashboard"
+    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
+    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
+    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
+
+    handler.do_GET()
+
+    assert writes
+    status, payload = writes[0]
+    assert status == HTTPStatus.OK
+    assert payload["stale_runtime_config_paths_detected"] is True
+    assert payload["stale_runtime_config_paths_ignored"] == [
+        "/Users/patrick/Documents/MGC-v05l-automation/config/base.yaml"
+    ]
+    assert payload["dashboard_meta"]["stale_runtime_config_paths_detected"] is True
+
+
+def test_market_data_semantics_do_not_report_dead_when_runtime_is_stopped_but_feed_is_available() -> None:
+    assert _market_data_semantics(running=False, market_data_ok=True, freshness="IDLE") == "READY"
+    assert _market_data_semantics(running=False, market_data_ok=False, freshness="IDLE") == "UNKNOWN"
+    assert _market_data_semantics(running=True, market_data_ok=False, freshness="FRESH") == "DEAD"
+
+
+def test_api_dashboard_serves_current_same_instance_cache_while_runtime_artifacts_advance(tmp_path: Path) -> None:
+    generated_at = (datetime.now(timezone.utc) - timedelta(seconds=35)).isoformat()
+    service = OperatorDashboardService(tmp_path)
+    service._server_info = DashboardServerInfo(
+        host="127.0.0.1",
+        port=8790,
+        url="http://127.0.0.1:8790/",
+        pid=12345,
+        started_at="2026-04-09T12:00:00+00:00",
+        build_stamp="abc123def456",
+        instance_id="instance-current",
+        info_file=str(tmp_path / "dashboard.json"),
+    )
+    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
+        json.dumps(
+            {
+                "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
+                "generated_at": generated_at,
+                "dashboard_meta": {"server_instance_id": "instance-current"},
+                "operator_surface": {"ok": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_path = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "operator_status.json"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text('{"updated_at":"2026-04-17T12:47:37+00:00"}', encoding="utf-8")
+
     inline_generation_attempted = False
 
     def _unexpected_live_snapshot() -> dict[str, object]:
         nonlocal inline_generation_attempted
         inline_generation_attempted = True
-        raise AssertionError("degraded cached payload should be served before inline regeneration")
+        raise AssertionError("current-age same-instance cache should be served before inline regeneration")
 
     service.dashboard_snapshot = _unexpected_live_snapshot  # type: ignore[method-assign]
     handler_cls = _build_handler(service)
@@ -2507,162 +2724,8 @@ def test_api_dashboard_serves_degraded_cached_snapshot_before_inline_live_genera
     status, payload = writes[0]
     assert status == HTTPStatus.OK
     assert inline_generation_attempted is False
-    assert payload["dashboard_meta"]["snapshot_fallback_active"] is True
-    assert payload["dashboard_meta"]["snapshot_instance_stale"] is True
-
-
-def test_api_dashboard_prefers_inline_regeneration_over_stale_same_instance_cache(tmp_path: Path) -> None:
-    service = OperatorDashboardService(tmp_path)
-    service._server_info = DashboardServerInfo(
-        host="127.0.0.1",
-        port=8790,
-        url="http://127.0.0.1:8790/",
-        pid=12345,
-        started_at="2026-04-09T12:00:00+00:00",
-        build_stamp="abc123def456",
-        instance_id="instance-current",
-        info_file=str(tmp_path / "dashboard.json"),
-    )
-    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
-        json.dumps(
-            {
-                "payload_version": 2,
-                "generated_at": "2026-04-09T12:00:05+00:00",
-                "dashboard_meta": {"server_instance_id": "instance-stale"},
-                "operator_surface": {"ok": True},
-                "startup_control_plane": {"overall_state": "READY", "counts": {"ready": 1}},
-                "supervised_paper_operability": {"app_usable_for_supervised_paper": True},
-            }
-        ),
-        encoding="utf-8",
-    )
-    service._record_dashboard_probe(snapshot=None, error=RuntimeError("api dashboard still warming"))  # noqa: SLF001
-
-    live_payload = {
-        "generated_at": "2026-04-09T12:00:08+00:00",
-        "dashboard_meta": {"server_instance_id": "instance-current"},
-        "operator_surface": {"ok": True, "lane_count": 26},
-    }
-
-    service.dashboard_snapshot = lambda: live_payload  # type: ignore[method-assign]
-    handler_cls = _build_handler(service)
-    handler = handler_cls.__new__(handler_cls)
-    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
-    handler.path = "/api/dashboard"
-    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
-    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
-    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
-
-    handler.do_GET()
-
-    assert writes
-    status, payload = writes[0]
-    assert status == HTTPStatus.OK
-    assert payload == live_payload
-
-
-def test_api_dashboard_uses_degraded_stale_cache_when_inline_regeneration_fails(tmp_path: Path) -> None:
-    service = OperatorDashboardService(tmp_path)
-    service._server_info = DashboardServerInfo(
-        host="127.0.0.1",
-        port=8790,
-        url="http://127.0.0.1:8790/",
-        pid=12345,
-        started_at="2026-04-09T12:00:00+00:00",
-        build_stamp="abc123def456",
-        instance_id="instance-current",
-        info_file=str(tmp_path / "dashboard.json"),
-    )
-    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
-        json.dumps(
-            {
-                "payload_version": 2,
-                "generated_at": "2026-04-09T12:00:05+00:00",
-                "dashboard_meta": {"server_instance_id": "instance-stale"},
-                "operator_surface": {"ok": True},
-                "startup_control_plane": {"overall_state": "READY", "counts": {"ready": 1}},
-                "supervised_paper_operability": {"app_usable_for_supervised_paper": True},
-            }
-        ),
-        encoding="utf-8",
-    )
-    service._record_dashboard_probe(snapshot=None, error=RuntimeError("api dashboard still warming"))  # noqa: SLF001
-
-    def _failing_live_snapshot() -> dict[str, object]:
-        raise RuntimeError("live generation failed")
-
-    service.dashboard_snapshot = _failing_live_snapshot  # type: ignore[method-assign]
-    handler_cls = _build_handler(service)
-    handler = handler_cls.__new__(handler_cls)
-    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
-    handler.path = "/api/dashboard"
-    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
-    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
-    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
-
-    handler.do_GET()
-
-    assert writes
-    status, payload = writes[0]
-    assert status == HTTPStatus.OK
-    assert payload["dashboard_meta"]["snapshot_fallback_active"] is True
-    assert payload["dashboard_meta"]["snapshot_instance_stale"] is True
-    assert payload["startup_control_plane"]["overall_state"] == "DEGRADED"
-    assert payload["supervised_paper_operability"]["app_usable_for_supervised_paper"] is False
-
-
-def test_market_data_semantics_do_not_report_dead_when_runtime_is_stopped_but_feed_is_available() -> None:
-    assert _market_data_semantics(running=False, market_data_ok=True, freshness="IDLE") == "READY"
-    assert _market_data_semantics(running=False, market_data_ok=False, freshness="IDLE") == "UNKNOWN"
-    assert _market_data_semantics(running=True, market_data_ok=False, freshness="FRESH") == "DEAD"
-
-
-def test_api_dashboard_ignores_stale_same_instance_cache_when_runtime_artifacts_advance(tmp_path: Path) -> None:
-    service = OperatorDashboardService(tmp_path)
-    service._server_info = DashboardServerInfo(
-        host="127.0.0.1",
-        port=8790,
-        url="http://127.0.0.1:8790/",
-        pid=12345,
-        started_at="2026-04-09T12:00:00+00:00",
-        build_stamp="abc123def456",
-        instance_id="instance-current",
-        info_file=str(tmp_path / "dashboard.json"),
-    )
-    service._dashboard_snapshot_path.write_text(  # noqa: SLF001
-        json.dumps(
-            {
-                "generated_at": "2026-04-17T11:56:07+00:00",
-                "dashboard_meta": {"server_instance_id": "instance-current"},
-                "operator_surface": {"ok": True},
-            }
-        ),
-        encoding="utf-8",
-    )
-    source_path = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "operator_status.json"
-    source_path.parent.mkdir(parents=True, exist_ok=True)
-    source_path.write_text('{"updated_at":"2026-04-17T12:47:37+00:00"}', encoding="utf-8")
-
-    live_payload = {
-        "generated_at": "2026-04-17T12:48:00+00:00",
-        "dashboard_meta": {"server_instance_id": "instance-current"},
-        "operator_surface": {"ok": True, "lane_count": 26},
-    }
-    service.dashboard_snapshot = lambda: live_payload  # type: ignore[method-assign]
-    handler_cls = _build_handler(service)
-    handler = handler_cls.__new__(handler_cls)
-    writes: list[tuple[HTTPStatus, dict[str, object]]] = []
-    handler.path = "/api/dashboard"
-    handler._write_json = lambda status, payload: writes.append((status, payload))  # type: ignore[method-assign]
-    handler._serve_index_html = lambda: (_ for _ in ()).throw(AssertionError("unexpected html request"))  # type: ignore[method-assign]
-    handler._serve_asset = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected asset request"))  # type: ignore[method-assign]
-
-    handler.do_GET()
-
-    assert writes
-    status, payload = writes[0]
-    assert status == HTTPStatus.OK
-    assert payload == live_payload
+    assert payload["dashboard_meta"]["server_instance_id"] == "instance-current"
+    assert payload["generated_at"] == generated_at
 
 
 def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surfaces() -> None:
@@ -11221,6 +11284,10 @@ def test_default_paper_runtime_config_paths_include_atp_companion_overlays(tmp_p
 
 def test_paper_runtime_config_paths_use_persisted_override_file(tmp_path: Path) -> None:
     service = OperatorDashboardService(tmp_path)
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "outputs" / "reports").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "base.yaml").write_text("", encoding="utf-8")
+    (tmp_path / "outputs" / "reports" / "gc_1x_all_lanes.paper_package.yaml").write_text("", encoding="utf-8")
     override_file = (
         tmp_path
         / "outputs"
@@ -11247,6 +11314,37 @@ def test_paper_runtime_config_paths_use_persisted_override_file(tmp_path: Path) 
         str((tmp_path / "config" / "base.yaml").resolve()),
         str((tmp_path / "outputs" / "reports" / "gc_1x_all_lanes.paper_package.yaml").resolve()),
     ]
+
+
+def test_paper_runtime_config_paths_ignore_stale_override_paths_outside_repo(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    override_file = (
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "paper_runtime_config_paths.txt"
+    )
+    override_file.parent.mkdir(parents=True, exist_ok=True)
+    override_file.write_text(
+        "\n".join(
+            [
+                "/Users/patrick/Documents/MGC-v05l-automation/config/base.yaml",
+                "/Users/patrick/Documents/MGC-v05l-automation/outputs/probationary_pattern_engine/paper_session/runtime/paper_route_canary_force_once.yaml",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config_paths = [str(path) for path in service._paper_runtime_config_paths()]
+
+    assert str(tmp_path / "config" / "probationary_pattern_engine_paper.yaml") in config_paths
+    assert all("/Users/patrick/Documents/MGC-v05l-automation" not in path for path in config_paths)
+    assert {warning["code"] for warning in service._paper_runtime_config_path_warnings} == {
+        "paper_runtime_config_override_outside_repo"
+    }
 
 
 def test_dashboard_snapshot_includes_approved_quant_baselines_snapshot(tmp_path: Path) -> None:
