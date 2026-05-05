@@ -195,14 +195,19 @@ Dashboard implication:
 - `track_b_runtime_candle_capture` owns the first bounded runtime MGC 1m candle
   context artifact for execution-time feature building. It is separate from
   weekly historical maintenance and is not a research archive. The first slice
-  supports supplied runtime candle JSON, bounds the window with `max_bars`
-  (default 250), overwrites stable latest artifacts, prunes old run folders,
-  and writes
+  supports bounded recent Databento `ohlcv-1m` fetches and supplied runtime
+  candle JSON, bounds the window with `max_bars` (default 250), overwrites
+  stable latest artifacts, prunes old run folders, and writes
   `outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json`
   plus
   `outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_candle_capture_report.json`.
   It reports `runtime_candle_context_ready`, candle counts/timestamps, duplicate
-  and gap counts, realtime quote-evidence fields, and no-submit safety fields.
+  and gap counts, requested window, Databento `provider_available_end`,
+  `history_end_used`, latest 1m/completed 5m ages,
+  `runtime_candle_context_stale`, realtime quote-evidence fields, and no-submit
+  safety fields. If Databento available_end fallback is used, the artifact is
+  still required to pass explicit runtime freshness thresholds before strategy
+  evaluation.
   It does not connect to broker/TWS/IBKR, run paper proof, infer execution
   authority, submit/cancel/place orders, or write an unbounded raw stream.
   Future live Databento candle capture should feed this bounded artifact shape

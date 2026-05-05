@@ -448,10 +448,35 @@ remains available for diagnostics and maintenance inputs, but it is not the
 normal trade-decision path.
 
 For execution-time EMA/VWAP/reclaim features, use the bounded runtime candle
-capture lane instead of weekly historical maintenance. The first implementation
-accepts supplied runtime candle JSON, overwrites stable latest artifacts, keeps
-only a small number of run folders, and does not create an unbounded raw
-stream:
+capture lane instead of weekly historical maintenance. It can fetch a bounded
+recent Databento `ohlcv-1m` window or accept supplied runtime candle JSON,
+overwrites stable latest artifacts, keeps only a small number of run folders,
+and does not create an unbounded raw stream:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_runtime_candle_capture_cli \
+  --fetch-databento-history \
+  --current-quote-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --local-symbol MGCM6 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --timeframe 1m \
+  --lookback-minutes 90 \
+  --max-bars 120 \
+  --min-bars 8 \
+  --max-latest-1m-age-seconds 900 \
+  --max-completed-5m-age-seconds 900 \
+  --source-id track_b_runtime_mgc_capture \
+  --output-root outputs/track_b_execution_core/track_b_runtime_candle_capture
+```
+
+For fixture/demo input:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_runtime_candle_capture_cli \
@@ -465,6 +490,8 @@ stream:
   --timeframe 1m \
   --max-bars 250 \
   --min-bars 3 \
+  --max-latest-1m-age-seconds 900 \
+  --max-completed-5m-age-seconds 900 \
   --source-id track_b_runtime_mgc_capture \
   --output-root outputs/track_b_execution_core/track_b_runtime_candle_capture
 ```
@@ -477,9 +504,16 @@ outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_can
 ```
 
 This runtime capture artifact is not the research archive. It is a bounded
-same-session context window for feature building. If live Databento streaming
-is needed later, it should feed this same bounded artifact shape rather than
-writing an unbounded stream by default.
+same-session context window for feature building. The capture report exposes
+`requested_window_start`, `requested_window_end`, `provider_available_end`,
+`history_end_used`, `available_end_lag_seconds`,
+`latest_1m_candle_timestamp`, `latest_completed_5m_candle_timestamp`, candle
+ages, and `runtime_candle_context_stale`. If Databento historical
+`available_end` lags the requested window, the capture may retry through
+`provider_available_end`, but the resulting bars must still pass the explicit
+runtime freshness thresholds before strategies consume them. If live Databento
+streaming is needed later, it should feed this same bounded artifact shape
+rather than writing an unbounded stream by default.
 
 The data-maintenance registry currently enables only `MGC` for runtime
 maintenance. Disabled planning entries preserve the broader Track A-style

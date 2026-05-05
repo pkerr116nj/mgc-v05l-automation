@@ -316,9 +316,10 @@ separate realtime current quote report.
 
 `track_b_runtime_candle_capture` is the bounded execution-time context lane for
 MGC 1m candles. It is not the research archive and it does not replace weekly
-historical maintenance. The first supported mode accepts supplied runtime candle
-JSON, bounds the retained window with `--max-bars` (default 250), overwrites
-stable latest artifacts, prunes old run folders, and writes:
+historical maintenance. It can fetch a bounded recent Databento `ohlcv-1m`
+window or accept supplied runtime candle JSON, bounds the retained window with
+`--max-bars` (default 250), freshness-checks latest 1m and completed 5m bars,
+overwrites stable latest artifacts, prunes old run folders, and writes:
 
 ```text
 outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json
@@ -329,6 +330,10 @@ The strategy paper runner can consume that context with
 `--runtime-candle-context-json .../latest_runtime_mgc_1m_candles.json`. If
 `--runtime-candle-context-required` is supplied and only maintained historical
 context is available, the runner blocks before readiness or paper proof.
+The runtime capture report includes requested window, provider available_end,
+history end used, latest 1m/completed 5m timestamps, age seconds, and
+`runtime_candle_context_stale`. Historical available_end fallback at this
+boundary is only a bounded recent data-source retry; stale bars still block.
 
 `track_b_mgc_candle_history_producer` remains available for diagnostics and
 maintenance inputs. On-demand historical fetch is not the normal trade-decision
