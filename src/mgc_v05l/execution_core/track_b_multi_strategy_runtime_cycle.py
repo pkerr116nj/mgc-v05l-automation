@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping
@@ -97,6 +98,15 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     confirm_paper_submit: bool = False
     manual_open_limit_price: str | None = None
     manual_close_limit_price: str | None = None
+    paper_order_pricing_policy: str = "MANUAL_LIMIT_PRICES"
+    paper_order_price_offset_ticks: int = 2
+    paper_exit_price_offset_ticks: int = 2
+    pricing_context_json: Path | None = None
+    pricing_context_payload: Mapping[str, object] | None = None
+    live_quote_report_json: Path | None = None
+    live_quote_report_payload: Mapping[str, object] | None = None
+    max_pricing_context_age_seconds: int = 120
+    tick_size: str = "0.1"
     allowlisted_local_symbol: str = "MGCM6"
     con_id: int | None = 712565978
     proof_timing_status: str = "ACTIVE_SESSION"
@@ -150,6 +160,7 @@ def run_track_b_multi_strategy_runtime_cycle(
     actual_stages = stages or default_stages()
     strategy_results: list[TrackBStrategyRuleRunnerResult] = []
     paper_result: TrackBStrategyPaperRunnerResult | None = None
+    paper_order_parameters: dict[str, object] = _empty_paper_order_parameters(config)
 
     try:
         strategy_reports: list[dict[str, object]] = []
@@ -187,14 +198,30 @@ def run_track_b_multi_strategy_runtime_cycle(
                 primary_blocker = "Chosen strategy candidate did not map back to a cycle input envelope."
                 required_next_action = "Review multi-strategy cycle artifacts before any PAPER retry."
             else:
-                paper_result = actual_stages.paper_runner(config, chosen_input, chosen_signal or {})
-                verdict = (
-                    TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
-                    if paper_result.report.get("strategy_paper_runner_verdict") == "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED"
-                    else TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_REVIEW_REQUIRED
-                )
-                primary_blocker = paper_result.report.get("primary_blocker")
-                required_next_action = str(paper_result.report.get("required_next_action") or "Review strategy PAPER runner report.")
+                paper_order_parameters = _resolve_paper_order_parameters(config, chosen_signal or {}, actual_now)
+                if paper_order_parameters.get("paper_order_parameter_blocker"):
+                    verdict = TrackBMultiStrategyRuntimeCycleVerdict.ARBITRATION_BLOCKED
+                    primary_blocker = paper_order_parameters.get("paper_order_parameter_blocker")
+                    required_next_action = (
+                        "Resolve Track B PAPER order pricing context before any guarded PAPER lifecycle handoff."
+                    )
+                else:
+                    paper_config = replace(
+                        config,
+                        manual_open_limit_price=str(paper_order_parameters["open_limit_price"]),
+                        manual_close_limit_price=str(paper_order_parameters["close_limit_price"]),
+                    )
+                    paper_result = actual_stages.paper_runner(paper_config, chosen_input, chosen_signal or {})
+                    paper_order_parameters["paper_runner_config_open_limit_price"] = paper_config.manual_open_limit_price
+                    paper_order_parameters["paper_runner_config_close_limit_price"] = paper_config.manual_close_limit_price
+                    verdict = (
+                        TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
+                        if paper_result.report.get("strategy_paper_runner_verdict")
+                        == "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED"
+                        else TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_REVIEW_REQUIRED
+                    )
+                    primary_blocker = paper_result.report.get("primary_blocker")
+                    required_next_action = str(paper_result.report.get("required_next_action") or "Review strategy PAPER runner report.")
 
         report = _build_report(
             config=config,
@@ -206,6 +233,7 @@ def run_track_b_multi_strategy_runtime_cycle(
             candidate_signals=candidate_signals,
             arbitration=arbitration,
             paper_result=paper_result,
+            paper_order_parameters=paper_order_parameters,
             primary_blocker=primary_blocker,
             required_next_action=required_next_action,
         )
@@ -232,6 +260,7 @@ def run_track_b_multi_strategy_runtime_cycle(
             candidate_signals=[],
             arbitration={},
             paper_result=paper_result,
+            paper_order_parameters=paper_order_parameters,
             primary_blocker=f"Track B multi-strategy runtime cycle stage error: {exc}",
             required_next_action="Review multi-strategy cycle diagnostics before retrying.",
         )
@@ -553,6 +582,259 @@ def _paper_side_for_chosen_signal(config_side: str, chosen_signal: Mapping[str, 
     return {"LONG": "BUY", "SHORT": "SELL"}.get(direction, config_side)
 
 
+def _empty_paper_order_parameters(config: TrackBMultiStrategyRuntimeCycleConfig) -> dict[str, object]:
+    return {
+        "pricing_policy": str(config.paper_order_pricing_policy or "MANUAL_LIMIT_PRICES").upper(),
+        "order_action": None,
+        "close_order_action": None,
+        "quantity": config.quantity,
+        "reference_price_source": None,
+        "reference_price": None,
+        "open_limit_price": config.manual_open_limit_price,
+        "close_limit_price": config.manual_close_limit_price,
+        "close_exit_policy": None,
+        "paper_order_parameter_blocker": None,
+        "pricing_context_path": str(config.pricing_context_json) if config.pricing_context_json else None,
+        "live_quote_report_path": str(config.live_quote_report_json) if config.live_quote_report_json else None,
+    }
+
+
+def _resolve_paper_order_parameters(
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    chosen_signal: Mapping[str, object],
+    now: datetime,
+) -> dict[str, object]:
+    policy = str(config.paper_order_pricing_policy or "MANUAL_LIMIT_PRICES").strip().upper()
+    order_action = _paper_side_for_chosen_signal(config.side, chosen_signal).upper()
+    if order_action not in {"BUY", "SELL"}:
+        return {
+            **_empty_paper_order_parameters(config),
+            "order_action": order_action,
+            "paper_order_parameter_blocker": "Chosen signal did not resolve to PAPER order_action BUY or SELL.",
+        }
+    close_action = "SELL" if order_action == "BUY" else "BUY"
+    base = {
+        **_empty_paper_order_parameters(config),
+        "pricing_policy": policy,
+        "order_action": order_action,
+        "close_order_action": close_action,
+        "quantity": config.quantity,
+        "close_exit_policy": "MARKETABLE_LIMIT_FLATTEN_AFTER_OPEN_PROOF",
+    }
+    if policy == "MANUAL_LIMIT_PRICES":
+        if config.manual_open_limit_price is None or config.manual_close_limit_price is None:
+            return {**base, "paper_order_parameter_blocker": "MANUAL_LIMIT_PRICES requires manual open and close limit prices."}
+        open_price = _positive_decimal(config.manual_open_limit_price)
+        close_price = _positive_decimal(config.manual_close_limit_price)
+        if open_price is None or close_price is None:
+            return {**base, "paper_order_parameter_blocker": "Manual PAPER open/close prices must be positive decimals."}
+        return {
+            **base,
+            "reference_price_source": "MANUAL_LIMIT_PRICES",
+            "reference_price": _decimal_text(open_price),
+            "open_limit_price": _decimal_text(open_price),
+            "close_limit_price": _decimal_text(close_price),
+        }
+    if policy not in {"MARKETABLE_LIMIT_FROM_LIVE_CONTEXT", "LIMIT_AT_LAST", "LIMIT_AT_SIGNAL_PRICE"}:
+        return {**base, "paper_order_parameter_blocker": f"Unsupported PAPER order pricing policy: {policy}."}
+
+    context = _pricing_context(config)
+    quote = _live_quote_context(config)
+    context_blocker = _pricing_context_blocker(config=config, context=context, now=now)
+    if context_blocker:
+        return {**base, "paper_order_parameter_blocker": context_blocker}
+    tick = _positive_decimal(config.tick_size)
+    if tick is None:
+        return {**base, "paper_order_parameter_blocker": "PAPER order pricing requires a positive tick_size."}
+
+    signal_reference = _decimal_from_first(
+        chosen_signal,
+        ("reference_price", "signal_reference_price", "signal_price", "close", "last_price"),
+    )
+    last_price = _latest_last_price(context)
+    bid = _decimal_from_first(quote, ("bid", "bid_price", "best_bid", "bid_px"))
+    ask = _decimal_from_first(quote, ("ask", "ask_price", "best_ask", "ask_px"))
+
+    if policy == "LIMIT_AT_SIGNAL_PRICE":
+        if signal_reference is None:
+            return {**base, "paper_order_parameter_blocker": "LIMIT_AT_SIGNAL_PRICE requires a signal reference price."}
+        ref_open = signal_reference
+        ref_close = signal_reference
+        ref_source = "SIGNAL_REFERENCE_PRICE"
+    elif policy == "LIMIT_AT_LAST":
+        if last_price is None:
+            return {**base, "paper_order_parameter_blocker": "LIMIT_AT_LAST requires a fresh live last/close price."}
+        ref_open = last_price
+        ref_close = last_price
+        ref_source = "LIVE_1M_LAST_CLOSE"
+    else:
+        if order_action == "BUY":
+            ref_open = ask or last_price
+            ref_close = bid or last_price
+            ref_source = "LIVE_QUOTE_ASK" if ask is not None else "LIVE_1M_LAST_CLOSE"
+            close_ref_source = "LIVE_QUOTE_BID" if bid is not None else "LIVE_1M_LAST_CLOSE"
+        else:
+            ref_open = bid or last_price
+            ref_close = ask or last_price
+            ref_source = "LIVE_QUOTE_BID" if bid is not None else "LIVE_1M_LAST_CLOSE"
+            close_ref_source = "LIVE_QUOTE_ASK" if ask is not None else "LIVE_1M_LAST_CLOSE"
+        if ref_open is None or ref_close is None:
+            return {
+                **base,
+                "paper_order_parameter_blocker": "MARKETABLE_LIMIT_FROM_LIVE_CONTEXT requires a fresh live quote or last price.",
+            }
+        open_offset = tick * Decimal(max(int(config.paper_order_price_offset_ticks), 0))
+        close_offset = tick * Decimal(max(int(config.paper_exit_price_offset_ticks), 0))
+        open_price = ref_open + open_offset if order_action == "BUY" else ref_open - open_offset
+        close_price = ref_close - close_offset if close_action == "SELL" else ref_close + close_offset
+        return {
+            **base,
+            "reference_price_source": ref_source,
+            "close_reference_price_source": close_ref_source,
+            "reference_price": _decimal_text(ref_open),
+            "close_reference_price": _decimal_text(ref_close),
+            "open_limit_price": _decimal_text(_round_to_tick(open_price, tick)),
+            "close_limit_price": _decimal_text(_round_to_tick(close_price, tick)),
+            "tick_size": _decimal_text(tick),
+            "open_price_offset_ticks": config.paper_order_price_offset_ticks,
+            "close_price_offset_ticks": config.paper_exit_price_offset_ticks,
+        }
+
+    return {
+        **base,
+        "reference_price_source": ref_source,
+        "reference_price": _decimal_text(ref_open),
+        "open_limit_price": _decimal_text(_round_to_tick(ref_open, tick)),
+        "close_limit_price": _decimal_text(_round_to_tick(ref_close, tick)),
+        "tick_size": _decimal_text(tick),
+    }
+
+
+def _pricing_context(config: TrackBMultiStrategyRuntimeCycleConfig) -> Mapping[str, object]:
+    if config.pricing_context_payload is not None:
+        return config.pricing_context_payload
+    if config.pricing_context_json is None:
+        return {}
+    try:
+        value = json.loads(Path(config.pricing_context_json).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return value if isinstance(value, Mapping) else {}
+
+
+def _live_quote_context(config: TrackBMultiStrategyRuntimeCycleConfig) -> Mapping[str, object]:
+    if config.live_quote_report_payload is not None:
+        return config.live_quote_report_payload
+    if config.live_quote_report_json is None:
+        return {}
+    try:
+        value = json.loads(Path(config.live_quote_report_json).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return value if isinstance(value, Mapping) else {}
+
+
+def _pricing_context_blocker(
+    *,
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    context: Mapping[str, object],
+    now: datetime,
+) -> str | None:
+    if not context:
+        return "Fresh Live pricing context JSON/payload is required for automatic PAPER order pricing."
+    if context.get("fresh_for_execution") is not True or context.get("runtime_candle_context_ready") is not True:
+        return "Live pricing context must be fresh_for_execution=true and runtime_candle_context_ready=true."
+    expected = {
+        "contract_key": config.contract_key,
+        "local_symbol": config.allowlisted_local_symbol,
+        "dataset": "GLBX.MDP3",
+    }
+    for key, expected_value in expected.items():
+        observed = context.get(key)
+        if observed is not None and str(observed) != str(expected_value):
+            return f"Live pricing context {key} mismatch: expected {expected_value}, observed {observed}."
+    age = _optional_decimal(context.get("latest_1m_age_seconds") or context.get("latest_1m_candle_age_seconds"))
+    if age is None:
+        latest_timestamp = _latest_context_timestamp(context)
+        if latest_timestamp is not None:
+            age = Decimal(str(max(0.0, (now.astimezone(UTC) - latest_timestamp.astimezone(UTC)).total_seconds())))
+    if age is None:
+        return "Live pricing context has no latest 1m age/timestamp for freshness validation."
+    if age > Decimal(str(config.max_pricing_context_age_seconds)):
+        return (
+            f"Live pricing context is stale for PAPER pricing: age_seconds={_decimal_text(age)}, "
+            f"max={config.max_pricing_context_age_seconds}."
+        )
+    return None
+
+
+def _latest_context_timestamp(context: Mapping[str, object]) -> datetime | None:
+    raw = context.get("candle_timestamp") or context.get("last_candle_timestamp") or context.get("latest_1m_timestamp")
+    candles = context.get("candles") or context.get("candle_history")
+    if isinstance(candles, list) and candles:
+        latest = candles[-1]
+        if isinstance(latest, Mapping):
+            raw = latest.get("candle_timestamp") or latest.get("timestamp") or raw
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _latest_last_price(context: Mapping[str, object]) -> Decimal | None:
+    direct = _decimal_from_first(context, ("last", "last_price", "close"))
+    if direct is not None:
+        return direct
+    candles = context.get("candles") or context.get("candle_history")
+    if isinstance(candles, list) and candles:
+        latest = candles[-1]
+        if isinstance(latest, Mapping):
+            return _decimal_from_first(latest, ("close", "last", "last_price"))
+    return None
+
+
+def _decimal_from_first(payload: Mapping[str, object], keys: tuple[str, ...]) -> Decimal | None:
+    for key in keys:
+        value = payload.get(key)
+        parsed = _optional_decimal(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _positive_decimal(value: object) -> Decimal | None:
+    parsed = _optional_decimal(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
+
+
+def _optional_decimal(value: object) -> Decimal | None:
+    if value in {None, ""}:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _round_to_tick(price: Decimal, tick: Decimal) -> Decimal:
+    if tick <= 0:
+        return price
+    units = (price / tick).to_integral_value(rounding=ROUND_HALF_UP)
+    return units * tick
+
+
+def _decimal_text(value: Decimal) -> str:
+    return format(value.normalize(), "f")
+
+
 def _build_report(
     *,
     config: TrackBMultiStrategyRuntimeCycleConfig,
@@ -564,6 +846,7 @@ def _build_report(
     candidate_signals: list[dict[str, object]],
     arbitration: Mapping[str, object],
     paper_result: TrackBStrategyPaperRunnerResult | None,
+    paper_order_parameters: Mapping[str, object],
     primary_blocker: object | None,
     required_next_action: str,
 ) -> dict[str, object]:
@@ -584,6 +867,16 @@ def _build_report(
         "chosen_strategy_id": chosen_signal.get("strategy_id") if isinstance(chosen_signal, Mapping) else None,
         "reason_no_signal_chosen": _reason_no_signal_chosen(verdict, arbitration, primary_blocker),
         "paper_submit_requested": _paper_submit_requested(config),
+        "paper_order_parameters": dict(paper_order_parameters),
+        "paper_order_parameter_blocker": paper_order_parameters.get("paper_order_parameter_blocker"),
+        "order_action": paper_order_parameters.get("order_action"),
+        "quantity": paper_order_parameters.get("quantity"),
+        "pricing_policy": paper_order_parameters.get("pricing_policy"),
+        "reference_price_source": paper_order_parameters.get("reference_price_source"),
+        "reference_price": paper_order_parameters.get("reference_price"),
+        "open_limit_price": paper_order_parameters.get("open_limit_price"),
+        "close_exit_policy": paper_order_parameters.get("close_exit_policy"),
+        "close_limit_price": paper_order_parameters.get("close_limit_price"),
         "readiness_invoked": bool(paper_report.get("readiness_invoked")) if paper_report else False,
         "paper_proof_invoked": bool(paper_report.get("paper_proof_invoked")) if paper_report else False,
         "submit_allowed": bool(paper_report.get("submit_allowed")) if paper_report else False,

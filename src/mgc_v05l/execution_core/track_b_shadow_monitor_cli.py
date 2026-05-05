@@ -42,8 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-paper-trades-per-run", type=int, default=1)
     parser.add_argument("--pause-after-paper-trade", choices=["true", "false"], default="true")
     parser.add_argument("--quantity", type=int)
+    parser.add_argument(
+        "--paper-order-pricing-policy",
+        choices=["MARKETABLE_LIMIT_FROM_LIVE_CONTEXT", "LIMIT_AT_LAST", "LIMIT_AT_SIGNAL_PRICE", "MANUAL_LIMIT_PRICES"],
+        default="MARKETABLE_LIMIT_FROM_LIVE_CONTEXT",
+    )
+    parser.add_argument("--paper-order-price-offset-ticks", type=int, default=2)
+    parser.add_argument("--paper-exit-price-offset-ticks", type=int, default=2)
     parser.add_argument("--manual-open-limit-price")
     parser.add_argument("--manual-close-limit-price")
+    parser.add_argument("--tick-size", default="0.1")
     parser.add_argument("--con-id", type=int, default=712565978)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7497)
@@ -142,8 +150,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_paper_trades_per_run=args.max_paper_trades_per_run,
             pause_after_paper_trade=args.pause_after_paper_trade == "true",
             quantity=args.quantity,
+            paper_order_pricing_policy=args.paper_order_pricing_policy,
+            paper_order_price_offset_ticks=args.paper_order_price_offset_ticks,
+            paper_exit_price_offset_ticks=args.paper_exit_price_offset_ticks,
             manual_open_limit_price=args.manual_open_limit_price,
             manual_close_limit_price=args.manual_close_limit_price,
+            tick_size=args.tick_size,
             con_id=args.con_id,
             host=args.host,
             port=args.port,
@@ -217,6 +229,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "latest_signal_side": result.report.get("latest_signal_side"),
                 "latest_paper_lifecycle_report_path": result.report.get("latest_paper_lifecycle_report_path"),
                 "latest_broker_state_classification": result.report.get("latest_broker_state_classification"),
+                "paper_order_pricing_policy": result.report.get("paper_order_pricing_policy"),
+                "latest_paper_order_parameters": result.report.get("latest_paper_order_parameters"),
+                "latest_paper_order_parameter_blocker": result.report.get("latest_paper_order_parameter_blocker"),
                 "runtime_data_freshness_by_instrument": result.report.get("runtime_data_freshness_by_instrument"),
                 "candidate_signals": result.report.get("candidate_signals", []),
                 "suppressed_signals": result.report.get("suppressed_signals", []),

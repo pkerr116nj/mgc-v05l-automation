@@ -67,6 +67,33 @@ def cycle_config(tmp_path: Path, **overrides: object) -> TrackBMultiStrategyRunt
     return TrackBMultiStrategyRuntimeCycleConfig(**payload)
 
 
+def live_pricing_context(*, close: str = "4575.0", fresh: bool = True, age_seconds: int = 10) -> dict[str, object]:
+    return {
+        "schema_version": "track_b_databento_live_mgc_1m_candles_v1",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "dataset": "GLBX.MDP3",
+        "fresh_for_execution": fresh,
+        "runtime_candle_context_ready": fresh,
+        "latest_1m_age_seconds": age_seconds,
+        "candle_timestamp": aware_now().isoformat(),
+        "close": close,
+        "candles": [
+            {
+                "candle_timestamp": aware_now().isoformat(),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": "1",
+            }
+        ],
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+
+
 def rule_report(
     strategy_id: str,
     *,
@@ -393,6 +420,176 @@ def test_auto_paper_side_matches_chosen_short_signal(tmp_path: Path) -> None:
     assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
     assert observed_side == ["SELL"]
     assert calls.paper == 1
+
+
+def test_auto_pricing_derives_buy_limits_from_fresh_live_last(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["FIRST_BULL_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BULL_SNAP_TURN_V1",
+        rule_mode="FIRST_BULL_SNAP_TURN_V1",
+        decision="LONG",
+        emitted=True,
+        direction="LONG",
+    )
+    observed: list[dict[str, object]] = []
+
+    def paper_stage(
+        config: TrackBMultiStrategyRuntimeCycleConfig,
+        _strategy_input: TrackBMultiStrategyInput,
+        _chosen_signal: dict[str, object],
+    ) -> TrackBStrategyPaperRunnerResult:
+        calls.paper += 1
+        observed.append(
+            {
+                "side": config.side,
+                "open": config.manual_open_limit_price,
+                "close": config.manual_close_limit_price,
+            }
+        )
+        return paper_result(tmp_path)
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            side="AUTO",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            paper_order_pricing_policy="MARKETABLE_LIMIT_FROM_LIVE_CONTEXT",
+            pricing_context_payload=live_pricing_context(close="4575.0"),
+        ),
+        stages=TrackBMultiStrategyRuntimeCycleStages(
+            strategy_rule=stages_for(tmp_path, calls, reports).strategy_rule,
+            paper_runner=paper_stage,
+        ),
+        cycle_id="cycle-auto-price-buy",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
+    assert observed == [{"side": "AUTO", "open": "4575.2", "close": "4574.8"}]
+    assert result.report["order_action"] == "BUY"
+    assert result.report["reference_price_source"] == "LIVE_1M_LAST_CLOSE"
+    assert result.report["open_limit_price"] == "4575.2"
+    assert result.report["close_limit_price"] == "4574.8"
+    assert calls.paper == 1
+
+
+def test_auto_pricing_derives_sell_limits_from_fresh_live_last(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["FIRST_BEAR_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BEAR_SNAP_TURN_V1",
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+        decision="SHORT",
+        emitted=True,
+        direction="SHORT",
+    )
+    observed: list[dict[str, object]] = []
+
+    def paper_stage(
+        config: TrackBMultiStrategyRuntimeCycleConfig,
+        _strategy_input: TrackBMultiStrategyInput,
+        _chosen_signal: dict[str, object],
+    ) -> TrackBStrategyPaperRunnerResult:
+        calls.paper += 1
+        observed.append(
+            {
+                "side": config.side,
+                "open": config.manual_open_limit_price,
+                "close": config.manual_close_limit_price,
+            }
+        )
+        return paper_result(tmp_path)
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            side="AUTO",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            paper_order_pricing_policy="MARKETABLE_LIMIT_FROM_LIVE_CONTEXT",
+            pricing_context_payload=live_pricing_context(close="4575.0"),
+        ),
+        stages=TrackBMultiStrategyRuntimeCycleStages(
+            strategy_rule=stages_for(tmp_path, calls, reports).strategy_rule,
+            paper_runner=paper_stage,
+        ),
+        cycle_id="cycle-auto-price-sell",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
+    assert observed == [{"side": "AUTO", "open": "4574.8", "close": "4575.2"}]
+    assert result.report["order_action"] == "SELL"
+    assert result.report["open_limit_price"] == "4574.8"
+    assert result.report["close_limit_price"] == "4575.2"
+    assert calls.paper == 1
+
+
+def test_auto_pricing_blocks_when_live_context_missing(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["FIRST_BULL_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BULL_SNAP_TURN_V1",
+        rule_mode="FIRST_BULL_SNAP_TURN_V1",
+        decision="LONG",
+        emitted=True,
+        direction="LONG",
+    )
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            side="AUTO",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            paper_order_pricing_policy="MARKETABLE_LIMIT_FROM_LIVE_CONTEXT",
+        ),
+        stages=stages_for(tmp_path, calls, reports, paper=paper_result(tmp_path)),
+        cycle_id="cycle-auto-price-missing",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.ARBITRATION_BLOCKED
+    assert "Fresh Live pricing context" in str(result.report["paper_order_parameter_blocker"])
+    assert calls.paper == 0
+    assert result.report["submit_attempted"] is False
+
+
+def test_auto_pricing_blocks_when_live_context_stale(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["FIRST_BULL_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BULL_SNAP_TURN_V1",
+        rule_mode="FIRST_BULL_SNAP_TURN_V1",
+        decision="LONG",
+        emitted=True,
+        direction="LONG",
+    )
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            side="AUTO",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            paper_order_pricing_policy="MARKETABLE_LIMIT_FROM_LIVE_CONTEXT",
+            pricing_context_payload=live_pricing_context(fresh=False, age_seconds=999),
+        ),
+        stages=stages_for(tmp_path, calls, reports, paper=paper_result(tmp_path)),
+        cycle_id="cycle-auto-price-stale",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.ARBITRATION_BLOCKED
+    assert "fresh_for_execution=true" in str(result.report["paper_order_parameter_blocker"])
+    assert calls.paper == 0
+    assert result.report["broker_state_mutated"] is False
 
 
 def test_multiple_same_direction_signals_without_arbitration_blocks(tmp_path: Path) -> None:

@@ -916,8 +916,7 @@ def paper_config(tmp_path: Path, **overrides: object) -> TrackBShadowMonitorConf
         "enable_paper_trading": True,
         "paper_on_signal": True,
         "quantity": 1,
-        "manual_open_limit_price": "4575.0",
-        "manual_close_limit_price": "4575.3",
+        "paper_order_pricing_policy": "MARKETABLE_LIMIT_FROM_LIVE_CONTEXT",
         "max_cycles": 2,
         "pause_after_paper_trade": True,
     }
@@ -959,6 +958,37 @@ def test_paper_mode_rejects_non_live_runtime_source(tmp_path: Path) -> None:
             monitor_id="monitor-paper-http-rejected",
             now_func=now,
         )
+
+
+def test_paper_mode_rejects_manual_prices_without_manual_policy(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+
+    with pytest.raises(ValueError, match="Manual PAPER prices are only accepted"):
+        run_track_b_shadow_monitor(
+            config=paper_config(tmp_path, manual_open_limit_price="4575.0", manual_close_limit_price="4575.3"),
+            stages=fake.stages(),
+            monitor_id="monitor-paper-manual-price-with-auto-policy",
+            now_func=now,
+        )
+
+
+def test_paper_mode_manual_prices_remain_available_for_manual_policy(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+
+    result = run_track_b_shadow_monitor(
+        config=paper_config(
+            tmp_path,
+            paper_order_pricing_policy="MANUAL_LIMIT_PRICES",
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=fake.stages(),
+        monitor_id="monitor-paper-manual-policy",
+        now_func=now,
+    )
+
+    assert result.report["paper_order_pricing_policy"] == "MANUAL_LIMIT_PRICES"
+    assert result.report["submit_attempted"] is False
 
 
 def test_paper_mode_blocks_when_live_feed_is_not_strategy_ready(tmp_path: Path) -> None:

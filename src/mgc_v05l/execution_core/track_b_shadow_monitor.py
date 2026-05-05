@@ -1,10 +1,9 @@
-"""Service-ready Track B SHADOW monitor.
+"""Service-ready Track B monitor.
 
-The monitor is the long-running no-submit observation owner for Track B. It
-owns process/lock/heartbeat artifacts and orchestrates existing Track B
-market-data and strategy components. It deliberately remains SHADOW-only:
-strategy signals are observed and journaled, but broker mutation is treated as
-a critical safety anomaly.
+The monitor is the long-running observation owner for Track B. It owns
+process/lock/heartbeat artifacts and orchestrates existing Track B market-data
+and strategy components. SHADOW mode remains no-submit. PAPER mode is explicit
+and delegates only through the guarded Track B paper lifecycle.
 """
 
 from __future__ import annotations
@@ -144,6 +143,10 @@ class TrackBShadowMonitorConfig:
     quantity: int | None = None
     manual_open_limit_price: str | None = None
     manual_close_limit_price: str | None = None
+    paper_order_pricing_policy: str = "MARKETABLE_LIMIT_FROM_LIVE_CONTEXT"
+    paper_order_price_offset_ticks: int = 2
+    paper_exit_price_offset_ticks: int = 2
+    tick_size: str = "0.1"
     con_id: int | None = 712565978
     host: str = "127.0.0.1"
     port: int = 7497
@@ -1232,10 +1235,16 @@ def _validate_monitor_mode_config(config: TrackBShadowMonitorConfig) -> None:
         raise ValueError("PAPER mode requires --max-paper-trades-per-run greater than zero.")
     if config.quantity is None or config.quantity <= 0:
         raise ValueError("PAPER mode requires explicit positive --quantity.")
-    if config.manual_open_limit_price is None:
-        raise ValueError("PAPER mode requires --manual-open-limit-price.")
-    if config.manual_close_limit_price is None:
-        raise ValueError("PAPER mode requires --manual-close-limit-price.")
+    policy = str(config.paper_order_pricing_policy or "").strip().upper()
+    if policy == "MANUAL_LIMIT_PRICES":
+        if config.manual_open_limit_price is None:
+            raise ValueError("PAPER mode with MANUAL_LIMIT_PRICES requires --manual-open-limit-price.")
+        if config.manual_close_limit_price is None:
+            raise ValueError("PAPER mode with MANUAL_LIMIT_PRICES requires --manual-close-limit-price.")
+    elif config.manual_open_limit_price is not None or config.manual_close_limit_price is not None:
+        raise ValueError("Manual PAPER prices are only accepted with --paper-order-pricing-policy MANUAL_LIMIT_PRICES.")
+    elif policy not in {"MARKETABLE_LIMIT_FROM_LIVE_CONTEXT", "LIMIT_AT_LAST", "LIMIT_AT_SIGNAL_PRICE"}:
+        raise ValueError("PAPER mode received an unsupported --paper-order-pricing-policy.")
     if config.expected_account_id != "DUM882026" or config.account_id != "DUM882026":
         raise ValueError("PAPER mode currently requires account and expected account DUM882026.")
 
@@ -1896,6 +1905,13 @@ def _run_multi_strategy_runtime_cycle(
             confirm_paper_submit=_monitor_paper_submit_requested(config),
             manual_open_limit_price=config.manual_open_limit_price,
             manual_close_limit_price=config.manual_close_limit_price,
+            paper_order_pricing_policy=config.paper_order_pricing_policy,
+            paper_order_price_offset_ticks=config.paper_order_price_offset_ticks,
+            paper_exit_price_offset_ticks=config.paper_exit_price_offset_ticks,
+            pricing_context_json=Path(config.runtime_candle_capture_output_root) / "latest_runtime_mgc_1m_candles.json",
+            live_quote_report_json=Path(config.live_runtime_feed_output_root) / "latest_live_quote_status_report.json",
+            max_pricing_context_age_seconds=config.max_latest_1m_age_seconds,
+            tick_size=config.tick_size,
             allowlisted_local_symbol=instrument.local_symbol,
             con_id=config.con_id,
             output_root=config.multi_strategy_output_root,
@@ -2079,6 +2095,16 @@ def _instrument_report_from_stages(
             "paper_runner_report_path": runtime_cycle_report.get("paper_runner_report_path"),
             "paper_runner_verdict": runtime_cycle_report.get("paper_runner_verdict"),
             "paper_proof_classification": runtime_cycle_report.get("paper_proof_classification"),
+            "paper_order_parameters": runtime_cycle_report.get("paper_order_parameters") or {},
+            "paper_order_parameter_blocker": runtime_cycle_report.get("paper_order_parameter_blocker"),
+            "order_action": runtime_cycle_report.get("order_action"),
+            "quantity": runtime_cycle_report.get("quantity"),
+            "pricing_policy": runtime_cycle_report.get("pricing_policy"),
+            "reference_price_source": runtime_cycle_report.get("reference_price_source"),
+            "reference_price": runtime_cycle_report.get("reference_price"),
+            "open_limit_price": runtime_cycle_report.get("open_limit_price"),
+            "close_exit_policy": runtime_cycle_report.get("close_exit_policy"),
+            "close_limit_price": runtime_cycle_report.get("close_limit_price"),
             "latest_broker_state_classification": runtime_cycle_report.get("paper_proof_classification")
             or runtime_cycle_report.get("final_broker_state_classification"),
             "final_broker_state_classification": runtime_cycle_report.get("final_broker_state_classification"),
@@ -2144,6 +2170,10 @@ def _report_for_cycle(
         "max_paper_trades_per_run": config.max_paper_trades_per_run,
         "paper_trades_attempted_count": paper_trades_attempted_count,
         "pause_after_paper_trade": config.pause_after_paper_trade,
+        "paper_order_pricing_policy": config.paper_order_pricing_policy,
+        "paper_order_price_offset_ticks": config.paper_order_price_offset_ticks,
+        "paper_exit_price_offset_ticks": config.paper_exit_price_offset_ticks,
+        "tick_size": config.tick_size,
         "started_at": started_at.astimezone(UTC).isoformat(),
         "completed_at": completed_at.isoformat(),
         "cycle_elapsed_seconds": round(max(0.0, (completed_at - started_at.astimezone(UTC)).total_seconds()), 3),
@@ -2212,6 +2242,10 @@ def _report_for_cycle(
         "latest_paper_lifecycle_report_path": _first_nonempty(item.get("paper_runner_report_path") for item in instrument_reports),
         "latest_broker_state_classification": _first_nonempty(
             item.get("latest_broker_state_classification") for item in instrument_reports
+        ),
+        "latest_paper_order_parameters": _first_nonempty(item.get("paper_order_parameters") for item in instrument_reports),
+        "latest_paper_order_parameter_blocker": _first_nonempty(
+            item.get("paper_order_parameter_blocker") for item in instrument_reports
         ),
         "decision_journal_summary_path": _first_nonempty(item.get("decision_journal_summary_path") for item in instrument_reports),
         "decision_journal_tier_counts": aggregate_tiers,
