@@ -25,6 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--breakout-retest-hold-long-event-json", type=Path)
     parser.add_argument("--first-bull-snap-turn-event-json", type=Path)
     parser.add_argument("--first-bear-snap-turn-event-json", type=Path)
+    parser.add_argument("--london-late-pause-resume-short-event-json", type=Path)
+    parser.add_argument("--asia-late-flat-pullback-pause-resume-long-event-json", type=Path)
     parser.add_argument("--inbox-dir", required=True, type=Path)
     parser.add_argument("--expected-account-id", default="DUM882026")
     parser.add_argument("--source-id", default="track_b_multi_strategy_runtime_cycle")
@@ -67,6 +69,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             breakout_retest_hold_long_event_json=args.breakout_retest_hold_long_event_json,
             first_bull_snap_turn_event_json=args.first_bull_snap_turn_event_json,
             first_bear_snap_turn_event_json=args.first_bear_snap_turn_event_json,
+            london_late_pause_resume_short_event_json=args.london_late_pause_resume_short_event_json,
+            asia_late_flat_pullback_pause_resume_long_event_json=args.asia_late_flat_pullback_pause_resume_long_event_json,
             inbox_dir=args.inbox_dir,
             expected_account_id=args.expected_account_id,
             source_id=args.source_id,

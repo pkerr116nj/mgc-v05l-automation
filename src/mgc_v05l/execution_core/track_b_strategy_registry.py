@@ -221,6 +221,74 @@ FIRST_BEAR_SNAP_TURN_V1 = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("FIRST_BEAR_SNAP_TURN_V1",),
 )
 
+LONDON_LATE_PAUSE_RESUME_SHORT_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+    rule_id="LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+    rule_mode="LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.london_late_pause_resume_short_features.normalized_slope",
+        "metadata.london_late_pause_resume_short_features.normalized_curvature",
+        "metadata.london_late_pause_resume_short_features.signal_range_expansion_ratio",
+        "metadata.london_late_pause_resume_short_features.derivative_bear_close_weak",
+        "metadata.london_late_pause_resume_short_features.derivative_bear_range_ok",
+        "metadata.london_late_pause_resume_short_features.derivative_bear_body_ok",
+        "metadata.london_late_pause_resume_short_features.derivative_bear_stretch_ok",
+        "metadata.london_late_pause_resume_short_features.slow_ema_ok",
+        "metadata.london_late_pause_resume_short_features.one_bar_rebound_before_signal",
+        "metadata.london_late_pause_resume_short_features.prior_3_any_positive_curvature",
+        "metadata.london_late_pause_resume_short_features.signal_breaks_prior_1_low",
+        "metadata.london_late_pause_resume_short_features.derivative_bear_cooldown_ok",
+        "metadata.london_late_pause_resume_short_features.no_competing_bear_short_candidate",
+        "metadata.london_late_pause_resume_short_features.feature_version",
+        "metadata.london_late_pause_resume_short_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.london_late_pause_resume_short_state.derivative_phase",
+        "metadata.london_late_pause_resume_short_state.session_london",
+        "metadata.london_late_pause_resume_short_state.allow_london",
+        "metadata.london_late_pause_resume_short_state.no_first_bear_snap_turn",
+    ),
+    feature_version="london_late_pause_resume_short_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=True,
+    live_money_eligible=False,
+    accepted_strategy_ids=("LONDON_LATE_PAUSE_RESUME_SHORT_V1",),
+    accepted_rule_ids=("LONDON_LATE_PAUSE_RESUME_SHORT_V1",),
+)
+
+ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+    rule_id="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+    rule_mode="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.asia_late_flat_pullback_pause_resume_long_features.bull_snap_close_strong",
+        "metadata.asia_late_flat_pullback_pause_resume_long_features.one_bar_pullback_before_signal",
+        "metadata.asia_late_flat_pullback_pause_resume_long_features.signal_breaks_prior_1_high",
+        "metadata.asia_late_flat_pullback_pause_resume_long_features.pullback_range_expansion_ratio",
+        "metadata.asia_late_flat_pullback_pause_resume_long_features.signal_range_expansion_ratio",
+        "metadata.asia_late_flat_pullback_pause_resume_long_features.pullback_normalized_curvature",
+        "metadata.asia_late_flat_pullback_pause_resume_long_features.prior_bars_since_long_setup_gt_anti_churn",
+        "metadata.asia_late_flat_pullback_pause_resume_long_features.feature_version",
+        "metadata.asia_late_flat_pullback_pause_resume_long_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.asia_late_flat_pullback_pause_resume_long_state.derivative_phase",
+        "metadata.asia_late_flat_pullback_pause_resume_long_state.session_asia",
+        "metadata.asia_late_flat_pullback_pause_resume_long_state.allow_asia",
+        "metadata.asia_late_flat_pullback_pause_resume_long_state.no_first_bull_snap_turn",
+    ),
+    feature_version="asia_late_flat_pullback_pause_resume_long_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=True,
+    live_money_eligible=False,
+    accepted_strategy_ids=("ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",),
+    accepted_rule_ids=("ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",),
+)
+
 DEMO_WIRING_PROOF = TrackBStrategyRegistryEntry(
     strategy_id="track_b_demo_wiring_proof",
     rule_id="mgc_realtime_quote_demo_long_v1",
@@ -260,6 +328,8 @@ TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1,
     FIRST_BULL_SNAP_TURN_V1,
     FIRST_BEAR_SNAP_TURN_V1,
+    LONDON_LATE_PAUSE_RESUME_SHORT_V1,
+    ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1,
     DEMO_WIRING_PROOF,
     HUMAN_REVIEW_ONLY,
 )

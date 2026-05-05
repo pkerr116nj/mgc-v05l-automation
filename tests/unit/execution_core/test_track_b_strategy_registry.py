@@ -132,6 +132,42 @@ def test_first_bear_snap_turn_registry_metadata_is_valid() -> None:
     assert "metadata.first_bear_snap_turn_state.session_allowed" in entry.required_state_schema
 
 
+def test_london_late_pause_resume_short_registry_metadata_is_valid() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+        rule_id="LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+        strategy_id="LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert entry.feature_version == "london_late_pause_resume_short_v1_phase1"
+    assert entry.calibration_profile == "probationary_baseline_v1"
+    assert "metadata.london_late_pause_resume_short_features.normalized_slope" in entry.required_feature_schema
+    assert "metadata.london_late_pause_resume_short_state.derivative_phase" in entry.required_state_schema
+
+
+def test_asia_late_flat_pullback_pause_resume_long_registry_metadata_is_valid() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+        rule_id="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+        strategy_id="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert entry.feature_version == "asia_late_flat_pullback_pause_resume_long_v1_phase1"
+    assert entry.calibration_profile == "probationary_baseline_v1"
+    assert "metadata.asia_late_flat_pullback_pause_resume_long_features.bull_snap_close_strong" in entry.required_feature_schema
+    assert "metadata.asia_late_flat_pullback_pause_resume_long_state.derivative_phase" in entry.required_state_schema
+
+
 def test_missing_required_state_fields_are_not_ready() -> None:
     entry, blocker = validate_strategy_event_against_registry(
         event={

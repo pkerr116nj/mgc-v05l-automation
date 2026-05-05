@@ -1,0 +1,631 @@
+"""Track B session-strategy feature/state envelope producer.
+
+This boundary migrates selected single-entry Track A session strategies into
+Track B's envelope contract. Raw 5m candle interpretation happens here, and the
+strategy adapters remain envelope-only consumers. The module intentionally does
+not import Track A strategy/app/research stacks and does not touch broker state.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, time
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo
+
+from .models import require_aware_datetime, to_jsonable
+from .track_b_snap_turn_envelope_producer import (
+    DEFAULT_CALIBRATION_PROFILE,
+    DEFAULT_EXPECTED_ACCOUNT_ID,
+    MAX_BEAR_SNAP_CLOSE_LOCATION,
+    MGC_CONTRACT_KEY,
+    MGC_DATASET,
+    MGC_INSTRUMENT_FAMILY,
+    MGC_LOCAL_SYMBOL,
+    MIN_BEAR_SNAP_BAR_RANGE_ATR,
+    MIN_BEAR_SNAP_BODY_ATR,
+    MIN_BEAR_SNAP_UP_STRETCH_ATR,
+    MIN_SNAP_CLOSE_LOCATION,
+    _FeaturePacket,
+    _RuntimeCandle,
+    _bear_snap_features,
+    _bull_snap_features,
+    _close_location_above_threshold,
+    _close_location_below_threshold,
+    _completed_5m_candles,
+    _compute_features,
+    _feature_diagnostics,
+    _optional_text,
+)
+
+
+DEFAULT_TRACK_B_SESSION_STRATEGY_ENVELOPE_OUTPUT_ROOT = Path(
+    "outputs/track_b_execution_core/session_strategy_state"
+)
+
+LONDON_LATE_PAUSE_RESUME_SHORT_STRATEGY_ID = "LONDON_LATE_PAUSE_RESUME_SHORT_V1"
+ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_STRATEGY_ID = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
+LONDON_LATE_PAUSE_RESUME_SHORT_FEATURE_VERSION = "london_late_pause_resume_short_v1_phase1"
+ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_FEATURE_VERSION = (
+    "asia_late_flat_pullback_pause_resume_long_v1_phase1"
+)
+
+NY = ZoneInfo("America/New_York")
+MIN_COMPLETED_5M_BARS = 8
+RISK_FLOOR = Decimal("0.01")
+
+LONDON_LATE_MIN_NORMALIZED_SLOPE = Decimal("-0.10")
+LONDON_LATE_MAX_NORMALIZED_SLOPE = Decimal("0.10")
+LONDON_LATE_MIN_NORMALIZED_CURVATURE = Decimal("-0.50")
+LONDON_LATE_MAX_NORMALIZED_CURVATURE = Decimal("-0.10")
+LONDON_LATE_MAX_RANGE_EXPANSION_RATIO = Decimal("1.25")
+
+ASIA_LATE_PULLBACK_MAX_RANGE_EXPANSION_RATIO = Decimal("0.85")
+ASIA_LATE_SIGNAL_MIN_RANGE_EXPANSION_RATIO = Decimal("0.85")
+ASIA_LATE_SIGNAL_MAX_RANGE_EXPANSION_RATIO = Decimal("1.25")
+ASIA_LATE_PULLBACK_CURVATURE_FLAT_THRESHOLD = Decimal("0.15")
+ANTI_CHURN_BARS = 5
+
+
+class TrackBSessionStrategyEnvelopeProducerVerdict(str, Enum):
+    WROTE_ENVELOPES = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_WROTE_ENVELOPES"
+    BLOCKED_INVALID_INPUT = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_BLOCKED_INVALID_INPUT"
+    BLOCKED_NO_5M_CANDLES = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_BLOCKED_NO_5M_CANDLES"
+    BLOCKED_INCOMPLETE_5M_CANDLE = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_BLOCKED_INCOMPLETE_5M_CANDLE"
+    BLOCKED_INSUFFICIENT_5M_CANDLES = "TRACK_B_SESSION_STRATEGY_ENVELOPE_PRODUCER_BLOCKED_INSUFFICIENT_5M_CANDLES"
+
+
+@dataclass(frozen=True)
+class TrackBSessionStrategyEnvelopeProducerResult:
+    verdict: TrackBSessionStrategyEnvelopeProducerVerdict
+    report_json: Path
+    report: dict[str, Any]
+    london_late_pause_resume_short_event_json: Path | None
+    asia_late_flat_pullback_pause_resume_long_event_json: Path | None
+    london_late_pause_resume_short_event: dict[str, Any] | None
+    asia_late_flat_pullback_pause_resume_long_event: dict[str, Any] | None
+
+
+def produce_track_b_session_strategy_envelopes(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None = None,
+    expected_account_id: str = DEFAULT_EXPECTED_ACCOUNT_ID,
+    source_id: str = "track_b_session_strategy_envelope_producer",
+    output_root: Path = DEFAULT_TRACK_B_SESSION_STRATEGY_ENVELOPE_OUTPUT_ROOT,
+    min_completed_bars: int = MIN_COMPLETED_5M_BARS,
+    prior_bars_since_long_setup: int | None = None,
+    prior_bars_since_short_setup: int | None = None,
+    prior_bars_since_bull_snap: int | None = None,
+    prior_bars_since_bear_snap: int | None = None,
+    now: datetime | None = None,
+    producer_id: str | None = None,
+) -> TrackBSessionStrategyEnvelopeProducerResult:
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    actual_producer_id = producer_id or f"track_b_session_strategy_envelope_producer_{uuid.uuid4().hex}"
+    output_root = Path(output_root)
+    report_json = output_root / actual_producer_id / "session_strategy_envelope_producer_report.json"
+
+    try:
+        candles = _completed_5m_candles(runtime_5m_payload)
+        blocker = _input_blocker(runtime_5m_payload, candles, min_completed_bars)
+        if blocker:
+            return _write_blocked_result(
+                verdict=_verdict_for_blocker(blocker),
+                report_json=report_json,
+                output_root=output_root,
+                now=actual_now,
+                producer_id=actual_producer_id,
+                source_id=source_id,
+                input_payload=runtime_5m_payload,
+                input_payload_path=runtime_5m_payload_path,
+                candles=candles,
+                primary_blocker=blocker,
+            )
+
+        feature_history = [_compute_features(candles[: index + 1]) for index in range(len(candles))]
+        current_features = feature_history[-1]
+        bull_snap = _bull_snap_features(
+            candles=candles,
+            features=current_features,
+            prior_bars_since_snap=prior_bars_since_bull_snap,
+        )
+        bear_snap = _bear_snap_features(
+            candles=candles,
+            features=current_features,
+            prior_bars_since_snap=prior_bars_since_bear_snap,
+        )
+        london_event = _london_late_pause_resume_short_event(
+            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload_path=runtime_5m_payload_path,
+            expected_account_id=expected_account_id,
+            source_id=source_id,
+            now=actual_now,
+            candles=candles,
+            feature_history=feature_history,
+            bear_snap=dict(bear_snap),
+            prior_bars_since_short_setup=prior_bars_since_short_setup,
+        )
+        asia_event = _asia_late_flat_pullback_pause_resume_long_event(
+            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload_path=runtime_5m_payload_path,
+            expected_account_id=expected_account_id,
+            source_id=source_id,
+            now=actual_now,
+            candles=candles,
+            feature_history=feature_history,
+            bull_snap=dict(bull_snap),
+            prior_bars_since_long_setup=prior_bars_since_long_setup,
+        )
+
+        london_json = output_root / actual_producer_id / "london_late_pause_resume_short_event_envelope.json"
+        asia_json = output_root / actual_producer_id / "asia_late_flat_pullback_pause_resume_long_event_envelope.json"
+        latest_london = output_root / "latest_london_late_pause_resume_short_event_envelope.json"
+        latest_asia = output_root / "latest_asia_late_flat_pullback_pause_resume_long_event_envelope.json"
+        _write_json(london_json, london_event)
+        _write_json(asia_json, asia_event)
+        _write_json(latest_london, london_event)
+        _write_json(latest_asia, asia_event)
+
+        report = _base_report(
+            verdict=TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES,
+            now=actual_now,
+            producer_id=actual_producer_id,
+            report_json=report_json,
+            source_id=source_id,
+            input_payload=runtime_5m_payload,
+            input_payload_path=runtime_5m_payload_path,
+            candles=candles,
+            primary_blocker=None,
+            required_next_action="Run the multi-strategy runtime cycle with the produced session strategy envelopes.",
+        )
+        report.update(
+            {
+                "london_late_pause_resume_short_event_json": str(london_json),
+                "asia_late_flat_pullback_pause_resume_long_event_json": str(asia_json),
+                "latest_london_late_pause_resume_short_event_json": str(latest_london),
+                "latest_asia_late_flat_pullback_pause_resume_long_event_json": str(latest_asia),
+                "london_late_pause_resume_short_envelope_ready": True,
+                "asia_late_flat_pullback_pause_resume_long_envelope_ready": True,
+                "feature_diagnostics": _feature_diagnostics(current_features),
+            }
+        )
+        _write_json(report_json, report)
+        _write_json(output_root / "latest_session_strategy_envelope_producer_report.json", report)
+        return TrackBSessionStrategyEnvelopeProducerResult(
+            verdict=TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES,
+            report_json=report_json,
+            report=report,
+            london_late_pause_resume_short_event_json=latest_london,
+            asia_late_flat_pullback_pause_resume_long_event_json=latest_asia,
+            london_late_pause_resume_short_event=london_event,
+            asia_late_flat_pullback_pause_resume_long_event=asia_event,
+        )
+    except Exception as exc:  # noqa: BLE001 - producer failures must become artifacts.
+        return _write_blocked_result(
+            verdict=TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_INVALID_INPUT,
+            report_json=report_json,
+            output_root=output_root,
+            now=actual_now,
+            producer_id=actual_producer_id,
+            source_id=source_id,
+            input_payload=runtime_5m_payload,
+            input_payload_path=runtime_5m_payload_path,
+            candles=[],
+            primary_blocker=f"Track B session-strategy envelope producer invalid input: {exc}",
+        )
+
+
+def _london_late_pause_resume_short_event(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None,
+    expected_account_id: str,
+    source_id: str,
+    now: datetime,
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+    bear_snap: Mapping[str, Any],
+    prior_bars_since_short_setup: int | None,
+) -> dict[str, Any]:
+    current = candles[-1]
+    previous = candles[-2]
+    features = feature_history[-1]
+    normalized_slope = _normalized(features.velocity, features.atr)
+    normalized_curvature = _normalized(features.velocity_delta, features.atr)
+    recent = _bear_recent_context(candles, feature_history)
+    prior_short = prior_bars_since_short_setup if prior_bars_since_short_setup is not None else 1000
+    state = {
+        "derivative_phase": _research_session_phase(current.timestamp),
+        "session_london": _research_session_phase(current.timestamp).startswith("LONDON"),
+        "allow_london": True,
+        "no_first_bear_snap_turn": bear_snap.get("first_bear_snap_turn") is not True,
+        "timeframe": "5m",
+    }
+    features_payload = {
+        "feature_version": LONDON_LATE_PAUSE_RESUME_SHORT_FEATURE_VERSION,
+        "calibration_profile": DEFAULT_CALIBRATION_PROFILE,
+        "close": current.close,
+        "open": current.open,
+        "previous_close": previous.close,
+        "normalized_slope": normalized_slope,
+        "min_normalized_slope": LONDON_LATE_MIN_NORMALIZED_SLOPE,
+        "max_normalized_slope": LONDON_LATE_MAX_NORMALIZED_SLOPE,
+        "normalized_curvature": normalized_curvature,
+        "min_normalized_curvature": LONDON_LATE_MIN_NORMALIZED_CURVATURE,
+        "max_normalized_curvature": LONDON_LATE_MAX_NORMALIZED_CURVATURE,
+        "signal_range_expansion_ratio": recent["signal_range_expansion_ratio"],
+        "max_range_expansion_ratio": LONDON_LATE_MAX_RANGE_EXPANSION_RATIO,
+        "derivative_bear_close_weak": _close_location_below_threshold(
+            current.low, current.close, features.bar_range, MAX_BEAR_SNAP_CLOSE_LOCATION
+        ),
+        "derivative_bear_range_ok": features.bar_range >= MIN_BEAR_SNAP_BAR_RANGE_ATR * features.atr,
+        "derivative_bear_body_ok": features.body_size >= MIN_BEAR_SNAP_BODY_ATR * features.atr,
+        "derivative_bear_stretch_ok": features.upside_stretch >= MIN_BEAR_SNAP_UP_STRETCH_ATR * features.atr,
+        "slow_ema_ok": current.close >= features.turn_ema_slow,
+        "one_bar_rebound_before_signal": recent["one_bar_rebound_before_signal"],
+        "prior_3_any_positive_curvature": recent["prior_3_any_positive_curvature"],
+        "signal_breaks_prior_1_low": recent["signal_breaks_prior_1_low"],
+        "derivative_bear_cooldown_ok": prior_short > 5,
+        "prior_bars_since_short_setup": prior_short,
+        "no_competing_bear_short_candidate": bear_snap.get("first_bear_snap_turn") is not True,
+    }
+    return _event_envelope(
+        runtime_5m_payload=runtime_5m_payload,
+        runtime_5m_payload_path=runtime_5m_payload_path,
+        expected_account_id=expected_account_id,
+        source_id=source_id,
+        now=now,
+        candle=current,
+        strategy_id=LONDON_LATE_PAUSE_RESUME_SHORT_STRATEGY_ID,
+        lane_id="mgc_london_late_pause_resume_short",
+        signal_side="SHORT",
+        state_key="london_late_pause_resume_short_state",
+        features_key="london_late_pause_resume_short_features",
+        feature_version=LONDON_LATE_PAUSE_RESUME_SHORT_FEATURE_VERSION,
+        state=state,
+        features=features_payload,
+        feature_packet=features,
+        input_bar_count=len(candles),
+    )
+
+
+def _asia_late_flat_pullback_pause_resume_long_event(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None,
+    expected_account_id: str,
+    source_id: str,
+    now: datetime,
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+    bull_snap: Mapping[str, Any],
+    prior_bars_since_long_setup: int | None,
+) -> dict[str, Any]:
+    current = candles[-1]
+    previous = candles[-2]
+    features = feature_history[-1]
+    recent = _asia_late_long_recent_context(candles, feature_history)
+    prior_long = prior_bars_since_long_setup if prior_bars_since_long_setup is not None else 1000
+    state = {
+        "derivative_phase": _research_session_phase(current.timestamp),
+        "session_asia": _research_session_phase(current.timestamp).startswith("ASIA"),
+        "allow_asia": True,
+        "no_first_bull_snap_turn": bull_snap.get("first_bull_snap_turn") is not True,
+        "timeframe": "5m",
+    }
+    features_payload = {
+        "feature_version": ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_FEATURE_VERSION,
+        "calibration_profile": DEFAULT_CALIBRATION_PROFILE,
+        "close": current.close,
+        "open": current.open,
+        "previous_close": previous.close,
+        "bull_snap_close_strong": _close_location_above_threshold(
+            current.low, current.close, features.bar_range, MIN_SNAP_CLOSE_LOCATION
+        ),
+        "one_bar_pullback_before_signal": recent["one_bar_pullback_before_signal"],
+        "signal_breaks_prior_1_high": recent["signal_breaks_prior_1_high"],
+        "pullback_range_expansion_ratio": recent["pullback_range_expansion_ratio"],
+        "pullback_max_range_expansion_ratio": ASIA_LATE_PULLBACK_MAX_RANGE_EXPANSION_RATIO,
+        "signal_range_expansion_ratio": recent["signal_range_expansion_ratio"],
+        "signal_min_range_expansion_ratio": ASIA_LATE_SIGNAL_MIN_RANGE_EXPANSION_RATIO,
+        "signal_max_range_expansion_ratio": ASIA_LATE_SIGNAL_MAX_RANGE_EXPANSION_RATIO,
+        "pullback_normalized_curvature": recent["pullback_normalized_curvature"],
+        "pullback_curvature_flat_threshold": ASIA_LATE_PULLBACK_CURVATURE_FLAT_THRESHOLD,
+        "prior_bars_since_long_setup": prior_long,
+        "prior_bars_since_long_setup_gt_anti_churn": prior_long > ANTI_CHURN_BARS,
+    }
+    return _event_envelope(
+        runtime_5m_payload=runtime_5m_payload,
+        runtime_5m_payload_path=runtime_5m_payload_path,
+        expected_account_id=expected_account_id,
+        source_id=source_id,
+        now=now,
+        candle=current,
+        strategy_id=ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_STRATEGY_ID,
+        lane_id="mgc_asia_late_flat_pullback_pause_resume_long",
+        signal_side="LONG",
+        state_key="asia_late_flat_pullback_pause_resume_long_state",
+        features_key="asia_late_flat_pullback_pause_resume_long_features",
+        feature_version=ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_FEATURE_VERSION,
+        state=state,
+        features=features_payload,
+        feature_packet=features,
+        input_bar_count=len(candles),
+    )
+
+
+def _bear_recent_context(
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+) -> dict[str, Any]:
+    current = candles[-1]
+    previous = candles[-2]
+    prior_curvatures = [
+        _normalized(feature.velocity_delta, feature.atr) for feature in feature_history[max(0, len(feature_history) - 4) : -1]
+    ]
+    return {
+        "prior_3_any_positive_curvature": any(value > 0 for value in prior_curvatures),
+        "one_bar_rebound_before_signal": len(candles) >= 3 and candles[-2].close > candles[-3].close,
+        "signal_range_expansion_ratio": _range_over_atr(current, feature_history[-1]),
+        "signal_breaks_prior_1_low": current.low < previous.low,
+    }
+
+
+def _asia_late_long_recent_context(
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+) -> dict[str, Any]:
+    if len(candles) < 3:
+        return {
+            "pullback_range_expansion_ratio": Decimal("0"),
+            "signal_range_expansion_ratio": Decimal("0"),
+            "pullback_normalized_curvature": Decimal("0"),
+            "one_bar_pullback_before_signal": False,
+            "signal_breaks_prior_1_high": False,
+        }
+    pullback = candles[-2]
+    signal = candles[-1]
+    pullback_features = feature_history[-2]
+    signal_features = feature_history[-1]
+    return {
+        "pullback_range_expansion_ratio": _range_over_atr(pullback, pullback_features),
+        "signal_range_expansion_ratio": _range_over_atr(signal, signal_features),
+        "pullback_normalized_curvature": _normalized(pullback_features.velocity_delta, pullback_features.atr),
+        "one_bar_pullback_before_signal": candles[-2].close < candles[-3].close,
+        "signal_breaks_prior_1_high": candles[-1].high > candles[-2].high,
+    }
+
+
+def _range_over_atr(candle: _RuntimeCandle, features: _FeaturePacket) -> Decimal:
+    return Decimal("0") if features.atr <= 0 else (candle.high - candle.low) / features.atr
+
+
+def _normalized(value: Decimal, atr: Decimal) -> Decimal:
+    return value / max(atr, RISK_FLOOR)
+
+
+def _input_blocker(payload: Mapping[str, Any], candles: Sequence[_RuntimeCandle], min_completed_bars: int) -> str | None:
+    contract_key = _optional_text(payload.get("contract_key"))
+    if contract_key and contract_key != MGC_CONTRACT_KEY:
+        return f"Only contract_key={MGC_CONTRACT_KEY} is supported by the Track B session-strategy envelope producer."
+    timeframe = _optional_text(payload.get("timeframe"))
+    if timeframe and timeframe != "5m":
+        return "Track B session-strategy envelope producer requires bounded completed 5m candles."
+    raw_candles = payload.get("candles") or payload.get("candle_history")
+    if not isinstance(raw_candles, Sequence) or isinstance(raw_candles, (str, bytes)):
+        return "Runtime 5m candle payload must include a candles array."
+    if not raw_candles:
+        return "Runtime 5m candle payload did not include any candles."
+    incomplete_count = sum(1 for item in raw_candles if isinstance(item, Mapping) and item.get("completed") is not True)
+    if incomplete_count:
+        return f"Runtime 5m candle payload included {incomplete_count} incomplete candle(s)."
+    if len(candles) < min_completed_bars:
+        return f"Track B session-strategy envelope producer requires at least {min_completed_bars} completed 5m candles; observed {len(candles)}."
+    if payload.get("realtime_quote_received") is not True:
+        return "Session-strategy envelope producer requires realtime_quote_received=true on the runtime context payload."
+    if payload.get("current_quote_available") is not True:
+        return "Session-strategy envelope producer requires current_quote_available=true on the runtime context payload."
+    if _optional_text(payload.get("quote_provider_mode")) != "REALTIME":
+        return "Session-strategy envelope producer requires quote_provider_mode=REALTIME."
+    return None
+
+
+def _verdict_for_blocker(blocker: str) -> TrackBSessionStrategyEnvelopeProducerVerdict:
+    if "incomplete" in blocker:
+        return TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_INCOMPLETE_5M_CANDLE
+    if "at least" in blocker:
+        return TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_INSUFFICIENT_5M_CANDLES
+    if "any candles" in blocker or "candles array" in blocker:
+        return TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_NO_5M_CANDLES
+    return TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_INVALID_INPUT
+
+
+def _event_envelope(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None,
+    expected_account_id: str,
+    source_id: str,
+    now: datetime,
+    candle: _RuntimeCandle,
+    strategy_id: str,
+    lane_id: str,
+    signal_side: str,
+    state_key: str,
+    features_key: str,
+    feature_version: str,
+    state: Mapping[str, Any],
+    features: Mapping[str, Any],
+    feature_packet: _FeaturePacket,
+    input_bar_count: int,
+) -> dict[str, Any]:
+    metadata = dict(runtime_5m_payload.get("metadata") or {}) if isinstance(runtime_5m_payload.get("metadata") or {}, Mapping) else {}
+    metadata.update(
+        {
+            "track_b_session_strategy_envelope_producer_boundary": "track_b_session_strategy_envelope_producer",
+            "track_b_strategy_adapter_consumes_envelope_only": True,
+            "track_b_no_submit_market_state": True,
+            "source_payload_path": None if runtime_5m_payload_path is None else str(runtime_5m_payload_path),
+            "source_bar_count": input_bar_count,
+            "signal_side_if_ready": signal_side,
+            "feature_version": feature_version,
+            "calibration_profile": DEFAULT_CALIBRATION_PROFILE,
+            "feature_diagnostics": _feature_diagnostics(feature_packet),
+            state_key: dict(state),
+            features_key: dict(features),
+        }
+    )
+    account_id = _optional_text(runtime_5m_payload.get("account_id") or runtime_5m_payload.get("expected_account_id")) or expected_account_id
+    return {
+        "account_id": account_id,
+        "expected_account_id": expected_account_id,
+        "contract_key": _optional_text(runtime_5m_payload.get("contract_key")) or MGC_CONTRACT_KEY,
+        "local_execution_contract_key": _optional_text(runtime_5m_payload.get("contract_key")) or MGC_CONTRACT_KEY,
+        "instrument_family": _optional_text(runtime_5m_payload.get("instrument_family")) or MGC_INSTRUMENT_FAMILY,
+        "local_symbol": _optional_text(runtime_5m_payload.get("local_symbol")) or MGC_LOCAL_SYMBOL,
+        "dataset": _optional_text(runtime_5m_payload.get("dataset")) or MGC_DATASET,
+        "strategy_id": strategy_id,
+        "signal_family": strategy_id,
+        "lane_id": lane_id,
+        "rule_mode": strategy_id,
+        "source_id": source_id,
+        "timeframe": "5m",
+        "candle_timestamp": candle.timestamp.isoformat(),
+        "observed_at": now.isoformat(),
+        "generated_at": now.isoformat(),
+        "open": candle.open,
+        "high": candle.high,
+        "low": candle.low,
+        "close": candle.close,
+        "last": candle.close,
+        "volume": candle.volume,
+        "quote_provider_mode": _optional_text(runtime_5m_payload.get("quote_provider_mode")) or "REALTIME",
+        "input_quote_provider_mode": _optional_text(runtime_5m_payload.get("quote_provider_mode")) or "REALTIME",
+        "realtime_quote_received": runtime_5m_payload.get("realtime_quote_received") is True,
+        "current_quote_available": runtime_5m_payload.get("current_quote_available") is True,
+        "quote_freshness_verdict": runtime_5m_payload.get("quote_freshness_verdict"),
+        "feature_version": feature_version,
+        "calibration_profile": DEFAULT_CALIBRATION_PROFILE,
+        "metadata": metadata,
+        "paper_proof_cli_called": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+    }
+
+
+def _base_report(
+    *,
+    verdict: TrackBSessionStrategyEnvelopeProducerVerdict,
+    now: datetime,
+    producer_id: str,
+    report_json: Path,
+    source_id: str,
+    input_payload: Mapping[str, Any],
+    input_payload_path: Path | None,
+    candles: Sequence[_RuntimeCandle],
+    primary_blocker: str | None,
+    required_next_action: str,
+) -> dict[str, Any]:
+    return {
+        "session_strategy_envelope_producer_verdict": verdict.value,
+        "producer_id": producer_id,
+        "source_id": source_id,
+        "generated_at": now.isoformat(),
+        "report_json_path": str(report_json),
+        "input_runtime_5m_candles_json": None if input_payload_path is None else str(input_payload_path),
+        "contract_key": _optional_text(input_payload.get("contract_key")) or MGC_CONTRACT_KEY,
+        "instrument_family": _optional_text(input_payload.get("instrument_family")) or MGC_INSTRUMENT_FAMILY,
+        "local_symbol": _optional_text(input_payload.get("local_symbol")) or MGC_LOCAL_SYMBOL,
+        "dataset": _optional_text(input_payload.get("dataset")) or MGC_DATASET,
+        "timeframe": _optional_text(input_payload.get("timeframe")) or "5m",
+        "quote_provider_mode": _optional_text(input_payload.get("quote_provider_mode")),
+        "realtime_quote_received": input_payload.get("realtime_quote_received") is True,
+        "current_quote_available": input_payload.get("current_quote_available") is True,
+        "input_bar_count": len(candles),
+        "first_bar_timestamp": None if not candles else candles[0].timestamp.isoformat(),
+        "last_bar_timestamp": None if not candles else candles[-1].timestamp.isoformat(),
+        "london_late_pause_resume_short_envelope_ready": False,
+        "asia_late_flat_pullback_pause_resume_long_envelope_ready": False,
+        "primary_blocker": primary_blocker,
+        "required_next_action": required_next_action,
+        "paper_proof_cli_called": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+    }
+
+
+def _write_blocked_result(
+    *,
+    verdict: TrackBSessionStrategyEnvelopeProducerVerdict,
+    report_json: Path,
+    output_root: Path,
+    now: datetime,
+    producer_id: str,
+    source_id: str,
+    input_payload: Mapping[str, Any],
+    input_payload_path: Path | None,
+    candles: Sequence[_RuntimeCandle],
+    primary_blocker: str,
+) -> TrackBSessionStrategyEnvelopeProducerResult:
+    report = _base_report(
+        verdict=verdict,
+        now=now,
+        producer_id=producer_id,
+        report_json=report_json,
+        source_id=source_id,
+        input_payload=input_payload,
+        input_payload_path=input_payload_path,
+        candles=candles,
+        primary_blocker=primary_blocker,
+        required_next_action="Provide bounded completed realtime MGC 5m candles before producing session-strategy envelopes.",
+    )
+    _write_json(report_json, report)
+    _write_json(output_root / "latest_session_strategy_envelope_producer_report.json", report)
+    return TrackBSessionStrategyEnvelopeProducerResult(
+        verdict=verdict,
+        report_json=report_json,
+        report=report,
+        london_late_pause_resume_short_event_json=None,
+        asia_late_flat_pullback_pause_resume_long_event_json=None,
+        london_late_pause_resume_short_event=None,
+        asia_late_flat_pullback_pause_resume_long_event=None,
+    )
+
+
+def _research_session_phase(timestamp: datetime) -> str:
+    local_time = timestamp.astimezone(NY).time()
+    if time(18, 0) <= local_time < time(20, 30):
+        return "ASIA_EARLY"
+    if time(20, 30) <= local_time < time(23, 0):
+        return "ASIA_LATE"
+    if time(3, 0) <= local_time < time(5, 30):
+        return "LONDON_OPEN"
+    if time(5, 30) <= local_time < time(8, 30):
+        return "LONDON_LATE"
+    if time(9, 0) <= local_time < time(9, 30):
+        return "US_PREOPEN_OPENING"
+    if time(9, 30) <= local_time < time(10, 0):
+        return "US_CASH_OPEN_IMPULSE"
+    if time(10, 0) <= local_time < time(10, 30):
+        return "US_OPEN_LATE"
+    if time(11, 0) <= local_time < time(13, 30):
+        return "US_MIDDAY"
+    if time(13, 30) <= local_time < time(16, 0):
+        return "US_LATE"
+    return "OUT_OF_SCOPE"
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(to_jsonable(dict(payload)), indent=2, sort_keys=True) + "\n", encoding="utf-8")
