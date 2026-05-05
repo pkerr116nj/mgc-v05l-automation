@@ -108,6 +108,36 @@ def test_live_runtime_feed_writes_fresh_bounded_candles(monkeypatch, tmp_path: P
     assert result.report["live_money_readiness"] is False
 
 
+def test_live_runtime_feed_writes_instrument_specific_mnq_hot_artifacts(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    client = FakeLiveClient(live_records())
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+
+    result = run_track_b_databento_live_runtime_feed(
+        config=config(
+            tmp_path,
+            contract_key="MNQ-202606",
+            instrument_family="MNQ",
+            local_symbol="MNQM6",
+            databento_continuous_symbol="MNQ.v.0",
+        ),
+        live_client_factory=lambda _key: client,
+        now_func=aware_now,
+        run_id="mnq-live-test",
+    )
+
+    assert result.verdict == TrackBDatabentoLiveFeedVerdict.DATA_WRITTEN_EXECUTION_FRESH
+    assert result.report["instrument_family"] == "MNQ"
+    assert result.report["latest_live_1m_candles_path"].endswith("latest_live_mnq_1m_candles.json")
+    assert (tmp_path / "live" / "latest_live_mnq_1m_candles.json").exists()
+    assert (tmp_path / "live" / "latest_live_mnq_completed_5m_candles.json").exists()
+    assert (tmp_path / "live" / "latest_databento_live_runtime_feed_mnq_report.json").exists()
+    assert (tmp_path / "live" / "latest_databento_live_runtime_feed_mnq_heartbeat.json").exists()
+    assert not (tmp_path / "live" / "latest_live_mgc_1m_candles.json").exists()
+    assert client.subscribe_kwargs["symbols"] == ["MNQ.v.0"]
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
 def test_live_runtime_feed_provider_error_never_logs_secret(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("DATABENTO_API_KEY", "SECRET_VALUE")
 
@@ -140,4 +170,3 @@ def test_live_runtime_feed_blocks_when_no_records(monkeypatch, tmp_path: Path) -
     assert result.report["live_feed_connected"] is False
     assert result.live_1m_candles_json is None
     assert "no records" in str(result.report["primary_blocker"]).lower()
-

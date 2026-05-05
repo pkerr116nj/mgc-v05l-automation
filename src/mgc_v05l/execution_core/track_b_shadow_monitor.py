@@ -120,6 +120,10 @@ class TrackBShadowMonitorInstrumentConfig:
     enabled_strategies: tuple[str, ...] = ()
     execution_account_id: str = "DUM882026"
     expected_account_id: str = "DUM882026"
+    con_id: int | None = None
+    tick_size: str = "0.1"
+    exchange: str = "COMEX"
+    currency: str = "USD"
     evaluation_mode: TrackBStrategyEvaluationMode = TrackBStrategyEvaluationMode.COMPLETED_BAR_ONLY
     requires_quote_freshness: bool = False
     runtime_chain_wired: bool = False
@@ -309,6 +313,7 @@ def default_instruments(config: TrackBShadowMonitorConfig | None = None) -> tupl
         "US_DERIVATIVE_BEAR_TURN_V1",
         "US_LATE_PAUSE_RESUME_LONG_V1",
     )
+    mnq_strategies = ("MNQ_US_DERIVATIVE_BEAR_TURN_V1",)
     return (
         TrackBShadowMonitorInstrumentConfig(
             instrument_family="GC",
@@ -326,6 +331,10 @@ def default_instruments(config: TrackBShadowMonitorConfig | None = None) -> tupl
             enabled_strategies=mgc_strategies,
             execution_account_id=base.account_id,
             expected_account_id=base.expected_account_id,
+            con_id=base.con_id,
+            tick_size=base.tick_size,
+            exchange="COMEX",
+            currency="USD",
             runtime_chain_wired=True,
         ),
         TrackBShadowMonitorInstrumentConfig(
@@ -351,10 +360,18 @@ def default_instruments(config: TrackBShadowMonitorConfig | None = None) -> tupl
         ),
         TrackBShadowMonitorInstrumentConfig(
             instrument_family="MNQ",
-            contract_key="MNQ-NOT_CONFIGURED",
-            local_symbol="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
             databento_continuous_symbol="MNQ.v.0",
             dataset="GLBX.MDP3",
+            enabled_strategies=mnq_strategies,
+            execution_account_id=base.account_id,
+            expected_account_id=base.expected_account_id,
+            con_id=770561201,
+            tick_size="0.25",
+            exchange="CME",
+            currency="USD",
+            runtime_chain_wired=True,
         ),
     )
 
@@ -959,10 +976,10 @@ def _read_live_feed_readiness(
     now: datetime,
 ) -> TrackBLiveFeedReadiness:
     root = Path(config.live_runtime_feed_output_root)
-    event_path = root / "latest_live_mgc_1m_candles.json"
-    completed_path = root / "latest_live_mgc_completed_5m_candles.json"
-    report_path = root / "latest_databento_live_runtime_feed_report.json"
-    heartbeat_path = root / "latest_databento_live_runtime_feed_heartbeat.json"
+    event_path = _latest_live_1m_path(root, instrument.instrument_family)
+    completed_path = _latest_live_completed_5m_path(root, instrument.instrument_family)
+    report_path = _latest_live_report_path(root, instrument.instrument_family)
+    heartbeat_path = _latest_live_heartbeat_path(root, instrument.instrument_family)
     report = _read_json_optional(report_path)
     heartbeat = _read_json_optional(heartbeat_path)
     event = _read_json_optional(event_path)
@@ -1086,6 +1103,58 @@ def _read_live_feed_readiness(
     )
 
 
+def _artifact_symbol(instrument_family: str | None) -> str:
+    return str(instrument_family or "MGC").strip().lower() or "mgc"
+
+
+def _latest_live_1m_path(root: Path, instrument_family: str | None) -> Path:
+    symbol = _artifact_symbol(instrument_family)
+    legacy = Path(root) / "latest_live_mgc_1m_candles.json"
+    if symbol == "mgc" and legacy.exists():
+        return legacy
+    return Path(root) / f"latest_live_{symbol}_1m_candles.json"
+
+
+def _latest_live_completed_5m_path(root: Path, instrument_family: str | None) -> Path:
+    symbol = _artifact_symbol(instrument_family)
+    legacy = Path(root) / "latest_live_mgc_completed_5m_candles.json"
+    if symbol == "mgc" and legacy.exists():
+        return legacy
+    return Path(root) / f"latest_live_{symbol}_completed_5m_candles.json"
+
+
+def _latest_live_report_path(root: Path, instrument_family: str | None) -> Path:
+    symbol = _artifact_symbol(instrument_family)
+    legacy = Path(root) / "latest_databento_live_runtime_feed_report.json"
+    if symbol == "mgc" and legacy.exists():
+        return legacy
+    return Path(root) / f"latest_databento_live_runtime_feed_{symbol}_report.json"
+
+
+def _latest_live_heartbeat_path(root: Path, instrument_family: str | None) -> Path:
+    symbol = _artifact_symbol(instrument_family)
+    legacy = Path(root) / "latest_databento_live_runtime_feed_heartbeat.json"
+    if symbol == "mgc" and legacy.exists():
+        return legacy
+    return Path(root) / f"latest_databento_live_runtime_feed_{symbol}_heartbeat.json"
+
+
+def _latest_live_quote_status_path(root: Path, instrument_family: str | None) -> Path:
+    symbol = _artifact_symbol(instrument_family)
+    legacy = Path(root) / "latest_live_quote_status_report.json"
+    if symbol == "mgc" and legacy.exists():
+        return legacy
+    return Path(root) / f"latest_live_{symbol}_quote_status_report.json"
+
+
+def _latest_runtime_1m_path(root: Path, instrument: TrackBShadowMonitorInstrumentConfig) -> Path:
+    symbol = _artifact_symbol(instrument.instrument_family)
+    legacy = Path(root) / "latest_runtime_mgc_1m_candles.json"
+    if symbol == "mgc" and legacy.exists():
+        return legacy
+    return Path(root) / f"latest_runtime_{symbol}_1m_candles.json"
+
+
 def _start_live_feed_process(
     *,
     config: TrackBShadowMonitorConfig,
@@ -1140,8 +1209,9 @@ def _start_live_feed_process(
         cmd.extend(["--stype-out", config.provider_stype_out])
     if config.env_file is not None:
         cmd.extend(["--env-file", str(config.env_file)])
-    stdout = open(root / "track_b_live_feed_stdout.log", "ab", buffering=0)  # noqa: SIM115 - Popen needs file handles.
-    stderr = open(root / "track_b_live_feed_stderr.log", "ab", buffering=0)  # noqa: SIM115
+    log_symbol = _artifact_symbol(instrument.instrument_family)
+    stdout = open(root / f"track_b_live_feed_{log_symbol}_stdout.log", "ab", buffering=0)  # noqa: SIM115 - Popen needs file handles.
+    stderr = open(root / f"track_b_live_feed_{log_symbol}_stderr.log", "ab", buffering=0)  # noqa: SIM115
     try:
         process = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
     finally:
@@ -1272,8 +1342,8 @@ def _run_live_runtime_artifact_capture(
     cycle_index: int,
     now: datetime,
 ) -> TrackBRuntimeCandleCaptureResult:
-    live_event_json = Path(config.live_runtime_feed_output_root) / "latest_live_mgc_1m_candles.json"
-    live_report_json = Path(config.live_runtime_feed_output_root) / "latest_databento_live_runtime_feed_report.json"
+    live_event_json = _latest_live_1m_path(Path(config.live_runtime_feed_output_root), instrument.instrument_family)
+    live_report_json = _latest_live_report_path(Path(config.live_runtime_feed_output_root), instrument.instrument_family)
     live_report = _read_json_optional(live_report_json)
     if not live_event_json.exists():
         result = write_runtime_candle_capture_provider_error(
@@ -1841,6 +1911,37 @@ def _run_snap_turn_envelopes(
     now: datetime,
     asian: TrackBAsianDriftWatchChainResult,
 ) -> TrackBSnapTurnEnvelopeProducerResult:
+    if not any(strategy in instrument.enabled_strategies for strategy in ("FIRST_BULL_SNAP_TURN_V1", "FIRST_BEAR_SNAP_TURN_V1")):
+        report_json = Path(config.snap_turn_output_root) / (
+            f"track_b_snap_turn_envelope_producer_skipped_{instrument.instrument_family.lower()}_{cycle_index}"
+        ) / "snap_turn_envelope_producer_report.json"
+        report = {
+            "snap_turn_envelope_producer_verdict": TrackBSnapTurnEnvelopeProducerVerdict.WROTE_ENVELOPES.value,
+            "producer_id": f"track_b_snap_turn_envelope_producer_skipped_{instrument.instrument_family.lower()}_{cycle_index}",
+            "source_id": f"{config.source_id}_snap_turn_cycle_{cycle_index}",
+            "generated_at": now.isoformat(),
+            "report_json_path": str(report_json),
+            "instrument_family": instrument.instrument_family,
+            "skipped_for_instrument_strategy_set": True,
+            "first_bull_snap_turn_envelope_ready": False,
+            "first_bear_snap_turn_envelope_ready": False,
+            "primary_blocker": None,
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "live_money_readiness": False,
+        }
+        report_json.parent.mkdir(parents=True, exist_ok=True)
+        report_json.write_text(json.dumps(to_jsonable(report), indent=2, sort_keys=True), encoding="utf-8")
+        return TrackBSnapTurnEnvelopeProducerResult(
+            verdict=TrackBSnapTurnEnvelopeProducerVerdict.WROTE_ENVELOPES,
+            report_json=report_json,
+            report=report,
+            first_bull_snap_turn_event_json=None,
+            first_bear_snap_turn_event_json=None,
+            first_bull_snap_turn_event=None,
+            first_bear_snap_turn_event=None,
+        )
     return produce_track_b_snap_turn_envelopes(
         runtime_5m_payload=asian.completed_5m_candles_payload or _read_json_required(asian.completed_5m_candles_json),
         runtime_5m_payload_path=asian.completed_5m_candles_json,
@@ -1881,6 +1982,7 @@ def _run_multi_strategy_runtime_cycle(
 ) -> TrackBMultiStrategyRuntimeCycleResult:
     return run_track_b_multi_strategy_runtime_cycle(
         config=TrackBMultiStrategyRuntimeCycleConfig(
+            enabled_strategy_ids=instrument.enabled_strategies,
             asian_drift_event_json=_path_from_report(asian.report, "asian_drift_state_snapshot_path"),
             pause_resume_short_event_json=session.asia_early_pause_resume_short_event_json,
             breakout_retest_hold_long_event_json=session.asia_early_normal_breakout_retest_hold_long_event_json,
@@ -1889,6 +1991,7 @@ def _run_multi_strategy_runtime_cycle(
             london_late_pause_resume_short_event_json=session.london_late_pause_resume_short_event_json,
             asia_late_flat_pullback_pause_resume_long_event_json=session.asia_late_flat_pullback_pause_resume_long_event_json,
             us_derivative_bear_turn_event_json=session.us_derivative_bear_turn_event_json,
+            mnq_us_derivative_bear_turn_event_json=session.mnq_us_derivative_bear_turn_event_json,
             us_late_pause_resume_long_event_json=session.us_late_pause_resume_long_event_json,
             inbox_dir=config.inbox_dir,
             source_id=f"{config.source_id}_multi_strategy_cycle_{cycle_index}",
@@ -1908,12 +2011,12 @@ def _run_multi_strategy_runtime_cycle(
             paper_order_pricing_policy=config.paper_order_pricing_policy,
             paper_order_price_offset_ticks=config.paper_order_price_offset_ticks,
             paper_exit_price_offset_ticks=config.paper_exit_price_offset_ticks,
-            pricing_context_json=Path(config.runtime_candle_capture_output_root) / "latest_runtime_mgc_1m_candles.json",
-            live_quote_report_json=Path(config.live_runtime_feed_output_root) / "latest_live_quote_status_report.json",
+            pricing_context_json=_latest_runtime_1m_path(Path(config.runtime_candle_capture_output_root), instrument),
+            live_quote_report_json=_latest_live_quote_status_path(Path(config.live_runtime_feed_output_root), instrument.instrument_family),
             max_pricing_context_age_seconds=config.max_latest_1m_age_seconds,
-            tick_size=config.tick_size,
+            tick_size=instrument.tick_size or config.tick_size,
             allowlisted_local_symbol=instrument.local_symbol,
-            con_id=config.con_id,
+            con_id=instrument.con_id if instrument.con_id is not None else config.con_id,
             output_root=config.multi_strategy_output_root,
             update_operator_status=config.update_operator_status,
             operator_status_output_root=config.operator_status_output_root,

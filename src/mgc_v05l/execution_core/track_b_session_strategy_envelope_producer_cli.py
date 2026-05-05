@@ -75,6 +75,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "asia_early_normal_breakout_retest_hold_long_envelope_ready"
                 ),
                 "us_derivative_bear_turn_envelope_ready": result.report.get("us_derivative_bear_turn_envelope_ready"),
+                "mnq_us_derivative_bear_turn_envelope_ready": result.report.get(
+                    "mnq_us_derivative_bear_turn_envelope_ready"
+                ),
                 "us_late_pause_resume_long_envelope_ready": result.report.get(
                     "us_late_pause_resume_long_envelope_ready"
                 ),
@@ -106,6 +109,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     None
                     if result.us_derivative_bear_turn_event_json is None
                     else str(result.us_derivative_bear_turn_event_json)
+                ),
+                "mnq_us_derivative_bear_turn_event_json": (
+                    None
+                    if result.mnq_us_derivative_bear_turn_event_json is None
+                    else str(result.mnq_us_derivative_bear_turn_event_json)
                 ),
                 "us_late_pause_resume_long_event_json": (
                     None

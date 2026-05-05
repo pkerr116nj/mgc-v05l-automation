@@ -68,6 +68,18 @@ class ReadOnlyPreflightConfig:
                 "con_id": 712565978,
                 "multiplier": "10",
                 "tick_size": "0.1",
+            },
+            "MNQ-202606": {
+                "symbol": "MNQ",
+                "security_type": "FUT",
+                "exchange": "CME",
+                "currency": "USD",
+                "contract_month": "202606",
+                "expiry": "20260618",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "multiplier": "2",
+                "tick_size": "0.25",
             }
         }
     )

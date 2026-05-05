@@ -28,7 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--london-late-pause-resume-short-event-json", type=Path)
     parser.add_argument("--asia-late-flat-pullback-pause-resume-long-event-json", type=Path)
     parser.add_argument("--us-derivative-bear-turn-event-json", type=Path)
+    parser.add_argument("--mnq-us-derivative-bear-turn-event-json", type=Path)
     parser.add_argument("--us-late-pause-resume-long-event-json", type=Path)
+    parser.add_argument("--enabled-strategy-id", action="append", default=None)
     parser.add_argument("--inbox-dir", required=True, type=Path)
     parser.add_argument("--expected-account-id", default="DUM882026")
     parser.add_argument("--source-id", default="track_b_multi_strategy_runtime_cycle")
@@ -66,6 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = run_track_b_multi_strategy_runtime_cycle(
         config=TrackBMultiStrategyRuntimeCycleConfig(
+            enabled_strategy_ids=tuple(args.enabled_strategy_id or ()),
             asian_drift_event_json=args.asian_drift_event_json,
             pause_resume_short_event_json=args.pause_resume_short_event_json,
             breakout_retest_hold_long_event_json=args.breakout_retest_hold_long_event_json,
@@ -74,6 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             london_late_pause_resume_short_event_json=args.london_late_pause_resume_short_event_json,
             asia_late_flat_pullback_pause_resume_long_event_json=args.asia_late_flat_pullback_pause_resume_long_event_json,
             us_derivative_bear_turn_event_json=args.us_derivative_bear_turn_event_json,
+            mnq_us_derivative_bear_turn_event_json=args.mnq_us_derivative_bear_turn_event_json,
             us_late_pause_resume_long_event_json=args.us_late_pause_resume_long_event_json,
             inbox_dir=args.inbox_dir,
             expected_account_id=args.expected_account_id,

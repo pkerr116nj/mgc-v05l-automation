@@ -56,6 +56,7 @@ ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_STRATEGY_ID = (
     "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
 )
 US_DERIVATIVE_BEAR_TURN_STRATEGY_ID = "US_DERIVATIVE_BEAR_TURN_V1"
+MNQ_US_DERIVATIVE_BEAR_TURN_STRATEGY_ID = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
 US_LATE_PAUSE_RESUME_LONG_STRATEGY_ID = "US_LATE_PAUSE_RESUME_LONG_V1"
 LONDON_LATE_PAUSE_RESUME_SHORT_FEATURE_VERSION = "london_late_pause_resume_short_v1_phase1"
 ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_FEATURE_VERSION = (
@@ -66,7 +67,13 @@ ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURE_VERSION = (
     "asia_early_normal_breakout_retest_hold_long_v1_phase1"
 )
 US_DERIVATIVE_BEAR_TURN_FEATURE_VERSION = "us_derivative_bear_turn_v1_phase1"
+MNQ_US_DERIVATIVE_BEAR_TURN_FEATURE_VERSION = "mnq_us_derivative_bear_turn_v1_phase1"
 US_LATE_PAUSE_RESUME_LONG_FEATURE_VERSION = "us_late_pause_resume_long_v1_phase1"
+
+MNQ_CONTRACT_KEY = "MNQ-202606"
+MNQ_INSTRUMENT_FAMILY = "MNQ"
+MNQ_LOCAL_SYMBOL = "MNQM6"
+MNQ_DATASET = "GLBX.MDP3"
 
 NY = ZoneInfo("America/New_York")
 MIN_COMPLETED_5M_BARS = 8
@@ -127,12 +134,14 @@ class TrackBSessionStrategyEnvelopeProducerResult:
     asia_early_pause_resume_short_event_json: Path | None
     asia_early_normal_breakout_retest_hold_long_event_json: Path | None
     us_derivative_bear_turn_event_json: Path | None
+    mnq_us_derivative_bear_turn_event_json: Path | None
     us_late_pause_resume_long_event_json: Path | None
     london_late_pause_resume_short_event: dict[str, Any] | None
     asia_late_flat_pullback_pause_resume_long_event: dict[str, Any] | None
     asia_early_pause_resume_short_event: dict[str, Any] | None
     asia_early_normal_breakout_retest_hold_long_event: dict[str, Any] | None
     us_derivative_bear_turn_event: dict[str, Any] | None
+    mnq_us_derivative_bear_turn_event: dict[str, Any] | None
     us_late_pause_resume_long_event: dict[str, Any] | None
 
 
@@ -213,6 +222,68 @@ def produce_track_b_session_strategy_envelopes(
             features=current_features,
             prior_bars_since_snap=prior_bars_since_bear_snap,
         )
+        instrument_family = _payload_instrument_family(runtime_5m_payload)
+        if instrument_family == MNQ_INSTRUMENT_FAMILY:
+            mnq_derivative_bear_event = _mnq_us_derivative_bear_turn_event(
+                runtime_5m_payload=runtime_5m_payload,
+                runtime_5m_payload_path=runtime_5m_payload_path,
+                expected_account_id=expected_account_id,
+                source_id=source_id,
+                now=actual_now,
+                candles=candles,
+                feature_history=feature_history,
+                prior_bars_since_short_setup=prior_bars_since_short_setup,
+            )
+            mnq_derivative_bear_json = (
+                output_root / actual_producer_id / "mnq_us_derivative_bear_turn_event_envelope.json"
+            )
+            latest_mnq_derivative_bear = output_root / "latest_mnq_us_derivative_bear_turn_event_envelope.json"
+            _write_json(mnq_derivative_bear_json, mnq_derivative_bear_event)
+            _write_json(latest_mnq_derivative_bear, mnq_derivative_bear_event)
+
+            report = _base_report(
+                verdict=TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES,
+                now=actual_now,
+                producer_id=actual_producer_id,
+                report_json=report_json,
+                source_id=source_id,
+                input_payload=runtime_5m_payload,
+                input_payload_path=runtime_5m_payload_path,
+                candles=candles,
+                primary_blocker=None,
+                required_next_action="Run the multi-strategy runtime cycle with the produced MNQ session strategy envelope.",
+                max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+            )
+            report.update(
+                {
+                    "mnq_us_derivative_bear_turn_event_json": str(mnq_derivative_bear_json),
+                    "latest_mnq_us_derivative_bear_turn_event_json": str(latest_mnq_derivative_bear),
+                    "mnq_us_derivative_bear_turn_envelope_ready": True,
+                    "feature_diagnostics": _feature_diagnostics(current_features),
+                }
+            )
+            _write_json(report_json, report)
+            _write_json(output_root / "latest_session_strategy_envelope_producer_report.json", report)
+            return TrackBSessionStrategyEnvelopeProducerResult(
+                verdict=TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES,
+                report_json=report_json,
+                report=report,
+                london_late_pause_resume_short_event_json=None,
+                asia_late_flat_pullback_pause_resume_long_event_json=None,
+                asia_early_pause_resume_short_event_json=None,
+                asia_early_normal_breakout_retest_hold_long_event_json=None,
+                us_derivative_bear_turn_event_json=None,
+                mnq_us_derivative_bear_turn_event_json=latest_mnq_derivative_bear,
+                us_late_pause_resume_long_event_json=None,
+                london_late_pause_resume_short_event=None,
+                asia_late_flat_pullback_pause_resume_long_event=None,
+                asia_early_pause_resume_short_event=None,
+                asia_early_normal_breakout_retest_hold_long_event=None,
+                us_derivative_bear_turn_event=None,
+                mnq_us_derivative_bear_turn_event=mnq_derivative_bear_event,
+                us_late_pause_resume_long_event=None,
+            )
+
         london_event = _london_late_pause_resume_short_event(
             runtime_5m_payload=runtime_5m_payload,
             runtime_5m_payload_path=runtime_5m_payload_path,
@@ -355,12 +426,14 @@ def produce_track_b_session_strategy_envelopes(
             asia_early_pause_resume_short_event_json=latest_asia_early_short,
             asia_early_normal_breakout_retest_hold_long_event_json=latest_asia_early_long,
             us_derivative_bear_turn_event_json=latest_derivative_bear,
+            mnq_us_derivative_bear_turn_event_json=None,
             us_late_pause_resume_long_event_json=latest_us_late_long,
             london_late_pause_resume_short_event=london_event,
             asia_late_flat_pullback_pause_resume_long_event=asia_event,
             asia_early_pause_resume_short_event=asia_early_short_event,
             asia_early_normal_breakout_retest_hold_long_event=asia_early_long_event,
             us_derivative_bear_turn_event=derivative_bear_event,
+            mnq_us_derivative_bear_turn_event=None,
             us_late_pause_resume_long_event=us_late_long_event,
         )
     except Exception as exc:  # noqa: BLE001 - producer failures must become artifacts.
@@ -752,6 +825,58 @@ def _us_derivative_bear_turn_event(
     )
 
 
+def _mnq_us_derivative_bear_turn_event(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None,
+    expected_account_id: str,
+    source_id: str,
+    now: datetime,
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+    prior_bars_since_short_setup: int | None,
+) -> dict[str, Any]:
+    event = _us_derivative_bear_turn_event(
+        runtime_5m_payload=runtime_5m_payload,
+        runtime_5m_payload_path=runtime_5m_payload_path,
+        expected_account_id=expected_account_id,
+        source_id=source_id,
+        now=now,
+        candles=candles,
+        feature_history=feature_history,
+        prior_bars_since_short_setup=prior_bars_since_short_setup,
+    )
+    metadata = dict(event.get("metadata") or {})
+    state = dict(metadata.pop("us_derivative_bear_turn_state", {}) or {})
+    features = dict(metadata.pop("us_derivative_bear_turn_features", {}) or {})
+    features["feature_version"] = MNQ_US_DERIVATIVE_BEAR_TURN_FEATURE_VERSION
+    metadata.update(
+        {
+            "track_b_mnq_us_derivative_bear_turn_lineage": (
+                "Mirrors the explicit usDerivativeBearTurn predicates from the MNQ validation path. "
+                "Track B computes a bounded 5m feature/state envelope and adapters remain envelope-only."
+            ),
+            "mnq_us_derivative_bear_turn_state": state,
+            "mnq_us_derivative_bear_turn_features": features,
+        }
+    )
+    event.update(
+        {
+            "strategy_id": MNQ_US_DERIVATIVE_BEAR_TURN_STRATEGY_ID,
+            "signal_family": MNQ_US_DERIVATIVE_BEAR_TURN_STRATEGY_ID,
+            "lane_id": "mnq_us_derivative_bear_turn",
+            "rule_mode": MNQ_US_DERIVATIVE_BEAR_TURN_STRATEGY_ID,
+            "contract_key": _optional_text(runtime_5m_payload.get("contract_key")) or MNQ_CONTRACT_KEY,
+            "local_execution_contract_key": _optional_text(runtime_5m_payload.get("contract_key")) or MNQ_CONTRACT_KEY,
+            "instrument_family": _optional_text(runtime_5m_payload.get("instrument_family")) or MNQ_INSTRUMENT_FAMILY,
+            "local_symbol": _optional_text(runtime_5m_payload.get("local_symbol")) or MNQ_LOCAL_SYMBOL,
+            "dataset": _optional_text(runtime_5m_payload.get("dataset")) or MNQ_DATASET,
+            "metadata": metadata,
+        }
+    )
+    return event
+
+
 def _us_late_pause_resume_long_event(
     *,
     runtime_5m_payload: Mapping[str, Any],
@@ -963,8 +1088,13 @@ def _normalized(value: Decimal, atr: Decimal) -> Decimal:
 
 def _input_blocker(payload: Mapping[str, Any], candles: Sequence[_RuntimeCandle], min_completed_bars: int) -> str | None:
     contract_key = _optional_text(payload.get("contract_key"))
-    if contract_key and contract_key != MGC_CONTRACT_KEY:
-        return f"Only contract_key={MGC_CONTRACT_KEY} is supported by the Track B session-strategy envelope producer."
+    instrument_family = _payload_instrument_family(payload)
+    expected_prefix = "MNQ-" if instrument_family == MNQ_INSTRUMENT_FAMILY else "MGC-"
+    if contract_key and not contract_key.startswith(expected_prefix):
+        return (
+            "Track B session-strategy envelope producer received mismatched contract/instrument metadata: "
+            f"instrument_family={instrument_family}, contract_key={contract_key}."
+        )
     timeframe = _optional_text(payload.get("timeframe"))
     if timeframe and timeframe != "5m":
         return "Track B session-strategy envelope producer requires bounded completed 5m candles."
@@ -985,6 +1115,10 @@ def _input_blocker(payload: Mapping[str, Any], candles: Sequence[_RuntimeCandle]
     if _optional_text(payload.get("quote_provider_mode")) != "REALTIME":
         return "Session-strategy envelope producer requires quote_provider_mode=REALTIME."
     return None
+
+
+def _payload_instrument_family(payload: Mapping[str, Any]) -> str:
+    return _optional_text(payload.get("instrument_family") or payload.get("symbol")) or MGC_INSTRUMENT_FAMILY
 
 
 def _verdict_for_blocker(blocker: str) -> TrackBSessionStrategyEnvelopeProducerVerdict:
@@ -1109,6 +1243,7 @@ def _base_report(
         "asia_early_pause_resume_short_envelope_ready": False,
         "asia_early_normal_breakout_retest_hold_long_envelope_ready": False,
         "us_derivative_bear_turn_envelope_ready": False,
+        "mnq_us_derivative_bear_turn_envelope_ready": False,
         "us_late_pause_resume_long_envelope_ready": False,
         "primary_blocker": primary_blocker,
         "required_next_action": required_next_action,
@@ -1167,12 +1302,14 @@ def _write_blocked_result(
         asia_early_pause_resume_short_event_json=None,
         asia_early_normal_breakout_retest_hold_long_event_json=None,
         us_derivative_bear_turn_event_json=None,
+        mnq_us_derivative_bear_turn_event_json=None,
         us_late_pause_resume_long_event_json=None,
         london_late_pause_resume_short_event=None,
         asia_late_flat_pullback_pause_resume_long_event=None,
         asia_early_pause_resume_short_event=None,
         asia_early_normal_breakout_retest_hold_long_event=None,
         us_derivative_bear_turn_event=None,
+        mnq_us_derivative_bear_turn_event=None,
         us_late_pause_resume_long_event=None,
     )
 

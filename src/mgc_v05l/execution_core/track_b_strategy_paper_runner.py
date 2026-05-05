@@ -1574,14 +1574,26 @@ def _submit_request_error(config: TrackBStrategyPaperRunnerConfig) -> str | None
         return f"--account-id {config.account_id} must match --expected-account-id {config.expected_account_id} for PAPER submit."
     if config.account_id != "DUM882026" or config.expected_account_id != "DUM882026":
         return "Track B strategy PAPER submit is currently restricted to PAPER account DUM882026."
-    if config.contract_key != "MGC-202606":
-        return "Track B strategy PAPER submit is currently restricted to contract_key MGC-202606."
-    if config.allowlisted_local_symbol != "MGCM6":
-        return "Track B strategy PAPER submit is currently restricted to local symbol MGCM6."
+    allowlist_entry = ReadOnlyPreflightConfig().contract_allowlist.get(config.contract_key)
+    if allowlist_entry is None:
+        allowed = ", ".join(sorted(ReadOnlyPreflightConfig().contract_allowlist))
+        return (
+            "Track B strategy PAPER submit requires an explicitly allowlisted contract_key "
+            f"({allowed}); observed {config.contract_key}."
+        )
+    expected_local_symbol = str(allowlist_entry.get("local_symbol") or "")
+    if config.allowlisted_local_symbol != expected_local_symbol:
+        return (
+            "Track B strategy PAPER submit local symbol guard failed: "
+            f"expected {expected_local_symbol}, observed {config.allowlisted_local_symbol}."
+        )
+    expected_con_id = allowlist_entry.get("con_id")
+    if config.con_id is not None and expected_con_id is not None and int(config.con_id) != int(expected_con_id):
+        return f"Track B strategy PAPER submit conId guard failed: expected {expected_con_id}, observed {config.con_id}."
     if config.quantity is None:
         return "--quantity is required for PAPER submit."
     if int(config.quantity) != 1:
-        return "--quantity must be exactly 1 for the current MGC paper proof lifecycle."
+        return "--quantity must be exactly 1 for the current Track B paper proof lifecycle."
     if config.manual_open_limit_price is None:
         return "--manual-open-limit-price is required for PAPER submit."
     if config.manual_close_limit_price is None:

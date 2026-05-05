@@ -61,6 +61,15 @@ _DATA_WRITTEN_VERDICTS = frozenset(
 )
 
 
+def _artifact_symbol_from_contract(contract_key: str | None, local_symbol: str | None) -> str:
+    source = str(contract_key or local_symbol or "MGC").strip().upper()
+    if source.startswith("MNQ"):
+        return "mnq"
+    if source.startswith("MGC"):
+        return "mgc"
+    return source.split("-", 1)[0].lower() or "mgc"
+
+
 def capture_track_b_runtime_mgc_1m_candles(
     *,
     runtime_candle_payload: Mapping[str, Any],
@@ -101,7 +110,8 @@ def capture_track_b_runtime_mgc_1m_candles(
     actual_capture_id = capture_id or f"track_b_runtime_candle_capture_{uuid.uuid4().hex}"
     actual_source_id = source_id or _optional_text(runtime_candle_payload.get("source_id")) or "track_b_runtime_candle_capture"
     report_json = Path(output_root) / actual_capture_id / "track_b_runtime_candle_capture_report.json"
-    event_json = Path(output_root) / actual_capture_id / "runtime_mgc_1m_candles.json"
+    artifact_symbol = _artifact_symbol_from_contract(contract_key, local_symbol)
+    event_json = Path(output_root) / actual_capture_id / f"runtime_{artifact_symbol}_1m_candles.json"
 
     try:
         if max_bars <= 0:
@@ -550,14 +560,16 @@ def _runtime_event(
 ) -> dict[str, Any]:
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
     latest = candles[-1]
+    artifact_symbol = _artifact_symbol_from_contract(contract_key, local_symbol)
+    instrument_family = str(contract_key or artifact_symbol).split("-", 1)[0].upper()
     return {
-        "schema_version": "track_b_runtime_mgc_1m_candles_v1",
+        "schema_version": f"track_b_runtime_{artifact_symbol}_1m_candles_v1",
         "source_id": source_id,
         "capture_id": capture_id,
         "batch_id": _optional_text(payload.get("batch_id")) or f"track_b_runtime_candle_batch_{uuid.uuid4().hex}",
         "account_id": _optional_text(payload.get("account_id")) or account_id,
         "contract_key": contract_key,
-        "instrument_family": "MGC",
+        "instrument_family": instrument_family,
         "symbol": local_symbol,
         "local_symbol": local_symbol,
         "allowlisted_local_symbol": local_symbol,
@@ -647,8 +659,9 @@ def _write_report(
     provider_credential_source: str | None = None,
 ) -> TrackBRuntimeCandleCaptureResult:
     output_root = report_json.parent.parent
-    latest_report_json = output_root / "latest_runtime_candle_capture_report.json"
-    latest_event_json = output_root / "latest_runtime_mgc_1m_candles.json"
+    artifact_symbol = _artifact_symbol_from_contract(contract_key, local_symbol)
+    latest_report_json = output_root / f"latest_runtime_candle_capture_{artifact_symbol}_report.json"
+    latest_event_json = output_root / f"latest_runtime_{artifact_symbol}_1m_candles.json"
     data_written = runtime_event is not None and verdict in _DATA_WRITTEN_VERDICTS
     freshness = _runtime_freshness(
         candles=candles,
@@ -727,10 +740,14 @@ def _write_report(
     report_json.write_text(payload, encoding="utf-8")
     latest_report_json.parent.mkdir(parents=True, exist_ok=True)
     latest_report_json.write_text(payload, encoding="utf-8")
+    if artifact_symbol == "mgc":
+        (output_root / "latest_runtime_candle_capture_report.json").write_text(payload, encoding="utf-8")
     if data_written:
         event_payload = json.dumps(to_jsonable(runtime_event), indent=2, sort_keys=True)
         event_json.write_text(event_payload, encoding="utf-8")
         latest_event_json.write_text(event_payload, encoding="utf-8")
+        if artifact_symbol == "mgc":
+            (output_root / "latest_runtime_mgc_1m_candles.json").write_text(event_payload, encoding="utf-8")
     return TrackBRuntimeCandleCaptureResult(
         verdict=verdict,
         report_json=report_json,

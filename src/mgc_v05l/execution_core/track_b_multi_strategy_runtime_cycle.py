@@ -64,6 +64,7 @@ class TrackBMultiStrategyInput:
 
 @dataclass(frozen=True)
 class TrackBMultiStrategyRuntimeCycleConfig:
+    enabled_strategy_ids: tuple[str, ...] = ()
     asian_drift_event_json: Path | None = None
     asian_drift_event_payload: Mapping[str, object] | None = None
     pause_resume_short_event_json: Path | None = None
@@ -80,6 +81,8 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     asia_late_flat_pullback_pause_resume_long_event_payload: Mapping[str, object] | None = None
     us_derivative_bear_turn_event_json: Path | None = None
     us_derivative_bear_turn_event_payload: Mapping[str, object] | None = None
+    mnq_us_derivative_bear_turn_event_json: Path | None = None
+    mnq_us_derivative_bear_turn_event_payload: Mapping[str, object] | None = None
     us_late_pause_resume_long_event_json: Path | None = None
     us_late_pause_resume_long_event_payload: Mapping[str, object] | None = None
     inbox_dir: Path = Path("examples/track_b_shadow_listener/inbox")
@@ -331,6 +334,10 @@ def _run_strategy_paper_runner(
             manual_close_limit_price=config.manual_close_limit_price,
             allowlisted_local_symbol=config.allowlisted_local_symbol,
             con_id=config.con_id,
+            tick_size=config.tick_size,
+            exchange="CME" if str(config.contract_key).startswith(("MNQ-", "NQ-", "MES-", "ES-")) else "COMEX",
+            databento_continuous_symbol="MNQ.v.0" if str(config.contract_key).startswith("MNQ-") else "MGC.v.0",
+            dataset="GLBX.MDP3",
             proof_timing_status=config.proof_timing_status,
             proof_timing_source=config.proof_timing_source,
             output_root=config.strategy_paper_runner_output_root,
@@ -339,7 +346,7 @@ def _run_strategy_paper_runner(
 
 
 def _strategy_inputs(config: TrackBMultiStrategyRuntimeCycleConfig) -> tuple[TrackBMultiStrategyInput, ...]:
-    return (
+    inputs = (
         TrackBMultiStrategyInput(
             strategy_id="asian_drift_v1",
             rule_id="asian_drift_v1",
@@ -405,6 +412,14 @@ def _strategy_inputs(config: TrackBMultiStrategyRuntimeCycleConfig) -> tuple[Tra
             event_payload=config.us_derivative_bear_turn_event_payload,
         ),
         TrackBMultiStrategyInput(
+            strategy_id="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+            rule_id="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+            rule_mode="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+            lane_id="mnq_us_derivative_bear_turn",
+            event_json=config.mnq_us_derivative_bear_turn_event_json,
+            event_payload=config.mnq_us_derivative_bear_turn_event_payload,
+        ),
+        TrackBMultiStrategyInput(
             strategy_id="US_LATE_PAUSE_RESUME_LONG_V1",
             rule_id="US_LATE_PAUSE_RESUME_LONG_V1",
             rule_mode="US_LATE_PAUSE_RESUME_LONG_V1",
@@ -413,6 +428,10 @@ def _strategy_inputs(config: TrackBMultiStrategyRuntimeCycleConfig) -> tuple[Tra
             event_payload=config.us_late_pause_resume_long_event_payload,
         ),
     )
+    enabled = {str(item) for item in config.enabled_strategy_ids if str(item)}
+    if not enabled:
+        return inputs
+    return tuple(item for item in inputs if item.strategy_id in enabled)
 
 
 def _payload_for_strategy_input(strategy_input: TrackBMultiStrategyInput) -> Mapping[str, object]:
@@ -499,6 +518,7 @@ def _strategy_runtime_verdict(report: Mapping[str, object]) -> str:
         "london_late_pause_resume_short_watch_verdict",
         "asia_late_flat_pullback_pause_resume_long_watch_verdict",
         "us_derivative_bear_turn_watch_verdict",
+        "mnq_us_derivative_bear_turn_watch_verdict",
         "us_late_pause_resume_long_watch_verdict",
     ):
         value = report.get(key)
@@ -566,6 +586,8 @@ def _signal_source_for_strategy(strategy_id: str) -> str:
         return "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
     if strategy_id == "US_DERIVATIVE_BEAR_TURN_V1":
         return "US_DERIVATIVE_BEAR_TURN_V1"
+    if strategy_id == "MNQ_US_DERIVATIVE_BEAR_TURN_V1":
+        return "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     if strategy_id == "US_LATE_PAUSE_RESUME_LONG_V1":
         return "US_LATE_PAUSE_RESUME_LONG_V1"
     return "UNKNOWN"

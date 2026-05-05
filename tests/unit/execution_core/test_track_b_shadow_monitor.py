@@ -304,12 +304,14 @@ class FakeStages:
             asia_early_pause_resume_short_event_json=write_json(self.tmp_path / f"pause-{cycle_index}.json", {}),
             asia_early_normal_breakout_retest_hold_long_event_json=write_json(self.tmp_path / f"breakout-{cycle_index}.json", {}),
             us_derivative_bear_turn_event_json=write_json(self.tmp_path / f"us-derivative-bear-{cycle_index}.json", {}),
+            mnq_us_derivative_bear_turn_event_json=write_json(self.tmp_path / f"mnq-us-derivative-bear-{cycle_index}.json", {}),
             us_late_pause_resume_long_event_json=write_json(self.tmp_path / f"us-late-long-{cycle_index}.json", {}),
             london_late_pause_resume_short_event={},
             asia_late_flat_pullback_pause_resume_long_event={},
             asia_early_pause_resume_short_event={},
             asia_early_normal_breakout_retest_hold_long_event={},
             us_derivative_bear_turn_event={},
+            mnq_us_derivative_bear_turn_event={},
             us_late_pause_resume_long_event={},
         )
 
@@ -398,6 +400,11 @@ def test_default_registry_reports_other_instruments_without_ignoring_them(tmp_pa
     assert mgc.runtime_chain_wired is True
     assert "US_DERIVATIVE_BEAR_TURN_V1" in mgc.enabled_strategies
     assert "US_LATE_PAUSE_RESUME_LONG_V1" in mgc.enabled_strategies
+    mnq = next(item for item in instruments if item.instrument_family == "MNQ")
+    assert mnq.runtime_chain_wired is True
+    assert mnq.contract_key == "MNQ-202606"
+    assert mnq.local_symbol == "MNQM6"
+    assert mnq.enabled_strategies == ("MNQ_US_DERIVATIVE_BEAR_TURN_V1",)
     assert next(item for item in instruments if item.instrument_family == "GC").enabled_strategies == ()
 
 

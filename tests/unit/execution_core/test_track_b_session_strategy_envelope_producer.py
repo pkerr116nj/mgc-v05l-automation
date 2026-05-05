@@ -69,6 +69,19 @@ def runtime_5m_payload(*, bars: int = 9, completed: bool = True) -> dict[str, ob
     }
 
 
+def mnq_runtime_5m_payload(*, bars: int = 9, completed: bool = True) -> dict[str, object]:
+    payload = runtime_5m_payload(bars=bars, completed=completed)
+    payload.update(
+        {
+            "contract_key": "MNQ-202606",
+            "instrument_family": "MNQ",
+            "local_symbol": "MNQM6",
+            "source_id": "unit_test_mnq_runtime_5m",
+        }
+    )
+    return payload
+
+
 def test_producer_blocks_when_insufficient_completed_5m_bars(tmp_path: Path) -> None:
     result = produce_track_b_session_strategy_envelopes(
         runtime_5m_payload=runtime_5m_payload(bars=3),
@@ -156,6 +169,103 @@ def test_producer_emits_valid_session_strategy_envelopes(tmp_path: Path) -> None
     )
     assert "us_derivative_bear_turn_features" in result.us_derivative_bear_turn_event["metadata"]
     assert "us_late_pause_resume_long_state" in result.us_late_pause_resume_long_event["metadata"]
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_producer_emits_valid_mnq_us_derivative_bear_envelope(tmp_path: Path) -> None:
+    result = produce_track_b_session_strategy_envelopes(
+        runtime_5m_payload=mnq_runtime_5m_payload(bars=9),
+        output_root=tmp_path / "session",
+        now=aware_now(),
+        producer_id="unit-mnq-producer",
+    )
+
+    assert result.verdict == TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES
+    assert result.mnq_us_derivative_bear_turn_event_json == (
+        tmp_path / "session" / "latest_mnq_us_derivative_bear_turn_event_envelope.json"
+    )
+    assert result.mnq_us_derivative_bear_turn_event is not None
+    event = result.mnq_us_derivative_bear_turn_event
+    assert event["strategy_id"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    assert event["contract_key"] == "MNQ-202606"
+    assert event["instrument_family"] == "MNQ"
+    assert "mnq_us_derivative_bear_turn_state" in event["metadata"]
+    assert "mnq_us_derivative_bear_turn_features" in event["metadata"]
+    entry, blocker = validate_strategy_event_against_registry(
+        event=event,
+        rule_mode="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        rule_id="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        strategy_id="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+    )
+    assert blocker is None
+    assert entry is not None
+    assert entry.instrument_family == "MNQ"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+
+
+def test_mnq_us_derivative_bear_rule_runner_consumes_envelope_without_mutation(tmp_path: Path) -> None:
+    producer = produce_track_b_session_strategy_envelopes(
+        runtime_5m_payload=mnq_runtime_5m_payload(bars=9),
+        output_root=tmp_path / "session",
+        now=aware_now(),
+    )
+    assert producer.mnq_us_derivative_bear_turn_event is not None
+
+    result = run_track_b_strategy_rule(
+        input_event_payload=producer.mnq_us_derivative_bear_turn_event,
+        input_event_path=tmp_path / "mnq_us_derivative_bear.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        strategy_id="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        lane_id="mnq_us_derivative_bear_turn",
+        rule_id="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        rule_mode="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        emit_signal=False,
+        output_root=tmp_path / "rule",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert result.report["strategy_registry_id"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    assert result.report["strategy_registry_instrument_family"] == "MNQ"
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_runtime_cycle_filters_to_mnq_derivative_bear_strategy(tmp_path: Path) -> None:
+    producer = produce_track_b_session_strategy_envelopes(
+        runtime_5m_payload=mnq_runtime_5m_payload(bars=9),
+        output_root=tmp_path / "session",
+        now=aware_now(),
+    )
+    assert producer.mnq_us_derivative_bear_turn_event_json is not None
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=TrackBMultiStrategyRuntimeCycleConfig(
+            enabled_strategy_ids=("MNQ_US_DERIVATIVE_BEAR_TURN_V1",),
+            mnq_us_derivative_bear_turn_event_json=producer.mnq_us_derivative_bear_turn_event_json,
+            inbox_dir=tmp_path / "inbox",
+            expected_account_id="DUM882026",
+            source_id="unit_test_mnq_cycle",
+            allow_fixture_input=False,
+            submit_paper=False,
+            confirm_paper_submit=False,
+            output_root=tmp_path / "cycle",
+            strategy_rule_output_root=tmp_path / "rule",
+            decision_journal_enabled=True,
+        ),
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION
+    assert [item["strategy_id"] for item in result.report["evaluated_strategies"]] == [
+        "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    ]
+    assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
     assert result.report["live_money_readiness"] is False
 

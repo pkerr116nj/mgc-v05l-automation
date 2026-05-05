@@ -35,6 +35,8 @@ from .track_b_strategy_registry import (
 DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT = Path("outputs/track_b_execution_core/track_b_strategy_rule_runner")
 MGC_CONTRACT_KEY = "MGC-202606"
 MGC_INSTRUMENT_FAMILY = "MGC"
+MNQ_CONTRACT_KEY = "MNQ-202606"
+MNQ_INSTRUMENT_FAMILY = "MNQ"
 DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID = "mgc_ema_momentum_reclaim_long_v1"
 DEFAULT_ASIAN_DRIFT_RULE_ID = "asian_drift_v1"
 DEFAULT_ASIA_EARLY_PAUSE_RESUME_SHORT_RULE_ID = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
@@ -44,6 +46,7 @@ DEFAULT_FIRST_BEAR_SNAP_TURN_RULE_ID = "FIRST_BEAR_SNAP_TURN_V1"
 DEFAULT_LONDON_LATE_PAUSE_RESUME_SHORT_RULE_ID = "LONDON_LATE_PAUSE_RESUME_SHORT_V1"
 DEFAULT_ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_RULE_ID = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
 DEFAULT_US_DERIVATIVE_BEAR_TURN_RULE_ID = "US_DERIVATIVE_BEAR_TURN_V1"
+DEFAULT_MNQ_US_DERIVATIVE_BEAR_TURN_RULE_ID = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
 DEFAULT_US_LATE_PAUSE_RESUME_LONG_RULE_ID = "US_LATE_PAUSE_RESUME_LONG_V1"
 
 
@@ -68,6 +71,7 @@ class TrackBStrategyRuleMode(str, Enum):
     LONDON_LATE_PAUSE_RESUME_SHORT_V1 = "LONDON_LATE_PAUSE_RESUME_SHORT_V1"
     ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1 = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
     US_DERIVATIVE_BEAR_TURN_V1 = "US_DERIVATIVE_BEAR_TURN_V1"
+    MNQ_US_DERIVATIVE_BEAR_TURN_V1 = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     US_LATE_PAUSE_RESUME_LONG_V1 = "US_LATE_PAUSE_RESUME_LONG_V1"
     HUMAN_REVIEW_ONLY = "HUMAN_REVIEW_ONLY"
 
@@ -154,6 +158,7 @@ def run_track_b_strategy_rule(
             expected_account_id=expected_account_id,
             allow_fixture_input=allow_fixture_input,
             rule_mode=actual_rule_mode,
+            registry_entry=registry_entry,
         )
         if validation_blocker:
             verdict = (
@@ -382,16 +387,22 @@ def _validate_input(
     expected_account_id: str | None,
     allow_fixture_input: bool,
     rule_mode: TrackBStrategyRuleMode,
+    registry_entry: TrackBStrategyRegistryEntry | None = None,
 ) -> str | None:
     account_id = _optional_text(event.get("account_id") or event.get("expected_account_id"))
     if expected_account_id and account_id and account_id != expected_account_id:
         return f"Event account_id {account_id} does not match expected_account_id {expected_account_id}."
     contract_key = _optional_text(event.get("local_execution_contract_key") or event.get("contract_key"))
-    if contract_key != MGC_CONTRACT_KEY:
-        return f"Only {MGC_CONTRACT_KEY} is supported by this first Track B strategy rule runner."
+    expected_family = registry_entry.instrument_family if registry_entry is not None else MGC_INSTRUMENT_FAMILY
+    expected_contract_prefix = _contract_prefix_for_instrument_family(expected_family)
+    if expected_contract_prefix and (contract_key is None or not contract_key.startswith(expected_contract_prefix)):
+        return (
+            f"Track B strategy rule runner expected a {expected_family} contract_key "
+            f"with prefix {expected_contract_prefix}; observed {contract_key}."
+        )
     instrument_family = _optional_text(event.get("instrument_family") or event.get("symbol"))
-    if instrument_family and instrument_family != MGC_INSTRUMENT_FAMILY:
-        return f"Only instrument_family={MGC_INSTRUMENT_FAMILY} is supported by this first Track B strategy rule runner."
+    if instrument_family and instrument_family != expected_family:
+        return f"Track B strategy rule runner expected instrument_family={expected_family}; observed {instrument_family}."
     if _optional_text(event.get("close")) is None and _optional_text(event.get("last")) is None:
         return "Realtime quote/candle event must include close or last price evidence."
 
@@ -452,6 +463,14 @@ def _validate_input(
             feature_version="us_derivative_bear_turn_v1_phase1",
             label="US derivative bear turn v1",
         )
+    if rule_mode == TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1:
+        return _validate_session_strategy_snapshot(
+            event,
+            state_key="mnq_us_derivative_bear_turn_state",
+            features_key="mnq_us_derivative_bear_turn_features",
+            feature_version="mnq_us_derivative_bear_turn_v1_phase1",
+            label="MNQ US derivative bear turn v1",
+        )
     if rule_mode == TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1:
         return _validate_session_strategy_snapshot(
             event,
@@ -460,6 +479,14 @@ def _validate_input(
             feature_version="us_late_pause_resume_long_v1_phase1",
             label="US Late pause-resume long v1",
         )
+    return None
+
+
+def _contract_prefix_for_instrument_family(instrument_family: str | None) -> str | None:
+    if instrument_family == MNQ_INSTRUMENT_FAMILY:
+        return "MNQ-"
+    if instrument_family == MGC_INSTRUMENT_FAMILY:
+        return "MGC-"
     return None
 
 
@@ -622,6 +649,16 @@ def _evaluate_rule_decision(
         )
     if rule_mode == TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1:
         return _evaluate_us_derivative_bear_turn_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
+    if rule_mode == TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1:
+        return _evaluate_us_derivative_bear_turn_v1(
+            event=event,
+            quote_evidence=quote_evidence,
+            rule_id=rule_id,
+            state_key="mnq_us_derivative_bear_turn_state",
+            features_key="mnq_us_derivative_bear_turn_features",
+            rule_name="mnq_us_derivative_bear_turn_v1",
+            label="MNQ US derivative bear turn v1",
+        )
     if rule_mode == TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1:
         return _evaluate_us_late_pause_resume_long_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     raise ValueError(f"Unsupported rule mode: {rule_mode.value}")
@@ -1198,16 +1235,20 @@ def _evaluate_us_derivative_bear_turn_v1(
     event: Mapping[str, Any],
     quote_evidence: Mapping[str, Any],
     rule_id: str,
+    state_key: str = "us_derivative_bear_turn_state",
+    features_key: str = "us_derivative_bear_turn_features",
+    rule_name: str = "us_derivative_bear_turn_v1",
+    label: str = "US derivative bear turn v1",
 ) -> dict[str, Any]:
     metadata = dict(event.get("metadata") or {}) if isinstance(event.get("metadata") or {}, Mapping) else {}
     state = (
-        metadata.get("us_derivative_bear_turn_state")
-        if isinstance(metadata.get("us_derivative_bear_turn_state") or {}, Mapping)
+        metadata.get(state_key)
+        if isinstance(metadata.get(state_key) or {}, Mapping)
         else {}
     )
     features = (
-        metadata.get("us_derivative_bear_turn_features")
-        if isinstance(metadata.get("us_derivative_bear_turn_features") or {}, Mapping)
+        metadata.get(features_key)
+        if isinstance(metadata.get(features_key) or {}, Mapping)
         else {}
     )
     normalized_slope = _decimal_field(features, "normalized_slope")
@@ -1256,12 +1297,12 @@ def _evaluate_us_derivative_bear_turn_v1(
     blockers = [f"{name}=false_or_missing" for name in failed]
     decision = TrackBStrategyRuleDecision.NO_SIGNAL if failed else TrackBStrategyRuleDecision.SHORT
     decision_reason = (
-        "US derivative bear turn v1 conditions did not pass: " + ", ".join(failed)
+        f"{label} conditions did not pass: " + ", ".join(failed)
         if failed
-        else "US derivative bear turn v1 explicit feature/state snapshot is entry-ready for SHORT."
+        else f"{label} explicit feature/state snapshot is entry-ready for SHORT."
     )
     return {
-        "rule_name": "us_derivative_bear_turn_v1",
+        "rule_name": rule_name,
         "decision": decision,
         "decision_reason": decision_reason,
         "rule_inputs": {
@@ -1280,7 +1321,7 @@ def _evaluate_us_derivative_bear_turn_v1(
         "rule_blockers": blockers,
         "research_lineage": (
             "Mirrors the explicit usDerivativeBearTurn predicates in src/mgc_v05l/signals/bear_snap.py "
-            "and the MGC usDerivativeBearTurn validation packet. Track B consumes a precomputed state/feature "
+            "and the MGC/MNQ usDerivativeBearTurn validation packets. Track B consumes a precomputed state/feature "
             "envelope and does not infer these fields from raw candles inside the adapter."
         ),
         "rule_id": rule_id,
@@ -1413,7 +1454,7 @@ def _strategy_event_for_adapter(
         "low": event.get("low") or event.get("last") or event.get("close"),
         "close": event.get("close") or event.get("last"),
         "volume": event.get("volume"),
-        "reason": f"{rule_id} emitted explicit {signal_direction} no-submit Track B signal from realtime MGC rule evidence.",
+        "reason": f"{rule_id} emitted explicit {signal_direction} no-submit Track B signal from realtime rule evidence.",
         "metadata": metadata,
     }
 
@@ -1509,6 +1550,14 @@ def _write_report(
             primary_blocker,
             expected_mode=TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1,
             prefix="US_DERIVATIVE_BEAR_TURN",
+        ),
+        "mnq_us_derivative_bear_turn_watch_verdict": _session_strategy_watch_verdict(
+            rule_mode,
+            verdict,
+            signal_emitted,
+            primary_blocker,
+            expected_mode=TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1,
+            prefix="MNQ_US_DERIVATIVE_BEAR_TURN",
         ),
         "us_late_pause_resume_long_watch_verdict": _session_strategy_watch_verdict(
             rule_mode,
@@ -1650,6 +1699,8 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
         return "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
     if rule_mode == TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1:
         return "US_DERIVATIVE_BEAR_TURN_V1"
+    if rule_mode == TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1:
+        return "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     if rule_mode == TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1:
         return "US_LATE_PAUSE_RESUME_LONG_V1"
     return "REAL_STRATEGY_RULE"
@@ -1666,6 +1717,7 @@ def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
         TrackBStrategyRuleMode.LONDON_LATE_PAUSE_RESUME_SHORT_V1,
         TrackBStrategyRuleMode.ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1,
         TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1,
+        TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1,
         TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1,
     }
 

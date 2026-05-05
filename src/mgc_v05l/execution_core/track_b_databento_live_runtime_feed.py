@@ -92,6 +92,30 @@ class TrackBDatabentoLiveFeedResult:
     live_1m_candles_event: dict[str, Any] | None
 
 
+def _artifact_symbol(instrument_family: str | None) -> str:
+    return str(instrument_family or "MGC").strip().lower() or "mgc"
+
+
+def _latest_live_1m_path(root: Path, instrument_family: str | None) -> Path:
+    return Path(root) / f"latest_live_{_artifact_symbol(instrument_family)}_1m_candles.json"
+
+
+def _latest_live_completed_5m_path(root: Path, instrument_family: str | None) -> Path:
+    return Path(root) / f"latest_live_{_artifact_symbol(instrument_family)}_completed_5m_candles.json"
+
+
+def _latest_live_report_path(root: Path, instrument_family: str | None) -> Path:
+    return Path(root) / f"latest_databento_live_runtime_feed_{_artifact_symbol(instrument_family)}_report.json"
+
+
+def _latest_live_heartbeat_path(root: Path, instrument_family: str | None) -> Path:
+    return Path(root) / f"latest_databento_live_runtime_feed_{_artifact_symbol(instrument_family)}_heartbeat.json"
+
+
+def _latest_live_quote_status_path(root: Path, instrument_family: str | None) -> Path:
+    return Path(root) / f"latest_live_{_artifact_symbol(instrument_family)}_quote_status_report.json"
+
+
 def run_track_b_databento_live_runtime_feed(
     *,
     config: TrackBDatabentoLiveFeedConfig,
@@ -104,7 +128,7 @@ def run_track_b_databento_live_runtime_feed(
     require_aware_datetime(started_at, "started_at")
     actual_run_id = run_id or f"track_b_databento_live_runtime_feed_{uuid.uuid4().hex}"
     report_json = Path(config.output_root) / actual_run_id / "databento_live_runtime_feed_report.json"
-    live_1m_json = Path(config.output_root) / actual_run_id / "live_mgc_1m_candles.json"
+    live_1m_json = Path(config.output_root) / actual_run_id / f"live_{_artifact_symbol(config.instrument_family)}_1m_candles.json"
     if config.max_records <= 0:
         return _write_provider_error(
             config=config,
@@ -342,7 +366,7 @@ def _write_success(
         latest_1m_age=latest_1m_age,
         completed_5m_age=completed_5m_age,
     )
-    completed_5m_candles = _completed_5m_candles(candles)
+    completed_5m_candles = _completed_5m_candles(candles, instrument_family=config.instrument_family)
     report = _base_report(
         config=config,
         run_id=run_id,
@@ -378,24 +402,26 @@ def _write_success(
             "required_next_action": "Track B Live runtime feed is fresh for SHADOW strategy evaluation."
             if fresh_for_execution
             else "Keep Live feed running; do not evaluate execution-live strategies until fresh_for_execution=true.",
-            "latest_live_1m_candles_path": str(report_json.parent.parent / "latest_live_mgc_1m_candles.json"),
-            "latest_live_completed_5m_candles_path": str(
-                report_json.parent.parent / "latest_live_mgc_completed_5m_candles.json"
-            ),
+            "latest_live_1m_candles_path": str(_latest_live_1m_path(report_json.parent.parent, config.instrument_family)),
+            "latest_live_completed_5m_candles_path": str(_latest_live_completed_5m_path(report_json.parent.parent, config.instrument_family)),
             "submit_allowed": False,
             "submit_attempted": False,
             "live_money_readiness": False,
         }
     )
     report["report_json_path"] = str(report_json)
-    report["latest_report_json_path"] = str(report_json.parent.parent / "latest_databento_live_runtime_feed_report.json")
+    report["latest_report_json_path"] = str(_latest_live_report_path(report_json.parent.parent, config.instrument_family))
     _write_json(report_json, report)
-    _write_json(report_json.parent.parent / "latest_databento_live_runtime_feed_report.json", report)
+    _write_json(_latest_live_report_path(report_json.parent.parent, config.instrument_family), report)
     _write_json(live_1m_json, event)
-    _write_json(report_json.parent.parent / "latest_live_mgc_1m_candles.json", event)
-    _write_json(report_json.parent.parent / "latest_live_mgc_completed_5m_candles.json", completed_5m_candles)
+    _write_json(_latest_live_1m_path(report_json.parent.parent, config.instrument_family), event)
+    _write_json(_latest_live_completed_5m_path(report_json.parent.parent, config.instrument_family), completed_5m_candles)
+    if config.instrument_family == "MGC":
+        _write_json(report_json.parent.parent / "latest_databento_live_runtime_feed_report.json", report)
+        _write_json(report_json.parent.parent / "latest_live_mgc_1m_candles.json", event)
+        _write_json(report_json.parent.parent / "latest_live_mgc_completed_5m_candles.json", completed_5m_candles)
     _write_json(
-        report_json.parent.parent / "latest_databento_live_runtime_feed_heartbeat.json",
+        _latest_live_heartbeat_path(report_json.parent.parent, config.instrument_family),
         {
             "schema_version": "track_b_databento_live_runtime_feed_heartbeat_v1",
             "generated_at": completed_at.isoformat(),
@@ -410,8 +436,25 @@ def _write_success(
             "live_money_readiness": False,
         },
     )
+    if config.instrument_family == "MGC":
+        _write_json(
+            report_json.parent.parent / "latest_databento_live_runtime_feed_heartbeat.json",
+            {
+                "schema_version": "track_b_databento_live_runtime_feed_heartbeat_v1",
+                "generated_at": completed_at.isoformat(),
+                "live_feed_connected": True,
+                "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+                "latest_1m_timestamp": report["latest_1m_timestamp"],
+                "latest_completed_5m_timestamp": report["latest_completed_5m_timestamp"],
+                "fresh_for_execution": fresh_for_execution,
+                "report_json_path": str(report_json),
+                "submit_allowed": False,
+                "submit_attempted": False,
+                "live_money_readiness": False,
+            },
+        )
     _write_json(
-        report_json.parent.parent / "latest_live_quote_status_report.json",
+        _latest_live_quote_status_path(report_json.parent.parent, config.instrument_family),
         {
             "schema_version": "track_b_databento_live_quote_status_v1",
             "generated_at": completed_at.isoformat(),
@@ -431,6 +474,28 @@ def _write_success(
             "live_money_readiness": False,
         },
     )
+    if config.instrument_family == "MGC":
+        _write_json(
+            report_json.parent.parent / "latest_live_quote_status_report.json",
+            {
+                "schema_version": "track_b_databento_live_quote_status_v1",
+                "generated_at": completed_at.isoformat(),
+                "live_feed_connected": True,
+                "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+                "dataset": config.dataset,
+                "symbol": config.selector_symbol(),
+                "schema": config.schema,
+                "quote_status": "LIVE_OHLCV_FEED_STATUS_ONLY",
+                "current_quote_available": False,
+                "realtime_quote_received": config.schema != "ohlcv-1m",
+                "latest_record_ts_event": report["latest_record_ts_event"],
+                "latest_record_ts_recv": report["latest_record_ts_recv"],
+                "latency_ms": report["latency_ms"],
+                "submit_allowed": False,
+                "submit_attempted": False,
+                "live_money_readiness": False,
+            },
+        )
     return TrackBDatabentoLiveFeedResult(verdict=verdict, report_json=report_json, report=report, live_1m_candles_json=live_1m_json, live_1m_candles_event=event)
 
 
@@ -467,10 +532,15 @@ def _write_hot_live_artifacts(
     )
     latency_anchor = latest_ts_recv or latest_ts_event or latest_1m
     latency_ms = max(0.0, (generated_at - latency_anchor).total_seconds() * 1000.0)
-    _write_json(Path(config.output_root) / "latest_live_mgc_1m_candles.json", event)
-    _write_json(Path(config.output_root) / "latest_live_mgc_completed_5m_candles.json", _completed_5m_candles(candles))
+    output_root = Path(config.output_root)
+    completed_payload = _completed_5m_candles(candles, instrument_family=config.instrument_family)
+    _write_json(_latest_live_1m_path(output_root, config.instrument_family), event)
+    _write_json(_latest_live_completed_5m_path(output_root, config.instrument_family), completed_payload)
+    if config.instrument_family == "MGC":
+        _write_json(output_root / "latest_live_mgc_1m_candles.json", event)
+        _write_json(output_root / "latest_live_mgc_completed_5m_candles.json", completed_payload)
     _write_json(
-        Path(config.output_root) / "latest_databento_live_runtime_feed_heartbeat.json",
+        _latest_live_heartbeat_path(output_root, config.instrument_family),
         {
             "schema_version": "track_b_databento_live_runtime_feed_heartbeat_v1",
             "generated_at": generated_at.isoformat(),
@@ -489,8 +559,29 @@ def _write_hot_live_artifacts(
             "live_money_readiness": False,
         },
     )
+    if config.instrument_family == "MGC":
+        _write_json(
+            output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+            {
+                "schema_version": "track_b_databento_live_runtime_feed_heartbeat_v1",
+                "generated_at": generated_at.isoformat(),
+                "live_feed_connected": True,
+                "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+                "latest_1m_timestamp": latest_1m.isoformat(),
+                "latest_completed_5m_timestamp": None if latest_completed_5m is None else latest_completed_5m.isoformat(),
+                "latest_record_ts_event": None if latest_ts_event is None else latest_ts_event.isoformat(),
+                "latest_record_ts_recv": None if latest_ts_recv is None else latest_ts_recv.isoformat(),
+                "latency_ms": round(latency_ms, 3),
+                "fresh_for_execution": fresh_for_execution,
+                "bars_available": len(candles),
+                "report_json_path": None,
+                "submit_allowed": False,
+                "submit_attempted": False,
+                "live_money_readiness": False,
+            },
+        )
     _write_json(
-        Path(config.output_root) / "latest_live_quote_status_report.json",
+        _latest_live_quote_status_path(output_root, config.instrument_family),
         {
             "schema_version": "track_b_databento_live_quote_status_v1",
             "generated_at": generated_at.isoformat(),
@@ -512,6 +603,30 @@ def _write_hot_live_artifacts(
             "live_money_readiness": False,
         },
     )
+    if config.instrument_family == "MGC":
+        _write_json(
+            output_root / "latest_live_quote_status_report.json",
+            {
+                "schema_version": "track_b_databento_live_quote_status_v1",
+                "generated_at": generated_at.isoformat(),
+                "live_feed_connected": True,
+                "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+                "dataset": config.dataset,
+                "symbol": config.selector_symbol(),
+                "schema": config.schema,
+                "stype_in": config.stype_in,
+                "stype_out": config.stype_out,
+                "quote_status": "LIVE_OHLCV_FEED_STATUS_ONLY",
+                "current_quote_available": False,
+                "realtime_quote_received": config.schema != "ohlcv-1m",
+                "latest_record_ts_event": None if latest_ts_event is None else latest_ts_event.isoformat(),
+                "latest_record_ts_recv": None if latest_ts_recv is None else latest_ts_recv.isoformat(),
+                "latency_ms": round(latency_ms, 3),
+                "submit_allowed": False,
+                "submit_attempted": False,
+                "live_money_readiness": False,
+            },
+        )
 
 
 def _write_provider_error(
@@ -552,11 +667,13 @@ def _write_provider_error(
         }
     )
     report["report_json_path"] = str(report_json)
-    report["latest_report_json_path"] = str(report_json.parent.parent / "latest_databento_live_runtime_feed_report.json")
+    report["latest_report_json_path"] = str(_latest_live_report_path(report_json.parent.parent, config.instrument_family))
     _write_json(report_json, report)
-    _write_json(report_json.parent.parent / "latest_databento_live_runtime_feed_report.json", report)
+    _write_json(_latest_live_report_path(report_json.parent.parent, config.instrument_family), report)
+    if config.instrument_family == "MGC":
+        _write_json(report_json.parent.parent / "latest_databento_live_runtime_feed_report.json", report)
     _write_json(
-        report_json.parent.parent / "latest_databento_live_runtime_feed_heartbeat.json",
+        _latest_live_heartbeat_path(report_json.parent.parent, config.instrument_family),
         {
             "schema_version": "track_b_databento_live_runtime_feed_heartbeat_v1",
             "generated_at": completed_at.isoformat(),
@@ -570,6 +687,22 @@ def _write_provider_error(
             "live_money_readiness": False,
         },
     )
+    if config.instrument_family == "MGC":
+        _write_json(
+            report_json.parent.parent / "latest_databento_live_runtime_feed_heartbeat.json",
+            {
+                "schema_version": "track_b_databento_live_runtime_feed_heartbeat_v1",
+                "generated_at": completed_at.isoformat(),
+                "live_feed_connected": False,
+                "subscription_status": report["subscription_status"],
+                "fresh_for_execution": False,
+                "primary_blocker": primary_blocker,
+                "report_json_path": str(report_json),
+                "submit_allowed": False,
+                "submit_attempted": False,
+                "live_money_readiness": False,
+            },
+        )
     return TrackBDatabentoLiveFeedResult(verdict=verdict, report_json=report_json, report=report, live_1m_candles_json=None, live_1m_candles_event=None)
 
 
@@ -638,7 +771,7 @@ def _live_1m_event(
 ) -> dict[str, Any]:
     latest = candles[-1]
     return {
-        "schema_version": "track_b_databento_live_mgc_1m_candles_v1",
+        "schema_version": f"track_b_databento_live_{_artifact_symbol(config.instrument_family)}_1m_candles_v1",
         "source_id": config.source_id,
         "capture_id": run_id,
         "account_id": config.account_id,
@@ -688,7 +821,7 @@ def _live_1m_event(
     }
 
 
-def _completed_5m_candles(candles: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _completed_5m_candles(candles: Sequence[Mapping[str, Any]], *, instrument_family: str = "MGC") -> dict[str, Any]:
     grouped: dict[datetime, list[Mapping[str, Any]]] = {}
     for candle in candles:
         ts = _parse_time(str(candle["candle_timestamp"]))
@@ -711,7 +844,7 @@ def _completed_5m_candles(candles: Sequence[Mapping[str, Any]]) -> dict[str, Any
             }
         )
     return {
-        "schema_version": "track_b_databento_live_mgc_completed_5m_candles_v1",
+        "schema_version": f"track_b_databento_live_{_artifact_symbol(instrument_family)}_completed_5m_candles_v1",
         "generated_at": datetime.now(UTC).isoformat(),
         "candles": completed,
         "bars_available": len(completed),
