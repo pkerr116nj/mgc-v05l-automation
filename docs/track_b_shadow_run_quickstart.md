@@ -846,7 +846,33 @@ semantics. The minimum snapshot fields are:
 - `calibration_profile`
 - realtime quote evidence fields or a current quote report path
 
-No-submit watch/evaluation:
+If the runtime input is a bounded 5m Asia Drift feature-row payload, use the
+live-state producer first. It accepts `asian_drift_feature_rows`,
+`feature_rows`, or candles only when each row already includes the research
+Asia Drift feature fields. Raw OHLC-only candles block as
+`ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`.
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_live_state_cli \
+  --runtime-5m-json <BOUNDED_ASIAN_DRIFT_5M_FEATURE_ROWS_JSON> \
+  --current-quote-report-json outputs/track_b_execution_core/databento_current_quote/latest_databento_current_quote_report.json \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --instrument-family MGC \
+  --source-id asian_drift_track_b_live_state \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --output-root outputs/track_b_execution_core/asian_drift_state
+```
+
+Stable outputs:
+
+- `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json`
+- `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_state_builder_report.json`
+- `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_live_state_report.json`
+
+If an explicit state snapshot already exists, write/validate it directly:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_state_cli \
@@ -859,6 +885,11 @@ No-submit watch/evaluation:
   --strategy-id asian_drift_v1 \
   --lane-id mgc_example_long_lmt_day \
   --output-root outputs/track_b_execution_core/asian_drift_state
+```
+
+No-submit watch/evaluation:
+
+```bash
 
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
   --input-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \

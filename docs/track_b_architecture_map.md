@@ -288,6 +288,15 @@ Dashboard implication:
   plus `latest_asian_drift_state_builder_report.json`. It is intentionally a
   state snapshot writer, not a state machine: Track B does not infer Asian
   Drift from raw candles in this slice.
+- `track_b_asian_drift_live_state` is the narrow Track B-safe producer for that
+  snapshot. It does not import the research package and does not infer Asian
+  Drift from raw OHLC candles. It accepts bounded completed 5m rows that already
+  carry the research-defined Asia Drift feature fields, mirrors the stable
+  replay state-machine transition rules documented in
+  `docs/track_b_asian_drift_state_producer_mapping.md`, and then delegates the
+  final snapshot write to `track_b_asian_drift_state`. Missing feature rows,
+  missing realtime quote evidence, or raw candles without the explicit feature
+  contract produce `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT` and no broker mutation.
 - `track_b_strategy_paper_runner` is the controlled Phase 2 PAPER handoff. It
   can now compose `track_b_data_maintenance` latest-good history with a
   separate realtime current quote report, then run `track_b_market_history ->

@@ -663,7 +663,27 @@ Minimum explicit semantics required for `real_strategy_signal=true`:
   `feature_version`, `calibration_profile`, MGC contract fields, and realtime
   quote evidence.
 
-Run no-submit watch/evaluation:
+Track B can now produce the explicit snapshot from bounded completed 5m rows
+that already carry the research-defined Asia Drift feature fields. The producer
+does not import broad research code and does not infer state from raw candles;
+raw OHLC-only input blocks as not ready.
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_live_state_cli \
+  --runtime-5m-json <BOUNDED_ASIAN_DRIFT_5M_FEATURE_ROWS_JSON> \
+  --current-quote-report-json outputs/track_b_execution_core/databento_current_quote/latest_databento_current_quote_report.json \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --instrument-family MGC \
+  --source-id asian_drift_track_b_live_state \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --output-root outputs/track_b_execution_core/asian_drift_state
+```
+
+If an explicit state snapshot is supplied by another approved process, validate
+and write it directly:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_state_cli \
@@ -676,6 +696,11 @@ Run no-submit watch/evaluation:
   --strategy-id asian_drift_v1 \
   --lane-id mgc_example_long_lmt_day \
   --output-root outputs/track_b_execution_core/asian_drift_state
+```
+
+Run no-submit watch/evaluation:
+
+```bash
 
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
   --input-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
