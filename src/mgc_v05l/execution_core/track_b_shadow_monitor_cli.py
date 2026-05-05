@@ -14,9 +14,11 @@ from .track_b_shadow_monitor import (
     DEFAULT_LOCKFILE,
     DEFAULT_PIDFILE,
     DEFAULT_TRACK_B_SHADOW_MONITOR_OUTPUT_ROOT,
+    TrackBRuntimeDataSource,
     TrackBShadowMonitorConfig,
     run_track_b_shadow_monitor,
 )
+from .track_b_databento_live_runtime_feed import DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider-timeout-seconds", "--provider-fetch-timeout-seconds", dest="provider_timeout_seconds", type=float, default=20.0)
     parser.add_argument("--provider-transport", choices=["native", "http"], default="http")
     parser.add_argument("--stype-out", default="instrument_id")
+    parser.add_argument(
+        "--runtime-data-source",
+        choices=[item.value for item in TrackBRuntimeDataSource],
+        default=TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value,
+        help="Live artifact is the default execution-runtime source. HTTP is explicit backfill/recovery only.",
+    )
+    parser.add_argument("--live-runtime-feed-output-root", type=Path, default=DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT)
     parser.add_argument("--use-continuous-symbol-for-runtime-fetch", action="store_true")
     parser.add_argument("--disable-fresh-runtime-artifact-fallback", action="store_true")
     parser.add_argument("--max-latest-1m-age-seconds", type=int, default=900)
@@ -115,6 +124,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             provider_timeout_seconds=args.provider_timeout_seconds,
             provider_transport=args.provider_transport,
             provider_stype_out=args.stype_out,
+            runtime_data_source=args.runtime_data_source,
+            live_runtime_feed_output_root=args.live_runtime_feed_output_root,
             prefer_raw_local_symbol_for_runtime_fetch=not args.use_continuous_symbol_for_runtime_fetch,
             allow_fresh_runtime_artifact_fallback=not args.disable_fresh_runtime_artifact_fallback,
             max_latest_1m_age_seconds=args.max_latest_1m_age_seconds,
@@ -151,6 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "cycle_id": result.report["cycle_id"],
                 "instrument_families": result.report.get("instrument_families", []),
                 "evaluated_strategy_count": result.report.get("evaluated_strategy_count"),
+                "runtime_data_source": result.report.get("runtime_data_source"),
                 "candidate_signals": result.report.get("candidate_signals", []),
                 "suppressed_signals": result.report.get("suppressed_signals", []),
                 "decision_journal_tier_counts": result.report.get("decision_journal_tier_counts", {}),

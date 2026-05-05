@@ -38,6 +38,7 @@ from .track_b_multi_strategy_runtime_cycle import (
     TrackBMultiStrategyRuntimeCycleVerdict,
     run_track_b_multi_strategy_runtime_cycle,
 )
+from .track_b_databento_live_runtime_feed import DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
 from .track_b_runtime_candle_capture import (
     DEFAULT_TRACK_B_RUNTIME_CANDLE_CAPTURE_OUTPUT_ROOT,
     MGC_CONTINUOUS_SYMBOL,
@@ -83,6 +84,11 @@ class TrackBStrategyEvaluationMode(str, Enum):
     QUOTE_TRIGGERED = "QUOTE_TRIGGERED"
 
 
+class TrackBRuntimeDataSource(str, Enum):
+    DATABENTO_LIVE_ARTIFACT = "DATABENTO_LIVE_ARTIFACT"
+    DATABENTO_HTTP_BACKFILL = "DATABENTO_HTTP_BACKFILL"
+
+
 class TrackBShadowMonitorVerdict(str, Enum):
     OK_NO_SIGNAL = "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL"
     OK_SIGNAL_READY_NO_SUBMIT = "TRACK_B_SHADOW_MONITOR_OK_SIGNAL_READY_NO_SUBMIT"
@@ -90,6 +96,7 @@ class TrackBShadowMonitorVerdict(str, Enum):
     NOT_READY_NO_STRATEGIES_CONFIGURED = "TRACK_B_SHADOW_MONITOR_NOT_READY_NO_STRATEGIES_CONFIGURED"
     NOT_READY_UNWIRED_INSTRUMENT = "TRACK_B_SHADOW_MONITOR_NOT_READY_UNWIRED_INSTRUMENT"
     NOT_READY_STALE_RUNTIME_CONTEXT = "TRACK_B_SHADOW_MONITOR_NOT_READY_STALE_RUNTIME_CONTEXT"
+    LIVE_FEED_NOT_READY = "TRACK_B_SHADOW_MONITOR_LIVE_FEED_NOT_READY"
     BLOCKED_PROVIDER_ERROR = "TRACK_B_SHADOW_MONITOR_BLOCKED_PROVIDER_ERROR"
     BLOCKED_PRODUCER_ERROR = "TRACK_B_SHADOW_MONITOR_BLOCKED_PRODUCER_ERROR"
     CRITICAL_UNEXPECTED_MUTATION_FLAG = "TRACK_B_SHADOW_MONITOR_CRITICAL_UNEXPECTED_MUTATION_FLAG"
@@ -138,6 +145,8 @@ class TrackBShadowMonitorConfig:
     allow_fresh_runtime_artifact_fallback: bool = True
     max_latest_1m_age_seconds: int = 900
     max_completed_5m_age_seconds: int = 900
+    runtime_data_source: TrackBRuntimeDataSource | str = TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT
+    live_runtime_feed_output_root: Path = DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
     current_quote_report_json: Path | None = DEFAULT_CURRENT_QUOTE_REPORT_JSON
     env_file: Path | None = None
     base_url: str = "https://hist.databento.com/v0"
@@ -616,13 +625,29 @@ def _run_instrument_cycle(
         last_runtime_fetch_attempt_at=last_runtime_fetch_attempt_at,
     )
     if runtime.report.get("data_written") is not True:
+        verdict = (
+            TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY
+            if runtime.report.get("runtime_data_source") == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
+            else TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR
+        )
         return (
             _instrument_report_from_stages(
                 instrument=instrument,
-                verdict=TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR,
+                verdict=verdict,
                 runtime=runtime,
                 primary_blocker=str(runtime.report.get("primary_blocker") or "Runtime candle capture did not write data."),
                 required_next_action=str(runtime.report.get("required_next_action") or "Repair runtime candle provider before evaluation."),
+            ),
+            None,
+        )
+    if runtime.report.get("runtime_data_source") == TrackBRuntimeDataSource.DATABENTO_HTTP_BACKFILL.value:
+        return (
+            _instrument_report_from_stages(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT,
+                runtime=runtime,
+                primary_blocker="Databento HTTP/historical data is backfill/recovery context only and is not a live runtime source.",
+                required_next_action="Start the Databento Live runtime feed writer before Track B SHADOW strategy evaluation.",
             ),
             None,
         )
@@ -735,6 +760,142 @@ def _run_runtime_candle_capture(
     cycle_index: int,
     now: datetime,
 ) -> TrackBRuntimeCandleCaptureResult:
+    if _runtime_data_source(config) == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT:
+        return _run_live_runtime_artifact_capture(config, instrument, cycle_index, now)
+    return _run_http_backfill_runtime_candle_capture(config, instrument, cycle_index, now)
+
+
+def _runtime_data_source(config: TrackBShadowMonitorConfig) -> TrackBRuntimeDataSource:
+    if isinstance(config.runtime_data_source, TrackBRuntimeDataSource):
+        return config.runtime_data_source
+    return TrackBRuntimeDataSource(str(config.runtime_data_source).strip().upper())
+
+
+def _run_live_runtime_artifact_capture(
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    now: datetime,
+) -> TrackBRuntimeCandleCaptureResult:
+    live_event_json = Path(config.live_runtime_feed_output_root) / "latest_live_mgc_1m_candles.json"
+    live_report_json = Path(config.live_runtime_feed_output_root) / "latest_databento_live_runtime_feed_report.json"
+    live_report = _read_json_optional(live_report_json)
+    if not live_event_json.exists():
+        result = write_runtime_candle_capture_provider_error(
+            primary_blocker="Databento Live runtime feed artifact is missing; HTTP historical/backfill is not a live runtime source.",
+            required_next_action="Start track_b_databento_live_runtime_feed_cli and wait for fresh Live artifacts.",
+            verdict=TrackBRuntimeCandleCaptureVerdict.PROVIDER_ERROR,
+            source_id=f"{config.source_id}_live_runtime_artifact_cycle_{cycle_index}",
+            account_id=instrument.execution_account_id,
+            contract_key=instrument.contract_key,
+            local_symbol=instrument.local_symbol,
+            databento_continuous_symbol=instrument.databento_continuous_symbol,
+            dataset=instrument.dataset,
+            timeframe=config.timeframe,
+            provider_transport="databento_live",
+            provider_request_symbol=instrument.databento_continuous_symbol,
+            provider_request_stype_in=config.stype_in,
+            provider_request_stype_out=config.provider_stype_out,
+            max_bars=config.max_bars,
+            min_bars=config.min_bars,
+            max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
+            max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+            output_root=config.runtime_candle_capture_output_root,
+            capture_id=f"track_b_shadow_monitor_live_runtime_artifact_cycle_{cycle_index}_{uuid.uuid4().hex}",
+            now=now,
+        )
+        _annotate_live_runtime_result(result, live_report_json=live_report_json, live_event_json=live_event_json, live_report=live_report)
+        return result
+    try:
+        payload = _read_json_required(live_event_json)
+    except Exception as exc:  # noqa: BLE001 - unreadable Live artifact is provider-not-ready evidence.
+        result = write_runtime_candle_capture_provider_error(
+            primary_blocker=f"Databento Live runtime feed artifact could not be read: {exc}",
+            required_next_action="Repair the Live runtime feed writer artifact before strategy evaluation.",
+            verdict=TrackBRuntimeCandleCaptureVerdict.PROVIDER_ERROR,
+            source_id=f"{config.source_id}_live_runtime_artifact_cycle_{cycle_index}",
+            account_id=instrument.execution_account_id,
+            contract_key=instrument.contract_key,
+            local_symbol=instrument.local_symbol,
+            databento_continuous_symbol=instrument.databento_continuous_symbol,
+            dataset=instrument.dataset,
+            timeframe=config.timeframe,
+            provider_transport="databento_live",
+            provider_request_symbol=instrument.databento_continuous_symbol,
+            provider_request_stype_in=config.stype_in,
+            provider_request_stype_out=config.provider_stype_out,
+            max_bars=config.max_bars,
+            min_bars=config.min_bars,
+            max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
+            max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+            output_root=config.runtime_candle_capture_output_root,
+            capture_id=f"track_b_shadow_monitor_live_runtime_artifact_cycle_{cycle_index}_{uuid.uuid4().hex}",
+            now=now,
+        )
+        _annotate_live_runtime_result(result, live_report_json=live_report_json, live_event_json=live_event_json, live_report=live_report)
+        return result
+    result = capture_track_b_runtime_mgc_1m_candles(
+        runtime_candle_payload=payload,
+        source_payload_path=live_event_json,
+        expected_account_id=instrument.expected_account_id,
+        account_id=instrument.execution_account_id,
+        contract_key=instrument.contract_key,
+        local_symbol=instrument.local_symbol,
+        databento_continuous_symbol=instrument.databento_continuous_symbol,
+        dataset=instrument.dataset,
+        timeframe=config.timeframe,
+        max_bars=config.max_bars,
+        min_bars=config.min_bars,
+        candle_source_mode="DATABENTO_LIVE_RUNTIME_FEED_MONITOR_READ",
+        provider_transport="databento_live",
+        provider_request_symbol=instrument.databento_continuous_symbol,
+        provider_request_stype_in=config.stype_in,
+        provider_request_stype_out=config.provider_stype_out,
+        max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
+        max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+        source_id=f"{config.source_id}_live_runtime_artifact_cycle_{cycle_index}",
+        output_root=config.runtime_candle_capture_output_root,
+        capture_id=f"track_b_shadow_monitor_live_runtime_artifact_cycle_{cycle_index}_{uuid.uuid4().hex}",
+        now=now,
+    )
+    _annotate_live_runtime_result(result, live_report_json=live_report_json, live_event_json=live_event_json, live_report=live_report)
+    return result
+
+
+def _annotate_live_runtime_result(
+    result: TrackBRuntimeCandleCaptureResult,
+    *,
+    live_report_json: Path,
+    live_event_json: Path,
+    live_report: Mapping[str, Any] | None,
+) -> None:
+    result.report.update(
+        {
+            "runtime_data_source": TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value,
+            "monitor_runtime_candle_source": "DATABENTO_LIVE_RUNTIME_FEED_ARTIFACT",
+            "live_feed_report_path": str(live_report_json) if live_report_json.exists() else None,
+            "live_feed_event_path": str(live_event_json) if live_event_json.exists() else None,
+            "live_feed_connected": None if live_report is None else live_report.get("live_feed_connected"),
+            "live_feed_subscription_status": None if live_report is None else live_report.get("subscription_status"),
+            "live_feed_verdict": None if live_report is None else live_report.get("live_runtime_feed_verdict"),
+            "latest_record_ts_event": None if live_report is None else live_report.get("latest_record_ts_event"),
+            "latest_record_ts_recv": None if live_report is None else live_report.get("latest_record_ts_recv"),
+            "latency_ms": None if live_report is None else live_report.get("latency_ms"),
+            "source_lineage": {
+                "live_feed_report_path": str(live_report_json) if live_report_json.exists() else None,
+                "live_feed_event_path": str(live_event_json),
+            },
+        }
+    )
+    _rewrite_runtime_result_files(result)
+
+
+def _run_http_backfill_runtime_candle_capture(
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    now: datetime,
+) -> TrackBRuntimeCandleCaptureResult:
     requested_window_end = now
     requested_window_start = requested_window_end - timedelta(minutes=max(config.lookback_minutes, 1))
     raw_api_key, credential_status, credential_source = _load_databento_api_key(config.env_file)
@@ -834,7 +995,9 @@ def _run_runtime_candle_capture(
             latest_report=fallback_candidate_report,
             latest_payload=fallback_candidate_payload,
         )
-        return fallback or provider_error
+        result = fallback or provider_error
+        _annotate_http_backfill_runtime_result(result)
+        return result
     quote_payload = _safe_quote_payload(config.current_quote_report_json)
     payload = _runtime_payload_from_records(
         records=records,
@@ -847,7 +1010,7 @@ def _run_runtime_candle_capture(
         history_end_used=history_end_used,
         available_end_lag_seconds=available_end_lag_seconds,
     )
-    return capture_track_b_runtime_mgc_1m_candles(
+    result = capture_track_b_runtime_mgc_1m_candles(
         runtime_candle_payload=payload,
         source_payload_path=None,
         expected_account_id=instrument.expected_account_id,
@@ -878,6 +1041,24 @@ def _run_runtime_candle_capture(
         capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_{uuid.uuid4().hex}",
         now=now,
     )
+    _annotate_http_backfill_runtime_result(result)
+    return result
+
+
+def _annotate_http_backfill_runtime_result(result: TrackBRuntimeCandleCaptureResult) -> None:
+    result.report.update(
+        {
+            "runtime_data_source": TrackBRuntimeDataSource.DATABENTO_HTTP_BACKFILL.value,
+            "monitor_runtime_candle_source": "DATABENTO_HTTP_BACKFILL_NOT_LIVE",
+            "http_backfill_used": True,
+            "execution_live_source": False,
+            "required_next_action": (
+                "HTTP/historical data was captured for backfill or recovery only; start Databento Live runtime feed "
+                "before strategy evaluation."
+            ),
+        }
+    )
+    _rewrite_runtime_result_files(result)
 
 
 def _runtime_for_refresh_cadence(
@@ -1275,6 +1456,9 @@ def _instrument_report_base(
         "requires_quote_freshness": instrument.requires_quote_freshness if instrument else False,
         "runtime_chain_wired": instrument.runtime_chain_wired if instrument else False,
         "runtime_candle_capture_verdict": None,
+        "runtime_data_source": None,
+        "live_feed_connected": None,
+        "live_feed_subscription_status": None,
         "data_written": False,
         "fresh_for_execution": False,
         "latest_1m_timestamp": None,
@@ -1333,9 +1517,18 @@ def _instrument_report_from_stages(
     base.update(
         {
             "runtime_candle_capture_verdict": runtime_report.get("runtime_candle_capture_verdict"),
+            "runtime_data_source": runtime_report.get("runtime_data_source"),
             "runtime_candle_capture_report_path": str(runtime.report_json) if runtime is not None else None,
             "runtime_provider_status_category": _provider_failure_category(runtime_report),
             "monitor_runtime_candle_source": runtime_report.get("monitor_runtime_candle_source") or "PROVIDER_FETCH",
+            "live_feed_report_path": runtime_report.get("live_feed_report_path"),
+            "live_feed_event_path": runtime_report.get("live_feed_event_path"),
+            "live_feed_connected": runtime_report.get("live_feed_connected"),
+            "live_feed_subscription_status": runtime_report.get("live_feed_subscription_status"),
+            "live_feed_verdict": runtime_report.get("live_feed_verdict"),
+            "latest_record_ts_event": runtime_report.get("latest_record_ts_event"),
+            "latest_record_ts_recv": runtime_report.get("latest_record_ts_recv"),
+            "latency_ms": runtime_report.get("latency_ms"),
             "provider_fetch_skipped_for_refresh_cadence": runtime_report.get("provider_fetch_skipped_for_refresh_cadence", False),
             "data_refresh_seconds": runtime_report.get("data_refresh_seconds"),
             "provider_fetch_failed_before_fallback": runtime_report.get("provider_fetch_failed_before_fallback", False),
@@ -1406,11 +1599,13 @@ def _report_for_cycle(
         "monitor_id": monitor_id,
         "cycle_id": cycle_id,
         "mode": "SHADOW",
+        "runtime_data_source": _runtime_data_source(config).value,
         "started_at": started_at.astimezone(UTC).isoformat(),
         "completed_at": completed_at.isoformat(),
         "cycle_elapsed_seconds": round(max(0.0, (completed_at - started_at.astimezone(UTC)).total_seconds()), 3),
         "poll_seconds": config.poll_seconds,
         "data_refresh_seconds": config.data_refresh_seconds,
+        "runtime_data_source": _runtime_data_source(config).value,
         "provider_timeout_seconds": config.provider_timeout_seconds,
         "provider_transport": config.provider_transport,
         "provider_stype_out": config.provider_stype_out,
@@ -1429,6 +1624,9 @@ def _report_for_cycle(
         "runtime_data_freshness_by_instrument": {
             str(item.get("instrument_family")): {
                 "data_written": item.get("data_written"),
+                "runtime_data_source": item.get("runtime_data_source"),
+                "live_feed_connected": item.get("live_feed_connected"),
+                "live_feed_subscription_status": item.get("live_feed_subscription_status"),
                 "fresh_for_execution": item.get("fresh_for_execution"),
                 "latest_1m_timestamp": item.get("latest_1m_timestamp"),
                 "latest_completed_5m_timestamp": item.get("latest_completed_5m_timestamp"),
@@ -1631,6 +1829,8 @@ def _cycle_verdict(instrument_reports: Sequence[Mapping[str, Any]]) -> TrackBSha
         return TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT
     if TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value in verdicts:
         return TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR
+    if TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY.value in verdicts:
+        return TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY
     if TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value in verdicts:
         return TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR
     if TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT.value in verdicts:
@@ -1662,6 +1862,7 @@ def _must_stop(report: Mapping[str, Any], config: TrackBShadowMonitorConfig) -> 
         return True
     if config.stop_on_error and report.get("monitor_verdict") in {
         TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY.value,
         TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value,
         TrackBShadowMonitorVerdict.ERROR.value,
     }:
@@ -1672,6 +1873,7 @@ def _must_stop(report: Mapping[str, Any], config: TrackBShadowMonitorConfig) -> 
 def _failure_counts_for_backoff(report: Mapping[str, Any]) -> bool:
     return str(report.get("monitor_verdict") or "") in {
         TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY.value,
         TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT.value,
         TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value,
         TrackBShadowMonitorVerdict.ERROR.value,
@@ -1850,6 +2052,7 @@ def _primary_blocker(instrument_reports: Sequence[Mapping[str, Any]]) -> str | N
     priority = (
         TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG.value,
         TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
+        TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY.value,
         TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value,
         TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT.value,
         TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT.value,
@@ -1870,6 +2073,8 @@ def _required_next_action(verdict: TrackBShadowMonitorVerdict) -> str:
         return "Stop SHADOW monitor and inspect Track B safety fields before continuing."
     if verdict == TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR:
         return "Repair provider/runtime candle capture; monitor may continue with bounded backoff."
+    if verdict == TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY:
+        return "Start or repair Databento Live runtime feed; do not evaluate strategies from HTTP backfill as live."
     if verdict == TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT:
         return "Wait for fresh runtime candles; do not evaluate strategies on stale context."
     if verdict == TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT:

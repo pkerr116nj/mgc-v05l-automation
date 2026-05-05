@@ -25,6 +25,7 @@ from mgc_v05l.execution_core.track_b_session_strategy_envelope_producer import (
     TrackBSessionStrategyEnvelopeProducerVerdict,
 )
 from mgc_v05l.execution_core.track_b_shadow_monitor import (
+    TrackBRuntimeDataSource,
     TrackBShadowMonitorConfig,
     TrackBShadowMonitorInstrumentConfig,
     TrackBShadowMonitorStages,
@@ -95,6 +96,7 @@ def config(tmp_path: Path, **overrides: object) -> TrackBShadowMonitorConfig:
         "data_refresh_seconds": 0,
         "output_root": tmp_path / "monitor",
         "runtime_candle_capture_output_root": tmp_path / "runtime",
+        "live_runtime_feed_output_root": tmp_path / "live",
         "asian_drift_output_root": tmp_path / "asian",
         "snap_turn_output_root": tmp_path / "snap",
         "session_strategy_output_root": tmp_path / "session",
@@ -374,7 +376,7 @@ def test_provider_failure_blocks_strategy_evaluation_and_continues_as_artifact(t
 
 
 def test_runtime_capture_uses_fresh_runtime_artifact_after_provider_timeout(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
-    cfg = config(tmp_path)
+    cfg = config(tmp_path, runtime_data_source=TrackBRuntimeDataSource.DATABENTO_HTTP_BACKFILL)
     capture_track_b_runtime_mgc_1m_candles(
         runtime_candle_payload=runtime_payload_for_now(),
         output_root=cfg.runtime_candle_capture_output_root,
@@ -399,12 +401,124 @@ def test_runtime_capture_uses_fresh_runtime_artifact_after_provider_timeout(monk
     )
 
     assert result.report["fresh_for_execution"] is True
-    assert result.report["monitor_runtime_candle_source"] == "FRESH_EXISTING_RUNTIME_ARTIFACT_AFTER_PROVIDER_FAILURE"
+    assert result.report["monitor_runtime_candle_source"] == "DATABENTO_HTTP_BACKFILL_NOT_LIVE"
+    assert result.report["runtime_data_source"] == TrackBRuntimeDataSource.DATABENTO_HTTP_BACKFILL.value
     assert result.report["provider_fetch_failed_before_fallback"] is True
     assert result.report["provider_fetch_failure_category"] == "PROVIDER_TIMEOUT"
     assert result.report["source_lineage"]["fallback_source_event_path"].endswith("latest_runtime_mgc_1m_candles.json")
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_default_runtime_capture_requires_live_feed_artifact(tmp_path: Path) -> None:
+    cfg = config(tmp_path)
+
+    result = _run_runtime_candle_capture(cfg, cfg.instruments[0], 1, now())
+
+    assert result.report["data_written"] is False
+    assert result.report["runtime_data_source"] == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
+    assert "Live runtime feed artifact is missing" in str(result.report["primary_blocker"])
+    assert "HTTP historical/backfill is not a live runtime source" in str(result.report["primary_blocker"])
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_default_monitor_reports_live_feed_not_ready_when_artifact_missing(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=config(tmp_path), stages=stages, monitor_id="monitor-live-missing", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY
+    assert fake.calls["multi"] == 0
+    assert result.report["instrument_reports"][0]["runtime_data_source"] == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+
+
+def test_default_monitor_evaluates_from_live_feed_artifact(tmp_path: Path) -> None:
+    cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live")
+    live_payload = runtime_payload_for_now()
+    live_payload["candle_source_mode"] = "DATABENTO_LIVE_RUNTIME_FEED"
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", live_payload)
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "live_runtime_feed_verdict": "TRACK_B_DATABENTO_LIVE_FEED_DATA_WRITTEN_EXECUTION_FRESH",
+            "latest_record_ts_event": "2026-05-05T11:59:00+00:00",
+            "latest_record_ts_recv": "2026-05-05T11:59:01+00:00",
+            "latency_ms": 1000,
+        },
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-live-artifact", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    assert fake.calls["multi"] == 1
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["runtime_data_source"] == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
+    assert instrument_report["monitor_runtime_candle_source"] == "DATABENTO_LIVE_RUNTIME_FEED_ARTIFACT"
+    assert instrument_report["live_feed_connected"] is True
+    assert instrument_report["submit_attempted"] is False
+    assert instrument_report["live_money_readiness"] is False
+
+
+def test_http_backfill_source_does_not_drive_strategy_evaluation(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+    fake.runtime = lambda _cfg, _instrument, cycle_index, actual_now: capture_track_b_runtime_mgc_1m_candles(  # type: ignore[method-assign]
+        runtime_candle_payload=runtime_payload_for_now(),
+        output_root=tmp_path / "runtime",
+        max_bars=20,
+        min_bars=8,
+        max_latest_1m_age_seconds=900,
+        max_completed_5m_age_seconds=900,
+        source_id=f"http_backfill_{cycle_index}",
+        now=actual_now,
+    )
+
+    def runtime_with_backfill_marker(cfg, instrument, cycle_index, actual_now):  # type: ignore[no-untyped-def]
+        result = fake.runtime(cfg, instrument, cycle_index, actual_now)
+        result.report["runtime_data_source"] = TrackBRuntimeDataSource.DATABENTO_HTTP_BACKFILL.value
+        return result
+
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=runtime_with_backfill_marker,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=config(tmp_path), stages=stages, monitor_id="monitor-http-block", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT
+    assert fake.calls["multi"] == 0
+    assert "backfill/recovery context only" in str(result.report["primary_blocker"])
 
 
 def test_stale_runtime_context_blocks_strategy_evaluation(tmp_path: Path) -> None:
