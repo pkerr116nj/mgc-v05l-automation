@@ -846,10 +846,31 @@ semantics. The minimum snapshot fields are:
 - `calibration_profile`
 - realtime quote evidence fields or a current quote report path
 
-If the runtime input is a bounded 5m Asia Drift feature-row payload, use the
-live-state producer first. It accepts `asian_drift_feature_rows`,
+If the runtime input is bounded completed 5m MGC candles, produce explicit Asia
+Drift feature rows first. This is the only Track B boundary that accepts raw
+OHLC candles for Asian Drift; it mirrors the research-defined feature row
+semantics and blocks fewer than 8 completed rows.
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_feature_rows_cli \
+  --runtime-5m-candles-json <BOUNDED_COMPLETED_MGC_5M_CANDLES_JSON> \
+  --current-quote-report-json outputs/track_b_execution_core/databento_current_quote/latest_databento_current_quote_report.json \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --instrument-family MGC \
+  --local-symbol MGCM6 \
+  --dataset GLBX.MDP3 \
+  --source-id asian_drift_track_b_feature_rows \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --output-root outputs/track_b_execution_core/asian_drift_state
+```
+
+If the runtime input is already a bounded 5m Asia Drift feature-row payload, use
+the live-state producer directly. It accepts `asian_drift_feature_rows`,
 `feature_rows`, or candles only when each row already includes the research
-Asia Drift feature fields. Raw OHLC-only candles block as
+Asia Drift feature fields. Raw OHLC-only input at this boundary blocks as
 `ASIAN_DRIFT_NOT_READY_FOR_TONIGHT`.
 
 ```bash
@@ -868,6 +889,8 @@ Asia Drift feature fields. Raw OHLC-only candles block as
 
 Stable outputs:
 
+- `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_feature_rows.json`
+- `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_feature_rows_report.json`
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json`
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_state_builder_report.json`
 - `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_live_state_report.json`

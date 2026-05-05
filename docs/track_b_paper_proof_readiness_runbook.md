@@ -663,10 +663,31 @@ Minimum explicit semantics required for `real_strategy_signal=true`:
   `feature_version`, `calibration_profile`, MGC contract fields, and realtime
   quote evidence.
 
-Track B can now produce the explicit snapshot from bounded completed 5m rows
-that already carry the research-defined Asia Drift feature fields. The producer
-does not import broad research code and does not infer state from raw candles;
-raw OHLC-only input blocks as not ready.
+Track B can now produce explicit Asia Drift feature rows from bounded completed
+5m MGC candles, then produce the explicit state snapshot from those feature
+rows. The feature-row producer mirrors the research-defined Phase 1 feature
+semantics without importing broad research code. The live-state producer still
+does not infer state from raw candles; raw OHLC-only input at that boundary
+blocks as not ready.
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_feature_rows_cli \
+  --runtime-5m-candles-json <BOUNDED_COMPLETED_MGC_5M_CANDLES_JSON> \
+  --current-quote-report-json outputs/track_b_execution_core/databento_current_quote/latest_databento_current_quote_report.json \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --instrument-family MGC \
+  --local-symbol MGCM6 \
+  --dataset GLBX.MDP3 \
+  --source-id asian_drift_track_b_feature_rows \
+  --strategy-id asian_drift_v1 \
+  --lane-id mgc_example_long_lmt_day \
+  --output-root outputs/track_b_execution_core/asian_drift_state
+```
+
+If an approved process already produced bounded feature rows, feed them to the
+live-state producer:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_live_state_cli \
@@ -701,7 +722,6 @@ and write it directly:
 Run no-submit watch/evaluation:
 
 ```bash
-
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
   --input-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
