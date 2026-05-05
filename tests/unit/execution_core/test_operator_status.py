@@ -118,6 +118,75 @@ def signal_batch_writer_report(tmp_path: Path, **overrides: object) -> Path:
     return write_json(tmp_path / "signal_batch_writer_report.json", payload)
 
 
+def backend_health_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "status": "ok",
+        "ready": True,
+        "generated_at": aware_now().isoformat(),
+        "url": "http://127.0.0.1:8790/",
+        "host": "127.0.0.1",
+        "port": 8790,
+        "pid": 12345,
+        "checks": {
+            "operator_surface_loadable": {"ok": True, "detail": "Operator surface loaded."},
+            "api_dashboard_responding": {"ok": True, "detail": "/api/dashboard responded."},
+            "startup_convergence_stable": {"ok": True, "detail": "Dashboard startup is stable."},
+        },
+        "error": None,
+        "info_file": "outputs/operator_dashboard/runtime/operator_dashboard.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "backend_health.json", payload)
+
+
+def multi_strategy_runtime_cycle_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_multi_strategy_runtime_cycle_v1",
+        "generated_at": aware_now().isoformat(),
+        "track_b_multi_strategy_runtime_cycle_id": "multi-cycle-001",
+        "multi_strategy_runtime_cycle_verdict": "TRACK_B_MULTI_STRATEGY_RUNTIME_SIGNAL_READY_NO_SUBMIT",
+        "mode": "PAPER",
+        "source_id": "unit_test_multi_strategy_cycle",
+        "evaluated_strategies": [
+            {
+                "strategy_id": "ASIAN_DRIFT_V1",
+                "strategy_runtime_verdict": "NO_SIGNAL_NO_MUTATION",
+                "registry_metadata": {"strategy_registry_live_money_eligible": False},
+            },
+            {
+                "strategy_id": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+                "strategy_runtime_verdict": "SIGNAL_READY_NO_SUBMIT",
+                "registry_metadata": {"strategy_registry_live_money_eligible": False},
+            },
+        ],
+        "candidate_signals": [
+            {
+                "strategy_id": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+                "signal_source": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+                "real_strategy_signal": True,
+                "signal_direction": "SHORT",
+                "paper_eligible": True,
+                "live_money_eligible": False,
+            }
+        ],
+        "suppressed_signals": [],
+        "arbitration_result": {"strategy_arbitration_verdict": "TRACK_B_STRATEGY_REGISTRY_READY"},
+        "chosen_signal": {"strategy_id": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1", "signal_direction": "SHORT"},
+        "chosen_strategy_id": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        "reason_no_signal_chosen": "One signal was chosen, but explicit PAPER submit flags were not supplied.",
+        "readiness_invoked": False,
+        "paper_proof_invoked": False,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+        "primary_blocker": None,
+        "required_next_action": "Exactly one real strategy signal is ready, but explicit PAPER submit flags were not supplied.",
+        "report_json_path": "track_b_multi_strategy_runtime_cycle_report.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "track_b_multi_strategy_runtime_cycle_report.json", payload)
+
+
 def strategy_signal_adapter_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, object] = {
         "schema_version": "track_b_strategy_signal_adapter_v1",
@@ -499,6 +568,118 @@ def test_signal_batch_writer_report_is_summarized(tmp_path: Path) -> None:
     assert result.report["listener_invoked"] is False
     assert result.report["runner_invoked"] is False
     assert result.report["submit_attempted"] is False
+
+
+def test_backend_health_report_is_summarized(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            backend_health_json=backend_health_report(tmp_path),
+            listener_health_json=listener_health(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-backend-health",
+        now=aware_now(),
+    )
+
+    assert result.report["backend_health_status"] == "ok"
+    assert result.report["backend_health_ready"] is True
+    assert result.report["backend_health_url"] == "http://127.0.0.1:8790/"
+    assert result.report["backend_health_api_dashboard_ok"] is True
+    assert result.report["backend_health_operator_surface_ok"] is True
+    assert result.report["latest_output_paths"]["backend_health"] == "outputs/operator_dashboard/runtime/operator_dashboard.json"
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_backend_down_state_is_reported_clearly_without_readiness(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            backend_health_json=backend_health_report(
+                tmp_path,
+                status="degraded",
+                ready=False,
+                error="dashboard_snapshot_failed",
+                checks={
+                    "operator_surface_loadable": {"ok": False, "detail": "No snapshot."},
+                    "api_dashboard_responding": {"ok": False, "detail": "/api/dashboard unreachable."},
+                    "startup_convergence_stable": {"ok": False, "detail": "Backend down."},
+                },
+            ),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-backend-down",
+        now=aware_now(),
+    )
+
+    assert result.verdict == OperatorStatusVerdict.UNKNOWN
+    assert result.report["backend_health_status"] == "degraded"
+    assert result.report["backend_health_ready"] is False
+    assert result.report["backend_health_api_dashboard_ok"] is False
+    assert result.report["backend_health_operator_surface_ok"] is False
+    assert result.report["primary_blocker"] == "dashboard_snapshot_failed"
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_multi_strategy_runtime_cycle_report_is_summarized(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            backend_health_json=backend_health_report(tmp_path),
+            track_b_multi_strategy_runtime_cycle_report_json=multi_strategy_runtime_cycle_report(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-multi-strategy-cycle",
+        now=aware_now(),
+    )
+
+    assert result.verdict == OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW
+    assert result.report["multi_strategy_runtime_cycle_verdict"] == "TRACK_B_MULTI_STRATEGY_RUNTIME_SIGNAL_READY_NO_SUBMIT"
+    assert result.report["multi_strategy_chosen_strategy_id"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    assert result.report["multi_strategy_candidate_signals"][0]["signal_direction"] == "SHORT"
+    assert result.report["multi_strategy_suppressed_signals"] == []
+    assert result.report["multi_strategy_readiness_invoked"] is False
+    assert result.report["multi_strategy_paper_proof_invoked"] is False
+    assert result.report["multi_strategy_submit_attempted"] is False
+    assert result.report["multi_strategy_broker_state_mutated"] is False
+    assert result.report["multi_strategy_live_money_readiness"] is False
+    assert result.report["latest_output_paths"]["track_b_multi_strategy_runtime_cycle"] == "track_b_multi_strategy_runtime_cycle_report.json"
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_blocked_multi_strategy_runtime_cycle_degrades_operator_status(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            track_b_multi_strategy_runtime_cycle_report_json=multi_strategy_runtime_cycle_report(
+                tmp_path,
+                multi_strategy_runtime_cycle_verdict="TRACK_B_MULTI_STRATEGY_RUNTIME_ARBITRATION_BLOCKED",
+                primary_blocker="Conflicting LONG and SHORT strategy signals require explicit arbitration.",
+                required_next_action="Do not submit; review suppressed candidates.",
+                candidate_signals=[
+                    {"strategy_id": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1", "signal_direction": "SHORT"},
+                    {"strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1", "signal_direction": "LONG"},
+                ],
+                suppressed_signals=[
+                    {"strategy_id": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1", "signal_direction": "SHORT"},
+                    {"strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1", "signal_direction": "LONG"},
+                ],
+            ),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-multi-strategy-blocked",
+        now=aware_now(),
+    )
+
+    assert result.verdict == OperatorStatusVerdict.BLOCKED_READINESS
+    assert result.report["primary_blocker"] == "Conflicting LONG and SHORT strategy signals require explicit arbitration."
+    assert result.report["multi_strategy_runtime_cycle_verdict"] == "TRACK_B_MULTI_STRATEGY_RUNTIME_ARBITRATION_BLOCKED"
+    assert len(result.report["multi_strategy_suppressed_signals"]) == 2
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
 
 
 def test_upstream_strategy_and_candle_reports_are_summarized(tmp_path: Path) -> None:
@@ -957,6 +1138,8 @@ def test_no_inputs_reports_missing_not_ok(tmp_path: Path) -> None:
 def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     exit_code = operator_status_cli_main(
         [
+            "--backend-health-json",
+            str(backend_health_report(tmp_path)),
             "--listener-heartbeat-json",
             str(listener_heartbeat(tmp_path)),
             "--listener-health-json",
@@ -967,6 +1150,8 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
             str(strategy_rule_runner_report(tmp_path)),
             "--track-b-strategy-paper-runner-report-json",
             str(strategy_paper_runner_report(tmp_path)),
+            "--track-b-multi-strategy-runtime-cycle-report-json",
+            str(multi_strategy_runtime_cycle_report(tmp_path)),
             "--databento-candle-observer-report-json",
             str(databento_candle_observer_report(tmp_path)),
             "--databento-candle-observer-heartbeat-json",
@@ -985,6 +1170,9 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
 
     assert exit_code == 0
     assert output["status_verdict"] == "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW"
+    assert output["backend_health_status"] == "ok"
+    assert output["backend_health_ready"] is True
+    assert output["backend_health_url"] == "http://127.0.0.1:8790/"
     assert output["listener_mode"] == "watch"
     assert output["listener_current_cycle_number"] == 3
     assert output["observation_runner_verdict"] == "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW"
@@ -1002,6 +1190,14 @@ def test_operator_status_cli_reads_reports_and_writes_summary(tmp_path: Path, ca
     assert output["strategy_paper_proof_invoked"] is True
     assert output["strategy_paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
     assert output["strategy_paper_final_flat"] is True
+    assert output["multi_strategy_runtime_cycle_verdict"] == "TRACK_B_MULTI_STRATEGY_RUNTIME_SIGNAL_READY_NO_SUBMIT"
+    assert output["multi_strategy_chosen_strategy_id"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    assert output["multi_strategy_candidate_signals"][0]["signal_direction"] == "SHORT"
+    assert output["multi_strategy_suppressed_signals"] == []
+    assert output["multi_strategy_readiness_invoked"] is False
+    assert output["multi_strategy_paper_proof_invoked"] is False
+    assert output["multi_strategy_submit_attempted"] is False
+    assert output["multi_strategy_broker_state_mutated"] is False
     assert output["databento_observer_verdict"] == "DATABENTO_CANDLE_OBSERVER_WROTE_EVENT"
     assert output["databento_observer_mode"] == "watch"
     assert output["databento_observer_current_cycle"] == 3

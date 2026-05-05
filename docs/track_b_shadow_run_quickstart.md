@@ -845,6 +845,33 @@ signal. Live-money remains prohibited, UI authority remains false, and final
 broker-state classification comes from the guarded Track B paper-proof
 lifecycle.
 
+To refresh the Track B Status UI read model after a multi-strategy cycle,
+include the backend health and multi-strategy latest artifacts in
+`operator_status_cli`:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
+  --backend-health-json outputs/operator_dashboard/runtime/operator_dashboard_readiness.json \
+  --track-b-multi-strategy-runtime-cycle-report-json outputs/track_b_execution_core/track_b_multi_strategy_runtime_cycle/latest_track_b_multi_strategy_runtime_cycle_report.json \
+  --track-b-observation-runner-report-json outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json \
+  --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \
+  --signal-batch-writer-report-json outputs/track_b_execution_core/signal_batch_writer/latest_signal_batch_writer_report.json \
+  --output-root outputs/track_b_execution_core/operator_status
+```
+
+The desktop dashboard backend is expected at `http://127.0.0.1:8790/`. Start
+or restart it with:
+
+```bash
+bash scripts/run_operator_dashboard.sh --no-open-browser --verify-dashboard-api --host 127.0.0.1 --port 8790
+```
+
+Backend-down status means the desktop cannot reach the local dashboard API or
+its persisted runtime metadata; it does not imply Track B submit readiness. A
+missing `latest_operator_status_summary.json` means the Track B read model has
+not been refreshed yet. Neither condition authorizes PAPER or live-money
+execution.
+
 Phase 2 paper execution stance: because Track B paper proof has passed the
 full PAPER open/guarded-close/flat lifecycle, PAPER execution is now allowed
 only through explicit Track B-controlled submit paths. The strategy paper

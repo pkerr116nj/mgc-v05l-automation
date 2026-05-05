@@ -34,6 +34,7 @@ class OperatorStatusVerdict(str, Enum):
 
 @dataclass(frozen=True)
 class OperatorStatusInputs:
+    backend_health_json: Path | None = None
     listener_heartbeat_json: Path | None = None
     listener_health_json: Path | None = None
     listener_cycle_json: Path | None = None
@@ -43,6 +44,7 @@ class OperatorStatusInputs:
     track_b_readiness_check_runner_report_json: Path | None = None
     track_b_strategy_rule_runner_report_json: Path | None = None
     track_b_strategy_paper_runner_report_json: Path | None = None
+    track_b_multi_strategy_runtime_cycle_report_json: Path | None = None
     databento_candle_observer_report_json: Path | None = None
     databento_candle_observer_heartbeat_json: Path | None = None
     strategy_signal_adapter_report_json: Path | None = None
@@ -94,6 +96,7 @@ def create_operator_status_summary(
 
 def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | None]:
     return {
+        "backend_health": _read_json(inputs.backend_health_json),
         "listener_heartbeat": _read_json(inputs.listener_heartbeat_json),
         "listener_health": _read_json(inputs.listener_health_json),
         "listener_cycle": _read_json(inputs.listener_cycle_json),
@@ -103,6 +106,7 @@ def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | No
         "track_b_readiness_check_runner": _read_json(inputs.track_b_readiness_check_runner_report_json),
         "track_b_strategy_rule_runner": _read_json(inputs.track_b_strategy_rule_runner_report_json),
         "track_b_strategy_paper_runner": _read_json(inputs.track_b_strategy_paper_runner_report_json),
+        "track_b_multi_strategy_runtime_cycle": _read_json(inputs.track_b_multi_strategy_runtime_cycle_report_json),
         "databento_candle_observer": _read_json(inputs.databento_candle_observer_report_json),
         "databento_candle_observer_heartbeat": _read_json(inputs.databento_candle_observer_heartbeat_json),
         "strategy_signal_adapter": _read_json(inputs.strategy_signal_adapter_report_json),
@@ -122,6 +126,8 @@ def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[Operator
     track_b_readiness_check_runner = reports.get("track_b_readiness_check_runner") or {}
     listener_health = reports.get("listener_health") or {}
     listener_heartbeat = reports.get("listener_heartbeat") or {}
+    track_b_multi_strategy_runtime_cycle = reports.get("track_b_multi_strategy_runtime_cycle") or {}
+    backend_health = reports.get("backend_health") or {}
 
     recovery_verdict = _recovery_verdict(recovery)
     if recovery_verdict in {"BLOCKED_UNRESOLVED_BROKER_ORDER", "RECOVERY_BLOCKED_UNRESOLVED_ORDER"}:
@@ -207,6 +213,37 @@ def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[Operator
             str(track_b_strategy_paper_runner.get("required_next_action") or "Reconcile broker state before any further PAPER submit."),
         )
 
+    multi_strategy_verdict = str(track_b_multi_strategy_runtime_cycle.get("multi_strategy_runtime_cycle_verdict") or "")
+    if multi_strategy_verdict in {
+        "TRACK_B_MULTI_STRATEGY_RUNTIME_ARBITRATION_BLOCKED",
+        "TRACK_B_MULTI_STRATEGY_RUNTIME_PAPER_PROOF_REVIEW_REQUIRED",
+        "TRACK_B_MULTI_STRATEGY_RUNTIME_BLOCKED_STAGE_ERROR",
+    }:
+        return (
+            OperatorStatusVerdict.BLOCKED_READINESS,
+            str(
+                track_b_multi_strategy_runtime_cycle.get("primary_blocker")
+                or f"Multi-strategy runtime cycle is blocked: {multi_strategy_verdict}"
+            ),
+            str(
+                track_b_multi_strategy_runtime_cycle.get("required_next_action")
+                or "Review multi-strategy runtime cycle arbitration before any PAPER retry."
+            ),
+        )
+    if multi_strategy_verdict in {
+        "TRACK_B_MULTI_STRATEGY_RUNTIME_NO_SIGNAL_NO_MUTATION",
+        "TRACK_B_MULTI_STRATEGY_RUNTIME_SIGNAL_READY_NO_SUBMIT",
+        "TRACK_B_MULTI_STRATEGY_RUNTIME_PAPER_PROOF_PASSED",
+    }:
+        return (
+            OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW,
+            None,
+            str(
+                track_b_multi_strategy_runtime_cycle.get("required_next_action")
+                or "Review multi-strategy runtime cycle artifacts. Dashboard remains display-only."
+            ),
+        )
+
     health_verdict = str(listener_health.get("health_verdict") or listener_heartbeat.get("last_health_verdict") or "")
     if health_verdict == "SHADOW_LISTENER_HEALTH_DEGRADED_FAILURES":
         return (
@@ -232,6 +269,17 @@ def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[Operator
             "No Track B observer reports were provided.",
             "Provide at least listener health or another Track B observer report.",
         )
+    if backend_health and not _backend_health_ok(backend_health) and _all_track_b_runtime_reports_missing(reports):
+        return (
+            OperatorStatusVerdict.UNKNOWN,
+            str(
+                backend_health.get("error")
+                or backend_health.get("message")
+                or backend_health.get("reason_detail")
+                or "Backend health is not OK."
+            ),
+            "Start or repair the local operator dashboard backend, then refresh Track B operator status artifacts.",
+        )
     return (
         OperatorStatusVerdict.UNKNOWN,
         "Supplied reports do not contain enough status evidence for a clear verdict.",
@@ -251,6 +299,7 @@ def _report(
 ) -> dict[str, Any]:
     missing = [name for name, report in reports.items() if report is None]
     considered = {name: report is not None for name, report in reports.items()}
+    backend_health = reports.get("backend_health") or {}
     listener_heartbeat = reports.get("listener_heartbeat") or {}
     listener_health = reports.get("listener_health") or {}
     listener_cycle = reports.get("listener_cycle") or {}
@@ -260,6 +309,7 @@ def _report(
     track_b_readiness_check_runner = reports.get("track_b_readiness_check_runner") or {}
     track_b_strategy_rule_runner = reports.get("track_b_strategy_rule_runner") or {}
     track_b_strategy_paper_runner = reports.get("track_b_strategy_paper_runner") or {}
+    track_b_multi_strategy_runtime_cycle = reports.get("track_b_multi_strategy_runtime_cycle") or {}
     databento_candle_observer = reports.get("databento_candle_observer") or {}
     databento_candle_observer_heartbeat = reports.get("databento_candle_observer_heartbeat") or {}
     strategy_signal_adapter = reports.get("strategy_signal_adapter") or {}
@@ -270,6 +320,7 @@ def _report(
     preflight = reports.get("preflight") or {}
     quote = reports.get("quote") or {}
     latest_output_paths = {
+        "backend_health": backend_health.get("report_json_path") or backend_health.get("health_json_path") or backend_health.get("info_file"),
         "listener_heartbeat": listener_heartbeat.get("heartbeat_json_path"),
         "listener_health": listener_health.get("health_report_path") or listener_health.get("latest_health_report_path"),
         "listener_cycle": listener_cycle.get("report_json_path") or listener_health.get("latest_cycle_summary_path"),
@@ -279,6 +330,7 @@ def _report(
         "track_b_readiness_check_runner": track_b_readiness_check_runner.get("report_json_path"),
         "track_b_strategy_rule_runner": track_b_strategy_rule_runner.get("report_json_path"),
         "track_b_strategy_paper_runner": track_b_strategy_paper_runner.get("report_json_path"),
+        "track_b_multi_strategy_runtime_cycle": track_b_multi_strategy_runtime_cycle.get("report_json_path"),
         "databento_candle_observer": databento_candle_observer.get("report_json_path"),
         "databento_candle_observer_heartbeat": databento_candle_observer_heartbeat.get("heartbeat_json_path"),
         "strategy_signal_adapter": strategy_signal_adapter.get("report_json_path"),
@@ -294,6 +346,22 @@ def _report(
         "generated_at": now.isoformat(),
         "operator_status_id": status_id,
         "status_verdict": verdict.value,
+        "backend_health_status": _backend_health_status(backend_health) or NOT_PROVIDED,
+        "backend_health_ready": _backend_health_ready(backend_health) if backend_health else NOT_PROVIDED,
+        "backend_health_url": backend_health.get("url") or backend_health.get("configured_url") or NOT_PROVIDED,
+        "backend_health_host": backend_health.get("host") or NOT_PROVIDED,
+        "backend_health_port": backend_health.get("port") if backend_health else NOT_PROVIDED,
+        "backend_health_pid": backend_health.get("pid") or _nested_get(backend_health, ("health", "pid"), NOT_PROVIDED),
+        "backend_health_api_dashboard_ok": _nested_get(
+            backend_health, ("checks", "api_dashboard_responding", "ok"), NOT_PROVIDED
+        ),
+        "backend_health_operator_surface_ok": _nested_get(
+            backend_health, ("checks", "operator_surface_loadable", "ok"), NOT_PROVIDED
+        ),
+        "backend_health_startup_stable": _nested_get(
+            backend_health, ("checks", "startup_convergence_stable", "ok"), NOT_PROVIDED
+        ),
+        "backend_health_error": backend_health.get("error") or backend_health.get("reason_detail") or NOT_PROVIDED,
         "listener_mode": listener_heartbeat.get("listener_mode") or NOT_PROVIDED,
         "listener_current_cycle_number": listener_heartbeat.get("current_cycle_number") if listener_heartbeat else NOT_PROVIDED,
         "listener_last_cycle_number": listener_heartbeat.get("last_cycle_number") if listener_heartbeat else NOT_PROVIDED,
@@ -400,6 +468,31 @@ def _report(
         "strategy_paper_submit_allowed": track_b_strategy_paper_runner.get("submit_allowed") if track_b_strategy_paper_runner else NOT_PROVIDED,
         "strategy_paper_submit_attempted": track_b_strategy_paper_runner.get("submit_attempted") if track_b_strategy_paper_runner else NOT_PROVIDED,
         "strategy_paper_live_money_readiness": track_b_strategy_paper_runner.get("live_money_readiness") if track_b_strategy_paper_runner else NOT_PROVIDED,
+        "multi_strategy_runtime_cycle_verdict": track_b_multi_strategy_runtime_cycle.get("multi_strategy_runtime_cycle_verdict") or NOT_PROVIDED,
+        "multi_strategy_runtime_cycle_mode": track_b_multi_strategy_runtime_cycle.get("mode") or NOT_PROVIDED,
+        "multi_strategy_runtime_cycle_source_id": track_b_multi_strategy_runtime_cycle.get("source_id") or NOT_PROVIDED,
+        "multi_strategy_evaluated_strategies": track_b_multi_strategy_runtime_cycle.get("evaluated_strategies") or [],
+        "multi_strategy_candidate_signals": track_b_multi_strategy_runtime_cycle.get("candidate_signals") or [],
+        "multi_strategy_suppressed_signals": track_b_multi_strategy_runtime_cycle.get("suppressed_signals") or [],
+        "multi_strategy_arbitration_result": track_b_multi_strategy_runtime_cycle.get("arbitration_result") or {},
+        "multi_strategy_chosen_signal": track_b_multi_strategy_runtime_cycle.get("chosen_signal") or {},
+        "multi_strategy_chosen_strategy_id": track_b_multi_strategy_runtime_cycle.get("chosen_strategy_id") or NOT_PROVIDED,
+        "multi_strategy_reason_no_signal_chosen": track_b_multi_strategy_runtime_cycle.get("reason_no_signal_chosen") or NOT_PROVIDED,
+        "multi_strategy_readiness_invoked": (
+            track_b_multi_strategy_runtime_cycle.get("readiness_invoked") if track_b_multi_strategy_runtime_cycle else NOT_PROVIDED
+        ),
+        "multi_strategy_paper_proof_invoked": (
+            track_b_multi_strategy_runtime_cycle.get("paper_proof_invoked") if track_b_multi_strategy_runtime_cycle else NOT_PROVIDED
+        ),
+        "multi_strategy_submit_attempted": (
+            track_b_multi_strategy_runtime_cycle.get("submit_attempted") if track_b_multi_strategy_runtime_cycle else NOT_PROVIDED
+        ),
+        "multi_strategy_broker_state_mutated": (
+            track_b_multi_strategy_runtime_cycle.get("broker_state_mutated") if track_b_multi_strategy_runtime_cycle else NOT_PROVIDED
+        ),
+        "multi_strategy_live_money_readiness": (
+            track_b_multi_strategy_runtime_cycle.get("live_money_readiness") if track_b_multi_strategy_runtime_cycle else NOT_PROVIDED
+        ),
         "databento_observer_verdict": databento_candle_observer.get("observer_verdict") or NOT_PROVIDED,
         "databento_contract_key": databento_candle_observer.get("contract_key") or databento_candle_observer_heartbeat.get("contract_key") or NOT_PROVIDED,
         "databento_symbol": databento_candle_observer.get("databento_continuous_symbol") or databento_candle_observer_heartbeat.get("databento_continuous_symbol") or NOT_PROVIDED,
@@ -503,6 +596,42 @@ def _all_missing(reports: Mapping[str, Mapping[str, Any] | None]) -> bool:
     return all(report is None for report in reports.values())
 
 
+def _all_track_b_runtime_reports_missing(reports: Mapping[str, Mapping[str, Any] | None]) -> bool:
+    return all(report is None for name, report in reports.items() if name != "backend_health")
+
+
+def _backend_health_ok(report: Mapping[str, Any]) -> bool:
+    return _backend_health_status(report) == "ok" and _backend_health_ready(report) is True
+
+
+def _backend_health_status(report: Mapping[str, Any]) -> str:
+    direct = str(report.get("status") or "").strip()
+    if direct:
+        return direct
+    nested = str(_nested_get(report, ("health", "status"), "") or "").strip()
+    if nested:
+        return nested
+    readiness_state = str(report.get("readiness_state") or "").strip()
+    if readiness_state == "READY":
+        return "ok"
+    if readiness_state:
+        return readiness_state.lower()
+    return ""
+
+
+def _backend_health_ready(report: Mapping[str, Any]) -> bool:
+    if isinstance(report.get("ready"), bool):
+        return bool(report["ready"])
+    nested_ready = _nested_get(report, ("health", "ready"), None)
+    if isinstance(nested_ready, bool):
+        return nested_ready
+    launch_allowed = report.get("launch_allowed")
+    listener_reachable = _nested_get(report, ("listener", "reachable"), None)
+    if isinstance(launch_allowed, bool) and isinstance(listener_reachable, bool):
+        return launch_allowed and listener_reachable
+    return False
+
+
 def _dedupe(values: list[str]) -> list[str]:
     unique: list[str] = []
     seen: set[str] = set()
@@ -511,6 +640,15 @@ def _dedupe(values: list[str]) -> list[str]:
             seen.add(value)
             unique.append(value)
     return unique
+
+
+def _nested_get(report: Mapping[str, Any], path: tuple[str, ...], default: Any) -> Any:
+    current: Any = report
+    for key in path:
+        if not isinstance(current, Mapping):
+            return default
+        current = current.get(key)
+    return default if current is None else current
 
 
 def _read_json(path: Path | None) -> dict[str, Any] | None:

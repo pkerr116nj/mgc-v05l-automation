@@ -13,6 +13,7 @@ from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatus
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create a Track B no-submit operator status summary from observer reports.")
+    parser.add_argument("--backend-health-json", type=Path)
     parser.add_argument("--listener-heartbeat-json", type=Path)
     parser.add_argument("--listener-health-json", type=Path)
     parser.add_argument("--listener-cycle-json", type=Path)
@@ -22,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--track-b-readiness-check-runner-report-json", type=Path)
     parser.add_argument("--track-b-strategy-rule-runner-report-json", type=Path)
     parser.add_argument("--track-b-strategy-paper-runner-report-json", type=Path)
+    parser.add_argument("--track-b-multi-strategy-runtime-cycle-report-json", type=Path)
     parser.add_argument("--databento-candle-observer-report-json", type=Path)
     parser.add_argument("--databento-candle-observer-heartbeat-json", type=Path)
     parser.add_argument("--strategy-signal-adapter-report-json", type=Path)
@@ -39,6 +41,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = create_operator_status_summary(
         inputs=OperatorStatusInputs(
+            backend_health_json=args.backend_health_json,
             listener_heartbeat_json=args.listener_heartbeat_json,
             listener_health_json=args.listener_health_json,
             listener_cycle_json=args.listener_cycle_json,
@@ -48,6 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             track_b_readiness_check_runner_report_json=args.track_b_readiness_check_runner_report_json,
             track_b_strategy_rule_runner_report_json=args.track_b_strategy_rule_runner_report_json,
             track_b_strategy_paper_runner_report_json=args.track_b_strategy_paper_runner_report_json,
+            track_b_multi_strategy_runtime_cycle_report_json=args.track_b_multi_strategy_runtime_cycle_report_json,
             databento_candle_observer_report_json=args.databento_candle_observer_report_json,
             databento_candle_observer_heartbeat_json=args.databento_candle_observer_heartbeat_json,
             strategy_signal_adapter_report_json=args.strategy_signal_adapter_report_json,
@@ -64,6 +68,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dumps(
             {
                 "status_verdict": result.report["status_verdict"],
+                "backend_health_status": result.report["backend_health_status"],
+                "backend_health_ready": result.report["backend_health_ready"],
+                "backend_health_url": result.report["backend_health_url"],
                 "listener_mode": result.report["listener_mode"],
                 "listener_current_cycle_number": result.report["listener_current_cycle_number"],
                 "listener_last_health_verdict": result.report["listener_last_health_verdict"],
@@ -92,6 +99,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "strategy_paper_proof_invoked": result.report["strategy_paper_proof_invoked"],
                 "strategy_paper_proof_classification": result.report["strategy_paper_proof_classification"],
                 "strategy_paper_final_flat": result.report["strategy_paper_final_flat"],
+                "multi_strategy_runtime_cycle_verdict": result.report["multi_strategy_runtime_cycle_verdict"],
+                "multi_strategy_chosen_strategy_id": result.report["multi_strategy_chosen_strategy_id"],
+                "multi_strategy_candidate_signals": result.report["multi_strategy_candidate_signals"],
+                "multi_strategy_suppressed_signals": result.report["multi_strategy_suppressed_signals"],
+                "multi_strategy_readiness_invoked": result.report["multi_strategy_readiness_invoked"],
+                "multi_strategy_paper_proof_invoked": result.report["multi_strategy_paper_proof_invoked"],
+                "multi_strategy_submit_attempted": result.report["multi_strategy_submit_attempted"],
+                "multi_strategy_broker_state_mutated": result.report["multi_strategy_broker_state_mutated"],
                 "databento_observer_verdict": result.report["databento_observer_verdict"],
                 "databento_observer_mode": result.report["databento_observer_mode"],
                 "databento_observer_current_cycle": result.report["databento_observer_current_cycle"],

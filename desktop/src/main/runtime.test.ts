@@ -482,6 +482,8 @@ test("Track B read-only status loads latest operator status artifact without inv
       {
         status_verdict: "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW",
         required_next_action: "Review no-submit artifacts.",
+        backend_health_status: "ok",
+        backend_health_ready: true,
         observation_runner_verdict: "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW",
         observation_runner_mode: "watch",
         observation_runner_current_cycle: 2,
@@ -509,6 +511,15 @@ test("Track B read-only status loads latest operator status artifact without inv
         strategy_adapter_verdict: "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH",
         candle_producer_verdict: "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH",
         signal_batch_writer_verdict: "SIGNAL_BATCH_WRITER_WROTE_BATCH",
+        multi_strategy_runtime_cycle_verdict: "TRACK_B_MULTI_STRATEGY_RUNTIME_SIGNAL_READY_NO_SUBMIT",
+        multi_strategy_chosen_strategy_id: "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        multi_strategy_candidate_signals: [{ strategy_id: "ASIA_EARLY_PAUSE_RESUME_SHORT_V1", signal_direction: "SHORT" }],
+        multi_strategy_suppressed_signals: [],
+        multi_strategy_readiness_invoked: false,
+        multi_strategy_paper_proof_invoked: false,
+        multi_strategy_submit_attempted: false,
+        multi_strategy_broker_state_mutated: false,
+        multi_strategy_live_money_readiness: false,
         submit_allowed: false,
         submit_attempted: false,
         live_money_readiness: false,
@@ -525,6 +536,8 @@ test("Track B read-only status loads latest operator status artifact without inv
     assert.equal(trackB.malformed, false);
     assert.equal(trackB.operatorStatusPath, tempPath);
     assert.equal(trackB.status?.status_verdict, "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW");
+    assert.equal(trackB.status?.backend_health_status, "ok");
+    assert.equal(trackB.status?.backend_health_ready, true);
     assert.equal(trackB.status?.observation_runner_verdict, "TRACK_B_OBSERVATION_RUNNER_COMPLETED_FOR_REVIEW");
     assert.equal(trackB.status?.observation_runner_mode, "watch");
     assert.equal(trackB.status?.readiness_check_runner_verdict, "TRACK_B_READINESS_CHECK_READY_FOR_PAPER_PROOF_REVIEW");
@@ -533,6 +546,9 @@ test("Track B read-only status loads latest operator status artifact without inv
     assert.equal(trackB.status?.databento_observer_mode, "watch");
     assert.equal(trackB.status?.strategy_adapter_verdict, "STRATEGY_SIGNAL_ADAPTER_EMITTED_SIGNAL_BATCH");
     assert.equal(trackB.status?.candle_producer_verdict, "CANDLE_SIGNAL_PRODUCER_PRODUCED_SIGNAL_BATCH");
+    assert.equal(trackB.status?.multi_strategy_runtime_cycle_verdict, "TRACK_B_MULTI_STRATEGY_RUNTIME_SIGNAL_READY_NO_SUBMIT");
+    assert.equal(trackB.status?.multi_strategy_chosen_strategy_id, "ASIA_EARLY_PAUSE_RESUME_SHORT_V1");
+    assert.equal(trackB.status?.multi_strategy_submit_attempted, false);
     assert.equal(trackB.status?.submit_allowed, false);
   } finally {
     if (previous === undefined) {
@@ -580,6 +596,10 @@ test("Track B status renderer is display-only and no-submit", () => {
   assert.match(appTsx, /Observation Runner/);
   assert.match(appTsx, /observation_runner_verdict/);
   assert.match(appTsx, /observation_runner_latest_operator_status_path/);
+  assert.match(appTsx, /Multi-Strategy Runtime Cycle/);
+  assert.match(appTsx, /multi_strategy_runtime_cycle_verdict/);
+  assert.match(appTsx, /multi_strategy_chosen_strategy_id/);
+  assert.match(appTsx, /multi_strategy_submit_attempted/);
   assert.match(appTsx, /Readiness Check Runner/);
   assert.match(appTsx, /readiness_check_runner_verdict/);
   assert.match(appTsx, /readiness_check_runner_current_quote_available/);

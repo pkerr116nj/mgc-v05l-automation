@@ -3159,6 +3159,8 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
         </div>
         <div className="metric-grid">
           <MetricCard label="Status Verdict" value={formatValue(statusVerdict)} tone={statusTone(statusVerdict)} />
+          <MetricCard label="Backend Health" value={formatValue(status.backend_health_status)} tone={statusTone(status.backend_health_status)} />
+          <MetricCard label="Backend Ready" value={formatValue(status.backend_health_ready)} tone={status.backend_health_ready === true ? "good" : status.backend_health_ready === false ? "warn" : "muted"} />
           <MetricCard label="Listener Mode" value={formatValue(status.listener_mode)} tone={statusTone(status.listener_mode)} />
           <MetricCard label="Current Cycle" value={formatValue(status.listener_current_cycle_number)} />
           <MetricCard label="Listener Health" value={formatValue(status.listener_last_health_verdict)} tone={statusTone(status.listener_last_health_verdict)} />
@@ -3225,6 +3227,39 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
             </div>
             <h3 className="subsection-title">Latest Operator Status From Runner</h3>
             <div className="placeholder-note">{formatValue(status.observation_runner_latest_operator_status_path)}</div>
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Multi-Strategy Runtime Cycle" subtitle="Registered Asia strategy arbitration; display-only, at most one guarded PAPER candidate">
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Arbitration State</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Verdict" value={formatValue(status.multi_strategy_runtime_cycle_verdict)} tone={statusTone(status.multi_strategy_runtime_cycle_verdict)} />
+              <MetricCard label="Mode" value={formatValue(status.multi_strategy_runtime_cycle_mode)} />
+              <MetricCard label="Source" value={formatValue(status.multi_strategy_runtime_cycle_source_id)} />
+              <MetricCard label="Chosen Strategy" value={formatValue(status.multi_strategy_chosen_strategy_id)} tone={statusTone(status.multi_strategy_chosen_strategy_id)} />
+              <MetricCard label="Readiness Invoked" value={formatValue(status.multi_strategy_readiness_invoked)} tone={status.multi_strategy_readiness_invoked === false ? "good" : "warn"} />
+              <MetricCard label="Paper Proof Invoked" value={formatValue(status.multi_strategy_paper_proof_invoked)} tone={status.multi_strategy_paper_proof_invoked === false ? "good" : "warn"} />
+              <MetricCard label="Submit Attempted" value={formatValue(status.multi_strategy_submit_attempted)} tone={status.multi_strategy_submit_attempted === false ? "good" : "warn"} />
+              <MetricCard label="Broker Mutated" value={formatValue(status.multi_strategy_broker_state_mutated)} tone={status.multi_strategy_broker_state_mutated === false ? "good" : "warn"} />
+              <MetricCard label="Live Money" value={formatValue(status.multi_strategy_live_money_readiness)} tone={status.multi_strategy_live_money_readiness === false ? "good" : "warn"} />
+            </div>
+            <h3 className="subsection-title">No-Choice Reason</h3>
+            <div className="placeholder-note">{formatValue(status.multi_strategy_reason_no_signal_chosen)}</div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Candidates / Suppressed</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Candidates" value={formatValue(asArray(status.multi_strategy_candidate_signals).length)} />
+              <MetricCard label="Suppressed" value={formatValue(asArray(status.multi_strategy_suppressed_signals).length)} />
+              <MetricCard label="Evaluated" value={formatValue(asArray(status.multi_strategy_evaluated_strategies).length)} />
+            </div>
+            <h3 className="subsection-title">Arbitration Result</h3>
+            <div className="placeholder-note">{formatValue(asRecord(status.multi_strategy_arbitration_result).strategy_arbitration_verdict)}</div>
+            <h3 className="subsection-title">Chosen Signal</h3>
+            <div className="placeholder-note">{formatValue(asRecord(status.multi_strategy_chosen_signal).signal_source)} {formatValue(asRecord(status.multi_strategy_chosen_signal).signal_direction)}</div>
           </div>
         </div>
       </Section>
