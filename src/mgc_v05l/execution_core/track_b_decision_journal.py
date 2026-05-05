@@ -97,6 +97,7 @@ def record_track_b_decision_journal_cycle(
     rotated_files = []
     rotated_files.extend(_rotate_jsonl_if_needed(active_journal, actual_config.max_bytes, actual_config.rotated_keep))
     rotated_files.extend(_rotate_jsonl_if_needed(heartbeat_path, actual_config.max_bytes, actual_config.rotated_keep))
+    active_journal.touch(exist_ok=True)
 
     aggregates = _read_json_object(aggregate_path)
     previous_state = _read_json_object(state_path)
