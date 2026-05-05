@@ -203,11 +203,31 @@ def test_all_three_no_signal_no_mutation(tmp_path: Path) -> None:
 
 def test_runtime_cycle_can_refresh_operator_status_latest(tmp_path: Path) -> None:
     calls = Calls()
+    backend_health_json = tmp_path / "operator_dashboard_readiness.json"
+    backend_health_json.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "ready": True,
+                "host": "127.0.0.1",
+                "port": 8790,
+                "url": "http://127.0.0.1:8790/",
+                "pid": 12345,
+                "checks": {
+                    "api_dashboard_responding": {"ok": True},
+                    "operator_surface_loadable": {"ok": True},
+                    "startup_convergence_stable": {"ok": True},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     result = run_track_b_multi_strategy_runtime_cycle(
         config=cycle_config(
             tmp_path,
             update_operator_status=True,
             operator_status_output_root=tmp_path / "operator_status",
+            backend_health_json=backend_health_json,
         ),
         stages=stages_for(tmp_path, calls, default_reports()),
         cycle_id="cycle-refresh-operator-status",
@@ -225,6 +245,8 @@ def test_runtime_cycle_can_refresh_operator_status_latest(tmp_path: Path) -> Non
     assert payload["multi_strategy_paper_proof_invoked"] is False
     assert payload["multi_strategy_submit_attempted"] is False
     assert payload["multi_strategy_broker_state_mutated"] is False
+    assert payload["backend_health_ready"] is True
+    assert payload["backend_health_api_dashboard_ok"] is True
     assert payload["live_money_readiness"] is False
 
 

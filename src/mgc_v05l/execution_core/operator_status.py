@@ -352,15 +352,9 @@ def _report(
         "backend_health_host": backend_health.get("host") or NOT_PROVIDED,
         "backend_health_port": backend_health.get("port") if backend_health else NOT_PROVIDED,
         "backend_health_pid": backend_health.get("pid") or _nested_get(backend_health, ("health", "pid"), NOT_PROVIDED),
-        "backend_health_api_dashboard_ok": _nested_get(
-            backend_health, ("checks", "api_dashboard_responding", "ok"), NOT_PROVIDED
-        ),
-        "backend_health_operator_surface_ok": _nested_get(
-            backend_health, ("checks", "operator_surface_loadable", "ok"), NOT_PROVIDED
-        ),
-        "backend_health_startup_stable": _nested_get(
-            backend_health, ("checks", "startup_convergence_stable", "ok"), NOT_PROVIDED
-        ),
+        "backend_health_api_dashboard_ok": _backend_health_api_dashboard_ok(backend_health) if backend_health else NOT_PROVIDED,
+        "backend_health_operator_surface_ok": _backend_health_operator_surface_ok(backend_health) if backend_health else NOT_PROVIDED,
+        "backend_health_startup_stable": _backend_health_startup_stable(backend_health) if backend_health else NOT_PROVIDED,
         "backend_health_error": backend_health.get("error") or backend_health.get("reason_detail") or NOT_PROVIDED,
         "listener_mode": listener_heartbeat.get("listener_mode") or NOT_PROVIDED,
         "listener_current_cycle_number": listener_heartbeat.get("current_cycle_number") if listener_heartbeat else NOT_PROVIDED,
@@ -630,6 +624,40 @@ def _backend_health_ready(report: Mapping[str, Any]) -> bool:
     if isinstance(launch_allowed, bool) and isinstance(listener_reachable, bool):
         return launch_allowed and listener_reachable
     return False
+
+
+def _backend_health_api_dashboard_ok(report: Mapping[str, Any]) -> Any:
+    direct = _nested_get(report, ("checks", "api_dashboard_responding", "ok"), None)
+    if direct is not None:
+        return direct
+    payload_reachable = _nested_get(report, ("payload", "reachable"), None)
+    payload_json_valid = _nested_get(report, ("payload", "json_valid"), None)
+    if isinstance(payload_reachable, bool) and isinstance(payload_json_valid, bool):
+        return payload_reachable and payload_json_valid
+    listener_reachable = _nested_get(report, ("listener", "reachable"), None)
+    if isinstance(listener_reachable, bool):
+        return listener_reachable
+    return NOT_PROVIDED
+
+
+def _backend_health_operator_surface_ok(report: Mapping[str, Any]) -> Any:
+    direct = _nested_get(report, ("checks", "operator_surface_loadable", "ok"), None)
+    if direct is not None:
+        return direct
+    startup_control_plane_present = _nested_get(report, ("payload", "startup_control_plane_present"), None)
+    if isinstance(startup_control_plane_present, bool):
+        return startup_control_plane_present
+    return NOT_PROVIDED
+
+
+def _backend_health_startup_stable(report: Mapping[str, Any]) -> Any:
+    direct = _nested_get(report, ("checks", "startup_convergence_stable", "ok"), None)
+    if direct is not None:
+        return direct
+    convergence_stable_ready = _nested_get(report, ("control_plane", "convergence_stable_ready"), None)
+    if isinstance(convergence_stable_ready, bool):
+        return convergence_stable_ready
+    return NOT_PROVIDED
 
 
 def _dedupe(values: list[str]) -> list[str]:

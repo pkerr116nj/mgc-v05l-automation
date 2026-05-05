@@ -592,6 +592,50 @@ def test_backend_health_report_is_summarized(tmp_path: Path) -> None:
     assert result.report["live_money_readiness"] is False
 
 
+def test_backend_readiness_contract_is_summarized(tmp_path: Path) -> None:
+    backend_readiness = write_json(
+        tmp_path / "operator_dashboard_readiness.json",
+        {
+            "contract_version": "dashboard_readiness_contract.v1",
+            "readiness_state": "READY",
+            "reason_detail": "Dashboard ownership, health, payload validity, and identity remained stable.",
+            "launch_allowed": True,
+            "configured_url": "http://127.0.0.1:8790/",
+            "listener": {
+                "reachable": True,
+                "health_url": "http://127.0.0.1:8790/health",
+                "dashboard_api_url": "http://127.0.0.1:8790/api/dashboard",
+            },
+            "health": {"status": "ok", "ready": True, "pid": 12345},
+            "payload": {
+                "reachable": True,
+                "json_valid": True,
+                "startup_control_plane_present": True,
+            },
+            "control_plane": {"convergence_stable_ready": True},
+        },
+    )
+
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            backend_health_json=backend_readiness,
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-backend-readiness-contract",
+        now=aware_now(),
+    )
+
+    assert result.report["backend_health_status"] == "ok"
+    assert result.report["backend_health_ready"] is True
+    assert result.report["backend_health_url"] == "http://127.0.0.1:8790/"
+    assert result.report["backend_health_api_dashboard_ok"] is True
+    assert result.report["backend_health_operator_surface_ok"] is True
+    assert result.report["backend_health_startup_stable"] is True
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
 def test_backend_down_state_is_reported_clearly_without_readiness(tmp_path: Path) -> None:
     result = create_operator_status_summary(
         inputs=OperatorStatusInputs(

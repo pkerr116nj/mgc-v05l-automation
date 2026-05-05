@@ -93,6 +93,7 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     strategy_paper_runner_output_root: Path = DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT
     update_operator_status: bool = False
     operator_status_output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
+    backend_health_json: Path | None = Path("outputs/operator_dashboard/runtime/operator_dashboard_readiness.json")
 
 
 @dataclass(frozen=True)
@@ -552,6 +553,7 @@ def _operator_status_inputs_for_runtime_cycle(
     runtime_cycle_report_json: Path,
 ) -> OperatorStatusInputs:
     return OperatorStatusInputs(
+        backend_health_json=_existing_optional_path(config.backend_health_json),
         listener_heartbeat_json=_existing_path(
             "outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_heartbeat.json"
         ),
@@ -580,6 +582,12 @@ def _operator_status_inputs_for_runtime_cycle(
 
 def _existing_path(raw_path: str) -> Path | None:
     path = Path(raw_path)
+    return path if path.exists() else None
+
+
+def _existing_optional_path(path: Path | None) -> Path | None:
+    if path is None:
+        return None
     return path if path.exists() else None
 
 

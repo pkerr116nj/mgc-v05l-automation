@@ -48,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--strategy-paper-runner-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_strategy_paper_runner"))
     parser.add_argument("--update-operator-status", action="store_true")
     parser.add_argument("--operator-status-output-root", type=Path, default=Path("outputs/track_b_execution_core/operator_status"))
+    parser.add_argument(
+        "--backend-health-json",
+        type=Path,
+        default=Path("outputs/operator_dashboard/runtime/operator_dashboard_readiness.json"),
+    )
     return parser
 
 
@@ -83,6 +88,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             strategy_paper_runner_output_root=args.strategy_paper_runner_output_root,
             update_operator_status=args.update_operator_status,
             operator_status_output_root=args.operator_status_output_root,
+            backend_health_json=args.backend_health_json,
         )
     )
     print(
