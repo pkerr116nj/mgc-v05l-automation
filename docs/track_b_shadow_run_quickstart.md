@@ -938,6 +938,85 @@ signal. Live-money remains prohibited, UI authority remains false, and final
 broker-state classification comes from the guarded Track B paper-proof
 lifecycle.
 
+### Continuous SHADOW monitor service
+
+The Track B continuous monitor is the service-grade owner for the live
+no-submit observation chain. It is designed to run in the background even when
+the desktop app is closed. The dashboard observes its heartbeat and latest
+report; it does not own or keep the monitor alive.
+
+Start the monitor in SHADOW mode:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_shadow_monitor_cli \
+  --mode SHADOW \
+  --max-cycles 999 \
+  --poll-seconds 15 \
+  --expected-account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --local-symbol MGCM6 \
+  --databento-continuous-symbol MGC.v.0 \
+  --dataset GLBX.MDP3 \
+  --update-operator-status
+```
+
+For a launchd/systemd wrapper, run the same command as the long-lived process.
+The monitor writes:
+
+```text
+outputs/track_b_execution_core/track_b_shadow_monitor/track_b_shadow_monitor.lock
+outputs/track_b_execution_core/track_b_shadow_monitor/track_b_shadow_monitor.pid
+outputs/track_b_execution_core/track_b_shadow_monitor/latest_track_b_shadow_monitor_heartbeat.json
+outputs/track_b_execution_core/track_b_shadow_monitor/latest_track_b_shadow_monitor_report.json
+```
+
+The lock file contains the owning PID, host, monitor ID, command, and repo
+root. A second monitor refuses to start while a live owner holds the lock.
+Dead-PID locks are treated as stale and taken over with a warning in the
+report. Use `--force-takeover` only after confirming that an apparently live
+owner is not the intended monitor.
+
+The first instrument registry is multi-instrument:
+
+```text
+GC, MGC, ES, MES, NQ, MNQ
+```
+
+MGC is the first fully wired runtime chain. Other configured instruments are
+reported explicitly as `NO_STRATEGIES_CONFIGURED` or `UNWIRED_INSTRUMENT`
+instead of being silently ignored. The rates families `ZT`, `ZF`, `ZN`, and
+`ZB` are planned additions to the same registry shape.
+
+Strategy evaluation modes are:
+
+```text
+COMPLETED_BAR_ONLY
+SAME_BAR_ALLOWED
+QUOTE_TRIGGERED
+```
+
+The current MGC strategies are completed-bar-only. The monitor refreshes
+runtime data each poll, but it evaluates completed-bar-only strategies only
+when the latest completed 5m candle advances; otherwise it writes a heartbeat.
+Future same-bar strategies must be registered as same-bar or quote-triggered
+and must clearly label forming-bar/current-quote decisions.
+
+Provider failures and stale runtime candles do not kill the monitor by default.
+The monitor writes a blocked cycle report, updates operator status, applies
+bounded backoff, and continues. `--max-consecutive-failures` can be used for
+strict test/service supervision. Critical safety anomalies stop immediately:
+
+```text
+submit_allowed=true
+submit_attempted=true
+paper_proof_invoked=true
+broker_state_mutated=true
+live_money_readiness=true
+```
+
+SHADOW mode does not stop on `SIGNAL_READY_NO_SUBMIT`; it journals the signal,
+updates operator status/dashboard, and continues without submit authority.
+
 To refresh the Track B Status UI read model after a multi-strategy cycle,
 include the backend health and multi-strategy latest artifacts in
 `operator_status_cli`:
@@ -945,6 +1024,8 @@ include the backend health and multi-strategy latest artifacts in
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.operator_status_cli \
   --backend-health-json outputs/operator_dashboard/runtime/operator_dashboard_readiness.json \
+  --track-b-shadow-monitor-report-json outputs/track_b_execution_core/track_b_shadow_monitor/latest_track_b_shadow_monitor_report.json \
+  --track-b-shadow-monitor-heartbeat-json outputs/track_b_execution_core/track_b_shadow_monitor/latest_track_b_shadow_monitor_heartbeat.json \
   --track-b-multi-strategy-runtime-cycle-report-json outputs/track_b_execution_core/track_b_multi_strategy_runtime_cycle/latest_track_b_multi_strategy_runtime_cycle_report.json \
   --track-b-observation-runner-report-json outputs/track_b_execution_core/track_b_observation_runner/latest_track_b_observation_runner_report.json \
   --databento-candle-observer-report-json outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json \

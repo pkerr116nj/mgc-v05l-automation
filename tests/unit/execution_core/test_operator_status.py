@@ -194,6 +194,67 @@ def multi_strategy_runtime_cycle_report(tmp_path: Path, **overrides: object) -> 
     return write_json(tmp_path / "track_b_multi_strategy_runtime_cycle_report.json", payload)
 
 
+def shadow_monitor_report(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_shadow_monitor_v2",
+        "monitor_id": "monitor-001",
+        "cycle_id": "cycle-001",
+        "mode": "SHADOW",
+        "completed_at": aware_now().isoformat(),
+        "monitor_verdict": "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL",
+        "instrument_families": ["GC", "MGC", "ES", "MES", "NQ", "MNQ"],
+        "instrument_reports": [
+            {
+                "instrument_family": "MGC",
+                "instrument_verdict": "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL",
+                "enabled_strategies": ["ASIAN_DRIFT_V1"],
+                "evaluated_strategy_count": 1,
+                "candidate_signals": [],
+            },
+            {
+                "instrument_family": "GC",
+                "instrument_verdict": "TRACK_B_SHADOW_MONITOR_NOT_READY_NO_STRATEGIES_CONFIGURED",
+                "enabled_strategies": [],
+                "primary_blocker": "GC has no enabled Track B strategies configured.",
+            },
+        ],
+        "evaluated_strategy_count": 1,
+        "candidate_signals": [],
+        "suppressed_signals": [],
+        "arbitration_result": {"decision": "NO_TRADE"},
+        "decision_journal_tier_counts": {"TIER_1_NO_SETUP_AGGREGATE": 1},
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+        "primary_blocker": None,
+        "required_next_action": "Continue Track B SHADOW monitoring.",
+        "report_json_path": "track_b_shadow_monitor_report.json",
+        "heartbeat_json_path": "latest_track_b_shadow_monitor_heartbeat.json",
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "track_b_shadow_monitor_report.json", payload)
+
+
+def shadow_monitor_heartbeat(tmp_path: Path, **overrides: object) -> Path:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_shadow_monitor_heartbeat_v2",
+        "generated_at": aware_now().isoformat(),
+        "monitor_id": "monitor-001",
+        "cycle_id": "cycle-001",
+        "monitor_running": True,
+        "heartbeat_json_path": "latest_track_b_shadow_monitor_heartbeat.json",
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+    }
+    payload.update(overrides)
+    return write_json(tmp_path / "latest_track_b_shadow_monitor_heartbeat.json", payload)
+
+
 def strategy_signal_adapter_report(tmp_path: Path, **overrides: object) -> Path:
     payload: dict[str, object] = {
         "schema_version": "track_b_strategy_signal_adapter_v1",
@@ -704,6 +765,55 @@ def test_multi_strategy_runtime_cycle_report_is_summarized(tmp_path: Path) -> No
     assert result.report["latest_output_paths"]["track_b_decision_journal_summary"] == "latest_track_b_decision_journal_summary.json"
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_shadow_monitor_report_is_summarized(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            backend_health_json=backend_health_report(tmp_path),
+            track_b_shadow_monitor_report_json=shadow_monitor_report(tmp_path),
+            track_b_shadow_monitor_heartbeat_json=shadow_monitor_heartbeat(tmp_path),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-shadow-monitor",
+        now=aware_now(),
+    )
+
+    assert result.verdict == OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW
+    assert result.report["latest_shadow_monitor_verdict"] == "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL"
+    assert result.report["latest_shadow_monitor_cycle_id"] == "cycle-001"
+    assert result.report["shadow_monitor_running"] is True
+    assert result.report["shadow_monitor_heartbeat_path"] == "latest_track_b_shadow_monitor_heartbeat.json"
+    assert result.report["shadow_monitor_instrument_families"] == ["GC", "MGC", "ES", "MES", "NQ", "MNQ"]
+    assert result.report["shadow_monitor_evaluated_strategy_count"] == 1
+    assert result.report["shadow_monitor_decision_journal_tier_counts"] == {"TIER_1_NO_SETUP_AGGREGATE": 1}
+    assert result.report["shadow_monitor_submit_allowed"] is False
+    assert result.report["shadow_monitor_submit_attempted"] is False
+    assert result.report["shadow_monitor_broker_state_mutated"] is False
+    assert result.report["shadow_monitor_live_money_readiness"] is False
+    assert result.report["latest_output_paths"]["track_b_shadow_monitor"] == "track_b_shadow_monitor_report.json"
+
+
+def test_critical_shadow_monitor_degrades_operator_status(tmp_path: Path) -> None:
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            track_b_shadow_monitor_report_json=shadow_monitor_report(
+                tmp_path,
+                monitor_verdict="TRACK_B_SHADOW_MONITOR_CRITICAL_UNEXPECTED_MUTATION_FLAG",
+                primary_blocker="Unexpected SHADOW mutation/safety flag submit_attempted=true.",
+                submit_attempted=True,
+            ),
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-shadow-monitor-critical",
+        now=aware_now(),
+    )
+
+    assert result.verdict == OperatorStatusVerdict.DEGRADED_SHADOW_FAILURES
+    assert result.report["primary_blocker"] == "Unexpected SHADOW mutation/safety flag submit_attempted=true."
+    assert result.report["shadow_monitor_submit_attempted"] is True
+    assert result.report["submit_allowed"] is False
     assert result.report["live_money_readiness"] is False
 
 

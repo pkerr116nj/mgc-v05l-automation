@@ -45,6 +45,8 @@ class OperatorStatusInputs:
     track_b_strategy_rule_runner_report_json: Path | None = None
     track_b_strategy_paper_runner_report_json: Path | None = None
     track_b_multi_strategy_runtime_cycle_report_json: Path | None = None
+    track_b_shadow_monitor_report_json: Path | None = None
+    track_b_shadow_monitor_heartbeat_json: Path | None = None
     databento_candle_observer_report_json: Path | None = None
     databento_candle_observer_heartbeat_json: Path | None = None
     strategy_signal_adapter_report_json: Path | None = None
@@ -107,6 +109,8 @@ def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | No
         "track_b_strategy_rule_runner": _read_json(inputs.track_b_strategy_rule_runner_report_json),
         "track_b_strategy_paper_runner": _read_json(inputs.track_b_strategy_paper_runner_report_json),
         "track_b_multi_strategy_runtime_cycle": _read_json(inputs.track_b_multi_strategy_runtime_cycle_report_json),
+        "track_b_shadow_monitor": _read_json(inputs.track_b_shadow_monitor_report_json),
+        "track_b_shadow_monitor_heartbeat": _read_json(inputs.track_b_shadow_monitor_heartbeat_json),
         "databento_candle_observer": _read_json(inputs.databento_candle_observer_report_json),
         "databento_candle_observer_heartbeat": _read_json(inputs.databento_candle_observer_heartbeat_json),
         "strategy_signal_adapter": _read_json(inputs.strategy_signal_adapter_report_json),
@@ -213,6 +217,40 @@ def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[Operator
             str(track_b_strategy_paper_runner.get("required_next_action") or "Reconcile broker state before any further PAPER submit."),
         )
 
+    track_b_shadow_monitor = reports.get("track_b_shadow_monitor") or {}
+    shadow_monitor_verdict = str(track_b_shadow_monitor.get("monitor_verdict") or "")
+    if shadow_monitor_verdict in {
+        "TRACK_B_SHADOW_MONITOR_CRITICAL_UNEXPECTED_MUTATION_FLAG",
+        "TRACK_B_SHADOW_MONITOR_ERROR",
+    }:
+        return (
+            OperatorStatusVerdict.DEGRADED_SHADOW_FAILURES,
+            str(track_b_shadow_monitor.get("primary_blocker") or f"Track B shadow monitor is degraded: {shadow_monitor_verdict}"),
+            str(track_b_shadow_monitor.get("required_next_action") or "Inspect Track B shadow monitor before continuing."),
+        )
+    if shadow_monitor_verdict in {
+        "TRACK_B_SHADOW_MONITOR_BLOCKED_PROVIDER_ERROR",
+        "TRACK_B_SHADOW_MONITOR_BLOCKED_PRODUCER_ERROR",
+        "TRACK_B_SHADOW_MONITOR_NOT_READY_STALE_RUNTIME_CONTEXT",
+    }:
+        return (
+            OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW,
+            str(track_b_shadow_monitor.get("primary_blocker") or f"Track B shadow monitor is not ready: {shadow_monitor_verdict}"),
+            str(track_b_shadow_monitor.get("required_next_action") or "Monitor remains no-submit; resolve the data/producer blocker."),
+        )
+    if shadow_monitor_verdict in {
+        "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL",
+        "TRACK_B_SHADOW_MONITOR_OK_SIGNAL_READY_NO_SUBMIT",
+        "TRACK_B_SHADOW_MONITOR_HEARTBEAT_NO_NEW_COMPLETED_BAR",
+        "TRACK_B_SHADOW_MONITOR_NOT_READY_NO_STRATEGIES_CONFIGURED",
+        "TRACK_B_SHADOW_MONITOR_NOT_READY_UNWIRED_INSTRUMENT",
+    }:
+        return (
+            OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW,
+            None if shadow_monitor_verdict.startswith("TRACK_B_SHADOW_MONITOR_OK") else str(track_b_shadow_monitor.get("primary_blocker") or ""),
+            str(track_b_shadow_monitor.get("required_next_action") or "Track B shadow monitor is display/status only."),
+        )
+
     multi_strategy_verdict = str(track_b_multi_strategy_runtime_cycle.get("multi_strategy_runtime_cycle_verdict") or "")
     if multi_strategy_verdict in {
         "TRACK_B_MULTI_STRATEGY_RUNTIME_ARBITRATION_BLOCKED",
@@ -310,6 +348,8 @@ def _report(
     track_b_strategy_rule_runner = reports.get("track_b_strategy_rule_runner") or {}
     track_b_strategy_paper_runner = reports.get("track_b_strategy_paper_runner") or {}
     track_b_multi_strategy_runtime_cycle = reports.get("track_b_multi_strategy_runtime_cycle") or {}
+    track_b_shadow_monitor = reports.get("track_b_shadow_monitor") or {}
+    track_b_shadow_monitor_heartbeat = reports.get("track_b_shadow_monitor_heartbeat") or {}
     databento_candle_observer = reports.get("databento_candle_observer") or {}
     databento_candle_observer_heartbeat = reports.get("databento_candle_observer_heartbeat") or {}
     strategy_signal_adapter = reports.get("strategy_signal_adapter") or {}
@@ -331,6 +371,10 @@ def _report(
         "track_b_strategy_rule_runner": track_b_strategy_rule_runner.get("report_json_path"),
         "track_b_strategy_paper_runner": track_b_strategy_paper_runner.get("report_json_path"),
         "track_b_multi_strategy_runtime_cycle": track_b_multi_strategy_runtime_cycle.get("report_json_path"),
+        "track_b_shadow_monitor": track_b_shadow_monitor.get("report_json_path"),
+        "track_b_shadow_monitor_heartbeat": (
+            track_b_shadow_monitor_heartbeat.get("heartbeat_json_path") or track_b_shadow_monitor.get("heartbeat_json_path")
+        ),
         "track_b_decision_journal_summary": track_b_multi_strategy_runtime_cycle.get("decision_journal_summary_path"),
         "databento_candle_observer": databento_candle_observer.get("report_json_path"),
         "databento_candle_observer_heartbeat": databento_candle_observer_heartbeat.get("heartbeat_json_path"),
@@ -463,6 +507,35 @@ def _report(
         "strategy_paper_submit_allowed": track_b_strategy_paper_runner.get("submit_allowed") if track_b_strategy_paper_runner else NOT_PROVIDED,
         "strategy_paper_submit_attempted": track_b_strategy_paper_runner.get("submit_attempted") if track_b_strategy_paper_runner else NOT_PROVIDED,
         "strategy_paper_live_money_readiness": track_b_strategy_paper_runner.get("live_money_readiness") if track_b_strategy_paper_runner else NOT_PROVIDED,
+        "latest_shadow_monitor_verdict": track_b_shadow_monitor.get("monitor_verdict") or NOT_PROVIDED,
+        "latest_shadow_monitor_cycle_id": track_b_shadow_monitor.get("cycle_id") or NOT_PROVIDED,
+        "latest_shadow_monitor_report_path": track_b_shadow_monitor.get("report_json_path") or NOT_PROVIDED,
+        "latest_shadow_monitor_completed_at": track_b_shadow_monitor.get("completed_at") or NOT_PROVIDED,
+        "shadow_monitor_running": (
+            track_b_shadow_monitor_heartbeat.get("monitor_running")
+            if track_b_shadow_monitor_heartbeat
+            else NOT_PROVIDED
+        ),
+        "shadow_monitor_heartbeat_generated_at": track_b_shadow_monitor_heartbeat.get("generated_at") or NOT_PROVIDED,
+        "shadow_monitor_heartbeat_path": (
+            track_b_shadow_monitor_heartbeat.get("heartbeat_json_path")
+            or track_b_shadow_monitor.get("heartbeat_json_path")
+            or NOT_PROVIDED
+        ),
+        "shadow_monitor_instrument_reports": track_b_shadow_monitor.get("instrument_reports") or [],
+        "shadow_monitor_instrument_families": track_b_shadow_monitor.get("instrument_families") or [],
+        "shadow_monitor_evaluated_strategy_count": (
+            track_b_shadow_monitor.get("evaluated_strategy_count") if track_b_shadow_monitor else NOT_PROVIDED
+        ),
+        "shadow_monitor_candidate_signals": track_b_shadow_monitor.get("candidate_signals") or [],
+        "shadow_monitor_suppressed_signals": track_b_shadow_monitor.get("suppressed_signals") or [],
+        "shadow_monitor_arbitration_result": track_b_shadow_monitor.get("arbitration_result") or {},
+        "shadow_monitor_decision_journal_tier_counts": track_b_shadow_monitor.get("decision_journal_tier_counts") or {},
+        "shadow_monitor_submit_allowed": track_b_shadow_monitor.get("submit_allowed") if track_b_shadow_monitor else NOT_PROVIDED,
+        "shadow_monitor_submit_attempted": track_b_shadow_monitor.get("submit_attempted") if track_b_shadow_monitor else NOT_PROVIDED,
+        "shadow_monitor_paper_proof_invoked": track_b_shadow_monitor.get("paper_proof_invoked") if track_b_shadow_monitor else NOT_PROVIDED,
+        "shadow_monitor_broker_state_mutated": track_b_shadow_monitor.get("broker_state_mutated") if track_b_shadow_monitor else NOT_PROVIDED,
+        "shadow_monitor_live_money_readiness": track_b_shadow_monitor.get("live_money_readiness") if track_b_shadow_monitor else NOT_PROVIDED,
         "multi_strategy_runtime_cycle_verdict": track_b_multi_strategy_runtime_cycle.get("multi_strategy_runtime_cycle_verdict") or NOT_PROVIDED,
         "multi_strategy_runtime_cycle_mode": track_b_multi_strategy_runtime_cycle.get("mode") or NOT_PROVIDED,
         "multi_strategy_runtime_cycle_source_id": track_b_multi_strategy_runtime_cycle.get("source_id") or NOT_PROVIDED,

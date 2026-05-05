@@ -1,0 +1,1579 @@
+"""Service-ready Track B SHADOW monitor.
+
+The monitor is the long-running no-submit observation owner for Track B. It
+owns process/lock/heartbeat artifacts and orchestrates existing Track B
+market-data and strategy components. It deliberately remains SHADOW-only:
+strategy signals are observed and journaled, but broker mutation is treated as
+a critical safety anomaly.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import socket
+import sys
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import Enum
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Callable, Mapping, Sequence
+
+from .models import require_aware_datetime, to_jsonable
+from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatusInputs, OperatorStatusResult, create_operator_status_summary
+from .track_b_asian_drift_watch_chain import (
+    DEFAULT_TRACK_B_ASIAN_DRIFT_WATCH_CHAIN_OUTPUT_ROOT,
+    TrackBAsianDriftWatchChainResult,
+    TrackBAsianDriftWatchChainVerdict,
+    run_track_b_asian_drift_watch_chain,
+)
+from .track_b_multi_strategy_runtime_cycle import (
+    DEFAULT_TRACK_B_MULTI_STRATEGY_RUNTIME_CYCLE_OUTPUT_ROOT,
+    TrackBMultiStrategyRuntimeCycleConfig,
+    TrackBMultiStrategyRuntimeCycleResult,
+    TrackBMultiStrategyRuntimeCycleVerdict,
+    run_track_b_multi_strategy_runtime_cycle,
+)
+from .track_b_runtime_candle_capture import (
+    DEFAULT_TRACK_B_RUNTIME_CANDLE_CAPTURE_OUTPUT_ROOT,
+    MGC_CONTINUOUS_SYMBOL,
+    MGC_DATASET,
+    MGC_LOCAL_SYMBOL,
+    TrackBRuntimeCandleCaptureResult,
+    TrackBRuntimeCandleCaptureVerdict,
+    capture_track_b_runtime_mgc_1m_candles,
+    write_runtime_candle_capture_provider_error,
+)
+from .track_b_runtime_candle_capture_cli import (
+    _fetch_records,
+    _load_databento_api_key,
+    _read_quote_payload,
+    _runtime_payload_from_records,
+)
+from .track_b_session_strategy_envelope_producer import (
+    DEFAULT_TRACK_B_SESSION_STRATEGY_ENVELOPE_OUTPUT_ROOT,
+    TrackBSessionStrategyEnvelopeProducerResult,
+    TrackBSessionStrategyEnvelopeProducerVerdict,
+    produce_track_b_session_strategy_envelopes,
+)
+from .track_b_snap_turn_envelope_producer import (
+    DEFAULT_TRACK_B_SNAP_TURN_ENVELOPE_OUTPUT_ROOT,
+    TrackBSnapTurnEnvelopeProducerResult,
+    TrackBSnapTurnEnvelopeProducerVerdict,
+    produce_track_b_snap_turn_envelopes,
+)
+
+
+DEFAULT_TRACK_B_SHADOW_MONITOR_OUTPUT_ROOT = Path("outputs/track_b_execution_core/track_b_shadow_monitor")
+DEFAULT_CURRENT_QUOTE_REPORT_JSON = Path(
+    "outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json"
+)
+DEFAULT_BACKEND_HEALTH_JSON = Path("outputs/operator_dashboard/runtime/operator_dashboard_readiness.json")
+DEFAULT_LOCKFILE = DEFAULT_TRACK_B_SHADOW_MONITOR_OUTPUT_ROOT / "track_b_shadow_monitor.lock"
+DEFAULT_PIDFILE = DEFAULT_TRACK_B_SHADOW_MONITOR_OUTPUT_ROOT / "track_b_shadow_monitor.pid"
+
+
+class TrackBStrategyEvaluationMode(str, Enum):
+    COMPLETED_BAR_ONLY = "COMPLETED_BAR_ONLY"
+    SAME_BAR_ALLOWED = "SAME_BAR_ALLOWED"
+    QUOTE_TRIGGERED = "QUOTE_TRIGGERED"
+
+
+class TrackBShadowMonitorVerdict(str, Enum):
+    OK_NO_SIGNAL = "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL"
+    OK_SIGNAL_READY_NO_SUBMIT = "TRACK_B_SHADOW_MONITOR_OK_SIGNAL_READY_NO_SUBMIT"
+    HEARTBEAT_NO_NEW_COMPLETED_BAR = "TRACK_B_SHADOW_MONITOR_HEARTBEAT_NO_NEW_COMPLETED_BAR"
+    NOT_READY_NO_STRATEGIES_CONFIGURED = "TRACK_B_SHADOW_MONITOR_NOT_READY_NO_STRATEGIES_CONFIGURED"
+    NOT_READY_UNWIRED_INSTRUMENT = "TRACK_B_SHADOW_MONITOR_NOT_READY_UNWIRED_INSTRUMENT"
+    NOT_READY_STALE_RUNTIME_CONTEXT = "TRACK_B_SHADOW_MONITOR_NOT_READY_STALE_RUNTIME_CONTEXT"
+    BLOCKED_PROVIDER_ERROR = "TRACK_B_SHADOW_MONITOR_BLOCKED_PROVIDER_ERROR"
+    BLOCKED_PRODUCER_ERROR = "TRACK_B_SHADOW_MONITOR_BLOCKED_PRODUCER_ERROR"
+    CRITICAL_UNEXPECTED_MUTATION_FLAG = "TRACK_B_SHADOW_MONITOR_CRITICAL_UNEXPECTED_MUTATION_FLAG"
+    ERROR = "TRACK_B_SHADOW_MONITOR_ERROR"
+    LOCK_HELD = "TRACK_B_SHADOW_MONITOR_LOCK_HELD"
+
+
+@dataclass(frozen=True)
+class TrackBShadowMonitorInstrumentConfig:
+    instrument_family: str
+    contract_key: str
+    local_symbol: str
+    databento_continuous_symbol: str
+    dataset: str
+    timeframes: tuple[str, ...] = ("1m", "5m")
+    enabled_strategies: tuple[str, ...] = ()
+    execution_account_id: str = "DUM882026"
+    expected_account_id: str = "DUM882026"
+    evaluation_mode: TrackBStrategyEvaluationMode = TrackBStrategyEvaluationMode.COMPLETED_BAR_ONLY
+    requires_quote_freshness: bool = False
+    runtime_chain_wired: bool = False
+
+
+@dataclass(frozen=True)
+class TrackBShadowMonitorConfig:
+    mode: str = "SHADOW"
+    max_cycles: int = 1
+    poll_seconds: float = 15.0
+    max_backoff_seconds: float = 300.0
+    max_consecutive_failures: int | None = None
+    expected_account_id: str = "DUM882026"
+    account_id: str = "DUM882026"
+    contract_key: str = "MGC-202606"
+    local_symbol: str = MGC_LOCAL_SYMBOL
+    databento_continuous_symbol: str = MGC_CONTINUOUS_SYMBOL
+    dataset: str = MGC_DATASET
+    timeframe: str = "1m"
+    lookback_minutes: int = 90
+    max_bars: int = 120
+    min_bars: int = 8
+    provider_fetch_timeout_seconds: float = 20.0
+    max_latest_1m_age_seconds: int = 900
+    max_completed_5m_age_seconds: int = 900
+    current_quote_report_json: Path | None = DEFAULT_CURRENT_QUOTE_REPORT_JSON
+    env_file: Path | None = None
+    base_url: str = "https://hist.databento.com/v0"
+    stype_in: str = "continuous"
+    schema: str = "ohlcv-1m"
+    source_id: str = "track_b_shadow_monitor"
+    inbox_dir: Path = Path("examples/track_b_shadow_listener/inbox")
+    output_root: Path = DEFAULT_TRACK_B_SHADOW_MONITOR_OUTPUT_ROOT
+    runtime_candle_capture_output_root: Path = DEFAULT_TRACK_B_RUNTIME_CANDLE_CAPTURE_OUTPUT_ROOT
+    asian_drift_output_root: Path = DEFAULT_TRACK_B_ASIAN_DRIFT_WATCH_CHAIN_OUTPUT_ROOT
+    snap_turn_output_root: Path = DEFAULT_TRACK_B_SNAP_TURN_ENVELOPE_OUTPUT_ROOT
+    session_strategy_output_root: Path = DEFAULT_TRACK_B_SESSION_STRATEGY_ENVELOPE_OUTPUT_ROOT
+    multi_strategy_output_root: Path = DEFAULT_TRACK_B_MULTI_STRATEGY_RUNTIME_CYCLE_OUTPUT_ROOT
+    operator_status_output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
+    backend_health_json: Path | None = DEFAULT_BACKEND_HEALTH_JSON
+    lockfile: Path = DEFAULT_LOCKFILE
+    pidfile: Path = DEFAULT_PIDFILE
+    update_operator_status: bool = False
+    stop_on_error: bool = False
+    force_takeover: bool = False
+    retention_cycles: int = 20
+    command: tuple[str, ...] = ()
+    repo_root: Path | None = None
+    instruments: tuple[TrackBShadowMonitorInstrumentConfig, ...] = ()
+
+
+@dataclass(frozen=True)
+class TrackBShadowMonitorStages:
+    runtime_candle_capture: Callable[
+        [TrackBShadowMonitorConfig, TrackBShadowMonitorInstrumentConfig, int, datetime],
+        TrackBRuntimeCandleCaptureResult,
+    ]
+    asian_drift_watch_chain: Callable[
+        [TrackBShadowMonitorConfig, TrackBShadowMonitorInstrumentConfig, int, datetime, TrackBRuntimeCandleCaptureResult],
+        TrackBAsianDriftWatchChainResult,
+    ]
+    snap_turn_envelopes: Callable[
+        [TrackBShadowMonitorConfig, TrackBShadowMonitorInstrumentConfig, int, datetime, TrackBAsianDriftWatchChainResult],
+        TrackBSnapTurnEnvelopeProducerResult,
+    ]
+    session_strategy_envelopes: Callable[
+        [TrackBShadowMonitorConfig, TrackBShadowMonitorInstrumentConfig, int, datetime, TrackBAsianDriftWatchChainResult],
+        TrackBSessionStrategyEnvelopeProducerResult,
+    ]
+    multi_strategy_runtime_cycle: Callable[
+        [
+            TrackBShadowMonitorConfig,
+            TrackBShadowMonitorInstrumentConfig,
+            int,
+            datetime,
+            TrackBAsianDriftWatchChainResult,
+            TrackBSnapTurnEnvelopeProducerResult,
+            TrackBSessionStrategyEnvelopeProducerResult,
+        ],
+        TrackBMultiStrategyRuntimeCycleResult,
+    ]
+    operator_status: Callable[[TrackBShadowMonitorConfig, Path, Path | None, datetime], OperatorStatusResult]
+    sleep: Callable[[float], None]
+    pid_is_alive: Callable[[int], bool]
+
+
+@dataclass(frozen=True)
+class TrackBShadowMonitorResult:
+    verdict: TrackBShadowMonitorVerdict
+    report_json: Path
+    report: dict[str, Any]
+    cycle_reports: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class TrackBShadowMonitorLock:
+    acquired: bool
+    lockfile: Path
+    pidfile: Path
+    owner: dict[str, Any]
+    stale_lock_takeover: bool = False
+    force_takeover_used: bool = False
+    blocker: str | None = None
+
+
+def default_instruments(config: TrackBShadowMonitorConfig | None = None) -> tuple[TrackBShadowMonitorInstrumentConfig, ...]:
+    base = config or TrackBShadowMonitorConfig()
+    mgc_strategies = (
+        "ASIAN_DRIFT_V1",
+        "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "FIRST_BULL_SNAP_TURN_V1",
+        "FIRST_BEAR_SNAP_TURN_V1",
+        "LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+        "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+    )
+    return (
+        TrackBShadowMonitorInstrumentConfig(
+            instrument_family="GC",
+            contract_key="GC-NOT_CONFIGURED",
+            local_symbol="GC",
+            databento_continuous_symbol="GC.v.0",
+            dataset="GLBX.MDP3",
+        ),
+        TrackBShadowMonitorInstrumentConfig(
+            instrument_family="MGC",
+            contract_key=base.contract_key,
+            local_symbol=base.local_symbol,
+            databento_continuous_symbol=base.databento_continuous_symbol,
+            dataset=base.dataset,
+            enabled_strategies=mgc_strategies,
+            execution_account_id=base.account_id,
+            expected_account_id=base.expected_account_id,
+            runtime_chain_wired=True,
+        ),
+        TrackBShadowMonitorInstrumentConfig(
+            instrument_family="ES",
+            contract_key="ES-NOT_CONFIGURED",
+            local_symbol="ES",
+            databento_continuous_symbol="ES.v.0",
+            dataset="GLBX.MDP3",
+        ),
+        TrackBShadowMonitorInstrumentConfig(
+            instrument_family="MES",
+            contract_key="MES-NOT_CONFIGURED",
+            local_symbol="MES",
+            databento_continuous_symbol="MES.v.0",
+            dataset="GLBX.MDP3",
+        ),
+        TrackBShadowMonitorInstrumentConfig(
+            instrument_family="NQ",
+            contract_key="NQ-NOT_CONFIGURED",
+            local_symbol="NQ",
+            databento_continuous_symbol="NQ.v.0",
+            dataset="GLBX.MDP3",
+        ),
+        TrackBShadowMonitorInstrumentConfig(
+            instrument_family="MNQ",
+            contract_key="MNQ-NOT_CONFIGURED",
+            local_symbol="MNQ",
+            databento_continuous_symbol="MNQ.v.0",
+            dataset="GLBX.MDP3",
+        ),
+    )
+
+
+def default_stages() -> TrackBShadowMonitorStages:
+    return TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=_run_asian_drift_watch_chain,
+        snap_turn_envelopes=_run_snap_turn_envelopes,
+        session_strategy_envelopes=_run_session_strategy_envelopes,
+        multi_strategy_runtime_cycle=_run_multi_strategy_runtime_cycle,
+        operator_status=_run_operator_status,
+        sleep=time.sleep,
+        pid_is_alive=_pid_is_alive,
+    )
+
+
+def run_track_b_shadow_monitor(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages | None = None,
+    monitor_id: str | None = None,
+    now_func: Callable[[], datetime] | None = None,
+) -> TrackBShadowMonitorResult:
+    if str(config.mode).upper() != "SHADOW":
+        raise ValueError("Track B shadow monitor is SHADOW-only; PAPER flags are not accepted.")
+    if config.max_cycles <= 0:
+        raise ValueError("max_cycles must be positive.")
+    if config.poll_seconds < 0:
+        raise ValueError("poll_seconds must be non-negative.")
+    if config.max_backoff_seconds < 0:
+        raise ValueError("max_backoff_seconds must be non-negative.")
+
+    actual_stages = stages or default_stages()
+    clock = now_func or (lambda: datetime.now(UTC))
+    actual_monitor_id = monitor_id or f"track_b_shadow_monitor_{uuid.uuid4().hex}"
+    instruments = config.instruments or default_instruments(config)
+    lock = acquire_monitor_lock(
+        config=config,
+        monitor_id=actual_monitor_id,
+        started_at=clock(),
+        pid_is_alive=actual_stages.pid_is_alive,
+    )
+    if not lock.acquired:
+        report = _lock_held_report(config=config, monitor_id=actual_monitor_id, lock=lock, now=clock())
+        _write_monitor_report(Path(str(report["report_json_path"])), report)
+        return TrackBShadowMonitorResult(
+            verdict=TrackBShadowMonitorVerdict.LOCK_HELD,
+            report_json=Path(str(report["report_json_path"])),
+            report=report,
+            cycle_reports=(report,),
+        )
+
+    cycle_reports: list[dict[str, Any]] = []
+    final_verdict = TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    final_report_json: Path | None = None
+    consecutive_failures = 0
+    last_evaluated_completed_5m: dict[str, str] = {}
+    shutdown_reason: str | None = None
+    try:
+        for cycle_index in range(1, config.max_cycles + 1):
+            started_at = clock()
+            require_aware_datetime(started_at, "cycle_started_at")
+            cycle_id = f"{actual_monitor_id}_cycle_{cycle_index:04d}_{uuid.uuid4().hex}"
+            _write_heartbeat(
+                config=config,
+                monitor_id=actual_monitor_id,
+                cycle_id=cycle_id,
+                cycle_index=cycle_index,
+                generated_at=started_at,
+                monitor_running=True,
+                instruments=instruments,
+                last_verdict=None,
+                last_report_path=None,
+                lock=lock,
+            )
+            report = _run_one_cycle(
+                config=config,
+                stages=actual_stages,
+                instruments=instruments,
+                monitor_id=actual_monitor_id,
+                cycle_id=cycle_id,
+                cycle_index=cycle_index,
+                started_at=started_at,
+                now_func=clock,
+                last_evaluated_completed_5m=last_evaluated_completed_5m,
+                lock=lock,
+            )
+            cycle_reports.append(report)
+            final_verdict = TrackBShadowMonitorVerdict(str(report["monitor_verdict"]))
+            final_report_json = Path(str(report["report_json_path"]))
+            failure = _failure_counts_for_backoff(report)
+            consecutive_failures = consecutive_failures + 1 if failure else 0
+            if config.max_consecutive_failures is not None and consecutive_failures >= config.max_consecutive_failures:
+                report["max_consecutive_failures_reached"] = True
+                report["primary_blocker"] = report.get("primary_blocker") or (
+                    f"max_consecutive_failures reached: {consecutive_failures}."
+                )
+                _write_monitor_report(final_report_json, report)
+                final_verdict = TrackBShadowMonitorVerdict(str(report["monitor_verdict"]))
+                break
+            should_stop = _must_stop(report, config)
+            _write_heartbeat(
+                config=config,
+                monitor_id=actual_monitor_id,
+                cycle_id=cycle_id,
+                cycle_index=cycle_index,
+                generated_at=_parse_time(str(report["completed_at"])),
+                monitor_running=cycle_index < config.max_cycles and not should_stop,
+                instruments=instruments,
+                last_verdict=final_verdict.value,
+                last_report_path=final_report_json,
+                lock=lock,
+            )
+            if should_stop:
+                break
+            if cycle_index < config.max_cycles:
+                sleep_seconds = _sleep_seconds(config=config, consecutive_failures=consecutive_failures)
+                if sleep_seconds > 0:
+                    actual_stages.sleep(sleep_seconds)
+    except KeyboardInterrupt:
+        shutdown_reason = "KeyboardInterrupt"
+    finally:
+        _write_final_heartbeat(
+            config=config,
+            monitor_id=actual_monitor_id,
+            generated_at=clock(),
+            last_report_path=final_report_json,
+            last_verdict=final_verdict.value,
+            shutdown_reason=shutdown_reason,
+            lock=lock,
+        )
+        if config.update_operator_status and final_report_json is not None and cycle_reports:
+            _refresh_final_operator_status(
+                config=config,
+                stages=actual_stages,
+                final_report=cycle_reports[-1],
+                final_report_json=final_report_json,
+                now=clock(),
+            )
+        release_monitor_lock(lock)
+
+    if not cycle_reports:
+        raise RuntimeError("Track B shadow monitor did not produce any cycle reports.")
+    if final_report_json is None:
+        final_report_json = Path(str(cycle_reports[-1]["report_json_path"]))
+    return TrackBShadowMonitorResult(
+        verdict=final_verdict,
+        report_json=final_report_json,
+        report=cycle_reports[-1],
+        cycle_reports=tuple(cycle_reports),
+    )
+
+
+def acquire_monitor_lock(
+    *,
+    config: TrackBShadowMonitorConfig,
+    monitor_id: str,
+    started_at: datetime,
+    pid_is_alive: Callable[[int], bool] | None = None,
+) -> TrackBShadowMonitorLock:
+    actual_pid_is_alive = pid_is_alive or _pid_is_alive
+    lockfile = Path(config.lockfile)
+    pidfile = Path(config.pidfile)
+    lockfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    existing = _read_json_optional(lockfile)
+    stale_takeover = False
+    force_takeover = False
+    if existing:
+        existing_pid = _int_or_none(existing.get("pid"))
+        live_owner = existing_pid is not None and actual_pid_is_alive(existing_pid)
+        if live_owner and not config.force_takeover:
+            return TrackBShadowMonitorLock(
+                acquired=False,
+                lockfile=lockfile,
+                pidfile=pidfile,
+                owner=dict(existing),
+                blocker=f"Live Track B shadow monitor already owns lock with pid={existing_pid}.",
+            )
+        stale_takeover = not live_owner
+        force_takeover = bool(live_owner and config.force_takeover)
+    owner = {
+        "schema_version": "track_b_shadow_monitor_lock_v1",
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "monitor_id": monitor_id,
+        "started_at": started_at.astimezone(UTC).isoformat(),
+        "command": list(config.command or tuple(sys.argv)),
+        "repo_root": str((config.repo_root or Path.cwd()).resolve()),
+        "lockfile": str(lockfile),
+        "pidfile": str(pidfile),
+        "stale_lock_takeover": stale_takeover,
+        "force_takeover_used": force_takeover,
+    }
+    lockfile.write_text(json.dumps(to_jsonable(owner), indent=2, sort_keys=True), encoding="utf-8")
+    pidfile.write_text(str(os.getpid()), encoding="utf-8")
+    return TrackBShadowMonitorLock(
+        acquired=True,
+        lockfile=lockfile,
+        pidfile=pidfile,
+        owner=owner,
+        stale_lock_takeover=stale_takeover,
+        force_takeover_used=force_takeover,
+    )
+
+
+def release_monitor_lock(lock: TrackBShadowMonitorLock) -> None:
+    if not lock.acquired:
+        return
+    current = _read_json_optional(lock.lockfile)
+    if current and current.get("pid") == lock.owner.get("pid") and current.get("monitor_id") == lock.owner.get("monitor_id"):
+        try:
+            lock.lockfile.unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        if lock.pidfile.read_text(encoding="utf-8").strip() == str(lock.owner.get("pid")):
+            lock.pidfile.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _run_one_cycle(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    instruments: Sequence[TrackBShadowMonitorInstrumentConfig],
+    monitor_id: str,
+    cycle_id: str,
+    cycle_index: int,
+    started_at: datetime,
+    now_func: Callable[[], datetime],
+    last_evaluated_completed_5m: dict[str, str],
+    lock: TrackBShadowMonitorLock,
+) -> dict[str, Any]:
+    report_json = Path(config.output_root) / cycle_id / "track_b_shadow_monitor_report.json"
+    instrument_reports: list[dict[str, Any]] = []
+    runtime_cycle_report_json: Path | None = None
+    try:
+        for instrument in instruments:
+            instrument_report, maybe_runtime_cycle_report_json = _run_instrument_cycle(
+                config=config,
+                stages=stages,
+                instrument=instrument,
+                cycle_index=cycle_index,
+                started_at=started_at,
+                now_func=now_func,
+                last_evaluated_completed_5m=last_evaluated_completed_5m,
+            )
+            instrument_reports.append(instrument_report)
+            if maybe_runtime_cycle_report_json is not None:
+                runtime_cycle_report_json = maybe_runtime_cycle_report_json
+    except Exception as exc:  # noqa: BLE001 - monitor errors must become artifacts.
+        instrument_reports.append(
+            _instrument_report_base(
+                instrument_family="GLOBAL",
+                verdict=TrackBShadowMonitorVerdict.ERROR,
+                primary_blocker=f"Track B shadow monitor error: {exc}",
+                required_next_action="Review monitor diagnostics before restarting.",
+            )
+        )
+
+    completed_at = now_func()
+    verdict = _cycle_verdict(instrument_reports)
+    critical = _global_critical_blocker(instrument_reports)
+    if critical:
+        verdict = TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG
+    report = _report_for_cycle(
+        config=config,
+        monitor_id=monitor_id,
+        cycle_id=cycle_id,
+        cycle_index=cycle_index,
+        started_at=started_at,
+        completed_at=completed_at,
+        report_json=report_json,
+        verdict=verdict,
+        instrument_reports=instrument_reports,
+        primary_blocker=critical or _primary_blocker(instrument_reports),
+        required_next_action=_required_next_action(verdict),
+        lock=lock,
+    )
+    return _finalize_cycle(
+        config,
+        stages,
+        report_json,
+        report,
+        runtime_cycle_report_json=runtime_cycle_report_json,
+        now=completed_at,
+    )
+
+
+def _run_instrument_cycle(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    started_at: datetime,
+    now_func: Callable[[], datetime],
+    last_evaluated_completed_5m: dict[str, str],
+) -> tuple[dict[str, Any], Path | None]:
+    if not instrument.enabled_strategies:
+        return (
+            _instrument_report_base(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.NOT_READY_NO_STRATEGIES_CONFIGURED,
+                primary_blocker=f"{instrument.instrument_family} has no enabled Track B strategies configured.",
+                required_next_action="Register Track B-safe strategy adapters and envelope producers before evaluation.",
+            ),
+            None,
+        )
+    if not instrument.runtime_chain_wired:
+        return (
+            _instrument_report_base(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.NOT_READY_UNWIRED_INSTRUMENT,
+                primary_blocker=f"{instrument.instrument_family} runtime candle/envelope chain is not wired yet.",
+                required_next_action="Wire Track B runtime candle and envelope producers for this instrument.",
+            ),
+            None,
+        )
+
+    runtime = stages.runtime_candle_capture(config, instrument, cycle_index, started_at)
+    if runtime.report.get("data_written") is not True:
+        return (
+            _instrument_report_from_stages(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR,
+                runtime=runtime,
+                primary_blocker=str(runtime.report.get("primary_blocker") or "Runtime candle capture did not write data."),
+                required_next_action=str(runtime.report.get("required_next_action") or "Repair runtime candle provider before evaluation."),
+            ),
+            None,
+        )
+    if runtime.report.get("fresh_for_execution") is not True:
+        return (
+            _instrument_report_from_stages(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT,
+                runtime=runtime,
+                primary_blocker=str(
+                    runtime.report.get("execution_freshness_blocker")
+                    or runtime.report.get("primary_blocker")
+                    or "Runtime candle context is not fresh_for_execution=true."
+                ),
+                required_next_action="Refresh runtime candles until fresh_for_execution=true before strategy evaluation.",
+            ),
+            None,
+        )
+
+    completed_5m = str(runtime.report.get("latest_completed_5m_timestamp") or "")
+    if (
+        instrument.evaluation_mode == TrackBStrategyEvaluationMode.COMPLETED_BAR_ONLY
+        and completed_5m
+        and last_evaluated_completed_5m.get(instrument.instrument_family) == completed_5m
+    ):
+        return (
+            _instrument_report_from_stages(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.HEARTBEAT_NO_NEW_COMPLETED_BAR,
+                runtime=runtime,
+                primary_blocker=None,
+                required_next_action="No new completed 5m bar; heartbeat only for completed-bar strategies.",
+            ),
+            None,
+        )
+
+    asian = stages.asian_drift_watch_chain(config, instrument, cycle_index, started_at, runtime)
+    if asian.verdict in {TrackBAsianDriftWatchChainVerdict.STALE_RUNTIME_CONTEXT, TrackBAsianDriftWatchChainVerdict.BLOCKED_SCHEMA_ERROR}:
+        return (
+            _instrument_report_from_stages(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR,
+                runtime=runtime,
+                asian=asian,
+                primary_blocker=str(asian.report.get("primary_blocker") or "Asian Drift watch chain blocked."),
+                required_next_action=str(asian.report.get("required_next_action") or "Resolve Asian Drift producer blocker."),
+            ),
+            None,
+        )
+
+    snap = stages.snap_turn_envelopes(config, instrument, cycle_index, started_at, asian)
+    if snap.verdict != TrackBSnapTurnEnvelopeProducerVerdict.WROTE_ENVELOPES:
+        return (
+            _instrument_report_from_stages(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR,
+                runtime=runtime,
+                asian=asian,
+                snap=snap,
+                primary_blocker=str(snap.report.get("primary_blocker") or "Snap-turn envelope producer blocked."),
+                required_next_action=str(snap.report.get("required_next_action") or "Resolve snap-turn envelope producer blocker."),
+            ),
+            None,
+        )
+
+    session = stages.session_strategy_envelopes(config, instrument, cycle_index, started_at, asian)
+    if session.verdict != TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES:
+        return (
+            _instrument_report_from_stages(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR,
+                runtime=runtime,
+                asian=asian,
+                snap=snap,
+                session=session,
+                primary_blocker=str(session.report.get("primary_blocker") or "Session strategy envelope producer blocked."),
+                required_next_action=str(session.report.get("required_next_action") or "Resolve session strategy envelope producer blocker."),
+            ),
+            None,
+        )
+
+    runtime_cycle = stages.multi_strategy_runtime_cycle(config, instrument, cycle_index, started_at, asian, snap, session)
+    if completed_5m:
+        last_evaluated_completed_5m[instrument.instrument_family] = completed_5m
+    critical = _critical_mutation_flag(runtime_cycle.report)
+    verdict = _verdict_for_runtime_cycle(runtime_cycle.report, critical)
+    return (
+        _instrument_report_from_stages(
+            instrument=instrument,
+            verdict=verdict,
+            runtime=runtime,
+            asian=asian,
+            snap=snap,
+            session=session,
+            runtime_cycle=runtime_cycle,
+            primary_blocker=critical or runtime_cycle.report.get("primary_blocker"),
+            required_next_action=(
+                "Stop SHADOW monitor and inspect Track B safety fields before continuing."
+                if critical
+                else str(runtime_cycle.report.get("required_next_action") or "Continue Track B SHADOW monitoring.")
+            ),
+        ),
+        runtime_cycle.report_json,
+    )
+
+
+def _run_runtime_candle_capture(
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    now: datetime,
+) -> TrackBRuntimeCandleCaptureResult:
+    requested_window_end = now
+    requested_window_start = requested_window_end - timedelta(minutes=max(config.lookback_minutes, 1))
+    raw_api_key, credential_status, credential_source = _load_databento_api_key(config.env_file)
+    if not raw_api_key:
+        return write_runtime_candle_capture_provider_error(
+            primary_blocker="DATABENTO_API_KEY is missing for Track B SHADOW runtime candle fetch.",
+            required_next_action="Set DATABENTO_API_KEY in process environment or repo .env.local before running the shadow monitor.",
+            source_id=f"{config.source_id}_runtime_candle_capture_cycle_{cycle_index}",
+            account_id=instrument.execution_account_id,
+            contract_key=instrument.contract_key,
+            local_symbol=instrument.local_symbol,
+            databento_continuous_symbol=instrument.databento_continuous_symbol,
+            dataset=instrument.dataset,
+            timeframe=config.timeframe,
+            requested_window_start=requested_window_start,
+            requested_window_end=requested_window_end,
+            max_bars=config.max_bars,
+            min_bars=config.min_bars,
+            max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
+            max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+            provider_credential_status=credential_status,
+            provider_credential_source=credential_source,
+            output_root=config.runtime_candle_capture_output_root,
+            capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_{uuid.uuid4().hex}",
+            now=now,
+        )
+    args = SimpleNamespace(
+        databento_symbol=None,
+        databento_continuous_symbol=instrument.databento_continuous_symbol,
+        stype_in=config.stype_in,
+        dataset=instrument.dataset,
+        schema=config.schema,
+        max_bars=config.max_bars,
+        base_url=config.base_url,
+        lookback_minutes=config.lookback_minutes,
+        source_id=f"{config.source_id}_runtime_candle_capture_cycle_{cycle_index}",
+        account_id=instrument.execution_account_id,
+        expected_account_id=instrument.expected_account_id,
+        contract_key=instrument.contract_key,
+        local_symbol=instrument.local_symbol,
+        strategy_id="track_b_shadow_monitor",
+        lane_id=f"{instrument.instrument_family.lower()}_shadow_monitor",
+        timeframe=config.timeframe,
+    )
+    try:
+        with _provider_fetch_deadline(config.provider_fetch_timeout_seconds):
+            records, provider_available_end, history_end_used, available_end_lag_seconds, candle_source_mode = _fetch_records(
+                args=args,
+                api_key=raw_api_key,
+                requested_window_start=requested_window_start,
+                requested_window_end=requested_window_end,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return write_runtime_candle_capture_provider_error(
+            primary_blocker=f"Track B SHADOW Databento runtime candle fetch failed: {exc}",
+            required_next_action="Retry after provider availability/entitlement is healthy, or inspect Databento runtime diagnostics.",
+            verdict=TrackBRuntimeCandleCaptureVerdict.FETCH_FAILED,
+            source_id=f"{config.source_id}_runtime_candle_capture_cycle_{cycle_index}",
+            account_id=instrument.execution_account_id,
+            contract_key=instrument.contract_key,
+            local_symbol=instrument.local_symbol,
+            databento_continuous_symbol=instrument.databento_continuous_symbol,
+            dataset=instrument.dataset,
+            timeframe=config.timeframe,
+            requested_window_start=requested_window_start,
+            requested_window_end=requested_window_end,
+            provider_available_end=getattr(exc, "provider_available_end", None),
+            max_bars=config.max_bars,
+            min_bars=config.min_bars,
+            max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
+            max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+            provider_credential_status=credential_status,
+            provider_credential_source=credential_source,
+            output_root=config.runtime_candle_capture_output_root,
+            capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_{uuid.uuid4().hex}",
+            now=now,
+        )
+    quote_payload = _safe_quote_payload(config.current_quote_report_json)
+    payload = _runtime_payload_from_records(
+        records=records,
+        args=args,
+        quote_payload=quote_payload,
+        candle_source_mode=candle_source_mode,
+        requested_window_start=requested_window_start,
+        requested_window_end=requested_window_end,
+        provider_available_end=provider_available_end,
+        history_end_used=history_end_used,
+        available_end_lag_seconds=available_end_lag_seconds,
+    )
+    return capture_track_b_runtime_mgc_1m_candles(
+        runtime_candle_payload=payload,
+        source_payload_path=None,
+        expected_account_id=instrument.expected_account_id,
+        account_id=instrument.execution_account_id,
+        contract_key=instrument.contract_key,
+        local_symbol=instrument.local_symbol,
+        databento_continuous_symbol=instrument.databento_continuous_symbol,
+        dataset=instrument.dataset,
+        timeframe=config.timeframe,
+        max_bars=config.max_bars,
+        min_bars=config.min_bars,
+        candle_source_mode=candle_source_mode,
+        requested_window_start=requested_window_start,
+        requested_window_end=requested_window_end,
+        provider_available_end=provider_available_end,
+        history_end_used=history_end_used,
+        available_end_lag_seconds=available_end_lag_seconds,
+        max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
+        max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+        provider_credential_status=credential_status,
+        provider_credential_source=credential_source,
+        source_id=f"{config.source_id}_runtime_candle_capture_cycle_{cycle_index}",
+        output_root=config.runtime_candle_capture_output_root,
+        capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_{uuid.uuid4().hex}",
+        now=now,
+    )
+
+
+def _run_asian_drift_watch_chain(
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    now: datetime,
+    runtime: TrackBRuntimeCandleCaptureResult,
+) -> TrackBAsianDriftWatchChainResult:
+    return run_track_b_asian_drift_watch_chain(
+        candle_payload=runtime.runtime_candles_event or _read_json_required(runtime.runtime_candles_json),
+        source_payload_path=runtime.runtime_candles_json,
+        current_quote_report_payload=_safe_quote_payload(config.current_quote_report_json),
+        current_quote_report_json=config.current_quote_report_json if config.current_quote_report_json and config.current_quote_report_json.exists() else None,
+        expected_account_id=instrument.expected_account_id,
+        account_id=instrument.execution_account_id,
+        contract_key=instrument.contract_key,
+        instrument_family=instrument.instrument_family,
+        local_symbol=instrument.local_symbol,
+        dataset=instrument.dataset,
+        source_id=f"{config.source_id}_asian_drift_cycle_{cycle_index}",
+        max_source_bars=config.max_bars,
+        max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+        output_root=config.asian_drift_output_root,
+        inbox_dir=config.inbox_dir,
+        now=now,
+    )
+
+
+def _run_snap_turn_envelopes(
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    now: datetime,
+    asian: TrackBAsianDriftWatchChainResult,
+) -> TrackBSnapTurnEnvelopeProducerResult:
+    return produce_track_b_snap_turn_envelopes(
+        runtime_5m_payload=asian.completed_5m_candles_payload or _read_json_required(asian.completed_5m_candles_json),
+        runtime_5m_payload_path=asian.completed_5m_candles_json,
+        expected_account_id=instrument.expected_account_id,
+        source_id=f"{config.source_id}_snap_turn_cycle_{cycle_index}",
+        output_root=config.snap_turn_output_root,
+        max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+        now=now,
+    )
+
+
+def _run_session_strategy_envelopes(
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    now: datetime,
+    asian: TrackBAsianDriftWatchChainResult,
+) -> TrackBSessionStrategyEnvelopeProducerResult:
+    return produce_track_b_session_strategy_envelopes(
+        runtime_5m_payload=asian.completed_5m_candles_payload or _read_json_required(asian.completed_5m_candles_json),
+        runtime_5m_payload_path=asian.completed_5m_candles_json,
+        expected_account_id=instrument.expected_account_id,
+        source_id=f"{config.source_id}_session_strategy_cycle_{cycle_index}",
+        output_root=config.session_strategy_output_root,
+        max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+        now=now,
+    )
+
+
+def _run_multi_strategy_runtime_cycle(
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    now: datetime,
+    asian: TrackBAsianDriftWatchChainResult,
+    snap: TrackBSnapTurnEnvelopeProducerResult,
+    session: TrackBSessionStrategyEnvelopeProducerResult,
+) -> TrackBMultiStrategyRuntimeCycleResult:
+    return run_track_b_multi_strategy_runtime_cycle(
+        config=TrackBMultiStrategyRuntimeCycleConfig(
+            asian_drift_event_json=_path_from_report(asian.report, "asian_drift_state_snapshot_path"),
+            pause_resume_short_event_json=session.asia_early_pause_resume_short_event_json,
+            breakout_retest_hold_long_event_json=session.asia_early_normal_breakout_retest_hold_long_event_json,
+            first_bull_snap_turn_event_json=snap.first_bull_snap_turn_event_json,
+            first_bear_snap_turn_event_json=snap.first_bear_snap_turn_event_json,
+            london_late_pause_resume_short_event_json=session.london_late_pause_resume_short_event_json,
+            asia_late_flat_pullback_pause_resume_long_event_json=session.asia_late_flat_pullback_pause_resume_long_event_json,
+            inbox_dir=config.inbox_dir,
+            expected_account_id=instrument.expected_account_id,
+            source_id=f"{config.source_id}_multi_strategy_cycle_{cycle_index}",
+            mode="PAPER",
+            account_id=instrument.execution_account_id,
+            contract_key=instrument.contract_key,
+            allowlisted_local_symbol=instrument.local_symbol,
+            submit_paper=False,
+            confirm_paper_submit=False,
+            output_root=config.multi_strategy_output_root,
+            update_operator_status=config.update_operator_status,
+            operator_status_output_root=config.operator_status_output_root,
+            backend_health_json=config.backend_health_json,
+        ),
+        now=now,
+    )
+
+
+def _run_operator_status(
+    config: TrackBShadowMonitorConfig,
+    monitor_report_json: Path,
+    runtime_cycle_report_json: Path | None,
+    now: datetime,
+) -> OperatorStatusResult:
+    return create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            backend_health_json=_existing_optional_path(config.backend_health_json),
+            track_b_shadow_monitor_report_json=monitor_report_json,
+            track_b_shadow_monitor_heartbeat_json=_existing_optional_path(
+                Path(config.output_root) / "latest_track_b_shadow_monitor_heartbeat.json"
+            ),
+            track_b_multi_strategy_runtime_cycle_report_json=runtime_cycle_report_json,
+            databento_candle_observer_report_json=_existing_optional_path(DEFAULT_CURRENT_QUOTE_REPORT_JSON),
+            output_root=config.operator_status_output_root,
+        ),
+        now=now,
+    )
+
+
+def _instrument_report_base(
+    *,
+    instrument: TrackBShadowMonitorInstrumentConfig | None = None,
+    instrument_family: str | None = None,
+    verdict: TrackBShadowMonitorVerdict,
+    primary_blocker: str | None,
+    required_next_action: str,
+) -> dict[str, Any]:
+    family = instrument.instrument_family if instrument else str(instrument_family)
+    return {
+        "instrument_family": family,
+        "instrument_verdict": verdict.value,
+        "contract_key": instrument.contract_key if instrument else None,
+        "local_symbol": instrument.local_symbol if instrument else None,
+        "databento_continuous_symbol": instrument.databento_continuous_symbol if instrument else None,
+        "dataset": instrument.dataset if instrument else None,
+        "timeframes": list(instrument.timeframes) if instrument else [],
+        "enabled_strategies": list(instrument.enabled_strategies) if instrument else [],
+        "evaluation_mode": instrument.evaluation_mode.value if instrument else None,
+        "requires_quote_freshness": instrument.requires_quote_freshness if instrument else False,
+        "runtime_chain_wired": instrument.runtime_chain_wired if instrument else False,
+        "runtime_candle_capture_verdict": None,
+        "data_written": False,
+        "fresh_for_execution": False,
+        "latest_1m_timestamp": None,
+        "latest_completed_5m_timestamp": None,
+        "runtime_candle_age_seconds": None,
+        "evaluated_strategy_count": 0,
+        "not_ready_strategy_count": len(instrument.enabled_strategies) if instrument else 0,
+        "no_signal_strategy_count": 0,
+        "signal_strategy_count": 0,
+        "candidate_signals": [],
+        "suppressed_signals": [],
+        "arbitration_result": {},
+        "decision_journal_tier_counts": {},
+        "submit_allowed": False,
+        "readiness_invoked": False,
+        "paper_proof_invoked": False,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+        "primary_blocker": primary_blocker,
+        "required_next_action": required_next_action,
+    }
+
+
+def _instrument_report_from_stages(
+    *,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    verdict: TrackBShadowMonitorVerdict,
+    runtime: TrackBRuntimeCandleCaptureResult | None = None,
+    asian: TrackBAsianDriftWatchChainResult | None = None,
+    snap: TrackBSnapTurnEnvelopeProducerResult | None = None,
+    session: TrackBSessionStrategyEnvelopeProducerResult | None = None,
+    runtime_cycle: TrackBMultiStrategyRuntimeCycleResult | None = None,
+    primary_blocker: object | None = None,
+    required_next_action: str,
+) -> dict[str, Any]:
+    base = _instrument_report_base(
+        instrument=instrument,
+        verdict=verdict,
+        primary_blocker=None if primary_blocker is None else str(primary_blocker),
+        required_next_action=required_next_action,
+    )
+    runtime_report = runtime.report if runtime is not None else {}
+    runtime_cycle_report = runtime_cycle.report if runtime_cycle is not None else {}
+    strategy_verdicts = [
+        {
+            "strategy_id": item.get("strategy_id"),
+            "strategy_runtime_verdict": item.get("strategy_runtime_verdict"),
+            "decision": item.get("decision"),
+            "signal_emitted": item.get("signal_emitted"),
+            "primary_blocker": item.get("primary_blocker"),
+        }
+        for item in runtime_cycle_report.get("evaluated_strategies", [])
+        if isinstance(item, Mapping)
+    ]
+    base.update(
+        {
+            "runtime_candle_capture_verdict": runtime_report.get("runtime_candle_capture_verdict"),
+            "runtime_candle_capture_report_path": str(runtime.report_json) if runtime is not None else None,
+            "data_written": runtime_report.get("data_written", False),
+            "fresh_for_execution": runtime_report.get("fresh_for_execution", False),
+            "latest_1m_timestamp": runtime_report.get("latest_1m_timestamp"),
+            "latest_completed_5m_timestamp": runtime_report.get("latest_completed_5m_timestamp"),
+            "runtime_candle_age_seconds": runtime_report.get("latest_completed_5m_candle_age_seconds"),
+            "asian_drift_watch_chain_report_path": str(asian.report_json) if asian is not None else None,
+            "asian_drift_watch_chain_verdict": asian.report.get("asian_drift_watch_chain_verdict") if asian is not None else None,
+            "snap_turn_producer_report_path": str(snap.report_json) if snap is not None else None,
+            "snap_turn_producer_verdict": snap.report.get("snap_turn_envelope_producer_verdict") if snap is not None else None,
+            "session_producer_report_path": str(session.report_json) if session is not None else None,
+            "session_producer_verdict": session.report.get("session_strategy_envelope_producer_verdict") if session is not None else None,
+            "multi_strategy_runtime_cycle_report_path": str(runtime_cycle.report_json) if runtime_cycle is not None else None,
+            "multi_strategy_runtime_cycle_verdict": runtime_cycle_report.get("multi_strategy_runtime_cycle_verdict"),
+            "evaluated_strategy_count": len(runtime_cycle_report.get("evaluated_strategies") or []),
+            "strategy_verdicts": strategy_verdicts,
+            "not_ready_strategy_count": _count_strategy_verdicts(strategy_verdicts, "NOT_READY"),
+            "no_signal_strategy_count": _count_strategy_verdicts(strategy_verdicts, "NO_SIGNAL"),
+            "signal_strategy_count": len(runtime_cycle_report.get("candidate_signals") or []),
+            "candidate_signals": runtime_cycle_report.get("candidate_signals") or [],
+            "suppressed_signals": runtime_cycle_report.get("suppressed_signals") or [],
+            "arbitration_result": runtime_cycle_report.get("arbitration_result") or {},
+            "chosen_signal": runtime_cycle_report.get("chosen_signal") or {},
+            "decision_journal_summary_path": runtime_cycle_report.get("decision_journal_summary_path"),
+            "decision_journal_tier_counts": runtime_cycle_report.get("decision_journal_tier_counts") or {},
+            "submit_allowed": bool(runtime_cycle_report.get("submit_allowed", False)),
+            "readiness_invoked": bool(runtime_cycle_report.get("readiness_invoked", False)),
+            "paper_proof_invoked": bool(runtime_cycle_report.get("paper_proof_invoked", False)),
+            "submit_attempted": bool(runtime_cycle_report.get("submit_attempted", False)),
+            "broker_state_mutated": bool(runtime_cycle_report.get("broker_state_mutated", False)),
+            "live_money_readiness": bool(runtime_cycle_report.get("live_money_readiness", False)),
+        }
+    )
+    return base
+
+
+def _report_for_cycle(
+    *,
+    config: TrackBShadowMonitorConfig,
+    monitor_id: str,
+    cycle_id: str,
+    cycle_index: int,
+    started_at: datetime,
+    completed_at: datetime,
+    report_json: Path,
+    verdict: TrackBShadowMonitorVerdict,
+    instrument_reports: Sequence[Mapping[str, Any]],
+    primary_blocker: object | None,
+    required_next_action: str,
+    lock: TrackBShadowMonitorLock,
+) -> dict[str, Any]:
+    completed_at = completed_at.astimezone(UTC)
+    aggregate_tiers = _aggregate_tier_counts(instrument_reports)
+    all_strategy_verdicts = [
+        verdict
+        for item in instrument_reports
+        for verdict in item.get("strategy_verdicts", [])
+        if isinstance(verdict, Mapping)
+    ]
+    return {
+        "monitor_schema_version": "track_b_shadow_monitor_v2",
+        "schema_version": "track_b_shadow_monitor_v2",
+        "monitor_id": monitor_id,
+        "cycle_id": cycle_id,
+        "mode": "SHADOW",
+        "started_at": started_at.astimezone(UTC).isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "cycle_elapsed_seconds": round(max(0.0, (completed_at - started_at.astimezone(UTC)).total_seconds()), 3),
+        "poll_seconds": config.poll_seconds,
+        "provider_fetch_timeout_seconds": config.provider_fetch_timeout_seconds,
+        "max_cycles": config.max_cycles,
+        "cycle_index": cycle_index,
+        "lockfile_path": str(lock.lockfile),
+        "pidfile_path": str(lock.pidfile),
+        "pid": lock.owner.get("pid"),
+        "host": lock.owner.get("host"),
+        "stale_lock_takeover": lock.stale_lock_takeover,
+        "force_takeover_used": lock.force_takeover_used,
+        "instrument_count": len(instrument_reports),
+        "instrument_reports": list(instrument_reports),
+        "instrument_families": [item.get("instrument_family") for item in instrument_reports],
+        "runtime_data_freshness_by_instrument": {
+            str(item.get("instrument_family")): {
+                "data_written": item.get("data_written"),
+                "fresh_for_execution": item.get("fresh_for_execution"),
+                "latest_1m_timestamp": item.get("latest_1m_timestamp"),
+                "latest_completed_5m_timestamp": item.get("latest_completed_5m_timestamp"),
+                "runtime_candle_age_seconds": item.get("runtime_candle_age_seconds"),
+                "runtime_candle_capture_verdict": item.get("runtime_candle_capture_verdict"),
+            }
+            for item in instrument_reports
+        },
+        "enabled_strategies_by_instrument": {
+            str(item.get("instrument_family")): item.get("enabled_strategies") or []
+            for item in instrument_reports
+        },
+        "evaluated_strategy_count": sum(int(item.get("evaluated_strategy_count") or 0) for item in instrument_reports),
+        "not_ready_strategy_count": sum(int(item.get("not_ready_strategy_count") or 0) for item in instrument_reports),
+        "no_signal_strategy_count": sum(int(item.get("no_signal_strategy_count") or 0) for item in instrument_reports),
+        "signal_strategy_count": sum(int(item.get("signal_strategy_count") or 0) for item in instrument_reports),
+        "strategy_verdicts": all_strategy_verdicts,
+        "candidate_signals": [sig for item in instrument_reports for sig in item.get("candidate_signals", [])],
+        "suppressed_signals": [sig for item in instrument_reports for sig in item.get("suppressed_signals", [])],
+        "arbitration_result": _first_nonempty(item.get("arbitration_result") for item in instrument_reports),
+        "chosen_signal": _first_nonempty(item.get("chosen_signal") for item in instrument_reports),
+        "decision_journal_summary_path": _first_nonempty(item.get("decision_journal_summary_path") for item in instrument_reports),
+        "decision_journal_tier_counts": aggregate_tiers,
+        "operator_status_path": None,
+        "operator_status_verdict": None,
+        "dashboard_backend_health": None,
+        "submit_allowed": any(item.get("submit_allowed") is True for item in instrument_reports),
+        "readiness_invoked": any(item.get("readiness_invoked") is True for item in instrument_reports),
+        "paper_proof_invoked": any(item.get("paper_proof_invoked") is True for item in instrument_reports),
+        "submit_attempted": any(item.get("submit_attempted") is True for item in instrument_reports),
+        "broker_state_mutated": any(item.get("broker_state_mutated") is True for item in instrument_reports),
+        "live_money_readiness": any(item.get("live_money_readiness") is True for item in instrument_reports),
+        "monitor_verdict": verdict.value,
+        "primary_blocker": None if primary_blocker is None else str(primary_blocker),
+        "required_next_action": required_next_action,
+        "report_json_path": str(report_json),
+        "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_shadow_monitor_report.json"),
+        "heartbeat_json_path": str(report_json.parent.parent / "latest_track_b_shadow_monitor_heartbeat.json"),
+        "submit_path_enabled": False,
+        "paper_flags_accepted": False,
+        "dashboard_is_observer_only": True,
+        "live_money_readiness_permitted": False,
+    }
+
+
+def _finalize_cycle(
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    report_json: Path,
+    report: dict[str, Any],
+    *,
+    runtime_cycle_report_json: Path | None,
+    now: datetime,
+) -> dict[str, Any]:
+    _write_monitor_report(report_json, report)
+    if config.update_operator_status:
+        try:
+            status = stages.operator_status(config, Path(str(report["latest_report_json_path"])), runtime_cycle_report_json, now)
+            report["operator_status_path"] = str(status.report_json)
+            report["operator_status_verdict"] = status.report.get("status_verdict")
+        except Exception as exc:  # noqa: BLE001
+            report["operator_status_path"] = None
+            report["operator_status_verdict"] = None
+            report["operator_status_error"] = str(exc)
+    _write_monitor_report(report_json, report)
+    _prune_old_cycles(Path(config.output_root), keep=config.retention_cycles, current_cycle_dir=report_json.parent)
+    return report
+
+
+def _refresh_final_operator_status(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    final_report: dict[str, Any],
+    final_report_json: Path,
+    now: datetime,
+) -> None:
+    raw_runtime_cycle_path = final_report.get("multi_strategy_runtime_cycle_report_path")
+    runtime_cycle_report_json = Path(str(raw_runtime_cycle_path)) if raw_runtime_cycle_path else None
+    try:
+        status = stages.operator_status(
+            config,
+            Path(str(final_report["latest_report_json_path"])),
+            runtime_cycle_report_json,
+            now,
+        )
+        final_report["operator_status_path"] = str(status.report_json)
+        final_report["operator_status_verdict"] = status.report.get("status_verdict")
+    except Exception as exc:  # noqa: BLE001
+        final_report["operator_status_error"] = str(exc)
+    _write_monitor_report(final_report_json, final_report)
+
+
+def _write_monitor_report(report_json: Path, report: Mapping[str, Any]) -> None:
+    payload = json.dumps(to_jsonable(dict(report)), indent=2, sort_keys=True)
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(payload, encoding="utf-8")
+    latest_report = Path(str(report["latest_report_json_path"]))
+    latest_report.parent.mkdir(parents=True, exist_ok=True)
+    latest_report.write_text(payload, encoding="utf-8")
+
+
+def _write_heartbeat(
+    *,
+    config: TrackBShadowMonitorConfig,
+    monitor_id: str,
+    cycle_id: str,
+    cycle_index: int,
+    generated_at: datetime,
+    monitor_running: bool,
+    instruments: Sequence[TrackBShadowMonitorInstrumentConfig],
+    last_verdict: str | None,
+    last_report_path: Path | None,
+    lock: TrackBShadowMonitorLock,
+) -> None:
+    path = Path(config.output_root) / "latest_track_b_shadow_monitor_heartbeat.json"
+    payload = {
+        "schema_version": "track_b_shadow_monitor_heartbeat_v2",
+        "generated_at": generated_at.astimezone(UTC).isoformat(),
+        "monitor_id": monitor_id,
+        "cycle_id": cycle_id,
+        "cycle_index": cycle_index,
+        "mode": "SHADOW",
+        "monitor_running": monitor_running,
+        "pid": lock.owner.get("pid"),
+        "host": lock.owner.get("host"),
+        "lockfile_path": str(lock.lockfile),
+        "pidfile_path": str(lock.pidfile),
+        "instrument_families": [instrument.instrument_family for instrument in instruments],
+        "last_monitor_verdict": last_verdict,
+        "last_report_path": None if last_report_path is None else str(last_report_path),
+        "heartbeat_json_path": str(path),
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(to_jsonable(payload), indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_final_heartbeat(
+    *,
+    config: TrackBShadowMonitorConfig,
+    monitor_id: str,
+    generated_at: datetime,
+    last_report_path: Path | None,
+    last_verdict: str | None,
+    shutdown_reason: str | None,
+    lock: TrackBShadowMonitorLock,
+) -> None:
+    path = Path(config.output_root) / "latest_track_b_shadow_monitor_heartbeat.json"
+    prior = _read_json_optional(path) or {}
+    prior.update(
+        {
+            "generated_at": generated_at.astimezone(UTC).isoformat(),
+            "monitor_id": monitor_id,
+            "mode": "SHADOW",
+            "monitor_running": False,
+            "shutdown_reason": shutdown_reason or "max_cycles_completed_or_stopped",
+            "last_monitor_verdict": last_verdict,
+            "last_report_path": None if last_report_path is None else str(last_report_path),
+            "pid": lock.owner.get("pid"),
+            "host": lock.owner.get("host"),
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "paper_proof_invoked": False,
+            "broker_state_mutated": False,
+            "live_money_readiness": False,
+        }
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(to_jsonable(prior), indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _verdict_for_runtime_cycle(
+    report: Mapping[str, Any],
+    critical_blocker: str | None,
+) -> TrackBShadowMonitorVerdict:
+    if critical_blocker:
+        return TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG
+    verdict = str(report.get("multi_strategy_runtime_cycle_verdict") or "")
+    if verdict == TrackBMultiStrategyRuntimeCycleVerdict.SIGNAL_READY_NO_SUBMIT.value:
+        return TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT
+    if verdict == TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION.value:
+        return TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    return TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR
+
+
+def _cycle_verdict(instrument_reports: Sequence[Mapping[str, Any]]) -> TrackBShadowMonitorVerdict:
+    verdicts = {str(report.get("instrument_verdict") or "") for report in instrument_reports}
+    if TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG.value in verdicts:
+        return TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG
+    if TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT.value in verdicts:
+        return TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT
+    if TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value in verdicts:
+        return TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR
+    if TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value in verdicts:
+        return TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR
+    if TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT.value in verdicts:
+        return TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT
+    if TrackBShadowMonitorVerdict.OK_NO_SIGNAL.value in verdicts:
+        return TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    if TrackBShadowMonitorVerdict.HEARTBEAT_NO_NEW_COMPLETED_BAR.value in verdicts:
+        return TrackBShadowMonitorVerdict.HEARTBEAT_NO_NEW_COMPLETED_BAR
+    return TrackBShadowMonitorVerdict.NOT_READY_NO_STRATEGIES_CONFIGURED
+
+
+def _critical_mutation_flag(report: Mapping[str, Any]) -> str | None:
+    for key in ("submit_allowed", "submit_attempted", "paper_proof_invoked", "broker_state_mutated", "live_money_readiness"):
+        if report.get(key) is True:
+            return f"Unexpected SHADOW mutation/safety flag {key}=true."
+    return None
+
+
+def _global_critical_blocker(instrument_reports: Sequence[Mapping[str, Any]]) -> str | None:
+    for report in instrument_reports:
+        for key in ("submit_allowed", "submit_attempted", "paper_proof_invoked", "broker_state_mutated", "live_money_readiness"):
+            if report.get(key) is True:
+                return f"Unexpected SHADOW mutation/safety flag {key}=true for {report.get('instrument_family')}."
+    return None
+
+
+def _must_stop(report: Mapping[str, Any], config: TrackBShadowMonitorConfig) -> bool:
+    if report.get("monitor_verdict") == TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG.value:
+        return True
+    if config.stop_on_error and report.get("monitor_verdict") in {
+        TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
+        TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value,
+        TrackBShadowMonitorVerdict.ERROR.value,
+    }:
+        return True
+    return False
+
+
+def _failure_counts_for_backoff(report: Mapping[str, Any]) -> bool:
+    return str(report.get("monitor_verdict") or "") in {
+        TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
+        TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT.value,
+        TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value,
+        TrackBShadowMonitorVerdict.ERROR.value,
+    }
+
+
+def _sleep_seconds(*, config: TrackBShadowMonitorConfig, consecutive_failures: int) -> float:
+    if consecutive_failures <= 0:
+        return config.poll_seconds
+    multiplier = 2 ** min(consecutive_failures - 1, 4)
+    return min(config.max_backoff_seconds, config.poll_seconds * multiplier)
+
+
+def _safe_quote_payload(path: Path | None) -> dict[str, object]:
+    if path is not None and path.exists():
+        try:
+            return _read_quote_payload(path)
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "quote_provider_mode": "NOT_PROVIDED",
+        "realtime_quote_received": False,
+        "current_quote_available": False,
+        "quote_freshness_verdict": "NOT_PROVIDED",
+        "report_json_path": None if path is None else str(path),
+    }
+
+
+class _ProviderFetchTimeout(TimeoutError):
+    pass
+
+
+class _provider_fetch_deadline:
+    def __init__(self, timeout_seconds: float | None) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.previous_handler: object | None = None
+        self.previous_alarm = 0
+        self.enabled = False
+
+    def __enter__(self) -> None:
+        if self.timeout_seconds is None or self.timeout_seconds <= 0:
+            return
+        if not hasattr(signal, "SIGALRM"):
+            return
+        if signal.getsignal(signal.SIGALRM) == self._handle_timeout:
+            return
+        self.previous_handler = signal.getsignal(signal.SIGALRM)
+        self.previous_alarm = signal.alarm(0)
+        signal.signal(signal.SIGALRM, self._handle_timeout)
+        signal.setitimer(signal.ITIMER_REAL, float(self.timeout_seconds))
+        self.enabled = True
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
+        if self.enabled:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if self.previous_handler is not None:
+                signal.signal(signal.SIGALRM, self.previous_handler)  # type: ignore[arg-type]
+            if self.previous_alarm > 0:
+                signal.alarm(self.previous_alarm)
+        return False
+
+    def _handle_timeout(self, _signum: int, _frame: object) -> None:
+        raise _ProviderFetchTimeout("Databento runtime candle fetch exceeded monitor provider timeout.")
+
+
+def _read_json_required(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        raise ValueError("Required JSON path was not provided.")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain a JSON object.")
+    return value
+
+
+def _read_json_optional(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _path_from_report(report: Mapping[str, Any], key: str) -> Path | None:
+    value = report.get(key)
+    return Path(str(value)) if value else None
+
+
+def _existing_optional_path(path: Path | None) -> Path | None:
+    return path if path is not None and path.exists() else None
+
+
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _lock_held_report(
+    *,
+    config: TrackBShadowMonitorConfig,
+    monitor_id: str,
+    lock: TrackBShadowMonitorLock,
+    now: datetime,
+) -> dict[str, Any]:
+    report_json = Path(config.output_root) / f"{monitor_id}_lock_held" / "track_b_shadow_monitor_report.json"
+    return {
+        "schema_version": "track_b_shadow_monitor_v2",
+        "monitor_schema_version": "track_b_shadow_monitor_v2",
+        "monitor_id": monitor_id,
+        "cycle_id": f"{monitor_id}_lock_held",
+        "mode": "SHADOW",
+        "started_at": now.astimezone(UTC).isoformat(),
+        "completed_at": now.astimezone(UTC).isoformat(),
+        "cycle_elapsed_seconds": 0,
+        "monitor_verdict": TrackBShadowMonitorVerdict.LOCK_HELD.value,
+        "primary_blocker": lock.blocker,
+        "required_next_action": "Stop the existing monitor or restart with --force-takeover after confirming stale ownership.",
+        "lock_owner": lock.owner,
+        "lockfile_path": str(lock.lockfile),
+        "pidfile_path": str(lock.pidfile),
+        "instrument_reports": [],
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+        "report_json_path": str(report_json),
+        "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_shadow_monitor_report.json"),
+        "heartbeat_json_path": str(report_json.parent.parent / "latest_track_b_shadow_monitor_heartbeat.json"),
+    }
+
+
+def _primary_blocker(instrument_reports: Sequence[Mapping[str, Any]]) -> str | None:
+    priority = (
+        TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG.value,
+        TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
+        TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR.value,
+        TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT.value,
+        TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT.value,
+    )
+    for verdict in priority:
+        for report in instrument_reports:
+            if report.get("instrument_verdict") == verdict and report.get("primary_blocker"):
+                return str(report["primary_blocker"])
+    for report in instrument_reports:
+        blocker = report.get("primary_blocker")
+        if blocker:
+            return str(blocker)
+    return None
+
+
+def _required_next_action(verdict: TrackBShadowMonitorVerdict) -> str:
+    if verdict == TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG:
+        return "Stop SHADOW monitor and inspect Track B safety fields before continuing."
+    if verdict == TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR:
+        return "Repair provider/runtime candle capture; monitor may continue with bounded backoff."
+    if verdict == TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT:
+        return "Wait for fresh runtime candles; do not evaluate strategies on stale context."
+    if verdict == TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT:
+        return "Review signal artifact; SHADOW monitor continues without submit authority."
+    return "Continue Track B SHADOW monitoring."
+
+
+def _first_nonempty(values: Sequence[object] | Any) -> object:
+    for value in values:
+        if value:
+            return value
+    return {}
+
+
+def _aggregate_tier_counts(instrument_reports: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for report in instrument_reports:
+        counts = report.get("decision_journal_tier_counts") or {}
+        if isinstance(counts, Mapping):
+            for key, value in counts.items():
+                totals[str(key)] = totals.get(str(key), 0) + int(value or 0)
+    return totals
+
+
+def _count_strategy_verdicts(strategy_verdicts: Sequence[Mapping[str, Any]], needle: str) -> int:
+    return sum(1 for item in strategy_verdicts if needle in str(item.get("strategy_runtime_verdict") or ""))
+
+
+def _prune_old_cycles(output_root: Path, *, keep: int, current_cycle_dir: Path) -> None:
+    if keep <= 0:
+        return
+    output_root.mkdir(parents=True, exist_ok=True)
+    cycle_dirs = [
+        item
+        for item in output_root.iterdir()
+        if item.is_dir() and item.name.startswith("track_b_shadow_monitor_")
+    ]
+    cycle_dirs.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    retained = 0
+    for item in cycle_dirs:
+        if item == current_cycle_dir or retained < keep:
+            retained += 1
+            continue
+        for child in item.iterdir():
+            child.unlink()
+        item.rmdir()

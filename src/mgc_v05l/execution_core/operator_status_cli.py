@@ -24,6 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--track-b-strategy-rule-runner-report-json", type=Path)
     parser.add_argument("--track-b-strategy-paper-runner-report-json", type=Path)
     parser.add_argument("--track-b-multi-strategy-runtime-cycle-report-json", type=Path)
+    parser.add_argument("--track-b-shadow-monitor-report-json", type=Path)
+    parser.add_argument("--track-b-shadow-monitor-heartbeat-json", type=Path)
     parser.add_argument("--databento-candle-observer-report-json", type=Path)
     parser.add_argument("--databento-candle-observer-heartbeat-json", type=Path)
     parser.add_argument("--strategy-signal-adapter-report-json", type=Path)
@@ -52,6 +54,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             track_b_strategy_rule_runner_report_json=args.track_b_strategy_rule_runner_report_json,
             track_b_strategy_paper_runner_report_json=args.track_b_strategy_paper_runner_report_json,
             track_b_multi_strategy_runtime_cycle_report_json=args.track_b_multi_strategy_runtime_cycle_report_json,
+            track_b_shadow_monitor_report_json=args.track_b_shadow_monitor_report_json,
+            track_b_shadow_monitor_heartbeat_json=args.track_b_shadow_monitor_heartbeat_json,
             databento_candle_observer_report_json=args.databento_candle_observer_report_json,
             databento_candle_observer_heartbeat_json=args.databento_candle_observer_heartbeat_json,
             strategy_signal_adapter_report_json=args.strategy_signal_adapter_report_json,
@@ -99,6 +103,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "strategy_paper_proof_invoked": result.report["strategy_paper_proof_invoked"],
                 "strategy_paper_proof_classification": result.report["strategy_paper_proof_classification"],
                 "strategy_paper_final_flat": result.report["strategy_paper_final_flat"],
+                "latest_shadow_monitor_verdict": result.report["latest_shadow_monitor_verdict"],
+                "latest_shadow_monitor_cycle_id": result.report["latest_shadow_monitor_cycle_id"],
+                "shadow_monitor_running": result.report["shadow_monitor_running"],
+                "shadow_monitor_instrument_families": result.report["shadow_monitor_instrument_families"],
+                "shadow_monitor_evaluated_strategy_count": result.report["shadow_monitor_evaluated_strategy_count"],
+                "shadow_monitor_submit_allowed": result.report["shadow_monitor_submit_allowed"],
+                "shadow_monitor_submit_attempted": result.report["shadow_monitor_submit_attempted"],
+                "shadow_monitor_broker_state_mutated": result.report["shadow_monitor_broker_state_mutated"],
+                "shadow_monitor_live_money_readiness": result.report["shadow_monitor_live_money_readiness"],
                 "multi_strategy_runtime_cycle_verdict": result.report["multi_strategy_runtime_cycle_verdict"],
                 "multi_strategy_chosen_strategy_id": result.report["multi_strategy_chosen_strategy_id"],
                 "multi_strategy_candidate_signals": result.report["multi_strategy_candidate_signals"],

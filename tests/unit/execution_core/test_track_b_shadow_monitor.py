@@ -1,0 +1,442 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+from mgc_v05l.execution_core.operator_status import OperatorStatusResult, OperatorStatusVerdict
+from mgc_v05l.execution_core.track_b_asian_drift_watch_chain import (
+    TrackBAsianDriftWatchChainResult,
+    TrackBAsianDriftWatchChainVerdict,
+)
+from mgc_v05l.execution_core.track_b_multi_strategy_runtime_cycle import (
+    TrackBMultiStrategyRuntimeCycleResult,
+    TrackBMultiStrategyRuntimeCycleVerdict,
+)
+from mgc_v05l.execution_core.track_b_runtime_candle_capture import (
+    TrackBRuntimeCandleCaptureResult,
+    TrackBRuntimeCandleCaptureVerdict,
+)
+from mgc_v05l.execution_core.track_b_session_strategy_envelope_producer import (
+    TrackBSessionStrategyEnvelopeProducerResult,
+    TrackBSessionStrategyEnvelopeProducerVerdict,
+)
+from mgc_v05l.execution_core.track_b_shadow_monitor import (
+    TrackBShadowMonitorConfig,
+    TrackBShadowMonitorInstrumentConfig,
+    TrackBShadowMonitorStages,
+    TrackBShadowMonitorVerdict,
+    TrackBStrategyEvaluationMode,
+    acquire_monitor_lock,
+    default_instruments,
+    release_monitor_lock,
+    run_track_b_shadow_monitor,
+)
+from mgc_v05l.execution_core.track_b_snap_turn_envelope_producer import (
+    TrackBSnapTurnEnvelopeProducerResult,
+    TrackBSnapTurnEnvelopeProducerVerdict,
+)
+
+
+def now() -> datetime:
+    return datetime(2026, 5, 5, 12, 0, tzinfo=UTC)
+
+
+def write_json(path: Path, payload: dict[str, object]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def config(tmp_path: Path, **overrides: object) -> TrackBShadowMonitorConfig:
+    values = {
+        "max_cycles": 1,
+        "poll_seconds": 0,
+        "output_root": tmp_path / "monitor",
+        "runtime_candle_capture_output_root": tmp_path / "runtime",
+        "asian_drift_output_root": tmp_path / "asian",
+        "snap_turn_output_root": tmp_path / "snap",
+        "session_strategy_output_root": tmp_path / "session",
+        "multi_strategy_output_root": tmp_path / "multi",
+        "operator_status_output_root": tmp_path / "operator_status",
+        "lockfile": tmp_path / "monitor" / "track_b_shadow_monitor.lock",
+        "pidfile": tmp_path / "monitor" / "track_b_shadow_monitor.pid",
+        "backend_health_json": None,
+        "current_quote_report_json": None,
+        "instruments": (
+            TrackBShadowMonitorInstrumentConfig(
+                instrument_family="MGC",
+                contract_key="MGC-202606",
+                local_symbol="MGCM6",
+                databento_continuous_symbol="MGC.v.0",
+                dataset="GLBX.MDP3",
+                enabled_strategies=("ASIAN_DRIFT_V1", "FIRST_BULL_SNAP_TURN_V1"),
+                runtime_chain_wired=True,
+            ),
+        ),
+    }
+    values.update(overrides)
+    return TrackBShadowMonitorConfig(**values)
+
+
+class FakeStages:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        runtime_data_written: bool = True,
+        runtime_fresh: bool = True,
+        completed_5m: str = "2026-05-05T11:55:00+00:00",
+        snap_ok: bool = True,
+        session_ok: bool = True,
+        runtime_cycle_verdict: str = TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION.value,
+        runtime_cycle_overrides: dict[str, object] | None = None,
+    ) -> None:
+        self.tmp_path = tmp_path
+        self.calls: dict[str, int] = {
+            "runtime": 0,
+            "asian": 0,
+            "snap": 0,
+            "session": 0,
+            "multi": 0,
+            "operator": 0,
+            "sleep": 0,
+        }
+        self.runtime_data_written = runtime_data_written
+        self.runtime_fresh = runtime_fresh
+        self.completed_5m = completed_5m
+        self.snap_ok = snap_ok
+        self.session_ok = session_ok
+        self.runtime_cycle_verdict = runtime_cycle_verdict
+        self.runtime_cycle_overrides = runtime_cycle_overrides or {}
+
+    def stages(self) -> TrackBShadowMonitorStages:
+        return TrackBShadowMonitorStages(
+            runtime_candle_capture=self.runtime,
+            asian_drift_watch_chain=self.asian,
+            snap_turn_envelopes=self.snap,
+            session_strategy_envelopes=self.session,
+            multi_strategy_runtime_cycle=self.multi,
+            operator_status=self.operator,
+            sleep=self.sleep,
+            pid_is_alive=lambda _pid: False,
+        )
+
+    def runtime(self, _config, _instrument, cycle_index: int, _now: datetime) -> TrackBRuntimeCandleCaptureResult:
+        self.calls["runtime"] += 1
+        report = {
+            "runtime_candle_capture_verdict": (
+                TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_EXECUTION_FRESH.value
+                if self.runtime_fresh
+                else TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_NOT_EXECUTION_FRESH.value
+            ),
+            "data_written": self.runtime_data_written,
+            "fresh_for_execution": self.runtime_fresh,
+            "latest_1m_timestamp": "2026-05-05T11:59:00+00:00",
+            "latest_completed_5m_timestamp": self.completed_5m,
+            "latest_completed_5m_candle_age_seconds": 300,
+            "primary_blocker": None if self.runtime_data_written else "provider failed",
+            "required_next_action": "continue",
+            "report_json_path": str(self.tmp_path / f"runtime-{cycle_index}.json"),
+        }
+        path = write_json(self.tmp_path / f"runtime-{cycle_index}.json", report)
+        event = {"contract_key": "MGC-202606", "candles": []}
+        return TrackBRuntimeCandleCaptureResult(
+            verdict=TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_EXECUTION_FRESH,
+            report_json=path,
+            report=report,
+            runtime_candles_json=write_json(self.tmp_path / f"runtime-event-{cycle_index}.json", event),
+            runtime_candles_event=event,
+        )
+
+    def asian(self, _config, _instrument, cycle_index: int, _now: datetime, _runtime) -> TrackBAsianDriftWatchChainResult:
+        self.calls["asian"] += 1
+        report = {
+            "asian_drift_watch_chain_verdict": TrackBAsianDriftWatchChainVerdict.NO_SIGNAL_NO_MUTATION.value,
+            "asian_drift_state_snapshot_path": str(self.tmp_path / f"asian-state-{cycle_index}.json"),
+            "primary_blocker": None,
+        }
+        path = write_json(self.tmp_path / f"asian-{cycle_index}.json", report)
+        return TrackBAsianDriftWatchChainResult(
+            verdict=TrackBAsianDriftWatchChainVerdict.NO_SIGNAL_NO_MUTATION,
+            report_json=path,
+            report=report,
+            completed_5m_candles_json=write_json(self.tmp_path / f"completed-5m-{cycle_index}.json", {"candles": []}),
+            completed_5m_candles_payload={"candles": []},
+            feature_rows_result=None,
+            rule_result=None,
+        )
+
+    def snap(self, _config, _instrument, cycle_index: int, _now: datetime, _asian) -> TrackBSnapTurnEnvelopeProducerResult:
+        self.calls["snap"] += 1
+        verdict = (
+            TrackBSnapTurnEnvelopeProducerVerdict.WROTE_ENVELOPES
+            if self.snap_ok
+            else TrackBSnapTurnEnvelopeProducerVerdict.BLOCKED_INVALID_INPUT
+        )
+        report = {
+            "snap_turn_envelope_producer_verdict": verdict.value,
+            "primary_blocker": None if self.snap_ok else "snap blocked",
+        }
+        path = write_json(self.tmp_path / f"snap-{cycle_index}.json", report)
+        return TrackBSnapTurnEnvelopeProducerResult(
+            verdict=verdict,
+            report_json=path,
+            report=report,
+            first_bull_snap_turn_event_json=write_json(self.tmp_path / f"bull-{cycle_index}.json", {}),
+            first_bear_snap_turn_event_json=write_json(self.tmp_path / f"bear-{cycle_index}.json", {}),
+            first_bull_snap_turn_event={},
+            first_bear_snap_turn_event={},
+        )
+
+    def session(self, _config, _instrument, cycle_index: int, _now: datetime, _asian) -> TrackBSessionStrategyEnvelopeProducerResult:
+        self.calls["session"] += 1
+        verdict = (
+            TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES
+            if self.session_ok
+            else TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_INVALID_INPUT
+        )
+        report = {
+            "session_strategy_envelope_producer_verdict": verdict.value,
+            "primary_blocker": None if self.session_ok else "session blocked",
+        }
+        path = write_json(self.tmp_path / f"session-{cycle_index}.json", report)
+        return TrackBSessionStrategyEnvelopeProducerResult(
+            verdict=verdict,
+            report_json=path,
+            report=report,
+            london_late_pause_resume_short_event_json=write_json(self.tmp_path / f"london-{cycle_index}.json", {}),
+            asia_late_flat_pullback_pause_resume_long_event_json=write_json(self.tmp_path / f"asia-late-{cycle_index}.json", {}),
+            asia_early_pause_resume_short_event_json=write_json(self.tmp_path / f"pause-{cycle_index}.json", {}),
+            asia_early_normal_breakout_retest_hold_long_event_json=write_json(self.tmp_path / f"breakout-{cycle_index}.json", {}),
+            london_late_pause_resume_short_event={},
+            asia_late_flat_pullback_pause_resume_long_event={},
+            asia_early_pause_resume_short_event={},
+            asia_early_normal_breakout_retest_hold_long_event={},
+        )
+
+    def multi(self, _config, _instrument, cycle_index: int, _now: datetime, _asian, _snap, _session) -> TrackBMultiStrategyRuntimeCycleResult:
+        self.calls["multi"] += 1
+        report = {
+            "multi_strategy_runtime_cycle_verdict": self.runtime_cycle_verdict,
+            "evaluated_strategies": [
+                {
+                    "strategy_id": "ASIAN_DRIFT_V1",
+                    "strategy_runtime_verdict": "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION",
+                    "decision": "NO_SIGNAL",
+                    "signal_emitted": False,
+                },
+                {
+                    "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+                    "strategy_runtime_verdict": "FIRST_BULL_SNAP_TURN_NO_SIGNAL_NO_MUTATION",
+                    "decision": "NO_SIGNAL",
+                    "signal_emitted": False,
+                },
+            ],
+            "candidate_signals": [],
+            "suppressed_signals": [],
+            "arbitration_result": {"decision": "NO_TRADE"},
+            "chosen_signal": {},
+            "chosen_strategy_id": None,
+            "decision_journal_summary_path": str(self.tmp_path / "journal-summary.json"),
+            "decision_journal_tier_counts": {"TIER_1_NO_SETUP_AGGREGATE": 2},
+            "submit_allowed": False,
+            "readiness_invoked": False,
+            "paper_proof_invoked": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "live_money_readiness": False,
+            "required_next_action": "continue",
+            "primary_blocker": None,
+        }
+        report.update(self.runtime_cycle_overrides)
+        path = write_json(self.tmp_path / f"multi-{cycle_index}.json", report)
+        return TrackBMultiStrategyRuntimeCycleResult(
+            verdict=TrackBMultiStrategyRuntimeCycleVerdict(str(report["multi_strategy_runtime_cycle_verdict"])),
+            report_json=path,
+            report=report,
+            strategy_results=(),
+            paper_runner_result=None,
+        )
+
+    def operator(self, _config, monitor_report_json: Path, _runtime_cycle_report_json: Path | None, _now: datetime) -> OperatorStatusResult:
+        self.calls["operator"] += 1
+        report = {
+            "status_verdict": OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW.value,
+            "report_json_path": str(self.tmp_path / "operator.json"),
+            "monitor_report_json": str(monitor_report_json),
+        }
+        path = write_json(self.tmp_path / "operator.json", report)
+        return OperatorStatusResult(verdict=OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW, report_json=path, report=report)
+
+    def sleep(self, _seconds: float) -> None:
+        self.calls["sleep"] += 1
+
+
+def test_one_successful_shadow_cycle_writes_multi_instrument_report(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+    result = run_track_b_shadow_monitor(config=config(tmp_path), stages=fake.stages(), monitor_id="monitor-test", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    assert result.report_json.exists()
+    assert result.report["mode"] == "SHADOW"
+    assert result.report["instrument_families"] == ["MGC"]
+    assert result.report["evaluated_strategy_count"] == 2
+    assert result.report["decision_journal_tier_counts"] == {"TIER_1_NO_SETUP_AGGREGATE": 2}
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+    assert fake.calls["multi"] == 1
+    assert not (tmp_path / "monitor" / "track_b_shadow_monitor.lock").exists()
+
+
+def test_default_registry_reports_other_instruments_without_ignoring_them(tmp_path: Path) -> None:
+    instruments = default_instruments(config(tmp_path))
+
+    families = [item.instrument_family for item in instruments]
+    assert families == ["GC", "MGC", "ES", "MES", "NQ", "MNQ"]
+    assert next(item for item in instruments if item.instrument_family == "MGC").runtime_chain_wired is True
+    assert next(item for item in instruments if item.instrument_family == "GC").enabled_strategies == ()
+
+
+def test_provider_blocker_is_primary_even_with_unwired_registry_entries(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path, runtime_data_written=False)
+    result = run_track_b_shadow_monitor(
+        config=config(tmp_path, instruments=()),
+        stages=fake.stages(),
+        monitor_id="monitor-default-provider",
+        now_func=now,
+    )
+
+    assert result.verdict == TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR
+    assert result.report["primary_blocker"] == "provider failed"
+    assert result.report["instrument_families"] == ["GC", "MGC", "ES", "MES", "NQ", "MNQ"]
+
+
+def test_provider_failure_blocks_strategy_evaluation_and_continues_as_artifact(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path, runtime_data_written=False)
+    result = run_track_b_shadow_monitor(config=config(tmp_path), stages=fake.stages(), monitor_id="monitor-provider", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR
+    assert fake.calls["asian"] == 0
+    assert fake.calls["multi"] == 0
+    assert result.report["instrument_reports"][0]["data_written"] is False
+    assert result.report["submit_attempted"] is False
+
+
+def test_stale_runtime_context_blocks_strategy_evaluation(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path, runtime_fresh=False)
+    result = run_track_b_shadow_monitor(config=config(tmp_path), stages=fake.stages(), monitor_id="monitor-stale", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT
+    assert fake.calls["asian"] == 0
+    assert fake.calls["multi"] == 0
+    assert result.report["instrument_reports"][0]["fresh_for_execution"] is False
+
+
+def test_completed_bar_only_skips_repeated_completed_bar_after_first_evaluation(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+    result = run_track_b_shadow_monitor(
+        config=config(tmp_path, max_cycles=2),
+        stages=fake.stages(),
+        monitor_id="monitor-repeat-bar",
+        now_func=now,
+    )
+
+    assert fake.calls["runtime"] == 2
+    assert fake.calls["multi"] == 1
+    assert result.verdict == TrackBShadowMonitorVerdict.HEARTBEAT_NO_NEW_COMPLETED_BAR
+    assert result.report["instrument_reports"][0]["instrument_verdict"] == (
+        TrackBShadowMonitorVerdict.HEARTBEAT_NO_NEW_COMPLETED_BAR.value
+    )
+
+
+def test_signal_ready_no_submit_does_not_stop_shadow_monitor(tmp_path: Path) -> None:
+    fake = FakeStages(
+        tmp_path,
+        runtime_cycle_verdict=TrackBMultiStrategyRuntimeCycleVerdict.SIGNAL_READY_NO_SUBMIT.value,
+        runtime_cycle_overrides={
+            "candidate_signals": [{"strategy_id": "FIRST_BULL_SNAP_TURN_V1", "signal_direction": "LONG"}],
+            "decision_journal_tier_counts": {"TIER_3_SIGNAL_TRADE_DECISION": 1},
+        },
+    )
+    result = run_track_b_shadow_monitor(config=config(tmp_path), stages=fake.stages(), monitor_id="monitor-signal", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT
+    assert result.report["candidate_signals"] == [{"strategy_id": "FIRST_BULL_SNAP_TURN_V1", "signal_direction": "LONG"}]
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+
+
+def test_unexpected_submit_flag_in_shadow_is_critical_and_stops(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path, runtime_cycle_overrides={"submit_attempted": True})
+    result = run_track_b_shadow_monitor(config=config(tmp_path), stages=fake.stages(), monitor_id="monitor-critical", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG
+    assert "submit_attempted=true" in str(result.report["primary_blocker"])
+
+
+def test_unexpected_broker_mutation_flag_in_shadow_is_critical(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path, runtime_cycle_overrides={"broker_state_mutated": True})
+    result = run_track_b_shadow_monitor(config=config(tmp_path), stages=fake.stages(), monitor_id="monitor-broker", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG
+    assert "broker_state_mutated=true" in str(result.report["primary_blocker"])
+
+
+def test_operator_status_update_receives_latest_monitor_report(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+    result = run_track_b_shadow_monitor(
+        config=config(tmp_path, update_operator_status=True),
+        stages=fake.stages(),
+        monitor_id="monitor-operator",
+        now_func=now,
+    )
+
+    assert fake.calls["operator"] == 2
+    assert result.report["operator_status_verdict"] == OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW.value
+    assert result.report["operator_status_path"] == str(tmp_path / "operator.json")
+
+
+def test_live_lock_refuses_second_monitor_without_force_takeover(tmp_path: Path) -> None:
+    lockfile = tmp_path / "monitor.lock"
+    pidfile = tmp_path / "monitor.pid"
+    write_json(
+        lockfile,
+        {
+            "pid": 12345,
+            "monitor_id": "existing",
+            "host": "test-host",
+            "started_at": now().isoformat(),
+            "repo_root": str(tmp_path),
+        },
+    )
+    cfg = config(tmp_path, lockfile=lockfile, pidfile=pidfile)
+    lock = acquire_monitor_lock(config=cfg, monitor_id="new", started_at=now(), pid_is_alive=lambda pid: pid == 12345)
+
+    assert lock.acquired is False
+    assert "already owns lock" in str(lock.blocker)
+
+
+def test_stale_lock_is_taken_over_and_released(tmp_path: Path) -> None:
+    lockfile = tmp_path / "monitor.lock"
+    pidfile = tmp_path / "monitor.pid"
+    write_json(lockfile, {"pid": 12345, "monitor_id": "dead", "repo_root": str(tmp_path)})
+    cfg = config(tmp_path, lockfile=lockfile, pidfile=pidfile)
+    lock = acquire_monitor_lock(config=cfg, monitor_id="new", started_at=now(), pid_is_alive=lambda _pid: False)
+
+    assert lock.acquired is True
+    assert lock.stale_lock_takeover is True
+    assert json.loads(lockfile.read_text(encoding="utf-8"))["monitor_id"] == "new"
+    release_monitor_lock(lock)
+    assert not lockfile.exists()
+    assert not pidfile.exists()
+
+
+def test_monitor_source_has_no_private_broker_submit_path() -> None:
+    source = Path("src/mgc_v05l/execution_core/track_b_shadow_monitor.py").read_text(encoding="utf-8")
+
+    assert "placeOrder" not in source
+    assert "cancelOrder" not in source
+    assert "paper_proof_cli" not in source
