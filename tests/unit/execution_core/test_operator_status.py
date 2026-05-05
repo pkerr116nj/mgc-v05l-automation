@@ -179,6 +179,13 @@ def multi_strategy_runtime_cycle_report(tmp_path: Path, **overrides: object) -> 
         "submit_attempted": False,
         "broker_state_mutated": False,
         "live_money_readiness": False,
+        "decision_journal_invoked": True,
+        "decision_journal_summary_path": "latest_track_b_decision_journal_summary.json",
+        "decision_journal_active_path": "track_b_decision_journal.jsonl",
+        "decision_journal_heartbeat_path": "track_b_runtime_heartbeat.jsonl",
+        "decision_journal_full_records_written": 1,
+        "decision_journal_tier_counts": {"TIER_3_SIGNAL_TRADE_DECISION": 1},
+        "decision_journal_error": None,
         "primary_blocker": None,
         "required_next_action": "Exactly one real strategy signal is ready, but explicit PAPER submit flags were not supplied.",
         "report_json_path": "track_b_multi_strategy_runtime_cycle_report.json",
@@ -688,7 +695,13 @@ def test_multi_strategy_runtime_cycle_report_is_summarized(tmp_path: Path) -> No
     assert result.report["multi_strategy_submit_attempted"] is False
     assert result.report["multi_strategy_broker_state_mutated"] is False
     assert result.report["multi_strategy_live_money_readiness"] is False
+    assert result.report["track_b_decision_journal_invoked"] is True
+    assert result.report["track_b_decision_journal_summary_path"] == "latest_track_b_decision_journal_summary.json"
+    assert result.report["track_b_decision_journal_active_path"] == "track_b_decision_journal.jsonl"
+    assert result.report["track_b_decision_journal_full_records_written"] == 1
+    assert result.report["track_b_decision_journal_tier_counts"] == {"TIER_3_SIGNAL_TRADE_DECISION": 1}
     assert result.report["latest_output_paths"]["track_b_multi_strategy_runtime_cycle"] == "track_b_multi_strategy_runtime_cycle_report.json"
+    assert result.report["latest_output_paths"]["track_b_decision_journal_summary"] == "latest_track_b_decision_journal_summary.json"
     assert result.report["submit_allowed"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False

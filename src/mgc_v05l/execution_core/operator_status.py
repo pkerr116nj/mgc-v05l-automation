@@ -331,6 +331,7 @@ def _report(
         "track_b_strategy_rule_runner": track_b_strategy_rule_runner.get("report_json_path"),
         "track_b_strategy_paper_runner": track_b_strategy_paper_runner.get("report_json_path"),
         "track_b_multi_strategy_runtime_cycle": track_b_multi_strategy_runtime_cycle.get("report_json_path"),
+        "track_b_decision_journal_summary": track_b_multi_strategy_runtime_cycle.get("decision_journal_summary_path"),
         "databento_candle_observer": databento_candle_observer.get("report_json_path"),
         "databento_candle_observer_heartbeat": databento_candle_observer_heartbeat.get("heartbeat_json_path"),
         "strategy_signal_adapter": strategy_signal_adapter.get("report_json_path"),
@@ -486,6 +487,29 @@ def _report(
         ),
         "multi_strategy_live_money_readiness": (
             track_b_multi_strategy_runtime_cycle.get("live_money_readiness") if track_b_multi_strategy_runtime_cycle else NOT_PROVIDED
+        ),
+        "track_b_decision_journal_invoked": (
+            track_b_multi_strategy_runtime_cycle.get("decision_journal_invoked") if track_b_multi_strategy_runtime_cycle else NOT_PROVIDED
+        ),
+        "track_b_decision_journal_summary_path": (
+            track_b_multi_strategy_runtime_cycle.get("decision_journal_summary_path") or NOT_PROVIDED
+        ),
+        "track_b_decision_journal_active_path": (
+            track_b_multi_strategy_runtime_cycle.get("decision_journal_active_path") or NOT_PROVIDED
+        ),
+        "track_b_decision_journal_heartbeat_path": (
+            track_b_multi_strategy_runtime_cycle.get("decision_journal_heartbeat_path") or NOT_PROVIDED
+        ),
+        "track_b_decision_journal_full_records_written": (
+            track_b_multi_strategy_runtime_cycle.get("decision_journal_full_records_written")
+            if track_b_multi_strategy_runtime_cycle
+            else NOT_PROVIDED
+        ),
+        "track_b_decision_journal_tier_counts": (
+            track_b_multi_strategy_runtime_cycle.get("decision_journal_tier_counts") or {}
+        ),
+        "track_b_decision_journal_error": (
+            track_b_multi_strategy_runtime_cycle.get("decision_journal_error") or NOT_PROVIDED
         ),
         "databento_observer_verdict": databento_candle_observer.get("observer_verdict") or NOT_PROVIDED,
         "databento_contract_key": databento_candle_observer.get("contract_key") or databento_candle_observer_heartbeat.get("contract_key") or NOT_PROVIDED,

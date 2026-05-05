@@ -18,6 +18,7 @@ from typing import Callable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
 from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatusInputs, create_operator_status_summary
+from .track_b_decision_journal import record_track_b_decision_journal_cycle
 from .track_b_strategy_paper_runner import (
     DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT,
     TrackBStrategyPaperRunnerConfig,
@@ -95,6 +96,8 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     output_root: Path = DEFAULT_TRACK_B_MULTI_STRATEGY_RUNTIME_CYCLE_OUTPUT_ROOT
     strategy_rule_output_root: Path = DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT
     strategy_paper_runner_output_root: Path = DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT
+    decision_journal_enabled: bool = True
+    decision_journal_output_root: Path | None = None
     update_operator_status: bool = False
     operator_status_output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
     backend_health_json: Path | None = Path("outputs/operator_dashboard/runtime/operator_dashboard_readiness.json")
@@ -199,6 +202,8 @@ def run_track_b_multi_strategy_runtime_cycle(
             required_next_action=required_next_action,
         )
         _write_report(report_json, report)
+        report.update(_maybe_record_decision_journal(config, report, report_json, actual_now))
+        _write_report(report_json, report)
         report.update(_maybe_update_operator_status(config, report))
         _write_report(report_json, report)
         return TrackBMultiStrategyRuntimeCycleResult(
@@ -222,6 +227,8 @@ def run_track_b_multi_strategy_runtime_cycle(
             primary_blocker=f"Track B multi-strategy runtime cycle stage error: {exc}",
             required_next_action="Review multi-strategy cycle diagnostics before retrying.",
         )
+        _write_report(report_json, report)
+        report.update(_maybe_record_decision_journal(config, report, report_json, actual_now))
         _write_report(report_json, report)
         report.update(_maybe_update_operator_status(config, report))
         _write_report(report_json, report)
@@ -570,6 +577,53 @@ def _maybe_update_operator_status(
             "operator_status_report_path": None,
             "latest_operator_status_path": None,
             "operator_status_error": str(exc),
+        }
+
+
+def _maybe_record_decision_journal(
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    report: Mapping[str, object],
+    report_json: Path,
+    now: datetime,
+) -> dict[str, object]:
+    if not config.decision_journal_enabled:
+        return {
+            "decision_journal_invoked": False,
+            "decision_journal_summary_path": None,
+            "decision_journal_active_path": None,
+            "decision_journal_heartbeat_path": None,
+            "decision_journal_full_records_written": 0,
+            "decision_journal_tier_counts": {},
+            "decision_journal_error": None,
+        }
+    output_root = config.decision_journal_output_root or config.output_root.parent / "track_b_decision_journal"
+    try:
+        result = record_track_b_decision_journal_cycle(
+            runtime_cycle_report=report,
+            runtime_cycle_report_json=report_json,
+            output_root=output_root,
+            now=now,
+        )
+        return {
+            "decision_journal_invoked": True,
+            "decision_journal_summary_path": str(result.summary_json),
+            "decision_journal_active_path": str(result.active_journal_jsonl),
+            "decision_journal_heartbeat_path": str(result.heartbeat_jsonl),
+            "decision_journal_aggregate_path": str(result.aggregate_json),
+            "decision_journal_full_records_written": result.summary.get("full_records_written"),
+            "decision_journal_tier_counts": result.summary.get("latest_tier_counts") or {},
+            "decision_journal_error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - journaling must not block shadow runtime status.
+        return {
+            "decision_journal_invoked": True,
+            "decision_journal_summary_path": None,
+            "decision_journal_active_path": None,
+            "decision_journal_heartbeat_path": None,
+            "decision_journal_aggregate_path": None,
+            "decision_journal_full_records_written": 0,
+            "decision_journal_tier_counts": {},
+            "decision_journal_error": str(exc),
         }
 
 
