@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-cycles", type=int, default=999)
     parser.add_argument("--once", action="store_true", help="Run exactly one monitor cycle.")
     parser.add_argument("--poll-seconds", type=float, default=15.0)
+    parser.add_argument("--data-refresh-seconds", type=float, default=60.0)
     parser.add_argument("--max-backoff-seconds", type=float, default=300.0)
     parser.add_argument("--max-consecutive-failures", type=int)
     parser.add_argument("--expected-account-id", default="DUM882026")
@@ -98,6 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode=args.mode,
             max_cycles=1 if args.once else args.max_cycles,
             poll_seconds=args.poll_seconds,
+            data_refresh_seconds=args.data_refresh_seconds,
             max_backoff_seconds=args.max_backoff_seconds,
             max_consecutive_failures=args.max_consecutive_failures,
             expected_account_id=args.expected_account_id,

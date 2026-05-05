@@ -119,6 +119,7 @@ class TrackBShadowMonitorConfig:
     max_cycles: int = 1
     poll_seconds: float = 15.0
     max_backoff_seconds: float = 300.0
+    data_refresh_seconds: float = 60.0
     max_consecutive_failures: int | None = None
     expected_account_id: str = "DUM882026"
     account_id: str = "DUM882026"
@@ -306,6 +307,8 @@ def run_track_b_shadow_monitor(
         raise ValueError("poll_seconds must be non-negative.")
     if config.max_backoff_seconds < 0:
         raise ValueError("max_backoff_seconds must be non-negative.")
+    if config.data_refresh_seconds < 0:
+        raise ValueError("data_refresh_seconds must be non-negative.")
 
     actual_stages = stages or default_stages()
     clock = now_func or (lambda: datetime.now(UTC))
@@ -332,6 +335,7 @@ def run_track_b_shadow_monitor(
     final_report_json: Path | None = None
     consecutive_failures = 0
     last_evaluated_completed_5m: dict[str, str] = {}
+    last_runtime_fetch_attempt_at: dict[str, datetime] = {}
     shutdown_reason: str | None = None
     try:
         for cycle_index in range(1, config.max_cycles + 1):
@@ -360,6 +364,7 @@ def run_track_b_shadow_monitor(
                 started_at=started_at,
                 now_func=clock,
                 last_evaluated_completed_5m=last_evaluated_completed_5m,
+                last_runtime_fetch_attempt_at=last_runtime_fetch_attempt_at,
                 lock=lock,
             )
             cycle_reports.append(report)
@@ -508,6 +513,7 @@ def _run_one_cycle(
     started_at: datetime,
     now_func: Callable[[], datetime],
     last_evaluated_completed_5m: dict[str, str],
+    last_runtime_fetch_attempt_at: dict[str, datetime],
     lock: TrackBShadowMonitorLock,
 ) -> dict[str, Any]:
     report_json = Path(config.output_root) / cycle_id / "track_b_shadow_monitor_report.json"
@@ -523,6 +529,7 @@ def _run_one_cycle(
                 started_at=started_at,
                 now_func=now_func,
                 last_evaluated_completed_5m=last_evaluated_completed_5m,
+                last_runtime_fetch_attempt_at=last_runtime_fetch_attempt_at,
             )
             instrument_reports.append(instrument_report)
             if maybe_runtime_cycle_report_json is not None:
@@ -575,6 +582,7 @@ def _run_instrument_cycle(
     started_at: datetime,
     now_func: Callable[[], datetime],
     last_evaluated_completed_5m: dict[str, str],
+    last_runtime_fetch_attempt_at: dict[str, datetime],
 ) -> tuple[dict[str, Any], Path | None]:
     if not instrument.enabled_strategies:
         return (
@@ -597,7 +605,14 @@ def _run_instrument_cycle(
             None,
         )
 
-    runtime = stages.runtime_candle_capture(config, instrument, cycle_index, started_at)
+    runtime = _runtime_for_refresh_cadence(
+        config=config,
+        stages=stages,
+        instrument=instrument,
+        cycle_index=cycle_index,
+        started_at=started_at,
+        last_runtime_fetch_attempt_at=last_runtime_fetch_attempt_at,
+    )
     if runtime.report.get("data_written") is not True:
         return (
             _instrument_report_from_stages(
@@ -861,6 +876,137 @@ def _run_runtime_candle_capture(
         capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_{uuid.uuid4().hex}",
         now=now,
     )
+
+
+def _runtime_for_refresh_cadence(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    started_at: datetime,
+    last_runtime_fetch_attempt_at: dict[str, datetime],
+) -> TrackBRuntimeCandleCaptureResult:
+    last_fetch_at = last_runtime_fetch_attempt_at.get(instrument.instrument_family)
+    if _should_reuse_runtime_artifact_for_cadence(
+        config=config,
+        instrument=instrument,
+        now=started_at,
+        last_fetch_at=last_fetch_at,
+    ):
+        reused = _runtime_artifact_reuse_for_refresh_cadence(
+            config=config,
+            instrument=instrument,
+            cycle_index=cycle_index,
+            now=started_at,
+        )
+        if reused is not None:
+            return reused
+
+    result = stages.runtime_candle_capture(config, instrument, cycle_index, started_at)
+    last_runtime_fetch_attempt_at[instrument.instrument_family] = started_at
+    return result
+
+
+def _should_reuse_runtime_artifact_for_cadence(
+    *,
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    now: datetime,
+    last_fetch_at: datetime | None,
+) -> bool:
+    if config.data_refresh_seconds <= 0:
+        return False
+    if last_fetch_at is None:
+        return False
+    if instrument.evaluation_mode != TrackBStrategyEvaluationMode.COMPLETED_BAR_ONLY:
+        return False
+    elapsed = max(0.0, (now.astimezone(UTC) - last_fetch_at.astimezone(UTC)).total_seconds())
+    return elapsed < float(config.data_refresh_seconds)
+
+
+def _runtime_artifact_reuse_for_refresh_cadence(
+    *,
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    now: datetime,
+) -> TrackBRuntimeCandleCaptureResult | None:
+    event_json = Path(config.runtime_candle_capture_output_root) / "latest_runtime_mgc_1m_candles.json"
+    report_json = Path(config.runtime_candle_capture_output_root) / "latest_runtime_candle_capture_report.json"
+    if not event_json.exists():
+        return None
+    try:
+        payload = _read_json_required(event_json)
+    except Exception:  # noqa: BLE001 - provider fetch can still repair unreadable cached context.
+        return None
+
+    source_mode = f"{payload.get('candle_source_mode') or 'RUNTIME_CANDLES'}_REFRESH_CADENCE_REUSE"
+    result = capture_track_b_runtime_mgc_1m_candles(
+        runtime_candle_payload=payload,
+        source_payload_path=event_json,
+        expected_account_id=instrument.expected_account_id,
+        account_id=instrument.execution_account_id,
+        contract_key=instrument.contract_key,
+        local_symbol=instrument.local_symbol,
+        databento_continuous_symbol=instrument.databento_continuous_symbol,
+        dataset=instrument.dataset,
+        timeframe=config.timeframe,
+        max_bars=config.max_bars,
+        min_bars=config.min_bars,
+        candle_source_mode=source_mode,
+        provider_transport=config.provider_transport,
+        provider_request_symbol=instrument.local_symbol if config.prefer_raw_local_symbol_for_runtime_fetch else instrument.databento_continuous_symbol,
+        provider_request_stype_in="raw_symbol" if config.prefer_raw_local_symbol_for_runtime_fetch else config.stype_in,
+        provider_request_stype_out=config.provider_stype_out if config.provider_transport == "http" else None,
+        max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
+        max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
+        source_id=f"{config.source_id}_runtime_candle_capture_cycle_{cycle_index}_refresh_cadence_reuse",
+        output_root=config.runtime_candle_capture_output_root,
+        capture_id=f"track_b_shadow_monitor_runtime_capture_cycle_{cycle_index}_refresh_cadence_reuse_{uuid.uuid4().hex}",
+        now=now,
+    )
+    if result.report.get("data_written") is not True:
+        return None
+    _annotate_runtime_refresh_cadence_reuse_report(
+        result=result,
+        latest_report_json=report_json,
+        latest_event_json=event_json,
+        source_mode=source_mode,
+        data_refresh_seconds=config.data_refresh_seconds,
+    )
+    return result
+
+
+def _annotate_runtime_refresh_cadence_reuse_report(
+    *,
+    result: TrackBRuntimeCandleCaptureResult,
+    latest_report_json: Path,
+    latest_event_json: Path,
+    source_mode: str,
+    data_refresh_seconds: float,
+) -> None:
+    source = (
+        "FRESH_EXISTING_RUNTIME_ARTIFACT_REFRESH_CADENCE"
+        if result.report.get("fresh_for_execution") is True
+        else "EXISTING_RUNTIME_ARTIFACT_REFRESH_CADENCE_NOT_FRESH"
+    )
+    result.report.update(
+        {
+            "monitor_runtime_candle_source": source,
+            "provider_fetch_skipped_for_refresh_cadence": True,
+            "provider_fetch_failed_before_fallback": False,
+            "data_refresh_seconds": data_refresh_seconds,
+            "fallback_source_report_path": str(latest_report_json),
+            "fallback_source_event_path": str(latest_event_json),
+            "candle_source_mode": source_mode,
+            "source_lineage": {
+                "refresh_cadence_source_report_path": str(latest_report_json),
+                "refresh_cadence_source_event_path": str(latest_event_json),
+            },
+        }
+    )
+    _rewrite_runtime_result_files(result)
 
 
 def _fresh_runtime_artifact_fallback(
@@ -1186,6 +1332,8 @@ def _instrument_report_from_stages(
             "runtime_candle_capture_report_path": str(runtime.report_json) if runtime is not None else None,
             "runtime_provider_status_category": _provider_failure_category(runtime_report),
             "monitor_runtime_candle_source": runtime_report.get("monitor_runtime_candle_source") or "PROVIDER_FETCH",
+            "provider_fetch_skipped_for_refresh_cadence": runtime_report.get("provider_fetch_skipped_for_refresh_cadence", False),
+            "data_refresh_seconds": runtime_report.get("data_refresh_seconds"),
             "provider_fetch_failed_before_fallback": runtime_report.get("provider_fetch_failed_before_fallback", False),
             "provider_fetch_failure_category": runtime_report.get("provider_fetch_failure_category"),
             "provider_fetch_failure_report_path": runtime_report.get("provider_fetch_failure_report_path"),
@@ -1258,6 +1406,7 @@ def _report_for_cycle(
         "completed_at": completed_at.isoformat(),
         "cycle_elapsed_seconds": round(max(0.0, (completed_at - started_at.astimezone(UTC)).total_seconds()), 3),
         "poll_seconds": config.poll_seconds,
+        "data_refresh_seconds": config.data_refresh_seconds,
         "provider_timeout_seconds": config.provider_timeout_seconds,
         "provider_transport": config.provider_transport,
         "provider_stype_out": config.provider_stype_out,
@@ -1283,6 +1432,7 @@ def _report_for_cycle(
                 "runtime_candle_capture_verdict": item.get("runtime_candle_capture_verdict"),
                 "runtime_provider_status_category": item.get("runtime_provider_status_category"),
                 "monitor_runtime_candle_source": item.get("monitor_runtime_candle_source"),
+                "provider_fetch_skipped_for_refresh_cadence": item.get("provider_fetch_skipped_for_refresh_cadence"),
                 "provider_fetch_failed_before_fallback": item.get("provider_fetch_failed_before_fallback"),
             }
             for item in instrument_reports

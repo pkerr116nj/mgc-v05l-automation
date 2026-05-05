@@ -959,6 +959,7 @@ Start the monitor in SHADOW mode:
   --mode SHADOW \
   --max-cycles 999 \
   --poll-seconds 15 \
+  --data-refresh-seconds 60 \
   --expected-account-id DUM882026 \
   --contract-key MGC-202606 \
   --local-symbol MGCM6 \
@@ -1008,8 +1009,14 @@ QUOTE_TRIGGERED
 ```
 
 The current MGC strategies are completed-bar-only. The monitor refreshes
-runtime data each poll, but it evaluates completed-bar-only strategies only
-when the latest completed 5m candle advances; otherwise it writes a heartbeat.
+heartbeat/liveness each poll, but it does not need to hit Databento every
+heartbeat. Runtime candle provider fetches are controlled separately by
+`--data-refresh-seconds` and may reuse the latest bounded runtime candle
+artifact between refreshes when it still matches the instrument and remains
+`fresh_for_execution=true`. Completed-bar-only strategies evaluate only when
+the latest completed 5m candle advances; otherwise the monitor writes a
+heartbeat. If the reused artifact becomes stale, the monitor reports stale
+runtime context and does not evaluate strategies.
 Future same-bar strategies must be registered as same-bar or quote-triggered
 and must clearly label forming-bar/current-quote decisions.
 

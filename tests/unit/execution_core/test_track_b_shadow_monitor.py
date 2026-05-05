@@ -92,6 +92,7 @@ def config(tmp_path: Path, **overrides: object) -> TrackBShadowMonitorConfig:
     values = {
         "max_cycles": 1,
         "poll_seconds": 0,
+        "data_refresh_seconds": 0,
         "output_root": tmp_path / "monitor",
         "runtime_candle_capture_output_root": tmp_path / "runtime",
         "asian_drift_output_root": tmp_path / "asian",
@@ -424,6 +425,113 @@ def test_completed_bar_only_skips_repeated_completed_bar_after_first_evaluation(
     assert result.report["instrument_reports"][0]["instrument_verdict"] == (
         TrackBShadowMonitorVerdict.HEARTBEAT_NO_NEW_COMPLETED_BAR.value
     )
+
+
+def test_completed_bar_only_reuses_fresh_runtime_artifact_inside_refresh_cadence(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+    runtime_fetch_calls = {"count": 0}
+
+    def runtime_real(
+        cfg: TrackBShadowMonitorConfig,
+        _instrument: TrackBShadowMonitorInstrumentConfig,
+        cycle_index: int,
+        actual_now: datetime,
+    ) -> TrackBRuntimeCandleCaptureResult:
+        runtime_fetch_calls["count"] += 1
+        return capture_track_b_runtime_mgc_1m_candles(
+            runtime_candle_payload=runtime_payload_for_now(),
+            output_root=cfg.runtime_candle_capture_output_root,
+            max_bars=20,
+            min_bars=8,
+            max_latest_1m_age_seconds=900,
+            max_completed_5m_age_seconds=900,
+            source_id=f"test_runtime_fetch_{cycle_index}",
+            now=actual_now,
+        )
+
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=runtime_real,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+    base = now()
+    calls = {"count": 0}
+
+    def clock() -> datetime:
+        calls["count"] += 1
+        return base if calls["count"] <= 3 else base.replace(second=15)
+
+    result = run_track_b_shadow_monitor(
+        config=config(tmp_path, max_cycles=2, data_refresh_seconds=60),
+        stages=stages,
+        monitor_id="monitor-refresh-cadence",
+        now_func=clock,
+    )
+
+    assert runtime_fetch_calls["count"] == 1
+    assert fake.calls["multi"] == 1
+    assert result.verdict == TrackBShadowMonitorVerdict.HEARTBEAT_NO_NEW_COMPLETED_BAR
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["monitor_runtime_candle_source"] == "FRESH_EXISTING_RUNTIME_ARTIFACT_REFRESH_CADENCE"
+    assert instrument_report["provider_fetch_skipped_for_refresh_cadence"] is True
+    assert instrument_report["fresh_for_execution"] is True
+    assert instrument_report["submit_attempted"] is False
+    assert instrument_report["broker_state_mutated"] is False
+
+
+def test_refresh_cadence_reuse_can_block_stale_cached_runtime_without_provider_fetch(tmp_path: Path) -> None:
+    cfg = config(
+        tmp_path,
+        max_cycles=2,
+        data_refresh_seconds=60,
+        max_latest_1m_age_seconds=5,
+        max_completed_5m_age_seconds=5,
+    )
+    capture_track_b_runtime_mgc_1m_candles(
+        runtime_candle_payload=runtime_payload_for_now(),
+        output_root=cfg.runtime_candle_capture_output_root,
+        max_bars=20,
+        min_bars=8,
+        max_latest_1m_age_seconds=900,
+        max_completed_5m_age_seconds=900,
+        now=now(),
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=fake.runtime,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+    base = datetime(2026, 5, 5, 12, 0, 15, tzinfo=UTC)
+    calls = {"count": 0}
+
+    def clock() -> datetime:
+        calls["count"] += 1
+        return now() if calls["count"] <= 3 else base
+
+    result = run_track_b_shadow_monitor(
+        config=cfg,
+        stages=stages,
+        monitor_id="monitor-refresh-cadence-stale",
+        now_func=clock,
+    )
+
+    assert result.verdict == TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["monitor_runtime_candle_source"] == "EXISTING_RUNTIME_ARTIFACT_REFRESH_CADENCE_NOT_FRESH"
+    assert instrument_report["provider_fetch_skipped_for_refresh_cadence"] is True
+    assert instrument_report["fresh_for_execution"] is False
+    assert fake.calls["multi"] == 1
 
 
 def test_signal_ready_no_submit_does_not_stop_shadow_monitor(tmp_path: Path) -> None:
