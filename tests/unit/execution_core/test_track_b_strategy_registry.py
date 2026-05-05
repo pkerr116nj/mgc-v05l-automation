@@ -56,9 +56,9 @@ def test_unregistered_strategy_is_rejected() -> None:
 
 def test_unregistered_rule_mode_is_rejected() -> None:
     entry = resolve_track_b_strategy_registry_entry(
-        rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_V1",
-        rule_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_V1",
-        strategy_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_V1",
+        rule_mode="ATP_STAGED_ADD_V1",
+        rule_id="ATP_STAGED_ADD_V1",
+        strategy_id="ATP_STAGED_ADD_V1",
     )
 
     assert entry is None
@@ -78,6 +78,22 @@ def test_asia_early_pause_resume_short_registry_metadata_is_valid() -> None:
     assert entry.live_money_eligible is False
     assert "metadata.asia_early_pause_resume_short_features.normalized_curvature" in entry.required_feature_schema
     assert "metadata.asia_early_pause_resume_short_state.derivative_phase" in entry.required_state_schema
+
+
+def test_asia_early_normal_breakout_retest_hold_long_registry_metadata_is_valid() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        rule_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        strategy_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert "metadata.asia_early_normal_breakout_retest_hold_long_features.breakout_bar_slope_is_flat" in entry.required_feature_schema
+    assert "metadata.asia_early_normal_breakout_retest_hold_long_state.asia_early_or_gc_mgc_london_open" in entry.required_state_schema
 
 
 def test_missing_required_state_fields_are_not_ready() -> None:

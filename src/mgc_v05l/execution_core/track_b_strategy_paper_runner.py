@@ -73,6 +73,9 @@ class TrackBStrategyPaperRunnerVerdict(str, Enum):
     ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY"
     ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION"
     ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
+    ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY"
+    ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION"
+    ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT = "TRACK_B_STRATEGY_PAPER_RUNNER_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT"
     BLOCKED_NON_PAPER_MODE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_NON_PAPER_MODE"
     BLOCKED_INVALID_SUBMIT_REQUEST = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_INVALID_SUBMIT_REQUEST"
     BLOCKED_DATA_MAINTENANCE = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_DATA_MAINTENANCE_STALE_OR_INSUFFICIENT"
@@ -494,6 +497,8 @@ def run_track_b_strategy_paper(
                 verdict = TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION
             elif _is_pause_resume_short_rule(config):
                 verdict = TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION
+            elif _is_breakout_retest_hold_long_rule(config):
+                verdict = TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION
             else:
                 verdict = (
                     TrackBStrategyPaperRunnerVerdict.HUMAN_REVIEW_NO_SIGNAL
@@ -990,6 +995,10 @@ def _build_report(
         "asian_drift_state_snapshot_path": _asian_drift_state_snapshot_path(config),
         "asian_drift_state_ready": _asian_drift_state_ready(config),
         "asia_early_pause_resume_short_watch_verdict": _pause_resume_short_runner_verdict(verdict, strategy_report),
+        "asia_early_normal_breakout_retest_hold_long_watch_verdict": _breakout_retest_hold_long_runner_verdict(
+            verdict,
+            strategy_report,
+        ),
         "strategy_registry_id": strategy_report.get("strategy_registry_id"),
         "strategy_registry_rule_id": strategy_report.get("strategy_registry_rule_id"),
         "strategy_registry_rule_mode": strategy_report.get("strategy_registry_rule_mode"),
@@ -1651,6 +1660,8 @@ def _signal_source_from_rule_mode(rule_mode: str) -> str:
         return "ASIAN_DRIFT_V1"
     if str(rule_mode or "").upper() == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1":
         return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    if str(rule_mode or "").upper() == "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1":
+        return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
     return "REAL_STRATEGY_RULE"
 
 
@@ -1659,6 +1670,7 @@ def _real_strategy_signal_from_rule_mode(rule_mode: str) -> bool:
         "MGC_EMA_MOMENTUM_RECLAIM_LONG",
         "ASIAN_DRIFT_V1",
         "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
     }
 
 
@@ -1671,8 +1683,13 @@ def _is_pause_resume_short_rule(config: TrackBStrategyPaperRunnerConfig) -> bool
     return str(config.rule_mode or "").upper() == value or str(config.rule_id or "").upper() == value
 
 
+def _is_breakout_retest_hold_long_rule(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    value = "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
+    return str(config.rule_mode or "").upper() == value or str(config.rule_id or "").upper() == value
+
+
 def _is_watch_only_until_submit_rule(config: TrackBStrategyPaperRunnerConfig) -> bool:
-    return _is_asian_drift_rule(config) or _is_pause_resume_short_rule(config)
+    return _is_asian_drift_rule(config) or _is_pause_resume_short_rule(config) or _is_breakout_retest_hold_long_rule(config)
 
 
 def _strategy_specific_not_ready_verdict(config: TrackBStrategyPaperRunnerConfig) -> TrackBStrategyPaperRunnerVerdict | None:
@@ -1680,6 +1697,8 @@ def _strategy_specific_not_ready_verdict(config: TrackBStrategyPaperRunnerConfig
         return TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_NOT_READY_FOR_TONIGHT
     if _is_pause_resume_short_rule(config):
         return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY
+    if _is_breakout_retest_hold_long_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY
     return None
 
 
@@ -1688,6 +1707,8 @@ def _strategy_specific_signal_ready_no_submit_verdict(config: TrackBStrategyPape
         return TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT
     if _is_pause_resume_short_rule(config):
         return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT
+    if _is_breakout_retest_hold_long_rule(config):
+        return TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT
     return None
 
 
@@ -1696,6 +1717,8 @@ def _expected_signal_source(config: TrackBStrategyPaperRunnerConfig) -> str:
         return "ASIAN_DRIFT_V1"
     if _is_pause_resume_short_rule(config):
         return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    if _is_breakout_retest_hold_long_rule(config):
+        return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
     return _signal_source_from_rule_mode(config.rule_mode)
 
 
@@ -1704,6 +1727,8 @@ def _strategy_specific_real_signal_next_action(config: TrackBStrategyPaperRunner
         return "Use an actual ASIAN_DRIFT_V1 state snapshot; DEMO/proof signals cannot drive this path."
     if _is_pause_resume_short_rule(config):
         return "Use an actual ASIA_EARLY_PAUSE_RESUME_SHORT_V1 feature/state envelope; DEMO/proof signals cannot drive this path."
+    if _is_breakout_retest_hold_long_rule(config):
+        return "Use an actual ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 feature/state envelope; DEMO/proof signals cannot drive this path."
     return "Use a registered real strategy signal before PAPER handoff."
 
 
@@ -1712,6 +1737,8 @@ def _strategy_specific_signal_ready_next_action(config: TrackBStrategyPaperRunne
         return "Asian Drift real state signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
     if _is_pause_resume_short_rule(config):
         return "Pause-resume short real strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
+    if _is_breakout_retest_hold_long_rule(config):
+        return "Breakout-retest-hold long real strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
     return "Strategy signal is ready, but explicit PAPER submit flags were not supplied. No readiness or broker mutation was attempted."
 
 
@@ -1757,6 +1784,19 @@ def _pause_resume_short_runner_verdict(
     if verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT:
         return "ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
     return strategy_report.get("asia_early_pause_resume_short_watch_verdict") if strategy_report else None
+
+
+def _breakout_retest_hold_long_runner_verdict(
+    verdict: TrackBStrategyPaperRunnerVerdict,
+    strategy_report: Mapping[str, object],
+) -> str | None:
+    if verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY:
+        return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY"
+    if verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION:
+        return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION"
+    if verdict == TrackBStrategyPaperRunnerVerdict.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT:
+        return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT"
+    return strategy_report.get("asia_early_normal_breakout_retest_hold_long_watch_verdict") if strategy_report else None
 
 
 def _asian_drift_state_snapshot_path(config: TrackBStrategyPaperRunnerConfig) -> str | None:

@@ -311,6 +311,23 @@ Dashboard implication:
   when explicit PAPER submit flags are supplied, registry
   `paper_eligible=true`, registry `live_money_eligible=false`, and the
   requested PAPER side matches the explicit short signal (`SHORT -> SELL`).
+- `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1` is the guarded PAPER
+  migration of the research-defined `asiaEarlyNormalBreakoutRetestHoldTurn`
+  branch. It is registered as MGC/5m, `paper_eligible=true`, and
+  `live_money_eligible=false`. It consumes only an explicit
+  `metadata.asia_early_normal_breakout_retest_hold_long_state` plus
+  `metadata.asia_early_normal_breakout_retest_hold_long_features` envelope
+  mirroring `src/mgc_v05l/signals/bull_snap.py` and
+  `config/replay.asia_early_breakout_retest_hold_pattern_v1_normal.yaml`.
+  Required predicates include the Asia-early/London-extension state gate,
+  no competing first-bull-snap turn, anti-churn spacing, flat breakout slope,
+  normal breakout expansion, breakout above prior high, and retest/hold of
+  the breakout level. Missing fields block as NOT_READY; valid non-setups
+  produce `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION`;
+  valid setups produce
+  `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT`. The
+  adapter itself remains signal-only; guarded PAPER handoff requires explicit
+  PAPER flags and side `BUY` for the real LONG signal.
 - `track_b_asian_drift_state` is the explicit 5m state snapshot boundary for
   the Asian Drift watch path. It validates and writes
   `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json`
@@ -371,6 +388,9 @@ Dashboard implication:
   `real_strategy_signal=true`, registry `paper_eligible=true`, registry
   `live_money_eligible=false`, and a side matching the strategy signal. The
   adapter still has no private broker path.
+  `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1` follows the same contract
+  with `signal_source=ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1`; the
+  requested PAPER side must match its explicit LONG signal (`LONG -> BUY`).
 - `track_b_real_rule_wait_runner` is the bounded real-rule polling wrapper for
   eventual MGC PAPER signals. It repeatedly refreshes or reads bounded runtime
   candle context, delegates one cycle to `track_b_strategy_paper_runner` using

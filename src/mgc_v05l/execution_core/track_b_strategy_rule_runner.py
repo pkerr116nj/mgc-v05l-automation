@@ -38,6 +38,7 @@ MGC_INSTRUMENT_FAMILY = "MGC"
 DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID = "mgc_ema_momentum_reclaim_long_v1"
 DEFAULT_ASIAN_DRIFT_RULE_ID = "asian_drift_v1"
 DEFAULT_ASIA_EARLY_PAUSE_RESUME_SHORT_RULE_ID = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+DEFAULT_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_RULE_ID = "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
 
 
 class TrackBStrategyRuleRunnerVerdict(str, Enum):
@@ -55,6 +56,7 @@ class TrackBStrategyRuleMode(str, Enum):
     MGC_EMA_MOMENTUM_RECLAIM_LONG = "MGC_EMA_MOMENTUM_RECLAIM_LONG"
     ASIAN_DRIFT_V1 = "ASIAN_DRIFT_V1"
     ASIA_EARLY_PAUSE_RESUME_SHORT_V1 = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 = "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
     HUMAN_REVIEW_ONLY = "HUMAN_REVIEW_ONLY"
 
 
@@ -396,6 +398,8 @@ def _validate_input(
         return _validate_asian_drift_snapshot(event)
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
         return _validate_asia_early_pause_resume_short_snapshot(event)
+    if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
+        return _validate_asia_early_normal_breakout_retest_hold_long_snapshot(event)
     return None
 
 
@@ -435,6 +439,22 @@ def _validate_asia_early_pause_resume_short_snapshot(event: Mapping[str, Any]) -
     return None
 
 
+def _validate_asia_early_normal_breakout_retest_hold_long_snapshot(event: Mapping[str, Any]) -> str | None:
+    metadata = event.get("metadata") if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = metadata.get("asia_early_normal_breakout_retest_hold_long_state")
+    features = metadata.get("asia_early_normal_breakout_retest_hold_long_features")
+    if not isinstance(state, Mapping) or not isinstance(features, Mapping):
+        return "Asia Early normal breakout-retest-hold long v1 requires explicit state and feature envelopes."
+    timeframe = _optional_text(event.get("timeframe") or state.get("timeframe") or metadata.get("timeframe"))
+    if timeframe != "5m":
+        return "Asia Early normal breakout-retest-hold long v1 Track B watch requires completed 5m decision-bar state."
+    if _optional_text(features.get("feature_version")) != "asia_early_normal_breakout_retest_hold_long_v1_phase1":
+        return "Asia Early normal breakout-retest-hold long v1 requires feature_version=asia_early_normal_breakout_retest_hold_long_v1_phase1."
+    if _optional_text(features.get("calibration_profile")) != "probationary_baseline_v1":
+        return "Asia Early normal breakout-retest-hold long v1 requires calibration_profile=probationary_baseline_v1."
+    return None
+
+
 def _evaluate_rule_decision(
     *,
     event: Mapping[str, Any],
@@ -458,6 +478,8 @@ def _evaluate_rule_decision(
         return _evaluate_asian_drift_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
         return _evaluate_asia_early_pause_resume_short_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
+    if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
+        return _evaluate_asia_early_normal_breakout_retest_hold_long_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     raise ValueError(f"Unsupported rule mode: {rule_mode.value}")
 
 
@@ -688,6 +710,82 @@ def _evaluate_asia_early_pause_resume_short_v1(
     }
 
 
+def _evaluate_asia_early_normal_breakout_retest_hold_long_v1(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+) -> dict[str, Any]:
+    metadata = dict(event.get("metadata") or {}) if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = (
+        metadata.get("asia_early_normal_breakout_retest_hold_long_state")
+        if isinstance(metadata.get("asia_early_normal_breakout_retest_hold_long_state") or {}, Mapping)
+        else {}
+    )
+    features = (
+        metadata.get("asia_early_normal_breakout_retest_hold_long_features")
+        if isinstance(metadata.get("asia_early_normal_breakout_retest_hold_long_features") or {}, Mapping)
+        else {}
+    )
+
+    breakout_normalized_slope = _decimal_field(features, "breakout_normalized_slope")
+    breakout_abs_slope_max = _decimal_field(features, "breakout_abs_slope_max") or Decimal("0.20")
+    breakout_range_expansion_ratio = _decimal_field(features, "breakout_range_expansion_ratio")
+    breakout_min_range_expansion_ratio = _decimal_field(features, "breakout_min_range_expansion_ratio") or Decimal("0.85")
+    breakout_max_range_expansion_ratio = _decimal_field(features, "breakout_max_range_expansion_ratio") or Decimal("1.25")
+
+    conditions: dict[str, bool | None] = {
+        "allow_asia": _bool_field(state, "allow_asia") is True,
+        "asia_early_or_gc_mgc_london_open": _bool_field(state, "asia_early_or_gc_mgc_london_open") is True,
+        "no_first_bull_snap_turn": _bool_field(state, "no_first_bull_snap_turn") is True,
+        "prior_bars_since_long_setup_gt_anti_churn": _bool_field(state, "prior_bars_since_long_setup_gt_anti_churn") is True,
+        "breakout_bar_slope_is_flat": _bool_field(features, "breakout_bar_slope_is_flat") is True,
+        "breakout_bar_expansion_is_normal": _bool_field(features, "breakout_bar_expansion_is_normal") is True,
+        "breakout_breaks_prior_1_high": _bool_field(features, "breakout_breaks_prior_1_high") is True,
+        "signal_retests_and_holds_breakout_level": _bool_field(features, "signal_retests_and_holds_breakout_level") is True,
+    }
+    failed = [name for name, passed in conditions.items() if passed is not True]
+    blockers = [f"{name}=false_or_missing" for name in failed]
+    if failed:
+        decision = TrackBStrategyRuleDecision.NO_SIGNAL
+        decision_reason = "Asia Early normal breakout-retest-hold long v1 conditions did not pass: " + ", ".join(failed)
+    else:
+        decision = TrackBStrategyRuleDecision.LONG
+        decision_reason = "Asia Early normal breakout-retest-hold long v1 explicit feature/state snapshot is entry-ready for LONG."
+    return {
+        "rule_name": "asia_early_normal_breakout_retest_hold_long_v1",
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "rule_inputs": {
+            "strategy_id": event.get("strategy_id"),
+            "derivative_phase": state.get("derivative_phase"),
+            "session_asia": state.get("session_asia"),
+            "allow_asia": state.get("allow_asia"),
+            "asia_early_or_gc_mgc_london_open": state.get("asia_early_or_gc_mgc_london_open"),
+            "no_first_bull_snap_turn": state.get("no_first_bull_snap_turn"),
+            "prior_bars_since_long_setup_gt_anti_churn": state.get("prior_bars_since_long_setup_gt_anti_churn"),
+            "breakout_normalized_slope": None if breakout_normalized_slope is None else str(breakout_normalized_slope),
+            "breakout_abs_slope_max": str(breakout_abs_slope_max),
+            "breakout_range_expansion_ratio": (
+                None if breakout_range_expansion_ratio is None else str(breakout_range_expansion_ratio)
+            ),
+            "breakout_min_range_expansion_ratio": str(breakout_min_range_expansion_ratio),
+            "breakout_max_range_expansion_ratio": str(breakout_max_range_expansion_ratio),
+            "feature_version": features.get("feature_version"),
+            "calibration_profile": features.get("calibration_profile"),
+            "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
+        },
+        "rule_conditions": conditions,
+        "rule_blockers": blockers,
+        "research_lineage": (
+            "Mirrors the explicit asiaEarlyNormalBreakoutRetestHoldTurn predicates in "
+            "src/mgc_v05l/signals/bull_snap.py and config/replay.asia_early_breakout_retest_hold_pattern_v1_normal.yaml. "
+            "Track B consumes a precomputed state/feature envelope and does not infer these fields from raw candles."
+        ),
+        "rule_id": rule_id,
+    }
+
+
 def _strategy_event_for_adapter(
     *,
     event: Mapping[str, Any],
@@ -783,6 +881,14 @@ def _write_report(
             verdict,
             signal_emitted,
             primary_blocker,
+        ),
+        "asia_early_normal_breakout_retest_hold_long_watch_verdict": (
+            _asia_early_normal_breakout_retest_hold_long_watch_verdict(
+                rule_mode,
+                verdict,
+                signal_emitted,
+                primary_blocker,
+            )
         ),
         "rule_inputs": rule_evaluation.get("rule_inputs") or {},
         "rule_conditions": rule_evaluation.get("rule_conditions") or {},
@@ -903,6 +1009,8 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
         return "ASIAN_DRIFT_V1"
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
         return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
+        return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
     return "REAL_STRATEGY_RULE"
 
 
@@ -911,6 +1019,7 @@ def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
         TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG,
         TrackBStrategyRuleMode.ASIAN_DRIFT_V1,
         TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1,
+        TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1,
     }
 
 
@@ -952,6 +1061,26 @@ def _asia_early_pause_resume_short_watch_verdict(
     if signal_emitted:
         return "ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
     return "ASIA_EARLY_PAUSE_RESUME_SHORT_NO_SIGNAL_NO_MUTATION"
+
+
+def _asia_early_normal_breakout_retest_hold_long_watch_verdict(
+    rule_mode: TrackBStrategyRuleMode,
+    verdict: TrackBStrategyRuleRunnerVerdict,
+    signal_emitted: bool,
+    primary_blocker: str | None,
+) -> str | None:
+    if rule_mode != TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
+        return None
+    if primary_blocker or verdict in {
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_NON_REALTIME_INPUT,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_SCHEMA_ERROR,
+        TrackBStrategyRuleRunnerVerdict.BLOCKED_DOWNSTREAM_REJECTED,
+    }:
+        return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY"
+    if signal_emitted:
+        return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT"
+    return "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION"
 
 
 def _rule_mode(value: str | TrackBStrategyRuleMode) -> TrackBStrategyRuleMode:

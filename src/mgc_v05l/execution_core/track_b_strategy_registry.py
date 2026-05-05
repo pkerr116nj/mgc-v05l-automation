@@ -127,6 +127,34 @@ ASIA_EARLY_PAUSE_RESUME_SHORT_V1 = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("ASIA_EARLY_PAUSE_RESUME_SHORT_V1",),
 )
 
+ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    rule_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.asia_early_normal_breakout_retest_hold_long_features.breakout_bar_slope_is_flat",
+        "metadata.asia_early_normal_breakout_retest_hold_long_features.breakout_bar_expansion_is_normal",
+        "metadata.asia_early_normal_breakout_retest_hold_long_features.breakout_breaks_prior_1_high",
+        "metadata.asia_early_normal_breakout_retest_hold_long_features.signal_retests_and_holds_breakout_level",
+        "metadata.asia_early_normal_breakout_retest_hold_long_features.feature_version",
+        "metadata.asia_early_normal_breakout_retest_hold_long_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.asia_early_normal_breakout_retest_hold_long_state.asia_early_or_gc_mgc_london_open",
+        "metadata.asia_early_normal_breakout_retest_hold_long_state.allow_asia",
+        "metadata.asia_early_normal_breakout_retest_hold_long_state.no_first_bull_snap_turn",
+        "metadata.asia_early_normal_breakout_retest_hold_long_state.prior_bars_since_long_setup_gt_anti_churn",
+    ),
+    feature_version="asia_early_normal_breakout_retest_hold_long_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=True,
+    live_money_eligible=False,
+    accepted_strategy_ids=("ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",),
+    accepted_rule_ids=("ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",),
+)
+
 DEMO_WIRING_PROOF = TrackBStrategyRegistryEntry(
     strategy_id="track_b_demo_wiring_proof",
     rule_id="mgc_realtime_quote_demo_long_v1",
@@ -163,6 +191,7 @@ TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     MGC_EMA_MOMENTUM_RECLAIM_LONG,
     ASIAN_DRIFT_V1,
     ASIA_EARLY_PAUSE_RESUME_SHORT_V1,
+    ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1,
     DEMO_WIRING_PROOF,
     HUMAN_REVIEW_ONLY,
 )

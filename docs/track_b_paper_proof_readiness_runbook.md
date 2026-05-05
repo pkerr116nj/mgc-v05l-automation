@@ -819,6 +819,20 @@ without submit flags produce
 `ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT` with no readiness or
 broker mutation.
 
+`ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1` also uses the guarded PAPER
+handoff after a real breakout/retest/hold state/feature envelope emits a LONG
+signal. The registry marks it `paper_eligible=true` and
+`live_money_eligible=false`; the adapter is signal-only and cannot submit.
+PAPER handoff requires
+`signal_source=ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1`,
+`real_strategy_signal=true`, explicit PAPER submit flags, and side `BUY` for
+the LONG signal. Missing fields produce
+`ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY`, no-signal states
+produce `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION`,
+and signal states without submit flags produce
+`ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT` with no
+readiness or broker mutation.
+
 Maintained weekly history is historical context. It may be many hours or days
 old and still be valid if `complete_through_cutoff=true`. The runner reports
 `historical_context_ready`, `runtime_candle_context_required`,

@@ -729,6 +729,60 @@ The strategy adapter still never submits. The paper runner rejects demo/proof
 signals, missing registry metadata, side mismatches, and any live-money mode;
 all broker mutation stays inside the Track B paper-proof lifecycle.
 
+`ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1` is also registered as guarded
+PAPER eligible (`paper_eligible=true`, `live_money_eligible=false`). It
+requires an explicit 5m feature/state envelope under
+`metadata.asia_early_normal_breakout_retest_hold_long_features` and
+`metadata.asia_early_normal_breakout_retest_hold_long_state`; Track B does not
+infer the breakout/retest/hold setup from raw candles. Use the same rule
+runner shape:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_rule_runner_cli \
+  --input-event-json <EXPLICIT_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_5M_STATE_JSON> \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --source-id asia_early_normal_breakout_retest_hold_long_watch \
+  --strategy-id ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 \
+  --lane-id mgc_asia_early_normal_breakout_retest_hold_long \
+  --rule-id ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 \
+  --rule-mode ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 \
+  --emit-signal \
+  --output-root outputs/track_b_execution_core/track_b_strategy_rule_runner
+```
+
+Valid watch outcomes are
+`ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NO_SIGNAL_NO_MUTATION`,
+`ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT`, and
+`ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY`. PAPER handoff is
+allowed only through the guarded strategy paper runner when the real strategy
+signal source matches and explicit PAPER flags are present. The order side
+must match the real long signal (`LONG -> BUY`):
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_strategy_paper_runner_cli \
+  --mode PAPER \
+  --input-event-json <EXPLICIT_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_5M_STATE_JSON> \
+  --inbox-dir examples/track_b_shadow_listener/inbox \
+  --expected-account-id DUM882026 \
+  --account-id DUM882026 \
+  --contract-key MGC-202606 \
+  --allowlisted-local-symbol MGCM6 \
+  --con-id 712565978 \
+  --strategy-id ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 \
+  --lane-id mgc_asia_early_normal_breakout_retest_hold_long \
+  --rule-id ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 \
+  --rule-mode ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 \
+  --emit-signal \
+  --side BUY \
+  --submit-paper \
+  --confirm-paper-submit \
+  --quantity 1 \
+  --manual-open-limit-price <SAFE_PAPER_OPEN_LIMIT> \
+  --manual-close-limit-price <SAFE_PAPER_CLOSE_LIMIT> \
+  --output-root outputs/track_b_execution_core/track_b_strategy_paper_runner
+```
+
 Historical `available_end`, fallback, or fixture evidence cannot produce a
 strategy signal unless `--allow-fixture-input` is intentionally supplied for a
 test/demo. The older `DEMO_LONG_ONLY` mode remains available as an explicit
