@@ -1382,6 +1382,7 @@ class OperatorDashboardService:
                     "research_capture": research_capture,
                     "production_link": production_link,
                     "same_underlying_conflicts": same_underlying_conflicts,
+                    "track_b_operator_status": self._latest_track_b_operator_status_payload(),
                 }
                 _write_json_file(self._dashboard_snapshot_path, dashboard_payload)
                 return dashboard_payload
@@ -1533,6 +1534,7 @@ class OperatorDashboardService:
         cold_snapshot_skipped_for_latency: bool,
     ) -> dict[str, Any]:
         annotated = dict(payload)
+        annotated["track_b_operator_status"] = self._latest_track_b_operator_status_payload()
         generated_at = _parse_iso_datetime(str(annotated.get("generated_at") or ""))
         snapshot_age_seconds = (
             max((datetime.now(timezone.utc) - generated_at.astimezone(timezone.utc)).total_seconds(), 0.0)

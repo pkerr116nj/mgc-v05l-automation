@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
+from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatusInputs, create_operator_status_summary
 from .track_b_strategy_paper_runner import (
     DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT,
     TrackBStrategyPaperRunnerConfig,
@@ -90,6 +91,8 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     output_root: Path = DEFAULT_TRACK_B_MULTI_STRATEGY_RUNTIME_CYCLE_OUTPUT_ROOT
     strategy_rule_output_root: Path = DEFAULT_TRACK_B_STRATEGY_RULE_RUNNER_OUTPUT_ROOT
     strategy_paper_runner_output_root: Path = DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT
+    update_operator_status: bool = False
+    operator_status_output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
 
 
 @dataclass(frozen=True)
@@ -191,6 +194,8 @@ def run_track_b_multi_strategy_runtime_cycle(
             required_next_action=required_next_action,
         )
         _write_report(report_json, report)
+        report.update(_maybe_update_operator_status(config, report))
+        _write_report(report_json, report)
         return TrackBMultiStrategyRuntimeCycleResult(
             verdict=verdict,
             report_json=report_json,
@@ -212,6 +217,8 @@ def run_track_b_multi_strategy_runtime_cycle(
             primary_blocker=f"Track B multi-strategy runtime cycle stage error: {exc}",
             required_next_action="Review multi-strategy cycle diagnostics before retrying.",
         )
+        _write_report(report_json, report)
+        report.update(_maybe_update_operator_status(config, report))
         _write_report(report_json, report)
         return TrackBMultiStrategyRuntimeCycleResult(
             verdict=TrackBMultiStrategyRuntimeCycleVerdict.BLOCKED_STAGE_ERROR,
@@ -492,9 +499,88 @@ def _build_report(
         "ui_authority": False,
         "hidden_submit": False,
         "direct_broker_path": False,
+        "operator_status_invoked": False,
+        "operator_status_verdict": None,
+        "operator_status_report_path": None,
+        "latest_operator_status_path": None,
+        "operator_status_error": None,
         "report_json_path": str(report_json),
         "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_multi_strategy_runtime_cycle_report.json"),
     }
+
+
+def _maybe_update_operator_status(
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    report: Mapping[str, object],
+) -> dict[str, object]:
+    if not config.update_operator_status:
+        return {
+            "operator_status_invoked": False,
+            "operator_status_verdict": None,
+            "operator_status_report_path": None,
+            "latest_operator_status_path": None,
+            "operator_status_error": None,
+        }
+    try:
+        runtime_cycle_report_json = Path(str(report["latest_report_json_path"]))
+        result = create_operator_status_summary(
+            inputs=_operator_status_inputs_for_runtime_cycle(
+                config=config,
+                runtime_cycle_report_json=runtime_cycle_report_json,
+            )
+        )
+        return {
+            "operator_status_invoked": True,
+            "operator_status_verdict": result.report.get("status_verdict"),
+            "operator_status_report_path": str(result.report_json),
+            "latest_operator_status_path": str(result.report.get("latest_report_json_path")),
+            "operator_status_error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - status refresh must remain report-only.
+        return {
+            "operator_status_invoked": True,
+            "operator_status_verdict": None,
+            "operator_status_report_path": None,
+            "latest_operator_status_path": None,
+            "operator_status_error": str(exc),
+        }
+
+
+def _operator_status_inputs_for_runtime_cycle(
+    *,
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    runtime_cycle_report_json: Path,
+) -> OperatorStatusInputs:
+    return OperatorStatusInputs(
+        listener_heartbeat_json=_existing_path(
+            "outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_heartbeat.json"
+        ),
+        listener_health_json=_existing_path(
+            "outputs/track_b_execution_core/shadow_listener/track_b_example_shadow_listener_v1/latest_shadow_listener_health.json"
+        ),
+        track_b_multi_strategy_runtime_cycle_report_json=runtime_cycle_report_json,
+        databento_candle_observer_report_json=_existing_path(
+            "outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json"
+        ),
+        databento_candle_observer_heartbeat_json=_existing_path(
+            "outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_heartbeat.json"
+        ),
+        strategy_signal_adapter_report_json=_existing_path(
+            "outputs/track_b_execution_core/strategy_signal_adapter/latest_strategy_signal_adapter_report.json"
+        ),
+        candle_signal_producer_report_json=_existing_path(
+            "outputs/track_b_execution_core/candle_signal_producer/latest_candle_signal_producer_report.json"
+        ),
+        signal_batch_writer_report_json=_existing_path(
+            "outputs/track_b_execution_core/signal_batch_writer/latest_signal_batch_writer_report.json"
+        ),
+        output_root=config.operator_status_output_root,
+    )
+
+
+def _existing_path(raw_path: str) -> Path | None:
+    path = Path(raw_path)
+    return path if path.exists() else None
 
 
 def _reason_no_signal_chosen(

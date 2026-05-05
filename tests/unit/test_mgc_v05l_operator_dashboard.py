@@ -2701,6 +2701,25 @@ def test_api_dashboard_serves_current_same_instance_cache_while_runtime_artifact
     source_path = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "operator_status.json"
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_text('{"updated_at":"2026-04-17T12:47:37+00:00"}', encoding="utf-8")
+    track_b_status_path = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "operator_status"
+        / "latest_operator_status_summary.json"
+    )
+    track_b_status_path.parent.mkdir(parents=True, exist_ok=True)
+    track_b_status_path.write_text(
+        json.dumps(
+            {
+                "status_verdict": "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW",
+                "multi_strategy_runtime_cycle_verdict": "TRACK_B_MULTI_STRATEGY_RUNTIME_NO_SIGNAL_NO_MUTATION",
+                "multi_strategy_submit_attempted": False,
+                "live_money_readiness": False,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     inline_generation_attempted = False
 
@@ -2727,6 +2746,11 @@ def test_api_dashboard_serves_current_same_instance_cache_while_runtime_artifact
     assert payload["dashboard_meta"]["server_instance_id"] == "instance-current"
     assert payload["generated_at"] == generated_at
 
+    assert payload["track_b_operator_status"]["multi_strategy_runtime_cycle_verdict"] == (
+        "TRACK_B_MULTI_STRATEGY_RUNTIME_NO_SIGNAL_NO_MUTATION"
+    )
+    assert payload["track_b_operator_status"]["multi_strategy_submit_attempted"] is False
+    assert payload["track_b_operator_status"]["live_money_readiness"] is False
 
 def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surfaces() -> None:
     html = Path("src/mgc_v05l/app/dashboard_assets/operator_dashboard.html").read_text(encoding="utf-8")

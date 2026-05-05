@@ -201,6 +201,33 @@ def test_all_three_no_signal_no_mutation(tmp_path: Path) -> None:
     assert result.report["live_money_readiness"] is False
 
 
+def test_runtime_cycle_can_refresh_operator_status_latest(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            update_operator_status=True,
+            operator_status_output_root=tmp_path / "operator_status",
+        ),
+        stages=stages_for(tmp_path, calls, default_reports()),
+        cycle_id="cycle-refresh-operator-status",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION
+    assert result.report["operator_status_invoked"] is True
+    assert result.report["operator_status_verdict"] == "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW"
+    latest_operator_status = Path(str(result.report["latest_operator_status_path"]))
+    assert latest_operator_status == tmp_path / "operator_status" / "latest_operator_status_summary.json"
+    payload = json.loads(latest_operator_status.read_text(encoding="utf-8"))
+    assert payload["multi_strategy_runtime_cycle_verdict"] == "TRACK_B_MULTI_STRATEGY_RUNTIME_NO_SIGNAL_NO_MUTATION"
+    assert payload["multi_strategy_readiness_invoked"] is False
+    assert payload["multi_strategy_paper_proof_invoked"] is False
+    assert payload["multi_strategy_submit_attempted"] is False
+    assert payload["multi_strategy_broker_state_mutated"] is False
+    assert payload["live_money_readiness"] is False
+
+
 def test_one_signal_without_paper_flags_reports_ready_no_submit(tmp_path: Path) -> None:
     calls = Calls()
     reports = default_reports()

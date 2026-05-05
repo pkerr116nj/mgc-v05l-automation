@@ -46,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_MULTI_STRATEGY_RUNTIME_CYCLE_OUTPUT_ROOT)
     parser.add_argument("--strategy-rule-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_strategy_rule_runner"))
     parser.add_argument("--strategy-paper-runner-output-root", type=Path, default=Path("outputs/track_b_execution_core/track_b_strategy_paper_runner"))
+    parser.add_argument("--update-operator-status", action="store_true")
+    parser.add_argument("--operator-status-output-root", type=Path, default=Path("outputs/track_b_execution_core/operator_status"))
     return parser
 
 
@@ -79,6 +81,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root=args.output_root,
             strategy_rule_output_root=args.strategy_rule_output_root,
             strategy_paper_runner_output_root=args.strategy_paper_runner_output_root,
+            update_operator_status=args.update_operator_status,
+            operator_status_output_root=args.operator_status_output_root,
         )
     )
     print(
@@ -94,6 +98,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "submit_attempted": result.report["submit_attempted"],
                 "broker_state_mutated": result.report["broker_state_mutated"],
                 "live_money_readiness": result.report["live_money_readiness"],
+                "operator_status_invoked": result.report["operator_status_invoked"],
+                "operator_status_verdict": result.report["operator_status_verdict"],
+                "latest_operator_status_path": result.report["latest_operator_status_path"],
+                "operator_status_error": result.report["operator_status_error"],
                 "primary_blocker": result.report["primary_blocker"],
                 "required_next_action": result.report["required_next_action"],
                 "report_json": str(result.report_json),
