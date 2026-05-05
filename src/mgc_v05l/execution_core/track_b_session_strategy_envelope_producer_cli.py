@@ -18,7 +18,7 @@ from .track_b_session_strategy_envelope_producer import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Produce explicit Track B London-late and Asia-late session strategy feature/state envelopes "
+            "Produce explicit Track B Asia Early, London-late, and Asia-late session strategy feature/state envelopes "
             "from bounded completed realtime MGC 5m candles."
         )
     )
@@ -61,6 +61,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "asia_late_flat_pullback_pause_resume_long_envelope_ready": result.report.get(
                     "asia_late_flat_pullback_pause_resume_long_envelope_ready"
                 ),
+                "asia_early_pause_resume_short_envelope_ready": result.report.get(
+                    "asia_early_pause_resume_short_envelope_ready"
+                ),
+                "asia_early_normal_breakout_retest_hold_long_envelope_ready": result.report.get(
+                    "asia_early_normal_breakout_retest_hold_long_envelope_ready"
+                ),
                 "london_late_pause_resume_short_event_json": (
                     None
                     if result.london_late_pause_resume_short_event_json is None
@@ -70,6 +76,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     None
                     if result.asia_late_flat_pullback_pause_resume_long_event_json is None
                     else str(result.asia_late_flat_pullback_pause_resume_long_event_json)
+                ),
+                "asia_early_pause_resume_short_event_json": (
+                    None
+                    if result.asia_early_pause_resume_short_event_json is None
+                    else str(result.asia_early_pause_resume_short_event_json)
+                ),
+                "asia_early_normal_breakout_retest_hold_long_event_json": (
+                    None
+                    if result.asia_early_normal_breakout_retest_hold_long_event_json is None
+                    else str(result.asia_early_normal_breakout_retest_hold_long_event_json)
                 ),
                 "primary_blocker": result.report.get("primary_blocker"),
                 "required_next_action": result.report.get("required_next_action"),

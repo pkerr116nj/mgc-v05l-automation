@@ -80,6 +80,8 @@ def test_producer_blocks_when_insufficient_completed_5m_bars(tmp_path: Path) -> 
     assert result.verdict == TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_INSUFFICIENT_5M_CANDLES
     assert result.london_late_pause_resume_short_event_json is None
     assert result.asia_late_flat_pullback_pause_resume_long_event_json is None
+    assert result.asia_early_pause_resume_short_event_json is None
+    assert result.asia_early_normal_breakout_retest_hold_long_event_json is None
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
 
@@ -110,10 +112,23 @@ def test_producer_emits_valid_session_strategy_envelopes(tmp_path: Path) -> None
     assert result.asia_late_flat_pullback_pause_resume_long_event_json == (
         tmp_path / "session" / "latest_asia_late_flat_pullback_pause_resume_long_event_envelope.json"
     )
+    assert result.asia_early_pause_resume_short_event_json == (
+        tmp_path / "session" / "latest_asia_early_pause_resume_short_event_envelope.json"
+    )
+    assert result.asia_early_normal_breakout_retest_hold_long_event_json == (
+        tmp_path / "session" / "latest_asia_early_normal_breakout_retest_hold_long_event_envelope.json"
+    )
     assert result.london_late_pause_resume_short_event is not None
     assert result.asia_late_flat_pullback_pause_resume_long_event is not None
+    assert result.asia_early_pause_resume_short_event is not None
+    assert result.asia_early_normal_breakout_retest_hold_long_event is not None
     assert "london_late_pause_resume_short_state" in result.london_late_pause_resume_short_event["metadata"]
     assert "asia_late_flat_pullback_pause_resume_long_features" in result.asia_late_flat_pullback_pause_resume_long_event["metadata"]
+    assert "asia_early_pause_resume_short_state" in result.asia_early_pause_resume_short_event["metadata"]
+    assert (
+        "asia_early_normal_breakout_retest_hold_long_features"
+        in result.asia_early_normal_breakout_retest_hold_long_event["metadata"]
+    )
     assert result.report["broker_state_mutated"] is False
     assert result.report["live_money_readiness"] is False
 
@@ -126,6 +141,8 @@ def test_produced_envelopes_satisfy_registered_schema(tmp_path: Path) -> None:
     )
     assert result.london_late_pause_resume_short_event is not None
     assert result.asia_late_flat_pullback_pause_resume_long_event is not None
+    assert result.asia_early_pause_resume_short_event is not None
+    assert result.asia_early_normal_breakout_retest_hold_long_event is not None
 
     london_entry, london_blocker = validate_strategy_event_against_registry(
         event=result.london_late_pause_resume_short_event,
@@ -139,11 +156,27 @@ def test_produced_envelopes_satisfy_registered_schema(tmp_path: Path) -> None:
         rule_id="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
         strategy_id="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
     )
+    asia_early_short_entry, asia_early_short_blocker = validate_strategy_event_against_registry(
+        event=result.asia_early_pause_resume_short_event,
+        rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+    )
+    asia_early_long_entry, asia_early_long_blocker = validate_strategy_event_against_registry(
+        event=result.asia_early_normal_breakout_retest_hold_long_event,
+        rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        rule_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        strategy_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    )
 
     assert london_entry is not None
     assert asia_entry is not None
+    assert asia_early_short_entry is not None
+    assert asia_early_long_entry is not None
     assert london_blocker is None
     assert asia_blocker is None
+    assert asia_early_short_blocker is None
+    assert asia_early_long_blocker is None
 
 
 def test_rule_runner_consumes_session_strategy_envelopes(tmp_path: Path) -> None:
@@ -154,6 +187,8 @@ def test_rule_runner_consumes_session_strategy_envelopes(tmp_path: Path) -> None
     )
     assert producer.london_late_pause_resume_short_event is not None
     assert producer.asia_late_flat_pullback_pause_resume_long_event is not None
+    assert producer.asia_early_pause_resume_short_event is not None
+    assert producer.asia_early_normal_breakout_retest_hold_long_event is not None
 
     london = run_track_b_strategy_rule(
         input_event_payload=producer.london_late_pause_resume_short_event,
@@ -184,15 +219,63 @@ def test_rule_runner_consumes_session_strategy_envelopes(tmp_path: Path) -> None
         candle_producer_output_root=tmp_path / "candle_producer",
         writer_output_root=tmp_path / "signal_batch_writer",
     )
+    asia_early_short = run_track_b_strategy_rule(
+        input_event_payload=producer.asia_early_pause_resume_short_event,
+        input_event_path=tmp_path / "asia_early_short.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_session_strategy",
+        strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        lane_id="mgc_asia_early_pause_resume_short",
+        rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        rule_mode="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rules",
+        strategy_adapter_output_root=tmp_path / "strategy_adapter",
+        candle_producer_output_root=tmp_path / "candle_producer",
+        writer_output_root=tmp_path / "signal_batch_writer",
+    )
+    asia_early_long = run_track_b_strategy_rule(
+        input_event_payload=producer.asia_early_normal_breakout_retest_hold_long_event,
+        input_event_path=tmp_path / "asia_early_long.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_session_strategy",
+        strategy_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        lane_id="mgc_asia_early_normal_breakout_retest_hold_long",
+        rule_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rules",
+        strategy_adapter_output_root=tmp_path / "strategy_adapter",
+        candle_producer_output_root=tmp_path / "candle_producer",
+        writer_output_root=tmp_path / "signal_batch_writer",
+    )
 
     assert london.verdict in {TrackBStrategyRuleRunnerVerdict.NO_SIGNAL, TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL}
     assert asia.verdict in {TrackBStrategyRuleRunnerVerdict.NO_SIGNAL, TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL}
+    assert asia_early_short.verdict in {
+        TrackBStrategyRuleRunnerVerdict.NO_SIGNAL,
+        TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL,
+    }
+    assert asia_early_long.verdict in {
+        TrackBStrategyRuleRunnerVerdict.NO_SIGNAL,
+        TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL,
+    }
     assert london.report["london_late_pause_resume_short_watch_verdict"] != "LONDON_LATE_PAUSE_RESUME_SHORT_NOT_READY"
     assert asia.report["asia_late_flat_pullback_pause_resume_long_watch_verdict"] != (
         "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_NOT_READY"
     )
+    assert asia_early_short.report["asia_early_pause_resume_short_watch_verdict"] != (
+        "ASIA_EARLY_PAUSE_RESUME_SHORT_NOT_READY"
+    )
+    assert asia_early_long.report["asia_early_normal_breakout_retest_hold_long_watch_verdict"] != (
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_NOT_READY"
+    )
     assert london.report["paper_proof_cli_called"] is False
     assert asia.report["paper_proof_cli_called"] is False
+    assert asia_early_short.report["paper_proof_cli_called"] is False
+    assert asia_early_long.report["paper_proof_cli_called"] is False
 
 
 def test_signal_fixture_without_paper_flags_reports_signal_ready_no_submit(tmp_path: Path) -> None:
@@ -253,9 +336,13 @@ def test_runtime_cycle_consumes_session_strategy_envelopes(tmp_path: Path) -> No
     )
     assert producer.london_late_pause_resume_short_event_json is not None
     assert producer.asia_late_flat_pullback_pause_resume_long_event_json is not None
+    assert producer.asia_early_pause_resume_short_event_json is not None
+    assert producer.asia_early_normal_breakout_retest_hold_long_event_json is not None
 
     result = run_track_b_multi_strategy_runtime_cycle(
         config=TrackBMultiStrategyRuntimeCycleConfig(
+            pause_resume_short_event_json=producer.asia_early_pause_resume_short_event_json,
+            breakout_retest_hold_long_event_json=producer.asia_early_normal_breakout_retest_hold_long_event_json,
             london_late_pause_resume_short_event_json=producer.london_late_pause_resume_short_event_json,
             asia_late_flat_pullback_pause_resume_long_event_json=producer.asia_late_flat_pullback_pause_resume_long_event_json,
             inbox_dir=tmp_path / "inbox",
@@ -273,6 +360,8 @@ def test_runtime_cycle_consumes_session_strategy_envelopes(tmp_path: Path) -> No
         TrackBMultiStrategyRuntimeCycleVerdict.ARBITRATION_BLOCKED,
     }
     summaries = {item["strategy_id"]: item for item in result.report["evaluated_strategies"]}
+    assert summaries["ASIA_EARLY_PAUSE_RESUME_SHORT_V1"]["strategy_runtime_verdict"] != "NOT_READY"
+    assert summaries["ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"]["strategy_runtime_verdict"] != "NOT_READY"
     assert summaries["LONDON_LATE_PAUSE_RESUME_SHORT_V1"]["strategy_runtime_verdict"] != "NOT_READY"
     assert summaries["ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"]["strategy_runtime_verdict"] != "NOT_READY"
     assert result.report["paper_proof_invoked"] is False
@@ -288,9 +377,23 @@ def test_latest_session_envelope_files_are_written_as_json(tmp_path: Path) -> No
         now=aware_now(),
     )
     assert result.london_late_pause_resume_short_event_json is not None
+    assert result.asia_early_pause_resume_short_event_json is not None
+    assert result.asia_early_normal_breakout_retest_hold_long_event_json is not None
     payload = json.loads(result.london_late_pause_resume_short_event_json.read_text(encoding="utf-8"))
+    early_short_payload = json.loads(result.asia_early_pause_resume_short_event_json.read_text(encoding="utf-8"))
+    early_long_payload = json.loads(result.asia_early_normal_breakout_retest_hold_long_event_json.read_text(encoding="utf-8"))
     assert payload["strategy_id"] == "LONDON_LATE_PAUSE_RESUME_SHORT_V1"
+    assert early_short_payload["strategy_id"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    assert early_long_payload["strategy_id"] == "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
     assert (
         payload["metadata"]["london_late_pause_resume_short_features"]["feature_version"]
         == "london_late_pause_resume_short_v1_phase1"
+    )
+    assert (
+        early_short_payload["metadata"]["asia_early_pause_resume_short_features"]["feature_version"]
+        == "asia_early_pause_resume_short_v1_phase1"
+    )
+    assert (
+        early_long_payload["metadata"]["asia_early_normal_breakout_retest_hold_long_features"]["feature_version"]
+        == "asia_early_normal_breakout_retest_hold_long_v1_phase1"
     )

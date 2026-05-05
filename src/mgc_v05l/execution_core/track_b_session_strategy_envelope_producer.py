@@ -50,9 +50,17 @@ DEFAULT_TRACK_B_SESSION_STRATEGY_ENVELOPE_OUTPUT_ROOT = Path(
 
 LONDON_LATE_PAUSE_RESUME_SHORT_STRATEGY_ID = "LONDON_LATE_PAUSE_RESUME_SHORT_V1"
 ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_STRATEGY_ID = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
+ASIA_EARLY_PAUSE_RESUME_SHORT_STRATEGY_ID = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_STRATEGY_ID = (
+    "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
+)
 LONDON_LATE_PAUSE_RESUME_SHORT_FEATURE_VERSION = "london_late_pause_resume_short_v1_phase1"
 ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_FEATURE_VERSION = (
     "asia_late_flat_pullback_pause_resume_long_v1_phase1"
+)
+ASIA_EARLY_PAUSE_RESUME_SHORT_FEATURE_VERSION = "asia_early_pause_resume_short_v1_phase1"
+ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURE_VERSION = (
+    "asia_early_normal_breakout_retest_hold_long_v1_phase1"
 )
 
 NY = ZoneInfo("America/New_York")
@@ -69,6 +77,12 @@ ASIA_LATE_PULLBACK_MAX_RANGE_EXPANSION_RATIO = Decimal("0.85")
 ASIA_LATE_SIGNAL_MIN_RANGE_EXPANSION_RATIO = Decimal("0.85")
 ASIA_LATE_SIGNAL_MAX_RANGE_EXPANSION_RATIO = Decimal("1.25")
 ASIA_LATE_PULLBACK_CURVATURE_FLAT_THRESHOLD = Decimal("0.15")
+ASIA_EARLY_PAUSE_RESUME_SHORT_MAX_NORMALIZED_CURVATURE = Decimal("-0.15")
+ASIA_EARLY_PAUSE_RESUME_SHORT_SETUP_CURVATURE_FLAT_THRESHOLD = Decimal("0.15")
+ASIA_EARLY_PAUSE_RESUME_SHORT_MAX_RANGE_EXPANSION_RATIO = Decimal("1.25")
+ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_ABS_SLOPE_MAX = Decimal("0.20")
+ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MIN_RANGE_EXPANSION_RATIO = Decimal("0.85")
+ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MAX_RANGE_EXPANSION_RATIO = Decimal("1.25")
 ANTI_CHURN_BARS = 5
 
 
@@ -87,8 +101,12 @@ class TrackBSessionStrategyEnvelopeProducerResult:
     report: dict[str, Any]
     london_late_pause_resume_short_event_json: Path | None
     asia_late_flat_pullback_pause_resume_long_event_json: Path | None
+    asia_early_pause_resume_short_event_json: Path | None
+    asia_early_normal_breakout_retest_hold_long_event_json: Path | None
     london_late_pause_resume_short_event: dict[str, Any] | None
     asia_late_flat_pullback_pause_resume_long_event: dict[str, Any] | None
+    asia_early_pause_resume_short_event: dict[str, Any] | None
+    asia_early_normal_breakout_retest_hold_long_event: dict[str, Any] | None
 
 
 def produce_track_b_session_strategy_envelopes(
@@ -163,15 +181,49 @@ def produce_track_b_session_strategy_envelopes(
             bull_snap=dict(bull_snap),
             prior_bars_since_long_setup=prior_bars_since_long_setup,
         )
+        asia_early_short_event = _asia_early_pause_resume_short_event(
+            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload_path=runtime_5m_payload_path,
+            expected_account_id=expected_account_id,
+            source_id=source_id,
+            now=actual_now,
+            candles=candles,
+            feature_history=feature_history,
+            bear_snap=dict(bear_snap),
+            prior_bars_since_short_setup=prior_bars_since_short_setup,
+        )
+        asia_early_long_event = _asia_early_normal_breakout_retest_hold_long_event(
+            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload_path=runtime_5m_payload_path,
+            expected_account_id=expected_account_id,
+            source_id=source_id,
+            now=actual_now,
+            candles=candles,
+            feature_history=feature_history,
+            bull_snap=dict(bull_snap),
+            prior_bars_since_long_setup=prior_bars_since_long_setup,
+        )
 
         london_json = output_root / actual_producer_id / "london_late_pause_resume_short_event_envelope.json"
         asia_json = output_root / actual_producer_id / "asia_late_flat_pullback_pause_resume_long_event_envelope.json"
+        asia_early_short_json = output_root / actual_producer_id / "asia_early_pause_resume_short_event_envelope.json"
+        asia_early_long_json = (
+            output_root / actual_producer_id / "asia_early_normal_breakout_retest_hold_long_event_envelope.json"
+        )
         latest_london = output_root / "latest_london_late_pause_resume_short_event_envelope.json"
         latest_asia = output_root / "latest_asia_late_flat_pullback_pause_resume_long_event_envelope.json"
+        latest_asia_early_short = output_root / "latest_asia_early_pause_resume_short_event_envelope.json"
+        latest_asia_early_long = (
+            output_root / "latest_asia_early_normal_breakout_retest_hold_long_event_envelope.json"
+        )
         _write_json(london_json, london_event)
         _write_json(asia_json, asia_event)
+        _write_json(asia_early_short_json, asia_early_short_event)
+        _write_json(asia_early_long_json, asia_early_long_event)
         _write_json(latest_london, london_event)
         _write_json(latest_asia, asia_event)
+        _write_json(latest_asia_early_short, asia_early_short_event)
+        _write_json(latest_asia_early_long, asia_early_long_event)
 
         report = _base_report(
             verdict=TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES,
@@ -189,10 +241,16 @@ def produce_track_b_session_strategy_envelopes(
             {
                 "london_late_pause_resume_short_event_json": str(london_json),
                 "asia_late_flat_pullback_pause_resume_long_event_json": str(asia_json),
+                "asia_early_pause_resume_short_event_json": str(asia_early_short_json),
+                "asia_early_normal_breakout_retest_hold_long_event_json": str(asia_early_long_json),
                 "latest_london_late_pause_resume_short_event_json": str(latest_london),
                 "latest_asia_late_flat_pullback_pause_resume_long_event_json": str(latest_asia),
+                "latest_asia_early_pause_resume_short_event_json": str(latest_asia_early_short),
+                "latest_asia_early_normal_breakout_retest_hold_long_event_json": str(latest_asia_early_long),
                 "london_late_pause_resume_short_envelope_ready": True,
                 "asia_late_flat_pullback_pause_resume_long_envelope_ready": True,
+                "asia_early_pause_resume_short_envelope_ready": True,
+                "asia_early_normal_breakout_retest_hold_long_envelope_ready": True,
                 "feature_diagnostics": _feature_diagnostics(current_features),
             }
         )
@@ -204,8 +262,12 @@ def produce_track_b_session_strategy_envelopes(
             report=report,
             london_late_pause_resume_short_event_json=latest_london,
             asia_late_flat_pullback_pause_resume_long_event_json=latest_asia,
+            asia_early_pause_resume_short_event_json=latest_asia_early_short,
+            asia_early_normal_breakout_retest_hold_long_event_json=latest_asia_early_long,
             london_late_pause_resume_short_event=london_event,
             asia_late_flat_pullback_pause_resume_long_event=asia_event,
+            asia_early_pause_resume_short_event=asia_early_short_event,
+            asia_early_normal_breakout_retest_hold_long_event=asia_early_long_event,
         )
     except Exception as exc:  # noqa: BLE001 - producer failures must become artifacts.
         return _write_blocked_result(
@@ -361,6 +423,141 @@ def _asia_late_flat_pullback_pause_resume_long_event(
     )
 
 
+def _asia_early_pause_resume_short_event(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None,
+    expected_account_id: str,
+    source_id: str,
+    now: datetime,
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+    bear_snap: Mapping[str, Any],
+    prior_bars_since_short_setup: int | None,
+) -> dict[str, Any]:
+    current = candles[-1]
+    previous = candles[-2]
+    features = feature_history[-1]
+    recent = _asia_early_short_recent_context(candles, feature_history)
+    prior_short = prior_bars_since_short_setup if prior_bars_since_short_setup is not None else 1000
+    phase = _research_session_phase(current.timestamp)
+    normalized_curvature = _normalized(features.velocity_delta, features.atr)
+    state = {
+        "derivative_phase": phase,
+        "session_asia": phase.startswith("ASIA"),
+        "allow_asia": True,
+        "timeframe": "5m",
+    }
+    features_payload = {
+        "feature_version": ASIA_EARLY_PAUSE_RESUME_SHORT_FEATURE_VERSION,
+        "calibration_profile": DEFAULT_CALIBRATION_PROFILE,
+        "close": current.close,
+        "open": current.open,
+        "previous_close": previous.close,
+        "normalized_curvature": normalized_curvature,
+        "max_normalized_curvature": ASIA_EARLY_PAUSE_RESUME_SHORT_MAX_NORMALIZED_CURVATURE,
+        "signal_range_expansion_ratio": recent["signal_range_expansion_ratio"],
+        "max_range_expansion_ratio": ASIA_EARLY_PAUSE_RESUME_SHORT_MAX_RANGE_EXPANSION_RATIO,
+        "setup_bar_normalized_curvature": recent["setup_bar_normalized_curvature"],
+        "setup_curvature_flat_threshold": ASIA_EARLY_PAUSE_RESUME_SHORT_SETUP_CURVATURE_FLAT_THRESHOLD,
+        "setup_bar_curvature_is_flat": recent["setup_bar_curvature_is_flat"],
+        "one_bar_rebound_before_signal": recent["one_bar_rebound_before_signal"],
+        "signal_breaks_prior_1_low": recent["signal_breaks_prior_1_low"],
+        "close_below_fast_ema": current.close <= features.turn_ema_fast,
+        "derivative_bear_close_weak": _close_location_below_threshold(
+            current.low, current.close, features.bar_range, MAX_BEAR_SNAP_CLOSE_LOCATION
+        ),
+        "derivative_bear_range_ok": features.bar_range >= MIN_BEAR_SNAP_BAR_RANGE_ATR * features.atr,
+        "derivative_bear_body_ok": features.body_size >= MIN_BEAR_SNAP_BODY_ATR * features.atr,
+        "derivative_bear_stretch_ok": features.upside_stretch >= MIN_BEAR_SNAP_UP_STRETCH_ATR * features.atr,
+        "derivative_bear_cooldown_ok": prior_short > ANTI_CHURN_BARS,
+        "prior_bars_since_short_setup": prior_short,
+        "no_competing_bear_short_candidate": bear_snap.get("first_bear_snap_turn") is not True,
+    }
+    return _event_envelope(
+        runtime_5m_payload=runtime_5m_payload,
+        runtime_5m_payload_path=runtime_5m_payload_path,
+        expected_account_id=expected_account_id,
+        source_id=source_id,
+        now=now,
+        candle=current,
+        strategy_id=ASIA_EARLY_PAUSE_RESUME_SHORT_STRATEGY_ID,
+        lane_id="mgc_asia_early_pause_resume_short",
+        signal_side="SHORT",
+        state_key="asia_early_pause_resume_short_state",
+        features_key="asia_early_pause_resume_short_features",
+        feature_version=ASIA_EARLY_PAUSE_RESUME_SHORT_FEATURE_VERSION,
+        state=state,
+        features=features_payload,
+        feature_packet=features,
+        input_bar_count=len(candles),
+    )
+
+
+def _asia_early_normal_breakout_retest_hold_long_event(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None,
+    expected_account_id: str,
+    source_id: str,
+    now: datetime,
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+    bull_snap: Mapping[str, Any],
+    prior_bars_since_long_setup: int | None,
+) -> dict[str, Any]:
+    current = candles[-1]
+    features = feature_history[-1]
+    breakout = _asia_early_breakout_retest_context(candles, feature_history)
+    prior_long = prior_bars_since_long_setup if prior_bars_since_long_setup is not None else 1000
+    phase = _research_session_phase(current.timestamp)
+    state = {
+        "derivative_phase": phase,
+        "session_asia": phase.startswith("ASIA"),
+        "allow_asia": True,
+        "asia_early_or_gc_mgc_london_open": _asia_early_or_gc_mgc_london_open(current.timestamp),
+        "no_first_bull_snap_turn": bull_snap.get("first_bull_snap_turn") is not True,
+        "prior_bars_since_long_setup": prior_long,
+        "prior_bars_since_long_setup_gt_anti_churn": prior_long > ANTI_CHURN_BARS,
+        "timeframe": "5m",
+    }
+    features_payload = {
+        "feature_version": ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURE_VERSION,
+        "calibration_profile": DEFAULT_CALIBRATION_PROFILE,
+        "close": current.close,
+        "open": current.open,
+        "previous_close": candles[-2].close,
+        "breakout_normalized_slope": breakout["breakout_normalized_slope"],
+        "breakout_abs_slope_max": ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_ABS_SLOPE_MAX,
+        "breakout_range_expansion_ratio": breakout["breakout_range_expansion_ratio"],
+        "breakout_min_range_expansion_ratio": ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MIN_RANGE_EXPANSION_RATIO,
+        "breakout_max_range_expansion_ratio": ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MAX_RANGE_EXPANSION_RATIO,
+        "breakout_level": breakout["breakout_level"],
+        "breakout_bar_slope_is_flat": breakout["breakout_bar_slope_is_flat"],
+        "breakout_bar_expansion_is_normal": breakout["breakout_bar_expansion_is_normal"],
+        "breakout_breaks_prior_1_high": breakout["breakout_breaks_prior_1_high"],
+        "signal_retests_and_holds_breakout_level": breakout["signal_retests_and_holds_breakout_level"],
+    }
+    return _event_envelope(
+        runtime_5m_payload=runtime_5m_payload,
+        runtime_5m_payload_path=runtime_5m_payload_path,
+        expected_account_id=expected_account_id,
+        source_id=source_id,
+        now=now,
+        candle=current,
+        strategy_id=ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_STRATEGY_ID,
+        lane_id="mgc_asia_early_normal_breakout_retest_hold_long",
+        signal_side="LONG",
+        state_key="asia_early_normal_breakout_retest_hold_long_state",
+        features_key="asia_early_normal_breakout_retest_hold_long_features",
+        feature_version=ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURE_VERSION,
+        state=state,
+        features=features_payload,
+        feature_packet=features,
+        input_bar_count=len(candles),
+    )
+
+
 def _bear_recent_context(
     candles: Sequence[_RuntimeCandle],
     feature_history: Sequence[_FeaturePacket],
@@ -375,6 +572,66 @@ def _bear_recent_context(
         "one_bar_rebound_before_signal": len(candles) >= 3 and candles[-2].close > candles[-3].close,
         "signal_range_expansion_ratio": _range_over_atr(current, feature_history[-1]),
         "signal_breaks_prior_1_low": current.low < previous.low,
+    }
+
+
+def _asia_early_short_recent_context(
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+) -> dict[str, Any]:
+    if len(candles) < 3 or len(feature_history) < 3:
+        return {
+            "setup_bar_normalized_curvature": Decimal("0"),
+            "setup_bar_curvature_is_flat": False,
+            "one_bar_rebound_before_signal": False,
+            "signal_breaks_prior_1_low": False,
+            "signal_range_expansion_ratio": Decimal("0"),
+        }
+    setup_features = feature_history[-3]
+    setup_curvature = _normalized(setup_features.velocity_delta, setup_features.atr)
+    return {
+        "setup_bar_normalized_curvature": setup_curvature,
+        "setup_bar_curvature_is_flat": abs(setup_curvature) <= ASIA_EARLY_PAUSE_RESUME_SHORT_SETUP_CURVATURE_FLAT_THRESHOLD,
+        "one_bar_rebound_before_signal": candles[-2].close > candles[-3].close,
+        "signal_breaks_prior_1_low": candles[-1].low < candles[-2].low,
+        "signal_range_expansion_ratio": _range_over_atr(candles[-1], feature_history[-1]),
+    }
+
+
+def _asia_early_breakout_retest_context(
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+) -> dict[str, Any]:
+    if len(candles) < 3 or len(feature_history) < 2:
+        return {
+            "breakout_normalized_slope": Decimal("0"),
+            "breakout_range_expansion_ratio": Decimal("0"),
+            "breakout_level": None,
+            "breakout_bar_slope_is_flat": False,
+            "breakout_bar_expansion_is_normal": False,
+            "breakout_breaks_prior_1_high": False,
+            "signal_retests_and_holds_breakout_level": False,
+        }
+    prior_bar = candles[-3]
+    breakout_bar = candles[-2]
+    signal_bar = candles[-1]
+    breakout_features = feature_history[-2]
+    breakout_normalized_slope = _normalized(breakout_features.velocity, breakout_features.atr)
+    breakout_range_expansion_ratio = _range_over_atr(breakout_bar, breakout_features)
+    breakout_level = breakout_bar.high
+    return {
+        "breakout_normalized_slope": breakout_normalized_slope,
+        "breakout_range_expansion_ratio": breakout_range_expansion_ratio,
+        "breakout_level": breakout_level,
+        "breakout_bar_slope_is_flat": (
+            abs(breakout_normalized_slope) <= ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_ABS_SLOPE_MAX
+        ),
+        "breakout_bar_expansion_is_normal": (
+            breakout_range_expansion_ratio > ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MIN_RANGE_EXPANSION_RATIO
+            and breakout_range_expansion_ratio < ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MAX_RANGE_EXPANSION_RATIO
+        ),
+        "breakout_breaks_prior_1_high": breakout_bar.high > prior_bar.high and breakout_bar.close >= prior_bar.close,
+        "signal_retests_and_holds_breakout_level": signal_bar.low <= breakout_level and signal_bar.close >= breakout_level,
     }
 
 
@@ -555,6 +812,8 @@ def _base_report(
         "last_bar_timestamp": None if not candles else candles[-1].timestamp.isoformat(),
         "london_late_pause_resume_short_envelope_ready": False,
         "asia_late_flat_pullback_pause_resume_long_envelope_ready": False,
+        "asia_early_pause_resume_short_envelope_ready": False,
+        "asia_early_normal_breakout_retest_hold_long_envelope_ready": False,
         "primary_blocker": primary_blocker,
         "required_next_action": required_next_action,
         "paper_proof_cli_called": False,
@@ -598,8 +857,12 @@ def _write_blocked_result(
         report=report,
         london_late_pause_resume_short_event_json=None,
         asia_late_flat_pullback_pause_resume_long_event_json=None,
+        asia_early_pause_resume_short_event_json=None,
+        asia_early_normal_breakout_retest_hold_long_event_json=None,
         london_late_pause_resume_short_event=None,
         asia_late_flat_pullback_pause_resume_long_event=None,
+        asia_early_pause_resume_short_event=None,
+        asia_early_normal_breakout_retest_hold_long_event=None,
     )
 
 
@@ -624,6 +887,14 @@ def _research_session_phase(timestamp: datetime) -> str:
     if time(13, 30) <= local_time < time(16, 0):
         return "US_LATE"
     return "OUT_OF_SCOPE"
+
+
+def _asia_early_or_gc_mgc_london_open(timestamp: datetime) -> bool:
+    phase = _research_session_phase(timestamp)
+    if phase == "ASIA_EARLY":
+        return True
+    local_time = timestamp.astimezone(NY).time()
+    return phase == "LONDON_OPEN" and local_time in {time(3, 5), time(3, 10), time(3, 15)}
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

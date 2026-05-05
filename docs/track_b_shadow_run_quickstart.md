@@ -798,14 +798,38 @@ outputs/track_b_execution_core/track_b_strategy_rule_runner/latest_track_b_strat
 The bounded multi-strategy cycle evaluates the registered Asia strategy
 envelopes together and arbitrates at most one PAPER candidate:
 
+Produce the bounded session-strategy envelopes from explicit completed realtime
+MGC 5m context first. This producer is the Track B-safe raw-candle boundary for
+the Asia Early pause-resume short, Asia Early normal breakout-retest-hold long,
+London-late pause-resume short, and Asia-late flat-pullback pause-resume long
+adapters:
+
+```bash
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_session_strategy_envelope_producer_cli \
+  --runtime-5m-candles-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_candles.json \
+  --expected-account-id DUM882026 \
+  --source-id asia_session_strategy_envelope_watch \
+  --output-root outputs/track_b_execution_core/session_strategy_state
+```
+
+The stable Asia Early envelope paths are:
+
+```text
+outputs/track_b_execution_core/session_strategy_state/latest_asia_early_pause_resume_short_event_envelope.json
+outputs/track_b_execution_core/session_strategy_state/latest_asia_early_normal_breakout_retest_hold_long_event_envelope.json
+```
+
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_multi_strategy_runtime_cycle_cli \
   --asian-drift-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
-  --pause-resume-short-event-json <EXPLICIT_ASIA_EARLY_PAUSE_RESUME_SHORT_5M_STATE_JSON> \
-  --breakout-retest-hold-long-event-json <EXPLICIT_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_5M_STATE_JSON> \
+  --pause-resume-short-event-json outputs/track_b_execution_core/session_strategy_state/latest_asia_early_pause_resume_short_event_envelope.json \
+  --breakout-retest-hold-long-event-json outputs/track_b_execution_core/session_strategy_state/latest_asia_early_normal_breakout_retest_hold_long_event_envelope.json \
+  --london-late-pause-resume-short-event-json outputs/track_b_execution_core/session_strategy_state/latest_london_late_pause_resume_short_event_envelope.json \
+  --asia-late-flat-pullback-pause-resume-long-event-json outputs/track_b_execution_core/session_strategy_state/latest_asia_late_flat_pullback_pause_resume_long_event_envelope.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --source-id asia_multi_strategy_watch \
+  --update-operator-status \
   --output-root outputs/track_b_execution_core/track_b_multi_strategy_runtime_cycle
 ```
 
@@ -823,8 +847,10 @@ authorized, add the same PAPER guards used by the strategy paper runner:
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_multi_strategy_runtime_cycle_cli \
   --asian-drift-event-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json \
-  --pause-resume-short-event-json <EXPLICIT_ASIA_EARLY_PAUSE_RESUME_SHORT_5M_STATE_JSON> \
-  --breakout-retest-hold-long-event-json <EXPLICIT_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_5M_STATE_JSON> \
+  --pause-resume-short-event-json outputs/track_b_execution_core/session_strategy_state/latest_asia_early_pause_resume_short_event_envelope.json \
+  --breakout-retest-hold-long-event-json outputs/track_b_execution_core/session_strategy_state/latest_asia_early_normal_breakout_retest_hold_long_event_envelope.json \
+  --london-late-pause-resume-short-event-json outputs/track_b_execution_core/session_strategy_state/latest_london_late_pause_resume_short_event_envelope.json \
+  --asia-late-flat-pullback-pause-resume-long-event-json outputs/track_b_execution_core/session_strategy_state/latest_asia_late_flat_pullback_pause_resume_long_event_envelope.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \

@@ -311,6 +311,9 @@ Dashboard implication:
   when explicit PAPER submit flags are supplied, registry
   `paper_eligible=true`, registry `live_money_eligible=false`, and the
   requested PAPER side matches the explicit short signal (`SHORT -> SELL`).
+  `track_b_session_strategy_envelope_producer` now writes the Track B-safe
+  envelope from bounded completed realtime MGC 5m context at
+  `outputs/track_b_execution_core/session_strategy_state/latest_asia_early_pause_resume_short_event_envelope.json`.
 - `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1` is the guarded PAPER
   migration of the research-defined `asiaEarlyNormalBreakoutRetestHoldTurn`
   branch. It is registered as MGC/5m, `paper_eligible=true`, and
@@ -328,6 +331,9 @@ Dashboard implication:
   `ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT`. The
   adapter itself remains signal-only; guarded PAPER handoff requires explicit
   PAPER flags and side `BUY` for the real LONG signal.
+  `track_b_session_strategy_envelope_producer` writes its Track B-safe envelope
+  at
+  `outputs/track_b_execution_core/session_strategy_state/latest_asia_early_normal_breakout_retest_hold_long_event_envelope.json`.
 - `track_b_asian_drift_state` is the explicit 5m state snapshot boundary for
   the Asian Drift watch path. It validates and writes
   `outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json`
