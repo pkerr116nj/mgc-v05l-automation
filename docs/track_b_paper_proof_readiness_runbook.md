@@ -334,6 +334,9 @@ The runtime capture report includes requested window, provider available_end,
 history end used, latest 1m/completed 5m timestamps, age seconds, and
 `runtime_candle_context_stale`. Historical available_end fallback at this
 boundary is only a bounded recent data-source retry; stale bars still block.
+For Databento fetch mode the CLI may load `DATABENTO_API_KEY` from the repo
+`.env.local` when the process environment does not already provide it. Reports
+show credential status/source only and never include the secret value.
 
 `track_b_mgc_candle_history_producer` remains available for diagnostics and
 maintenance inputs. On-demand historical fetch is not the normal trade-decision

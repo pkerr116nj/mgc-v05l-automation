@@ -69,6 +69,8 @@ def capture_track_b_runtime_mgc_1m_candles(
     available_end_lag_seconds: int | None = None,
     max_latest_1m_age_seconds: int | None = None,
     max_completed_5m_age_seconds: int | None = None,
+    provider_credential_status: str | None = None,
+    provider_credential_source: str | None = None,
     source_id: str | None = None,
     strategy_id: str = "track_b_example_gold_shadow_v1",
     lane_id: str = "mgc_example_long_lmt_day",
@@ -134,6 +136,8 @@ def capture_track_b_runtime_mgc_1m_candles(
                 available_end_lag_seconds=available_end_lag_seconds,
                 max_latest_1m_age_seconds=max_latest_1m_age_seconds,
                 max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+                provider_credential_status=provider_credential_status,
+                provider_credential_source=provider_credential_source,
             )
         if len(bounded) < min_bars:
             return _write_report(
@@ -168,6 +172,8 @@ def capture_track_b_runtime_mgc_1m_candles(
                 available_end_lag_seconds=available_end_lag_seconds,
                 max_latest_1m_age_seconds=max_latest_1m_age_seconds,
                 max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+                provider_credential_status=provider_credential_status,
+                provider_credential_source=provider_credential_source,
             )
         if gap_count > 0:
             return _write_report(
@@ -202,6 +208,8 @@ def capture_track_b_runtime_mgc_1m_candles(
                 available_end_lag_seconds=available_end_lag_seconds,
                 max_latest_1m_age_seconds=max_latest_1m_age_seconds,
                 max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+                provider_credential_status=provider_credential_status,
+                provider_credential_source=provider_credential_source,
             )
         freshness = _runtime_freshness(
             candles=bounded,
@@ -242,6 +250,8 @@ def capture_track_b_runtime_mgc_1m_candles(
                 available_end_lag_seconds=available_end_lag_seconds,
                 max_latest_1m_age_seconds=max_latest_1m_age_seconds,
                 max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+                provider_credential_status=provider_credential_status,
+                provider_credential_source=provider_credential_source,
             )
         runtime_event = _runtime_event(
             payload=runtime_candle_payload,
@@ -294,6 +304,8 @@ def capture_track_b_runtime_mgc_1m_candles(
             available_end_lag_seconds=available_end_lag_seconds,
             max_latest_1m_age_seconds=max_latest_1m_age_seconds,
             max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+            provider_credential_status=provider_credential_status,
+            provider_credential_source=provider_credential_source,
         )
     except (TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
         return _write_report(
@@ -328,6 +340,8 @@ def capture_track_b_runtime_mgc_1m_candles(
             available_end_lag_seconds=available_end_lag_seconds,
             max_latest_1m_age_seconds=max_latest_1m_age_seconds,
             max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+            provider_credential_status=provider_credential_status,
+            provider_credential_source=provider_credential_source,
         )
 
 
@@ -352,6 +366,8 @@ def write_runtime_candle_capture_provider_error(
     min_bars: int = 3,
     max_latest_1m_age_seconds: int | None = None,
     max_completed_5m_age_seconds: int | None = None,
+    provider_credential_status: str | None = None,
+    provider_credential_source: str | None = None,
     output_root: Path = DEFAULT_TRACK_B_RUNTIME_CANDLE_CAPTURE_OUTPUT_ROOT,
     capture_id: str | None = None,
     now: datetime | None = None,
@@ -393,6 +409,8 @@ def write_runtime_candle_capture_provider_error(
         available_end_lag_seconds=available_end_lag_seconds,
         max_latest_1m_age_seconds=max_latest_1m_age_seconds,
         max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+        provider_credential_status=provider_credential_status,
+        provider_credential_source=provider_credential_source,
     )
 
 
@@ -591,6 +609,8 @@ def _write_report(
     available_end_lag_seconds: int | None = None,
     max_latest_1m_age_seconds: int | None = None,
     max_completed_5m_age_seconds: int | None = None,
+    provider_credential_status: str | None = None,
+    provider_credential_source: str | None = None,
 ) -> TrackBRuntimeCandleCaptureResult:
     output_root = report_json.parent.parent
     latest_report_json = output_root / "latest_runtime_candle_capture_report.json"
@@ -616,6 +636,8 @@ def _write_report(
         "provider_available_end": None if provider_available_end is None else provider_available_end.astimezone(UTC).isoformat(),
         "history_end_used": None if history_end_used is None else history_end_used.astimezone(UTC).isoformat(),
         "available_end_lag_seconds": available_end_lag_seconds,
+        "provider_credential_status": provider_credential_status or "NOT_APPLICABLE",
+        "provider_credential_source": provider_credential_source,
         "max_bars": max_bars,
         "min_bars": min_bars,
         "bars_available": len(candles),

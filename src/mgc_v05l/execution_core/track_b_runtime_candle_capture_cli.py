@@ -45,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lookback-minutes", type=int, default=60)
     parser.add_argument("--history-start")
     parser.add_argument("--history-end")
+    parser.add_argument("--env-file", type=Path, help="Optional dotenv file containing DATABENTO_API_KEY. Defaults to repo .env.local for Databento fetch mode.")
     parser.add_argument("--base-url", default="https://hist.databento.com/v0")
     parser.add_argument("--max-bars", type=int, default=250)
     parser.add_argument("--min-bars", type=int, default=3)
@@ -66,6 +67,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     provider_available_end = None
     history_end_used = None
     available_end_lag_seconds = None
+    credential_status = "NOT_APPLICABLE"
+    credential_source = None
     source_payload_path = args.runtime_candle_json
     candle_source_mode = args.candle_source_mode
 
@@ -77,14 +80,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.history_start
             else requested_window_end - timedelta(minutes=max(int(args.lookback_minutes), 1))
         )
-        raw_api_key = str(os.environ.get("DATABENTO_API_KEY") or "").strip()
+        raw_api_key, credential_status, credential_source = _load_databento_api_key(args.env_file)
         if not raw_api_key:
             result = _provider_error_result(
                 args=args,
-                primary_blocker="DATABENTO_API_KEY is required for bounded Databento runtime candle fetch.",
-                required_next_action="Set DATABENTO_API_KEY or provide --runtime-candle-json with fresh bounded runtime candles.",
+                primary_blocker="DATABENTO_API_KEY is missing for bounded Databento runtime candle fetch.",
+                required_next_action="Set DATABENTO_API_KEY in the process environment or repo .env.local, or provide --runtime-candle-json with fresh bounded runtime candles.",
                 requested_window_start=requested_window_start,
                 requested_window_end=requested_window_end,
+                provider_credential_status=credential_status,
+                provider_credential_source=credential_source,
             )
             _print_result(result)
             return 2
@@ -103,6 +108,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 requested_window_start=requested_window_start,
                 requested_window_end=requested_window_end,
                 provider_available_end=getattr(exc, "provider_available_end", None),
+                provider_credential_status=credential_status,
+                provider_credential_source=credential_source,
             )
             _print_result(result)
             return 2
@@ -143,6 +150,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         available_end_lag_seconds=available_end_lag_seconds,
         max_latest_1m_age_seconds=args.max_latest_1m_age_seconds,
         max_completed_5m_age_seconds=args.max_completed_5m_age_seconds,
+        provider_credential_status=credential_status,
+        provider_credential_source=credential_source,
         source_id=args.source_id,
         strategy_id=args.strategy_id,
         lane_id=args.lane_id,
@@ -205,6 +214,8 @@ def _provider_error_result(
     requested_window_start: datetime | None,
     requested_window_end: datetime | None,
     provider_available_end: datetime | None = None,
+    provider_credential_status: str | None = None,
+    provider_credential_source: str | None = None,
 ) -> TrackBRuntimeCandleCaptureResult:
     return write_runtime_candle_capture_provider_error(
         primary_blocker=primary_blocker,
@@ -223,6 +234,8 @@ def _provider_error_result(
         min_bars=args.min_bars,
         max_latest_1m_age_seconds=args.max_latest_1m_age_seconds,
         max_completed_5m_age_seconds=args.max_completed_5m_age_seconds,
+        provider_credential_status=provider_credential_status,
+        provider_credential_source=provider_credential_source,
         output_root=args.output_root,
     )
 
@@ -279,6 +292,48 @@ def _read_quote_payload(path: Path | None) -> dict[str, object]:
     return payload
 
 
+def _load_databento_api_key(env_file: Path | None) -> tuple[str, str, str | None]:
+    process_value = str(os.environ.get("DATABENTO_API_KEY") or "").strip()
+    if process_value:
+        return process_value, "FOUND_IN_PROCESS_ENV", "process:DATABENTO_API_KEY"
+    dotenv_path = env_file or _repo_root() / ".env.local"
+    file_value = _read_dotenv_value(dotenv_path, "DATABENTO_API_KEY")
+    if file_value:
+        os.environ.setdefault("DATABENTO_API_KEY", file_value)
+        return file_value, "FOUND_IN_ENV_FILE", str(dotenv_path)
+    return "", "MISSING", str(dotenv_path)
+
+
+def _read_dotenv_value(path: Path, key: str) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    prefix = f"{key}="
+    export_prefix = f"export {key}="
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(export_prefix):
+            raw_value = line[len(export_prefix) :]
+        elif line.startswith(prefix):
+            raw_value = line[len(prefix) :]
+        else:
+            continue
+        value = raw_value.strip()
+        if "#" in value and not (value.startswith('"') or value.startswith("'")):
+            value = value.split("#", 1)[0].strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        return value.strip()
+    return ""
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
 def _parse_time(value: str) -> datetime:
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -302,6 +357,8 @@ def _print_result(result: TrackBRuntimeCandleCaptureResult) -> None:
                 "provider_available_end": report.get("provider_available_end"),
                 "history_end_used": report.get("history_end_used"),
                 "available_end_lag_seconds": report.get("available_end_lag_seconds"),
+                "provider_credential_status": report.get("provider_credential_status"),
+                "provider_credential_source": report.get("provider_credential_source"),
                 "latest_1m_candle_timestamp": report.get("latest_1m_candle_timestamp"),
                 "latest_completed_5m_candle_timestamp": report.get("latest_completed_5m_candle_timestamp"),
                 "latest_1m_candle_age_seconds": report.get("latest_1m_candle_age_seconds"),

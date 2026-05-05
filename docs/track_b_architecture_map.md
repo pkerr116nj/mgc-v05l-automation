@@ -207,7 +207,9 @@ Dashboard implication:
   `runtime_candle_context_stale`, realtime quote-evidence fields, and no-submit
   safety fields. If Databento available_end fallback is used, the artifact is
   still required to pass explicit runtime freshness thresholds before strategy
-  evaluation.
+  evaluation. The CLI can load `DATABENTO_API_KEY` from the repo `.env.local`
+  when it is absent from the process environment; reports expose only
+  credential status/source, never the key value.
   It does not connect to broker/TWS/IBKR, run paper proof, infer execution
   authority, submit/cancel/place orders, or write an unbounded raw stream.
   Future live Databento candle capture should feed this bounded artifact shape

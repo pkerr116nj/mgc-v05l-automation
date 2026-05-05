@@ -476,6 +476,11 @@ set +a
   --output-root outputs/track_b_execution_core/track_b_runtime_candle_capture
 ```
 
+The CLI also loads `DATABENTO_API_KEY` directly from the repo `.env.local` for
+this Databento fetch mode if the key is not already present in the process
+environment. Reports include only credential status/source, never the key
+value.
+
 For fixture/demo input:
 
 ```bash

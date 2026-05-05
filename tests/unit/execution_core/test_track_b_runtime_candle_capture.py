@@ -197,11 +197,112 @@ def test_runtime_capture_cli_fetches_bounded_databento_history(monkeypatch, tmp_
     output = json.loads(capsys.readouterr().out)
     assert output["runtime_candle_capture_verdict"] == TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES
     assert output["candle_source_mode"] == "DATABENTO_HISTORICAL_RECENT"
+    assert output["provider_credential_status"] == "FOUND_IN_PROCESS_ENV"
+    assert output["provider_credential_source"] == "process:DATABENTO_API_KEY"
     assert output["latest_1m_candle_timestamp"] == "2026-05-04T14:30:00+00:00"
     assert output["runtime_candle_context_stale"] is False
     assert output["submit_attempted"] is False
     assert output["live_money_readiness"] is False
     assert (tmp_path / "capture" / "latest_runtime_mgc_1m_candles.json").exists()
+
+
+def test_runtime_capture_cli_loads_databento_key_from_env_file(monkeypatch, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    quote_path = tmp_path / "quote.json"
+    env_path = tmp_path / ".env.local"
+    quote_path.write_text(
+        json.dumps(
+            {
+                "quote_provider_mode": "REALTIME",
+                "realtime_quote_received": True,
+                "current_quote_available": True,
+                "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+                "report_json_path": str(quote_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    env_path.write_text('export DATABENTO_API_KEY="file-secret-value"\n', encoding="utf-8")
+    records = runtime_payload(candle_count=5)["candles"]
+
+    def fake_fetch(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["api_key"] == "file-secret-value"
+        return records
+
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+    monkeypatch.setattr(runtime_cli, "fetch_databento_ohlcv_1m_records", fake_fetch)
+
+    exit_code = runtime_cli.main(
+        [
+            "--fetch-databento-history",
+            "--current-quote-report-json",
+            str(quote_path),
+            "--env-file",
+            str(env_path),
+            "--history-end",
+            "2026-05-04T14:31:00+00:00",
+            "--lookback-minutes",
+            "5",
+            "--max-bars",
+            "5",
+            "--max-latest-1m-age-seconds",
+            "999999",
+            "--max-completed-5m-age-seconds",
+            "999999",
+            "--output-root",
+            str(tmp_path / "capture"),
+        ]
+    )
+
+    assert exit_code == 0
+    output_text = capsys.readouterr().out
+    assert "file-secret-value" not in output_text
+    output = json.loads(output_text)
+    assert output["provider_credential_status"] == "FOUND_IN_ENV_FILE"
+    assert output["provider_credential_source"] == str(env_path)
+    latest_report = json.loads((tmp_path / "capture" / "latest_runtime_candle_capture_report.json").read_text(encoding="utf-8"))
+    assert "file-secret-value" not in json.dumps(latest_report)
+
+
+def test_runtime_capture_cli_missing_databento_key_writes_explicit_provider_error(monkeypatch, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    quote_path = tmp_path / "quote.json"
+    env_path = tmp_path / ".env.local"
+    quote_path.write_text(
+        json.dumps(
+            {
+                "quote_provider_mode": "REALTIME",
+                "realtime_quote_received": True,
+                "current_quote_available": True,
+                "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+                "report_json_path": str(quote_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    env_path.write_text("# no key here\n", encoding="utf-8")
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+
+    exit_code = runtime_cli.main(
+        [
+            "--fetch-databento-history",
+            "--current-quote-report-json",
+            str(quote_path),
+            "--env-file",
+            str(env_path),
+            "--history-end",
+            "2026-05-04T14:31:00+00:00",
+            "--output-root",
+            str(tmp_path / "capture"),
+        ]
+    )
+
+    assert exit_code == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["runtime_candle_capture_verdict"] == TrackBRuntimeCandleCaptureVerdict.BLOCKED_PROVIDER_ERROR
+    assert output["provider_credential_status"] == "MISSING"
+    assert output["provider_credential_source"] == str(env_path)
+    assert "DATABENTO_API_KEY is missing" in output["primary_blocker"]
+    assert output["submit_attempted"] is False
+    assert output["live_money_readiness"] is False
 
 
 def test_runtime_capture_does_not_reference_broker_or_proof_paths() -> None:
