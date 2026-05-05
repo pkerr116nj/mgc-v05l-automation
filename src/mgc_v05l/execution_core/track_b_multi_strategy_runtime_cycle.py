@@ -294,7 +294,7 @@ def _run_strategy_paper_runner(
             account_id=config.account_id,
             expected_account_id=config.expected_account_id,
             contract_key=config.contract_key,
-            side=config.side,
+            side=_paper_side_for_chosen_signal(config.side, chosen_signal),
             quantity=config.quantity,
             submit_paper=config.submit_paper,
             confirm_paper_submit=config.confirm_paper_submit,
@@ -546,6 +546,13 @@ def _paper_submit_requested(config: TrackBMultiStrategyRuntimeCycleConfig) -> bo
     return bool(config.submit_paper and config.confirm_paper_submit)
 
 
+def _paper_side_for_chosen_signal(config_side: str, chosen_signal: Mapping[str, object]) -> str:
+    if str(config_side or "").strip().upper() != "AUTO":
+        return config_side
+    direction = str(chosen_signal.get("signal_direction") or chosen_signal.get("decision") or "").upper()
+    return {"LONG": "BUY", "SHORT": "SELL"}.get(direction, config_side)
+
+
 def _build_report(
     *,
     config: TrackBMultiStrategyRuntimeCycleConfig,
@@ -579,6 +586,7 @@ def _build_report(
         "paper_submit_requested": _paper_submit_requested(config),
         "readiness_invoked": bool(paper_report.get("readiness_invoked")) if paper_report else False,
         "paper_proof_invoked": bool(paper_report.get("paper_proof_invoked")) if paper_report else False,
+        "submit_allowed": bool(paper_report.get("submit_allowed")) if paper_report else False,
         "submit_attempted": bool(paper_report.get("submit_attempted")) if paper_report else False,
         "broker_state_mutated": bool(paper_report.get("broker_state_mutated")) if paper_report else False,
         "paper_runner_report_path": str(paper_result.report_json) if paper_result else None,

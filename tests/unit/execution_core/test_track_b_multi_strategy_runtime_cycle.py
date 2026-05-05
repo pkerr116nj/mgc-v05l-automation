@@ -345,6 +345,56 @@ def test_one_signal_with_paper_flags_delegates_once(tmp_path: Path) -> None:
     assert result.report["live_money_readiness"] is False
 
 
+def test_auto_paper_side_matches_chosen_short_signal(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["FIRST_BEAR_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BEAR_SNAP_TURN_V1",
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+        decision="SHORT",
+        emitted=True,
+        direction="SHORT",
+    )
+    observed_side: list[str] = []
+
+    def strategy_stage(
+        strategy_input: TrackBMultiStrategyInput,
+        config: TrackBMultiStrategyRuntimeCycleConfig,
+    ) -> TrackBStrategyRuleRunnerResult:
+        calls.strategy.append(strategy_input.strategy_id)
+        return strategy_result(tmp_path, reports[strategy_input.strategy_id])
+
+    def paper_stage(
+        config: TrackBMultiStrategyRuntimeCycleConfig,
+        strategy_input: TrackBMultiStrategyInput,
+        chosen_signal: dict[str, object],
+    ) -> TrackBStrategyPaperRunnerResult:
+        calls.paper += 1
+        from mgc_v05l.execution_core.track_b_multi_strategy_runtime_cycle import _paper_side_for_chosen_signal
+
+        observed_side.append(_paper_side_for_chosen_signal(config.side, chosen_signal))
+        return paper_result(tmp_path)
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            side="AUTO",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=TrackBMultiStrategyRuntimeCycleStages(strategy_rule=strategy_stage, paper_runner=paper_stage),
+        cycle_id="cycle-auto-side-paper",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
+    assert observed_side == ["SELL"]
+    assert calls.paper == 1
+
+
 def test_multiple_same_direction_signals_without_arbitration_blocks(tmp_path: Path) -> None:
     calls = Calls()
     reports = default_reports()

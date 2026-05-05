@@ -4,6 +4,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 import mgc_v05l.execution_core.track_b_shadow_monitor as shadow_monitor_module
 import mgc_v05l.execution_core.track_b_runtime_candle_capture_cli as runtime_cli
 from mgc_v05l.execution_core.track_b_runtime_candle_capture import capture_track_b_runtime_mgc_1m_candles
@@ -906,6 +908,167 @@ def test_signal_ready_no_submit_does_not_stop_shadow_monitor(tmp_path: Path) -> 
     assert result.report["candidate_signals"] == [{"strategy_id": "FIRST_BULL_SNAP_TURN_V1", "signal_direction": "LONG"}]
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
+
+
+def paper_config(tmp_path: Path, **overrides: object) -> TrackBShadowMonitorConfig:
+    values = {
+        "mode": "PAPER",
+        "enable_paper_trading": True,
+        "paper_on_signal": True,
+        "quantity": 1,
+        "manual_open_limit_price": "4575.0",
+        "manual_close_limit_price": "4575.3",
+        "max_cycles": 2,
+        "pause_after_paper_trade": True,
+    }
+    values.update(overrides)
+    return config(tmp_path, **values)
+
+
+def test_paper_mode_rejects_without_enable_paper_trading(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+
+    with pytest.raises(ValueError, match="enable-paper-trading"):
+        run_track_b_shadow_monitor(
+            config=paper_config(tmp_path, enable_paper_trading=False),
+            stages=fake.stages(),
+            monitor_id="monitor-paper-missing-enable",
+            now_func=now,
+        )
+
+
+def test_paper_mode_rejects_without_paper_on_signal(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+
+    with pytest.raises(ValueError, match="paper-on-signal"):
+        run_track_b_shadow_monitor(
+            config=paper_config(tmp_path, paper_on_signal=False),
+            stages=fake.stages(),
+            monitor_id="monitor-paper-missing-on-signal",
+            now_func=now,
+        )
+
+
+def test_paper_mode_rejects_non_live_runtime_source(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+
+    with pytest.raises(ValueError, match="DATABENTO_LIVE_ARTIFACT"):
+        run_track_b_shadow_monitor(
+            config=paper_config(tmp_path, runtime_data_source=TrackBRuntimeDataSource.DATABENTO_HTTP_BACKFILL),
+            stages=fake.stages(),
+            monitor_id="monitor-paper-http-rejected",
+            now_func=now,
+        )
+
+
+def test_paper_mode_blocks_when_live_feed_is_not_strategy_ready(tmp_path: Path) -> None:
+    cfg = paper_config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", manage_live_feed=False, live_feed_min_bars=8)
+    live_payload = runtime_payload_for_now()
+    live_payload["candles"] = live_payload["candles"][:5]  # type: ignore[index]
+    live_payload["candle_history"] = live_payload["candles"]
+    live_payload["bars_available"] = 5
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", live_payload)
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now(1))
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+            "bars_available": 5,
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+        },
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-paper-warmup", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
+    assert fake.calls["multi"] == 0
+    assert result.report["paper_trading_enabled"] is True
+    assert result.report["paper_trades_attempted_count"] == 0
+    assert result.report["submit_attempted"] is False
+
+
+def test_paper_mode_records_guarded_lifecycle_and_pauses_after_trade(tmp_path: Path) -> None:
+    fake = FakeStages(
+        tmp_path,
+        runtime_cycle_verdict=TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED.value,
+        runtime_cycle_overrides={
+            "chosen_signal": {"strategy_id": "FIRST_BULL_SNAP_TURN_V1", "signal_direction": "LONG"},
+            "candidate_signals": [{"strategy_id": "FIRST_BULL_SNAP_TURN_V1", "signal_direction": "LONG"}],
+            "paper_runner_report_path": str(tmp_path / "paper-runner.json"),
+            "paper_proof_classification": "TRACK_B_PAPER_PROOF_PASSED",
+            "final_broker_state_classification": "PROOF_COMPLETE_FLAT",
+            "submit_allowed": True,
+            "readiness_invoked": True,
+            "paper_proof_invoked": True,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "live_money_readiness": False,
+        },
+    )
+
+    result = run_track_b_shadow_monitor(config=paper_config(tmp_path), stages=fake.stages(), monitor_id="monitor-paper-proof", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.PAPER_PROOF_PASSED
+    assert fake.calls["multi"] == 1
+    assert result.report["monitor_mode"] == "PAPER"
+    assert result.report["paper_trading_enabled"] is True
+    assert result.report["paper_on_signal"] is True
+    assert result.report["paper_trades_attempted_count"] == 1
+    assert result.report["latest_signal_strategy_id"] == "FIRST_BULL_SNAP_TURN_V1"
+    assert result.report["latest_signal_side"] == "LONG"
+    assert result.report["latest_paper_lifecycle_report_path"] == str(tmp_path / "paper-runner.json")
+    assert result.report["latest_broker_state_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
+    assert result.report["submit_attempted"] is True
+    assert result.report["broker_state_mutated"] is True
+    assert result.report["live_money_readiness"] is False
+
+
+def test_paper_mode_submit_without_guarded_provenance_is_critical(tmp_path: Path) -> None:
+    fake = FakeStages(
+        tmp_path,
+        runtime_cycle_overrides={
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "paper_proof_invoked": True,
+            "paper_runner_report_path": None,
+            "paper_proof_classification": None,
+        },
+    )
+
+    result = run_track_b_shadow_monitor(
+        config=paper_config(tmp_path),
+        stages=fake.stages(),
+        monitor_id="monitor-paper-critical",
+        now_func=now,
+    )
+
+    assert result.verdict == TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG
+    assert "without guarded lifecycle provenance" in str(result.report["primary_blocker"])
 
 
 def test_unexpected_submit_flag_in_shadow_is_critical_and_stops(tmp_path: Path) -> None:

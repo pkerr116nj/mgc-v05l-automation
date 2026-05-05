@@ -23,9 +23,12 @@ from .track_b_databento_live_runtime_feed import DEFAULT_TRACK_B_DATABENTO_LIVE_
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the service-ready Track B SHADOW monitor. This CLI has no submit/PAPER mode."
+        description=(
+            "Run the service-ready Track B monitor. SHADOW is no-submit; PAPER requires explicit "
+            "--enable-paper-trading and --paper-on-signal and delegates only through the guarded Track B lifecycle."
+        )
     )
-    parser.add_argument("--mode", default="SHADOW", choices=["SHADOW"])
+    parser.add_argument("--mode", default="SHADOW", choices=["SHADOW", "PAPER"])
     parser.add_argument("--max-cycles", type=int, default=999)
     parser.add_argument("--once", action="store_true", help="Run exactly one monitor cycle.")
     parser.add_argument("--poll-seconds", type=float, default=15.0)
@@ -34,6 +37,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-consecutive-failures", type=int)
     parser.add_argument("--expected-account-id", default="DUM882026")
     parser.add_argument("--account-id", default="DUM882026")
+    parser.add_argument("--enable-paper-trading", action="store_true")
+    parser.add_argument("--paper-on-signal", action="store_true")
+    parser.add_argument("--max-paper-trades-per-run", type=int, default=1)
+    parser.add_argument("--pause-after-paper-trade", choices=["true", "false"], default="true")
+    parser.add_argument("--quantity", type=int)
+    parser.add_argument("--manual-open-limit-price")
+    parser.add_argument("--manual-close-limit-price")
+    parser.add_argument("--con-id", type=int, default=712565978)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7497)
+    parser.add_argument("--client-id", type=int, default=17086)
     parser.add_argument("--contract-key", default="MGC-202606")
     parser.add_argument("--local-symbol", default="MGCM6")
     parser.add_argument("--databento-continuous-symbol", default="MGC.v.0")
@@ -123,6 +137,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_consecutive_failures=args.max_consecutive_failures,
             expected_account_id=args.expected_account_id,
             account_id=args.account_id,
+            enable_paper_trading=args.enable_paper_trading,
+            paper_on_signal=args.paper_on_signal,
+            max_paper_trades_per_run=args.max_paper_trades_per_run,
+            pause_after_paper_trade=args.pause_after_paper_trade == "true",
+            quantity=args.quantity,
+            manual_open_limit_price=args.manual_open_limit_price,
+            manual_close_limit_price=args.manual_close_limit_price,
+            con_id=args.con_id,
+            host=args.host,
+            port=args.port,
+            client_id=args.client_id,
             contract_key=args.contract_key,
             local_symbol=args.local_symbol,
             databento_continuous_symbol=args.databento_continuous_symbol,
@@ -177,12 +202,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dumps(
             {
                 "monitor_verdict": result.report["monitor_verdict"],
+                "monitor_mode": result.report.get("monitor_mode"),
                 "cycle_id": result.report["cycle_id"],
                 "instrument_families": result.report.get("instrument_families", []),
                 "evaluated_strategy_count": result.report.get("evaluated_strategy_count"),
                 "runtime_data_source": result.report.get("runtime_data_source"),
                 "runtime_decision_source": result.report.get("runtime_decision_source"),
                 "live_feed_managed": result.report.get("live_feed_managed"),
+                "paper_trading_enabled": result.report.get("paper_trading_enabled"),
+                "paper_on_signal": result.report.get("paper_on_signal"),
+                "max_paper_trades_per_run": result.report.get("max_paper_trades_per_run"),
+                "paper_trades_attempted_count": result.report.get("paper_trades_attempted_count"),
+                "latest_signal_strategy_id": result.report.get("latest_signal_strategy_id"),
+                "latest_signal_side": result.report.get("latest_signal_side"),
+                "latest_paper_lifecycle_report_path": result.report.get("latest_paper_lifecycle_report_path"),
+                "latest_broker_state_classification": result.report.get("latest_broker_state_classification"),
                 "runtime_data_freshness_by_instrument": result.report.get("runtime_data_freshness_by_instrument"),
                 "candidate_signals": result.report.get("candidate_signals", []),
                 "suppressed_signals": result.report.get("suppressed_signals", []),

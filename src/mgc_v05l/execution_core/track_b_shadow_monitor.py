@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -93,6 +93,8 @@ class TrackBRuntimeDataSource(str, Enum):
 class TrackBShadowMonitorVerdict(str, Enum):
     OK_NO_SIGNAL = "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL"
     OK_SIGNAL_READY_NO_SUBMIT = "TRACK_B_SHADOW_MONITOR_OK_SIGNAL_READY_NO_SUBMIT"
+    PAPER_PROOF_PASSED = "TRACK_B_SHADOW_MONITOR_PAPER_PROOF_PASSED"
+    PAPER_PROOF_REVIEW_REQUIRED = "TRACK_B_SHADOW_MONITOR_PAPER_PROOF_REVIEW_REQUIRED"
     HEARTBEAT_NO_NEW_COMPLETED_BAR = "TRACK_B_SHADOW_MONITOR_HEARTBEAT_NO_NEW_COMPLETED_BAR"
     NOT_READY_NO_STRATEGIES_CONFIGURED = "TRACK_B_SHADOW_MONITOR_NOT_READY_NO_STRATEGIES_CONFIGURED"
     NOT_READY_UNWIRED_INSTRUMENT = "TRACK_B_SHADOW_MONITOR_NOT_READY_UNWIRED_INSTRUMENT"
@@ -134,6 +136,18 @@ class TrackBShadowMonitorConfig:
     max_consecutive_failures: int | None = None
     expected_account_id: str = "DUM882026"
     account_id: str = "DUM882026"
+    enable_paper_trading: bool = False
+    paper_on_signal: bool = False
+    max_paper_trades_per_run: int = 1
+    paper_trades_attempted_count: int = 0
+    pause_after_paper_trade: bool = True
+    quantity: int | None = None
+    manual_open_limit_price: str | None = None
+    manual_close_limit_price: str | None = None
+    con_id: int | None = 712565978
+    host: str = "127.0.0.1"
+    port: int = 7497
+    client_id: int = 17086
     contract_key: str = "MGC-202606"
     local_symbol: str = MGC_LOCAL_SYMBOL
     databento_continuous_symbol: str = MGC_CONTINUOUS_SYMBOL
@@ -362,8 +376,7 @@ def run_track_b_shadow_monitor(
     monitor_id: str | None = None,
     now_func: Callable[[], datetime] | None = None,
 ) -> TrackBShadowMonitorResult:
-    if str(config.mode).upper() != "SHADOW":
-        raise ValueError("Track B shadow monitor is SHADOW-only; PAPER flags are not accepted.")
+    _validate_monitor_mode_config(config)
     if config.max_cycles <= 0:
         raise ValueError("max_cycles must be positive.")
     if config.poll_seconds < 0:
@@ -400,6 +413,7 @@ def run_track_b_shadow_monitor(
     last_evaluated_completed_5m: dict[str, str] = {}
     last_runtime_fetch_attempt_at: dict[str, datetime] = {}
     live_feed_processes: dict[str, TrackBLiveFeedProcessState] = {}
+    paper_trades_attempted_count = 0
     shutdown_reason: str | None = None
     try:
         for cycle_index in range(1, config.max_cycles + 1):
@@ -430,9 +444,11 @@ def run_track_b_shadow_monitor(
                 last_evaluated_completed_5m=last_evaluated_completed_5m,
                 last_runtime_fetch_attempt_at=last_runtime_fetch_attempt_at,
                 live_feed_processes=live_feed_processes,
+                paper_trades_attempted_count=paper_trades_attempted_count,
                 lock=lock,
             )
             cycle_reports.append(report)
+            paper_trades_attempted_count = int(report.get("paper_trades_attempted_count") or paper_trades_attempted_count)
             final_verdict = TrackBShadowMonitorVerdict(str(report["monitor_verdict"]))
             final_report_json = Path(str(report["report_json_path"]))
             failure = _failure_counts_for_backoff(report)
@@ -586,14 +602,16 @@ def _run_one_cycle(
     last_runtime_fetch_attempt_at: dict[str, datetime],
     live_feed_processes: dict[str, TrackBLiveFeedProcessState],
     lock: TrackBShadowMonitorLock,
+    paper_trades_attempted_count: int,
 ) -> dict[str, Any]:
     report_json = Path(config.output_root) / cycle_id / "track_b_shadow_monitor_report.json"
     instrument_reports: list[dict[str, Any]] = []
     runtime_cycle_report_json: Path | None = None
+    cycle_config = replace(config, paper_trades_attempted_count=paper_trades_attempted_count)
     try:
         for instrument in instruments:
             instrument_report, maybe_runtime_cycle_report_json = _run_instrument_cycle(
-                config=config,
+                config=cycle_config,
                 stages=stages,
                 instrument=instrument,
                 cycle_index=cycle_index,
@@ -602,6 +620,7 @@ def _run_one_cycle(
                 last_evaluated_completed_5m=last_evaluated_completed_5m,
                 last_runtime_fetch_attempt_at=last_runtime_fetch_attempt_at,
                 live_feed_processes=live_feed_processes,
+                paper_trades_attempted_count=paper_trades_attempted_count,
             )
             instrument_reports.append(instrument_report)
             if maybe_runtime_cycle_report_json is not None:
@@ -618,7 +637,7 @@ def _run_one_cycle(
 
     completed_at = now_func()
     verdict = _cycle_verdict(instrument_reports)
-    critical = _global_critical_blocker(instrument_reports)
+    critical = _global_critical_blocker(instrument_reports, config=config)
     if critical:
         verdict = TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG
     report = _report_for_cycle(
@@ -634,6 +653,7 @@ def _run_one_cycle(
         primary_blocker=critical or _primary_blocker(instrument_reports),
         required_next_action=_required_next_action(verdict),
         lock=lock,
+        paper_trades_attempted_count=paper_trades_attempted_count + _paper_trade_attempt_count_delta(instrument_reports),
     )
     return _finalize_cycle(
         config,
@@ -656,6 +676,7 @@ def _run_instrument_cycle(
     last_evaluated_completed_5m: dict[str, str],
     last_runtime_fetch_attempt_at: dict[str, datetime],
     live_feed_processes: dict[str, TrackBLiveFeedProcessState] | None = None,
+    paper_trades_attempted_count: int = 0,
 ) -> tuple[dict[str, Any], Path | None]:
     if not instrument.enabled_strategies:
         return (
@@ -828,7 +849,7 @@ def _run_instrument_cycle(
     runtime_cycle = stages.multi_strategy_runtime_cycle(config, instrument, cycle_index, started_at, asian, snap, session)
     if completed_5m:
         last_evaluated_completed_5m[instrument.instrument_family] = completed_5m
-    critical = _critical_mutation_flag(runtime_cycle.report)
+    critical = _critical_mutation_flag(runtime_cycle.report, config=config)
     verdict = _verdict_for_runtime_cycle(runtime_cycle.report, critical)
     return (
         _instrument_report_from_stages(
@@ -1191,6 +1212,49 @@ def _runtime_data_source(config: TrackBShadowMonitorConfig) -> TrackBRuntimeData
     if isinstance(config.runtime_data_source, TrackBRuntimeDataSource):
         return config.runtime_data_source
     return TrackBRuntimeDataSource(str(config.runtime_data_source).strip().upper())
+
+
+def _validate_monitor_mode_config(config: TrackBShadowMonitorConfig) -> None:
+    mode = str(config.mode).upper()
+    if mode not in {"SHADOW", "PAPER"}:
+        raise ValueError("Track B monitor mode must be SHADOW or PAPER.")
+    if mode == "SHADOW":
+        if config.enable_paper_trading or config.paper_on_signal:
+            raise ValueError("SHADOW mode cannot enable paper trading or paper-on-signal.")
+        return
+    if not config.enable_paper_trading:
+        raise ValueError("PAPER mode requires --enable-paper-trading.")
+    if not config.paper_on_signal:
+        raise ValueError("PAPER mode requires --paper-on-signal.")
+    if _runtime_data_source(config) != TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT:
+        raise ValueError("PAPER mode requires runtime_decision_source=DATABENTO_LIVE_ARTIFACT.")
+    if config.max_paper_trades_per_run <= 0:
+        raise ValueError("PAPER mode requires --max-paper-trades-per-run greater than zero.")
+    if config.quantity is None or config.quantity <= 0:
+        raise ValueError("PAPER mode requires explicit positive --quantity.")
+    if config.manual_open_limit_price is None:
+        raise ValueError("PAPER mode requires --manual-open-limit-price.")
+    if config.manual_close_limit_price is None:
+        raise ValueError("PAPER mode requires --manual-close-limit-price.")
+    if config.expected_account_id != "DUM882026" or config.account_id != "DUM882026":
+        raise ValueError("PAPER mode currently requires account and expected account DUM882026.")
+
+
+def _monitor_mode(config: TrackBShadowMonitorConfig) -> str:
+    return str(config.mode).upper()
+
+
+def _monitor_paper_submit_requested(config: TrackBShadowMonitorConfig) -> bool:
+    return bool(
+        _monitor_mode(config) == "PAPER"
+        and config.enable_paper_trading
+        and config.paper_on_signal
+        and config.paper_trades_attempted_count < config.max_paper_trades_per_run
+    )
+
+
+def _monitor_paper_side(config: TrackBShadowMonitorConfig) -> str:
+    return "AUTO" if _monitor_mode(config) == "PAPER" else "BUY"
 
 
 def _run_live_runtime_artifact_capture(
@@ -1818,14 +1882,22 @@ def _run_multi_strategy_runtime_cycle(
             us_derivative_bear_turn_event_json=session.us_derivative_bear_turn_event_json,
             us_late_pause_resume_long_event_json=session.us_late_pause_resume_long_event_json,
             inbox_dir=config.inbox_dir,
-            expected_account_id=instrument.expected_account_id,
             source_id=f"{config.source_id}_multi_strategy_cycle_{cycle_index}",
             mode="PAPER",
+            host=config.host,
+            port=config.port,
+            client_id=config.client_id,
             account_id=instrument.execution_account_id,
+            expected_account_id=instrument.expected_account_id,
             contract_key=instrument.contract_key,
+            side=_monitor_paper_side(config),
+            quantity=config.quantity,
+            submit_paper=_monitor_paper_submit_requested(config),
+            confirm_paper_submit=_monitor_paper_submit_requested(config),
+            manual_open_limit_price=config.manual_open_limit_price,
+            manual_close_limit_price=config.manual_close_limit_price,
             allowlisted_local_symbol=instrument.local_symbol,
-            submit_paper=False,
-            confirm_paper_submit=False,
+            con_id=config.con_id,
             output_root=config.multi_strategy_output_root,
             update_operator_status=config.update_operator_status,
             operator_status_output_root=config.operator_status_output_root,
@@ -2004,6 +2076,13 @@ def _instrument_report_from_stages(
             "session_producer_verdict": session.report.get("session_strategy_envelope_producer_verdict") if session is not None else None,
             "multi_strategy_runtime_cycle_report_path": str(runtime_cycle.report_json) if runtime_cycle is not None else None,
             "multi_strategy_runtime_cycle_verdict": runtime_cycle_report.get("multi_strategy_runtime_cycle_verdict"),
+            "paper_runner_report_path": runtime_cycle_report.get("paper_runner_report_path"),
+            "paper_runner_verdict": runtime_cycle_report.get("paper_runner_verdict"),
+            "paper_proof_classification": runtime_cycle_report.get("paper_proof_classification"),
+            "latest_broker_state_classification": runtime_cycle_report.get("paper_proof_classification")
+            or runtime_cycle_report.get("final_broker_state_classification"),
+            "final_broker_state_classification": runtime_cycle_report.get("final_broker_state_classification"),
+            "final_flat": runtime_cycle_report.get("final_flat"),
             "evaluated_strategy_count": len(runtime_cycle_report.get("evaluated_strategies") or []),
             "strategy_verdicts": strategy_verdicts,
             "not_ready_strategy_count": _count_strategy_verdicts(strategy_verdicts, "NOT_READY"),
@@ -2040,6 +2119,7 @@ def _report_for_cycle(
     primary_blocker: object | None,
     required_next_action: str,
     lock: TrackBShadowMonitorLock,
+    paper_trades_attempted_count: int,
 ) -> dict[str, Any]:
     completed_at = completed_at.astimezone(UTC)
     aggregate_tiers = _aggregate_tier_counts(instrument_reports)
@@ -2054,10 +2134,16 @@ def _report_for_cycle(
         "schema_version": "track_b_shadow_monitor_v2",
         "monitor_id": monitor_id,
         "cycle_id": cycle_id,
-        "mode": "SHADOW",
+        "mode": _monitor_mode(config),
+        "monitor_mode": _monitor_mode(config),
         "runtime_data_source": _runtime_data_source(config).value,
         "runtime_decision_source": _runtime_data_source(config).value,
         "live_feed_managed": config.manage_live_feed,
+        "paper_trading_enabled": config.enable_paper_trading,
+        "paper_on_signal": config.paper_on_signal,
+        "max_paper_trades_per_run": config.max_paper_trades_per_run,
+        "paper_trades_attempted_count": paper_trades_attempted_count,
+        "pause_after_paper_trade": config.pause_after_paper_trade,
         "started_at": started_at.astimezone(UTC).isoformat(),
         "completed_at": completed_at.isoformat(),
         "cycle_elapsed_seconds": round(max(0.0, (completed_at - started_at.astimezone(UTC)).total_seconds()), 3),
@@ -2121,6 +2207,12 @@ def _report_for_cycle(
         "suppressed_signals": [sig for item in instrument_reports for sig in item.get("suppressed_signals", [])],
         "arbitration_result": _first_nonempty(item.get("arbitration_result") for item in instrument_reports),
         "chosen_signal": _first_nonempty(item.get("chosen_signal") for item in instrument_reports),
+        "latest_signal_strategy_id": _latest_signal_field(instrument_reports, "strategy_id"),
+        "latest_signal_side": _latest_signal_field(instrument_reports, "signal_direction"),
+        "latest_paper_lifecycle_report_path": _first_nonempty(item.get("paper_runner_report_path") for item in instrument_reports),
+        "latest_broker_state_classification": _first_nonempty(
+            item.get("latest_broker_state_classification") for item in instrument_reports
+        ),
         "decision_journal_summary_path": _first_nonempty(item.get("decision_journal_summary_path") for item in instrument_reports),
         "decision_journal_tier_counts": aggregate_tiers,
         "operator_status_path": None,
@@ -2222,7 +2314,8 @@ def _write_heartbeat(
         "monitor_id": monitor_id,
         "cycle_id": cycle_id,
         "cycle_index": cycle_index,
-        "mode": "SHADOW",
+        "mode": _monitor_mode(config),
+        "monitor_mode": _monitor_mode(config),
         "monitor_running": monitor_running,
         "pid": lock.owner.get("pid"),
         "host": lock.owner.get("host"),
@@ -2258,7 +2351,8 @@ def _write_final_heartbeat(
         {
             "generated_at": generated_at.astimezone(UTC).isoformat(),
             "monitor_id": monitor_id,
-            "mode": "SHADOW",
+            "mode": _monitor_mode(config),
+            "monitor_mode": _monitor_mode(config),
             "monitor_running": False,
             "shutdown_reason": shutdown_reason or "max_cycles_completed_or_stopped",
             "last_monitor_verdict": last_verdict,
@@ -2287,6 +2381,10 @@ def _verdict_for_runtime_cycle(
         return TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT
     if verdict == TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION.value:
         return TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    if verdict == TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED.value:
+        return TrackBShadowMonitorVerdict.PAPER_PROOF_PASSED
+    if verdict == TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_REVIEW_REQUIRED.value:
+        return TrackBShadowMonitorVerdict.PAPER_PROOF_REVIEW_REQUIRED
     return TrackBShadowMonitorVerdict.BLOCKED_PRODUCER_ERROR
 
 
@@ -2296,6 +2394,10 @@ def _cycle_verdict(instrument_reports: Sequence[Mapping[str, Any]]) -> TrackBSha
         return TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG
     if TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT.value in verdicts:
         return TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT
+    if TrackBShadowMonitorVerdict.PAPER_PROOF_REVIEW_REQUIRED.value in verdicts:
+        return TrackBShadowMonitorVerdict.PAPER_PROOF_REVIEW_REQUIRED
+    if TrackBShadowMonitorVerdict.PAPER_PROOF_PASSED.value in verdicts:
+        return TrackBShadowMonitorVerdict.PAPER_PROOF_PASSED
     if TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value in verdicts:
         return TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR
     if TrackBShadowMonitorVerdict.LIVE_FEED_DISCONNECTED.value in verdicts:
@@ -2317,23 +2419,49 @@ def _cycle_verdict(instrument_reports: Sequence[Mapping[str, Any]]) -> TrackBSha
     return TrackBShadowMonitorVerdict.NOT_READY_NO_STRATEGIES_CONFIGURED
 
 
-def _critical_mutation_flag(report: Mapping[str, Any]) -> str | None:
-    for key in ("submit_allowed", "submit_attempted", "paper_proof_invoked", "broker_state_mutated", "live_money_readiness"):
-        if report.get(key) is True:
-            return f"Unexpected SHADOW mutation/safety flag {key}=true."
-    return None
-
-
-def _global_critical_blocker(instrument_reports: Sequence[Mapping[str, Any]]) -> str | None:
-    for report in instrument_reports:
-        for key in ("submit_allowed", "submit_attempted", "paper_proof_invoked", "broker_state_mutated", "live_money_readiness"):
+def _critical_mutation_flag(report: Mapping[str, Any], *, config: TrackBShadowMonitorConfig) -> str | None:
+    if report.get("live_money_readiness") is True:
+        return "Unexpected monitor safety flag live_money_readiness=true."
+    if _monitor_mode(config) == "SHADOW":
+        for key in ("submit_allowed", "submit_attempted", "paper_proof_invoked", "broker_state_mutated"):
             if report.get(key) is True:
-                return f"Unexpected SHADOW mutation/safety flag {key}=true for {report.get('instrument_family')}."
+                return f"Unexpected SHADOW mutation/safety flag {key}=true."
+        return None
+    if report.get("submit_attempted") is True and not _has_guarded_paper_lifecycle_provenance(report):
+        return "PAPER submit_attempted=true without guarded lifecycle provenance."
+    if report.get("broker_state_mutated") is True and not _has_guarded_paper_lifecycle_provenance(report):
+        return "PAPER broker_state_mutated=true outside guarded lifecycle provenance."
+    if report.get("paper_proof_invoked") is True and not _has_guarded_paper_lifecycle_provenance(report):
+        return "PAPER paper_proof_invoked=true without guarded lifecycle provenance."
     return None
+
+
+def _global_critical_blocker(
+    instrument_reports: Sequence[Mapping[str, Any]],
+    *,
+    config: TrackBShadowMonitorConfig,
+) -> str | None:
+    for report in instrument_reports:
+        blocker = _critical_mutation_flag(report, config=config)
+        if blocker:
+            return f"{blocker} Instrument={report.get('instrument_family')}."
+    return None
+
+
+def _has_guarded_paper_lifecycle_provenance(report: Mapping[str, Any]) -> bool:
+    return bool(report.get("paper_runner_report_path") and report.get("paper_proof_classification"))
 
 
 def _must_stop(report: Mapping[str, Any], config: TrackBShadowMonitorConfig) -> bool:
     if report.get("monitor_verdict") == TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG.value:
+        return True
+    if (
+        _monitor_mode(config) == "PAPER"
+        and config.pause_after_paper_trade
+        and int(report.get("paper_trades_attempted_count") or 0) > int(config.paper_trades_attempted_count or 0)
+    ):
+        return True
+    if _monitor_mode(config) == "PAPER" and int(report.get("paper_trades_attempted_count") or 0) >= config.max_paper_trades_per_run:
         return True
     if config.stop_on_error and report.get("monitor_verdict") in {
         TrackBShadowMonitorVerdict.BLOCKED_PROVIDER_ERROR.value,
@@ -2346,6 +2474,10 @@ def _must_stop(report: Mapping[str, Any], config: TrackBShadowMonitorConfig) -> 
     }:
         return True
     return False
+
+
+def _paper_trade_attempt_count_delta(instrument_reports: Sequence[Mapping[str, Any]]) -> int:
+    return sum(1 for report in instrument_reports if report.get("paper_proof_invoked") is True)
 
 
 def _failure_counts_for_backoff(report: Mapping[str, Any]) -> bool:
@@ -2571,7 +2703,8 @@ def _lock_held_report(
         "monitor_schema_version": "track_b_shadow_monitor_v2",
         "monitor_id": monitor_id,
         "cycle_id": f"{monitor_id}_lock_held",
-        "mode": "SHADOW",
+        "mode": _monitor_mode(config),
+        "monitor_mode": _monitor_mode(config),
         "started_at": now.astimezone(UTC).isoformat(),
         "completed_at": now.astimezone(UTC).isoformat(),
         "cycle_elapsed_seconds": 0,
@@ -2633,6 +2766,10 @@ def _required_next_action(verdict: TrackBShadowMonitorVerdict) -> str:
         return "Wait for fresh runtime candles; do not evaluate strategies on stale context."
     if verdict == TrackBShadowMonitorVerdict.OK_SIGNAL_READY_NO_SUBMIT:
         return "Review signal artifact; SHADOW monitor continues without submit authority."
+    if verdict == TrackBShadowMonitorVerdict.PAPER_PROOF_PASSED:
+        return "Guarded PAPER lifecycle completed; pause/stop according to monitor paper policy."
+    if verdict == TrackBShadowMonitorVerdict.PAPER_PROOF_REVIEW_REQUIRED:
+        return "Review guarded PAPER lifecycle classification before re-arming PAPER mode."
     return "Continue Track B SHADOW monitoring."
 
 
@@ -2641,6 +2778,20 @@ def _first_nonempty(values: Sequence[object] | Any) -> object:
         if value:
             return value
     return {}
+
+
+def _latest_signal_field(instrument_reports: Sequence[Mapping[str, Any]], field: str) -> object:
+    for report in instrument_reports:
+        chosen = report.get("chosen_signal")
+        if isinstance(chosen, Mapping) and chosen.get(field):
+            return chosen.get(field)
+    for report in instrument_reports:
+        candidates = report.get("candidate_signals") or []
+        if isinstance(candidates, Sequence) and not isinstance(candidates, (str, bytes)):
+            for candidate in candidates:
+                if isinstance(candidate, Mapping) and candidate.get(field):
+                    return candidate.get(field)
+    return None
 
 
 def _aggregate_tier_counts(instrument_reports: Sequence[Mapping[str, Any]]) -> dict[str, int]:
