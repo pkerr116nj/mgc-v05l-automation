@@ -32,6 +32,10 @@ MGC_DATASET = "GLBX.MDP3"
 
 class TrackBRuntimeCandleCaptureVerdict(str, Enum):
     WROTE_RUNTIME_CANDLES = "TRACK_B_RUNTIME_CANDLE_CAPTURE_WROTE_RUNTIME_CANDLES"
+    DATA_WRITTEN_EXECUTION_FRESH = "TRACK_B_RUNTIME_CANDLE_CAPTURE_DATA_WRITTEN_EXECUTION_FRESH"
+    DATA_WRITTEN_NOT_EXECUTION_FRESH = "TRACK_B_RUNTIME_CANDLE_CAPTURE_DATA_WRITTEN_NOT_EXECUTION_FRESH"
+    FETCH_FAILED = "TRACK_B_RUNTIME_CANDLE_CAPTURE_FETCH_FAILED"
+    PROVIDER_ERROR = "TRACK_B_RUNTIME_CANDLE_CAPTURE_PROVIDER_ERROR"
     BLOCKED_INSUFFICIENT_RUNTIME_CANDLES = "TRACK_B_RUNTIME_CANDLE_CAPTURE_BLOCKED_INSUFFICIENT_RUNTIME_CANDLES"
     BLOCKED_INVALID_INPUT = "TRACK_B_RUNTIME_CANDLE_CAPTURE_BLOCKED_INVALID_INPUT"
     BLOCKED_SCHEMA_ERROR = "TRACK_B_RUNTIME_CANDLE_CAPTURE_BLOCKED_SCHEMA_ERROR"
@@ -46,6 +50,15 @@ class TrackBRuntimeCandleCaptureResult:
     report: dict[str, Any]
     runtime_candles_json: Path | None
     runtime_candles_event: dict[str, Any] | None
+
+
+_DATA_WRITTEN_VERDICTS = frozenset(
+    {
+        TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES,
+        TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_EXECUTION_FRESH,
+        TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_NOT_EXECUTION_FRESH,
+    }
+)
 
 
 def capture_track_b_runtime_mgc_1m_candles(
@@ -216,43 +229,10 @@ def capture_track_b_runtime_mgc_1m_candles(
             now=actual_now,
             max_latest_1m_age_seconds=max_latest_1m_age_seconds,
             max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+            provider_available_end=provider_available_end,
         )
-        if freshness["runtime_candle_context_stale"] is True:
-            return _write_report(
-                report_json=report_json,
-                event_json=event_json,
-                verdict=TrackBRuntimeCandleCaptureVerdict.BLOCKED_STALE_RUNTIME_CANDLES,
-                now=actual_now,
-                capture_id=actual_capture_id,
-                source_id=actual_source_id,
-                source_payload_path=source_payload_path,
-                account_id=account_id,
-                contract_key=contract_key,
-                local_symbol=local_symbol,
-                databento_continuous_symbol=databento_continuous_symbol,
-                dataset=dataset,
-                timeframe=timeframe,
-                candle_source_mode=candle_source_mode,
-                max_bars=max_bars,
-                min_bars=min_bars,
-                candles=bounded,
-                duplicate_count=duplicate_count,
-                gap_count=gap_count,
-                quote_evidence=quote_evidence,
-                runtime_event=None,
-                primary_blocker=_stale_blocker(freshness),
-                required_next_action="Refresh bounded Track B runtime candles from a current market-data source before strategy evaluation.",
-                retention_runs=retention_runs,
-                requested_window_start=requested_window_start,
-                requested_window_end=requested_window_end,
-                provider_available_end=provider_available_end,
-                history_end_used=history_end_used,
-                available_end_lag_seconds=available_end_lag_seconds,
-                max_latest_1m_age_seconds=max_latest_1m_age_seconds,
-                max_completed_5m_age_seconds=max_completed_5m_age_seconds,
-                provider_credential_status=provider_credential_status,
-                provider_credential_source=provider_credential_source,
-            )
+        fresh_for_execution = freshness["runtime_candle_context_stale"] is not True
+        execution_freshness_blocker = None if fresh_for_execution else _stale_blocker(freshness)
         runtime_event = _runtime_event(
             payload=runtime_candle_payload,
             candles=bounded,
@@ -271,11 +251,18 @@ def capture_track_b_runtime_mgc_1m_candles(
             strategy_id=strategy_id,
             lane_id=lane_id,
             now=actual_now,
+            fresh_for_execution=fresh_for_execution,
+            execution_freshness_blocker=execution_freshness_blocker,
+        )
+        verdict = (
+            TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_EXECUTION_FRESH
+            if fresh_for_execution
+            else TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_NOT_EXECUTION_FRESH
         )
         return _write_report(
             report_json=report_json,
             event_json=event_json,
-            verdict=TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES,
+            verdict=verdict,
             now=actual_now,
             capture_id=actual_capture_id,
             source_id=actual_source_id,
@@ -294,8 +281,12 @@ def capture_track_b_runtime_mgc_1m_candles(
             gap_count=gap_count,
             quote_evidence=quote_evidence,
             runtime_event=runtime_event,
-            primary_blocker=None,
-            required_next_action="Runtime candle context is ready for track_b_feature_builder or track_b_strategy_paper_runner.",
+            primary_blocker=execution_freshness_blocker,
+            required_next_action=(
+                "Runtime candle context is fresh for live Track B strategy evaluation."
+                if fresh_for_execution
+                else "Bounded candle data was written for backfill/context only; do not run live strategy evaluation until fresh_for_execution=true or an explicit research/shadow replay override is supplied."
+            ),
             retention_runs=retention_runs,
             requested_window_start=requested_window_start,
             requested_window_end=requested_window_end,
@@ -349,6 +340,7 @@ def write_runtime_candle_capture_provider_error(
     *,
     primary_blocker: str,
     required_next_action: str,
+    verdict: TrackBRuntimeCandleCaptureVerdict = TrackBRuntimeCandleCaptureVerdict.PROVIDER_ERROR,
     source_id: str = "track_b_runtime_candle_capture",
     account_id: str = "DUM882026",
     contract_key: str = MGC_CONTRACT_KEY,
@@ -380,7 +372,7 @@ def write_runtime_candle_capture_provider_error(
     return _write_report(
         report_json=report_json,
         event_json=event_json,
-        verdict=TrackBRuntimeCandleCaptureVerdict.BLOCKED_PROVIDER_ERROR,
+        verdict=verdict,
         now=actual_now,
         capture_id=actual_capture_id,
         source_id=source_id,
@@ -520,6 +512,8 @@ def _runtime_event(
     strategy_id: str,
     lane_id: str,
     now: datetime,
+    fresh_for_execution: bool,
+    execution_freshness_blocker: str | None,
 ) -> dict[str, Any]:
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
     latest = candles[-1]
@@ -554,7 +548,10 @@ def _runtime_event(
         "volume": latest.get("volume"),
         "candles": list(candles),
         "candle_history": list(candles),
-        "runtime_candle_context_ready": True,
+        "data_written": True,
+        "fresh_for_execution": fresh_for_execution,
+        "execution_freshness_blocker": execution_freshness_blocker,
+        "runtime_candle_context_ready": fresh_for_execution,
         "quote_provider_mode": quote_evidence.get("quote_provider_mode"),
         "realtime_quote_received": quote_evidence.get("realtime_quote_received"),
         "current_quote_available": quote_evidence.get("current_quote_available"),
@@ -615,7 +612,16 @@ def _write_report(
     output_root = report_json.parent.parent
     latest_report_json = output_root / "latest_runtime_candle_capture_report.json"
     latest_event_json = output_root / "latest_runtime_mgc_1m_candles.json"
-    wrote_event = runtime_event is not None and verdict == TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES
+    data_written = runtime_event is not None and verdict in _DATA_WRITTEN_VERDICTS
+    freshness = _runtime_freshness(
+        candles=candles,
+        now=now,
+        max_latest_1m_age_seconds=max_latest_1m_age_seconds,
+        max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+        provider_available_end=provider_available_end,
+    )
+    fresh_for_execution = data_written and freshness["runtime_candle_context_stale"] is not True
+    execution_freshness_blocker = None if fresh_for_execution else (_stale_blocker(freshness) if data_written else None)
     report = {
         "schema_version": "track_b_runtime_candle_capture_report_v1",
         "generated_at": now.isoformat(),
@@ -643,21 +649,19 @@ def _write_report(
         "bars_available": len(candles),
         "first_candle_timestamp": candles[0].get("candle_timestamp") if candles else None,
         "last_candle_timestamp": candles[-1].get("candle_timestamp") if candles else None,
-        **_runtime_freshness(
-            candles=candles,
-            now=now,
-            max_latest_1m_age_seconds=max_latest_1m_age_seconds,
-            max_completed_5m_age_seconds=max_completed_5m_age_seconds,
-        ),
-        "runtime_candle_context_ready": wrote_event,
+        **freshness,
+        "data_written": data_written,
+        "fresh_for_execution": fresh_for_execution,
+        "execution_freshness_blocker": execution_freshness_blocker,
+        "runtime_candle_context_ready": fresh_for_execution,
         "duplicate_count": duplicate_count,
         "gap_count": gap_count,
         "quote_provider_mode": quote_evidence.get("quote_provider_mode") or "NOT_PROVIDED",
         "realtime_quote_received": quote_evidence.get("realtime_quote_received") if quote_evidence else False,
         "current_quote_available": quote_evidence.get("current_quote_available") if quote_evidence else False,
         "quote_freshness_verdict": quote_evidence.get("quote_freshness_verdict") or "NOT_PROVIDED",
-        "output_runtime_candles_path": str(event_json) if wrote_event else None,
-        "latest_runtime_candles_path": str(latest_event_json) if wrote_event else None,
+        "output_runtime_candles_path": str(event_json) if data_written else None,
+        "latest_runtime_candles_path": str(latest_event_json) if data_written else None,
         "stored_run_count": _prune_old_runs(output_root=output_root, keep=max(int(retention_runs), 0), current_run_dir=report_json.parent),
         "retention_runs": retention_runs,
         "primary_blocker": primary_blocker,
@@ -682,7 +686,7 @@ def _write_report(
     report_json.write_text(payload, encoding="utf-8")
     latest_report_json.parent.mkdir(parents=True, exist_ok=True)
     latest_report_json.write_text(payload, encoding="utf-8")
-    if wrote_event:
+    if data_written:
         event_payload = json.dumps(to_jsonable(runtime_event), indent=2, sort_keys=True)
         event_json.write_text(event_payload, encoding="utf-8")
         latest_event_json.write_text(event_payload, encoding="utf-8")
@@ -690,7 +694,7 @@ def _write_report(
         verdict=verdict,
         report_json=report_json,
         report=report,
-        runtime_candles_json=event_json if wrote_event else None,
+        runtime_candles_json=event_json if data_written else None,
         runtime_candles_event=runtime_event,
     )
 
@@ -701,6 +705,7 @@ def _runtime_freshness(
     now: datetime,
     max_latest_1m_age_seconds: int | None,
     max_completed_5m_age_seconds: int | None,
+    provider_available_end: datetime | None = None,
 ) -> dict[str, Any]:
     latest_1m_timestamp = _latest_candle_timestamp(candles)
     latest_completed_5m_timestamp = _latest_completed_5m_timestamp(candles)
@@ -717,15 +722,30 @@ def _runtime_freshness(
         and (latest_completed_5m_age is None or latest_completed_5m_age > max_completed_5m_age_seconds)
     )
     stale = latest_1m_stale or completed_5m_stale
+    provider_lag = None
+    completed_5m_lag_vs_provider = None
+    if provider_available_end is not None:
+        provider_lag = (now - provider_available_end.astimezone(UTC)).total_seconds()
+        if latest_completed_5m_timestamp is not None:
+            completed_5m_lag_vs_provider = (
+                provider_available_end.astimezone(UTC) - latest_completed_5m_timestamp
+            ).total_seconds()
     return {
+        "latest_1m_timestamp": None if latest_1m_timestamp is None else latest_1m_timestamp.isoformat(),
         "latest_1m_candle_timestamp": None if latest_1m_timestamp is None else latest_1m_timestamp.isoformat(),
         "latest_1m_candle_age_seconds": None if latest_1m_age is None else round(latest_1m_age, 3),
         "latest_1m_candle_age_minutes": None if latest_1m_age is None else round(latest_1m_age / 60.0, 3),
         "max_latest_1m_candle_age_seconds": max_latest_1m_age_seconds,
+        "latest_completed_5m_timestamp": None if latest_completed_5m_timestamp is None else latest_completed_5m_timestamp.isoformat(),
         "latest_completed_5m_candle_timestamp": None if latest_completed_5m_timestamp is None else latest_completed_5m_timestamp.isoformat(),
         "latest_completed_5m_candle_age_seconds": None if latest_completed_5m_age is None else round(latest_completed_5m_age, 3),
         "latest_completed_5m_candle_age_minutes": None if latest_completed_5m_age is None else round(latest_completed_5m_age / 60.0, 3),
         "max_completed_5m_candle_age_seconds": max_completed_5m_age_seconds,
+        "provider_lag_seconds_vs_wall_clock": None if provider_lag is None else round(provider_lag, 3),
+        "completed_5m_lag_vs_provider_seconds": (
+            None if completed_5m_lag_vs_provider is None else round(completed_5m_lag_vs_provider, 3)
+        ),
+        "completed_5m_lag_vs_wall_clock_seconds": None if latest_completed_5m_age is None else round(latest_completed_5m_age, 3),
         "latest_1m_candle_stale": latest_1m_stale,
         "completed_5m_candle_stale": completed_5m_stale,
         "runtime_candle_context_stale": stale,

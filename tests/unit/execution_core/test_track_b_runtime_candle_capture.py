@@ -62,8 +62,10 @@ def test_runtime_capture_writes_bounded_latest_artifacts(tmp_path: Path) -> None
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES
+    assert result.verdict == TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_EXECUTION_FRESH
     assert result.runtime_candles_json is not None
+    assert result.report["data_written"] is True
+    assert result.report["fresh_for_execution"] is True
     assert result.report["runtime_candle_context_ready"] is True
     assert result.report["bars_available"] == 3
     assert result.report["first_candle_timestamp"] == "2026-05-04T14:28:00+00:00"
@@ -139,13 +141,38 @@ def test_runtime_capture_blocks_stale_candles_when_freshness_required(tmp_path: 
         now=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
     )
 
-    assert result.verdict == TrackBRuntimeCandleCaptureVerdict.BLOCKED_STALE_RUNTIME_CANDLES
-    assert result.runtime_candles_json is None
+    assert result.verdict == TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_NOT_EXECUTION_FRESH
+    assert result.runtime_candles_json is not None
+    assert result.report["data_written"] is True
+    assert result.report["fresh_for_execution"] is False
     assert result.report["latest_1m_candle_timestamp"] == "2026-05-04T14:30:00+00:00"
+    assert result.report["latest_1m_timestamp"] == "2026-05-04T14:30:00+00:00"
     assert result.report["latest_completed_5m_candle_timestamp"] == "2026-05-04T14:30:00+00:00"
+    assert result.report["latest_completed_5m_timestamp"] == "2026-05-04T14:30:00+00:00"
     assert result.report["runtime_candle_context_stale"] is True
+    assert result.report["runtime_candle_context_ready"] is False
+    assert "latest 1m candle age" in result.report["execution_freshness_blocker"]
+    assert (tmp_path / "latest_runtime_mgc_1m_candles.json").exists()
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_runtime_capture_reports_provider_and_completed_5m_lags(tmp_path: Path) -> None:
+    result = capture_track_b_runtime_mgc_1m_candles(
+        runtime_candle_payload=runtime_payload(candle_count=5),
+        output_root=tmp_path,
+        provider_available_end=datetime(2026, 5, 4, 14, 32, tzinfo=timezone.utc),
+        max_latest_1m_age_seconds=900,
+        max_completed_5m_age_seconds=900,
+        now=datetime(2026, 5, 4, 14, 33, tzinfo=timezone.utc),
+    )
+
+    assert result.verdict == TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_EXECUTION_FRESH
+    assert result.report["provider_lag_seconds_vs_wall_clock"] == 60.0
+    assert result.report["completed_5m_lag_vs_provider_seconds"] == 120.0
+    assert result.report["completed_5m_lag_vs_wall_clock_seconds"] == 180.0
+    assert result.report["data_written"] is True
+    assert result.report["fresh_for_execution"] is True
 
 
 def test_runtime_capture_cli_fetches_bounded_databento_history(monkeypatch, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -195,8 +222,10 @@ def test_runtime_capture_cli_fetches_bounded_databento_history(monkeypatch, tmp_
 
     assert exit_code == 0
     output = json.loads(capsys.readouterr().out)
-    assert output["runtime_candle_capture_verdict"] == TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES
+    assert output["runtime_candle_capture_verdict"] == TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_EXECUTION_FRESH
     assert output["candle_source_mode"] == "DATABENTO_HISTORICAL_RECENT"
+    assert output["data_written"] is True
+    assert output["fresh_for_execution"] is True
     assert output["provider_credential_status"] == "FOUND_IN_PROCESS_ENV"
     assert output["provider_credential_source"] == "process:DATABENTO_API_KEY"
     assert output["latest_1m_candle_timestamp"] == "2026-05-04T14:30:00+00:00"
@@ -297,10 +326,57 @@ def test_runtime_capture_cli_missing_databento_key_writes_explicit_provider_erro
 
     assert exit_code == 2
     output = json.loads(capsys.readouterr().out)
-    assert output["runtime_candle_capture_verdict"] == TrackBRuntimeCandleCaptureVerdict.BLOCKED_PROVIDER_ERROR
+    assert output["runtime_candle_capture_verdict"] == TrackBRuntimeCandleCaptureVerdict.PROVIDER_ERROR
+    assert output["data_written"] is False
+    assert output["fresh_for_execution"] is False
     assert output["provider_credential_status"] == "MISSING"
     assert output["provider_credential_source"] == str(env_path)
     assert "DATABENTO_API_KEY is missing" in output["primary_blocker"]
+    assert output["submit_attempted"] is False
+    assert output["live_money_readiness"] is False
+
+
+def test_runtime_capture_cli_fetch_failure_writes_fetch_failed(monkeypatch, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    quote_path = tmp_path / "quote.json"
+    quote_path.write_text(
+        json.dumps(
+            {
+                "quote_provider_mode": "REALTIME",
+                "realtime_quote_received": True,
+                "current_quote_available": True,
+                "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+                "report_json_path": str(quote_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_fetch(**kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    monkeypatch.setattr(runtime_cli, "fetch_databento_ohlcv_1m_records", fake_fetch)
+
+    exit_code = runtime_cli.main(
+        [
+            "--fetch-databento-history",
+            "--current-quote-report-json",
+            str(quote_path),
+            "--history-end",
+            "2026-05-04T14:31:00+00:00",
+            "--output-root",
+            str(tmp_path / "capture"),
+        ]
+    )
+
+    assert exit_code == 2
+    output_text = capsys.readouterr().out
+    assert "test-key" not in output_text
+    output = json.loads(output_text)
+    assert output["runtime_candle_capture_verdict"] == TrackBRuntimeCandleCaptureVerdict.FETCH_FAILED
+    assert output["data_written"] is False
+    assert output["fresh_for_execution"] is False
+    assert "provider unavailable" in output["primary_blocker"]
     assert output["submit_attempted"] is False
     assert output["live_money_readiness"] is False
 

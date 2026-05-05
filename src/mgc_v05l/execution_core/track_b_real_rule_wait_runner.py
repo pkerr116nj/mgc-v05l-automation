@@ -151,7 +151,7 @@ def run_track_b_real_rule_wait(
             break
 
         capture = actual_stages.runtime_candle_capture(config, cycle_index, cycle_now)
-        if capture is not None and capture.verdict != TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES:
+        if capture is not None and capture.report.get("runtime_candle_context_ready") is not True:
             cycle = _cycle_report(
                 cycle_index=cycle_index,
                 now=cycle_now,

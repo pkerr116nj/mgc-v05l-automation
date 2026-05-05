@@ -201,13 +201,16 @@ Dashboard implication:
   `outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json`
   plus
   `outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_candle_capture_report.json`.
-  It reports `runtime_candle_context_ready`, candle counts/timestamps, duplicate
-  and gap counts, requested window, Databento `provider_available_end`,
-  `history_end_used`, latest 1m/completed 5m ages,
-  `runtime_candle_context_stale`, realtime quote-evidence fields, and no-submit
-  safety fields. If Databento available_end fallback is used, the artifact is
-  still required to pass explicit runtime freshness thresholds before strategy
-  evaluation. The CLI can load `DATABENTO_API_KEY` from the repo `.env.local`
+  It reports `data_written`, `fresh_for_execution`,
+  `execution_freshness_blocker`, `runtime_candle_context_ready`, candle
+  counts/timestamps, duplicate and gap counts, requested window, Databento
+  `provider_available_end`, `history_end_used`, latest 1m/completed 5m ages,
+  provider lag versus wall clock, completed-5m lag versus provider/wall clock,
+  realtime quote-evidence fields, and no-submit safety fields. If Databento
+  available_end fallback is used, valid bounded candles are still written for
+  backfill/gap-fill/data context, but strategy evaluation may proceed only when
+  `fresh_for_execution=true` unless an explicit research/shadow replay override
+  is supplied. The CLI can load `DATABENTO_API_KEY` from the repo `.env.local`
   when it is absent from the process environment; reports expose only
   credential status/source, never the key value.
   It does not connect to broker/TWS/IBKR, run paper proof, infer execution

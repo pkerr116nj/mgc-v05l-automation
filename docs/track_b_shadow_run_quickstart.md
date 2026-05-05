@@ -512,13 +512,18 @@ This runtime capture artifact is not the research archive. It is a bounded
 same-session context window for feature building. The capture report exposes
 `requested_window_start`, `requested_window_end`, `provider_available_end`,
 `history_end_used`, `available_end_lag_seconds`,
-`latest_1m_candle_timestamp`, `latest_completed_5m_candle_timestamp`, candle
-ages, and `runtime_candle_context_stale`. If Databento historical
+`latest_1m_timestamp`, `latest_completed_5m_timestamp`,
+`provider_lag_seconds_vs_wall_clock`, `completed_5m_lag_vs_provider_seconds`,
+`completed_5m_lag_vs_wall_clock_seconds`, candle ages,
+`data_written`, `fresh_for_execution`, and `execution_freshness_blocker`. If
+Databento historical
 `available_end` lags the requested window, the capture may retry through
-`provider_available_end`, but the resulting bars must still pass the explicit
-runtime freshness thresholds before strategies consume them. If live Databento
-streaming is needed later, it should feed this same bounded artifact shape
-rather than writing an unbounded stream by default.
+`provider_available_end` and still write a valid bounded candle artifact. That
+write is a backfill/gap-fill/data-context result, not execution readiness.
+Strategies may consume the artifact for live evaluation only when
+`fresh_for_execution=true`, unless an explicit research/shadow replay override
+is supplied. If live Databento streaming is needed later, it should feed this
+same bounded artifact shape rather than writing an unbounded stream by default.
 
 The data-maintenance registry currently enables only `MGC` for runtime
 maintenance. Disabled planning entries preserve the broader Track A-style

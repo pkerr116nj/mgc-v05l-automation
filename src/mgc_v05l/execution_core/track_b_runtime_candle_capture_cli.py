@@ -110,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider_available_end=getattr(exc, "provider_available_end", None),
                 provider_credential_status=credential_status,
                 provider_credential_source=credential_source,
+                verdict=TrackBRuntimeCandleCaptureVerdict.FETCH_FAILED,
             )
             _print_result(result)
             return 2
@@ -159,7 +160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=args.output_root,
     )
     _print_result(result)
-    return 0 if result.verdict == TrackBRuntimeCandleCaptureVerdict.WROTE_RUNTIME_CANDLES else 2
+    return 0 if result.report.get("data_written") is True else 2
 
 
 def _fetch_records(
@@ -216,10 +217,12 @@ def _provider_error_result(
     provider_available_end: datetime | None = None,
     provider_credential_status: str | None = None,
     provider_credential_source: str | None = None,
+    verdict: TrackBRuntimeCandleCaptureVerdict = TrackBRuntimeCandleCaptureVerdict.PROVIDER_ERROR,
 ) -> TrackBRuntimeCandleCaptureResult:
     return write_runtime_candle_capture_provider_error(
         primary_blocker=primary_blocker,
         required_next_action=required_next_action,
+        verdict=verdict,
         source_id=args.source_id,
         account_id=args.account_id,
         contract_key=args.contract_key,
@@ -348,6 +351,9 @@ def _print_result(result: TrackBRuntimeCandleCaptureResult) -> None:
             {
                 "runtime_candle_capture_verdict": report["runtime_candle_capture_verdict"],
                 "runtime_candle_context_ready": report["runtime_candle_context_ready"],
+                "data_written": report.get("data_written"),
+                "fresh_for_execution": report.get("fresh_for_execution"),
+                "execution_freshness_blocker": report.get("execution_freshness_blocker"),
                 "bars_available": report["bars_available"],
                 "max_bars": report["max_bars"],
                 "gap_count": report["gap_count"],
@@ -357,8 +363,13 @@ def _print_result(result: TrackBRuntimeCandleCaptureResult) -> None:
                 "provider_available_end": report.get("provider_available_end"),
                 "history_end_used": report.get("history_end_used"),
                 "available_end_lag_seconds": report.get("available_end_lag_seconds"),
+                "provider_lag_seconds_vs_wall_clock": report.get("provider_lag_seconds_vs_wall_clock"),
+                "completed_5m_lag_vs_provider_seconds": report.get("completed_5m_lag_vs_provider_seconds"),
+                "completed_5m_lag_vs_wall_clock_seconds": report.get("completed_5m_lag_vs_wall_clock_seconds"),
                 "provider_credential_status": report.get("provider_credential_status"),
                 "provider_credential_source": report.get("provider_credential_source"),
+                "latest_1m_timestamp": report.get("latest_1m_timestamp"),
+                "latest_completed_5m_timestamp": report.get("latest_completed_5m_timestamp"),
                 "latest_1m_candle_timestamp": report.get("latest_1m_candle_timestamp"),
                 "latest_completed_5m_candle_timestamp": report.get("latest_completed_5m_candle_timestamp"),
                 "latest_1m_candle_age_seconds": report.get("latest_1m_candle_age_seconds"),

@@ -318,7 +318,7 @@ separate realtime current quote report.
 MGC 1m candles. It is not the research archive and it does not replace weekly
 historical maintenance. It can fetch a bounded recent Databento `ohlcv-1m`
 window or accept supplied runtime candle JSON, bounds the retained window with
-`--max-bars` (default 250), freshness-checks latest 1m and completed 5m bars,
+`--max-bars` (default 250), reports freshness for latest 1m and completed 5m bars,
 overwrites stable latest artifacts, prunes old run folders, and writes:
 
 ```text
@@ -331,9 +331,13 @@ The strategy paper runner can consume that context with
 `--runtime-candle-context-required` is supplied and only maintained historical
 context is available, the runner blocks before readiness or paper proof.
 The runtime capture report includes requested window, provider available_end,
-history end used, latest 1m/completed 5m timestamps, age seconds, and
-`runtime_candle_context_stale`. Historical available_end fallback at this
-boundary is only a bounded recent data-source retry; stale bars still block.
+history end used, latest 1m/completed 5m timestamps, provider and completed-5m
+lag fields, `data_written`, `fresh_for_execution`, and
+`execution_freshness_blocker`. Historical available_end fallback at this
+boundary is a bounded backfill/gap-fill/data-context retry. Valid candles are
+written even when they are not execution-fresh, but live strategy evaluation
+must still require `fresh_for_execution=true` unless an explicit
+research/shadow replay override is supplied.
 For Databento fetch mode the CLI may load `DATABENTO_API_KEY` from the repo
 `.env.local` when the process environment does not already provide it. Reports
 show credential status/source only and never include the secret value.
