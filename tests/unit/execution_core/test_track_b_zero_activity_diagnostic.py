@@ -147,6 +147,53 @@ def test_diagnostic_classifies_normal_repeated_no_signal(tmp_path: Path) -> None
     assert result.report["per_strategy_recent_result_counts"]["TEST_STRATEGY_V1"]["no_signal"] == 1
 
 
+def test_diagnostic_classifies_no_new_completed_bar_heartbeat_separately(tmp_path: Path) -> None:
+    compact_summaries(tmp_path)
+    runtime = runtime_report(tmp_path, "runtime-1", strategies=[strategy("TEST_STRATEGY_V1", "TEST_NO_SIGNAL_NO_MUTATION")])
+    monitor_report(tmp_path, 1, runtime_path=runtime)
+    for cycle in range(2, 8):
+        monitor_report(
+            tmp_path,
+            cycle,
+            verdict="TRACK_B_SHADOW_MONITOR_HEARTBEAT_NO_NEW_COMPLETED_BAR",
+            evaluated=0,
+            primary_blocker=None,
+        )
+
+    result = build_track_b_zero_activity_diagnostic(repo_root=tmp_path, output_root=tmp_path / "diag", now=now())
+
+    assert result.report["diagnosis_classification"] == "NO_NEW_COMPLETED_5M_BAR_HEARTBEAT"
+    assert result.report["cycle_summary"]["recent_evaluation_cycle_count"] == 1
+    assert result.report["cycle_summary"]["recent_heartbeat_only_cycle_count"] == 6
+
+
+def test_diagnostic_classifies_intermittent_live_execution_failures(tmp_path: Path) -> None:
+    compact_summaries(tmp_path)
+    runtime = runtime_report(tmp_path, "runtime-1", strategies=[strategy("TEST_STRATEGY_V1", "TEST_NO_SIGNAL_NO_MUTATION")])
+    monitor_report(tmp_path, 1, runtime_path=runtime)
+    for cycle in range(2, 6):
+        monitor_report(
+            tmp_path,
+            cycle,
+            verdict="TRACK_B_SHADOW_MONITOR_NOT_READY_STALE_RUNTIME_CONTEXT",
+            evaluated=0,
+            primary_blocker="Track B runtime candle context is stale: latest 1m candle age exceeds max.",
+        )
+    monitor_report(
+        tmp_path,
+        6,
+        verdict="TRACK_B_SHADOW_MONITOR_HEARTBEAT_NO_NEW_COMPLETED_BAR",
+        evaluated=0,
+        primary_blocker=None,
+    )
+
+    result = build_track_b_zero_activity_diagnostic(repo_root=tmp_path, output_root=tmp_path / "diag", now=now())
+
+    assert result.report["diagnosis_classification"] == "LIVE_EXECUTION_INTERMITTENT"
+    assert result.report["cycle_summary"]["recent_stale_cycle_count"] == 4
+    assert result.report["cycle_summary"]["recent_evaluation_cycle_count"] == 1
+
+
 def test_diagnostic_classifies_no_recent_evaluation_cycles_as_stuck(tmp_path: Path) -> None:
     compact_summaries(tmp_path)
     monitor_report(
@@ -238,4 +285,3 @@ def test_diagnostic_detects_stale_ledger_after_handoff(tmp_path: Path) -> None:
 
     assert result.report["diagnosis_classification"] == "LEDGER_WRITE_BLOCKED"
     assert result.report["ledger_summary"]["full_paper_trade_ledger_scanned"] is False
-

@@ -1842,12 +1842,14 @@ class OperatorDashboardService:
         zero_activity_diagnostic_path = diagnostic_root / "latest_track_b_zero_activity_diagnostic.json"
         live_feed_freshness_diagnostic_path = diagnostic_root / "latest_track_b_live_feed_freshness_diagnostic.json"
         startup_readiness_diagnostic_path = diagnostic_root / "latest_track_b_startup_readiness_diagnostic.json"
+        monitor_liveness_diagnostic_path = diagnostic_root / "latest_track_b_monitor_liveness_diagnostic.json"
         trade_summary = _load_json_file(trade_summary_path)
         live_position_status = _load_json_file(live_position_status_path)
         pnl_summary = _load_json_file(pnl_summary_path)
         zero_activity_diagnostic = _load_json_file(zero_activity_diagnostic_path)
         live_feed_freshness_diagnostic = _load_json_file(live_feed_freshness_diagnostic_path)
         startup_readiness_diagnostic = _load_json_file(startup_readiness_diagnostic_path)
+        monitor_liveness_diagnostic = _load_json_file(monitor_liveness_diagnostic_path)
         trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
         live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
         pnl_summary = pnl_summary if isinstance(pnl_summary, dict) else {}
@@ -1857,6 +1859,9 @@ class OperatorDashboardService:
         )
         startup_readiness_diagnostic = (
             startup_readiness_diagnostic if isinstance(startup_readiness_diagnostic, dict) else {}
+        )
+        monitor_liveness_diagnostic = (
+            monitor_liveness_diagnostic if isinstance(monitor_liveness_diagnostic, dict) else {}
         )
         missing = [
             str(path)
@@ -1953,6 +1958,11 @@ class OperatorDashboardService:
             "zero_activity_diagnostic": _compact_track_b_zero_activity_diagnostic(
                 zero_activity_diagnostic,
                 zero_activity_diagnostic_path,
+                reference_payloads=(
+                    live_feed_freshness_diagnostic,
+                    startup_readiness_diagnostic,
+                    monitor_liveness_diagnostic,
+                ),
             ),
             "live_feed_freshness_diagnostic": _compact_track_b_live_feed_freshness_diagnostic(
                 live_feed_freshness_diagnostic,
@@ -16973,7 +16983,12 @@ def _track_b_paper_artifact_status(path: Path) -> dict[str, Any]:
     }
 
 
-def _compact_track_b_zero_activity_diagnostic(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+def _compact_track_b_zero_activity_diagnostic(
+    payload: dict[str, Any],
+    path: Path,
+    *,
+    reference_payloads: tuple[dict[str, Any], ...] = (),
+) -> dict[str, Any]:
     if not payload:
         return {
             "available": False,
@@ -16986,11 +17001,18 @@ def _compact_track_b_zero_activity_diagnostic(payload: dict[str, Any], path: Pat
         }
     cycle_summary = payload.get("cycle_summary") if isinstance(payload.get("cycle_summary"), dict) else {}
     journal_summary = payload.get("journal_summary") if isinstance(payload.get("journal_summary"), dict) else {}
+    diagnosis = payload.get("diagnosis_classification")
+    stale_reason = _track_b_diagnostic_stale_reason(payload, reference_payloads)
+    if stale_reason:
+        diagnosis = "STALE_DIAGNOSTIC"
     return {
         "available": True,
         "path": str(path),
         "generated_at": payload.get("generated_at"),
-        "diagnosis_classification": payload.get("diagnosis_classification"),
+        "diagnosis_classification": diagnosis,
+        "source_diagnosis_classification": payload.get("diagnosis_classification"),
+        "stale": bool(stale_reason),
+        "stale_reason": stale_reason,
         "dominant_blocker": payload.get("dominant_blocker"),
         "recommended_next_action": payload.get("recommended_next_action"),
         "last_evaluation_time": payload.get("latest_monitor_completed_at"),
@@ -17005,6 +17027,30 @@ def _compact_track_b_zero_activity_diagnostic(payload: dict[str, Any], path: Pat
             "tier3_without_recent_candidate_signal_warning"
         ),
     }
+
+
+def _track_b_diagnostic_stale_reason(
+    payload: dict[str, Any],
+    reference_payloads: tuple[dict[str, Any], ...],
+) -> str | None:
+    generated_at = _parse_iso_datetime(payload.get("generated_at"))
+    if generated_at is None:
+        return "Zero-activity diagnostic has no generated_at timestamp."
+    latest_reference: datetime | None = None
+    latest_reference_name: str | None = None
+    for reference in reference_payloads:
+        if not isinstance(reference, dict):
+            continue
+        ref_time = _parse_iso_datetime(reference.get("generated_at") or reference.get("last_report_timestamp"))
+        if ref_time is not None and (latest_reference is None or ref_time > latest_reference):
+            latest_reference = ref_time
+            latest_reference_name = str(reference.get("schema_version") or "reference diagnostic")
+    if latest_reference is not None and generated_at < latest_reference - timedelta(seconds=60):
+        return (
+            f"Zero-activity diagnostic generated_at {generated_at.isoformat()} is older than "
+            f"{latest_reference_name} at {latest_reference.isoformat()}."
+        )
+    return None
 
 
 def _compact_track_b_live_feed_freshness_diagnostic(payload: dict[str, Any], path: Path) -> dict[str, Any]:

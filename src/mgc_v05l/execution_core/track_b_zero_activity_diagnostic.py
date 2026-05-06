@@ -507,6 +507,8 @@ def _classify_diagnosis(
     cycle_count = int(cycle_summary.get("recent_monitor_cycle_count") or 0)
     eval_cycles = int(cycle_summary.get("recent_evaluation_cycle_count") or 0)
     stale_cycles = int(cycle_summary.get("recent_stale_cycle_count") or 0)
+    heartbeat_only_cycles = int(cycle_summary.get("recent_heartbeat_only_cycle_count") or 0)
+    provider_blocked_cycles = int(cycle_summary.get("recent_provider_blocked_cycle_count") or 0)
     signal_count = int(cycle_summary.get("recent_candidate_signal_count") or 0)
     signal_seen = signal_count > 0 or bool(signals.get("latest_signal_candidate"))
     handoff_count = int(signals.get("paper_handoff_attempt_count") or 0)
@@ -520,10 +522,20 @@ def _classify_diagnosis(
             "STUCK_BEFORE_EVALUATION",
             "No recent Track B monitor cycle reports were found; inspect launchd process, monitor lock, and heartbeat writer.",
         )
+    if provider_blocked_cycles > 0 and eval_cycles == 0:
+        return (
+            "PROVIDER_OR_LIVE_FEED_BLOCKED",
+            "Provider or Live feed readiness blocked all recent evaluation cycles; inspect Live feed diagnostics and provider errors.",
+        )
     if "STALE" in str(latest_monitor.get("monitor_verdict") or "") and stale_cycles >= max(1, eval_cycles):
         return (
             "STALE_LIVE_FEED",
             "Live artifacts are connected/warm but execution freshness is frequently failing; inspect Databento Live ohlcv delivery latency and monitor max-latest-1m-age-seconds.",
+        )
+    if stale_cycles > 0:
+        return (
+            "LIVE_EXECUTION_INTERMITTENT",
+            "Some recent cycles evaluated, but execution freshness also failed in the diagnostic window; inspect exact stale 1m/5m blockers before treating zero trades as normal.",
         )
     if eval_cycles == 0 and not_ready_total > 0:
         return (
@@ -554,6 +566,11 @@ def _classify_diagnosis(
         return (
             "INPUTS_NOT_READY",
             "Strategies are being evaluated but repeatedly return NOT_READY; inspect top_not_ready_reasons.",
+        )
+    if heartbeat_only_cycles > 0 and eval_cycles > 0:
+        return (
+            "NO_NEW_COMPLETED_5M_BAR_HEARTBEAT",
+            "The monitor is eligible and heartbeating between completed-bar evaluations; wait for the next completed decision bar or inspect latest evaluated strategy blockers.",
         )
     return (
         "NORMAL_NO_SIGNAL",

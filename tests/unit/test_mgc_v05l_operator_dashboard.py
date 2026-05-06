@@ -3361,6 +3361,50 @@ def test_track_b_paper_trading_payload_includes_compact_zero_activity_diagnostic
     assert diagnostic["signals_seen"] == 0
 
 
+def test_track_b_paper_trading_payload_marks_stale_zero_activity_diagnostic(tmp_path: Path) -> None:
+    diagnostics_dir = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics"
+    diagnostics_dir.mkdir(parents=True)
+    (diagnostics_dir / "latest_track_b_zero_activity_diagnostic.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_zero_activity_diagnostic_v1",
+                "generated_at": "2026-05-06T06:30:00+00:00",
+                "latest_monitor_completed_at": "2026-05-06T06:29:45+00:00",
+                "latest_monitor_verdict": "TRACK_B_SHADOW_MONITOR_NOT_READY_STALE_RUNTIME_CONTEXT",
+                "diagnosis_classification": "NORMAL_NO_SIGNAL",
+                "cycle_summary": {
+                    "recent_monitor_cycle_count": 20,
+                    "recent_evaluation_cycle_count": 1,
+                    "recent_strategy_evaluation_count": 9,
+                    "recent_candidate_signal_count": 0,
+                    "recent_suppressed_signal_count": 0,
+                },
+                "journal_summary": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (diagnostics_dir / "latest_track_b_startup_readiness_diagnostic.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_startup_readiness_diagnostic_v1",
+                "generated_at": "2026-05-06T13:34:29+00:00",
+                "diagnosis_classification": "READY_WITH_LIVE_ONLY_CONTEXT",
+                "instruments": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
+
+    diagnostic = payload["zero_activity_diagnostic"]
+    assert diagnostic["diagnosis_classification"] == "STALE_DIAGNOSTIC"
+    assert diagnostic["source_diagnosis_classification"] == "NORMAL_NO_SIGNAL"
+    assert diagnostic["stale"] is True
+    assert "older than" in diagnostic["stale_reason"]
+
+
 def test_track_b_paper_trading_payload_includes_startup_readiness_diagnostic(tmp_path: Path) -> None:
     diagnostics_dir = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics"
     diagnostics_dir.mkdir(parents=True)
