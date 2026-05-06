@@ -3742,6 +3742,8 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
             { key: "live_5m", label: "Live Confirm 5m", render: (row) => `${formatValue(row.live_completed_5m_bars)} / ${formatValue(row.required_live_completed_5m_bars)}` },
             { key: "backfill", label: "Backfill", render: (row) => formatValue(row.backfill_source ?? row.backfill_gap_filled) },
             { key: "gaps", label: "Gaps", render: (row) => formatValue(row.context_continuity_verdict ?? row.context_gap_count ?? row.gap_count) },
+            { key: "gap_classification", label: "Gap Class", render: (row) => formatValue(row.gap_classification ?? asRecord(asArray<JsonRecord>(row.gaps)[0]).classification) },
+            { key: "gap_repair", label: "Gap Repair", render: (row) => formatValue(row.gap_repair_succeeded === true ? "REPAIRED" : row.gap_repair_attempted === true ? "ATTEMPTED" : row.remaining_blocker ?? "NONE") },
             { key: "decision_source", label: "Decision Bar", render: (row) => formatValue(row.latest_decision_bar_source) },
             { key: "blocker", label: "Blocker", render: (row) => formatValue(row.blocked_reason) },
           ]}

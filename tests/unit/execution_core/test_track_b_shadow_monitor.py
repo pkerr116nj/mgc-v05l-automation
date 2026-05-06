@@ -1004,6 +1004,18 @@ def test_startup_context_gap_outside_required_window_does_not_block(tmp_path: Pa
     assert gaps[0].within_required_window is False
 
 
+def test_startup_context_window_expands_to_satisfy_completed_5m_requirement() -> None:
+    candles = shadow_monitor_module._merge_context_candles(
+        one_minute_candles(20, 41, source_tag="DATABENTO_HTTP_BACKFILL")
+    )
+
+    window = shadow_monitor_module._required_context_window(candles, required_1m=40, required_5m=8)
+
+    assert len(window) == 41
+    assert shadow_monitor_module._completed_5m_count_from_1m(window) == 8
+    assert shadow_monitor_module._classify_context_gaps(candles, required_1m=40, required_5m=8) == []
+
+
 def test_session_boundary_startup_context_gap_is_allowed() -> None:
     candles = [
         {"candle_timestamp": "2026-05-05T20:59:00+00:00", "source_tag": "DATABENTO_HTTP_BACKFILL"},

@@ -3391,6 +3391,16 @@ def test_track_b_paper_trading_payload_includes_startup_readiness_diagnostic(tmp
                         "blocked_reason": None,
                         "context_continuity_verdict": "CONTEXT_CONTINUITY_READY",
                         "gap_count": 1,
+                        "gap_start": "2026-05-06T07:03:00+00:00",
+                        "gap_end": "2026-05-06T07:03:00+00:00",
+                        "missing_expected_bars": 1,
+                        "gap_classification": "REPAIRED_BACKFILL_GAP",
+                        "gap_repair_attempted": True,
+                        "gap_repair_succeeded": True,
+                        "gap_repair_source": "DATABENTO_HTTP_BACKFILL",
+                        "remaining_blocker": None,
+                        "feature_context_ready_after_repair": True,
+                        "paper_evaluation_allowed_after_repair": True,
                         "gaps": [
                             {
                                 "classification": "REPAIRED_BACKFILL_GAP",
@@ -3421,6 +3431,10 @@ def test_track_b_paper_trading_payload_includes_startup_readiness_diagnostic(tmp
     assert diagnostic["instruments"]["MGC"]["required_live_completed_5m_bars"] == 1
     assert diagnostic["instruments"]["MGC"]["latest_decision_bar_source"] == "DATABENTO_LIVE_ARTIFACT"
     assert diagnostic["instruments"]["MGC"]["paper_evaluation_allowed"] is True
+    assert diagnostic["instruments"]["MGC"]["gap_start"] == "2026-05-06T07:03:00+00:00"
+    assert diagnostic["instruments"]["MGC"]["gap_classification"] == "REPAIRED_BACKFILL_GAP"
+    assert diagnostic["instruments"]["MGC"]["gap_repair_succeeded"] is True
+    assert diagnostic["instruments"]["MGC"]["paper_evaluation_allowed_after_repair"] is True
     assert diagnostic["instruments"]["MGC"]["context_continuity_verdict"] == "CONTEXT_CONTINUITY_READY"
     assert diagnostic["instruments"]["MGC"]["gaps"][0]["classification"] == "REPAIRED_BACKFILL_GAP"
 

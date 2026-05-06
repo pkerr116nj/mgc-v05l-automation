@@ -1707,7 +1707,7 @@ def _startup_context_payload(
             backfill_source = "RECOVERY_CONTEXT"
             backfill_report_path = str(recovery_event_path)
     merged = _merge_context_candles(merged)
-    initial_gap_details = _classify_context_gaps(merged, required_1m=required_1m)
+    initial_gap_details = _classify_context_gaps(merged, required_1m=required_1m, required_5m=required_5m)
     blocking_initial_gaps = _blocking_context_gaps(initial_gap_details)
     if blocking_initial_gaps:
         backfill_gap_detected = True
@@ -1733,6 +1733,7 @@ def _startup_context_payload(
     gap_details = _classify_context_gaps(
         merged,
         required_1m=required_1m,
+        required_5m=required_5m,
         repair_attempted=gap_repair_attempted,
         repair_source=gap_repair_source,
     )
@@ -1744,9 +1745,10 @@ def _startup_context_payload(
             not in {(item.start_timestamp, item.end_timestamp) for item in initial_gap_details}
         ]
     blocking_gaps = _blocking_context_gaps(gap_details)
-    validation_candles = _required_context_window(merged, required_1m=required_1m)
+    validation_candles = _required_context_window(merged, required_1m=required_1m, required_5m=required_5m)
     completed_5m_count = _completed_5m_count_from_1m(validation_candles)
     context_gap_count = len(blocking_gaps)
+    primary_gap = blocking_gaps[0] if blocking_gaps else (gap_details[0] if gap_details else None)
     latest_decision_bar_source = merged[-1].get("source_tag") if merged else None
     context_ready = len(validation_candles) >= required_1m and completed_5m_count >= required_5m and context_gap_count == 0
     live_completed_1m_fresh = _first_bool(
@@ -1831,6 +1833,14 @@ def _startup_context_payload(
         "backfill_report_path": backfill_report_path,
         "gap_count": len(gap_details),
         "gaps": [gap.to_payload() for gap in gap_details],
+        "gap_start": primary_gap.start_timestamp if primary_gap else None,
+        "gap_end": primary_gap.end_timestamp if primary_gap else None,
+        "missing_expected_bars": primary_gap.missing_expected_bars if primary_gap else None,
+        "gap_classification": primary_gap.classification if primary_gap else None,
+        "gap_repair_attempted": primary_gap.repair_attempted if primary_gap else False,
+        "gap_repair_succeeded": primary_gap.repair_succeeded if primary_gap else False,
+        "gap_repair_source": primary_gap.repair_source if primary_gap else None,
+        "remaining_blocker": primary_gap.remaining_blocker if primary_gap else None,
         "context_continuity_verdict": "CONTEXT_CONTINUITY_READY" if not blocking_gaps else "CONTEXT_CONTINUITY_BLOCKED",
         "context_gap_count": context_gap_count,
         "context_ready": context_ready,
@@ -1842,6 +1852,8 @@ def _startup_context_payload(
         "live_execution_approved": live_execution_approved,
         "strategy_ready": paper_evaluation_allowed,
         "paper_evaluation_allowed": paper_evaluation_allowed,
+        "feature_context_ready_after_repair": context_ready,
+        "paper_evaluation_allowed_after_repair": paper_evaluation_allowed,
         "blocked_reason": _startup_blocked_reason(
             context_ready=context_ready,
             live_execution_approved=live_execution_approved,
@@ -1955,22 +1967,35 @@ def _context_gap_count(candles: Sequence[Mapping[str, Any]]) -> int:
     return gaps
 
 
-def _required_context_window(candles: Sequence[Mapping[str, Any]], *, required_1m: int) -> list[dict[str, Any]]:
+def _required_context_window(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    required_1m: int,
+    required_5m: int = 0,
+) -> list[dict[str, Any]]:
     if required_1m <= 0:
         return [dict(item) for item in candles]
-    return [dict(item) for item in candles[-required_1m:]]
+    base_start = max(0, len(candles) - required_1m)
+    if required_5m <= 0:
+        return [dict(item) for item in candles[base_start:]]
+    for start in range(base_start, -1, -1):
+        candidate = [dict(item) for item in candles[start:]]
+        if len(candidate) >= required_1m and _completed_5m_count_from_1m(candidate) >= required_5m:
+            return candidate
+    return [dict(item) for item in candles[base_start:]]
 
 
 def _classify_context_gaps(
     candles: Sequence[Mapping[str, Any]],
     *,
     required_1m: int,
+    required_5m: int = 0,
     repair_attempted: bool = False,
     repair_source: str | None = None,
 ) -> list[TrackBStartupContextGap]:
     if len(candles) < 2:
         return []
-    required_window = _required_context_window(candles, required_1m=required_1m)
+    required_window = _required_context_window(candles, required_1m=required_1m, required_5m=required_5m)
     required_times = [
         _parse_time(str(item.get("candle_timestamp")))
         for item in required_window
