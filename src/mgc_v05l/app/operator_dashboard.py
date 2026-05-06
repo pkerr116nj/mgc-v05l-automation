@@ -1799,15 +1799,19 @@ class OperatorDashboardService:
 
     def _track_b_paper_trading_results_payload(self) -> dict[str, Any]:
         ledger_root = self._repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+        diagnostic_root = self._repo_root / "outputs" / "track_b_execution_core" / "diagnostics"
         trade_summary_path = ledger_root / "latest_track_b_paper_trade_summary.json"
         live_position_status_path = ledger_root / "latest_track_b_live_position_status.json"
         pnl_summary_path = ledger_root / "latest_track_b_pnl_summary.json"
+        zero_activity_diagnostic_path = diagnostic_root / "latest_track_b_zero_activity_diagnostic.json"
         trade_summary = _load_json_file(trade_summary_path)
         live_position_status = _load_json_file(live_position_status_path)
         pnl_summary = _load_json_file(pnl_summary_path)
+        zero_activity_diagnostic = _load_json_file(zero_activity_diagnostic_path)
         trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
         live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
         pnl_summary = pnl_summary if isinstance(pnl_summary, dict) else {}
+        zero_activity_diagnostic = zero_activity_diagnostic if isinstance(zero_activity_diagnostic, dict) else {}
         missing = [
             str(path)
             for path, payload in (
@@ -1900,6 +1904,10 @@ class OperatorDashboardService:
             "latest_pnl_summary_path": pnl_summary.get("latest_pnl_summary_path")
             or trade_summary.get("latest_pnl_summary_path")
             or str(pnl_summary_path),
+            "zero_activity_diagnostic": _compact_track_b_zero_activity_diagnostic(
+                zero_activity_diagnostic,
+                zero_activity_diagnostic_path,
+            ),
             "live_money_readiness": live_money_readiness,
             "critical": bool(critical_warnings),
             "critical_warnings": critical_warnings,
@@ -16688,6 +16696,40 @@ def _track_b_paper_artifact_status(path: Path) -> dict[str, Any]:
         "exists": exists,
         "age_seconds": age_seconds,
         "stale": bool(age_seconds is not None and age_seconds > 3600),
+    }
+
+
+def _compact_track_b_zero_activity_diagnostic(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "path": str(path),
+            "diagnosis_classification": "NOT_PROVIDED",
+            "dominant_blocker": None,
+            "recent_cycles_evaluated": 0,
+            "strategies_evaluated": 0,
+            "signals_seen": 0,
+        }
+    cycle_summary = payload.get("cycle_summary") if isinstance(payload.get("cycle_summary"), dict) else {}
+    journal_summary = payload.get("journal_summary") if isinstance(payload.get("journal_summary"), dict) else {}
+    return {
+        "available": True,
+        "path": str(path),
+        "generated_at": payload.get("generated_at"),
+        "diagnosis_classification": payload.get("diagnosis_classification"),
+        "dominant_blocker": payload.get("dominant_blocker"),
+        "recommended_next_action": payload.get("recommended_next_action"),
+        "last_evaluation_time": payload.get("latest_monitor_completed_at"),
+        "recent_cycles": cycle_summary.get("recent_monitor_cycle_count", 0),
+        "recent_cycles_evaluated": cycle_summary.get("recent_evaluation_cycle_count", 0),
+        "strategies_evaluated": cycle_summary.get("recent_strategy_evaluation_count", 0),
+        "signals_seen": cycle_summary.get("recent_candidate_signal_count", 0),
+        "suppressed_signals": cycle_summary.get("recent_suppressed_signal_count", 0),
+        "latest_monitor_verdict": payload.get("latest_monitor_verdict"),
+        "journal_tier_counts": journal_summary.get("latest_tier_counts") or journal_summary.get("recent_monitor_report_tier_counts") or {},
+        "tier3_without_recent_candidate_signal_warning": journal_summary.get(
+            "tier3_without_recent_candidate_signal_warning"
+        ),
     }
 
 

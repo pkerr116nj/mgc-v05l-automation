@@ -622,9 +622,11 @@ def _is_tier_3(detail: Mapping[str, Any], runtime_cycle_report: Mapping[str, Any
         return True
     if str(detail.get("strategy_runtime_verdict") or "").endswith("SIGNAL_READY_NO_SUBMIT"):
         return True
+    if runtime_cycle_report.get("candidate_signals"):
+        return True
     return any(
         bool(runtime_cycle_report.get(key))
-        for key in ("paper_submit_requested", "paper_proof_invoked", "submit_attempted", "broker_state_mutated")
+        for key in ("paper_proof_invoked", "submit_attempted", "broker_state_mutated")
     )
 
 

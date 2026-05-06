@@ -3240,6 +3240,45 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     assert payload["instrument_performance"][0]["instrument"] == "MNQ-202606"
 
 
+def test_track_b_paper_trading_payload_includes_compact_zero_activity_diagnostic(tmp_path: Path) -> None:
+    diagnostics_dir = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics"
+    diagnostics_dir.mkdir(parents=True)
+    (diagnostics_dir / "latest_track_b_zero_activity_diagnostic.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_zero_activity_diagnostic_v1",
+                "generated_at": "2026-05-06T06:30:00+00:00",
+                "latest_monitor_completed_at": "2026-05-06T06:29:45+00:00",
+                "latest_monitor_verdict": "TRACK_B_SHADOW_MONITOR_NOT_READY_STALE_RUNTIME_CONTEXT",
+                "diagnosis_classification": "STALE_LIVE_FEED",
+                "dominant_blocker": "Execution freshness failing for: MGC",
+                "recommended_next_action": "Inspect live ohlcv latency.",
+                "cycle_summary": {
+                    "recent_monitor_cycle_count": 20,
+                    "recent_evaluation_cycle_count": 2,
+                    "recent_strategy_evaluation_count": 18,
+                    "recent_candidate_signal_count": 0,
+                    "recent_suppressed_signal_count": 0,
+                },
+                "journal_summary": {
+                    "latest_tier_counts": {"TIER_1_NO_SETUP_AGGREGATE": 8},
+                    "tier3_without_recent_candidate_signal_warning": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
+
+    diagnostic = payload["zero_activity_diagnostic"]
+    assert diagnostic["available"] is True
+    assert diagnostic["diagnosis_classification"] == "STALE_LIVE_FEED"
+    assert diagnostic["recent_cycles"] == 20
+    assert diagnostic["strategies_evaluated"] == 18
+    assert diagnostic["signals_seen"] == 0
+
+
 def test_track_b_paper_trading_payload_degrades_with_missing_compact_summaries(tmp_path: Path) -> None:
     payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
 
@@ -3250,6 +3289,7 @@ def test_track_b_paper_trading_payload_degrades_with_missing_compact_summaries(t
     assert payload["realized_pnl_today"] == "0"
     assert payload["unrealized_pnl"] == "0"
     assert payload["summary_artifacts_missing"]
+    assert payload["zero_activity_diagnostic"]["available"] is False
 
 
 def test_track_b_paper_trading_payload_marks_live_money_critical(tmp_path: Path) -> None:

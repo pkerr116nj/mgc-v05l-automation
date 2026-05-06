@@ -203,6 +203,31 @@ def test_boring_no_setup_cycles_do_not_create_full_journal_spam(tmp_path: Path) 
     assert result.summary["ordinary_no_setup_aggregate_updates"] == 1
 
 
+def test_paper_armed_no_setup_cycle_still_aggregates_tier1(tmp_path: Path) -> None:
+    report_path = strategy_report(
+        tmp_path,
+        "FIRST_BULL_SNAP_TURN_V1",
+        conditions={f"predicate_{index}": index < 2 for index in range(12)},
+    )
+    report, runtime_path = runtime_report(
+        tmp_path,
+        strategies=[strategy_summary("FIRST_BULL_SNAP_TURN_V1", report_path)],
+    )
+    report["paper_submit_requested"] = True
+
+    result = record_track_b_decision_journal_cycle(
+        runtime_cycle_report=report,
+        runtime_cycle_report_json=runtime_path,
+        output_root=tmp_path / "journal",
+        config=journal_config(),
+        now=aware_now(),
+    )
+
+    assert read_jsonl(result.active_journal_jsonl) == []
+    assert result.summary["latest_tier_counts"] == {"TIER_1_NO_SETUP_AGGREGATE": 1}
+    assert result.summary["signal_records_written"] == 0
+
+
 def test_repeated_no_setup_evaluations_aggregate_into_one_summary(tmp_path: Path) -> None:
     report_path = strategy_report(
         tmp_path,

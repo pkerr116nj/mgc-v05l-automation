@@ -3574,6 +3574,7 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const recentTrades = asArray<JsonRecord>(trading.recent_trades);
   const strategyRows = asArray<JsonRecord>(trading.strategy_performance);
   const instrumentRows = asArray<JsonRecord>(trading.instrument_performance);
+  const zeroActivityDiagnostic = asRecord(trading.zero_activity_diagnostic);
   const missingArtifacts = asArray<string>(trading.summary_artifacts_missing);
   const criticalWarnings = asArray<string>(trading.critical_warnings);
   const liveMoneyCritical = trading.live_money_readiness === true;
@@ -3648,6 +3649,26 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
           <MetricCard label="Completed Trades" value={formatValue(trading.completed_trade_count ?? 0)} />
           <MetricCard label="Review Required" value={formatValue(trading.review_required_count ?? 0)} tone={reviewRequired ? "danger" : "good"} />
         </div>
+      </Section>
+
+      <Section title="Zero Activity Diagnosis" subtitle="Bounded read-only explanation for no PAPER trades">
+        <div className={`status-banner ${zeroActivityDiagnostic.available === false ? "warn" : statusTone(zeroActivityDiagnostic.diagnosis_classification)}`}>
+          <div className="status-banner-main">
+            <div className="status-banner-title">{formatValue(zeroActivityDiagnostic.diagnosis_classification)}</div>
+            <div className="status-banner-body">{formatValue(zeroActivityDiagnostic.dominant_blocker ?? zeroActivityDiagnostic.recommended_next_action)}</div>
+          </div>
+        </div>
+        <div className="metric-grid compact">
+          <MetricCard label="Last Evaluation" value={formatTimestamp(zeroActivityDiagnostic.last_evaluation_time)} />
+          <MetricCard label="Recent Cycles" value={formatValue(zeroActivityDiagnostic.recent_cycles ?? 0)} />
+          <MetricCard label="Cycles Evaluated" value={formatValue(zeroActivityDiagnostic.recent_cycles_evaluated ?? 0)} />
+          <MetricCard label="Strategies Evaluated" value={formatValue(zeroActivityDiagnostic.strategies_evaluated ?? 0)} />
+          <MetricCard label="Signals Seen" value={formatValue(zeroActivityDiagnostic.signals_seen ?? 0)} tone={Number(zeroActivityDiagnostic.signals_seen ?? 0) > 0 ? "warn" : "good"} />
+          <MetricCard label="Suppressed" value={formatValue(zeroActivityDiagnostic.suppressed_signals ?? 0)} tone={Number(zeroActivityDiagnostic.suppressed_signals ?? 0) > 0 ? "warn" : "good"} />
+          <MetricCard label="Latest Monitor" value={formatValue(zeroActivityDiagnostic.latest_monitor_verdict)} tone={statusTone(zeroActivityDiagnostic.latest_monitor_verdict)} />
+          <MetricCard label="Tier 3 Warning" value={formatValue(zeroActivityDiagnostic.tier3_without_recent_candidate_signal_warning)} tone={zeroActivityDiagnostic.tier3_without_recent_candidate_signal_warning === true ? "warn" : "good"} />
+        </div>
+        <div className="placeholder-note">{formatValue(zeroActivityDiagnostic.path)}</div>
       </Section>
 
       <Section title="Current Positions" subtitle="Artifact-derived open Track B PAPER lifecycle positions">
