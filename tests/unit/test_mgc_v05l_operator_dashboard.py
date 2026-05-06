@@ -2839,12 +2839,363 @@ def test_api_dashboard_serves_current_same_instance_cache_while_runtime_artifact
     assert inline_generation_attempted is False
     assert payload["dashboard_meta"]["server_instance_id"] == "instance-current"
     assert payload["generated_at"] == generated_at
-
     assert payload["track_b_operator_status"]["multi_strategy_runtime_cycle_verdict"] == (
         "TRACK_B_MULTI_STRATEGY_RUNTIME_NO_SIGNAL_NO_MUTATION"
     )
     assert payload["track_b_operator_status"]["multi_strategy_submit_attempted"] is False
     assert payload["track_b_operator_status"]["live_money_readiness"] is False
+
+
+def test_track_b_operator_status_overlay_reads_live_monitor_artifacts(tmp_path: Path) -> None:
+    operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
+    monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
+    ledger_dir = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+    operator_status_dir.mkdir(parents=True)
+    monitor_dir.mkdir(parents=True)
+    ledger_dir.mkdir(parents=True)
+    (operator_status_dir / "latest_operator_status_summary.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_operator_status_v1",
+                "submit_allowed": False,
+                "submit_attempted": False,
+                "live_money_readiness": False,
+                "shadow_monitor_mode": "NOT_PROVIDED",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (monitor_dir / "latest_track_b_shadow_monitor_report.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_shadow_monitor_v2",
+                "monitor_mode": "PAPER",
+                "mode": "PAPER",
+                "monitor_verdict": "TRACK_B_SHADOW_MONITOR_LIVE_FEED_WARMING_UP",
+                "pid": 80971,
+                "runtime_decision_source": "DATABENTO_LIVE_ARTIFACT",
+                "paper_trading_enabled": True,
+                "paper_on_signal": True,
+                "paper_trades_attempted_count": 0,
+                "latest_paper_lifecycle_report_path": {},
+                "latest_broker_state_classification": {},
+                "submit_allowed": False,
+                "submit_attempted": False,
+                "paper_proof_invoked": False,
+                "broker_state_mutated": False,
+                "live_money_readiness": False,
+                "instrument_reports": [
+                    {
+                        "instrument_family": "MGC",
+                        "runtime_chain_wired": True,
+                        "enabled_strategies": ["ASIAN_DRIFT_V1", "US_LATE_PAUSE_RESUME_LONG_V1"],
+                        "live_feed_pid": 80972,
+                        "live_feed_connected": True,
+                        "live_feed_status": "LIVE_FEED_WARMING_UP",
+                        "live_feed_subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+                        "live_feed_heartbeat_age_seconds": 13.4,
+                        "live_feed_strategy_ready": False,
+                        "live_feed_warmup_1m_count": 28,
+                        "live_feed_warmup_completed_5m_count": 4,
+                        "live_feed_required_1m_count": 40,
+                        "live_feed_required_completed_5m_count": 8,
+                        "live_feed_blocker": "Databento Live feed is warming up.",
+                    },
+                    {
+                        "instrument_family": "MNQ",
+                        "runtime_chain_wired": True,
+                        "enabled_strategies": ["MNQ_US_DERIVATIVE_BEAR_TURN_V1"],
+                        "live_feed_pid": 80973,
+                        "live_feed_connected": True,
+                        "live_feed_status": "LIVE_FEED_WARMING_UP",
+                        "live_feed_subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+                        "live_feed_heartbeat_age_seconds": 12.9,
+                        "live_feed_strategy_ready": False,
+                        "live_feed_warmup_1m_count": 27,
+                        "live_feed_warmup_completed_5m_count": 4,
+                        "live_feed_required_1m_count": 40,
+                        "live_feed_required_completed_5m_count": 8,
+                        "live_feed_blocker": "Databento Live feed is warming up.",
+                    },
+                    {
+                        "instrument_family": "ES",
+                        "runtime_chain_wired": False,
+                        "enabled_strategies": [],
+                        "primary_blocker": "ES has no enabled Track B strategies configured.",
+                    }
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (monitor_dir / "latest_track_b_shadow_monitor_heartbeat.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_shadow_monitor_heartbeat_v2",
+                "monitor_running": True,
+                "pid": 80971,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "track_b_paper_trade_ledger.jsonl").write_text("", encoding="utf-8")
+    (ledger_dir / "latest_track_b_paper_trade_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "paper_trades_attempted_count": 0,
+                "open_position_count": 0,
+                "review_required_count": 0,
+                "latest_trade_ledger_path": "outputs/track_b_execution_core/paper_trade_ledger/track_b_paper_trade_ledger.jsonl",
+                "latest_live_position_status_path": "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json",
+                "latest_pnl_summary_path": "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_pnl_summary.json",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_live_position_status.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "open_position_count": 0,
+                "open_order_count": 0,
+                "positions_by_instrument": {},
+                "positions_by_strategy": {},
+                "broker_truth_warning": "Artifact-derived status is not broker truth until source=BROKER_RECONCILED.",
+                "latest_live_position_status_path": "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_pnl_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "total_realized_pnl_today": "0",
+                "total_realized_pnl_session": "0",
+                "total_realized_pnl_week": "0",
+                "total_unrealized_pnl": "0",
+                "last_trade_strategy": None,
+                "last_trade_pnl": None,
+                "review_required_count": 0,
+                "by_strategy": {},
+                "by_instrument": {},
+                "latest_pnl_summary_path": "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_pnl_summary.json",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._latest_track_b_operator_status_payload()  # noqa: SLF001
+
+    assert payload is not None
+    assert payload["shadow_monitor_mode"] == "PAPER"
+    assert payload["shadow_monitor_launchd_label"] == "com.mgc.trackb.paper-monitor"
+    assert payload["shadow_monitor_pid"] == 80971
+    assert payload["shadow_monitor_live_feed_pid"] == 80972
+    assert payload["shadow_monitor_runtime_decision_source"] == "DATABENTO_LIVE_ARTIFACT"
+    assert payload["shadow_monitor_live_feed_connected"] is True
+    assert payload["shadow_monitor_live_feed_strategy_ready"] is False
+    assert payload["shadow_monitor_live_feed_warmup_1m_count"] == 28
+    assert payload["shadow_monitor_live_feed_warmup_completed_5m_count"] == 4
+    assert payload["shadow_monitor_paper_trades_attempted_count"] == 0
+    assert payload["shadow_monitor_submit_allowed"] is False
+    assert payload["shadow_monitor_submit_attempted"] is False
+    assert payload["shadow_monitor_paper_proof_invoked"] is False
+    assert payload["shadow_monitor_broker_state_mutated"] is False
+    assert payload["shadow_monitor_live_money_readiness"] is False
+    assert len(payload["shadow_monitor_instrument_reports"]) == 3
+    assert payload["shadow_monitor_instrument_families"] == ["MGC", "MNQ", "ES"]
+    assert payload["shadow_monitor_wired_instrument_count"] == 2
+    assert payload["shadow_monitor_instrument_reports"][1]["instrument_family"] == "MNQ"
+    assert payload["shadow_monitor_instrument_reports"][1]["enabled_strategies"] == ["MNQ_US_DERIVATIVE_BEAR_TURN_V1"]
+    assert payload["track_b_paper_results_source"] == "TRACK_B_LIFECYCLE_ARTIFACTS"
+    assert payload["track_b_paper_results_broker_reconciled"] is False
+    assert payload["paper_trades_attempted_count"] == 0
+    assert payload["open_position_count"] == 0
+    assert payload["realized_pnl_today"] == "0"
+    assert payload["realized_pnl_session"] == "0"
+    assert payload["realized_pnl_week"] == "0"
+    assert payload["unrealized_pnl"] == "0"
+    assert payload["review_required_count"] == 0
+    assert payload["track_b_positions_by_instrument"] == {}
+    assert payload["latest_trade_ledger_path"] == "outputs/track_b_execution_core/paper_trade_ledger/track_b_paper_trade_ledger.jsonl"
+
+
+def test_track_b_operator_status_overlay_does_not_scan_full_paper_ledger(tmp_path: Path) -> None:
+    operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
+    monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
+    ledger_dir = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+    operator_status_dir.mkdir(parents=True)
+    monitor_dir.mkdir(parents=True)
+    ledger_dir.mkdir(parents=True)
+    (operator_status_dir / "latest_operator_status_summary.json").write_text(
+        json.dumps({"schema_version": "track_b_operator_status_v1", "live_money_readiness": False}),
+        encoding="utf-8",
+    )
+    (monitor_dir / "latest_track_b_shadow_monitor_report.json").write_text(
+        json.dumps(
+            {
+                "monitor_mode": "PAPER",
+                "pid": 123,
+                "submit_attempted": False,
+                "broker_state_mutated": False,
+                "live_money_readiness": False,
+                "instrument_reports": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (monitor_dir / "latest_track_b_shadow_monitor_heartbeat.json").write_text(
+        json.dumps({"monitor_running": True, "pid": 123}),
+        encoding="utf-8",
+    )
+    (ledger_dir / "track_b_paper_trade_ledger.jsonl").write_text("{not valid jsonl and must not be read}\n", encoding="utf-8")
+    (ledger_dir / "latest_track_b_paper_trade_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "paper_trades_attempted_count": 0,
+                "latest_trade_ledger_path": "outputs/track_b_execution_core/paper_trade_ledger/track_b_paper_trade_ledger.jsonl",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_live_position_status.json").write_text(
+        json.dumps({"source": "TRACK_B_LIFECYCLE_ARTIFACTS", "broker_reconciled": False, "open_position_count": 0}),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_pnl_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "total_realized_pnl_today": "0",
+                "total_realized_pnl_session": "0",
+                "total_realized_pnl_week": "0",
+                "total_unrealized_pnl": "0",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._latest_track_b_operator_status_payload()  # noqa: SLF001
+
+    assert payload is not None
+    assert payload["paper_trades_attempted_count"] == 0
+    assert payload["latest_trade_ledger_path"].endswith("track_b_paper_trade_ledger.jsonl")
+    assert payload["track_b_paper_results_broker_reconciled"] is False
+
+
+def test_track_b_operator_status_overlay_degrades_when_compact_paper_summaries_are_missing(tmp_path: Path) -> None:
+    operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
+    monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
+    operator_status_dir.mkdir(parents=True)
+    monitor_dir.mkdir(parents=True)
+    (operator_status_dir / "latest_operator_status_summary.json").write_text(
+        json.dumps({"schema_version": "track_b_operator_status_v1", "live_money_readiness": False}),
+        encoding="utf-8",
+    )
+    (monitor_dir / "latest_track_b_shadow_monitor_report.json").write_text(
+        json.dumps(
+            {
+                "monitor_mode": "PAPER",
+                "pid": 123,
+                "monitor_verdict": "TRACK_B_SHADOW_MONITOR_LIVE_FEED_WARMING_UP",
+                "paper_trades_attempted_count": 0,
+                "submit_attempted": False,
+                "broker_state_mutated": False,
+                "live_money_readiness": False,
+                "instrument_reports": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._latest_track_b_operator_status_payload()  # noqa: SLF001
+
+    assert payload is not None
+    assert payload["shadow_monitor_mode"] == "PAPER"
+    assert payload["shadow_monitor_pid"] == 123
+    assert payload["paper_trades_attempted_count"] == 0
+    assert payload["track_b_safety_critical"] is False
+
+
+def test_track_b_operator_status_overlay_marks_live_money_readiness_as_critical(tmp_path: Path) -> None:
+    operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
+    monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
+    operator_status_dir.mkdir(parents=True)
+    monitor_dir.mkdir(parents=True)
+    (operator_status_dir / "latest_operator_status_summary.json").write_text(
+        json.dumps({"schema_version": "track_b_operator_status_v1", "live_money_readiness": False}),
+        encoding="utf-8",
+    )
+    (monitor_dir / "latest_track_b_shadow_monitor_report.json").write_text(
+        json.dumps(
+            {
+                "monitor_mode": "PAPER",
+                "live_money_readiness": True,
+                "submit_attempted": False,
+                "broker_state_mutated": False,
+                "instrument_reports": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._latest_track_b_operator_status_payload()  # noqa: SLF001
+
+    assert payload is not None
+    assert payload["track_b_safety_critical"] is True
+    assert "live_money_readiness=true" in payload["track_b_safety_primary_warning"]
+
+
+def test_track_b_operator_status_overlay_marks_unproven_mutation_review_required(tmp_path: Path) -> None:
+    operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
+    monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
+    operator_status_dir.mkdir(parents=True)
+    monitor_dir.mkdir(parents=True)
+    (operator_status_dir / "latest_operator_status_summary.json").write_text(
+        json.dumps({"schema_version": "track_b_operator_status_v1", "live_money_readiness": False}),
+        encoding="utf-8",
+    )
+    (monitor_dir / "latest_track_b_shadow_monitor_report.json").write_text(
+        json.dumps(
+            {
+                "monitor_mode": "PAPER",
+                "submit_attempted": True,
+                "broker_state_mutated": True,
+                "latest_paper_lifecycle_report_path": {},
+                "live_money_readiness": False,
+                "instrument_reports": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._latest_track_b_operator_status_payload()  # noqa: SLF001
+
+    assert payload is not None
+    assert payload["track_b_safety_critical"] is True
+    assert payload["track_b_safety_review_required"] is True
+    assert "guarded lifecycle provenance" in payload["track_b_safety_primary_warning"]
+
 
 def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surfaces() -> None:
     html = Path("src/mgc_v05l/app/dashboard_assets/operator_dashboard.html").read_text(encoding="utf-8")

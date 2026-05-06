@@ -3121,6 +3121,24 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
     status.live_money_readiness !== false;
   const missingReports = asArray<string>(status.reports_missing);
   const latestOutputPaths = asRecord(status.latest_output_paths);
+  const instrumentReports = asArray<JsonRecord>(status.shadow_monitor_instrument_reports);
+  const trackBSafetyWarnings = asArray<string>(status.track_b_safety_warnings);
+  const trackBSafetyCritical = status.track_b_safety_critical === true;
+  const trackBSafetyReviewRequired = status.track_b_safety_review_required === true;
+  const openPositionsByInstrument = asRecord(status.track_b_positions_by_instrument);
+  const openPositionsByStrategy = asRecord(status.track_b_positions_by_strategy);
+  const openPositionRows = [
+    ...Object.entries(openPositionsByInstrument).map(([key, value]) => ({
+      ...asRecord(value),
+      position_key: key,
+      position_group: "Instrument",
+    })),
+    ...Object.entries(openPositionsByStrategy).map(([key, value]) => ({
+      ...asRecord(value),
+      position_key: key,
+      position_group: "Strategy",
+    })),
+  ];
   const statusVerdict = available ? status.status_verdict : malformed ? "MALFORMED_ARTIFACT" : "NOT_FOUND";
   const safetyLabel = safetyUnknownOrUnsafe ? "UNKNOWN / WARNING" : "NO-SUBMIT / SHADOW REVIEW";
   const safetyTone: Tone = safetyUnknownOrUnsafe ? "warn" : "good";
@@ -3174,6 +3192,136 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
           <MetricCard label="Submit Allowed" value={formatValue(status.submit_allowed)} tone={status.submit_allowed === false ? "good" : "warn"} />
           <MetricCard label="Submit Attempted" value={formatValue(status.submit_attempted)} tone={status.submit_attempted === false ? "good" : "warn"} />
           <MetricCard label="Live Money Readiness" value={formatValue(status.live_money_readiness)} tone={status.live_money_readiness === false ? "good" : "warn"} />
+        </div>
+      </Section>
+
+      <Section title="Autonomous Track B Monitor" subtitle="Read-only launchd PAPER monitor state; dashboard observes only">
+        {(trackBSafetyCritical || trackBSafetyReviewRequired || trackBSafetyWarnings.length > 0) ? (
+          <div className={`status-banner ${trackBSafetyCritical ? "danger" : "warn"}`}>
+            <div className="status-banner-main">
+              <div className="status-banner-title">
+                {trackBSafetyCritical ? "TRACK B SAFETY CRITICAL" : "TRACK B REVIEW REQUIRED"}
+              </div>
+              <div className="status-banner-body">{formatValue(status.track_b_safety_primary_warning)}</div>
+              {trackBSafetyWarnings.slice(1).map((warning, index) => (
+                <div className="status-banner-body secondary" key={`track-b-safety-warning-${index}`}>{warning}</div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Monitor</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Mode" value={formatValue(status.shadow_monitor_mode)} tone={statusTone(status.shadow_monitor_mode)} />
+              <MetricCard label="Launchd Label" value={formatValue(status.shadow_monitor_launchd_label)} />
+              <MetricCard label="Monitor PID" value={formatValue(status.shadow_monitor_pid)} />
+              <MetricCard label="Running" value={formatValue(status.shadow_monitor_running)} tone={status.shadow_monitor_running === true ? "good" : "warn"} />
+              <MetricCard label="Runtime Source" value={formatValue(status.shadow_monitor_runtime_decision_source)} />
+              <MetricCard label="Verdict" value={formatValue(status.latest_shadow_monitor_verdict)} tone={statusTone(status.latest_shadow_monitor_verdict)} />
+              <MetricCard label="Evaluated" value={formatValue(status.shadow_monitor_evaluated_strategy_count)} />
+              <MetricCard label="Paper Trades" value={formatValue(status.shadow_monitor_paper_trades_attempted_count)} />
+            </div>
+            <h3 className="subsection-title">Latest Monitor Report</h3>
+            <div className="placeholder-note">{formatValue(status.latest_shadow_monitor_report_path)}</div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Managed Databento Live Feed</h3>
+            <div className="metric-grid compact">
+              <MetricCard label="Live PID" value={formatValue(status.shadow_monitor_live_feed_pid)} />
+              <MetricCard label="Connected" value={formatValue(status.shadow_monitor_live_feed_connected)} tone={status.shadow_monitor_live_feed_connected === true ? "good" : status.shadow_monitor_live_feed_connected === false ? "warn" : "muted"} />
+              <MetricCard label="Feed Status" value={formatValue(status.shadow_monitor_live_feed_status)} tone={statusTone(status.shadow_monitor_live_feed_status)} />
+              <MetricCard label="Subscription" value={formatValue(status.shadow_monitor_live_feed_subscription_status)} tone={statusTone(status.shadow_monitor_live_feed_subscription_status)} />
+              <MetricCard label="Heartbeat Age" value={formatValue(status.shadow_monitor_live_feed_heartbeat_age_seconds)} />
+              <MetricCard label="Strategy Ready" value={formatValue(status.shadow_monitor_live_feed_strategy_ready)} tone={status.shadow_monitor_live_feed_strategy_ready === true ? "good" : status.shadow_monitor_live_feed_strategy_ready === false ? "warn" : "muted"} />
+              <MetricCard label="1m Bars" value={`${formatValue(status.shadow_monitor_live_feed_warmup_1m_count)} / ${formatValue(status.shadow_monitor_live_feed_required_1m_count)}`} />
+              <MetricCard label="5m Bars" value={`${formatValue(status.shadow_monitor_live_feed_warmup_completed_5m_count)} / ${formatValue(status.shadow_monitor_live_feed_required_completed_5m_count)}`} />
+            </div>
+            <h3 className="subsection-title">Live Feed Blocker</h3>
+            <div className="placeholder-note">{formatValue(status.shadow_monitor_live_feed_blocker)}</div>
+          </div>
+        </div>
+        <div className="metric-grid compact">
+          <MetricCard label="Paper Enabled" value={formatValue(status.shadow_monitor_paper_trading_enabled)} tone={status.shadow_monitor_paper_trading_enabled === true ? "warn" : "muted"} />
+          <MetricCard label="Paper On Signal" value={formatValue(status.shadow_monitor_paper_on_signal)} tone={status.shadow_monitor_paper_on_signal === true ? "warn" : "muted"} />
+          <MetricCard label="Lifecycle Report" value={formatValue(status.shadow_monitor_latest_paper_lifecycle_report_path)} />
+          <MetricCard label="Broker Classification" value={formatValue(status.shadow_monitor_latest_broker_state_classification)} tone={statusTone(status.shadow_monitor_latest_broker_state_classification)} />
+          <MetricCard label="Submit Allowed" value={formatValue(status.shadow_monitor_submit_allowed)} tone={status.shadow_monitor_submit_allowed === false ? "good" : "warn"} />
+          <MetricCard label="Submit Attempted" value={formatValue(status.shadow_monitor_submit_attempted)} tone={status.shadow_monitor_submit_attempted === false ? "good" : "warn"} />
+          <MetricCard label="Paper Proof Invoked" value={formatValue(status.shadow_monitor_paper_proof_invoked)} tone={status.shadow_monitor_paper_proof_invoked === false ? "good" : "warn"} />
+          <MetricCard label="Broker Mutated" value={formatValue(status.shadow_monitor_broker_state_mutated)} tone={status.shadow_monitor_broker_state_mutated === false ? "good" : "warn"} />
+          <MetricCard label="Live Money" value={formatValue(status.shadow_monitor_live_money_readiness)} tone={status.shadow_monitor_live_money_readiness === false ? "good" : "warn"} />
+        </div>
+      </Section>
+
+      <Section title="Track B Instrument Runtime" subtitle="Per-instrument Live feed readiness and enabled strategy coverage">
+        <DataTable
+          rows={instrumentReports}
+          emptyLabel="No Track B monitor instrument reports are available yet."
+          rowKey={(row, index) => String(row.instrument_family ?? row.contract_key ?? index)}
+          columns={[
+            { key: "instrument_family", label: "Instrument", render: (row) => formatValue(row.instrument_family) },
+            { key: "runtime_chain_wired", label: "Wired", render: (row) => formatValue(row.runtime_chain_wired) },
+            { key: "live_feed_status", label: "Live Feed", render: (row) => <span className={`badge ${statusTone(row.live_feed_status)}`}>{formatValue(row.live_feed_status ?? row.instrument_verdict)}</span> },
+            { key: "live_feed_pid", label: "Feed PID", render: (row) => formatValue(row.live_feed_pid) },
+            { key: "warmup_1m", label: "1m Bars", render: (row) => `${formatValue(row.live_feed_warmup_1m_count)} / ${formatValue(row.live_feed_required_1m_count)}` },
+            { key: "warmup_5m", label: "5m Bars", render: (row) => `${formatValue(row.live_feed_warmup_completed_5m_count)} / ${formatValue(row.live_feed_required_completed_5m_count)}` },
+            { key: "strategy_ready", label: "Strategy Ready", render: (row) => formatValue(row.live_feed_strategy_ready) },
+            { key: "enabled_strategies", label: "Strategies", render: (row) => formatValue(asArray(row.enabled_strategies).length || row.enabled_strategy_count || 0) },
+            { key: "evaluated_strategy_count", label: "Evaluated", render: (row) => formatValue(row.evaluated_strategy_count) },
+            { key: "primary_blocker", label: "Blocker", render: (row) => formatValue(row.primary_blocker ?? row.live_feed_blocker) },
+          ]}
+        />
+      </Section>
+
+      <Section title="Track B PAPER Results" subtitle="Artifact-derived PAPER trade, position, and P&L read model; not broker truth unless reconciled">
+        <div className={`status-banner ${status.track_b_paper_results_broker_reconciled === true ? "good" : "warn"}`}>
+          <div className="status-banner-main">
+            <div className="status-banner-title">
+              {status.track_b_paper_results_broker_reconciled === true ? "BROKER RECONCILED" : "ARTIFACT-DERIVED / NOT BROKER TRUTH"}
+            </div>
+            <div className="status-banner-body">{formatValue(status.track_b_paper_results_warning)}</div>
+          </div>
+        </div>
+        <div className="metric-grid compact">
+          <MetricCard label="Source" value={formatValue(status.track_b_paper_results_source)} />
+          <MetricCard label="Broker Reconciled" value={formatValue(status.track_b_paper_results_broker_reconciled)} tone={status.track_b_paper_results_broker_reconciled === true ? "good" : "warn"} />
+          <MetricCard label="Paper Trades" value={formatValue(status.paper_trades_attempted_count)} />
+          <MetricCard label="Open Positions" value={formatValue(status.open_position_count)} tone={Number(status.open_position_count ?? 0) > 0 ? "warn" : "good"} />
+          <MetricCard label="Realized Today" value={formatMaybePnL(status.realized_pnl_today)} tone={pnlTone(status.realized_pnl_today)} />
+          <MetricCard label="Realized Session" value={formatMaybePnL(status.realized_pnl_session)} tone={pnlTone(status.realized_pnl_session)} />
+          <MetricCard label="Realized Week" value={formatMaybePnL(status.realized_pnl_week)} tone={pnlTone(status.realized_pnl_week)} />
+          <MetricCard label="Unrealized" value={formatMaybePnL(status.unrealized_pnl)} tone={pnlTone(status.unrealized_pnl)} />
+          <MetricCard label="Last Trade Strategy" value={formatValue(status.last_trade_strategy)} />
+          <MetricCard label="Last Trade P&L" value={formatMaybePnL(status.last_trade_pnl)} tone={pnlTone(status.last_trade_pnl)} />
+          <MetricCard label="Review Required" value={formatValue(status.review_required_count)} tone={Number(status.review_required_count ?? 0) > 0 ? "danger" : "good"} />
+        </div>
+        <DataTable
+          rows={openPositionRows}
+          emptyLabel="No Track B artifact-derived open PAPER positions are recorded."
+          rowKey={(row, index) => `${formatValue(row.position_group)}-${formatValue(row.position_key)}-${index}`}
+          columns={[
+            { key: "position_group", label: "Group", render: (row) => formatValue(row.position_group) },
+            { key: "position_key", label: "Key", render: (row) => formatValue(row.position_key) },
+            { key: "strategy_id", label: "Strategy", render: (row) => formatValue(row.strategy_id) },
+            { key: "contract_key", label: "Contract", render: (row) => formatValue(row.contract_key) },
+            { key: "local_symbol", label: "Local Symbol", render: (row) => formatValue(row.local_symbol) },
+            { key: "quantity", label: "Qty", render: (row) => formatValue(row.quantity) },
+            { key: "avg_entry_price", label: "Avg Entry", render: (row) => formatValue(row.avg_entry_price) },
+            { key: "unrealized_pnl", label: "Unrealized", render: (row) => formatMaybePnL(row.unrealized_pnl) },
+            { key: "review_required", label: "Review", render: (row) => formatValue(row.review_required) },
+          ]}
+        />
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Ledger</h3>
+            <div className="placeholder-note">{formatValue(status.latest_trade_ledger_path ?? latestOutputPaths.track_b_paper_trade_ledger)}</div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Position / P&L Summaries</h3>
+            <div className="placeholder-note">{formatValue(status.latest_live_position_status_path ?? latestOutputPaths.track_b_live_position_status)}</div>
+            <div className="placeholder-note">{formatValue(status.latest_pnl_summary_path ?? latestOutputPaths.track_b_pnl_summary)}</div>
+          </div>
         </div>
       </Section>
 

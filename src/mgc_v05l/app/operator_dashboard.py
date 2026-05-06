@@ -1607,13 +1607,189 @@ class OperatorDashboardService:
         return annotated
 
     def _latest_track_b_operator_status_payload(self) -> dict[str, Any] | None:
-        return _load_json_file(
+        payload = _load_json_file(
             self._repo_root
             / "outputs"
             / "track_b_execution_core"
             / "operator_status"
             / "latest_operator_status_summary.json"
         )
+        if not isinstance(payload, dict):
+            return payload
+
+        monitor_root = self._repo_root / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
+        monitor = _load_json_file(monitor_root / "latest_track_b_shadow_monitor_report.json") or {}
+        heartbeat = _load_json_file(monitor_root / "latest_track_b_shadow_monitor_heartbeat.json") or {}
+        if not isinstance(monitor, dict):
+            monitor = {}
+        if not isinstance(heartbeat, dict):
+            heartbeat = {}
+        ledger_root = self._repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+        trade_summary = _load_json_file(ledger_root / "latest_track_b_paper_trade_summary.json") or {}
+        live_position_status = _load_json_file(ledger_root / "latest_track_b_live_position_status.json") or {}
+        pnl_summary = _load_json_file(ledger_root / "latest_track_b_pnl_summary.json") or {}
+        if not isinstance(trade_summary, dict):
+            trade_summary = {}
+        if not isinstance(live_position_status, dict):
+            live_position_status = {}
+        if not isinstance(pnl_summary, dict):
+            pnl_summary = {}
+        instrument_reports = monitor.get("instrument_reports") if isinstance(monitor.get("instrument_reports"), list) else []
+        primary_instrument = next(
+            (
+                item
+                for item in instrument_reports
+                if isinstance(item, dict) and item.get("runtime_chain_wired") is True
+            ),
+            {},
+        )
+        if not primary_instrument:
+            primary_instrument = next(
+                (
+                    item
+                    for item in instrument_reports
+                    if isinstance(item, dict) and item.get("instrument_family") == "MGC"
+                ),
+                {},
+            )
+
+        def put_missing(key: str, value: Any) -> None:
+            if payload.get(key) in {None, "NOT_PROVIDED"} and value not in (None, "", {}, []):
+                payload[key] = value
+
+        def put_latest(key: str, value: Any) -> None:
+            if value not in (None, "", [], {}):
+                payload[key] = value
+
+        def put_latest_allow_empty(key: str, value: Any) -> None:
+            if value is not None:
+                payload[key] = value
+
+        mode = monitor.get("monitor_mode") or monitor.get("mode") or heartbeat.get("monitor_mode") or heartbeat.get("mode")
+        put_missing("latest_shadow_monitor_verdict", monitor.get("monitor_verdict") or heartbeat.get("last_monitor_verdict"))
+        put_missing("latest_shadow_monitor_cycle_id", monitor.get("cycle_id") or heartbeat.get("cycle_id"))
+        put_missing("latest_shadow_monitor_report_path", monitor.get("report_json_path") or heartbeat.get("last_report_path"))
+        put_missing("latest_shadow_monitor_completed_at", monitor.get("completed_at"))
+        put_missing("shadow_monitor_mode", mode)
+        put_missing("shadow_monitor_launchd_label", "com.mgc.trackb.paper-monitor" if mode == "PAPER" else None)
+        put_missing("shadow_monitor_pid", monitor.get("pid") or heartbeat.get("pid"))
+        put_missing(
+            "shadow_monitor_runtime_decision_source",
+            monitor.get("runtime_decision_source")
+            or monitor.get("runtime_data_source")
+            or primary_instrument.get("runtime_decision_source")
+            or primary_instrument.get("runtime_data_source"),
+        )
+        put_missing("shadow_monitor_paper_trading_enabled", monitor.get("paper_trading_enabled"))
+        put_missing("shadow_monitor_paper_on_signal", monitor.get("paper_on_signal"))
+        put_missing("shadow_monitor_paper_trades_attempted_count", monitor.get("paper_trades_attempted_count"))
+        put_missing("shadow_monitor_latest_paper_lifecycle_report_path", monitor.get("latest_paper_lifecycle_report_path"))
+        put_missing("shadow_monitor_latest_broker_state_classification", monitor.get("latest_broker_state_classification"))
+        put_missing("shadow_monitor_live_feed_pid", primary_instrument.get("live_feed_pid"))
+        put_missing("shadow_monitor_live_feed_connected", primary_instrument.get("live_feed_connected"))
+        put_missing("shadow_monitor_live_feed_status", primary_instrument.get("live_feed_status"))
+        put_missing("shadow_monitor_live_feed_subscription_status", primary_instrument.get("live_feed_subscription_status"))
+        put_missing("shadow_monitor_live_feed_heartbeat_age_seconds", primary_instrument.get("live_feed_heartbeat_age_seconds"))
+        put_missing("shadow_monitor_live_feed_strategy_ready", primary_instrument.get("live_feed_strategy_ready"))
+        put_missing("shadow_monitor_live_feed_warmup_1m_count", primary_instrument.get("live_feed_warmup_1m_count"))
+        put_missing(
+            "shadow_monitor_live_feed_warmup_completed_5m_count",
+            primary_instrument.get("live_feed_warmup_completed_5m_count"),
+        )
+        put_missing("shadow_monitor_live_feed_required_1m_count", primary_instrument.get("live_feed_required_1m_count"))
+        put_missing(
+            "shadow_monitor_live_feed_required_completed_5m_count",
+            primary_instrument.get("live_feed_required_completed_5m_count"),
+        )
+        put_missing("shadow_monitor_live_feed_blocker", primary_instrument.get("live_feed_blocker"))
+        put_missing("shadow_monitor_running", heartbeat.get("monitor_running"))
+        if instrument_reports:
+            put_latest_allow_empty("shadow_monitor_instrument_reports", instrument_reports)
+            put_latest(
+                "shadow_monitor_instrument_families",
+                [
+                    item.get("instrument_family")
+                    for item in instrument_reports
+                    if isinstance(item, dict) and item.get("instrument_family")
+                ],
+            )
+            put_latest_allow_empty(
+                "shadow_monitor_wired_instrument_count",
+                sum(1 for item in instrument_reports if isinstance(item, dict) and item.get("runtime_chain_wired") is True),
+            )
+        put_missing("shadow_monitor_submit_allowed", monitor.get("submit_allowed"))
+        put_missing("shadow_monitor_submit_attempted", monitor.get("submit_attempted"))
+        put_missing("shadow_monitor_paper_proof_invoked", monitor.get("paper_proof_invoked"))
+        put_missing("shadow_monitor_broker_state_mutated", monitor.get("broker_state_mutated"))
+        put_missing("shadow_monitor_live_money_readiness", monitor.get("live_money_readiness"))
+        lifecycle_report_path = (
+            monitor.get("latest_paper_lifecycle_report_path")
+            or payload.get("shadow_monitor_latest_paper_lifecycle_report_path")
+        )
+        has_guarded_lifecycle_provenance = bool(lifecycle_report_path) and lifecycle_report_path != "NOT_PROVIDED"
+        live_money_ready = bool(monitor.get("live_money_readiness") or payload.get("live_money_readiness"))
+        submit_or_mutation_without_provenance = bool(
+            (monitor.get("submit_attempted") or monitor.get("broker_state_mutated"))
+            and not has_guarded_lifecycle_provenance
+        )
+        safety_warnings: list[str] = []
+        if live_money_ready:
+            safety_warnings.append("CRITICAL: live_money_readiness=true in Track B PAPER monitor status.")
+        if submit_or_mutation_without_provenance:
+            safety_warnings.append(
+                "REVIEW_REQUIRED: submit or broker mutation flag is true without guarded lifecycle provenance."
+            )
+        put_latest_allow_empty("track_b_safety_critical", bool(live_money_ready or submit_or_mutation_without_provenance))
+        put_latest_allow_empty("track_b_safety_review_required", bool(submit_or_mutation_without_provenance))
+        if safety_warnings:
+            put_latest_allow_empty("track_b_safety_warnings", safety_warnings)
+            put_latest("track_b_safety_primary_warning", safety_warnings[0])
+        put_latest(
+            "track_b_paper_results_source",
+            trade_summary.get("source") or live_position_status.get("source") or pnl_summary.get("source"),
+        )
+        put_latest_allow_empty(
+            "track_b_paper_results_broker_reconciled",
+            live_position_status.get("broker_reconciled", trade_summary.get("broker_reconciled")),
+        )
+        put_latest_allow_empty(
+            "paper_trades_attempted_count",
+            trade_summary.get("paper_trades_attempted_count", monitor.get("paper_trades_attempted_count")),
+        )
+        put_latest_allow_empty("open_position_count", live_position_status.get("open_position_count"))
+        put_latest_allow_empty("realized_pnl_today", pnl_summary.get("total_realized_pnl_today"))
+        put_latest_allow_empty("realized_pnl_session", pnl_summary.get("total_realized_pnl_session"))
+        put_latest_allow_empty("realized_pnl_week", pnl_summary.get("total_realized_pnl_week"))
+        put_latest_allow_empty("unrealized_pnl", pnl_summary.get("total_unrealized_pnl"))
+        put_latest("last_trade_strategy", pnl_summary.get("last_trade_strategy"))
+        put_latest_allow_empty("last_trade_pnl", pnl_summary.get("last_trade_pnl"))
+        put_latest_allow_empty(
+            "review_required_count",
+            pnl_summary.get("review_required_count", trade_summary.get("review_required_count")),
+        )
+        put_latest("latest_trade_ledger_path", trade_summary.get("latest_trade_ledger_path"))
+        put_latest("latest_live_position_status_path", live_position_status.get("latest_live_position_status_path"))
+        put_latest("latest_pnl_summary_path", pnl_summary.get("latest_pnl_summary_path"))
+        put_latest_allow_empty(
+            "track_b_positions_by_instrument",
+            live_position_status.get("positions_by_instrument"),
+        )
+        put_latest_allow_empty(
+            "track_b_positions_by_strategy",
+            live_position_status.get("positions_by_strategy"),
+        )
+        put_latest_allow_empty("track_b_pnl_by_strategy", pnl_summary.get("by_strategy"))
+        put_latest_allow_empty("track_b_pnl_by_instrument", pnl_summary.get("by_instrument"))
+        put_latest(
+            "track_b_paper_results_warning",
+            live_position_status.get("broker_truth_warning") or trade_summary.get("hot_path_note"),
+        )
+        latest_output_paths = payload.get("latest_output_paths")
+        if isinstance(latest_output_paths, dict):
+            latest_output_paths.setdefault("track_b_paper_trade_ledger", trade_summary.get("latest_trade_ledger_path"))
+            latest_output_paths.setdefault("track_b_live_position_status", live_position_status.get("latest_live_position_status_path"))
+            latest_output_paths.setdefault("track_b_pnl_summary", pnl_summary.get("latest_pnl_summary_path"))
+        return payload
 
     def _minimal_degraded_dashboard_payload(self, *, detail: str) -> dict[str, Any]:
         generated_at = datetime.now(timezone.utc).isoformat()

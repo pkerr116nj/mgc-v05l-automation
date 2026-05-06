@@ -108,6 +108,11 @@ def create_operator_status_summary(
 
 
 def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | None]:
+    def read_default_operator_summary(path: Path | None, default_path: Path) -> dict[str, Any] | None:
+        if path == default_path and Path(inputs.output_root) != DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT:
+            return None
+        return _read_optional_json(path)
+
     return {
         "backend_health": _read_json(inputs.backend_health_json),
         "listener_heartbeat": _read_json(inputs.listener_heartbeat_json),
@@ -131,9 +136,18 @@ def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | No
         "recovery": _read_json(inputs.recovery_report_json),
         "preflight": _read_json(inputs.preflight_report_json),
         "quote": _read_json(inputs.quote_report_json),
-        "track_b_paper_trade_summary": _read_optional_json(inputs.track_b_paper_trade_summary_json),
-        "track_b_live_position_status": _read_optional_json(inputs.track_b_live_position_status_json),
-        "track_b_pnl_summary": _read_optional_json(inputs.track_b_pnl_summary_json),
+        "track_b_paper_trade_summary": read_default_operator_summary(
+            inputs.track_b_paper_trade_summary_json,
+            DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON,
+        ),
+        "track_b_live_position_status": read_default_operator_summary(
+            inputs.track_b_live_position_status_json,
+            DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
+        ),
+        "track_b_pnl_summary": read_default_operator_summary(
+            inputs.track_b_pnl_summary_json,
+            DEFAULT_TRACK_B_PNL_SUMMARY_JSON,
+        ),
     }
 
 
@@ -409,6 +423,41 @@ def _report(
         "track_b_pnl_summary": track_b_pnl_summary.get("latest_pnl_summary_path")
         or track_b_paper_trade_summary.get("latest_pnl_summary_path"),
     }
+    shadow_monitor_instrument_reports = track_b_shadow_monitor.get("instrument_reports") or []
+    primary_shadow_monitor_instrument = next(
+        (
+            item
+            for item in shadow_monitor_instrument_reports
+            if isinstance(item, Mapping) and item.get("runtime_chain_wired") is True
+        ),
+        {},
+    )
+    if not primary_shadow_monitor_instrument:
+        primary_shadow_monitor_instrument = next(
+            (
+                item
+                for item in shadow_monitor_instrument_reports
+                if isinstance(item, Mapping) and item.get("instrument_family") == "MGC"
+            ),
+            {},
+        )
+    latest_shadow_monitor_lifecycle_path = track_b_shadow_monitor.get("latest_paper_lifecycle_report_path")
+    shadow_monitor_has_guarded_lifecycle_provenance = (
+        bool(latest_shadow_monitor_lifecycle_path)
+        and latest_shadow_monitor_lifecycle_path != NOT_PROVIDED
+    )
+    shadow_monitor_live_money_ready = bool(track_b_shadow_monitor.get("live_money_readiness"))
+    shadow_monitor_unproven_mutation = bool(
+        (track_b_shadow_monitor.get("submit_attempted") or track_b_shadow_monitor.get("broker_state_mutated"))
+        and not shadow_monitor_has_guarded_lifecycle_provenance
+    )
+    track_b_safety_warnings: list[str] = []
+    if shadow_monitor_live_money_ready:
+        track_b_safety_warnings.append("CRITICAL: live_money_readiness=true in Track B PAPER monitor status.")
+    if shadow_monitor_unproven_mutation:
+        track_b_safety_warnings.append(
+            "REVIEW_REQUIRED: submit or broker mutation flag is true without guarded lifecycle provenance."
+        )
     return {
         "schema_version": "track_b_operator_status_v1",
         "generated_at": now.isoformat(),
@@ -534,6 +583,80 @@ def _report(
         "latest_shadow_monitor_cycle_id": track_b_shadow_monitor.get("cycle_id") or NOT_PROVIDED,
         "latest_shadow_monitor_report_path": track_b_shadow_monitor.get("report_json_path") or NOT_PROVIDED,
         "latest_shadow_monitor_completed_at": track_b_shadow_monitor.get("completed_at") or NOT_PROVIDED,
+        "shadow_monitor_mode": (
+            track_b_shadow_monitor.get("monitor_mode") or track_b_shadow_monitor.get("mode") or NOT_PROVIDED
+        ),
+        "shadow_monitor_launchd_label": (
+            "com.mgc.trackb.paper-monitor"
+            if (track_b_shadow_monitor.get("monitor_mode") or track_b_shadow_monitor.get("mode")) == "PAPER"
+            else NOT_PROVIDED
+        ),
+        "shadow_monitor_pid": (
+            track_b_shadow_monitor.get("pid") or track_b_shadow_monitor_heartbeat.get("pid") or NOT_PROVIDED
+        ),
+        "shadow_monitor_runtime_decision_source": (
+            track_b_shadow_monitor.get("runtime_decision_source")
+            or track_b_shadow_monitor.get("runtime_data_source")
+            or primary_shadow_monitor_instrument.get("runtime_decision_source")
+            or primary_shadow_monitor_instrument.get("runtime_data_source")
+            or NOT_PROVIDED
+        ),
+        "shadow_monitor_paper_trading_enabled": (
+            track_b_shadow_monitor.get("paper_trading_enabled") if track_b_shadow_monitor else NOT_PROVIDED
+        ),
+        "shadow_monitor_paper_on_signal": (
+            track_b_shadow_monitor.get("paper_on_signal") if track_b_shadow_monitor else NOT_PROVIDED
+        ),
+        "shadow_monitor_paper_trades_attempted_count": (
+            track_b_shadow_monitor.get("paper_trades_attempted_count") if track_b_shadow_monitor else NOT_PROVIDED
+        ),
+        "shadow_monitor_latest_paper_lifecycle_report_path": (
+            track_b_shadow_monitor.get("latest_paper_lifecycle_report_path") or NOT_PROVIDED
+        ),
+        "shadow_monitor_latest_broker_state_classification": (
+            track_b_shadow_monitor.get("latest_broker_state_classification") or NOT_PROVIDED
+        ),
+        "shadow_monitor_live_feed_pid": primary_shadow_monitor_instrument.get("live_feed_pid") or NOT_PROVIDED,
+        "shadow_monitor_live_feed_connected": (
+            primary_shadow_monitor_instrument.get("live_feed_connected")
+            if primary_shadow_monitor_instrument
+            else NOT_PROVIDED
+        ),
+        "shadow_monitor_live_feed_status": primary_shadow_monitor_instrument.get("live_feed_status") or NOT_PROVIDED,
+        "shadow_monitor_live_feed_subscription_status": (
+            primary_shadow_monitor_instrument.get("live_feed_subscription_status") or NOT_PROVIDED
+        ),
+        "shadow_monitor_live_feed_heartbeat_age_seconds": (
+            primary_shadow_monitor_instrument.get("live_feed_heartbeat_age_seconds")
+            if primary_shadow_monitor_instrument
+            else NOT_PROVIDED
+        ),
+        "shadow_monitor_live_feed_strategy_ready": (
+            primary_shadow_monitor_instrument.get("live_feed_strategy_ready")
+            if primary_shadow_monitor_instrument
+            else NOT_PROVIDED
+        ),
+        "shadow_monitor_live_feed_warmup_1m_count": (
+            primary_shadow_monitor_instrument.get("live_feed_warmup_1m_count")
+            if primary_shadow_monitor_instrument
+            else NOT_PROVIDED
+        ),
+        "shadow_monitor_live_feed_warmup_completed_5m_count": (
+            primary_shadow_monitor_instrument.get("live_feed_warmup_completed_5m_count")
+            if primary_shadow_monitor_instrument
+            else NOT_PROVIDED
+        ),
+        "shadow_monitor_live_feed_required_1m_count": (
+            primary_shadow_monitor_instrument.get("live_feed_required_1m_count")
+            if primary_shadow_monitor_instrument
+            else NOT_PROVIDED
+        ),
+        "shadow_monitor_live_feed_required_completed_5m_count": (
+            primary_shadow_monitor_instrument.get("live_feed_required_completed_5m_count")
+            if primary_shadow_monitor_instrument
+            else NOT_PROVIDED
+        ),
+        "shadow_monitor_live_feed_blocker": primary_shadow_monitor_instrument.get("live_feed_blocker") or NOT_PROVIDED,
         "shadow_monitor_running": (
             track_b_shadow_monitor_heartbeat.get("monitor_running")
             if track_b_shadow_monitor_heartbeat
@@ -545,7 +668,7 @@ def _report(
             or track_b_shadow_monitor.get("heartbeat_json_path")
             or NOT_PROVIDED
         ),
-        "shadow_monitor_instrument_reports": track_b_shadow_monitor.get("instrument_reports") or [],
+        "shadow_monitor_instrument_reports": shadow_monitor_instrument_reports,
         "shadow_monitor_instrument_families": track_b_shadow_monitor.get("instrument_families") or [],
         "shadow_monitor_evaluated_strategy_count": (
             track_b_shadow_monitor.get("evaluated_strategy_count") if track_b_shadow_monitor else NOT_PROVIDED
@@ -559,6 +682,10 @@ def _report(
         "shadow_monitor_paper_proof_invoked": track_b_shadow_monitor.get("paper_proof_invoked") if track_b_shadow_monitor else NOT_PROVIDED,
         "shadow_monitor_broker_state_mutated": track_b_shadow_monitor.get("broker_state_mutated") if track_b_shadow_monitor else NOT_PROVIDED,
         "shadow_monitor_live_money_readiness": track_b_shadow_monitor.get("live_money_readiness") if track_b_shadow_monitor else NOT_PROVIDED,
+        "track_b_safety_critical": bool(shadow_monitor_live_money_ready or shadow_monitor_unproven_mutation),
+        "track_b_safety_review_required": bool(shadow_monitor_unproven_mutation),
+        "track_b_safety_warnings": track_b_safety_warnings,
+        "track_b_safety_primary_warning": track_b_safety_warnings[0] if track_b_safety_warnings else NOT_PROVIDED,
         "multi_strategy_runtime_cycle_verdict": track_b_multi_strategy_runtime_cycle.get("multi_strategy_runtime_cycle_verdict") or NOT_PROVIDED,
         "multi_strategy_runtime_cycle_mode": track_b_multi_strategy_runtime_cycle.get("mode") or NOT_PROVIDED,
         "multi_strategy_runtime_cycle_source_id": track_b_multi_strategy_runtime_cycle.get("source_id") or NOT_PROVIDED,
@@ -629,6 +756,7 @@ def _report(
             else 0
         ),
         "realized_pnl_today": track_b_pnl_summary.get("total_realized_pnl_today", "0"),
+        "realized_pnl_session": track_b_pnl_summary.get("total_realized_pnl_session", "0"),
         "realized_pnl_week": track_b_pnl_summary.get("total_realized_pnl_week", "0"),
         "unrealized_pnl": track_b_pnl_summary.get("total_unrealized_pnl", "0"),
         "last_trade_strategy": track_b_pnl_summary.get("last_trade_strategy") or NOT_PROVIDED,
