@@ -1622,10 +1622,15 @@ class OperatorDashboardService:
         monitor_root = self._repo_root / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
         monitor = _load_json_file(monitor_root / "latest_track_b_shadow_monitor_report.json") or {}
         heartbeat = _load_json_file(monitor_root / "latest_track_b_shadow_monitor_heartbeat.json") or {}
+        diagnostic_root = self._repo_root / "outputs" / "track_b_execution_core" / "diagnostics"
+        live_feed_freshness_diagnostic_path = diagnostic_root / "latest_track_b_live_feed_freshness_diagnostic.json"
+        live_feed_freshness_diagnostic = _load_json_file(live_feed_freshness_diagnostic_path) or {}
         if not isinstance(monitor, dict):
             monitor = {}
         if not isinstance(heartbeat, dict):
             heartbeat = {}
+        if not isinstance(live_feed_freshness_diagnostic, dict):
+            live_feed_freshness_diagnostic = {}
         ledger_root = self._repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
         trade_summary = _load_json_file(ledger_root / "latest_track_b_paper_trade_summary.json") or {}
         live_position_status = _load_json_file(ledger_root / "latest_track_b_live_position_status.json") or {}
@@ -1692,6 +1697,20 @@ class OperatorDashboardService:
         put_missing("shadow_monitor_live_feed_status", primary_instrument.get("live_feed_status"))
         put_missing("shadow_monitor_live_feed_subscription_status", primary_instrument.get("live_feed_subscription_status"))
         put_missing("shadow_monitor_live_feed_heartbeat_age_seconds", primary_instrument.get("live_feed_heartbeat_age_seconds"))
+        put_missing("shadow_monitor_live_feed_transport_connected", primary_instrument.get("live_feed_transport_connected"))
+        put_missing("shadow_monitor_live_feed_raw_messages_fresh", primary_instrument.get("live_feed_raw_messages_fresh"))
+        put_missing("shadow_monitor_live_feed_completed_1m_fresh", primary_instrument.get("live_feed_completed_1m_fresh"))
+        put_missing("shadow_monitor_live_feed_completed_5m_fresh", primary_instrument.get("live_feed_completed_5m_fresh"))
+        put_missing("shadow_monitor_live_feed_execution_fresh", primary_instrument.get("live_feed_execution_fresh"))
+        put_missing("shadow_monitor_live_feed_latest_1m_age_seconds", primary_instrument.get("live_feed_latest_1m_age_seconds"))
+        put_missing(
+            "shadow_monitor_live_feed_latest_completed_5m_age_seconds",
+            primary_instrument.get("live_feed_latest_completed_5m_age_seconds"),
+        )
+        put_missing(
+            "shadow_monitor_live_feed_execution_freshness_blocker",
+            primary_instrument.get("live_feed_execution_freshness_blocker"),
+        )
         put_missing("shadow_monitor_live_feed_strategy_ready", primary_instrument.get("live_feed_strategy_ready"))
         put_missing("shadow_monitor_live_feed_warmup_1m_count", primary_instrument.get("live_feed_warmup_1m_count"))
         put_missing(
@@ -1719,6 +1738,13 @@ class OperatorDashboardService:
                 "shadow_monitor_wired_instrument_count",
                 sum(1 for item in instrument_reports if isinstance(item, dict) and item.get("runtime_chain_wired") is True),
             )
+        put_latest_allow_empty(
+            "track_b_live_feed_freshness_diagnostic",
+            _compact_track_b_live_feed_freshness_diagnostic(
+                live_feed_freshness_diagnostic,
+                live_feed_freshness_diagnostic_path,
+            ),
+        )
         put_missing("shadow_monitor_submit_allowed", monitor.get("submit_allowed"))
         put_missing("shadow_monitor_submit_attempted", monitor.get("submit_attempted"))
         put_missing("shadow_monitor_paper_proof_invoked", monitor.get("paper_proof_invoked"))
@@ -1804,14 +1830,19 @@ class OperatorDashboardService:
         live_position_status_path = ledger_root / "latest_track_b_live_position_status.json"
         pnl_summary_path = ledger_root / "latest_track_b_pnl_summary.json"
         zero_activity_diagnostic_path = diagnostic_root / "latest_track_b_zero_activity_diagnostic.json"
+        live_feed_freshness_diagnostic_path = diagnostic_root / "latest_track_b_live_feed_freshness_diagnostic.json"
         trade_summary = _load_json_file(trade_summary_path)
         live_position_status = _load_json_file(live_position_status_path)
         pnl_summary = _load_json_file(pnl_summary_path)
         zero_activity_diagnostic = _load_json_file(zero_activity_diagnostic_path)
+        live_feed_freshness_diagnostic = _load_json_file(live_feed_freshness_diagnostic_path)
         trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
         live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
         pnl_summary = pnl_summary if isinstance(pnl_summary, dict) else {}
         zero_activity_diagnostic = zero_activity_diagnostic if isinstance(zero_activity_diagnostic, dict) else {}
+        live_feed_freshness_diagnostic = (
+            live_feed_freshness_diagnostic if isinstance(live_feed_freshness_diagnostic, dict) else {}
+        )
         missing = [
             str(path)
             for path, payload in (
@@ -1907,6 +1938,10 @@ class OperatorDashboardService:
             "zero_activity_diagnostic": _compact_track_b_zero_activity_diagnostic(
                 zero_activity_diagnostic,
                 zero_activity_diagnostic_path,
+            ),
+            "live_feed_freshness_diagnostic": _compact_track_b_live_feed_freshness_diagnostic(
+                live_feed_freshness_diagnostic,
+                live_feed_freshness_diagnostic_path,
             ),
             "live_money_readiness": live_money_readiness,
             "critical": bool(critical_warnings),
@@ -16730,6 +16765,28 @@ def _compact_track_b_zero_activity_diagnostic(payload: dict[str, Any], path: Pat
         "tier3_without_recent_candidate_signal_warning": journal_summary.get(
             "tier3_without_recent_candidate_signal_warning"
         ),
+    }
+
+
+def _compact_track_b_live_feed_freshness_diagnostic(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "path": str(path),
+            "diagnosis_classification": "NOT_PROVIDED",
+            "primary_blocker": None,
+            "instrument_reports": [],
+        }
+    return {
+        "available": True,
+        "path": str(path),
+        "generated_at": payload.get("generated_at"),
+        "diagnosis_classification": payload.get("diagnosis_classification"),
+        "primary_blocker": payload.get("primary_blocker"),
+        "fresh_instruments": payload.get("fresh_instruments") or [],
+        "stale_instruments": payload.get("stale_instruments") or [],
+        "instrument_reports": payload.get("instrument_reports") if isinstance(payload.get("instrument_reports"), list) else [],
+        "http_backfill_can_satisfy_execution_freshness": payload.get("http_backfill_can_satisfy_execution_freshness"),
     }
 
 

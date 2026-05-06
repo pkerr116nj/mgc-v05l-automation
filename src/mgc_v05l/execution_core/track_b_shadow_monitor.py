@@ -294,6 +294,14 @@ class TrackBLiveFeedReadiness:
     live_feed_connected: bool | None
     subscription_status: str | None
     heartbeat_age_seconds: float | None
+    transport_connected: bool | None
+    raw_messages_fresh: bool | None
+    completed_1m_fresh: bool | None
+    completed_5m_fresh: bool | None
+    execution_fresh: bool | None
+    latest_1m_age_seconds: float | None
+    latest_completed_5m_age_seconds: float | None
+    execution_freshness_blocker: str | None
     strategy_ready: bool
     warmup_1m_count: int
     warmup_completed_5m_count: int
@@ -1016,11 +1024,66 @@ def _read_live_feed_readiness(
         and owned_warmup_elapsed <= config.live_feed_warmup_timeout_seconds
     )
     artifact_matches = _live_feed_artifact_matches(report=report, event=event, instrument=instrument)
+    latest_1m_age = _first_float(
+        (event or {}).get("latest_1m_age_seconds"),
+        (report or {}).get("latest_1m_age_seconds"),
+        (heartbeat or {}).get("latest_1m_age_seconds"),
+    )
+    latest_completed_5m_age = _first_float(
+        (event or {}).get("latest_completed_5m_age_seconds"),
+        (report or {}).get("latest_completed_5m_age_seconds"),
+        (heartbeat or {}).get("latest_completed_5m_age_seconds"),
+    )
+    completed_1m_fresh = (
+        latest_1m_age is not None and latest_1m_age <= float(config.max_latest_1m_age_seconds)
+    )
+    completed_5m_fresh = (
+        latest_completed_5m_age is not None
+        and latest_completed_5m_age <= float(config.max_completed_5m_age_seconds)
+    )
+    latest_raw_message = _first_text(
+        (heartbeat or {}).get("latest_record_ts_recv"),
+        (heartbeat or {}).get("latest_record_ts_event"),
+        (report or {}).get("latest_record_ts_recv"),
+        (report or {}).get("latest_record_ts_event"),
+        (event or {}).get("last_candle_timestamp"),
+        (event or {}).get("candle_timestamp"),
+    )
+    raw_message_age = None
+    if latest_raw_message:
+        try:
+            raw_message_age = max(0.0, (now.astimezone(UTC) - _parse_time(latest_raw_message)).total_seconds())
+        except ValueError:
+            raw_message_age = None
+    raw_messages_fresh = None if raw_message_age is None else raw_message_age <= float(config.max_latest_1m_age_seconds)
+    reported_execution_fresh = _bool_or_none((heartbeat or report or event or {}).get("fresh_for_execution"))
+    execution_fresh = (
+        completed_1m_fresh and completed_5m_fresh
+        if latest_1m_age is not None and latest_completed_5m_age is not None
+        else reported_execution_fresh
+    )
+    execution_freshness_blocker = None
+    if execution_fresh is not True:
+        stale_parts: list[str] = []
+        if latest_1m_age is None:
+            stale_parts.append("latest 1m candle age is unavailable")
+        elif not completed_1m_fresh:
+            stale_parts.append(
+                f"latest 1m candle age {round(latest_1m_age, 3)}s exceeds max {config.max_latest_1m_age_seconds}s"
+            )
+        if latest_completed_5m_age is None:
+            stale_parts.append("latest completed 5m candle age is unavailable")
+        elif not completed_5m_fresh:
+            stale_parts.append(
+                "latest completed 5m candle age "
+                f"{round(latest_completed_5m_age, 3)}s exceeds max {config.max_completed_5m_age_seconds}s"
+            )
+        execution_freshness_blocker = "; ".join(stale_parts) or "Databento Live execution freshness is unavailable."
     strategy_ready = (
         artifact_matches is None
         and heartbeat_fresh
         and live_connected is True
-        and bool((heartbeat or report or {}).get("fresh_for_execution")) is True
+        and execution_fresh is True
         and warmup_1m_count >= required_1m_count
         and warmup_completed_5m_count >= required_completed_5m_count
     )
@@ -1078,10 +1141,10 @@ def _read_live_feed_readiness(
                 f"1m={warmup_1m_count}/{required_1m_count}, "
                 f"completed_5m={warmup_completed_5m_count}/{required_completed_5m_count}."
             )
-    elif bool((heartbeat or report or {}).get("fresh_for_execution")) is not True:
+    elif execution_fresh is not True:
         status = "LIVE_FEED_STALE"
         verdict = TrackBShadowMonitorVerdict.LIVE_FEED_STALE
-        blocker = "Databento Live feed artifacts are present but not fresh_for_execution=true."
+        blocker = execution_freshness_blocker or "Databento Live feed artifacts are present but not fresh_for_execution=true."
     else:
         status = "LIVE_FEED_STRATEGY_READY"
 
@@ -1096,6 +1159,14 @@ def _read_live_feed_readiness(
         live_feed_connected=live_connected,
         subscription_status=subscription_status,
         heartbeat_age_seconds=None if heartbeat_age is None else round(heartbeat_age, 3),
+        transport_connected=live_connected,
+        raw_messages_fresh=raw_messages_fresh,
+        completed_1m_fresh=completed_1m_fresh,
+        completed_5m_fresh=completed_5m_fresh,
+        execution_fresh=execution_fresh,
+        latest_1m_age_seconds=None if latest_1m_age is None else round(latest_1m_age, 3),
+        latest_completed_5m_age_seconds=None if latest_completed_5m_age is None else round(latest_completed_5m_age, 3),
+        execution_freshness_blocker=execution_freshness_blocker,
         strategy_ready=strategy_ready,
         warmup_1m_count=warmup_1m_count,
         warmup_completed_5m_count=warmup_completed_5m_count,
@@ -1671,6 +1742,8 @@ def _should_reuse_runtime_artifact_for_cadence(
 ) -> bool:
     if config.data_refresh_seconds <= 0:
         return False
+    if _runtime_data_source(config) == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT:
+        return False
     if last_fetch_at is None:
         return False
     if instrument.evaluation_mode != TrackBStrategyEvaluationMode.COMPLETED_BAR_ONLY:
@@ -2085,6 +2158,14 @@ def _instrument_report_base(
         "live_feed_connected": None if live_feed is None else live_feed.live_feed_connected,
         "live_feed_subscription_status": None if live_feed is None else live_feed.subscription_status,
         "live_feed_heartbeat_age_seconds": None if live_feed is None else live_feed.heartbeat_age_seconds,
+        "live_feed_transport_connected": None if live_feed is None else live_feed.transport_connected,
+        "live_feed_raw_messages_fresh": None if live_feed is None else live_feed.raw_messages_fresh,
+        "live_feed_completed_1m_fresh": None if live_feed is None else live_feed.completed_1m_fresh,
+        "live_feed_completed_5m_fresh": None if live_feed is None else live_feed.completed_5m_fresh,
+        "live_feed_execution_fresh": None if live_feed is None else live_feed.execution_fresh,
+        "live_feed_latest_1m_age_seconds": None if live_feed is None else live_feed.latest_1m_age_seconds,
+        "live_feed_latest_completed_5m_age_seconds": None if live_feed is None else live_feed.latest_completed_5m_age_seconds,
+        "live_feed_execution_freshness_blocker": None if live_feed is None else live_feed.execution_freshness_blocker,
         "live_feed_strategy_ready": None if live_feed is None else live_feed.strategy_ready,
         "live_feed_warmup_1m_count": None if live_feed is None else live_feed.warmup_1m_count,
         "live_feed_warmup_completed_5m_count": None if live_feed is None else live_feed.warmup_completed_5m_count,
@@ -2172,6 +2253,14 @@ def _instrument_report_from_stages(
             "live_feed_subscription_status": runtime_report.get("live_feed_subscription_status")
             or base.get("live_feed_subscription_status"),
             "live_feed_heartbeat_age_seconds": base.get("live_feed_heartbeat_age_seconds"),
+            "live_feed_transport_connected": base.get("live_feed_transport_connected"),
+            "live_feed_raw_messages_fresh": base.get("live_feed_raw_messages_fresh"),
+            "live_feed_completed_1m_fresh": base.get("live_feed_completed_1m_fresh"),
+            "live_feed_completed_5m_fresh": base.get("live_feed_completed_5m_fresh"),
+            "live_feed_execution_fresh": base.get("live_feed_execution_fresh"),
+            "live_feed_latest_1m_age_seconds": base.get("live_feed_latest_1m_age_seconds"),
+            "live_feed_latest_completed_5m_age_seconds": base.get("live_feed_latest_completed_5m_age_seconds"),
+            "live_feed_execution_freshness_blocker": base.get("live_feed_execution_freshness_blocker"),
             "live_feed_strategy_ready": base.get("live_feed_strategy_ready"),
             "live_feed_warmup_1m_count": base.get("live_feed_warmup_1m_count"),
             "live_feed_warmup_completed_5m_count": base.get("live_feed_warmup_completed_5m_count"),
@@ -2192,6 +2281,9 @@ def _instrument_report_from_stages(
             "fresh_for_execution": runtime_report.get("fresh_for_execution", False),
             "latest_1m_timestamp": runtime_report.get("latest_1m_timestamp"),
             "latest_completed_5m_timestamp": runtime_report.get("latest_completed_5m_timestamp"),
+            "latest_1m_age_seconds": runtime_report.get("latest_1m_candle_age_seconds"),
+            "latest_completed_5m_age_seconds": runtime_report.get("latest_completed_5m_candle_age_seconds"),
+            "execution_freshness_blocker": runtime_report.get("execution_freshness_blocker"),
             "runtime_candle_age_seconds": runtime_report.get("latest_completed_5m_candle_age_seconds"),
             "asian_drift_watch_chain_report_path": str(asian.report_json) if asian is not None else None,
             "asian_drift_watch_chain_verdict": asian.report.get("asian_drift_watch_chain_verdict") if asian is not None else None,
@@ -2318,6 +2410,14 @@ def _report_for_cycle(
                 "live_feed_connected": item.get("live_feed_connected"),
                 "live_feed_subscription_status": item.get("live_feed_subscription_status"),
                 "live_feed_heartbeat_age_seconds": item.get("live_feed_heartbeat_age_seconds"),
+                "live_feed_transport_connected": item.get("live_feed_transport_connected"),
+                "live_feed_raw_messages_fresh": item.get("live_feed_raw_messages_fresh"),
+                "live_feed_completed_1m_fresh": item.get("live_feed_completed_1m_fresh"),
+                "live_feed_completed_5m_fresh": item.get("live_feed_completed_5m_fresh"),
+                "live_feed_execution_fresh": item.get("live_feed_execution_fresh"),
+                "live_feed_latest_1m_age_seconds": item.get("live_feed_latest_1m_age_seconds"),
+                "live_feed_latest_completed_5m_age_seconds": item.get("live_feed_latest_completed_5m_age_seconds"),
+                "live_feed_execution_freshness_blocker": item.get("live_feed_execution_freshness_blocker"),
                 "live_feed_strategy_ready": item.get("live_feed_strategy_ready"),
                 "live_feed_warmup_1m_count": item.get("live_feed_warmup_1m_count"),
                 "live_feed_warmup_completed_5m_count": item.get("live_feed_warmup_completed_5m_count"),
@@ -2327,6 +2427,9 @@ def _report_for_cycle(
                 "fresh_for_execution": item.get("fresh_for_execution"),
                 "latest_1m_timestamp": item.get("latest_1m_timestamp"),
                 "latest_completed_5m_timestamp": item.get("latest_completed_5m_timestamp"),
+                "latest_1m_age_seconds": item.get("latest_1m_age_seconds"),
+                "latest_completed_5m_age_seconds": item.get("latest_completed_5m_age_seconds"),
+                "execution_freshness_blocker": item.get("execution_freshness_blocker"),
                 "runtime_candle_age_seconds": item.get("runtime_candle_age_seconds"),
                 "runtime_candle_capture_verdict": item.get("runtime_candle_capture_verdict"),
                 "runtime_provider_status_category": item.get("runtime_provider_status_category"),
@@ -2807,6 +2910,29 @@ def _bool_or_none(value: object) -> bool | None:
         return True
     if text in {"false", "0", "no"}:
         return False
+    return None
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_float(*values: object) -> float | None:
+    for value in values:
+        parsed = _float_or_none(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _first_text(*values: object) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
     return None
 
 

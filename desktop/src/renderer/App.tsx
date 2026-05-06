@@ -3234,13 +3234,18 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
               <MetricCard label="Connected" value={formatValue(status.shadow_monitor_live_feed_connected)} tone={status.shadow_monitor_live_feed_connected === true ? "good" : status.shadow_monitor_live_feed_connected === false ? "warn" : "muted"} />
               <MetricCard label="Feed Status" value={formatValue(status.shadow_monitor_live_feed_status)} tone={statusTone(status.shadow_monitor_live_feed_status)} />
               <MetricCard label="Subscription" value={formatValue(status.shadow_monitor_live_feed_subscription_status)} tone={statusTone(status.shadow_monitor_live_feed_subscription_status)} />
+              <MetricCard label="Execution Fresh" value={formatValue(status.shadow_monitor_live_feed_execution_fresh)} tone={status.shadow_monitor_live_feed_execution_fresh === true ? "good" : status.shadow_monitor_live_feed_execution_fresh === false ? "danger" : "muted"} />
+              <MetricCard label="1m Fresh" value={formatValue(status.shadow_monitor_live_feed_completed_1m_fresh)} tone={status.shadow_monitor_live_feed_completed_1m_fresh === true ? "good" : status.shadow_monitor_live_feed_completed_1m_fresh === false ? "danger" : "muted"} />
+              <MetricCard label="5m Fresh" value={formatValue(status.shadow_monitor_live_feed_completed_5m_fresh)} tone={status.shadow_monitor_live_feed_completed_5m_fresh === true ? "good" : status.shadow_monitor_live_feed_completed_5m_fresh === false ? "danger" : "muted"} />
               <MetricCard label="Heartbeat Age" value={formatValue(status.shadow_monitor_live_feed_heartbeat_age_seconds)} />
+              <MetricCard label="1m Age" value={formatValue(status.shadow_monitor_live_feed_latest_1m_age_seconds)} />
+              <MetricCard label="5m Age" value={formatValue(status.shadow_monitor_live_feed_latest_completed_5m_age_seconds)} />
               <MetricCard label="Strategy Ready" value={formatValue(status.shadow_monitor_live_feed_strategy_ready)} tone={status.shadow_monitor_live_feed_strategy_ready === true ? "good" : status.shadow_monitor_live_feed_strategy_ready === false ? "warn" : "muted"} />
               <MetricCard label="1m Bars" value={`${formatValue(status.shadow_monitor_live_feed_warmup_1m_count)} / ${formatValue(status.shadow_monitor_live_feed_required_1m_count)}`} />
               <MetricCard label="5m Bars" value={`${formatValue(status.shadow_monitor_live_feed_warmup_completed_5m_count)} / ${formatValue(status.shadow_monitor_live_feed_required_completed_5m_count)}`} />
             </div>
             <h3 className="subsection-title">Live Feed Blocker</h3>
-            <div className="placeholder-note">{formatValue(status.shadow_monitor_live_feed_blocker)}</div>
+            <div className="placeholder-note">{formatValue(status.shadow_monitor_live_feed_execution_freshness_blocker ?? status.shadow_monitor_live_feed_blocker)}</div>
           </div>
         </div>
         <div className="metric-grid compact">
@@ -3265,13 +3270,16 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
             { key: "instrument_family", label: "Instrument", render: (row) => formatValue(row.instrument_family) },
             { key: "runtime_chain_wired", label: "Wired", render: (row) => formatValue(row.runtime_chain_wired) },
             { key: "live_feed_status", label: "Live Feed", render: (row) => <span className={`badge ${statusTone(row.live_feed_status)}`}>{formatValue(row.live_feed_status ?? row.instrument_verdict)}</span> },
+            { key: "execution_fresh", label: "Exec Fresh", render: (row) => <span className={`badge ${row.live_feed_execution_fresh === true ? "good" : row.live_feed_execution_fresh === false ? "danger" : "muted"}`}>{formatValue(row.live_feed_execution_fresh ?? row.fresh_for_execution)}</span> },
             { key: "live_feed_pid", label: "Feed PID", render: (row) => formatValue(row.live_feed_pid) },
+            { key: "age_1m", label: "1m Age", render: (row) => formatValue(row.live_feed_latest_1m_age_seconds ?? row.latest_1m_age_seconds) },
+            { key: "age_5m", label: "5m Age", render: (row) => formatValue(row.live_feed_latest_completed_5m_age_seconds ?? row.latest_completed_5m_age_seconds ?? row.runtime_candle_age_seconds) },
             { key: "warmup_1m", label: "1m Bars", render: (row) => `${formatValue(row.live_feed_warmup_1m_count)} / ${formatValue(row.live_feed_required_1m_count)}` },
             { key: "warmup_5m", label: "5m Bars", render: (row) => `${formatValue(row.live_feed_warmup_completed_5m_count)} / ${formatValue(row.live_feed_required_completed_5m_count)}` },
             { key: "strategy_ready", label: "Strategy Ready", render: (row) => formatValue(row.live_feed_strategy_ready) },
             { key: "enabled_strategies", label: "Strategies", render: (row) => formatValue(asArray(row.enabled_strategies).length || row.enabled_strategy_count || 0) },
             { key: "evaluated_strategy_count", label: "Evaluated", render: (row) => formatValue(row.evaluated_strategy_count) },
-            { key: "primary_blocker", label: "Blocker", render: (row) => formatValue(row.primary_blocker ?? row.live_feed_blocker) },
+            { key: "primary_blocker", label: "Blocker", render: (row) => formatValue(row.live_feed_execution_freshness_blocker ?? row.execution_freshness_blocker ?? row.primary_blocker ?? row.live_feed_blocker) },
           ]}
         />
       </Section>
@@ -3575,6 +3583,8 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const strategyRows = asArray<JsonRecord>(trading.strategy_performance);
   const instrumentRows = asArray<JsonRecord>(trading.instrument_performance);
   const zeroActivityDiagnostic = asRecord(trading.zero_activity_diagnostic);
+  const liveFeedFreshnessDiagnostic = asRecord(trading.live_feed_freshness_diagnostic);
+  const liveFeedFreshnessRows = asArray<JsonRecord>(liveFeedFreshnessDiagnostic.instrument_reports);
   const missingArtifacts = asArray<string>(trading.summary_artifacts_missing);
   const criticalWarnings = asArray<string>(trading.critical_warnings);
   const liveMoneyCritical = trading.live_money_readiness === true;
@@ -3669,6 +3679,32 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
           <MetricCard label="Tier 3 Warning" value={formatValue(zeroActivityDiagnostic.tier3_without_recent_candidate_signal_warning)} tone={zeroActivityDiagnostic.tier3_without_recent_candidate_signal_warning === true ? "warn" : "good"} />
         </div>
         <div className="placeholder-note">{formatValue(zeroActivityDiagnostic.path)}</div>
+      </Section>
+
+      <Section title="Execution Live Freshness" subtitle="Databento Live transport is separate from execution candle freshness">
+        <div className={`status-banner ${liveFeedFreshnessDiagnostic.available === false ? "warn" : liveFeedFreshnessDiagnostic.diagnosis_classification === "LIVE_FEED_EXECUTION_FRESH" ? "good" : "danger"}`}>
+          <div className="status-banner-main">
+            <div className="status-banner-title">{formatValue(liveFeedFreshnessDiagnostic.diagnosis_classification)}</div>
+            <div className="status-banner-body">{formatValue(liveFeedFreshnessDiagnostic.primary_blocker ?? "Live execution candles are fresh by instrument.")}</div>
+          </div>
+        </div>
+        <DataTable
+          rows={liveFeedFreshnessRows}
+          emptyLabel="No Track B Live feed freshness diagnostic is available yet."
+          rowKey={(row, index) => String(row.instrument_family ?? index)}
+          columns={[
+            { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument_family) },
+            { key: "transport", label: "Transport", render: (row) => <span className={`badge ${row.transport_connected === true ? "good" : row.transport_connected === false ? "danger" : "muted"}`}>{formatValue(row.transport_connected)}</span> },
+            { key: "raw", label: "Raw Fresh", render: (row) => formatValue(row.raw_messages_fresh) },
+            { key: "one_m", label: "1m Fresh", render: (row) => <span className={`badge ${row.completed_1m_fresh === true ? "good" : row.completed_1m_fresh === false ? "danger" : "muted"}`}>{formatValue(row.completed_1m_fresh)}</span> },
+            { key: "five_m", label: "5m Fresh", render: (row) => <span className={`badge ${row.completed_5m_fresh === true ? "good" : row.completed_5m_fresh === false ? "danger" : "muted"}`}>{formatValue(row.completed_5m_fresh)}</span> },
+            { key: "exec", label: "Execution Fresh", render: (row) => <span className={`badge ${row.execution_fresh === true ? "good" : row.execution_fresh === false ? "danger" : "muted"}`}>{formatValue(row.execution_fresh)}</span> },
+            { key: "age_1m", label: "1m Age", render: (row) => formatValue(row.latest_1m_candle_age_seconds) },
+            { key: "age_5m", label: "5m Age", render: (row) => formatValue(row.latest_completed_5m_candle_age_seconds) },
+            { key: "blocker", label: "Stale Reason", render: (row) => formatValue(row.reason_for_stale_verdict) },
+          ]}
+        />
+        <div className="placeholder-note">{formatValue(liveFeedFreshnessDiagnostic.path)}</div>
       </Section>
 
       <Section title="Current Positions" subtitle="Artifact-derived open Track B PAPER lifecycle positions">

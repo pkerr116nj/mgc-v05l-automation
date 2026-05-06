@@ -730,6 +730,147 @@ def test_monitor_blocks_stale_live_feed_when_management_is_disabled(tmp_path: Pa
     assert fake.calls["multi"] == 0
 
 
+def test_monitor_distinguishes_connected_feed_from_stale_execution_candles(tmp_path: Path) -> None:
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        live_feed_min_bars=8,
+        manage_live_feed=False,
+        max_latest_1m_age_seconds=5,
+        max_completed_5m_age_seconds=900,
+    )
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", runtime_payload_for_now())
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now())
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "bars_available": 20,
+            "latest_1m_age_seconds": 60,
+            "latest_completed_5m_age_seconds": 300,
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "latest_1m_age_seconds": 60,
+            "latest_completed_5m_age_seconds": 300,
+        },
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-live-exec-stale", now_func=now)
+
+    instrument_report = result.report["instrument_reports"][0]
+    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_STALE
+    assert instrument_report["live_feed_connected"] is True
+    assert instrument_report["live_feed_execution_fresh"] is False
+    assert instrument_report["live_feed_completed_1m_fresh"] is False
+    assert "latest 1m candle age" in str(instrument_report["live_feed_execution_freshness_blocker"])
+    assert fake.calls["multi"] == 0
+
+
+def test_live_artifact_source_does_not_reuse_stale_runtime_cadence_cache(tmp_path: Path) -> None:
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        data_refresh_seconds=60,
+        live_feed_min_bars=8,
+        max_latest_1m_age_seconds=900,
+        max_completed_5m_age_seconds=900,
+    )
+    stale_payload = runtime_payload_for_now()
+    stale_payload["candles"] = [
+        {
+            "candle_timestamp": f"2026-05-05T10:{41 + index:02d}:00+00:00"
+            if 41 + index < 60
+            else "2026-05-05T11:00:00+00:00",
+            "open": str(3400 + index / 10),
+            "high": str(3400.2 + index / 10),
+            "low": str(3399.8 + index / 10),
+            "close": str(3400.1 + index / 10),
+            "volume": "1",
+        }
+        for index in range(20)
+    ]
+    stale_payload["candle_history"] = stale_payload["candles"]
+    capture_track_b_runtime_mgc_1m_candles(
+        runtime_candle_payload=stale_payload,
+        output_root=cfg.runtime_candle_capture_output_root,
+        max_bars=20,
+        min_bars=8,
+        max_latest_1m_age_seconds=5,
+        max_completed_5m_age_seconds=5,
+        now=now(),
+    )
+    live_payload = runtime_payload_for_now()
+    live_payload["candle_source_mode"] = "DATABENTO_LIVE_RUNTIME_FEED"
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", live_payload)
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now())
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+            "bars_available": 20,
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+        },
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-live-no-cache-reuse", now_func=now)
+
+    instrument_report = result.report["instrument_reports"][0]
+    assert result.verdict == TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    assert instrument_report["monitor_runtime_candle_source"] == "DATABENTO_LIVE_RUNTIME_FEED_ARTIFACT"
+    assert instrument_report["provider_fetch_skipped_for_refresh_cadence"] is False
+    assert instrument_report["fresh_for_execution"] is True
+    assert fake.calls["multi"] == 1
+
+
 def test_http_backfill_source_does_not_drive_strategy_evaluation(tmp_path: Path) -> None:
     fake = FakeStages(tmp_path)
     fake.runtime = lambda _cfg, _instrument, cycle_index, actual_now: capture_track_b_runtime_mgc_1m_candles(  # type: ignore[method-assign]
@@ -833,7 +974,7 @@ def test_completed_bar_only_reuses_fresh_runtime_artifact_inside_refresh_cadence
         return base if calls["count"] <= 3 else base.replace(second=15)
 
     result = run_track_b_shadow_monitor(
-        config=config(tmp_path, max_cycles=2, data_refresh_seconds=60),
+        config=config(tmp_path, max_cycles=2, data_refresh_seconds=60, runtime_data_source=TrackBRuntimeDataSource.DATABENTO_HTTP_BACKFILL),
         stages=stages,
         monitor_id="monitor-refresh-cadence",
         now_func=clock,
@@ -857,6 +998,7 @@ def test_refresh_cadence_reuse_can_block_stale_cached_runtime_without_provider_f
         data_refresh_seconds=60,
         max_latest_1m_age_seconds=5,
         max_completed_5m_age_seconds=5,
+        runtime_data_source=TrackBRuntimeDataSource.DATABENTO_HTTP_BACKFILL,
     )
     capture_track_b_runtime_mgc_1m_candles(
         runtime_candle_payload=runtime_payload_for_now(),

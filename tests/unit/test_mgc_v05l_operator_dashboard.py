@@ -2850,9 +2850,11 @@ def test_track_b_operator_status_overlay_reads_live_monitor_artifacts(tmp_path: 
     operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
     monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
     ledger_dir = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+    diagnostic_dir = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics"
     operator_status_dir.mkdir(parents=True)
     monitor_dir.mkdir(parents=True)
     ledger_dir.mkdir(parents=True)
+    diagnostic_dir.mkdir(parents=True)
     (operator_status_dir / "latest_operator_status_summary.json").write_text(
         json.dumps(
             {
@@ -2896,6 +2898,14 @@ def test_track_b_operator_status_overlay_reads_live_monitor_artifacts(tmp_path: 
                         "live_feed_status": "LIVE_FEED_WARMING_UP",
                         "live_feed_subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
                         "live_feed_heartbeat_age_seconds": 13.4,
+                        "live_feed_transport_connected": True,
+                        "live_feed_raw_messages_fresh": True,
+                        "live_feed_completed_1m_fresh": False,
+                        "live_feed_completed_5m_fresh": True,
+                        "live_feed_execution_fresh": False,
+                        "live_feed_latest_1m_age_seconds": 151.2,
+                        "live_feed_latest_completed_5m_age_seconds": 260.0,
+                        "live_feed_execution_freshness_blocker": "latest 1m candle age 151.2s exceeds max 120s",
                         "live_feed_strategy_ready": False,
                         "live_feed_warmup_1m_count": 28,
                         "live_feed_warmup_completed_5m_count": 4,
@@ -3000,6 +3010,29 @@ def test_track_b_operator_status_overlay_reads_live_monitor_artifacts(tmp_path: 
         ),
         encoding="utf-8",
     )
+    (diagnostic_dir / "latest_track_b_live_feed_freshness_diagnostic.json").write_text(
+        json.dumps(
+            {
+                "diagnosis_classification": "STALE_LIVE_FEED",
+                "primary_blocker": "MGC: latest 1m candle age 151.2s exceeds max 120s",
+                "stale_instruments": ["MGC"],
+                "fresh_instruments": ["MNQ"],
+                "http_backfill_can_satisfy_execution_freshness": False,
+                "instrument_reports": [
+                    {
+                        "instrument_family": "MGC",
+                        "transport_connected": True,
+                        "completed_1m_fresh": False,
+                        "completed_5m_fresh": True,
+                        "execution_fresh": False,
+                    }
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
     payload = OperatorDashboardService(tmp_path)._latest_track_b_operator_status_payload()  # noqa: SLF001
 
@@ -3010,6 +3043,10 @@ def test_track_b_operator_status_overlay_reads_live_monitor_artifacts(tmp_path: 
     assert payload["shadow_monitor_live_feed_pid"] == 80972
     assert payload["shadow_monitor_runtime_decision_source"] == "DATABENTO_LIVE_ARTIFACT"
     assert payload["shadow_monitor_live_feed_connected"] is True
+    assert payload["shadow_monitor_live_feed_execution_fresh"] is False
+    assert payload["shadow_monitor_live_feed_completed_1m_fresh"] is False
+    assert payload["shadow_monitor_live_feed_latest_1m_age_seconds"] == 151.2
+    assert "latest 1m candle age" in payload["shadow_monitor_live_feed_execution_freshness_blocker"]
     assert payload["shadow_monitor_live_feed_strategy_ready"] is False
     assert payload["shadow_monitor_live_feed_warmup_1m_count"] == 28
     assert payload["shadow_monitor_live_feed_warmup_completed_5m_count"] == 4
@@ -3035,6 +3072,8 @@ def test_track_b_operator_status_overlay_reads_live_monitor_artifacts(tmp_path: 
     assert payload["review_required_count"] == 0
     assert payload["track_b_positions_by_instrument"] == {}
     assert payload["latest_trade_ledger_path"] == "outputs/track_b_execution_core/paper_trade_ledger/track_b_paper_trade_ledger.jsonl"
+    assert payload["track_b_live_feed_freshness_diagnostic"]["diagnosis_classification"] == "STALE_LIVE_FEED"
+    assert payload["track_b_live_feed_freshness_diagnostic"]["stale_instruments"] == ["MGC"]
 
 
 def test_track_b_operator_status_overlay_does_not_scan_full_paper_ledger(tmp_path: Path) -> None:

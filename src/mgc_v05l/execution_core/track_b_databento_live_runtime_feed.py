@@ -352,6 +352,14 @@ def _write_success(
         and completed_5m_age is not None
         and completed_5m_age <= config.max_completed_5m_age_seconds
     )
+    freshness_fields = _live_execution_freshness_fields(
+        config=config,
+        latest_1m_age=latest_1m_age,
+        completed_5m_age=completed_5m_age,
+        latest_ts_event=latest_ts_event,
+        latest_ts_recv=latest_ts_recv,
+        generated_at=completed_at,
+    )
     verdict = (
         TrackBDatabentoLiveFeedVerdict.DATA_WRITTEN_EXECUTION_FRESH
         if fresh_for_execution
@@ -366,6 +374,7 @@ def _write_success(
         latest_1m_age=latest_1m_age,
         completed_5m_age=completed_5m_age,
     )
+    event.update(freshness_fields)
     completed_5m_candles = _completed_5m_candles(candles, instrument_family=config.instrument_family)
     report = _base_report(
         config=config,
@@ -395,10 +404,9 @@ def _write_success(
             "latest_1m_age_seconds": None if latest_1m_age is None else round(latest_1m_age, 3),
             "latest_completed_5m_age_seconds": None if completed_5m_age is None else round(completed_5m_age, 3),
             "fresh_for_execution": fresh_for_execution,
+            **freshness_fields,
             "runtime_candle_context_ready": fresh_for_execution,
-            "primary_blocker": None
-            if fresh_for_execution
-            else "Databento Live records were written, but latest candles are not fresh_for_execution.",
+            "primary_blocker": None if fresh_for_execution else freshness_fields["execution_freshness_blocker"],
             "required_next_action": "Track B Live runtime feed is fresh for SHADOW strategy evaluation."
             if fresh_for_execution
             else "Keep Live feed running; do not evaluate execution-live strategies until fresh_for_execution=true.",
@@ -429,6 +437,7 @@ def _write_success(
             "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
             "latest_1m_timestamp": report["latest_1m_timestamp"],
             "latest_completed_5m_timestamp": report["latest_completed_5m_timestamp"],
+            **freshness_fields,
             "fresh_for_execution": fresh_for_execution,
             "report_json_path": str(report_json),
             "submit_allowed": False,
@@ -446,6 +455,7 @@ def _write_success(
                 "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
                 "latest_1m_timestamp": report["latest_1m_timestamp"],
                 "latest_completed_5m_timestamp": report["latest_completed_5m_timestamp"],
+                **freshness_fields,
                 "fresh_for_execution": fresh_for_execution,
                 "report_json_path": str(report_json),
                 "submit_allowed": False,
@@ -499,6 +509,51 @@ def _write_success(
     return TrackBDatabentoLiveFeedResult(verdict=verdict, report_json=report_json, report=report, live_1m_candles_json=live_1m_json, live_1m_candles_event=event)
 
 
+def _live_execution_freshness_fields(
+    *,
+    config: TrackBDatabentoLiveFeedConfig,
+    latest_1m_age: float | None,
+    completed_5m_age: float | None,
+    latest_ts_event: datetime | None,
+    latest_ts_recv: datetime | None,
+    generated_at: datetime,
+) -> dict[str, Any]:
+    raw_anchor = latest_ts_recv or latest_ts_event
+    raw_age = None if raw_anchor is None else max(0.0, (generated_at - raw_anchor).total_seconds())
+    completed_1m_fresh = latest_1m_age is not None and latest_1m_age <= float(config.max_latest_1m_age_seconds)
+    completed_5m_fresh = completed_5m_age is not None and completed_5m_age <= float(config.max_completed_5m_age_seconds)
+    raw_messages_fresh = None if raw_age is None else raw_age <= float(config.max_latest_1m_age_seconds)
+    execution_fresh = completed_1m_fresh and completed_5m_fresh
+    blocker = None
+    if not execution_fresh:
+        parts: list[str] = []
+        if latest_1m_age is None:
+            parts.append("latest 1m candle age is unavailable")
+        elif not completed_1m_fresh:
+            parts.append(
+                f"latest 1m candle age {round(latest_1m_age, 3)}s exceeds max {config.max_latest_1m_age_seconds}s"
+            )
+        if completed_5m_age is None:
+            parts.append("latest completed 5m candle age is unavailable")
+        elif not completed_5m_fresh:
+            parts.append(
+                "latest completed 5m candle age "
+                f"{round(completed_5m_age, 3)}s exceeds max {config.max_completed_5m_age_seconds}s"
+            )
+        blocker = "Databento Live execution candle freshness failed: " + "; ".join(parts)
+    return {
+        "transport_connected": True,
+        "raw_messages_fresh": raw_messages_fresh,
+        "completed_1m_fresh": completed_1m_fresh,
+        "completed_5m_fresh": completed_5m_fresh,
+        "execution_fresh": execution_fresh,
+        "execution_freshness_blocker": blocker,
+        "latest_1m_age_seconds": None if latest_1m_age is None else round(latest_1m_age, 3),
+        "latest_completed_5m_age_seconds": None if completed_5m_age is None else round(completed_5m_age, 3),
+        "latest_raw_message_age_seconds": None if raw_age is None else round(raw_age, 3),
+    }
+
+
 def _write_hot_live_artifacts(
     *,
     config: TrackBDatabentoLiveFeedConfig,
@@ -521,6 +576,14 @@ def _write_hot_live_artifacts(
         and completed_5m_age <= config.max_completed_5m_age_seconds
         and len(candles) >= config.min_bars
     )
+    freshness_fields = _live_execution_freshness_fields(
+        config=config,
+        latest_1m_age=latest_1m_age,
+        completed_5m_age=completed_5m_age,
+        latest_ts_event=latest_ts_event,
+        latest_ts_recv=latest_ts_recv,
+        generated_at=generated_at,
+    )
     event = _live_1m_event(
         config=config,
         run_id=run_id,
@@ -530,6 +593,7 @@ def _write_hot_live_artifacts(
         latest_1m_age=latest_1m_age,
         completed_5m_age=completed_5m_age,
     )
+    event.update(freshness_fields)
     latency_anchor = latest_ts_recv or latest_ts_event or latest_1m
     latency_ms = max(0.0, (generated_at - latency_anchor).total_seconds() * 1000.0)
     output_root = Path(config.output_root)
@@ -551,6 +615,7 @@ def _write_hot_live_artifacts(
             "latest_record_ts_event": None if latest_ts_event is None else latest_ts_event.isoformat(),
             "latest_record_ts_recv": None if latest_ts_recv is None else latest_ts_recv.isoformat(),
             "latency_ms": round(latency_ms, 3),
+            **freshness_fields,
             "fresh_for_execution": fresh_for_execution,
             "bars_available": len(candles),
             "report_json_path": None,
@@ -572,6 +637,7 @@ def _write_hot_live_artifacts(
                 "latest_record_ts_event": None if latest_ts_event is None else latest_ts_event.isoformat(),
                 "latest_record_ts_recv": None if latest_ts_recv is None else latest_ts_recv.isoformat(),
                 "latency_ms": round(latency_ms, 3),
+                **freshness_fields,
                 "fresh_for_execution": fresh_for_execution,
                 "bars_available": len(candles),
                 "report_json_path": None,

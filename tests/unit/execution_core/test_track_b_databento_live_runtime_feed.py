@@ -94,6 +94,10 @@ def test_live_runtime_feed_writes_fresh_bounded_candles(monkeypatch, tmp_path: P
     assert result.report["latest_1m_timestamp"] == "2026-05-05T12:09:00+00:00"
     assert result.report["latest_completed_5m_timestamp"] == "2026-05-05T12:05:00+00:00"
     assert result.report["fresh_for_execution"] is True
+    assert result.report["transport_connected"] is True
+    assert result.report["completed_1m_fresh"] is True
+    assert result.report["completed_5m_fresh"] is True
+    assert result.report["execution_fresh"] is True
     assert result.live_1m_candles_json is not None
     assert (tmp_path / "live" / "latest_live_mgc_1m_candles.json").exists()
     assert (tmp_path / "live" / "latest_databento_live_runtime_feed_heartbeat.json").exists()
@@ -106,6 +110,25 @@ def test_live_runtime_feed_writes_fresh_bounded_candles(monkeypatch, tmp_path: P
     }
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_live_runtime_feed_marks_connected_but_execution_stale_when_candle_age_exceeds_threshold(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    client = FakeLiveClient(live_records())
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+
+    result = run_track_b_databento_live_runtime_feed(
+        config=config(tmp_path, max_latest_1m_age_seconds=5, max_completed_5m_age_seconds=360),
+        live_client_factory=lambda _key: client,
+        now_func=aware_now,
+        run_id="live-stale-execution",
+    )
+
+    assert result.verdict == TrackBDatabentoLiveFeedVerdict.DATA_WRITTEN_NOT_EXECUTION_FRESH
+    assert result.report["live_feed_connected"] is True
+    assert result.report["transport_connected"] is True
+    assert result.report["completed_1m_fresh"] is False
+    assert result.report["execution_fresh"] is False
+    assert "latest 1m candle age" in str(result.report["execution_freshness_blocker"])
 
 
 def test_live_runtime_feed_writes_instrument_specific_mnq_hot_artifacts(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
