@@ -3635,10 +3635,64 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const liveMoneyCritical = trading.live_money_readiness === true;
   const reviewRequired = Number(trading.review_required_count ?? 0) > 0;
   const noPaperRecords = positions.length === 0 && recentTrades.length === 0;
+  const paperEvalAllowedCount = startupReadinessRows.filter((row) => row.paper_evaluation_allowed === true).length;
+  const featureContextBlockedRows = startupReadinessRows.filter((row) => row.context_ready === false);
+  const liveExecutionBlockedRows = startupReadinessRows.filter((row) => row.live_execution_approved === false);
+  const zeroActivityClassification = String(zeroActivityDiagnostic.diagnosis_classification ?? "").toUpperCase();
+  const completedDecisionAudit = asRecord(zeroActivityDiagnostic.completed_decision_bar_audit);
+  const completedDecisionAuditClassification = String(completedDecisionAudit.classification ?? "").toUpperCase();
+  const trackBPaperStatus =
+    liveMoneyCritical || reviewRequired
+      ? {
+          code: "TRACK_B_PAPER_REVIEW_REQUIRED",
+          message: "Track B PAPER review is required before interpreting autonomous trading status as clean.",
+          tone: "danger" as Tone,
+        }
+      : zeroActivityClassification === "STALE_DIAGNOSTIC"
+        ? {
+            code: "TRACK_B_PAPER_DIAGNOSTIC_STALE",
+            message: "Track B PAPER diagnostic is stale; refresh or inspect the latest monitor artifact.",
+            tone: "warn" as Tone,
+          }
+        : liveExecutionBlockedRows.length > 0 && paperEvalAllowedCount === 0
+          ? {
+              code: "TRACK_B_PAPER_BLOCKED_LIVE_EXECUTION",
+              message: `Track B PAPER blocked: live execution freshness failed for ${liveExecutionBlockedRows.map((row) => formatValue(row.instrument)).join(", ")}.`,
+              tone: "danger" as Tone,
+            }
+          : featureContextBlockedRows.length > 0 && paperEvalAllowedCount === 0
+            ? {
+                code: "TRACK_B_PAPER_BLOCKED_FEATURE_CONTEXT",
+                message: `Track B PAPER blocked: feature context not ready for ${featureContextBlockedRows.map((row) => formatValue(row.instrument)).join(", ")}.`,
+                tone: "warn" as Tone,
+              }
+            : paperEvalAllowedCount > 0 && Number(zeroActivityDiagnostic.signals_seen ?? 0) === 0 && completedDecisionAuditClassification === "EVALUATING_EACH_COMPLETED_BAR"
+              ? {
+                  code: "TRACK_B_PAPER_READY_NO_SIGNAL",
+                  message: "Track B PAPER evaluating live decision bars; no trade signals observed.",
+                  tone: "good" as Tone,
+                }
+              : paperEvalAllowedCount > 0
+                ? {
+                    code: "TRACK_B_PAPER_WAITING_NEW_COMPLETED_BAR",
+                    message: "Track B PAPER ready; waiting for the next completed decision bar.",
+                    tone: "good" as Tone,
+                  }
+                : {
+                    code: "TRACK_B_PAPER_STATUS_NOT_PROVIDED",
+                    message: "Track B PAPER readiness summary is not available yet.",
+                    tone: "warn" as Tone,
+                  };
 
   return (
     <>
       <Section title="Track B PAPER" subtitle="Read-only PAPER blotter, positions, and P&L from bounded Track B lifecycle summaries">
+        <div className={`status-banner ${trackBPaperStatus.tone}`}>
+          <div className="status-banner-main">
+            <div className="status-banner-title">{trackBPaperStatus.code}</div>
+            <div className="status-banner-body">{trackBPaperStatus.message}</div>
+          </div>
+        </div>
         {!available ? (
           <div className="status-banner warn">
             <div className="status-banner-main">
@@ -11682,6 +11736,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     runtimeReadiness,
     runtimeValues,
     paperReadiness,
+    trackBPaperTrading: asRecord(dashboard?.track_b_paper_trading),
     portfolio,
     laneRows,
     currentPositions,

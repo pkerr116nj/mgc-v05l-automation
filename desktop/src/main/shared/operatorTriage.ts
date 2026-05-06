@@ -120,6 +120,9 @@ export interface OperatorTriage {
   outage_posture: OutagePostureState;
   connection_posture: ConnectionPostureState;
   runtime_posture: RuntimePostureState;
+  track_b_paper_status_code: string | null;
+  track_b_paper_status_message: string | null;
+  track_b_legacy_market_data_note: string | null;
   verdict_sentence: string;
   dominant_blocker: OperatorTriageDominantBlocker;
   root_cause: OperatorTriageRootCause;
@@ -143,6 +146,7 @@ export interface OperatorTriageInput {
   runtimeReadiness?: JsonRecord | null;
   runtimeValues?: JsonRecord | null;
   paperReadiness?: JsonRecord | null;
+  trackBPaperTrading?: JsonRecord | null;
   portfolio?: JsonRecord | null;
   laneRows?: JsonRecord[] | null;
   currentPositions?: JsonRecord[] | null;
@@ -272,6 +276,93 @@ function numericOrNull(value: unknown): number | null {
   }
   const numeric = Number(value);
   return Number.isNaN(numeric) ? null : numeric;
+}
+
+interface TrackBPaperReadinessSummary {
+  available: boolean;
+  code: string | null;
+  message: string | null;
+  ready: boolean;
+  evaluating: boolean;
+  waitingForCompletedBar: boolean;
+  blockedFeatureContext: boolean;
+  blockedLiveExecution: boolean;
+  diagnosticStale: boolean;
+  reviewRequired: boolean;
+  legacyMarketDataNote: string | null;
+}
+
+function summarizeTrackBPaperReadiness(payload: JsonRecord): TrackBPaperReadinessSummary {
+  const startup = asRecord(payload.startup_readiness_diagnostic);
+  const zeroActivity = asRecord(payload.zero_activity_diagnostic);
+  const completedAudit = asRecord(zeroActivity.completed_decision_bar_audit);
+  const instruments = Object.values(asRecord(startup.instruments)).map((row) => asRecord(row));
+  const configured = instruments.length > 0;
+  const paperAllowedRows = instruments.filter((row) => row.paper_evaluation_allowed === true);
+  const liveBlockedRows = instruments.filter((row) => row.live_execution_approved === false);
+  const featureBlockedRows = instruments.filter((row) => row.context_ready === false || row.feature_context_ready === false);
+  const reviewRequired = payload.critical === true || Number(payload.review_required_count ?? 0) > 0;
+  const diagnosticStale = zeroActivity.stale === true || String(zeroActivity.diagnosis_classification ?? "") === "STALE_DIAGNOSTIC";
+  const auditClassification = String(completedAudit.classification ?? "").trim().toUpperCase();
+  const latestMonitorVerdict = String(zeroActivity.latest_monitor_verdict ?? "").trim().toUpperCase();
+  const signalsSeen = Number(zeroActivity.signals_seen ?? 0) || 0;
+  const recentEvaluated = Number(zeroActivity.recent_cycles_evaluated ?? 0) || 0;
+  const waitingForCompletedBar =
+    latestMonitorVerdict.includes("NO_NEW_COMPLETED_5M_BAR")
+    || latestMonitorVerdict.includes("WAITING_NEW_COMPLETED_BAR")
+    || auditClassification === "EVALUATING_EACH_COMPLETED_BAR";
+  const evaluating = paperAllowedRows.length > 0 && (
+    auditClassification === "EVALUATING_EACH_COMPLETED_BAR"
+    || recentEvaluated > 0
+    || Number(zeroActivity.strategies_evaluated ?? 0) > 0
+  );
+  const ready = paperAllowedRows.length > 0 && !diagnosticStale && !reviewRequired;
+  const blockedLiveExecution = configured && liveBlockedRows.length > 0 && paperAllowedRows.length === 0;
+  const blockedFeatureContext = configured && featureBlockedRows.length > 0 && paperAllowedRows.length === 0;
+  let code: string | null = null;
+  let message: string | null = null;
+  if (!configured && payload.available !== true) {
+    code = null;
+    message = null;
+  } else if (reviewRequired) {
+    code = "TRACK_B_PAPER_REVIEW_REQUIRED";
+    message = "Track B PAPER review is required before interpreting autonomous trading status as clean.";
+  } else if (diagnosticStale) {
+    code = "TRACK_B_PAPER_DIAGNOSTIC_STALE";
+    message = "Track B PAPER diagnostic is stale; refresh or inspect the latest monitor artifact.";
+  } else if (blockedLiveExecution) {
+    const names = liveBlockedRows.map((row) => String(row.instrument ?? row.instrument_family ?? "")).filter(Boolean);
+    code = "TRACK_B_PAPER_BLOCKED_LIVE_EXECUTION";
+    message = `Track B PAPER blocked: live execution freshness failed${names.length ? ` for ${names.join(", ")}` : ""}.`;
+  } else if (blockedFeatureContext) {
+    const names = featureBlockedRows.map((row) => String(row.instrument ?? row.instrument_family ?? "")).filter(Boolean);
+    code = "TRACK_B_PAPER_BLOCKED_FEATURE_CONTEXT";
+    message = `Track B PAPER blocked: feature context not ready${names.length ? ` for ${names.join(", ")}` : ""}.`;
+  } else if (evaluating && signalsSeen === 0) {
+    code = "TRACK_B_PAPER_READY_NO_SIGNAL";
+    message = "Track B PAPER evaluating live decision bars; no trade signals observed.";
+  } else if (waitingForCompletedBar && ready) {
+    code = "TRACK_B_PAPER_WAITING_NEW_COMPLETED_BAR";
+    message = "Track B PAPER ready; waiting for the next completed decision bar.";
+  } else if (ready) {
+    code = "TRACK_B_PAPER_EVALUATING";
+    message = "Track B PAPER live path is ready for eligible strategy evaluation.";
+  }
+  return {
+    available: Boolean(code),
+    code,
+    message,
+    ready,
+    evaluating,
+    waitingForCompletedBar,
+    blockedFeatureContext,
+    blockedLiveExecution,
+    diagnosticStale,
+    reviewRequired,
+    legacyMarketDataNote: code
+      ? "Legacy paper market-data status is separate from Track B Databento Live execution readiness."
+      : null,
+  };
 }
 
 function formatCompactMetric(value: unknown, digits = 2): string {
@@ -673,6 +764,8 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
   const runtimeReadiness = asRecord(input.runtimeReadiness);
   const runtimeValues = asRecord(input.runtimeValues);
   const paperReadiness = asRecord(input.paperReadiness);
+  const trackBPaperTrading = asRecord(input.trackBPaperTrading);
+  const trackBPaperStatus = summarizeTrackBPaperReadiness(trackBPaperTrading);
   const portfolio = asRecord(input.portfolio);
   const productionLink = asRecord(input.productionLink);
   const productionHealth = asRecord(input.productionHealth);
@@ -765,22 +858,29 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     && paperReadiness.entries_enabled !== false
     && runtimeReadiness.entries_enabled !== false;
   const paperRuntimeReady = paperRuntimeReadyKnown ? paperRuntimeReadyRaw === true : inferredPaperRuntimeReady;
-  const authoritativePaperTradeAllowedRaw = runtimeValues.paper_trade_allowed ?? paperReadiness.paper_trade_allowed;
-  const authoritativePaperTradeAllowedKnown = typeof authoritativePaperTradeAllowedRaw === "boolean";
-  const authoritativePaperTradeAllowed = authoritativePaperTradeAllowedKnown ? authoritativePaperTradeAllowedRaw === true : false;
   const authoritativePaperTradeBlockReason = firstNonEmptyString(
     runtimeValues.paper_trade_block_reason,
     paperReadiness.paper_trade_block_reason,
   );
+  const legacyMarketDataBlockReason =
+    authoritativePaperTradeBlockReason === "paper_market_data_stale_or_unavailable";
+  const authoritativePaperTradeAllowedRaw = runtimeValues.paper_trade_allowed ?? paperReadiness.paper_trade_allowed;
+  const authoritativePaperTradeAllowedKnown = typeof authoritativePaperTradeAllowedRaw === "boolean";
+  const authoritativePaperTradeAllowed = paperMode && trackBPaperStatus.ready && legacyMarketDataBlockReason
+    ? true
+    : authoritativePaperTradeAllowedKnown
+      ? authoritativePaperTradeAllowedRaw === true
+      : false;
 
   const currentExposure = buildExposureSummary(input, pilotSymbol, productionReconciliation);
   const todayPnL = buildTodayPnLSummary(portfolio, operatorSurfaceAsOf);
   const positionPosture: PositionPostureState =
     currentExposure.quantity !== null && Math.abs(currentExposure.quantity) > 0 ? "In Position" : "Flat";
 
-  const marketDataPass =
+  const legacyMarketDataPass =
     String(global.market_data_status ?? global.market_data_label ?? runtimeReadiness.market_data_readiness ?? "").trim().toUpperCase() === "LIVE"
     && global.stale !== true;
+  const marketDataPass = paperMode && trackBPaperStatus.ready ? true : legacyMarketDataPass;
   const brokerReachable = asRecord(productionHealth.broker_reachable).ok === true;
   const brokerAuthHealthy = asRecord(productionHealth.auth_healthy).ok === true;
   const brokerAccountSelected = asRecord(productionHealth.account_selected).ok === true;
@@ -839,11 +939,18 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
   const hardGates: OperatorTriageHardGate[] = [
     {
       key: "market-data",
-      label: "Market Data",
+      label: paperMode && trackBPaperStatus.available ? "Track B Live Market Data" : "Market Data",
       status: marketDataPass ? "pass" : "fail",
-      reason: marketDataPass
-        ? "Live market data is available."
-        : textOrFallback(global.market_data_label ?? global.market_data_status, "Live market data is unavailable."),
+      reason: paperMode && trackBPaperStatus.available
+        ? textOrFallback(
+            trackBPaperStatus.message,
+            legacyMarketDataPass
+              ? "Track B PAPER Live execution readiness is available."
+              : "Legacy paper market data is unavailable; Track B Live path status is reported separately.",
+          )
+        : marketDataPass
+          ? "Live market data is available."
+          : textOrFallback(global.market_data_label ?? global.market_data_status, "Live market data is unavailable."),
       checked_at: checkedAt,
       source_timestamp: timestampOrNull(global.last_update_timestamp) ?? timestampOrNull(input.desktopRefreshedAt),
       freshness_seconds: freshnessSeconds(
@@ -860,9 +967,13 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
           "global.market_data_status",
           "global.market_data_label",
           "operator_surface.runtime_readiness.market_data_readiness",
+          "track_b_paper_trading.startup_readiness_diagnostic",
+          "track_b_paper_trading.zero_activity_diagnostic",
           "global.last_update_timestamp",
         ],
-        detail: "Hard-gate status is derived from stitched dashboard freshness and market-data readiness fields.",
+        detail: paperMode && trackBPaperStatus.available
+          ? "Paper-mode market-data posture uses Track B Databento Live execution readiness when Track B PAPER diagnostics are present; legacy paper market-data freshness is labeled separately."
+          : "Hard-gate status is derived from stitched dashboard freshness and market-data readiness fields.",
       }),
     },
     {
@@ -1027,7 +1138,7 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
       ? (authoritativePaperTradeAllowed ? "Enabled" : "Blocked")
       : (hardGates.every((row) => row.status === "pass") ? "Enabled" : "Blocked");
   const liveTradeAuthority: TradeAuthorityState = (
-    marketDataPass
+    legacyMarketDataPass
     && liveBrokerAuthorityPass
     && reconciliationPass
     && liveRuntimeReady
@@ -1059,7 +1170,13 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
       : outagePosture === "Review"
         ? { code: "review_active_warnings", label: "Review active warnings" }
         : { code: "no_active_blocker", label: "No active blocker" };
-  const rootCause: OperatorTriageRootCause = paperMode && !paperTradeAllowed
+  const rootCause: OperatorTriageRootCause = paperMode && trackBPaperStatus.available
+    ? {
+        layer: "runtime",
+        code: textOrFallback(trackBPaperStatus.code, "track_b_paper_status"),
+        detail: textOrFallback(trackBPaperStatus.message, "Track B PAPER status is available."),
+      }
+    : paperMode && !paperTradeAllowed
     ? {
         layer: "runtime",
         code: textOrFallback(authoritativePaperTradeBlockReason, "paper_trade_blocked"),
@@ -1083,6 +1200,9 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
             detail: "No hard-gate failure.",
           };
   const verdictSentence =
+    paperMode && trackBPaperStatus.message
+      ? trackBPaperStatus.message
+      :
     activeTradeAuthority === "Enabled"
       ? positionPosture === "In Position"
         ? paperMode
@@ -1108,7 +1228,11 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
       pilot_symbol: pilotSymbol,
       paper_trade_authority: paperTradeAuthority,
       paper_trade_allowed: paperTradeAllowed,
-      paper_trade_block_reason: paperTradeAllowed ? null : authoritativePaperTradeBlockReason ?? "Paper trade authority is unavailable.",
+      paper_trade_block_reason: paperTradeAllowed
+        ? null
+        : legacyMarketDataBlockReason
+          ? "legacy_paper_market_data_stale_or_unavailable"
+          : authoritativePaperTradeBlockReason ?? "Paper trade authority is unavailable.",
       live_trade_authority: liveTradeAuthority,
       live_trade_allowed: liveTradeAllowed,
       live_trade_block_reason: liveTradeBlockReason,
@@ -1118,6 +1242,9 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
       live_bridge_allowed: liveTradeAllowed,
       paper_readiness_source: paperReadinessSource,
       paper_readiness_timestamp: paperReadinessTimestamp,
+      track_b_paper_status_code: trackBPaperStatus.code,
+      track_b_paper_status_message: trackBPaperStatus.message,
+      track_b_legacy_market_data_note: trackBPaperStatus.ready && !legacyMarketDataPass ? trackBPaperStatus.legacyMarketDataNote : null,
       session_eligible_count: sessionEligibleCount,
       waiting_for_bar_count: waitingForBarCount,
       no_setup_count: noSetupCount,
