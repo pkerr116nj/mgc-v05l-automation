@@ -28,13 +28,19 @@ MGC_CONTRACT_KEY = "MGC-202606"
 MGC_INSTRUMENT_FAMILY = "MGC"
 MGC_LOCAL_SYMBOL = "MGCM6"
 MGC_DATASET = "GLBX.MDP3"
+MNQ_CONTRACT_KEY = "MNQ-202606"
+MNQ_INSTRUMENT_FAMILY = "MNQ"
+MNQ_LOCAL_SYMBOL = "MNQM6"
+MNQ_DATASET = "GLBX.MDP3"
 DEFAULT_EXPECTED_ACCOUNT_ID = "DUM882026"
 DEFAULT_CALIBRATION_PROFILE = "probationary_baseline_v1"
 
 FIRST_BULL_SNAP_TURN_STRATEGY_ID = "FIRST_BULL_SNAP_TURN_V1"
 FIRST_BEAR_SNAP_TURN_STRATEGY_ID = "FIRST_BEAR_SNAP_TURN_V1"
+MNQ_FIRST_BEAR_SNAP_TURN_STRATEGY_ID = "MNQ_FIRST_BEAR_SNAP_TURN_V1"
 FIRST_BULL_SNAP_TURN_FEATURE_VERSION = "first_bull_snap_turn_v1_phase1"
 FIRST_BEAR_SNAP_TURN_FEATURE_VERSION = "first_bear_snap_turn_v1_phase1"
+MNQ_FIRST_BEAR_SNAP_TURN_FEATURE_VERSION = "mnq_first_bear_snap_turn_v1_phase1"
 
 NY = ZoneInfo("America/New_York")
 
@@ -192,6 +198,76 @@ def produce_track_b_snap_turn_envelopes(
         last = candles[-1]
         derivative_phase = _derivative_phase(last.timestamp)
         session_allowed = _session_allowed(last.timestamp)
+        instrument_family = _payload_instrument_family(runtime_5m_payload)
+
+        if instrument_family == MNQ_INSTRUMENT_FAMILY:
+            bear_event = _event_envelope(
+                runtime_5m_payload=runtime_5m_payload,
+                runtime_5m_payload_path=runtime_5m_payload_path,
+                expected_account_id=expected_account_id,
+                source_id=source_id,
+                now=actual_now,
+                candle=last,
+                strategy_id=MNQ_FIRST_BEAR_SNAP_TURN_STRATEGY_ID,
+                lane_id="mnq_first_bear_snap_turn",
+                signal_side="SHORT",
+                state_key="mnq_first_bear_snap_turn_state",
+                features_key="mnq_first_bear_snap_turn_features",
+                feature_version=MNQ_FIRST_BEAR_SNAP_TURN_FEATURE_VERSION,
+                state={
+                    "derivative_phase": derivative_phase,
+                    "session_allowed": session_allowed,
+                    "prior_bars_since_bear_snap": bear_features.pop("prior_bars_since_bear_snap"),
+                    "prior_bars_since_bear_snap_gt_cooldown": bear_features.pop(
+                        "prior_bars_since_bear_snap_gt_cooldown"
+                    ),
+                    "timeframe": "5m",
+                },
+                features={**bear_features, "feature_version": MNQ_FIRST_BEAR_SNAP_TURN_FEATURE_VERSION},
+                feature_packet=features,
+                input_bar_count=len(candles),
+            )
+            bear_json = output_root / actual_producer_id / "mnq_first_bear_snap_turn_event_envelope.json"
+            latest_bear = output_root / "latest_mnq_first_bear_snap_turn_event_envelope.json"
+            _write_json(bear_json, bear_event)
+            _write_json(latest_bear, bear_event)
+
+            report = _base_report(
+                verdict=TrackBSnapTurnEnvelopeProducerVerdict.WROTE_ENVELOPES,
+                now=actual_now,
+                producer_id=actual_producer_id,
+                report_json=report_json,
+                source_id=source_id,
+                input_payload=runtime_5m_payload,
+                input_payload_path=runtime_5m_payload_path,
+                candles=candles,
+                primary_blocker=None,
+                required_next_action="Run the multi-strategy runtime cycle with the produced MNQ snap-turn envelope.",
+                max_completed_5m_age_seconds=max_completed_5m_age_seconds,
+            )
+            report.update(
+                {
+                    "mnq_first_bear_snap_turn_event_json": str(bear_json),
+                    "latest_mnq_first_bear_snap_turn_event_json": str(latest_bear),
+                    "mnq_first_bear_snap_turn_envelope_ready": True,
+                    "mnq_first_bear_snap_turn": bear_event["metadata"]["mnq_first_bear_snap_turn_features"][
+                        "first_bear_snap_turn"
+                    ],
+                    "feature_diagnostics": _feature_diagnostics(features),
+                }
+            )
+            _write_json(report_json, report)
+            latest_report = output_root / "latest_snap_turn_envelope_producer_report.json"
+            _write_json(latest_report, report)
+            return TrackBSnapTurnEnvelopeProducerResult(
+                verdict=TrackBSnapTurnEnvelopeProducerVerdict.WROTE_ENVELOPES,
+                report_json=report_json,
+                report=report,
+                first_bull_snap_turn_event_json=None,
+                first_bear_snap_turn_event_json=latest_bear,
+                first_bull_snap_turn_event=None,
+                first_bear_snap_turn_event=bear_event,
+            )
 
         bull_event = _event_envelope(
             runtime_5m_payload=runtime_5m_payload,
@@ -315,8 +391,13 @@ def produce_track_b_snap_turn_envelopes(
 
 def _input_blocker(payload: Mapping[str, Any], candles: Sequence[_RuntimeCandle], min_completed_bars: int) -> str | None:
     contract_key = _optional_text(payload.get("contract_key"))
-    if contract_key and contract_key != MGC_CONTRACT_KEY:
-        return f"Only contract_key={MGC_CONTRACT_KEY} is supported by the Track B snap-turn envelope producer."
+    instrument_family = _payload_instrument_family(payload)
+    expected_prefix = "MNQ-" if instrument_family == MNQ_INSTRUMENT_FAMILY else "MGC-"
+    if contract_key and not contract_key.startswith(expected_prefix):
+        return (
+            "Track B snap-turn envelope producer received mismatched contract/instrument metadata: "
+            f"instrument_family={instrument_family}, contract_key={contract_key}."
+        )
     timeframe = _optional_text(payload.get("timeframe"))
     if timeframe and timeframe != "5m":
         return "Track B snap-turn envelope producer requires bounded completed 5m candles."
@@ -337,6 +418,10 @@ def _input_blocker(payload: Mapping[str, Any], candles: Sequence[_RuntimeCandle]
     if _optional_text(payload.get("quote_provider_mode")) != "REALTIME":
         return "Snap-turn envelope producer requires quote_provider_mode=REALTIME."
     return None
+
+
+def _payload_instrument_family(payload: Mapping[str, Any]) -> str:
+    return _optional_text(payload.get("instrument_family") or payload.get("symbol")) or MGC_INSTRUMENT_FAMILY
 
 
 def _verdict_for_blocker(blocker: str) -> TrackBSnapTurnEnvelopeProducerVerdict:

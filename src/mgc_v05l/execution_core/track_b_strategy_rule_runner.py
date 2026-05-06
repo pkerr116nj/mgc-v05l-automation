@@ -47,6 +47,7 @@ DEFAULT_LONDON_LATE_PAUSE_RESUME_SHORT_RULE_ID = "LONDON_LATE_PAUSE_RESUME_SHORT
 DEFAULT_ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_RULE_ID = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
 DEFAULT_US_DERIVATIVE_BEAR_TURN_RULE_ID = "US_DERIVATIVE_BEAR_TURN_V1"
 DEFAULT_MNQ_US_DERIVATIVE_BEAR_TURN_RULE_ID = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+DEFAULT_MNQ_FIRST_BEAR_SNAP_TURN_RULE_ID = "MNQ_FIRST_BEAR_SNAP_TURN_V1"
 DEFAULT_US_LATE_PAUSE_RESUME_LONG_RULE_ID = "US_LATE_PAUSE_RESUME_LONG_V1"
 
 
@@ -72,6 +73,7 @@ class TrackBStrategyRuleMode(str, Enum):
     ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1 = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
     US_DERIVATIVE_BEAR_TURN_V1 = "US_DERIVATIVE_BEAR_TURN_V1"
     MNQ_US_DERIVATIVE_BEAR_TURN_V1 = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    MNQ_FIRST_BEAR_SNAP_TURN_V1 = "MNQ_FIRST_BEAR_SNAP_TURN_V1"
     US_LATE_PAUSE_RESUME_LONG_V1 = "US_LATE_PAUSE_RESUME_LONG_V1"
     HUMAN_REVIEW_ONLY = "HUMAN_REVIEW_ONLY"
 
@@ -471,6 +473,14 @@ def _validate_input(
             feature_version="mnq_us_derivative_bear_turn_v1_phase1",
             label="MNQ US derivative bear turn v1",
         )
+    if rule_mode == TrackBStrategyRuleMode.MNQ_FIRST_BEAR_SNAP_TURN_V1:
+        return _validate_first_snap_turn_snapshot(
+            event,
+            state_key="mnq_first_bear_snap_turn_state",
+            features_key="mnq_first_bear_snap_turn_features",
+            feature_version="mnq_first_bear_snap_turn_v1_phase1",
+            label="MNQ First Bear Snap Turn v1",
+        )
     if rule_mode == TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1:
         return _validate_session_strategy_snapshot(
             event,
@@ -658,6 +668,17 @@ def _evaluate_rule_decision(
             features_key="mnq_us_derivative_bear_turn_features",
             rule_name="mnq_us_derivative_bear_turn_v1",
             label="MNQ US derivative bear turn v1",
+        )
+    if rule_mode == TrackBStrategyRuleMode.MNQ_FIRST_BEAR_SNAP_TURN_V1:
+        return _evaluate_first_snap_turn_v1(
+            event=event,
+            quote_evidence=quote_evidence,
+            rule_id=rule_id,
+            direction=TrackBStrategyRuleDecision.SHORT,
+            state_key="mnq_first_bear_snap_turn_state",
+            features_key="mnq_first_bear_snap_turn_features",
+            predicate_prefix="bear",
+            rule_name="mnq_first_bear_snap_turn_v1",
         )
     if rule_mode == TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1:
         return _evaluate_us_late_pause_resume_long_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
@@ -1559,6 +1580,14 @@ def _write_report(
             expected_mode=TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1,
             prefix="MNQ_US_DERIVATIVE_BEAR_TURN",
         ),
+        "mnq_first_bear_snap_turn_watch_verdict": _first_snap_turn_watch_verdict(
+            rule_mode,
+            verdict,
+            signal_emitted,
+            primary_blocker,
+            expected_mode=TrackBStrategyRuleMode.MNQ_FIRST_BEAR_SNAP_TURN_V1,
+            prefix="MNQ_FIRST_BEAR_SNAP_TURN",
+        ),
         "us_late_pause_resume_long_watch_verdict": _session_strategy_watch_verdict(
             rule_mode,
             verdict,
@@ -1661,6 +1690,8 @@ def _missing_registry_metadata() -> dict[str, Any]:
         "strategy_registry_paper_eligible": False,
         "strategy_registry_live_money_eligible": False,
         "strategy_registry_evaluation_mode": "NOT_REGISTERED",
+        "strategy_registry_required_1m_context_bars": None,
+        "strategy_registry_required_5m_context_bars": None,
     }
 
 
@@ -1701,6 +1732,8 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
         return "US_DERIVATIVE_BEAR_TURN_V1"
     if rule_mode == TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1:
         return "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    if rule_mode == TrackBStrategyRuleMode.MNQ_FIRST_BEAR_SNAP_TURN_V1:
+        return "MNQ_FIRST_BEAR_SNAP_TURN_V1"
     if rule_mode == TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1:
         return "US_LATE_PAUSE_RESUME_LONG_V1"
     return "REAL_STRATEGY_RULE"
@@ -1718,6 +1751,7 @@ def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
         TrackBStrategyRuleMode.ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1,
         TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1,
         TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1,
+        TrackBStrategyRuleMode.MNQ_FIRST_BEAR_SNAP_TURN_V1,
         TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1,
     }
 

@@ -35,6 +35,8 @@ class TrackBStrategyRegistryEntry:
     paper_eligible: bool
     live_money_eligible: bool = False
     evaluation_mode: str = "COMPLETED_BAR_ONLY"
+    required_1m_context_bars: int = 40
+    required_5m_context_bars: int = 8
     rule_id: str | None = None
     accepted_strategy_ids: tuple[str, ...] = ()
     accepted_rule_ids: tuple[str, ...] = ()
@@ -53,6 +55,8 @@ class TrackBStrategyRegistryEntry:
             "strategy_registry_paper_eligible": self.paper_eligible,
             "strategy_registry_live_money_eligible": self.live_money_eligible,
             "strategy_registry_evaluation_mode": self.evaluation_mode,
+            "strategy_registry_required_1m_context_bars": self.required_1m_context_bars,
+            "strategy_registry_required_5m_context_bars": self.required_5m_context_bars,
         }
 
 
@@ -379,6 +383,42 @@ MNQ_US_DERIVATIVE_BEAR_TURN_V1 = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("MNQ_US_DERIVATIVE_BEAR_TURN_V1",),
 )
 
+MNQ_FIRST_BEAR_SNAP_TURN_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+    rule_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+    rule_mode="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+    instrument_family="MNQ",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.mnq_first_bear_snap_turn_features.bear_snap_up_stretch_ok",
+        "metadata.mnq_first_bear_snap_turn_features.bear_snap_range_ok",
+        "metadata.mnq_first_bear_snap_turn_features.bear_snap_body_ok",
+        "metadata.mnq_first_bear_snap_turn_features.bear_snap_close_weak",
+        "metadata.mnq_first_bear_snap_turn_features.bear_snap_velocity_ok",
+        "metadata.mnq_first_bear_snap_turn_features.bear_snap_reversal_bar",
+        "metadata.mnq_first_bear_snap_turn_features.bear_snap_location_ok",
+        "metadata.mnq_first_bear_snap_turn_features.bear_snap_raw",
+        "metadata.mnq_first_bear_snap_turn_features.bear_snap_turn_candidate",
+        "metadata.mnq_first_bear_snap_turn_features.first_bear_snap_turn",
+        "metadata.mnq_first_bear_snap_turn_features.feature_version",
+        "metadata.mnq_first_bear_snap_turn_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.mnq_first_bear_snap_turn_state.session_allowed",
+        "metadata.mnq_first_bear_snap_turn_state.prior_bars_since_bear_snap_gt_cooldown",
+        "metadata.mnq_first_bear_snap_turn_state.derivative_phase",
+    ),
+    feature_version="mnq_first_bear_snap_turn_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=True,
+    live_money_eligible=False,
+    evaluation_mode="COMPLETED_BAR_ONLY",
+    required_1m_context_bars=40,
+    required_5m_context_bars=8,
+    accepted_strategy_ids=("MNQ_FIRST_BEAR_SNAP_TURN_V1",),
+    accepted_rule_ids=("MNQ_FIRST_BEAR_SNAP_TURN_V1",),
+)
+
 US_LATE_PAUSE_RESUME_LONG_V1 = TrackBStrategyRegistryEntry(
     strategy_id="US_LATE_PAUSE_RESUME_LONG_V1",
     rule_id="US_LATE_PAUSE_RESUME_LONG_V1",
@@ -454,6 +494,7 @@ TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1,
     US_DERIVATIVE_BEAR_TURN_V1,
     MNQ_US_DERIVATIVE_BEAR_TURN_V1,
+    MNQ_FIRST_BEAR_SNAP_TURN_V1,
     US_LATE_PAUSE_RESUME_LONG_V1,
     DEMO_WIRING_PROOF,
     HUMAN_REVIEW_ONLY,
@@ -482,6 +523,8 @@ def validate_track_b_strategy_registry(
                 blockers.append(f"registry entry {index} is missing required metadata field {field_name}.")
         if entry.live_money_eligible is not False:
             blockers.append(f"registry entry {entry.strategy_id or index} must keep live_money_eligible=false.")
+        if entry.required_1m_context_bars < 0 or entry.required_5m_context_bars < 0:
+            blockers.append(f"registry entry {entry.strategy_id or index} must use nonnegative context bar requirements.")
     return blockers
 
 

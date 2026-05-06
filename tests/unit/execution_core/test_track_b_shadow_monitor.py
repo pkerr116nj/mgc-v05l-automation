@@ -497,7 +497,7 @@ def test_default_registry_reports_other_instruments_without_ignoring_them(tmp_pa
     assert mnq.runtime_chain_wired is True
     assert mnq.contract_key == "MNQ-202606"
     assert mnq.local_symbol == "MNQM6"
-    assert mnq.enabled_strategies == ("MNQ_US_DERIVATIVE_BEAR_TURN_V1",)
+    assert mnq.enabled_strategies == ("MNQ_US_DERIVATIVE_BEAR_TURN_V1", "MNQ_FIRST_BEAR_SNAP_TURN_V1")
     assert next(item for item in instruments if item.instrument_family == "GC").enabled_strategies == ()
 
 

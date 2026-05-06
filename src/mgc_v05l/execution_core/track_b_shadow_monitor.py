@@ -373,7 +373,7 @@ def default_instruments(config: TrackBShadowMonitorConfig | None = None) -> tupl
         "US_DERIVATIVE_BEAR_TURN_V1",
         "US_LATE_PAUSE_RESUME_LONG_V1",
     )
-    mnq_strategies = ("MNQ_US_DERIVATIVE_BEAR_TURN_V1",)
+    mnq_strategies = ("MNQ_US_DERIVATIVE_BEAR_TURN_V1", "MNQ_FIRST_BEAR_SNAP_TURN_V1")
     return (
         TrackBShadowMonitorInstrumentConfig(
             instrument_family="GC",
@@ -2737,7 +2737,10 @@ def _run_snap_turn_envelopes(
     now: datetime,
     asian: TrackBAsianDriftWatchChainResult,
 ) -> TrackBSnapTurnEnvelopeProducerResult:
-    if not any(strategy in instrument.enabled_strategies for strategy in ("FIRST_BULL_SNAP_TURN_V1", "FIRST_BEAR_SNAP_TURN_V1")):
+    if not any(
+        strategy in instrument.enabled_strategies
+        for strategy in ("FIRST_BULL_SNAP_TURN_V1", "FIRST_BEAR_SNAP_TURN_V1", "MNQ_FIRST_BEAR_SNAP_TURN_V1")
+    ):
         report_json = Path(config.snap_turn_output_root) / (
             f"track_b_snap_turn_envelope_producer_skipped_{instrument.instrument_family.lower()}_{cycle_index}"
         ) / "snap_turn_envelope_producer_report.json"
@@ -2818,6 +2821,11 @@ def _run_multi_strategy_runtime_cycle(
             asia_late_flat_pullback_pause_resume_long_event_json=session.asia_late_flat_pullback_pause_resume_long_event_json,
             us_derivative_bear_turn_event_json=session.us_derivative_bear_turn_event_json,
             mnq_us_derivative_bear_turn_event_json=session.mnq_us_derivative_bear_turn_event_json,
+            mnq_first_bear_snap_turn_event_json=(
+                snap.first_bear_snap_turn_event_json
+                if "MNQ_FIRST_BEAR_SNAP_TURN_V1" in instrument.enabled_strategies
+                else None
+            ),
             us_late_pause_resume_long_event_json=session.us_late_pause_resume_long_event_json,
             inbox_dir=config.inbox_dir,
             source_id=f"{config.source_id}_multi_strategy_cycle_{cycle_index}",

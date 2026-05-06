@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--asia-late-flat-pullback-pause-resume-long-event-json", type=Path)
     parser.add_argument("--us-derivative-bear-turn-event-json", type=Path)
     parser.add_argument("--mnq-us-derivative-bear-turn-event-json", type=Path)
+    parser.add_argument("--mnq-first-bear-snap-turn-event-json", type=Path)
     parser.add_argument("--us-late-pause-resume-long-event-json", type=Path)
     parser.add_argument("--enabled-strategy-id", action="append", default=None)
     parser.add_argument("--inbox-dir", required=True, type=Path)
@@ -78,6 +79,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             asia_late_flat_pullback_pause_resume_long_event_json=args.asia_late_flat_pullback_pause_resume_long_event_json,
             us_derivative_bear_turn_event_json=args.us_derivative_bear_turn_event_json,
             mnq_us_derivative_bear_turn_event_json=args.mnq_us_derivative_bear_turn_event_json,
+            mnq_first_bear_snap_turn_event_json=args.mnq_first_bear_snap_turn_event_json,
             us_late_pause_resume_long_event_json=args.us_late_pause_resume_long_event_json,
             inbox_dir=args.inbox_dir,
             expected_account_id=args.expected_account_id,

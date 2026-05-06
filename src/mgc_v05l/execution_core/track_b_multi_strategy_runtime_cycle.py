@@ -83,6 +83,8 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     us_derivative_bear_turn_event_payload: Mapping[str, object] | None = None
     mnq_us_derivative_bear_turn_event_json: Path | None = None
     mnq_us_derivative_bear_turn_event_payload: Mapping[str, object] | None = None
+    mnq_first_bear_snap_turn_event_json: Path | None = None
+    mnq_first_bear_snap_turn_event_payload: Mapping[str, object] | None = None
     us_late_pause_resume_long_event_json: Path | None = None
     us_late_pause_resume_long_event_payload: Mapping[str, object] | None = None
     inbox_dir: Path = Path("examples/track_b_shadow_listener/inbox")
@@ -420,6 +422,14 @@ def _strategy_inputs(config: TrackBMultiStrategyRuntimeCycleConfig) -> tuple[Tra
             event_payload=config.mnq_us_derivative_bear_turn_event_payload,
         ),
         TrackBMultiStrategyInput(
+            strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+            rule_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+            rule_mode="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+            lane_id="mnq_first_bear_snap_turn",
+            event_json=config.mnq_first_bear_snap_turn_event_json,
+            event_payload=config.mnq_first_bear_snap_turn_event_payload,
+        ),
+        TrackBMultiStrategyInput(
             strategy_id="US_LATE_PAUSE_RESUME_LONG_V1",
             rule_id="US_LATE_PAUSE_RESUME_LONG_V1",
             rule_mode="US_LATE_PAUSE_RESUME_LONG_V1",
@@ -487,6 +497,8 @@ def _strategy_summary(report: Mapping[str, object]) -> dict[str, object]:
             "strategy_registry_paper_eligible": report.get("strategy_registry_paper_eligible"),
             "strategy_registry_live_money_eligible": report.get("strategy_registry_live_money_eligible"),
             "strategy_registry_evaluation_mode": report.get("strategy_registry_evaluation_mode"),
+            "strategy_registry_required_1m_context_bars": report.get("strategy_registry_required_1m_context_bars"),
+            "strategy_registry_required_5m_context_bars": report.get("strategy_registry_required_5m_context_bars"),
         },
         "signal_source": report.get("signal_source"),
         "real_strategy_signal": report.get("real_strategy_signal"),
@@ -519,6 +531,7 @@ def _strategy_runtime_verdict(report: Mapping[str, object]) -> str:
         "asia_late_flat_pullback_pause_resume_long_watch_verdict",
         "us_derivative_bear_turn_watch_verdict",
         "mnq_us_derivative_bear_turn_watch_verdict",
+        "mnq_first_bear_snap_turn_watch_verdict",
         "us_late_pause_resume_long_watch_verdict",
     ):
         value = report.get(key)
@@ -588,6 +601,8 @@ def _signal_source_for_strategy(strategy_id: str) -> str:
         return "US_DERIVATIVE_BEAR_TURN_V1"
     if strategy_id == "MNQ_US_DERIVATIVE_BEAR_TURN_V1":
         return "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    if strategy_id == "MNQ_FIRST_BEAR_SNAP_TURN_V1":
+        return "MNQ_FIRST_BEAR_SNAP_TURN_V1"
     if strategy_id == "US_LATE_PAUSE_RESUME_LONG_V1":
         return "US_LATE_PAUSE_RESUME_LONG_V1"
     return "UNKNOWN"
