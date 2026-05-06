@@ -329,6 +329,34 @@ class TrackBLiveFeedReadiness:
     completed_5m_path: Path | None
 
 
+@dataclass(frozen=True)
+class TrackBStartupContextGap:
+    start_timestamp: str
+    end_timestamp: str
+    missing_expected_bars: int
+    gap_duration_seconds: int
+    within_required_window: bool
+    classification: str
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    repair_source: str | None = None
+    remaining_blocker: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "start_timestamp": self.start_timestamp,
+            "end_timestamp": self.end_timestamp,
+            "missing_expected_bars": self.missing_expected_bars,
+            "gap_duration_seconds": self.gap_duration_seconds,
+            "within_required_window": self.within_required_window,
+            "classification": self.classification,
+            "repair_attempted": self.repair_attempted,
+            "repair_succeeded": self.repair_succeeded,
+            "repair_source": self.repair_source,
+            "remaining_blocker": self.remaining_blocker,
+        }
+
+
 def default_instruments(config: TrackBShadowMonitorConfig | None = None) -> tuple[TrackBShadowMonitorInstrumentConfig, ...]:
     base = config or TrackBShadowMonitorConfig()
     mgc_strategies = (
@@ -1627,14 +1655,17 @@ def _startup_context_payload(
     live_report_json: Path,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     live_report_payload = live_report or {}
-    required_1m = max(int(config.live_feed_min_bars), int(config.min_bars))
     required_5m = max(8, int(config.min_bars))
+    required_1m = max(int(config.live_feed_min_bars), int(config.min_bars), required_5m * 5)
     live_candles = _tag_context_candles(_payload_candles(live_payload), "DATABENTO_LIVE_ARTIFACT")
     merged = list(live_candles)
     backfill_gap_detected = len(merged) < required_1m or _completed_5m_count_from_1m(merged) < required_5m
     backfill_gap_filled = False
     backfill_source = None
     backfill_report_path = None
+    gap_repair_attempted = False
+    gap_repair_source = None
+    initial_gap_details: list[TrackBStartupContextGap] = []
     recovery_event_path = _latest_runtime_1m_path(Path(config.runtime_candle_capture_output_root), instrument)
     recovery_payload = _read_json_optional(recovery_event_path)
     if backfill_gap_detected and recovery_payload:
@@ -1647,11 +1678,17 @@ def _startup_context_payload(
         if backfill_gap_filled:
             backfill_source = "RECOVERY_CONTEXT"
             backfill_report_path = str(recovery_event_path)
+    merged = _merge_context_candles(merged)
+    initial_gap_details = _classify_context_gaps(merged, required_1m=required_1m)
+    blocking_initial_gaps = _blocking_context_gaps(initial_gap_details)
+    if blocking_initial_gaps:
+        backfill_gap_detected = True
     if (
         backfill_gap_detected
-        and not backfill_gap_filled
+        and (not backfill_gap_filled or blocking_initial_gaps)
         and config.startup_backfill_context_enabled
     ):
+        gap_repair_attempted = bool(blocking_initial_gaps)
         backfill = _run_http_backfill_runtime_candle_capture(config, instrument, cycle_index, now)
         backfill_report_path = str(backfill.report_json)
         if backfill.report.get("data_written") is True and backfill.runtime_candles_event:
@@ -1661,13 +1698,29 @@ def _startup_context_payload(
             )
             merged = _merge_context_candles(http_candles, live_candles)
             backfill_source = "DATABENTO_HTTP_BACKFILL"
+            gap_repair_source = "DATABENTO_HTTP_BACKFILL" if gap_repair_attempted else None
             backfill_gap_filled = len(merged) >= required_1m and _completed_5m_count_from_1m(merged) >= required_5m
     merged = _merge_context_candles(merged)
     merged = merged[-max(int(config.max_bars), required_1m):]
-    completed_5m_count = _completed_5m_count_from_1m(merged)
-    context_gap_count = _context_gap_count(merged)
+    gap_details = _classify_context_gaps(
+        merged,
+        required_1m=required_1m,
+        repair_attempted=gap_repair_attempted,
+        repair_source=gap_repair_source,
+    )
+    if gap_repair_attempted and initial_gap_details:
+        gap_details = _mark_repaired_gaps(initial_gap_details, gap_details, repair_source=gap_repair_source) + [
+            gap
+            for gap in gap_details
+            if (gap.start_timestamp, gap.end_timestamp)
+            not in {(item.start_timestamp, item.end_timestamp) for item in initial_gap_details}
+        ]
+    blocking_gaps = _blocking_context_gaps(gap_details)
+    validation_candles = _required_context_window(merged, required_1m=required_1m)
+    completed_5m_count = _completed_5m_count_from_1m(validation_candles)
+    context_gap_count = len(blocking_gaps)
     latest_decision_bar_source = merged[-1].get("source_tag") if merged else None
-    context_ready = len(merged) >= required_1m and completed_5m_count >= required_5m and context_gap_count == 0
+    context_ready = len(validation_candles) >= required_1m and completed_5m_count >= required_5m and context_gap_count == 0
     live_completed_1m_fresh = _first_bool(
         live_payload.get("completed_1m_fresh"),
         live_report_payload.get("completed_1m_fresh"),
@@ -1735,8 +1788,10 @@ def _startup_context_payload(
         "strategy_ids": list(instrument.enabled_strategies),
         "required_1m_context_bars": required_1m,
         "available_1m_context_bars": len(merged),
+        "usable_1m_context_bars": len(validation_candles),
         "required_5m_context_bars": required_5m,
         "available_5m_context_bars": completed_5m_count,
+        "total_5m_context_bars": _completed_5m_count_from_1m(merged),
         "live_1m_bars": len(live_candles),
         "live_completed_5m_bars": _completed_5m_count_from_1m(live_candles),
         "backfill_gap_detected": backfill_gap_detected,
@@ -1744,6 +1799,9 @@ def _startup_context_payload(
         "backfill_source": backfill_source,
         "context_source": context_source,
         "backfill_report_path": backfill_report_path,
+        "gap_count": len(gap_details),
+        "gaps": [gap.to_payload() for gap in gap_details],
+        "context_continuity_verdict": "CONTEXT_CONTINUITY_READY" if not blocking_gaps else "CONTEXT_CONTINUITY_BLOCKED",
         "context_gap_count": context_gap_count,
         "context_ready": context_ready,
         "live_transport_connected": True,
@@ -1778,15 +1836,18 @@ def _startup_context_payload(
                 if context_source == "MIXED_BACKFILL_SEEDED_CONTEXT"
                 else "DATABENTO_LIVE_RUNTIME_FEED"
             ),
-            "candles": merged,
-            "candle_history": merged,
-            "bars_available": len(merged),
+            "candles": validation_candles if context_ready else merged,
+            "candle_history": validation_candles if context_ready else merged,
+            "bars_available": len(validation_candles) if context_ready else len(merged),
             "feature_context_ready": context_ready,
             "feature_context_source": context_source,
             "startup_readiness_classification": classification,
             "latest_decision_bar_source": latest_decision_bar_source,
             "live_execution_approved": live_execution_approved,
             "paper_evaluation_allowed": paper_evaluation_allowed,
+            "startup_context_gap_count": context_gap_count,
+            "startup_context_gaps": [gap.to_payload() for gap in gap_details],
+            "context_continuity_verdict": "CONTEXT_CONTINUITY_READY" if not blocking_gaps else "CONTEXT_CONTINUITY_BLOCKED",
             "source_lineage": {
                 "live_event_path": str(live_event_json),
                 "live_report_path": str(live_report_json) if live_report_json.exists() else None,
@@ -1833,7 +1894,7 @@ def _merge_context_candles(*groups: Sequence[Mapping[str, Any]]) -> list[dict[st
             if not ts:
                 continue
             try:
-                normalized_ts = _parse_time(ts).isoformat()
+                normalized_ts = _normalize_context_minute(_parse_time(ts)).isoformat()
             except ValueError:
                 continue
             item = dict(candle)
@@ -1842,6 +1903,13 @@ def _merge_context_candles(*groups: Sequence[Mapping[str, Any]]) -> list[dict[st
             if existing is None or item.get("source_tag") == "DATABENTO_LIVE_ARTIFACT":
                 by_ts[normalized_ts] = item
     return [by_ts[key] for key in sorted(by_ts, key=lambda value: _parse_time(value))]
+
+
+def _normalize_context_minute(value: datetime) -> datetime:
+    value = value.astimezone(UTC)
+    if value.second >= 30:
+        value = value + timedelta(minutes=1)
+    return value.replace(second=0, microsecond=0)
 
 
 def _context_gap_count(candles: Sequence[Mapping[str, Any]]) -> int:
@@ -1855,6 +1923,140 @@ def _context_gap_count(candles: Sequence[Mapping[str, Any]]) -> int:
             gaps += 1
         previous = current
     return gaps
+
+
+def _required_context_window(candles: Sequence[Mapping[str, Any]], *, required_1m: int) -> list[dict[str, Any]]:
+    if required_1m <= 0:
+        return [dict(item) for item in candles]
+    return [dict(item) for item in candles[-required_1m:]]
+
+
+def _classify_context_gaps(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    required_1m: int,
+    repair_attempted: bool = False,
+    repair_source: str | None = None,
+) -> list[TrackBStartupContextGap]:
+    if len(candles) < 2:
+        return []
+    required_window = _required_context_window(candles, required_1m=required_1m)
+    required_times = [
+        _parse_time(str(item.get("candle_timestamp")))
+        for item in required_window
+        if item.get("candle_timestamp") is not None
+    ]
+    required_start = min(required_times) if required_times else None
+    required_end = max(required_times) if required_times else None
+    gaps: list[TrackBStartupContextGap] = []
+    previous_candle = candles[0]
+    previous = _parse_time(str(previous_candle["candle_timestamp"]))
+    for candle in candles[1:]:
+        current = _parse_time(str(candle["candle_timestamp"]))
+        delta = current - previous
+        if delta > timedelta(minutes=1):
+            missing_expected_bars = max(0, int(delta.total_seconds() // 60) - 1)
+            start = previous + timedelta(minutes=1)
+            end = current - timedelta(minutes=1)
+            within_required = (
+                required_start is not None
+                and required_end is not None
+                and start <= required_end
+                and end >= required_start
+            )
+            classification = _classify_context_gap(
+                previous=previous,
+                current=current,
+                previous_source=_first_text(previous_candle.get("source_tag")),
+                current_source=_first_text(candle.get("source_tag")),
+                within_required_window=within_required,
+            )
+            remaining_blocker = None
+            if within_required and classification not in {"SESSION_BOUNDARY_GAP_ALLOWED", "GAP_OUTSIDE_REQUIRED_WINDOW"}:
+                remaining_blocker = "Required startup feature context still has an unrepaired 1m gap."
+                if repair_attempted:
+                    classification = "UNREPAIRABLE_REQUIRED_CONTEXT_GAP"
+            gaps.append(
+                TrackBStartupContextGap(
+                    start_timestamp=start.isoformat(),
+                    end_timestamp=end.isoformat(),
+                    missing_expected_bars=missing_expected_bars,
+                    gap_duration_seconds=int(delta.total_seconds()),
+                    within_required_window=within_required,
+                    classification=classification,
+                    repair_attempted=repair_attempted and within_required,
+                    repair_succeeded=False,
+                    repair_source=repair_source if repair_attempted and within_required else None,
+                    remaining_blocker=remaining_blocker,
+                )
+            )
+        previous = current
+        previous_candle = candle
+    return gaps
+
+
+def _classify_context_gap(
+    *,
+    previous: datetime,
+    current: datetime,
+    previous_source: str | None,
+    current_source: str | None,
+    within_required_window: bool,
+) -> str:
+    if not within_required_window:
+        return "GAP_OUTSIDE_REQUIRED_WINDOW"
+    if _is_allowed_session_boundary_gap(previous, current):
+        return "SESSION_BOUNDARY_GAP_ALLOWED"
+    if previous_source != current_source and "DATABENTO_LIVE_ARTIFACT" in {previous_source, current_source}:
+        return "LIVE_BACKFILL_STITCH_GAP"
+    return "REPAIRABLE_BACKFILL_GAP"
+
+
+def _is_allowed_session_boundary_gap(previous: datetime, current: datetime) -> bool:
+    previous_utc = previous.astimezone(UTC)
+    current_utc = current.astimezone(UTC)
+    # CME futures generally have a weekday maintenance break near 21:00-22:00 UTC
+    # during daylight time. Treat only a narrow boundary as a non-data gap.
+    expected_reopen = previous_utc.replace(hour=22, minute=0, second=0, microsecond=0)
+    expected_close = previous_utc.replace(hour=20, minute=59, second=0, microsecond=0)
+    return previous_utc == expected_close and current_utc == expected_reopen
+
+
+def _blocking_context_gaps(gaps: Sequence[TrackBStartupContextGap]) -> list[TrackBStartupContextGap]:
+    allowed = {"SESSION_BOUNDARY_GAP_ALLOWED", "GAP_OUTSIDE_REQUIRED_WINDOW", "REPAIRED_BACKFILL_GAP"}
+    return [gap for gap in gaps if gap.within_required_window and gap.classification not in allowed]
+
+
+def _mark_repaired_gaps(
+    before: Sequence[TrackBStartupContextGap],
+    after: Sequence[TrackBStartupContextGap],
+    *,
+    repair_source: str | None,
+) -> list[TrackBStartupContextGap]:
+    remaining = {(gap.start_timestamp, gap.end_timestamp): gap for gap in after}
+    marked: list[TrackBStartupContextGap] = []
+    for gap in before:
+        key = (gap.start_timestamp, gap.end_timestamp)
+        if key not in remaining and gap.within_required_window:
+            marked.append(
+                TrackBStartupContextGap(
+                    start_timestamp=gap.start_timestamp,
+                    end_timestamp=gap.end_timestamp,
+                    missing_expected_bars=gap.missing_expected_bars,
+                    gap_duration_seconds=gap.gap_duration_seconds,
+                    within_required_window=gap.within_required_window,
+                    classification="REPAIRED_BACKFILL_GAP",
+                    repair_attempted=True,
+                    repair_succeeded=True,
+                    repair_source=repair_source,
+                    remaining_blocker=None,
+                )
+            )
+        elif key in remaining and gap.within_required_window:
+            marked.append(remaining[key])
+        else:
+            marked.append(gap)
+    return marked
 
 
 def _completed_5m_count_from_1m(candles: Sequence[Mapping[str, Any]]) -> int:

@@ -738,6 +738,229 @@ def test_backfill_seeded_context_allows_evaluation_without_forty_live_minutes(tm
     assert diagnostic["instruments"]["MGC"]["classification"] == "READY_WITH_BACKFILL_SEEDED_CONTEXT"
 
 
+def test_repairable_startup_context_gap_is_backfilled_and_allows_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        live_feed_min_bars=40,
+        max_bars=50,
+        manage_live_feed=False,
+    )
+    recovery_candles = one_minute_candles(20, 34, source_tag="DATABENTO_HTTP_BACKFILL")
+    live_candles = one_minute_candles(55, 5, source_tag="DATABENTO_LIVE_ARTIFACT")
+    repaired_candles = one_minute_candles(20, 40, source_tag="DATABENTO_HTTP_BACKFILL")
+    write_json(
+        cfg.runtime_candle_capture_output_root / "latest_runtime_mgc_1m_candles.json",
+        {
+            **runtime_payload_for_now(),
+            "candles": recovery_candles,
+            "candle_history": recovery_candles,
+            "candle_source_mode": "DATABENTO_HTTP_BACKFILL",
+            "bars_available": len(recovery_candles),
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json",
+        {
+            **runtime_payload_for_now(),
+            "candles": live_candles,
+            "candle_history": live_candles,
+            "candle_source_mode": "DATABENTO_LIVE_RUNTIME_FEED",
+            "fresh_for_execution": False,
+            "completed_1m_fresh": True,
+            "completed_5m_fresh": True,
+            "bars_available": len(live_candles),
+        },
+    )
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now(1))
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "latest_1m_age_seconds": 60,
+            "latest_completed_5m_age_seconds": 300,
+            "bars_available": len(live_candles),
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "latest_1m_age_seconds": 60,
+            "latest_completed_5m_age_seconds": 300,
+        },
+    )
+
+    def fake_backfill(*_args: object, **_kwargs: object) -> TrackBRuntimeCandleCaptureResult:
+        report_path = tmp_path / "runtime" / "backfill-report.json"
+        event_path = tmp_path / "runtime" / "backfill-event.json"
+        event = {
+            **runtime_payload_for_now(),
+            "candles": repaired_candles,
+            "candle_history": repaired_candles,
+            "candle_source_mode": "DATABENTO_HTTP_BACKFILL",
+            "bars_available": len(repaired_candles),
+        }
+        write_json(report_path, {"data_written": True})
+        write_json(event_path, event)
+        return TrackBRuntimeCandleCaptureResult(
+            verdict=TrackBRuntimeCandleCaptureVerdict.DATA_WRITTEN_NOT_EXECUTION_FRESH,
+            report_json=report_path,
+            report={"data_written": True},
+            runtime_candles_json=event_path,
+            runtime_candles_event=event,
+        )
+
+    monkeypatch.setattr(shadow_monitor_module, "_run_http_backfill_runtime_candle_capture", fake_backfill)
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-gap-repair", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    assert fake.calls["multi"] == 1
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["feature_context_ready"] is True
+    assert instrument_report["live_execution_approved"] is True
+    assert instrument_report["paper_evaluation_allowed"] is True
+    diagnostic = json.loads((cfg.diagnostic_output_root / "latest_track_b_startup_readiness_diagnostic.json").read_text())
+    mgc = diagnostic["instruments"]["MGC"]
+    assert mgc["classification"] == "READY_WITH_BACKFILL_SEEDED_CONTEXT"
+    assert mgc["latest_decision_bar_source"] == "DATABENTO_LIVE_ARTIFACT"
+    assert mgc["gaps"][0]["classification"] == "REPAIRED_BACKFILL_GAP"
+    assert mgc["gaps"][0]["repair_succeeded"] is True
+
+
+def test_startup_context_gap_outside_required_window_does_not_block(tmp_path: Path) -> None:
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        live_feed_min_bars=40,
+        max_bars=90,
+        manage_live_feed=False,
+    )
+    context_candles = one_minute_candles(0, 35, source_tag="DATABENTO_HTTP_BACKFILL")
+    live_candles = one_minute_candles(60, 40, source_tag="DATABENTO_LIVE_ARTIFACT")
+    write_json(
+        cfg.runtime_candle_capture_output_root / "latest_runtime_mgc_1m_candles.json",
+        {
+            **runtime_payload_for_now(),
+            "candles": context_candles,
+            "candle_history": context_candles,
+            "candle_source_mode": "DATABENTO_HTTP_BACKFILL",
+            "bars_available": len(context_candles),
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json",
+        {
+            **runtime_payload_for_now(),
+            "candles": live_candles,
+            "candle_history": live_candles,
+            "candle_source_mode": "DATABENTO_LIVE_RUNTIME_FEED",
+            "fresh_for_execution": False,
+            "completed_1m_fresh": True,
+            "completed_5m_fresh": True,
+            "bars_available": len(live_candles),
+        },
+    )
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now(1))
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "latest_1m_age_seconds": 60,
+            "latest_completed_5m_age_seconds": 300,
+            "bars_available": len(live_candles),
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "latest_1m_age_seconds": 60,
+            "latest_completed_5m_age_seconds": 300,
+        },
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-gap-outside-window", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    assert fake.calls["multi"] == 1
+    diagnostic = json.loads((cfg.diagnostic_output_root / "latest_track_b_startup_readiness_diagnostic.json").read_text())
+    mgc = diagnostic["instruments"]["MGC"]
+    assert mgc["context_ready"] is True
+    assert mgc["paper_evaluation_allowed"] is True
+    gaps = shadow_monitor_module._classify_context_gaps(
+        shadow_monitor_module._merge_context_candles(context_candles, live_candles),
+        required_1m=40,
+    )
+    assert gaps[0].classification == "GAP_OUTSIDE_REQUIRED_WINDOW"
+    assert gaps[0].within_required_window is False
+
+
+def test_session_boundary_startup_context_gap_is_allowed() -> None:
+    candles = [
+        {"candle_timestamp": "2026-05-05T20:59:00+00:00", "source_tag": "DATABENTO_HTTP_BACKFILL"},
+        {"candle_timestamp": "2026-05-05T22:00:00+00:00", "source_tag": "DATABENTO_HTTP_BACKFILL"},
+    ]
+
+    gaps = shadow_monitor_module._classify_context_gaps(candles, required_1m=2)
+
+    assert gaps[0].classification == "SESSION_BOUNDARY_GAP_ALLOWED"
+    assert shadow_monitor_module._blocking_context_gaps(gaps) == []
+
+
+def test_timestamp_alignment_is_normalized_before_gap_detection() -> None:
+    candles = shadow_monitor_module._merge_context_candles(
+        [
+            {"candle_timestamp": "2026-05-05T11:00:01+00:00", "source_tag": "DATABENTO_HTTP_BACKFILL"},
+            {"candle_timestamp": "2026-05-05T11:01:29+00:00", "source_tag": "DATABENTO_HTTP_BACKFILL"},
+            {"candle_timestamp": "2026-05-05T11:02:00+00:00", "source_tag": "DATABENTO_LIVE_ARTIFACT"},
+        ]
+    )
+
+    assert [item["candle_timestamp"] for item in candles] == [
+        "2026-05-05T11:00:00+00:00",
+        "2026-05-05T11:01:00+00:00",
+        "2026-05-05T11:02:00+00:00",
+    ]
+    assert shadow_monitor_module._classify_context_gaps(candles, required_1m=3) == []
+
+
 def test_backfill_context_without_fresh_live_feed_does_not_evaluate(tmp_path: Path) -> None:
     cfg = config(
         tmp_path,

@@ -3713,10 +3713,25 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
             { key: "bars_1m", label: "1m Context", render: (row) => `${formatValue(row.available_1m_context_bars)} / ${formatValue(row.required_1m_context_bars)}` },
             { key: "bars_5m", label: "5m Context", render: (row) => `${formatValue(row.available_5m_context_bars)} / ${formatValue(row.required_5m_context_bars)}` },
             { key: "backfill", label: "Backfill", render: (row) => formatValue(row.backfill_source ?? row.backfill_gap_filled) },
+            { key: "gaps", label: "Gaps", render: (row) => formatValue(row.context_continuity_verdict ?? row.context_gap_count ?? row.gap_count) },
             { key: "decision_source", label: "Decision Bar", render: (row) => formatValue(row.latest_decision_bar_source) },
             { key: "blocker", label: "Blocker", render: (row) => formatValue(row.blocked_reason) },
           ]}
         />
+        {startupReadinessRows.some((row) => asArray(row.gaps).length > 0) ? (
+          <div className="operator-context-gap-list">
+            {startupReadinessRows.flatMap((row) =>
+              asArray<JsonRecord>(row.gaps).slice(0, 3).map((gap, index) => (
+                <div key={`${formatValue(row.instrument)}-${index}`} className="operator-context-gap-row">
+                  <span>{formatValue(row.instrument)}</span>
+                  <span>{formatValue(gap.classification)}</span>
+                  <span>{formatTimestamp(gap.start_timestamp)} → {formatTimestamp(gap.end_timestamp)}</span>
+                  <span>{formatValue(gap.repair_succeeded === true ? "repaired" : gap.remaining_blocker ?? "classified")}</span>
+                </div>
+              ))
+            )}
+          </div>
+        ) : null}
         <div className="placeholder-note">{formatValue(startupReadinessDiagnostic.path)}</div>
       </Section>
 

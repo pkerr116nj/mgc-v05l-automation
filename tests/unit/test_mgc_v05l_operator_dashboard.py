@@ -3345,6 +3345,18 @@ def test_track_b_paper_trading_payload_includes_startup_readiness_diagnostic(tmp
                         "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
                         "paper_evaluation_allowed": True,
                         "blocked_reason": None,
+                        "context_continuity_verdict": "CONTEXT_CONTINUITY_READY",
+                        "gap_count": 1,
+                        "gaps": [
+                            {
+                                "classification": "REPAIRED_BACKFILL_GAP",
+                                "start_timestamp": "2026-05-06T07:03:00+00:00",
+                                "end_timestamp": "2026-05-06T07:03:00+00:00",
+                                "within_required_window": True,
+                                "repair_attempted": True,
+                                "repair_succeeded": True,
+                            }
+                        ],
                     }
                 },
             }
@@ -3361,6 +3373,8 @@ def test_track_b_paper_trading_payload_includes_startup_readiness_diagnostic(tmp
     assert diagnostic["instruments"]["MGC"]["live_execution_approved"] is True
     assert diagnostic["instruments"]["MGC"]["latest_decision_bar_source"] == "DATABENTO_LIVE_ARTIFACT"
     assert diagnostic["instruments"]["MGC"]["paper_evaluation_allowed"] is True
+    assert diagnostic["instruments"]["MGC"]["context_continuity_verdict"] == "CONTEXT_CONTINUITY_READY"
+    assert diagnostic["instruments"]["MGC"]["gaps"][0]["classification"] == "REPAIRED_BACKFILL_GAP"
 
 
 def test_track_b_paper_trading_payload_degrades_with_missing_compact_summaries(tmp_path: Path) -> None:

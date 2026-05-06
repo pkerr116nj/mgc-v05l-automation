@@ -1570,6 +1570,25 @@ input {
   color: var(--muted);
 }
 
+.operator-context-gap-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.operator-context-gap-row {
+  display: grid;
+  grid-template-columns: 72px 220px minmax(0, 1fr) 140px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(18, 24, 34, 0.72);
+}
+
 .readiness-state-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
