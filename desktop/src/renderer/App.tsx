@@ -3617,6 +3617,12 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const strategyRows = asArray<JsonRecord>(trading.strategy_performance);
   const instrumentRows = asArray<JsonRecord>(trading.instrument_performance);
   const zeroActivityDiagnostic = asRecord(trading.zero_activity_diagnostic);
+  const noSignalAttribution = Object.keys(asRecord(trading.no_signal_attribution_rollup)).length
+    ? asRecord(trading.no_signal_attribution_rollup)
+    : asRecord(zeroActivityDiagnostic.no_signal_attribution_rollup);
+  const noSignalAttributionStrategies = asArray<JsonRecord>(noSignalAttribution.strategies);
+  const noSignalTopFailed = asArray<JsonRecord>(noSignalAttribution.top_failed_predicates);
+  const noSignalNearMisses = asArray<JsonRecord>(noSignalAttribution.closest_near_misses);
   const liveFeedFreshnessDiagnostic = asRecord(trading.live_feed_freshness_diagnostic);
   const startupReadinessDiagnostic = asRecord(trading.startup_readiness_diagnostic);
   const startupReadinessRows: JsonRecord[] = Object.entries(asRecord(startupReadinessDiagnostic.instruments)).map(([instrument, value]) => ({
@@ -3718,6 +3724,60 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
           <MetricCard label="Tier 3 Warning" value={formatValue(zeroActivityDiagnostic.tier3_without_recent_candidate_signal_warning)} tone={zeroActivityDiagnostic.tier3_without_recent_candidate_signal_warning === true ? "warn" : "good"} />
         </div>
         <div className="placeholder-note">{formatValue(zeroActivityDiagnostic.path)}</div>
+      </Section>
+
+      <Section title="NO_SIGNAL Attribution" subtitle="Completed decision-bar predicate rollup for evaluated Track B PAPER strategies">
+        <div className={`status-banner ${noSignalAttribution.available === false ? "warn" : statusTone(noSignalAttribution.classification)}`}>
+          <div className="status-banner-main">
+            <div className="status-banner-title">{formatValue(noSignalAttribution.classification)}</div>
+            <div className="status-banner-body">
+              {formatValue(noSignalAttribution.total_no_signals ?? 0)} no-signal evaluations across {formatValue(noSignalAttribution.evaluated_decision_bars ?? 0)} evaluated completed decision bar(s).
+            </div>
+          </div>
+        </div>
+        <div className="metric-grid compact">
+          <MetricCard label="Completed Bars" value={formatValue(noSignalAttribution.completed_decision_bars_observed ?? 0)} />
+          <MetricCard label="Eligible Bars" value={formatValue(noSignalAttribution.eligible_decision_bars ?? 0)} />
+          <MetricCard label="Evaluated Bars" value={formatValue(noSignalAttribution.evaluated_decision_bars ?? 0)} />
+          <MetricCard label="Strategy Evals" value={formatValue(noSignalAttribution.total_strategy_evaluations ?? 0)} />
+          <MetricCard label="NO_SIGNAL" value={formatValue(noSignalAttribution.total_no_signals ?? 0)} />
+          <MetricCard label="Signals" value={formatValue(noSignalAttribution.total_signals ?? 0)} tone={Number(noSignalAttribution.total_signals ?? 0) > 0 ? "warn" : "good"} />
+          <MetricCard label="Suppressed" value={formatValue(noSignalAttribution.total_suppressed ?? 0)} tone={Number(noSignalAttribution.total_suppressed ?? 0) > 0 ? "warn" : "good"} />
+          <MetricCard label="Attribution Complete" value={formatValue(noSignalAttribution.attribution_complete)} tone={noSignalAttribution.attribution_complete === false ? "warn" : "good"} />
+        </div>
+        <div className="operator-context-gap-list">
+          {noSignalTopFailed.slice(0, 6).map((row, index) => (
+            <div key={`${formatValue(row.reason)}-${index}`} className="operator-context-gap-row">
+              <span>{formatValue(row.reason)}</span>
+              <span>{formatValue(row.count)}</span>
+            </div>
+          ))}
+          {!noSignalTopFailed.length ? <div className="placeholder-note">No failed predicate attribution is available yet.</div> : null}
+        </div>
+        <DataTable
+          rows={noSignalAttributionStrategies}
+          emptyLabel="No per-strategy NO_SIGNAL attribution has been recorded yet."
+          rowKey={(row, index) => `${formatValue(row.instrument)}-${formatValue(row.strategy_id)}-${index}`}
+          columns={[
+            { key: "strategy", label: "Strategy", render: (row) => formatValue(row.strategy_id) },
+            { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument) },
+            { key: "evaluated", label: "Bars", render: (row) => formatValue(row.evaluated_bars ?? 0) },
+            { key: "no_signal", label: "NO_SIGNAL", render: (row) => formatValue(row.no_signal_count ?? 0) },
+            { key: "signals", label: "Signals", render: (row) => formatValue(row.signal_count ?? 0) },
+            { key: "top_failed", label: "Top Failed Predicate", render: (row) => formatValue(asRecord(asArray<JsonRecord>(row.top_failed_predicates)[0]).reason ?? "None") },
+            { key: "session", label: "Session Blocker", render: (row) => formatValue(asRecord(asArray<JsonRecord>(row.top_session_blockers)[0]).reason ?? "None") },
+            { key: "near_miss", label: "Near Misses", render: (row) => formatValue(row.nearest_miss_count ?? 0) },
+          ]}
+        />
+        {noSignalNearMisses.length ? (
+          <div className="notice-strip">
+            {noSignalNearMisses.slice(0, 3).map((row, index) => (
+              <div key={`${formatValue(row.strategy_id)}-${index}`}>
+                Closest: {formatValue(row.instrument)} {formatValue(row.strategy_id)} at {formatTimestamp(row.decision_bar_timestamp)} failed {formatValue(row.nearest_failed_predicate)}
+              </div>
+            ))}
+          </div>
+        ) : null}
       </Section>
 
       <Section title="Startup Readiness" subtitle="Feature context may be backfill-seeded; PAPER evaluation still requires fresh Databento Live approval">

@@ -25,8 +25,12 @@ DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_JSON = (
 DEFAULT_TRACK_B_COMPLETED_DECISION_BAR_AUDIT_JSON = (
     DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_OUTPUT_ROOT / "latest_track_b_completed_decision_bar_evaluation_audit.json"
 )
+DEFAULT_TRACK_B_NO_SIGNAL_ATTRIBUTION_ROLLUP_JSON = (
+    DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_OUTPUT_ROOT / "latest_track_b_no_signal_attribution_rollup.json"
+)
 DEFAULT_RECENT_CYCLE_LIMIT = 120
 DEFAULT_DECISION_BAR_AUDIT_WINDOW_MINUTES = 60
+DEFAULT_NO_SIGNAL_ATTRIBUTION_DECISION_BAR_LIMIT = 24
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 
 
@@ -42,6 +46,7 @@ def build_track_b_zero_activity_diagnostic(
     output_root: Path = DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_OUTPUT_ROOT,
     recent_cycle_limit: int = DEFAULT_RECENT_CYCLE_LIMIT,
     decision_bar_audit_window_minutes: int = DEFAULT_DECISION_BAR_AUDIT_WINDOW_MINUTES,
+    no_signal_attribution_decision_bar_limit: int = DEFAULT_NO_SIGNAL_ATTRIBUTION_DECISION_BAR_LIMIT,
     now: datetime | None = None,
     write: bool = True,
 ) -> TrackBZeroActivityDiagnosticResult:
@@ -108,6 +113,12 @@ def build_track_b_zero_activity_diagnostic(
         enabled_by_instrument=enabled_by_instrument,
         window_minutes=decision_bar_audit_window_minutes,
     )
+    no_signal_attribution_rollup = _build_no_signal_attribution_rollup(
+        repo_root=root,
+        now=actual_now,
+        completed_decision_bar_audit=completed_decision_bar_audit,
+        decision_bar_limit=no_signal_attribution_decision_bar_limit,
+    )
     diagnosis, next_action = _classify_diagnosis(
         latest_monitor=latest_monitor,
         cycle_summary=cycle_summary,
@@ -120,6 +131,7 @@ def build_track_b_zero_activity_diagnostic(
 
     report_json = Path(output_root) / "latest_track_b_zero_activity_diagnostic.json"
     completed_decision_bar_audit_json = Path(output_root) / "latest_track_b_completed_decision_bar_evaluation_audit.json"
+    no_signal_attribution_rollup_json = Path(output_root) / "latest_track_b_no_signal_attribution_rollup.json"
     report = {
         "schema_version": "track_b_zero_activity_diagnostic_v1",
         "generated_at": actual_now.isoformat(),
@@ -144,6 +156,7 @@ def build_track_b_zero_activity_diagnostic(
         "live_feed_summary": live_feed,
         "cycle_summary": cycle_summary,
         "completed_decision_bar_audit": completed_decision_bar_audit,
+        "no_signal_attribution_rollup": no_signal_attribution_rollup,
         "per_strategy_recent_result_counts": strategy_summary["per_strategy_recent_result_counts"],
         "top_not_ready_reasons": strategy_summary["top_not_ready_reasons"],
         "top_no_signal_predicate_blockers": strategy_summary["top_no_signal_predicate_blockers"],
@@ -167,11 +180,13 @@ def build_track_b_zero_activity_diagnostic(
             "latest_live_position_status": str(latest_position_status_path),
             "latest_pnl_summary": str(latest_pnl_summary_path),
             "latest_completed_decision_bar_audit": str(completed_decision_bar_audit_json),
+            "latest_no_signal_attribution_rollup": str(no_signal_attribution_rollup_json),
         },
         "operator_status_verdict": latest_operator_status.get("status_verdict"),
     }
     if write:
         _write_json(completed_decision_bar_audit_json, completed_decision_bar_audit)
+        _write_json(no_signal_attribution_rollup_json, no_signal_attribution_rollup)
         _write_json(report_json, report)
     return TrackBZeroActivityDiagnosticResult(report_json=report_json, report=report)
 
@@ -765,6 +780,379 @@ def _classify_completed_decision_bar_audit(instruments: Mapping[str, Any]) -> st
         return "PAPER_NOT_ALLOWED_DURING_BARS"
     if all(item in {"EVALUATING_EACH_COMPLETED_BAR", "NO_COMPLETED_BARS_IN_WINDOW"} for item in classifications):
         return "EVALUATING_EACH_COMPLETED_BAR"
+    return "DIAGNOSTIC_INCONCLUSIVE"
+
+
+def _build_no_signal_attribution_rollup(
+    *,
+    repo_root: Path,
+    now: datetime,
+    completed_decision_bar_audit: Mapping[str, Any],
+    decision_bar_limit: int,
+) -> dict[str, Any]:
+    require_aware_datetime(now, "now")
+    limit = max(1, int(decision_bar_limit))
+    selected_bars = _evaluated_decision_bars_from_audit(completed_decision_bar_audit)[-limit:]
+    instrument_rows: dict[str, dict[str, Any]] = {}
+    strategy_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    evaluated_entries: list[dict[str, Any]] = []
+    total_signals = 0
+    total_no_signals = 0
+    total_suppressed = 0
+    total_handoffs = 0
+    attribution_missing = 0
+    for bar in selected_bars:
+        instrument = str(bar.get("instrument") or "UNKNOWN")
+        runtime_reports = [
+            _load_json(_resolve_artifact_path(repo_root, path))
+            for path in bar.get("runtime_cycle_report_paths") or []
+            if path
+        ]
+        for runtime in runtime_reports:
+            suppressed_ids = {
+                str(item.get("strategy_id") or item.get("signal_source") or "")
+                for item in runtime.get("suppressed_signals") or []
+                if isinstance(item, Mapping)
+            }
+            candidate_ids = {
+                str(item.get("strategy_id") or item.get("signal_source") or "")
+                for item in runtime.get("candidate_signals") or []
+                if isinstance(item, Mapping)
+            }
+            total_suppressed += len(runtime.get("suppressed_signals") or [])
+            if runtime.get("paper_runner_report_path") or runtime.get("paper_proof_invoked") or runtime.get("submit_attempted"):
+                total_handoffs += 1
+            instrument_row = instrument_rows.setdefault(instrument, _empty_no_signal_instrument_row(instrument, bar))
+            instrument_row["evaluated_decision_bars"] = max(
+                int(instrument_row.get("evaluated_decision_bars") or 0),
+                len({*(instrument_row.get("_decision_bar_timestamps") or []), str(bar.get("decision_bar_timestamp"))}),
+            )
+            instrument_row.setdefault("_decision_bar_timestamps", set()).add(str(bar.get("decision_bar_timestamp")))
+            for strategy in runtime.get("evaluated_strategies") or []:
+                if not isinstance(strategy, Mapping):
+                    continue
+                strategy_id = str(strategy.get("strategy_id") or strategy.get("signal_source") or "UNKNOWN")
+                result = _strategy_result(strategy, suppressed_ids=suppressed_ids, candidate_ids=candidate_ids)
+                blockers = _strategy_failed_predicates(strategy)
+                missing_fields = _strategy_missing_fields(strategy, blockers)
+                near_miss = _strategy_near_miss_summary(strategy, blockers)
+                if result == "SIGNAL":
+                    total_signals += 1
+                elif result == "NO_SIGNAL":
+                    total_no_signals += 1
+                if result == "SUPPRESSED":
+                    total_suppressed += 1
+                if result == "NO_SIGNAL" and not blockers:
+                    attribution_missing += 1
+                instrument_row["total_no_signals"] = int(instrument_row.get("total_no_signals") or 0) + (1 if result == "NO_SIGNAL" else 0)
+                instrument_row["total_signals"] = int(instrument_row.get("total_signals") or 0) + (1 if result == "SIGNAL" else 0)
+                instrument_row["total_suppressed"] = int(instrument_row.get("total_suppressed") or 0) + (1 if result == "SUPPRESSED" else 0)
+                instrument_row.setdefault("_strategy_ids", set()).add(strategy_id)
+                _update_counter(instrument_row.setdefault("_failed_predicates", Counter()), blockers)
+                if near_miss["near_miss_bucket"] in {"ONE_PREDICATE_AWAY", "TWO_PREDICATES_AWAY"}:
+                    instrument_row.setdefault("_near_misses", []).append(
+                        _compact_near_miss_example(instrument=instrument, strategy_id=strategy_id, bar=bar, near_miss=near_miss)
+                    )
+                strategy_key = (instrument, strategy_id)
+                strategy_row = strategy_rows.setdefault(strategy_key, _empty_no_signal_strategy_row(instrument, strategy_id))
+                strategy_row["evaluated_bars"] = int(strategy_row.get("evaluated_bars") or 0) + 1
+                strategy_row["signal_count"] = int(strategy_row.get("signal_count") or 0) + (1 if result == "SIGNAL" else 0)
+                strategy_row["no_signal_count"] = int(strategy_row.get("no_signal_count") or 0) + (1 if result == "NO_SIGNAL" else 0)
+                strategy_row["suppressed_count"] = int(strategy_row.get("suppressed_count") or 0) + (1 if result == "SUPPRESSED" else 0)
+                strategy_row["handoff_count"] = int(strategy_row.get("handoff_count") or 0) + (1 if total_handoffs else 0)
+                _update_counter(strategy_row.setdefault("_failed_predicates", Counter()), blockers)
+                _update_counter(strategy_row.setdefault("_missing_fields", Counter()), missing_fields)
+                _update_categorized_blockers(strategy_row, blockers)
+                if near_miss["near_miss_bucket"] in {"ONE_PREDICATE_AWAY", "TWO_PREDICATES_AWAY"}:
+                    strategy_row["nearest_miss_count"] = int(strategy_row.get("nearest_miss_count") or 0) + 1
+                    strategy_row.setdefault("_near_misses", []).append(
+                        _compact_near_miss_example(instrument=instrument, strategy_id=strategy_id, bar=bar, near_miss=near_miss)
+                    )
+                evaluated_entries.append(
+                    {
+                        "decision_bar_timestamp": bar.get("decision_bar_timestamp"),
+                        "instrument": instrument,
+                        "strategy_id": strategy_id,
+                        "result": result,
+                        "failed_predicates": blockers,
+                        "passed_predicates_count": near_miss.get("passed_predicates_count"),
+                        "failed_predicates_count": near_miss.get("failed_predicates_count"),
+                        "missing_fields": missing_fields,
+                        "near_miss_score": near_miss.get("near_miss_score"),
+                        "near_miss_bucket": near_miss.get("near_miss_bucket"),
+                        "nearest_failed_predicate": near_miss.get("nearest_failed_predicate"),
+                        "candidate_reason": strategy.get("decision_reason") if result == "SIGNAL" else None,
+                        "suppression_reason": _suppression_reason(strategy_id, runtime) if result == "SUPPRESSED" else None,
+                    }
+                )
+
+    compact_instruments = [_finalize_no_signal_instrument_row(row) for row in instrument_rows.values()]
+    compact_strategies = [_finalize_no_signal_strategy_row(row) for row in strategy_rows.values()]
+    all_failed = Counter()
+    for row in instrument_rows.values():
+        all_failed.update(row.get("_failed_predicates") or {})
+    classification = _classify_no_signal_attribution_rollup(
+        evaluated_bars=len(selected_bars),
+        total_evaluations=len(evaluated_entries),
+        total_signals=total_signals,
+        total_no_signals=total_no_signals,
+        attribution_missing=attribution_missing,
+    )
+    timestamps = [str(item.get("decision_bar_timestamp")) for item in selected_bars if item.get("decision_bar_timestamp")]
+    return {
+        "schema_version": "track_b_no_signal_attribution_rollup_v1",
+        "generated_at": now.isoformat(),
+        "window_start": timestamps[0] if timestamps else None,
+        "window_end": timestamps[-1] if timestamps else None,
+        "decision_bar_limit": limit,
+        "completed_decision_bars_observed": len(selected_bars),
+        "eligible_decision_bars": sum(1 for item in selected_bars if item.get("paper_evaluation_allowed") is True),
+        "evaluated_decision_bars": len(selected_bars),
+        "total_strategy_evaluations": len(evaluated_entries),
+        "total_signals": total_signals,
+        "total_no_signals": total_no_signals,
+        "total_suppressed": total_suppressed,
+        "total_handoffs": total_handoffs,
+        "classification": classification,
+        "attribution_complete": bool(evaluated_entries) and attribution_missing == 0,
+        "attribution_missing_count": attribution_missing,
+        "top_failed_predicates": _counter_rows(all_failed, limit=20),
+        "closest_near_misses": _top_near_miss_examples(compact_strategies),
+        "instruments": sorted(compact_instruments, key=lambda item: str(item.get("instrument"))),
+        "strategies": sorted(compact_strategies, key=lambda item: (str(item.get("instrument")), str(item.get("strategy_id")))),
+        "evaluated_decision_bar_records": evaluated_entries[-200:],
+        "full_paper_trade_ledger_scanned": False,
+        "full_decision_journal_scanned": False,
+    }
+
+
+def _evaluated_decision_bars_from_audit(audit: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    instruments = audit.get("instruments") if isinstance(audit.get("instruments"), Mapping) else {}
+    for instrument, row in instruments.items():
+        if not isinstance(row, Mapping):
+            continue
+        for bar in row.get("decision_bars") or []:
+            if not isinstance(bar, Mapping) or bar.get("evaluated") is not True:
+                continue
+            rows.append(
+                {
+                    "instrument": str(instrument),
+                    "decision_bar_timestamp": bar.get("completed_5m_timestamp"),
+                    "paper_evaluation_allowed": bar.get("paper_evaluation_allowed"),
+                    "runtime_cycle_report_paths": bar.get("runtime_cycle_report_paths") or [],
+                    "enabled_strategies": row.get("enabled_strategies") or [],
+                }
+            )
+    return sorted(rows, key=lambda item: (str(item.get("decision_bar_timestamp") or ""), str(item.get("instrument") or "")))
+
+
+def _resolve_artifact_path(repo_root: Path, raw_path: object) -> Path:
+    path = Path(str(raw_path))
+    return path if path.is_absolute() else repo_root / path
+
+
+def _empty_no_signal_instrument_row(instrument: str, bar: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "instrument": instrument,
+        "eligible_decision_bars": 0,
+        "evaluated_decision_bars": 0,
+        "strategies_enabled": bar.get("enabled_strategies") or [],
+        "strategies_evaluated": 0,
+        "total_no_signals": 0,
+        "total_signals": 0,
+        "total_suppressed": 0,
+        "total_handoffs": 0,
+        "window_start": bar.get("decision_bar_timestamp"),
+        "window_end": bar.get("decision_bar_timestamp"),
+    }
+
+
+def _empty_no_signal_strategy_row(instrument: str, strategy_id: str) -> dict[str, Any]:
+    return {
+        "strategy_id": strategy_id,
+        "instrument": instrument,
+        "evaluated_bars": 0,
+        "signal_count": 0,
+        "no_signal_count": 0,
+        "suppressed_count": 0,
+        "handoff_count": 0,
+        "nearest_miss_count": 0,
+    }
+
+
+def _strategy_failed_predicates(strategy: Mapping[str, Any]) -> list[str]:
+    blockers = [str(item) for item in strategy.get("rule_blockers") or [] if item]
+    if blockers:
+        return [_predicate_name_from_blocker(item) for item in blockers]
+    conditions = strategy.get("rule_conditions") if isinstance(strategy.get("rule_conditions"), Mapping) else {}
+    return [str(key) for key, value in conditions.items() if value is False]
+
+
+def _predicate_name_from_blocker(blocker: str) -> str:
+    return blocker.split("=", 1)[0].strip() or blocker
+
+
+def _strategy_missing_fields(strategy: Mapping[str, Any], blockers: list[str]) -> list[str]:
+    missing = []
+    for item in blockers:
+        lowered = item.lower()
+        if "missing" in lowered or "required" in lowered:
+            missing.append(item)
+    reason = str(strategy.get("primary_blocker") or strategy.get("decision_reason") or "")
+    if "missing" in reason.lower():
+        missing.append(reason)
+    return missing
+
+
+def _strategy_near_miss_summary(strategy: Mapping[str, Any], blockers: list[str]) -> dict[str, Any]:
+    conditions = strategy.get("rule_conditions") if isinstance(strategy.get("rule_conditions"), Mapping) else {}
+    passed = sum(1 for value in conditions.values() if value is True) if conditions else None
+    failed = len(blockers)
+    total = (passed or 0) + failed if passed is not None else None
+    score = round(float(passed) / float(total), 4) if passed is not None and total else None
+    if failed == 1:
+        bucket = "ONE_PREDICATE_AWAY"
+    elif failed == 2:
+        bucket = "TWO_PREDICATES_AWAY"
+    elif failed > 2:
+        bucket = "MULTI_PREDICATE_FAIL"
+    else:
+        bucket = "NOT_SCORABLE"
+    return {
+        "passed_predicates_count": passed,
+        "failed_predicates_count": failed,
+        "near_miss_score": score,
+        "near_miss_bucket": bucket,
+        "nearest_failed_predicate": blockers[0] if blockers else None,
+    }
+
+
+def _compact_near_miss_example(
+    *,
+    instrument: str,
+    strategy_id: str,
+    bar: Mapping[str, Any],
+    near_miss: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "instrument": instrument,
+        "strategy_id": strategy_id,
+        "decision_bar_timestamp": bar.get("decision_bar_timestamp"),
+        "near_miss_bucket": near_miss.get("near_miss_bucket"),
+        "near_miss_score": near_miss.get("near_miss_score"),
+        "nearest_failed_predicate": near_miss.get("nearest_failed_predicate"),
+        "failed_predicates_count": near_miss.get("failed_predicates_count"),
+        "passed_predicates_count": near_miss.get("passed_predicates_count"),
+    }
+
+
+def _update_counter(counter: Counter[str], values: list[str]) -> None:
+    for value in values:
+        if value:
+            counter[str(value)] += 1
+
+
+def _update_categorized_blockers(row: dict[str, Any], blockers: list[str]) -> None:
+    for blocker in blockers:
+        category = _predicate_category(blocker)
+        bucket = row.setdefault(f"_{category}_blockers", Counter())
+        bucket[str(blocker)] += 1
+
+
+def _predicate_category(predicate: str) -> str:
+    lowered = predicate.lower()
+    if "missing" in lowered or "required" in lowered:
+        return "missing_field"
+    if "session" in lowered or "phase" in lowered or "window" in lowered:
+        return "session"
+    if "snap" in lowered or "breakout" in lowered or "retest" in lowered or "pullback" in lowered or "resume" in lowered:
+        return "structure"
+    if "cooldown" in lowered or "prior_bars" in lowered or "competing" in lowered:
+        return "state"
+    if "readiness" in lowered or "safety" in lowered or "allowed" in lowered or "eligible" in lowered:
+        return "safety_or_readiness"
+    return "structure"
+
+
+def _suppression_reason(strategy_id: str, runtime: Mapping[str, Any]) -> str | None:
+    for item in runtime.get("suppressed_signals") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("strategy_id") or item.get("signal_source") or "") == strategy_id:
+            return str(item.get("reason") or item.get("primary_blocker") or "suppressed")
+    return None
+
+
+def _finalize_no_signal_instrument_row(row: dict[str, Any]) -> dict[str, Any]:
+    strategy_ids = row.get("_strategy_ids") or set()
+    return {
+        "instrument": row.get("instrument"),
+        "eligible_decision_bars": len(row.get("_decision_bar_timestamps") or []),
+        "evaluated_decision_bars": int(row.get("evaluated_decision_bars") or 0),
+        "strategies_enabled": row.get("strategies_enabled") or [],
+        "strategies_evaluated": len(strategy_ids) or None,
+        "total_no_signals": row.get("total_no_signals", 0),
+        "total_signals": row.get("total_signals", 0),
+        "total_suppressed": row.get("total_suppressed", 0),
+        "total_handoffs": row.get("total_handoffs", 0),
+        "top_failed_predicates": _counter_rows(row.get("_failed_predicates") or Counter(), limit=10),
+        "closest_near_misses": (row.get("_near_misses") or [])[:5],
+    }
+
+
+def _finalize_no_signal_strategy_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "strategy_id": row.get("strategy_id"),
+        "instrument": row.get("instrument"),
+        "evaluated_bars": row.get("evaluated_bars", 0),
+        "signal_count": row.get("signal_count", 0),
+        "no_signal_count": row.get("no_signal_count", 0),
+        "suppressed_count": row.get("suppressed_count", 0),
+        "handoff_count": row.get("handoff_count", 0),
+        "top_failed_predicates": _counter_rows(row.get("_failed_predicates") or Counter(), limit=10),
+        "top_missing_fields": _counter_rows(row.get("_missing_field_blockers") or Counter(), limit=10),
+        "top_session_blockers": _counter_rows(row.get("_session_blockers") or Counter(), limit=10),
+        "top_structure_blockers": _counter_rows(row.get("_structure_blockers") or Counter(), limit=10),
+        "top_state_blockers": _counter_rows(row.get("_state_blockers") or Counter(), limit=10),
+        "top_safety_or_readiness_blockers": _counter_rows(row.get("_safety_or_readiness_blockers") or Counter(), limit=10),
+        "nearest_miss_count": row.get("nearest_miss_count", 0),
+        "nearest_miss_examples": (row.get("_near_misses") or [])[:5],
+    }
+
+
+def _top_near_miss_examples(strategy_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    examples: list[dict[str, Any]] = []
+    for row in strategy_rows:
+        examples.extend([item for item in row.get("nearest_miss_examples") or [] if isinstance(item, dict)])
+    return sorted(
+        examples,
+        key=lambda item: (
+            int(item.get("failed_predicates_count") or 999),
+            -float(item.get("near_miss_score") or 0.0),
+            str(item.get("decision_bar_timestamp") or ""),
+        ),
+    )[:10]
+
+
+def _classify_no_signal_attribution_rollup(
+    *,
+    evaluated_bars: int,
+    total_evaluations: int,
+    total_signals: int,
+    total_no_signals: int,
+    attribution_missing: int,
+) -> str:
+    if evaluated_bars <= 0:
+        return "INSUFFICIENT_DECISION_BARS"
+    if total_evaluations <= 0:
+        return "STRATEGIES_NOT_EVALUATING"
+    if total_signals > 0:
+        return "SIGNALS_OBSERVED"
+    if total_no_signals > 0 and attribution_missing > 0:
+        return "NO_SIGNAL_BUT_ATTRIBUTION_MISSING"
+    if total_no_signals > 0:
+        return "NO_SIGNAL_WITH_ATTRIBUTION"
     return "DIAGNOSTIC_INCONCLUSIVE"
 
 

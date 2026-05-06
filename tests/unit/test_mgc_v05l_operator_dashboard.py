@@ -3370,6 +3370,38 @@ def test_track_b_paper_trading_payload_includes_compact_zero_activity_diagnostic
         ),
         encoding="utf-8",
     )
+    (diagnostics_dir / "latest_track_b_no_signal_attribution_rollup.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_no_signal_attribution_rollup_v1",
+                "generated_at": "2026-05-06T06:30:00+00:00",
+                "classification": "NO_SIGNAL_WITH_ATTRIBUTION",
+                "completed_decision_bars_observed": 1,
+                "eligible_decision_bars": 1,
+                "evaluated_decision_bars": 1,
+                "total_strategy_evaluations": 1,
+                "total_no_signals": 1,
+                "total_signals": 0,
+                "total_suppressed": 0,
+                "total_handoffs": 0,
+                "attribution_complete": True,
+                "top_failed_predicates": [{"reason": "vwap_location_ok", "count": 1}],
+                "closest_near_misses": [],
+                "strategies": [
+                    {
+                        "strategy_id": "TEST_STRATEGY_V1",
+                        "instrument": "MGC",
+                        "evaluated_bars": 1,
+                        "no_signal_count": 1,
+                        "signal_count": 0,
+                        "suppressed_count": 0,
+                        "top_failed_predicates": [{"reason": "vwap_location_ok", "count": 1}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
 
@@ -3381,6 +3413,8 @@ def test_track_b_paper_trading_payload_includes_compact_zero_activity_diagnostic
     assert diagnostic["signals_seen"] == 0
     assert diagnostic["completed_decision_bar_audit"]["classification"] == "EVALUATING_EACH_COMPLETED_BAR"
     assert diagnostic["completed_decision_bar_audit"]["instruments"][0]["decision_bars_actually_evaluated"] == 1
+    assert payload["no_signal_attribution_rollup"]["classification"] == "NO_SIGNAL_WITH_ATTRIBUTION"
+    assert payload["no_signal_attribution_rollup"]["top_failed_predicates"][0]["reason"] == "vwap_location_ok"
 
 
 def test_track_b_paper_trading_payload_marks_stale_zero_activity_diagnostic(tmp_path: Path) -> None:

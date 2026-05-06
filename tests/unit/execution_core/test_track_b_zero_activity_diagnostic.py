@@ -254,6 +254,101 @@ def test_completed_decision_bar_audit_detects_lagging_live_bars(tmp_path: Path) 
     assert result.report["diagnosis_classification"] == "EVALUATION_LAGGING_LIVE_BARS"
 
 
+def test_no_signal_attribution_rollup_counts_failed_predicates(tmp_path: Path) -> None:
+    compact_summaries(tmp_path)
+    completed_5m_artifact(tmp_path, "MGC", ["2026-05-06T06:30:00+00:00"])
+    runtime = runtime_report(
+        tmp_path,
+        "runtime-1",
+        strategies=[
+            {
+                **strategy("TEST_STRATEGY_V1", "TEST_NO_SIGNAL_NO_MUTATION"),
+                "rule_conditions": {"session_us": True, "vwap_location_ok": False, "range_expansion_ok": False},
+                "rule_blockers": ["vwap_location_ok=false_or_missing", "range_expansion_ok=false_or_missing"],
+            }
+        ],
+    )
+    monitor_report(tmp_path, 1, runtime_path=runtime, latest_completed_5m_timestamp="2026-05-06T06:30:00+00:00")
+
+    result = build_track_b_zero_activity_diagnostic(repo_root=tmp_path, output_root=tmp_path / "diag", now=now())
+
+    rollup = result.report["no_signal_attribution_rollup"]
+    assert rollup["classification"] == "NO_SIGNAL_WITH_ATTRIBUTION"
+    assert rollup["total_no_signals"] == 1
+    assert rollup["top_failed_predicates"][0]["reason"] == "vwap_location_ok"
+    assert rollup["strategies"][0]["top_failed_predicates"][0]["reason"] == "vwap_location_ok"
+    assert (tmp_path / "diag" / "latest_track_b_no_signal_attribution_rollup.json").exists()
+
+
+def test_no_signal_attribution_rollup_detects_missing_attribution(tmp_path: Path) -> None:
+    compact_summaries(tmp_path)
+    completed_5m_artifact(tmp_path, "MGC", ["2026-05-06T06:30:00+00:00"])
+    runtime = runtime_report(
+        tmp_path,
+        "runtime-1",
+        strategies=[
+            {
+                **strategy("TEST_STRATEGY_V1", "TEST_NO_SIGNAL_NO_MUTATION"),
+                "rule_conditions": {},
+                "rule_blockers": [],
+            }
+        ],
+    )
+    monitor_report(tmp_path, 1, runtime_path=runtime, latest_completed_5m_timestamp="2026-05-06T06:30:00+00:00")
+
+    result = build_track_b_zero_activity_diagnostic(repo_root=tmp_path, output_root=tmp_path / "diag", now=now())
+
+    rollup = result.report["no_signal_attribution_rollup"]
+    assert rollup["classification"] == "NO_SIGNAL_BUT_ATTRIBUTION_MISSING"
+    assert rollup["attribution_missing_count"] == 1
+
+
+def test_no_signal_attribution_rollup_surfaces_one_predicate_near_miss(tmp_path: Path) -> None:
+    compact_summaries(tmp_path)
+    completed_5m_artifact(tmp_path, "MGC", ["2026-05-06T06:30:00+00:00"])
+    runtime = runtime_report(
+        tmp_path,
+        "runtime-1",
+        strategies=[
+            {
+                **strategy("TEST_STRATEGY_V1", "TEST_NO_SIGNAL_NO_MUTATION"),
+                "rule_conditions": {"session_us": True, "vwap_location_ok": True, "range_expansion_ok": False},
+                "rule_blockers": ["range_expansion_ok=false_or_missing"],
+            }
+        ],
+    )
+    monitor_report(tmp_path, 1, runtime_path=runtime, latest_completed_5m_timestamp="2026-05-06T06:30:00+00:00")
+
+    result = build_track_b_zero_activity_diagnostic(repo_root=tmp_path, output_root=tmp_path / "diag", now=now())
+
+    rollup = result.report["no_signal_attribution_rollup"]
+    assert rollup["closest_near_misses"][0]["near_miss_bucket"] == "ONE_PREDICATE_AWAY"
+    assert rollup["closest_near_misses"][0]["nearest_failed_predicate"] == "range_expansion_ok"
+
+
+def test_no_signal_attribution_rollup_classifies_signals_observed(tmp_path: Path) -> None:
+    compact_summaries(tmp_path)
+    completed_5m_artifact(tmp_path, "MGC", ["2026-05-06T06:30:00+00:00"])
+    runtime = runtime_report(
+        tmp_path,
+        "runtime-1",
+        strategies=[
+            {
+                **strategy("TEST_STRATEGY_V1", "TEST_SIGNAL_READY_NO_SUBMIT", signal=True),
+                "rule_conditions": {"session_us": True, "range_expansion_ok": True},
+                "rule_blockers": [],
+            }
+        ],
+        candidates=[{"strategy_id": "TEST_STRATEGY_V1", "side": "LONG"}],
+    )
+    monitor_report(tmp_path, 1, runtime_path=runtime, latest_completed_5m_timestamp="2026-05-06T06:30:00+00:00")
+
+    result = build_track_b_zero_activity_diagnostic(repo_root=tmp_path, output_root=tmp_path / "diag", now=now())
+
+    assert result.report["no_signal_attribution_rollup"]["classification"] == "SIGNALS_OBSERVED"
+    assert result.report["no_signal_attribution_rollup"]["total_signals"] == 1
+
+
 def test_diagnostic_classifies_intermittent_live_execution_failures(tmp_path: Path) -> None:
     compact_summaries(tmp_path)
     runtime = runtime_report(tmp_path, "runtime-1", strategies=[strategy("TEST_STRATEGY_V1", "TEST_NO_SIGNAL_NO_MUTATION")])

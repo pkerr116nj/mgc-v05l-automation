@@ -9,6 +9,7 @@ from typing import Sequence
 
 from .track_b_zero_activity_diagnostic import (
     DEFAULT_DECISION_BAR_AUDIT_WINDOW_MINUTES,
+    DEFAULT_NO_SIGNAL_ATTRIBUTION_DECISION_BAR_LIMIT,
     DEFAULT_RECENT_CYCLE_LIMIT,
     DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_OUTPUT_ROOT,
     build_track_b_zero_activity_diagnostic,
@@ -25,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_OUTPUT_ROOT)
     parser.add_argument("--recent-cycle-limit", type=int, default=DEFAULT_RECENT_CYCLE_LIMIT)
     parser.add_argument("--decision-bar-audit-window-minutes", type=int, default=DEFAULT_DECISION_BAR_AUDIT_WINDOW_MINUTES)
+    parser.add_argument("--no-signal-attribution-decision-bar-limit", type=int, default=DEFAULT_NO_SIGNAL_ATTRIBUTION_DECISION_BAR_LIMIT)
     parser.add_argument("--no-write", action="store_true")
     return parser
 
@@ -36,6 +38,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=args.output_root,
         recent_cycle_limit=args.recent_cycle_limit,
         decision_bar_audit_window_minutes=args.decision_bar_audit_window_minutes,
+        no_signal_attribution_decision_bar_limit=args.no_signal_attribution_decision_bar_limit,
         write=not args.no_write,
     )
     print(json.dumps(result.report, indent=2, sort_keys=True))

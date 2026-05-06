@@ -1840,6 +1840,7 @@ class OperatorDashboardService:
         live_position_status_path = ledger_root / "latest_track_b_live_position_status.json"
         pnl_summary_path = ledger_root / "latest_track_b_pnl_summary.json"
         zero_activity_diagnostic_path = diagnostic_root / "latest_track_b_zero_activity_diagnostic.json"
+        no_signal_attribution_rollup_path = diagnostic_root / "latest_track_b_no_signal_attribution_rollup.json"
         live_feed_freshness_diagnostic_path = diagnostic_root / "latest_track_b_live_feed_freshness_diagnostic.json"
         startup_readiness_diagnostic_path = diagnostic_root / "latest_track_b_startup_readiness_diagnostic.json"
         monitor_liveness_diagnostic_path = diagnostic_root / "latest_track_b_monitor_liveness_diagnostic.json"
@@ -1847,6 +1848,7 @@ class OperatorDashboardService:
         live_position_status = _load_json_file(live_position_status_path)
         pnl_summary = _load_json_file(pnl_summary_path)
         zero_activity_diagnostic = _load_json_file(zero_activity_diagnostic_path)
+        no_signal_attribution_rollup = _load_json_file(no_signal_attribution_rollup_path)
         live_feed_freshness_diagnostic = _load_json_file(live_feed_freshness_diagnostic_path)
         startup_readiness_diagnostic = _load_json_file(startup_readiness_diagnostic_path)
         monitor_liveness_diagnostic = _load_json_file(monitor_liveness_diagnostic_path)
@@ -1854,6 +1856,7 @@ class OperatorDashboardService:
         live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
         pnl_summary = pnl_summary if isinstance(pnl_summary, dict) else {}
         zero_activity_diagnostic = zero_activity_diagnostic if isinstance(zero_activity_diagnostic, dict) else {}
+        no_signal_attribution_rollup = no_signal_attribution_rollup if isinstance(no_signal_attribution_rollup, dict) else {}
         live_feed_freshness_diagnostic = (
             live_feed_freshness_diagnostic if isinstance(live_feed_freshness_diagnostic, dict) else {}
         )
@@ -1963,6 +1966,15 @@ class OperatorDashboardService:
                     startup_readiness_diagnostic,
                     monitor_liveness_diagnostic,
                 ),
+            ),
+            "no_signal_attribution_rollup": _compact_track_b_no_signal_attribution_rollup(
+                no_signal_attribution_rollup
+                or (
+                    zero_activity_diagnostic.get("no_signal_attribution_rollup")
+                    if isinstance(zero_activity_diagnostic.get("no_signal_attribution_rollup"), dict)
+                    else {}
+                ),
+                no_signal_attribution_rollup_path,
             ),
             "live_feed_freshness_diagnostic": _compact_track_b_live_feed_freshness_diagnostic(
                 live_feed_freshness_diagnostic,
@@ -17031,6 +17043,75 @@ def _compact_track_b_zero_activity_diagnostic(
             if isinstance(payload.get("completed_decision_bar_audit"), dict)
             else {}
         ),
+        "no_signal_attribution_rollup": _compact_track_b_no_signal_attribution_rollup(
+            payload.get("no_signal_attribution_rollup")
+            if isinstance(payload.get("no_signal_attribution_rollup"), dict)
+            else {},
+            None,
+        ),
+    }
+
+
+def _compact_track_b_no_signal_attribution_rollup(payload: dict[str, Any], path: Path | None) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "path": None if path is None else str(path),
+            "classification": "NOT_PROVIDED",
+            "top_failed_predicates": [],
+            "closest_near_misses": [],
+            "strategies": [],
+        }
+    strategies = payload.get("strategies") if isinstance(payload.get("strategies"), list) else []
+    instruments = payload.get("instruments") if isinstance(payload.get("instruments"), list) else []
+    return {
+        "available": True,
+        "path": None if path is None else str(path),
+        "generated_at": payload.get("generated_at"),
+        "classification": payload.get("classification"),
+        "window_start": payload.get("window_start"),
+        "window_end": payload.get("window_end"),
+        "completed_decision_bars_observed": payload.get("completed_decision_bars_observed"),
+        "eligible_decision_bars": payload.get("eligible_decision_bars"),
+        "evaluated_decision_bars": payload.get("evaluated_decision_bars"),
+        "total_strategy_evaluations": payload.get("total_strategy_evaluations"),
+        "total_signals": payload.get("total_signals"),
+        "total_no_signals": payload.get("total_no_signals"),
+        "total_suppressed": payload.get("total_suppressed"),
+        "total_handoffs": payload.get("total_handoffs"),
+        "attribution_complete": payload.get("attribution_complete"),
+        "attribution_missing_count": payload.get("attribution_missing_count"),
+        "top_failed_predicates": payload.get("top_failed_predicates") if isinstance(payload.get("top_failed_predicates"), list) else [],
+        "closest_near_misses": payload.get("closest_near_misses") if isinstance(payload.get("closest_near_misses"), list) else [],
+        "instruments": [
+            {
+                "instrument": row.get("instrument"),
+                "evaluated_decision_bars": row.get("evaluated_decision_bars"),
+                "total_no_signals": row.get("total_no_signals"),
+                "total_signals": row.get("total_signals"),
+                "total_suppressed": row.get("total_suppressed"),
+                "top_failed_predicates": row.get("top_failed_predicates") if isinstance(row.get("top_failed_predicates"), list) else [],
+            }
+            for row in instruments
+            if isinstance(row, dict)
+        ],
+        "strategies": [
+            {
+                "strategy_id": row.get("strategy_id"),
+                "instrument": row.get("instrument"),
+                "evaluated_bars": row.get("evaluated_bars"),
+                "signal_count": row.get("signal_count"),
+                "no_signal_count": row.get("no_signal_count"),
+                "suppressed_count": row.get("suppressed_count"),
+                "top_failed_predicates": row.get("top_failed_predicates") if isinstance(row.get("top_failed_predicates"), list) else [],
+                "top_session_blockers": row.get("top_session_blockers") if isinstance(row.get("top_session_blockers"), list) else [],
+                "top_structure_blockers": row.get("top_structure_blockers") if isinstance(row.get("top_structure_blockers"), list) else [],
+                "nearest_miss_count": row.get("nearest_miss_count"),
+                "nearest_miss_examples": row.get("nearest_miss_examples") if isinstance(row.get("nearest_miss_examples"), list) else [],
+            }
+            for row in strategies[:20]
+            if isinstance(row, dict)
+        ],
     }
 
 
