@@ -180,7 +180,7 @@ def test_produced_envelopes_satisfy_registered_schema(tmp_path: Path) -> None:
     assert bear_blocker is None
 
 
-def test_producer_emits_valid_mnq_first_bear_snap_turn_envelope(tmp_path: Path) -> None:
+def test_producer_emits_valid_mnq_first_snap_turn_envelopes(tmp_path: Path) -> None:
     result = produce_track_b_snap_turn_envelopes(
         runtime_5m_payload=mnq_runtime_5m_payload(bars=9),
         output_root=tmp_path / "snap",
@@ -189,28 +189,77 @@ def test_producer_emits_valid_mnq_first_bear_snap_turn_envelope(tmp_path: Path) 
     )
 
     assert result.verdict == TrackBSnapTurnEnvelopeProducerVerdict.WROTE_ENVELOPES
-    assert result.first_bull_snap_turn_event_json is None
+    assert result.first_bull_snap_turn_event_json == (
+        tmp_path / "snap" / "latest_mnq_first_bull_snap_turn_event_envelope.json"
+    )
     assert result.first_bear_snap_turn_event_json == (
         tmp_path / "snap" / "latest_mnq_first_bear_snap_turn_event_envelope.json"
     )
+    assert result.first_bull_snap_turn_event is not None
     assert result.first_bear_snap_turn_event is not None
-    event = result.first_bear_snap_turn_event
-    assert event["strategy_id"] == "MNQ_FIRST_BEAR_SNAP_TURN_V1"
-    assert event["contract_key"] == "MNQ-202606"
-    assert event["instrument_family"] == "MNQ"
-    assert "mnq_first_bear_snap_turn_state" in event["metadata"]
-    assert "mnq_first_bear_snap_turn_features" in event["metadata"]
-    entry, blocker = validate_strategy_event_against_registry(
-        event=event,
+    bull = result.first_bull_snap_turn_event
+    bear = result.first_bear_snap_turn_event
+    assert bull["strategy_id"] == "MNQ_FIRST_BULL_SNAP_TURN_V1"
+    assert bull["contract_key"] == "MNQ-202606"
+    assert bull["instrument_family"] == "MNQ"
+    assert "mnq_first_bull_snap_turn_state" in bull["metadata"]
+    assert "mnq_first_bull_snap_turn_features" in bull["metadata"]
+    assert bear["strategy_id"] == "MNQ_FIRST_BEAR_SNAP_TURN_V1"
+    assert bear["contract_key"] == "MNQ-202606"
+    assert bear["instrument_family"] == "MNQ"
+    assert "mnq_first_bear_snap_turn_state" in bear["metadata"]
+    assert "mnq_first_bear_snap_turn_features" in bear["metadata"]
+    bull_entry, bull_blocker = validate_strategy_event_against_registry(
+        event=bull,
+        rule_mode="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        rule_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+    )
+    bear_entry, bear_blocker = validate_strategy_event_against_registry(
+        event=bear,
         rule_mode="MNQ_FIRST_BEAR_SNAP_TURN_V1",
         rule_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
         strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
     )
-    assert blocker is None
-    assert entry is not None
-    assert entry.instrument_family == "MNQ"
-    assert entry.paper_eligible is True
-    assert entry.live_money_eligible is False
+    assert bull_blocker is None
+    assert bear_blocker is None
+    assert bull_entry is not None
+    assert bear_entry is not None
+    assert bull_entry.instrument_family == "MNQ"
+    assert bull_entry.paper_eligible is True
+    assert bull_entry.live_money_eligible is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_mnq_first_bull_snap_turn_rule_runner_consumes_envelope_without_mutation(tmp_path: Path) -> None:
+    producer = produce_track_b_snap_turn_envelopes(
+        runtime_5m_payload=mnq_runtime_5m_payload(bars=9),
+        output_root=tmp_path / "snap",
+        now=aware_now(),
+    )
+    assert producer.first_bull_snap_turn_event is not None
+
+    result = run_track_b_strategy_rule(
+        input_event_payload=producer.first_bull_snap_turn_event,
+        input_event_path=tmp_path / "mnq_first_bull_snap.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_mnq_bull_snap_turn",
+        strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        lane_id="mnq_first_bull_snap_turn",
+        rule_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        rule_mode="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        emit_signal=False,
+        output_root=tmp_path / "rule",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert result.report["strategy_registry_id"] == "MNQ_FIRST_BULL_SNAP_TURN_V1"
+    assert result.report["strategy_registry_instrument_family"] == "MNQ"
+    assert result.report["mnq_first_bull_snap_turn_watch_verdict"] != "MNQ_FIRST_BULL_SNAP_TURN_NOT_READY"
+    assert result.report["paper_proof_cli_called"] is False
     assert result.report["broker_state_mutated"] is False
     assert result.report["live_money_readiness"] is False
 
@@ -275,6 +324,40 @@ def test_runtime_cycle_consumes_mnq_first_bear_snap_turn_envelope(tmp_path: Path
     }
     summaries = {item["strategy_id"]: item for item in result.report["evaluated_strategies"]}
     assert summaries["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["strategy_runtime_verdict"] != "NOT_READY"
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+
+
+def test_runtime_cycle_consumes_mnq_first_bull_snap_turn_envelope(tmp_path: Path) -> None:
+    producer = produce_track_b_snap_turn_envelopes(
+        runtime_5m_payload=mnq_runtime_5m_payload(bars=9),
+        output_root=tmp_path / "snap",
+        now=aware_now(),
+    )
+    assert producer.first_bull_snap_turn_event_json is not None
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=TrackBMultiStrategyRuntimeCycleConfig(
+            enabled_strategy_ids=("MNQ_FIRST_BULL_SNAP_TURN_V1",),
+            mnq_first_bull_snap_turn_event_json=producer.first_bull_snap_turn_event_json,
+            inbox_dir=tmp_path / "inbox",
+            output_root=tmp_path / "cycle",
+            strategy_rule_output_root=tmp_path / "rules",
+            strategy_paper_runner_output_root=tmp_path / "paper",
+        ),
+        now=aware_now(),
+        cycle_id="unit-mnq-bull-snap-cycle",
+    )
+
+    assert result.verdict in {
+        TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION,
+        TrackBMultiStrategyRuntimeCycleVerdict.SIGNAL_READY_NO_SUBMIT,
+        TrackBMultiStrategyRuntimeCycleVerdict.ARBITRATION_BLOCKED,
+    }
+    summaries = {item["strategy_id"]: item for item in result.report["evaluated_strategies"]}
+    assert summaries["MNQ_FIRST_BULL_SNAP_TURN_V1"]["strategy_runtime_verdict"] != "NOT_READY"
     assert result.report["paper_proof_invoked"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False

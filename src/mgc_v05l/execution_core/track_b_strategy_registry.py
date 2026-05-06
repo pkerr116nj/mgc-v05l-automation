@@ -419,6 +419,42 @@ MNQ_FIRST_BEAR_SNAP_TURN_V1 = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("MNQ_FIRST_BEAR_SNAP_TURN_V1",),
 )
 
+MNQ_FIRST_BULL_SNAP_TURN_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+    rule_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+    rule_mode="MNQ_FIRST_BULL_SNAP_TURN_V1",
+    instrument_family="MNQ",
+    timeframe="5m",
+    required_feature_schema=(
+        "metadata.mnq_first_bull_snap_turn_features.bull_snap_downside_stretch_ok",
+        "metadata.mnq_first_bull_snap_turn_features.bull_snap_range_ok",
+        "metadata.mnq_first_bull_snap_turn_features.bull_snap_body_ok",
+        "metadata.mnq_first_bull_snap_turn_features.bull_snap_close_strong",
+        "metadata.mnq_first_bull_snap_turn_features.bull_snap_velocity_ok",
+        "metadata.mnq_first_bull_snap_turn_features.bull_snap_reversal_bar",
+        "metadata.mnq_first_bull_snap_turn_features.bull_snap_location_ok",
+        "metadata.mnq_first_bull_snap_turn_features.bull_snap_raw",
+        "metadata.mnq_first_bull_snap_turn_features.bull_snap_turn_candidate",
+        "metadata.mnq_first_bull_snap_turn_features.first_bull_snap_turn",
+        "metadata.mnq_first_bull_snap_turn_features.feature_version",
+        "metadata.mnq_first_bull_snap_turn_features.calibration_profile",
+    ),
+    required_state_schema=(
+        "metadata.mnq_first_bull_snap_turn_state.session_allowed",
+        "metadata.mnq_first_bull_snap_turn_state.prior_bars_since_bull_snap_gt_cooldown",
+        "metadata.mnq_first_bull_snap_turn_state.derivative_phase",
+    ),
+    feature_version="mnq_first_bull_snap_turn_v1_phase1",
+    calibration_profile="probationary_baseline_v1",
+    paper_eligible=True,
+    live_money_eligible=False,
+    evaluation_mode="COMPLETED_BAR_ONLY",
+    required_1m_context_bars=40,
+    required_5m_context_bars=8,
+    accepted_strategy_ids=("MNQ_FIRST_BULL_SNAP_TURN_V1",),
+    accepted_rule_ids=("MNQ_FIRST_BULL_SNAP_TURN_V1",),
+)
+
 US_LATE_PAUSE_RESUME_LONG_V1 = TrackBStrategyRegistryEntry(
     strategy_id="US_LATE_PAUSE_RESUME_LONG_V1",
     rule_id="US_LATE_PAUSE_RESUME_LONG_V1",
@@ -495,6 +531,7 @@ TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     US_DERIVATIVE_BEAR_TURN_V1,
     MNQ_US_DERIVATIVE_BEAR_TURN_V1,
     MNQ_FIRST_BEAR_SNAP_TURN_V1,
+    MNQ_FIRST_BULL_SNAP_TURN_V1,
     US_LATE_PAUSE_RESUME_LONG_V1,
     DEMO_WIRING_PROOF,
     HUMAN_REVIEW_ONLY,

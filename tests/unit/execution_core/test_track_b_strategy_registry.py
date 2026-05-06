@@ -227,6 +227,27 @@ def test_mnq_first_bear_snap_turn_registry_metadata_is_valid() -> None:
     assert "metadata.mnq_first_bear_snap_turn_state.session_allowed" in entry.required_state_schema
 
 
+def test_mnq_first_bull_snap_turn_registry_metadata_is_valid() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        rule_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MNQ"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert entry.evaluation_mode == "COMPLETED_BAR_ONLY"
+    assert entry.required_1m_context_bars == 40
+    assert entry.required_5m_context_bars == 8
+    assert entry.feature_version == "mnq_first_bull_snap_turn_v1_phase1"
+    assert entry.calibration_profile == "probationary_baseline_v1"
+    assert "metadata.mnq_first_bull_snap_turn_features.first_bull_snap_turn" in entry.required_feature_schema
+    assert "metadata.mnq_first_bull_snap_turn_state.session_allowed" in entry.required_state_schema
+
+
 def test_missing_required_state_fields_are_not_ready() -> None:
     entry, blocker = validate_strategy_event_against_registry(
         event={

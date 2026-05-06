@@ -38,9 +38,11 @@ DEFAULT_CALIBRATION_PROFILE = "probationary_baseline_v1"
 FIRST_BULL_SNAP_TURN_STRATEGY_ID = "FIRST_BULL_SNAP_TURN_V1"
 FIRST_BEAR_SNAP_TURN_STRATEGY_ID = "FIRST_BEAR_SNAP_TURN_V1"
 MNQ_FIRST_BEAR_SNAP_TURN_STRATEGY_ID = "MNQ_FIRST_BEAR_SNAP_TURN_V1"
+MNQ_FIRST_BULL_SNAP_TURN_STRATEGY_ID = "MNQ_FIRST_BULL_SNAP_TURN_V1"
 FIRST_BULL_SNAP_TURN_FEATURE_VERSION = "first_bull_snap_turn_v1_phase1"
 FIRST_BEAR_SNAP_TURN_FEATURE_VERSION = "first_bear_snap_turn_v1_phase1"
 MNQ_FIRST_BEAR_SNAP_TURN_FEATURE_VERSION = "mnq_first_bear_snap_turn_v1_phase1"
+MNQ_FIRST_BULL_SNAP_TURN_FEATURE_VERSION = "mnq_first_bull_snap_turn_v1_phase1"
 
 NY = ZoneInfo("America/New_York")
 
@@ -201,6 +203,32 @@ def produce_track_b_snap_turn_envelopes(
         instrument_family = _payload_instrument_family(runtime_5m_payload)
 
         if instrument_family == MNQ_INSTRUMENT_FAMILY:
+            bull_event = _event_envelope(
+                runtime_5m_payload=runtime_5m_payload,
+                runtime_5m_payload_path=runtime_5m_payload_path,
+                expected_account_id=expected_account_id,
+                source_id=source_id,
+                now=actual_now,
+                candle=last,
+                strategy_id=MNQ_FIRST_BULL_SNAP_TURN_STRATEGY_ID,
+                lane_id="mnq_first_bull_snap_turn",
+                signal_side="LONG",
+                state_key="mnq_first_bull_snap_turn_state",
+                features_key="mnq_first_bull_snap_turn_features",
+                feature_version=MNQ_FIRST_BULL_SNAP_TURN_FEATURE_VERSION,
+                state={
+                    "derivative_phase": derivative_phase,
+                    "session_allowed": session_allowed,
+                    "prior_bars_since_bull_snap": bull_features.pop("prior_bars_since_bull_snap"),
+                    "prior_bars_since_bull_snap_gt_cooldown": bull_features.pop(
+                        "prior_bars_since_bull_snap_gt_cooldown"
+                    ),
+                    "timeframe": "5m",
+                },
+                features={**bull_features, "feature_version": MNQ_FIRST_BULL_SNAP_TURN_FEATURE_VERSION},
+                feature_packet=features,
+                input_bar_count=len(candles),
+            )
             bear_event = _event_envelope(
                 runtime_5m_payload=runtime_5m_payload,
                 runtime_5m_payload_path=runtime_5m_payload_path,
@@ -227,9 +255,13 @@ def produce_track_b_snap_turn_envelopes(
                 feature_packet=features,
                 input_bar_count=len(candles),
             )
+            bull_json = output_root / actual_producer_id / "mnq_first_bull_snap_turn_event_envelope.json"
             bear_json = output_root / actual_producer_id / "mnq_first_bear_snap_turn_event_envelope.json"
+            latest_bull = output_root / "latest_mnq_first_bull_snap_turn_event_envelope.json"
             latest_bear = output_root / "latest_mnq_first_bear_snap_turn_event_envelope.json"
+            _write_json(bull_json, bull_event)
             _write_json(bear_json, bear_event)
+            _write_json(latest_bull, bull_event)
             _write_json(latest_bear, bear_event)
 
             report = _base_report(
@@ -247,9 +279,15 @@ def produce_track_b_snap_turn_envelopes(
             )
             report.update(
                 {
+                    "mnq_first_bull_snap_turn_event_json": str(bull_json),
                     "mnq_first_bear_snap_turn_event_json": str(bear_json),
+                    "latest_mnq_first_bull_snap_turn_event_json": str(latest_bull),
                     "latest_mnq_first_bear_snap_turn_event_json": str(latest_bear),
+                    "mnq_first_bull_snap_turn_envelope_ready": True,
                     "mnq_first_bear_snap_turn_envelope_ready": True,
+                    "mnq_first_bull_snap_turn": bull_event["metadata"]["mnq_first_bull_snap_turn_features"][
+                        "first_bull_snap_turn"
+                    ],
                     "mnq_first_bear_snap_turn": bear_event["metadata"]["mnq_first_bear_snap_turn_features"][
                         "first_bear_snap_turn"
                     ],
@@ -263,9 +301,9 @@ def produce_track_b_snap_turn_envelopes(
                 verdict=TrackBSnapTurnEnvelopeProducerVerdict.WROTE_ENVELOPES,
                 report_json=report_json,
                 report=report,
-                first_bull_snap_turn_event_json=None,
+                first_bull_snap_turn_event_json=latest_bull,
                 first_bear_snap_turn_event_json=latest_bear,
-                first_bull_snap_turn_event=None,
+                first_bull_snap_turn_event=bull_event,
                 first_bear_snap_turn_event=bear_event,
             )
 
