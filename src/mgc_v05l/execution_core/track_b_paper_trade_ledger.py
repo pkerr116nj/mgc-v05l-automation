@@ -140,15 +140,32 @@ def build_track_b_paper_trade_summaries(
     records = [dict(item) for item in ledger_records]
     today = actual_now.date().isoformat()
     week_start = (actual_now.date() - timedelta(days=actual_now.weekday())).isoformat()
+    month_start = actual_now.date().replace(day=1).isoformat()
+    year_start = actual_now.date().replace(month=1, day=1).isoformat()
     today_records = [item for item in records if _date_prefix(item.get("exit_timestamp") or item.get("created_at")) == today]
     week_records = [
         item
         for item in records
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= week_start
     ]
+    month_records = [
+        item
+        for item in records
+        if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= month_start
+    ]
+    ytd_records = [
+        item
+        for item in records
+        if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= year_start
+    ]
     open_records = [item for item in records if not _is_flat_closed_trade(item)]
     review_required = [item for item in records if item.get("review_required") is True]
     last_trade = max(records, key=lambda item: str(item.get("entry_timestamp") or item.get("created_at") or ""), default=None)
+    recent_trades = sorted(
+        records,
+        key=lambda item: str(item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at") or ""),
+        reverse=True,
+    )[:20]
 
     trade_summary = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -157,9 +174,11 @@ def build_track_b_paper_trade_summaries(
         "broker_reconciled": False,
         "trade_count": len(records),
         "closed_trade_count": sum(1 for item in records if _is_flat_closed_trade(item)),
+        "completed_trade_count": sum(1 for item in records if _is_flat_closed_trade(item)),
         "open_position_count": len(open_records),
         "review_required_count": len(review_required),
         "paper_trades_attempted_count": len(records),
+        "recent_trades": [_compact_trade_row(item) for item in recent_trades],
         "last_trade_time": None if last_trade is None else last_trade.get("entry_timestamp") or last_trade.get("created_at"),
         "last_trade_strategy": None if last_trade is None else last_trade.get("strategy_id"),
         "last_trade_pnl": None if last_trade is None else last_trade.get("realized_pnl"),
@@ -195,23 +214,30 @@ def build_track_b_paper_trade_summaries(
         "as_of": actual_now.isoformat(),
         "date": today,
         "week_start": week_start,
+        "month_start": month_start,
+        "year_start": year_start,
         "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
         "broker_reconciled": False,
         "total_realized_pnl_today": _sum_decimal(today_records, "realized_pnl"),
         "total_realized_pnl_week": _sum_decimal(week_records, "realized_pnl"),
+        "total_realized_pnl_month": _sum_decimal(month_records, "realized_pnl"),
+        "total_realized_pnl_ytd": _sum_decimal(ytd_records, "realized_pnl"),
         "total_realized_pnl_session": _sum_decimal(today_records, "realized_pnl"),
         "total_unrealized_pnl": "0",
         "trades_today": len(today_records),
         "trades_week": len(week_records),
+        "trades_month": len(month_records),
+        "trades_ytd": len(ytd_records),
         "trades_session": len(today_records),
+        "completed_trades": trade_summary["closed_trade_count"],
         "wins": len(wins),
         "losses": len(losses),
         "avg_win": _average_decimal(wins, "realized_pnl"),
         "avg_loss": _average_decimal(losses, "realized_pnl"),
-        "by_strategy": _pnl_groups(records, "strategy_id"),
-        "by_instrument": _pnl_groups(records, "contract_key"),
-        "by_side": _pnl_groups(records, "side"),
-        "by_lifecycle_classification": _pnl_groups(records, "paper_lifecycle_classification"),
+        "by_strategy": _pnl_groups(records, "strategy_id", actual_now),
+        "by_instrument": _pnl_groups(records, "contract_key", actual_now),
+        "by_side": _pnl_groups(records, "side", actual_now),
+        "by_lifecycle_classification": _pnl_groups(records, "paper_lifecycle_classification", actual_now),
         "review_required_count": len(review_required),
         "last_trade_time": trade_summary["last_trade_time"],
         "last_trade_strategy": trade_summary["last_trade_strategy"],
@@ -472,17 +498,74 @@ def _average_decimal(records: list[Mapping[str, Any]], key: str) -> str | None:
     return _decimal_text(total / Decimal(len(records)))
 
 
-def _pnl_groups(records: Iterable[Mapping[str, Any]], key: str) -> dict[str, dict[str, Any]]:
+def _pnl_groups(records: Iterable[Mapping[str, Any]], key: str, now: datetime) -> dict[str, dict[str, Any]]:
     grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for item in records:
         grouped[str(item.get(key) or "UNKNOWN")].append(item)
+    today = now.date().isoformat()
+    week_start = (now.date() - timedelta(days=now.weekday())).isoformat()
+    ytd_start = now.date().replace(month=1, day=1).isoformat()
     return {
         name: {
             "trade_count": len(items),
+            "trades": len(items),
+            "open_position_count": sum(1 for item in items if not _is_flat_closed_trade(item)),
             "realized_pnl": _sum_decimal(items, "realized_pnl"),
+            "realized_pnl_today": _sum_decimal(_records_since(items, today, exact_date=True), "realized_pnl"),
+            "realized_pnl_week": _sum_decimal(_records_since(items, week_start), "realized_pnl"),
+            "realized_pnl_ytd": _sum_decimal(_records_since(items, ytd_start), "realized_pnl"),
+            "unrealized_pnl": "0",
+            "instrument_family": _first(list(items), "instrument_family"),
+            "instrument": _first(list(items), "instrument_family") or _first(list(items), "contract_key"),
+            "contract_key": _first(list(items), "contract_key"),
+            "last_trade_time": max(
+                (str(item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at") or "") for item in items),
+                default=None,
+            ),
             "review_required_count": sum(1 for item in items if item.get("review_required") is True),
         }
         for name, items in sorted(grouped.items())
+    }
+
+
+def _records_since(records: Iterable[Mapping[str, Any]], date_key: str, *, exact_date: bool = False) -> list[Mapping[str, Any]]:
+    if exact_date:
+        return [item for item in records if _date_prefix(item.get("exit_timestamp") or item.get("created_at")) == date_key]
+    return [
+        item
+        for item in records
+        if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= date_key
+    ]
+
+
+def _compact_trade_row(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "trade_id": item.get("trade_id"),
+        "lifecycle_id": item.get("lifecycle_id"),
+        "signal_id": item.get("signal_id"),
+        "strategy_id": item.get("strategy_id"),
+        "instrument_family": item.get("instrument_family"),
+        "contract_key": item.get("contract_key"),
+        "local_symbol": item.get("local_symbol"),
+        "con_id": item.get("con_id"),
+        "account_id": item.get("account_id"),
+        "time": item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at"),
+        "entry_timestamp": item.get("entry_timestamp"),
+        "exit_timestamp": item.get("exit_timestamp"),
+        "side": item.get("side"),
+        "order_action": item.get("order_action"),
+        "quantity": item.get("quantity"),
+        "entry_price": item.get("entry_fill_price"),
+        "exit_price": item.get("exit_fill_price"),
+        "entry_fill_price": item.get("entry_fill_price"),
+        "exit_fill_price": item.get("exit_fill_price"),
+        "realized_pnl": item.get("realized_pnl"),
+        "paper_lifecycle_classification": item.get("paper_lifecycle_classification"),
+        "final_broker_state_classification": item.get("final_broker_state_classification"),
+        "final_position_status": item.get("final_position_status"),
+        "broker_reconciled": item.get("broker_reconciled"),
+        "review_required": item.get("review_required"),
+        "paper_lifecycle_report_path": item.get("paper_lifecycle_report_path"),
     }
 
 

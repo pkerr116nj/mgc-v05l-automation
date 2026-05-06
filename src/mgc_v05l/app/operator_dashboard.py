@@ -1418,6 +1418,7 @@ class OperatorDashboardService:
                     "production_link": production_link,
                     "same_underlying_conflicts": same_underlying_conflicts,
                     "track_b_operator_status": self._latest_track_b_operator_status_payload(),
+                    "track_b_paper_trading": self._track_b_paper_trading_results_payload(),
                 }
                 _write_json_file(self._dashboard_snapshot_path, dashboard_payload)
                 return dashboard_payload
@@ -1570,6 +1571,7 @@ class OperatorDashboardService:
     ) -> dict[str, Any]:
         annotated = dict(payload)
         annotated["track_b_operator_status"] = self._latest_track_b_operator_status_payload()
+        annotated["track_b_paper_trading"] = self._track_b_paper_trading_results_payload()
         generated_at = _parse_iso_datetime(str(annotated.get("generated_at") or ""))
         snapshot_age_seconds = (
             max((datetime.now(timezone.utc) - generated_at.astimezone(timezone.utc)).total_seconds(), 0.0)
@@ -1756,10 +1758,14 @@ class OperatorDashboardService:
             "paper_trades_attempted_count",
             trade_summary.get("paper_trades_attempted_count", monitor.get("paper_trades_attempted_count")),
         )
+        put_latest_allow_empty("completed_trade_count", trade_summary.get("completed_trade_count", trade_summary.get("closed_trade_count")))
+        put_latest_allow_empty("track_b_recent_trades", trade_summary.get("recent_trades"))
         put_latest_allow_empty("open_position_count", live_position_status.get("open_position_count"))
         put_latest_allow_empty("realized_pnl_today", pnl_summary.get("total_realized_pnl_today"))
         put_latest_allow_empty("realized_pnl_session", pnl_summary.get("total_realized_pnl_session"))
         put_latest_allow_empty("realized_pnl_week", pnl_summary.get("total_realized_pnl_week"))
+        put_latest_allow_empty("realized_pnl_month", pnl_summary.get("total_realized_pnl_month"))
+        put_latest_allow_empty("realized_pnl_ytd", pnl_summary.get("total_realized_pnl_ytd"))
         put_latest_allow_empty("unrealized_pnl", pnl_summary.get("total_unrealized_pnl"))
         put_latest("last_trade_strategy", pnl_summary.get("last_trade_strategy"))
         put_latest_allow_empty("last_trade_pnl", pnl_summary.get("last_trade_pnl"))
@@ -1791,11 +1797,125 @@ class OperatorDashboardService:
             latest_output_paths.setdefault("track_b_pnl_summary", pnl_summary.get("latest_pnl_summary_path"))
         return payload
 
+    def _track_b_paper_trading_results_payload(self) -> dict[str, Any]:
+        ledger_root = self._repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+        trade_summary_path = ledger_root / "latest_track_b_paper_trade_summary.json"
+        live_position_status_path = ledger_root / "latest_track_b_live_position_status.json"
+        pnl_summary_path = ledger_root / "latest_track_b_pnl_summary.json"
+        trade_summary = _load_json_file(trade_summary_path)
+        live_position_status = _load_json_file(live_position_status_path)
+        pnl_summary = _load_json_file(pnl_summary_path)
+        trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
+        live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
+        pnl_summary = pnl_summary if isinstance(pnl_summary, dict) else {}
+        missing = [
+            str(path)
+            for path, payload in (
+                (trade_summary_path, trade_summary),
+                (live_position_status_path, live_position_status),
+                (pnl_summary_path, pnl_summary),
+            )
+            if not payload
+        ]
+        source = (
+            trade_summary.get("source")
+            or live_position_status.get("source")
+            or pnl_summary.get("source")
+            or "NOT_PROVIDED"
+        )
+        broker_reconciled = bool(
+            live_position_status.get("broker_reconciled")
+            if live_position_status
+            else trade_summary.get("broker_reconciled", False)
+        )
+        positions_by_instrument = live_position_status.get("positions_by_instrument")
+        positions_by_strategy = live_position_status.get("positions_by_strategy")
+        positions = _track_b_paper_position_rows(
+            positions_by_instrument if isinstance(positions_by_instrument, dict) else {},
+            positions_by_strategy if isinstance(positions_by_strategy, dict) else {},
+        )
+        by_strategy = pnl_summary.get("by_strategy") if isinstance(pnl_summary.get("by_strategy"), dict) else {}
+        by_instrument = pnl_summary.get("by_instrument") if isinstance(pnl_summary.get("by_instrument"), dict) else {}
+        operator_status = self._latest_track_b_operator_status_payload() or {}
+        if not isinstance(operator_status, dict):
+            operator_status = {}
+        live_money_readiness = bool(operator_status.get("shadow_monitor_live_money_readiness") or operator_status.get("live_money_readiness"))
+        review_required_count = (
+            pnl_summary.get("review_required_count")
+            if pnl_summary
+            else trade_summary.get("review_required_count", 0)
+        )
+        recent_trades = trade_summary.get("recent_trades") if isinstance(trade_summary.get("recent_trades"), list) else []
+        warning = (
+            "Artifact-derived PAPER lifecycle view - not broker truth. "
+            "TWS/IBKR Paper remains broker truth until read-only reconciliation is implemented."
+            if not broker_reconciled
+            else "Broker-reconciled PAPER lifecycle view."
+        )
+        critical_warnings: list[str] = []
+        if live_money_readiness:
+            critical_warnings.append("CRITICAL: live_money_readiness=true in Track B PAPER trading status.")
+        try:
+            review_required_numeric = int(review_required_count or 0)
+        except (TypeError, ValueError):
+            review_required_numeric = 0
+        if review_required_numeric > 0:
+            critical_warnings.append("REVIEW_REQUIRED: one or more Track B PAPER lifecycle records require review.")
+        return {
+            "schema_version": "track_b_paper_trading_results_v1",
+            "available": bool(trade_summary or live_position_status or pnl_summary),
+            "source": source,
+            "broker_reconciled": broker_reconciled,
+            "source_label": source,
+            "broker_truth_warning": warning,
+            "summary_artifacts_missing": missing,
+            "summary_artifacts": {
+                "trade_summary": _track_b_paper_artifact_status(trade_summary_path),
+                "live_position_status": _track_b_paper_artifact_status(live_position_status_path),
+                "pnl_summary": _track_b_paper_artifact_status(pnl_summary_path),
+            },
+            "paper_trades_attempted_count": trade_summary.get("paper_trades_attempted_count", 0),
+            "completed_trade_count": trade_summary.get("completed_trade_count", trade_summary.get("closed_trade_count", 0)),
+            "open_position_count": live_position_status.get("open_position_count", trade_summary.get("open_position_count", 0)),
+            "realized_pnl_today": pnl_summary.get("total_realized_pnl_today", "0"),
+            "realized_pnl_session": pnl_summary.get("total_realized_pnl_session", "0"),
+            "realized_pnl_week": pnl_summary.get("total_realized_pnl_week", "0"),
+            "realized_pnl_month": pnl_summary.get("total_realized_pnl_month", "0"),
+            "realized_pnl_ytd": pnl_summary.get("total_realized_pnl_ytd", "0"),
+            "unrealized_pnl": pnl_summary.get("total_unrealized_pnl", live_position_status.get("total_unrealized_pnl", "0")),
+            "last_trade_strategy": pnl_summary.get("last_trade_strategy") or trade_summary.get("last_trade_strategy"),
+            "last_trade_pnl": pnl_summary.get("last_trade_pnl") if pnl_summary else trade_summary.get("last_trade_pnl"),
+            "last_trade_time": pnl_summary.get("last_trade_time") or trade_summary.get("last_trade_time"),
+            "review_required_count": review_required_count or 0,
+            "positions": positions,
+            "recent_trades": recent_trades[:20],
+            "strategy_performance": _track_b_paper_performance_rows(by_strategy, row_key="strategy"),
+            "instrument_performance": _track_b_paper_performance_rows(by_instrument, row_key="instrument"),
+            "latest_trade_ledger_path": trade_summary.get("latest_trade_ledger_path")
+            or str(ledger_root / "track_b_paper_trade_ledger.jsonl"),
+            "latest_trade_summary_path": trade_summary.get("latest_trade_summary_path") or str(trade_summary_path),
+            "latest_live_position_status_path": live_position_status.get("latest_live_position_status_path")
+            or trade_summary.get("latest_live_position_status_path")
+            or str(live_position_status_path),
+            "latest_pnl_summary_path": pnl_summary.get("latest_pnl_summary_path")
+            or trade_summary.get("latest_pnl_summary_path")
+            or str(pnl_summary_path),
+            "live_money_readiness": live_money_readiness,
+            "critical": bool(critical_warnings),
+            "critical_warnings": critical_warnings,
+            "empty_state_message": (
+                "No Track B PAPER trades have been recorded yet."
+                if not recent_trades and not positions
+                else None
+            ),
+        }
+
     def _minimal_degraded_dashboard_payload(self, *, detail: str) -> dict[str, Any]:
         generated_at = datetime.now(timezone.utc).isoformat()
         with self._dashboard_probe_lock:
             probe = dict(self._dashboard_probe)
         track_b_operator_status = self._latest_track_b_operator_status_payload()
+        track_b_paper_trading = self._track_b_paper_trading_results_payload()
         warning_payload = self._paper_runtime_config_warning_payload()
         dashboard_recovery = {
             "state": "DEGRADED",
@@ -1864,6 +1984,7 @@ class OperatorDashboardService:
                 "primary_next_action": "Wait for recovery",
             },
             "track_b_operator_status": track_b_operator_status,
+            "track_b_paper_trading": track_b_paper_trading,
             "shadow": {"running": False},
             "paper": {"running": False},
             "action_log": [],
@@ -16552,6 +16673,63 @@ def _dashboard_action_log_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str,
             }
         )
     return compact_rows
+
+
+def _track_b_paper_artifact_status(path: Path) -> dict[str, Any]:
+    exists = path.exists()
+    age_seconds = None
+    if exists:
+        try:
+            age_seconds = max((datetime.now(timezone.utc).timestamp() - path.stat().st_mtime), 0.0)
+        except OSError:
+            age_seconds = None
+    return {
+        "path": str(path),
+        "exists": exists,
+        "age_seconds": age_seconds,
+        "stale": bool(age_seconds is not None and age_seconds > 3600),
+    }
+
+
+def _track_b_paper_position_rows(
+    positions_by_instrument: dict[str, Any],
+    positions_by_strategy: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for group, payload in (("instrument", positions_by_instrument), ("strategy", positions_by_strategy)):
+        for key, value in payload.items():
+            row = dict(value) if isinstance(value, dict) else {}
+            unique = (str(row.get("lifecycle_id") or key), str(row.get("strategy_id") or ""))
+            if unique in seen:
+                continue
+            seen.add(unique)
+            row.setdefault("position_group", group)
+            row.setdefault("position_key", key)
+            row.setdefault("instrument", row.get("instrument_family") or row.get("contract_key") or key)
+            row.setdefault("strategy", row.get("strategy_id"))
+            row.setdefault("side", row.get("side") or row.get("position_side"))
+            row.setdefault("last_mark_price", row.get("latest_mark_price"))
+            row.setdefault("open_time", row.get("entry_timestamp") or row.get("opened_at"))
+            row.setdefault("lifecycle_status", row.get("final_position_status") or row.get("status"))
+            rows.append(row)
+    return rows
+
+
+def _track_b_paper_performance_rows(payload: dict[str, Any], *, row_key: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key, value in sorted(payload.items()):
+        row = dict(value) if isinstance(value, dict) else {}
+        row[row_key] = key
+        row.setdefault("trades", row.get("trade_count", 0))
+        row.setdefault("open_positions", row.get("open_position_count", 0))
+        row.setdefault("realized_pnl_today", row.get("realized_pnl_today", "0"))
+        row.setdefault("realized_pnl_week", row.get("realized_pnl_week", "0"))
+        row.setdefault("realized_pnl_ytd", row.get("realized_pnl_ytd", "0"))
+        row.setdefault("unrealized_pnl", row.get("unrealized_pnl", "0"))
+        row.setdefault("review_required_count", row.get("review_required_count", 0))
+        rows.append(row)
+    return rows
 
 
 def _bind_dashboard_server(host: str, preferred_port: int, handler, *, allow_port_fallback: bool):

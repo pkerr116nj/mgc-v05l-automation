@@ -750,6 +750,8 @@ def _report(
             if track_b_paper_trade_summary
             else track_b_shadow_monitor.get("paper_trades_attempted_count", 0)
         ),
+        "completed_trade_count": track_b_paper_trade_summary.get("completed_trade_count", track_b_paper_trade_summary.get("closed_trade_count", 0)),
+        "track_b_recent_trades": track_b_paper_trade_summary.get("recent_trades") or [],
         "open_position_count": (
             track_b_live_position_status.get("open_position_count")
             if track_b_live_position_status
@@ -758,6 +760,8 @@ def _report(
         "realized_pnl_today": track_b_pnl_summary.get("total_realized_pnl_today", "0"),
         "realized_pnl_session": track_b_pnl_summary.get("total_realized_pnl_session", "0"),
         "realized_pnl_week": track_b_pnl_summary.get("total_realized_pnl_week", "0"),
+        "realized_pnl_month": track_b_pnl_summary.get("total_realized_pnl_month", "0"),
+        "realized_pnl_ytd": track_b_pnl_summary.get("total_realized_pnl_ytd", "0"),
         "unrealized_pnl": track_b_pnl_summary.get("total_unrealized_pnl", "0"),
         "last_trade_strategy": track_b_pnl_summary.get("last_trade_strategy") or NOT_PROVIDED,
         "last_trade_pnl": track_b_pnl_summary.get("last_trade_pnl") if track_b_pnl_summary else NOT_PROVIDED,

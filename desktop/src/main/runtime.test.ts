@@ -618,6 +618,33 @@ test("Track B status renderer is display-only and no-submit", () => {
   assert.doesNotMatch(appTsx, /page === "track-b"[\s\S]{0,2000}paper_proof_cli/);
 });
 
+test("Track B PAPER trading renderer is standalone read-only blotter view", () => {
+  const appTsx = fs.readFileSync(path.resolve(__dirname, "../../src/renderer/App.tsx"), "utf8");
+
+  assert.match(appTsx, /TrackBPaperTradingPage/);
+  assert.match(appTsx, /\{ id: "track-b-paper", label: "Track B PAPER" \}/);
+  assert.match(appTsx, /page === "track-b-paper"/);
+  assert.match(appTsx, /No Track B PAPER trades have been recorded yet/);
+  assert.match(appTsx, /Current Positions/);
+  assert.match(appTsx, /Recent Trades/);
+  assert.match(appTsx, /Strategy Performance/);
+  assert.match(appTsx, /Instrument Performance/);
+  assert.match(appTsx, /Artifact-derived PAPER lifecycle view/);
+  assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}runDashboardAction/);
+  assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}paper_proof_cli/);
+  assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}placeOrder/);
+  assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}submit\/cancel/);
+});
+
+test("paper mode does not silently replace historical backcast with paper ledger when replay history exists", () => {
+  const appTsx = fs.readFileSync(path.resolve(__dirname, "../../src/renderer/App.tsx"), "utf8");
+
+  assert.match(
+    appTsx,
+    /!calendarSourceTouched[\s\S]*paperMode[\s\S]*playbackLatestStudyItems\.length === 0[\s\S]*paperCalendarEntries\.length > 0[\s\S]*calendarSource === "historical_backcast"[\s\S]*setCalendarSource\("paper"\)/,
+  );
+});
+
 test("desktop state promotes to live when Node localhost transport is denied but curl fallback succeeds", async () => {
   __testing.resetRuntimeState();
   __testing.setBuildLocalOperatorAuthStateHook(async () => ({

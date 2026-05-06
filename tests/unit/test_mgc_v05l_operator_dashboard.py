@@ -3103,6 +3103,175 @@ def test_track_b_operator_status_overlay_does_not_scan_full_paper_ledger(tmp_pat
     assert payload["track_b_paper_results_broker_reconciled"] is False
 
 
+def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledger_scan(tmp_path: Path) -> None:
+    ledger_dir = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+    operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
+    monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
+    ledger_dir.mkdir(parents=True)
+    operator_status_dir.mkdir(parents=True)
+    monitor_dir.mkdir(parents=True)
+    (operator_status_dir / "latest_operator_status_summary.json").write_text(
+        json.dumps({"schema_version": "track_b_operator_status_v1", "live_money_readiness": False}),
+        encoding="utf-8",
+    )
+    (monitor_dir / "latest_track_b_shadow_monitor_report.json").write_text(
+        json.dumps({"monitor_mode": "PAPER", "live_money_readiness": False, "instrument_reports": []}),
+        encoding="utf-8",
+    )
+    (ledger_dir / "track_b_paper_trade_ledger.jsonl").write_text("{invalid full ledger that must not be scanned}\n", encoding="utf-8")
+    (ledger_dir / "latest_track_b_paper_trade_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "paper_trades_attempted_count": 1,
+                "completed_trade_count": 1,
+                "recent_trades": [
+                    {
+                        "trade_id": "trade-1",
+                        "time": "2026-05-06T13:35:00+00:00",
+                        "instrument_family": "MNQ",
+                        "contract_key": "MNQ-202606",
+                        "local_symbol": "MNQM6",
+                        "strategy_id": "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+                        "side": "SHORT",
+                        "quantity": "1",
+                        "entry_price": "18799.5",
+                        "exit_price": "18795.25",
+                        "realized_pnl": "8.5",
+                        "paper_lifecycle_classification": "PROOF_COMPLETE_FLAT",
+                        "broker_reconciled": False,
+                        "review_required": False,
+                    }
+                ],
+                "latest_trade_ledger_path": "outputs/track_b_execution_core/paper_trade_ledger/track_b_paper_trade_ledger.jsonl",
+                "latest_trade_summary_path": "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_paper_trade_summary.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_live_position_status.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "open_position_count": 1,
+                "positions_by_instrument": {
+                    "MNQ-202606": {
+                        "lifecycle_id": "life-1",
+                        "strategy_id": "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+                        "instrument_family": "MNQ",
+                        "contract_key": "MNQ-202606",
+                        "local_symbol": "MNQM6",
+                        "side": "SHORT",
+                        "quantity": "1",
+                        "avg_entry_price": "18799.5",
+                        "latest_mark_price": "18798.0",
+                        "unrealized_pnl": "3.0",
+                        "entry_timestamp": "2026-05-06T13:30:00+00:00",
+                        "status": "OPEN",
+                        "review_required": False,
+                    }
+                },
+                "positions_by_strategy": {},
+                "broker_truth_warning": "Artifact-derived status is not broker truth until source=BROKER_RECONCILED.",
+                "latest_live_position_status_path": "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_pnl_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "total_realized_pnl_today": "8.5",
+                "total_realized_pnl_session": "8.5",
+                "total_realized_pnl_week": "8.5",
+                "total_realized_pnl_month": "8.5",
+                "total_realized_pnl_ytd": "8.5",
+                "total_unrealized_pnl": "3.0",
+                "last_trade_strategy": "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+                "last_trade_pnl": "8.5",
+                "review_required_count": 0,
+                "by_strategy": {
+                    "MNQ_US_DERIVATIVE_BEAR_TURN_V1": {
+                        "trades": 1,
+                        "open_position_count": 1,
+                        "instrument": "MNQ",
+                        "realized_pnl_today": "8.5",
+                        "realized_pnl_week": "8.5",
+                        "realized_pnl_ytd": "8.5",
+                        "last_trade_time": "2026-05-06T13:35:00+00:00",
+                        "review_required_count": 0,
+                    }
+                },
+                "by_instrument": {
+                    "MNQ-202606": {
+                        "trades": 1,
+                        "open_position_count": 1,
+                        "instrument": "MNQ",
+                        "realized_pnl_today": "8.5",
+                        "unrealized_pnl": "3.0",
+                        "review_required_count": 0,
+                    }
+                },
+                "latest_pnl_summary_path": "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_pnl_summary.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
+
+    assert payload["source"] == "TRACK_B_LIFECYCLE_ARTIFACTS"
+    assert payload["broker_reconciled"] is False
+    assert "not broker truth" in payload["broker_truth_warning"]
+    assert payload["paper_trades_attempted_count"] == 1
+    assert payload["completed_trade_count"] == 1
+    assert payload["open_position_count"] == 1
+    assert payload["realized_pnl_today"] == "8.5"
+    assert payload["realized_pnl_month"] == "8.5"
+    assert payload["realized_pnl_ytd"] == "8.5"
+    assert payload["unrealized_pnl"] == "3.0"
+    assert payload["positions"][0]["contract_key"] == "MNQ-202606"
+    assert payload["recent_trades"][0]["strategy_id"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    assert payload["strategy_performance"][0]["strategy"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    assert payload["instrument_performance"][0]["instrument"] == "MNQ-202606"
+
+
+def test_track_b_paper_trading_payload_degrades_with_missing_compact_summaries(tmp_path: Path) -> None:
+    payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
+
+    assert payload["available"] is False
+    assert payload["source"] == "NOT_PROVIDED"
+    assert payload["paper_trades_attempted_count"] == 0
+    assert payload["open_position_count"] == 0
+    assert payload["realized_pnl_today"] == "0"
+    assert payload["unrealized_pnl"] == "0"
+    assert payload["summary_artifacts_missing"]
+
+
+def test_track_b_paper_trading_payload_marks_live_money_critical(tmp_path: Path) -> None:
+    operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
+    monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
+    operator_status_dir.mkdir(parents=True)
+    monitor_dir.mkdir(parents=True)
+    (operator_status_dir / "latest_operator_status_summary.json").write_text(
+        json.dumps({"schema_version": "track_b_operator_status_v1", "live_money_readiness": False}),
+        encoding="utf-8",
+    )
+    (monitor_dir / "latest_track_b_shadow_monitor_report.json").write_text(
+        json.dumps({"monitor_mode": "PAPER", "live_money_readiness": True, "instrument_reports": []}),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
+
+    assert payload["critical"] is True
+    assert "live_money_readiness=true" in payload["critical_warnings"][0]
+
+
 def test_track_b_operator_status_overlay_degrades_when_compact_paper_summaries_are_missing(tmp_path: Path) -> None:
     operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
     monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"

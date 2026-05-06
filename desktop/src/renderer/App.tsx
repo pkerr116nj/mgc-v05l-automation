@@ -40,6 +40,7 @@ type PageId =
   | "atp-performance"
   | "atp-attribution"
   | "track-b"
+  | "track-b-paper"
   | "positions"
   | "market"
   | "replay"
@@ -675,6 +676,7 @@ const NAV_ITEMS: Array<{ id: PageId; label: string }> = [
   { id: "atp-performance", label: "ATP Experimental Performance" },
   { id: "atp-attribution", label: "ATP Attribution" },
   { id: "track-b", label: "Track B Status" },
+  { id: "track-b-paper", label: "Track B PAPER" },
   { id: "diagnostics", label: "Evidence" },
   { id: "settings", label: "Settings" },
 ];
@@ -3519,6 +3521,222 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
           <div>
             <h3 className="subsection-title">Latest Output Paths</h3>
             <JsonBlock value={latestOutputPaths} />
+          </div>
+        </div>
+      </Section>
+    </>
+  );
+}
+
+function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: DesktopState["trackB"] | null }) {
+  const status = asRecord(props.trackB?.status);
+  const rawTrading = asRecord(props.dashboard?.track_b_paper_trading);
+  const latestOutputPaths = asRecord(status.latest_output_paths);
+  const trading = Object.keys(rawTrading).length
+    ? rawTrading
+    : {
+        available: props.trackB?.available === true,
+        source: status.track_b_paper_results_source,
+        broker_reconciled: status.track_b_paper_results_broker_reconciled,
+        broker_truth_warning: status.track_b_paper_results_warning,
+        paper_trades_attempted_count: status.paper_trades_attempted_count,
+        completed_trade_count: status.completed_trade_count,
+        open_position_count: status.open_position_count,
+        realized_pnl_today: status.realized_pnl_today,
+        realized_pnl_session: status.realized_pnl_session,
+        realized_pnl_week: status.realized_pnl_week,
+        realized_pnl_month: status.realized_pnl_month,
+        realized_pnl_ytd: status.realized_pnl_ytd,
+        unrealized_pnl: status.unrealized_pnl,
+        last_trade_strategy: status.last_trade_strategy,
+        last_trade_pnl: status.last_trade_pnl,
+        review_required_count: status.review_required_count,
+        positions: [],
+        recent_trades: asArray(status.track_b_recent_trades),
+        strategy_performance: Object.entries(asRecord(status.track_b_pnl_by_strategy)).map(([strategy, value]) => ({
+          ...asRecord(value),
+          strategy,
+        })),
+        instrument_performance: Object.entries(asRecord(status.track_b_pnl_by_instrument)).map(([instrument, value]) => ({
+          ...asRecord(value),
+          instrument,
+        })),
+        latest_trade_ledger_path: status.latest_trade_ledger_path ?? latestOutputPaths.track_b_paper_trade_ledger,
+        latest_live_position_status_path: status.latest_live_position_status_path ?? latestOutputPaths.track_b_live_position_status,
+        latest_pnl_summary_path: status.latest_pnl_summary_path ?? latestOutputPaths.track_b_pnl_summary,
+        live_money_readiness: status.shadow_monitor_live_money_readiness ?? status.live_money_readiness,
+        critical: status.track_b_safety_critical,
+        critical_warnings: status.track_b_safety_warnings,
+      };
+  const available = trading.available !== false && (Object.keys(rawTrading).length > 0 || props.trackB?.available === true);
+  const brokerReconciled = trading.broker_reconciled === true;
+  const positions = asArray<JsonRecord>(trading.positions);
+  const recentTrades = asArray<JsonRecord>(trading.recent_trades);
+  const strategyRows = asArray<JsonRecord>(trading.strategy_performance);
+  const instrumentRows = asArray<JsonRecord>(trading.instrument_performance);
+  const missingArtifacts = asArray<string>(trading.summary_artifacts_missing);
+  const criticalWarnings = asArray<string>(trading.critical_warnings);
+  const liveMoneyCritical = trading.live_money_readiness === true;
+  const reviewRequired = Number(trading.review_required_count ?? 0) > 0;
+  const noPaperRecords = positions.length === 0 && recentTrades.length === 0;
+
+  return (
+    <>
+      <Section title="Track B PAPER" subtitle="Read-only PAPER blotter, positions, and P&L from bounded Track B lifecycle summaries">
+        {!available ? (
+          <div className="status-banner warn">
+            <div className="status-banner-main">
+              <div className="status-banner-title">PAPER trading summaries unavailable</div>
+              <div className="status-banner-body">Compact Track B PAPER summary artifacts are missing or unavailable.</div>
+            </div>
+          </div>
+        ) : null}
+        {liveMoneyCritical || trading.critical === true ? (
+          <div className="status-banner danger">
+            <div className="status-banner-main">
+              <div className="status-banner-title">TRACK B PAPER SAFETY CRITICAL</div>
+              <div className="status-banner-body">
+                {liveMoneyCritical ? "live_money_readiness=true is present in the read model." : formatValue(criticalWarnings[0])}
+              </div>
+            </div>
+          </div>
+        ) : null}
+        {reviewRequired ? (
+          <div className="status-banner danger">
+            <div className="status-banner-main">
+              <div className="status-banner-title">REVIEW REQUIRED</div>
+              <div className="status-banner-body">{formatValue(trading.review_required_count)} Track B PAPER lifecycle item(s) require review.</div>
+            </div>
+          </div>
+        ) : null}
+        <div className={`status-banner ${brokerReconciled ? "good" : "warn"}`}>
+          <div className="status-banner-main">
+            <div className="status-banner-title">
+              {brokerReconciled ? "BROKER RECONCILED PAPER VIEW" : "ARTIFACT-DERIVED PAPER LIFECYCLE VIEW"}
+            </div>
+            <div className="status-banner-body">
+              {brokerReconciled
+                ? "Read-only broker-reconciled PAPER result summaries."
+                : "Artifact-derived PAPER lifecycle view — not broker truth. TWS/IBKR Paper remains broker truth until read-only reconciliation is implemented."}
+            </div>
+            {trading.broker_truth_warning ? (
+              <div className="status-banner-body secondary">{formatValue(trading.broker_truth_warning)}</div>
+            ) : null}
+          </div>
+        </div>
+        {noPaperRecords ? (
+          <div className="placeholder-note">No Track B PAPER trades have been recorded yet.</div>
+        ) : null}
+        {missingArtifacts.length ? (
+          <div className="notice-strip">
+            {missingArtifacts.map((path) => (
+              <div key={path}>Missing compact summary artifact: {path}</div>
+            ))}
+          </div>
+        ) : null}
+        <div className="metric-grid compact">
+          <MetricCard label="Broker Reconciled" value={formatValue(brokerReconciled)} tone={brokerReconciled ? "good" : "warn"} />
+          <MetricCard label="Source" value={formatValue(trading.source)} />
+          <MetricCard label="Open Positions" value={formatValue(trading.open_position_count ?? 0)} tone={Number(trading.open_position_count ?? 0) > 0 ? "warn" : "good"} />
+          <MetricCard label="Unrealized P&L" value={formatMaybePnL(trading.unrealized_pnl ?? "0")} tone={pnlTone(trading.unrealized_pnl)} />
+          <MetricCard label="Realized Today" value={formatMaybePnL(trading.realized_pnl_today ?? "0")} tone={pnlTone(trading.realized_pnl_today)} />
+          <MetricCard label="Realized Session" value={formatMaybePnL(trading.realized_pnl_session ?? "0")} tone={pnlTone(trading.realized_pnl_session)} />
+          <MetricCard label="Realized Week" value={formatMaybePnL(trading.realized_pnl_week ?? "0")} tone={pnlTone(trading.realized_pnl_week)} />
+          <MetricCard label="Realized Month" value={formatMaybePnL(trading.realized_pnl_month ?? "0")} tone={pnlTone(trading.realized_pnl_month)} />
+          <MetricCard label="Realized YTD" value={formatMaybePnL(trading.realized_pnl_ytd ?? "0")} tone={pnlTone(trading.realized_pnl_ytd)} />
+          <MetricCard label="Trades Attempted" value={formatValue(trading.paper_trades_attempted_count ?? 0)} />
+          <MetricCard label="Completed Trades" value={formatValue(trading.completed_trade_count ?? 0)} />
+          <MetricCard label="Review Required" value={formatValue(trading.review_required_count ?? 0)} tone={reviewRequired ? "danger" : "good"} />
+        </div>
+      </Section>
+
+      <Section title="Current Positions" subtitle="Artifact-derived open Track B PAPER lifecycle positions">
+        <DataTable
+          rows={positions}
+          emptyLabel="No Track B artifact-derived open PAPER positions are recorded."
+          rowKey={(row, index) => String(row.lifecycle_id ?? row.position_key ?? index)}
+          columns={[
+            { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument ?? row.instrument_family) },
+            { key: "contract", label: "Contract / Local", render: (row) => `${formatValue(row.contract_key)} / ${formatValue(row.local_symbol)}` },
+            { key: "strategy", label: "Strategy", render: (row) => formatValue(row.strategy ?? row.strategy_id) },
+            { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+            { key: "quantity", label: "Qty", render: (row) => formatValue(row.quantity) },
+            { key: "avg_entry_price", label: "Avg Entry", render: (row) => formatValue(row.avg_entry_price) },
+            { key: "last_mark_price", label: "Last / Mark", render: (row) => formatValue(row.last_mark_price ?? row.latest_mark_price) },
+            { key: "unrealized_pnl", label: "Unrealized", render: (row) => formatMaybePnL(row.unrealized_pnl) },
+            { key: "open_time", label: "Open Time", render: (row) => formatTimestamp(row.open_time) },
+            { key: "lifecycle_status", label: "Lifecycle", render: (row) => formatValue(row.lifecycle_status ?? row.status) },
+            { key: "review_required", label: "Review", render: (row) => formatValue(row.review_required) },
+          ]}
+        />
+      </Section>
+
+      <Section title="Recent Trades" subtitle="Bounded recent Track B PAPER lifecycle records from compact trade summary">
+        <DataTable
+          rows={recentTrades}
+          emptyLabel="No Track B PAPER trades have been recorded yet."
+          rowKey={(row, index) => String(row.trade_id ?? row.lifecycle_id ?? index)}
+          columns={[
+            { key: "time", label: "Time", render: (row) => formatTimestamp(row.time ?? row.exit_timestamp ?? row.entry_timestamp) },
+            { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument_family) },
+            { key: "contract", label: "Contract / Local", render: (row) => `${formatValue(row.contract_key)} / ${formatValue(row.local_symbol)}` },
+            { key: "strategy", label: "Strategy", render: (row) => formatValue(row.strategy_id) },
+            { key: "side", label: "Side", render: (row) => formatValue(row.side) },
+            { key: "quantity", label: "Qty", render: (row) => formatValue(row.quantity) },
+            { key: "entry_price", label: "Entry", render: (row) => formatValue(row.entry_price ?? row.entry_fill_price) },
+            { key: "exit_price", label: "Exit", render: (row) => formatValue(row.exit_price ?? row.exit_fill_price) },
+            { key: "realized_pnl", label: "Realized P&L", render: (row) => formatMaybePnL(row.realized_pnl) },
+            { key: "lifecycle_status", label: "Lifecycle", render: (row) => formatValue(row.paper_lifecycle_classification ?? row.final_position_status) },
+            { key: "broker_reconciled", label: "Broker Reconciled", render: (row) => formatValue(row.broker_reconciled) },
+            { key: "review_required", label: "Review", render: (row) => formatValue(row.review_required) },
+          ]}
+        />
+      </Section>
+
+      <Section title="Strategy Performance" subtitle="Compact Track B PAPER realized P&L and review rollup by strategy">
+        <DataTable
+          rows={strategyRows}
+          emptyLabel="No strategy-level Track B PAPER performance has been recorded yet."
+          rowKey={(row, index) => String(row.strategy ?? index)}
+          columns={[
+            { key: "strategy", label: "Strategy", render: (row) => formatValue(row.strategy) },
+            { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument ?? row.instrument_family ?? row.contract_key) },
+            { key: "trades", label: "Trades", render: (row) => formatValue(row.trades ?? row.trade_count) },
+            { key: "open_positions", label: "Open", render: (row) => formatValue(row.open_positions ?? row.open_position_count) },
+            { key: "realized_pnl_today", label: "Today", render: (row) => formatMaybePnL(row.realized_pnl_today) },
+            { key: "realized_pnl_week", label: "Week", render: (row) => formatMaybePnL(row.realized_pnl_week) },
+            { key: "realized_pnl_ytd", label: "YTD", render: (row) => formatMaybePnL(row.realized_pnl_ytd) },
+            { key: "last_trade_time", label: "Last Trade", render: (row) => formatTimestamp(row.last_trade_time) },
+            { key: "review_required_count", label: "Review", render: (row) => formatValue(row.review_required_count) },
+          ]}
+        />
+      </Section>
+
+      <Section title="Instrument Performance" subtitle="Compact Track B PAPER realized/unrealized P&L rollup by instrument">
+        <DataTable
+          rows={instrumentRows}
+          emptyLabel="No instrument-level Track B PAPER performance has been recorded yet."
+          rowKey={(row, index) => String(row.instrument ?? index)}
+          columns={[
+            { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument ?? row.contract_key) },
+            { key: "trades", label: "Trades", render: (row) => formatValue(row.trades ?? row.trade_count) },
+            { key: "open_positions", label: "Open", render: (row) => formatValue(row.open_positions ?? row.open_position_count) },
+            { key: "realized_pnl_today", label: "Today", render: (row) => formatMaybePnL(row.realized_pnl_today) },
+            { key: "unrealized_pnl", label: "Unrealized", render: (row) => formatMaybePnL(row.unrealized_pnl) },
+            { key: "realized_pnl", label: "Total / Session", render: (row) => formatMaybePnL(row.realized_pnl ?? row.realized_pnl_today) },
+            { key: "review_required_count", label: "Review", render: (row) => formatValue(row.review_required_count) },
+          ]}
+        />
+        <div className="split-panel">
+          <div>
+            <h3 className="subsection-title">Trade Summary</h3>
+            <div className="placeholder-note">{formatValue(trading.latest_trade_summary_path)}</div>
+            <div className="placeholder-note">{formatValue(trading.latest_trade_ledger_path)}</div>
+          </div>
+          <div>
+            <h3 className="subsection-title">Position / P&L Summary</h3>
+            <div className="placeholder-note">{formatValue(trading.latest_live_position_status_path)}</div>
+            <div className="placeholder-note">{formatValue(trading.latest_pnl_summary_path)}</div>
           </div>
         </div>
       </Section>
@@ -10805,7 +11023,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
   ]);
 
   const primaryNavItems = NAV_ITEMS.filter((item) =>
-    ["home", "calendar", "positions", "market", "strategies", "drawdown-lab", "atp-performance", "atp-attribution"].includes(item.id),
+    ["home", "calendar", "positions", "track-b-paper", "market", "strategies", "drawdown-lab", "atp-performance", "atp-attribution"].includes(item.id),
   );
   const utilityNavItems = NAV_ITEMS.filter((item) => !primaryNavItems.includes(item));
   const processControlCards = [
@@ -18683,6 +18901,10 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
 
           {!loading && page === "track-b" ? (
             <TrackBStatusPage trackB={desktopState?.trackB ?? null} buildMetadata={desktopState?.buildMetadata ?? null} />
+          ) : null}
+
+          {!loading && page === "track-b-paper" ? (
+            <TrackBPaperTradingPage dashboard={asRecord(desktopState?.dashboard)} trackB={desktopState?.trackB ?? null} />
           ) : null}
 
           {!loading && page === "history" ? (

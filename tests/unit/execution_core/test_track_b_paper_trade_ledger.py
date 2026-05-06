@@ -108,9 +108,18 @@ def test_trade_ledger_writes_compact_pnl_and_summaries(tmp_path: Path) -> None:
     pnl = json.loads(result.pnl_summary_json.read_text(encoding="utf-8"))
     assert pnl["total_realized_pnl_today"] == "8.5"
     assert pnl["total_realized_pnl_session"] == "8.5"
+    assert pnl["total_realized_pnl_month"] == "8.5"
+    assert pnl["total_realized_pnl_ytd"] == "8.5"
     assert pnl["trades_today"] == 1
     assert pnl["trades_session"] == 1
+    assert pnl["trades_month"] == 1
+    assert pnl["trades_ytd"] == 1
+    summary = json.loads(result.trade_summary_json.read_text(encoding="utf-8"))
+    assert summary["completed_trade_count"] == 1
+    assert summary["recent_trades"][0]["strategy_id"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    assert summary["recent_trades"][0]["realized_pnl"] == "8.5"
     assert pnl["by_strategy"]["MNQ_US_DERIVATIVE_BEAR_TURN_V1"]["realized_pnl"] == "8.5"
+    assert pnl["by_strategy"]["MNQ_US_DERIVATIVE_BEAR_TURN_V1"]["realized_pnl_ytd"] == "8.5"
     status = json.loads(result.live_position_status_json.read_text(encoding="utf-8"))
     assert status["source"] == "TRACK_B_LIFECYCLE_ARTIFACTS"
     assert status["broker_reconciled"] is False
@@ -179,7 +188,11 @@ def test_operator_status_exposes_compact_paper_results(tmp_path: Path) -> None:
     assert result.report["open_position_count"] == 0
     assert result.report["realized_pnl_today"] == "8.5"
     assert result.report["realized_pnl_week"] == "8.5"
+    assert result.report["realized_pnl_month"] == "8.5"
+    assert result.report["realized_pnl_ytd"] == "8.5"
     assert result.report["unrealized_pnl"] == "0"
+    assert result.report["completed_trade_count"] == 1
+    assert result.report["track_b_recent_trades"][0]["realized_pnl"] == "8.5"
     assert result.report["last_trade_strategy"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     assert result.report["last_trade_pnl"] == "8.5"
     assert result.report["review_required_count"] == 0
