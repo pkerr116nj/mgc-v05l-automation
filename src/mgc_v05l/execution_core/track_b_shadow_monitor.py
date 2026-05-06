@@ -39,6 +39,12 @@ from .track_b_multi_strategy_runtime_cycle import (
     run_track_b_multi_strategy_runtime_cycle,
 )
 from .track_b_databento_live_runtime_feed import DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
+from .track_b_paper_trade_ledger import (
+    DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
+    DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON,
+    DEFAULT_TRACK_B_PNL_SUMMARY_JSON,
+)
 from .track_b_runtime_candle_capture import (
     DEFAULT_TRACK_B_RUNTIME_CANDLE_CAPTURE_OUTPUT_ROOT,
     MGC_CONTINUOUS_SYMBOL,
@@ -2252,6 +2258,9 @@ def _report_for_cycle(
 ) -> dict[str, Any]:
     completed_at = completed_at.astimezone(UTC)
     aggregate_tiers = _aggregate_tier_counts(instrument_reports)
+    paper_trade_summary = _read_json_optional(DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON) or {}
+    live_position_status = _read_json_optional(DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON) or {}
+    pnl_summary = _read_json_optional(DEFAULT_TRACK_B_PNL_SUMMARY_JSON) or {}
     all_strategy_verdicts = [
         verdict
         for item in instrument_reports
@@ -2346,6 +2355,37 @@ def _report_for_cycle(
         "latest_broker_state_classification": _first_nonempty(
             item.get("latest_broker_state_classification") for item in instrument_reports
         ),
+        "latest_trade_ledger_path": (
+            paper_trade_summary.get("latest_trade_ledger_path")
+            or str(DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT / "track_b_paper_trade_ledger.jsonl")
+        ),
+        "latest_paper_trade_summary_path": (
+            paper_trade_summary.get("latest_trade_summary_path") or str(DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON)
+        ),
+        "latest_live_position_status_path": (
+            live_position_status.get("latest_live_position_status_path")
+            or paper_trade_summary.get("latest_live_position_status_path")
+            or str(DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON)
+        ),
+        "latest_pnl_summary_path": (
+            pnl_summary.get("latest_pnl_summary_path")
+            or paper_trade_summary.get("latest_pnl_summary_path")
+            or str(DEFAULT_TRACK_B_PNL_SUMMARY_JSON)
+        ),
+        "open_position_count": live_position_status.get("open_position_count", 0),
+        "realized_pnl_today": pnl_summary.get("total_realized_pnl_today", "0"),
+        "realized_pnl_week": pnl_summary.get("total_realized_pnl_week", "0"),
+        "unrealized_pnl": pnl_summary.get("total_unrealized_pnl", "0"),
+        "last_trade_strategy": pnl_summary.get("last_trade_strategy"),
+        "last_trade_pnl": pnl_summary.get("last_trade_pnl"),
+        "review_required_count": pnl_summary.get("review_required_count", paper_trade_summary.get("review_required_count", 0)),
+        "paper_results_source": (
+            paper_trade_summary.get("source")
+            or live_position_status.get("source")
+            or pnl_summary.get("source")
+            or "NO_TRACK_B_PAPER_TRADES_RECORDED"
+        ),
+        "paper_results_broker_reconciled": bool(live_position_status.get("broker_reconciled", False)),
         "latest_paper_order_parameters": _first_nonempty(item.get("paper_order_parameters") for item in instrument_reports),
         "latest_paper_order_parameter_blocker": _first_nonempty(
             item.get("paper_order_parameter_blocker") for item in instrument_reports

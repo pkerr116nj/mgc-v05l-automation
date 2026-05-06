@@ -16,10 +16,18 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .models import require_aware_datetime, to_jsonable
+from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
 
 
 DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT = Path("outputs/track_b_execution_core/operator_status")
 NOT_PROVIDED = "NOT_PROVIDED"
+DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON = (
+    DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT / "latest_track_b_paper_trade_summary.json"
+)
+DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON = (
+    DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT / "latest_track_b_live_position_status.json"
+)
+DEFAULT_TRACK_B_PNL_SUMMARY_JSON = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT / "latest_track_b_pnl_summary.json"
 
 
 class OperatorStatusVerdict(str, Enum):
@@ -56,6 +64,9 @@ class OperatorStatusInputs:
     recovery_report_json: Path | None = None
     preflight_report_json: Path | None = None
     quote_report_json: Path | None = None
+    track_b_paper_trade_summary_json: Path | None = DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON
+    track_b_live_position_status_json: Path | None = DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON
+    track_b_pnl_summary_json: Path | None = DEFAULT_TRACK_B_PNL_SUMMARY_JSON
     output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
 
 
@@ -120,6 +131,9 @@ def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | No
         "recovery": _read_json(inputs.recovery_report_json),
         "preflight": _read_json(inputs.preflight_report_json),
         "quote": _read_json(inputs.quote_report_json),
+        "track_b_paper_trade_summary": _read_optional_json(inputs.track_b_paper_trade_summary_json),
+        "track_b_live_position_status": _read_optional_json(inputs.track_b_live_position_status_json),
+        "track_b_pnl_summary": _read_optional_json(inputs.track_b_pnl_summary_json),
     }
 
 
@@ -359,6 +373,9 @@ def _report(
     recovery = reports.get("recovery") or {}
     preflight = reports.get("preflight") or {}
     quote = reports.get("quote") or {}
+    track_b_paper_trade_summary = reports.get("track_b_paper_trade_summary") or {}
+    track_b_live_position_status = reports.get("track_b_live_position_status") or {}
+    track_b_pnl_summary = reports.get("track_b_pnl_summary") or {}
     latest_output_paths = {
         "backend_health": backend_health.get("report_json_path") or backend_health.get("health_json_path") or backend_health.get("info_file"),
         "listener_heartbeat": listener_heartbeat.get("heartbeat_json_path"),
@@ -385,6 +402,12 @@ def _report(
         "recovery": recovery.get("report_json_path"),
         "preflight": preflight.get("report_json_path"),
         "quote": quote.get("report_json_path"),
+        "track_b_paper_trade_ledger": track_b_paper_trade_summary.get("latest_trade_ledger_path"),
+        "track_b_paper_trade_summary": track_b_paper_trade_summary.get("latest_trade_summary_path"),
+        "track_b_live_position_status": track_b_live_position_status.get("latest_live_position_status_path")
+        or track_b_paper_trade_summary.get("latest_live_position_status_path"),
+        "track_b_pnl_summary": track_b_pnl_summary.get("latest_pnl_summary_path")
+        or track_b_paper_trade_summary.get("latest_pnl_summary_path"),
     }
     return {
         "schema_version": "track_b_operator_status_v1",
@@ -583,6 +606,59 @@ def _report(
         ),
         "track_b_decision_journal_error": (
             track_b_multi_strategy_runtime_cycle.get("decision_journal_error") or NOT_PROVIDED
+        ),
+        "track_b_paper_results_source": (
+            track_b_paper_trade_summary.get("source")
+            or track_b_live_position_status.get("source")
+            or track_b_pnl_summary.get("source")
+            or "NO_TRACK_B_PAPER_TRADES_RECORDED"
+        ),
+        "track_b_paper_results_broker_reconciled": (
+            track_b_live_position_status.get("broker_reconciled")
+            if track_b_live_position_status
+            else False
+        ),
+        "paper_trades_attempted_count": (
+            track_b_paper_trade_summary.get("paper_trades_attempted_count")
+            if track_b_paper_trade_summary
+            else track_b_shadow_monitor.get("paper_trades_attempted_count", 0)
+        ),
+        "open_position_count": (
+            track_b_live_position_status.get("open_position_count")
+            if track_b_live_position_status
+            else 0
+        ),
+        "realized_pnl_today": track_b_pnl_summary.get("total_realized_pnl_today", "0"),
+        "realized_pnl_week": track_b_pnl_summary.get("total_realized_pnl_week", "0"),
+        "unrealized_pnl": track_b_pnl_summary.get("total_unrealized_pnl", "0"),
+        "last_trade_strategy": track_b_pnl_summary.get("last_trade_strategy") or NOT_PROVIDED,
+        "last_trade_pnl": track_b_pnl_summary.get("last_trade_pnl") if track_b_pnl_summary else NOT_PROVIDED,
+        "latest_trade_ledger_path": (
+            track_b_paper_trade_summary.get("latest_trade_ledger_path")
+            or str(DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT / "track_b_paper_trade_ledger.jsonl")
+        ),
+        "latest_live_position_status_path": (
+            track_b_live_position_status.get("latest_live_position_status_path")
+            or track_b_paper_trade_summary.get("latest_live_position_status_path")
+            or str(DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON)
+        ),
+        "latest_pnl_summary_path": (
+            track_b_pnl_summary.get("latest_pnl_summary_path")
+            or track_b_paper_trade_summary.get("latest_pnl_summary_path")
+            or str(DEFAULT_TRACK_B_PNL_SUMMARY_JSON)
+        ),
+        "review_required_count": (
+            track_b_pnl_summary.get("review_required_count")
+            if track_b_pnl_summary
+            else track_b_paper_trade_summary.get("review_required_count", 0)
+        ),
+        "track_b_positions_by_instrument": track_b_live_position_status.get("positions_by_instrument") or {},
+        "track_b_positions_by_strategy": track_b_live_position_status.get("positions_by_strategy") or {},
+        "track_b_pnl_by_strategy": track_b_pnl_summary.get("by_strategy") or {},
+        "track_b_pnl_by_instrument": track_b_pnl_summary.get("by_instrument") or {},
+        "track_b_paper_results_warning": (
+            track_b_live_position_status.get("broker_truth_warning")
+            or "No Track B PAPER trade ledger rows have been recorded yet."
         ),
         "databento_observer_verdict": databento_candle_observer.get("observer_verdict") or NOT_PROVIDED,
         "databento_contract_key": databento_candle_observer.get("contract_key") or databento_candle_observer_heartbeat.get("contract_key") or NOT_PROVIDED,
@@ -783,3 +859,9 @@ def _read_json(path: Path | None) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object.")
     return value
+
+
+def _read_optional_json(path: Path | None) -> dict[str, Any] | None:
+    if path is None or not path.exists():
+        return None
+    return _read_json(path)

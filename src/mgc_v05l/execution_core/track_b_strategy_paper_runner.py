@@ -24,6 +24,10 @@ from .ibkr_readonly_transport import IbkrReadOnlyTransportConfig, IbkrReadOnlyTw
 from .models import TerminalClassification, require_aware_datetime, to_jsonable
 from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatusInputs, create_operator_status_summary
 from .paper_proof import DEFAULT_PAPER_PROOF_OUTPUT_ROOT, PaperProofConfig, PaperProofResult, ProofRunner, run_paper_proof
+from .track_b_paper_trade_ledger import (
+    DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    update_track_b_paper_trade_ledger_from_runner_report,
+)
 from .preflight import ReadOnlyPreflightConfig, run_read_only_preflight
 from .signal_batch_writer import DEFAULT_SIGNAL_BATCH_WRITER_OUTPUT_ROOT
 from .strategy_signal_adapter import DEFAULT_STRATEGY_SIGNAL_ADAPTER_OUTPUT_ROOT
@@ -181,6 +185,7 @@ class TrackBStrategyPaperRunnerConfig:
     current_quote_output_root: Path = Path("outputs/track_b_execution_core/current_quotes")
     readiness_summary_output_root: Path = Path("outputs/track_b_execution_core/readiness_summary")
     paper_proof_output_root: Path = DEFAULT_PAPER_PROOF_OUTPUT_ROOT
+    paper_trade_ledger_output_root: Path | None = None
     operator_status_output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
 
 
@@ -898,6 +903,14 @@ def _run_operator_status(config: TrackBStrategyPaperRunnerConfig, runner_report_
     )
 
 
+def _paper_trade_ledger_output_root(config: TrackBStrategyPaperRunnerConfig) -> Path:
+    if config.paper_trade_ledger_output_root is not None:
+        return config.paper_trade_ledger_output_root
+    if Path(config.output_root) == DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT:
+        return DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
+    return Path(config.output_root).parent / "paper_trade_ledger"
+
+
 def _finalize(
     *,
     config: TrackBStrategyPaperRunnerConfig,
@@ -933,6 +946,27 @@ def _finalize(
         proof_classification=proof_classification,
     )
     _write_report(report_json, report)
+    try:
+        ledger = update_track_b_paper_trade_ledger_from_runner_report(
+            runner_report=report,
+            runner_report_json=report_json.parent.parent / "latest_track_b_strategy_paper_runner_report.json",
+            output_root=_paper_trade_ledger_output_root(config),
+            now=now,
+        )
+        report.update(
+            {
+                "paper_trade_ledger_invoked": True,
+                "paper_trade_record_written": ledger.trade_record_written,
+                "latest_paper_trade_ledger_path": str(ledger.ledger_jsonl),
+                "latest_paper_trade_summary_path": str(ledger.trade_summary_json),
+                "latest_live_position_status_path": str(ledger.live_position_status_json),
+                "latest_pnl_summary_path": str(ledger.pnl_summary_json),
+            }
+        )
+        _write_report(report_json, report)
+    except Exception as exc:  # noqa: BLE001 - ledger is a compact read model, not submit authority.
+        report["paper_trade_ledger_error"] = str(exc)
+        _write_report(report_json, report)
     try:
         operator_status_stage(config, report_json.parent.parent / "latest_track_b_strategy_paper_runner_report.json")
     except Exception as exc:  # noqa: BLE001 - operator-status is read-model convenience only.
