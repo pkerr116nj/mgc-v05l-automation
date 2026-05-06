@@ -311,6 +311,14 @@ def _aggregate_1m_to_5m(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, 
                 "source_1m_bar_count": len(group),
                 "source_start_timestamp": group[0]["candle_timestamp"],
                 "source_end_timestamp": group[-1]["candle_timestamp"],
+                "source_tags": sorted(
+                    {
+                        str(item.get("source_tag"))
+                        for item in group
+                        if item.get("source_tag") is not None
+                    }
+                ),
+                "latest_decision_bar_source": group[-1].get("source_tag"),
             }
         )
     return output
@@ -330,6 +338,8 @@ def _normalize_candle(item: Mapping[str, Any]) -> dict[str, Any]:
         "completed": _completed_value(item),
         "provider_symbol": item.get("provider_symbol"),
         "raw_symbol": item.get("raw_symbol"),
+        "source_tag": item.get("source_tag"),
+        "source_role": item.get("source_role"),
     }
 
 

@@ -76,6 +76,10 @@ from .track_b_snap_turn_envelope_producer import (
 
 
 DEFAULT_TRACK_B_SHADOW_MONITOR_OUTPUT_ROOT = Path("outputs/track_b_execution_core/track_b_shadow_monitor")
+DEFAULT_TRACK_B_DIAGNOSTIC_OUTPUT_ROOT = Path("outputs/track_b_execution_core/diagnostics")
+DEFAULT_TRACK_B_STARTUP_READINESS_DIAGNOSTIC_JSON = (
+    DEFAULT_TRACK_B_DIAGNOSTIC_OUTPUT_ROOT / "latest_track_b_startup_readiness_diagnostic.json"
+)
 DEFAULT_CURRENT_QUOTE_REPORT_JSON = Path(
     "outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json"
 )
@@ -176,6 +180,9 @@ class TrackBShadowMonitorConfig:
     allow_fresh_runtime_artifact_fallback: bool = True
     max_latest_1m_age_seconds: int = 900
     max_completed_5m_age_seconds: int = 900
+    live_execution_min_1m_bars: int = 3
+    live_execution_min_completed_5m_bars: int = 1
+    startup_backfill_context_enabled: bool = True
     runtime_data_source: TrackBRuntimeDataSource | str = TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT
     live_runtime_feed_output_root: Path = DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
     manage_live_feed: bool = True
@@ -200,6 +207,7 @@ class TrackBShadowMonitorConfig:
     session_strategy_output_root: Path = DEFAULT_TRACK_B_SESSION_STRATEGY_ENVELOPE_OUTPUT_ROOT
     multi_strategy_output_root: Path = DEFAULT_TRACK_B_MULTI_STRATEGY_RUNTIME_CYCLE_OUTPUT_ROOT
     operator_status_output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
+    diagnostic_output_root: Path = DEFAULT_TRACK_B_DIAGNOSTIC_OUTPUT_ROOT
     backend_health_json: Path | None = DEFAULT_BACKEND_HEALTH_JSON
     lockfile: Path = DEFAULT_LOCKFILE
     pidfile: Path = DEFAULT_PIDFILE
@@ -302,11 +310,18 @@ class TrackBLiveFeedReadiness:
     latest_1m_age_seconds: float | None
     latest_completed_5m_age_seconds: float | None
     execution_freshness_blocker: str | None
+    live_execution_approved: bool
+    live_confirmation_1m_count: int
+    live_confirmation_completed_5m_count: int
+    live_execution_required_1m_count: int
+    live_execution_required_completed_5m_count: int
     strategy_ready: bool
     warmup_1m_count: int
     warmup_completed_5m_count: int
     required_1m_count: int
     required_completed_5m_count: int
+    feature_context_ready: bool
+    feature_context_source: str | None
     blocker: str | None
     report_path: Path | None
     heartbeat_path: Path | None
@@ -745,12 +760,23 @@ def _run_instrument_cycle(
             now=started_at,
             live_feed_processes=live_feed_processes if live_feed_processes is not None else {},
         )
-        if not live_feed_readiness.strategy_ready:
+        if not live_feed_readiness.strategy_ready and not (
+            config.startup_backfill_context_enabled and live_feed_readiness.live_execution_approved
+        ):
+            _write_live_readiness_startup_diagnostic(
+                config=config,
+                instrument=instrument,
+                readiness=live_feed_readiness,
+                now=started_at,
+            )
             report = _instrument_report_base(
                 instrument=instrument,
                 verdict=live_feed_readiness.verdict or TrackBShadowMonitorVerdict.LIVE_FEED_NOT_READY,
                 primary_blocker=live_feed_readiness.blocker or "Databento Live feed is not strategy-ready.",
-                required_next_action="Keep the managed Databento Live feed running until strategy_ready=true.",
+                required_next_action=(
+                    "Keep the managed Databento Live feed running until live_execution_approved=true, "
+                    "then seed feature context from bounded backfill if needed."
+                ),
                 live_feed=live_feed_readiness,
             )
             report["runtime_data_source"] = TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
@@ -810,6 +836,25 @@ def _run_instrument_cycle(
                     or "Runtime candle context is not fresh_for_execution=true."
                 ),
                 required_next_action="Refresh runtime candles until fresh_for_execution=true before strategy evaluation.",
+            ),
+            None,
+        )
+    if (
+        runtime.report.get("runtime_data_source") == TrackBRuntimeDataSource.DATABENTO_LIVE_ARTIFACT.value
+        and runtime.report.get("paper_evaluation_allowed") is False
+    ):
+        return (
+            _instrument_report_from_stages(
+                instrument=instrument,
+                verdict=TrackBShadowMonitorVerdict.NOT_READY_STALE_RUNTIME_CONTEXT,
+                runtime=runtime,
+                live_feed=live_feed_readiness,
+                primary_blocker=str(
+                    runtime.report.get("startup_readiness_classification")
+                    or runtime.report.get("execution_freshness_blocker")
+                    or "Startup feature context or Live execution approval is not ready."
+                ),
+                required_next_action="Seed bounded feature context and require latest decision bar from fresh Databento Live artifacts.",
             ),
             None,
         )
@@ -1011,6 +1056,8 @@ def _read_live_feed_readiness(
     warmup_completed_5m_count = _bars_available(completed)
     required_1m_count = max(int(config.live_feed_min_bars), int(config.min_bars))
     required_completed_5m_count = max(8, int(config.min_bars))
+    live_execution_required_1m_count = max(1, int(config.live_execution_min_1m_bars))
+    live_execution_required_completed_5m_count = max(0, int(config.live_execution_min_completed_5m_bars))
     heartbeat_fresh = heartbeat_age is not None and heartbeat_age <= max(float(config.max_latest_1m_age_seconds), config.poll_seconds * 3)
     owned_warmup_elapsed = None if state is None or state.started_at is None else (
         now.astimezone(UTC) - state.started_at.astimezone(UTC)
@@ -1079,11 +1126,44 @@ def _read_live_feed_readiness(
                 f"{round(latest_completed_5m_age, 3)}s exceeds max {config.max_completed_5m_age_seconds}s"
             )
         execution_freshness_blocker = "; ".join(stale_parts) or "Databento Live execution freshness is unavailable."
-    strategy_ready = (
+    live_execution_approved = (
         artifact_matches is None
         and heartbeat_fresh
         and live_connected is True
         and execution_fresh is True
+        and warmup_1m_count >= live_execution_required_1m_count
+        and warmup_completed_5m_count >= live_execution_required_completed_5m_count
+    )
+    feature_context_ready = (
+        warmup_1m_count >= required_1m_count
+        and warmup_completed_5m_count >= required_completed_5m_count
+    )
+    strategy_ready = (
+        live_execution_approved
+        and feature_context_ready
+    )
+    live_execution_blocker = None
+    if live_execution_approved is not True:
+        if artifact_matches:
+            live_execution_blocker = artifact_matches
+        elif not heartbeat_fresh:
+            live_execution_blocker = "Databento Live heartbeat is not fresh enough for execution approval."
+        elif live_connected is not True:
+            live_execution_blocker = "Databento Live transport is not connected."
+        elif execution_fresh is not True:
+            live_execution_blocker = execution_freshness_blocker or "Databento Live execution freshness is unavailable."
+        elif warmup_1m_count < live_execution_required_1m_count:
+            live_execution_blocker = (
+                "Databento Live confirmation window is incomplete: "
+                f"1m={warmup_1m_count}/{live_execution_required_1m_count}."
+            )
+        elif warmup_completed_5m_count < live_execution_required_completed_5m_count:
+            live_execution_blocker = (
+                "Databento Live confirmation window is incomplete: "
+                f"completed_5m={warmup_completed_5m_count}/{live_execution_required_completed_5m_count}."
+            )
+    live_only_strategy_ready = (
+        live_execution_approved
         and warmup_1m_count >= required_1m_count
         and warmup_completed_5m_count >= required_completed_5m_count
     )
@@ -1122,7 +1202,11 @@ def _read_live_feed_readiness(
         status = "LIVE_FEED_DISCONNECTED"
         verdict = TrackBShadowMonitorVerdict.LIVE_FEED_DISCONNECTED
         blocker = "Databento Live feed is not connected."
-    elif warmup_1m_count < required_1m_count or warmup_completed_5m_count < required_completed_5m_count:
+    elif live_execution_approved is not True:
+        status = "LIVE_FEED_STALE" if execution_fresh is not True else "LIVE_FEED_WARMING_UP"
+        verdict = TrackBShadowMonitorVerdict.LIVE_FEED_STALE if execution_fresh is not True else TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
+        blocker = live_execution_blocker or "Databento Live feed is not approved for execution yet."
+    elif live_only_strategy_ready is not True:
         warmup_elapsed = owned_warmup_elapsed
         if warmup_elapsed is not None and warmup_elapsed > config.live_feed_warmup_timeout_seconds:
             status = "LIVE_FEED_WARMUP_TIMEOUT"
@@ -1137,14 +1221,10 @@ def _read_live_feed_readiness(
             status = "LIVE_FEED_WARMING_UP"
             verdict = TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
             blocker = (
-                "Databento Live feed is warming up: "
+                "Databento Live feed is execution-fresh but feature context is warming up: "
                 f"1m={warmup_1m_count}/{required_1m_count}, "
                 f"completed_5m={warmup_completed_5m_count}/{required_completed_5m_count}."
             )
-    elif execution_fresh is not True:
-        status = "LIVE_FEED_STALE"
-        verdict = TrackBShadowMonitorVerdict.LIVE_FEED_STALE
-        blocker = execution_freshness_blocker or "Databento Live feed artifacts are present but not fresh_for_execution=true."
     else:
         status = "LIVE_FEED_STRATEGY_READY"
 
@@ -1167,11 +1247,18 @@ def _read_live_feed_readiness(
         latest_1m_age_seconds=None if latest_1m_age is None else round(latest_1m_age, 3),
         latest_completed_5m_age_seconds=None if latest_completed_5m_age is None else round(latest_completed_5m_age, 3),
         execution_freshness_blocker=execution_freshness_blocker,
+        live_execution_approved=live_execution_approved,
+        live_confirmation_1m_count=warmup_1m_count,
+        live_confirmation_completed_5m_count=warmup_completed_5m_count,
+        live_execution_required_1m_count=live_execution_required_1m_count,
+        live_execution_required_completed_5m_count=live_execution_required_completed_5m_count,
         strategy_ready=strategy_ready,
         warmup_1m_count=warmup_1m_count,
         warmup_completed_5m_count=warmup_completed_5m_count,
         required_1m_count=required_1m_count,
         required_completed_5m_count=required_completed_5m_count,
+        feature_context_ready=feature_context_ready,
+        feature_context_source="DATABENTO_LIVE_ARTIFACT" if feature_context_ready else None,
         blocker=blocker,
         report_path=report_path if report_path.exists() else None,
         heartbeat_path=heartbeat_path if heartbeat_path.exists() else None,
@@ -1476,8 +1563,18 @@ def _run_live_runtime_artifact_capture(
         )
         _annotate_live_runtime_result(result, live_report_json=live_report_json, live_event_json=live_event_json, live_report=live_report)
         return result
+    startup_context_payload, startup_readiness = _startup_context_payload(
+        config=config,
+        instrument=instrument,
+        cycle_index=cycle_index,
+        now=now,
+        live_payload=payload,
+        live_report=live_report,
+        live_event_json=live_event_json,
+        live_report_json=live_report_json,
+    )
     result = capture_track_b_runtime_mgc_1m_candles(
-        runtime_candle_payload=payload,
+        runtime_candle_payload=startup_context_payload,
         source_payload_path=live_event_json,
         expected_account_id=instrument.expected_account_id,
         account_id=instrument.execution_account_id,
@@ -1500,8 +1597,394 @@ def _run_live_runtime_artifact_capture(
         capture_id=f"track_b_shadow_monitor_live_runtime_artifact_cycle_{cycle_index}_{uuid.uuid4().hex}",
         now=now,
     )
+    result.report.update(
+        {
+            "feature_context_ready": startup_readiness.get("context_ready"),
+            "feature_context_source": startup_readiness.get("context_source"),
+            "startup_readiness_classification": startup_readiness.get("classification"),
+            "startup_readiness_diagnostic_path": startup_readiness.get("diagnostic_path"),
+            "backfill_gap_detected": startup_readiness.get("backfill_gap_detected"),
+            "backfill_gap_filled": startup_readiness.get("backfill_gap_filled"),
+            "backfill_source": startup_readiness.get("backfill_source"),
+            "latest_decision_bar_source": startup_readiness.get("latest_decision_bar_source"),
+            "live_execution_approved": startup_readiness.get("live_execution_approved"),
+            "paper_evaluation_allowed": startup_readiness.get("paper_evaluation_allowed"),
+        }
+    )
     _annotate_live_runtime_result(result, live_report_json=live_report_json, live_event_json=live_event_json, live_report=live_report)
     return result
+
+
+def _startup_context_payload(
+    *,
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    cycle_index: int,
+    now: datetime,
+    live_payload: Mapping[str, Any],
+    live_report: Mapping[str, Any] | None,
+    live_event_json: Path,
+    live_report_json: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    live_report_payload = live_report or {}
+    required_1m = max(int(config.live_feed_min_bars), int(config.min_bars))
+    required_5m = max(8, int(config.min_bars))
+    live_candles = _tag_context_candles(_payload_candles(live_payload), "DATABENTO_LIVE_ARTIFACT")
+    merged = list(live_candles)
+    backfill_gap_detected = len(merged) < required_1m or _completed_5m_count_from_1m(merged) < required_5m
+    backfill_gap_filled = False
+    backfill_source = None
+    backfill_report_path = None
+    recovery_event_path = _latest_runtime_1m_path(Path(config.runtime_candle_capture_output_root), instrument)
+    recovery_payload = _read_json_optional(recovery_event_path)
+    if backfill_gap_detected and recovery_payload:
+        recovery_candles = _tag_context_candles(
+            _payload_candles(recovery_payload),
+            _context_source_tag(recovery_payload, default="RECOVERY_CONTEXT"),
+        )
+        merged = _merge_context_candles(recovery_candles, merged)
+        backfill_gap_filled = len(merged) >= required_1m and _completed_5m_count_from_1m(merged) >= required_5m
+        if backfill_gap_filled:
+            backfill_source = "RECOVERY_CONTEXT"
+            backfill_report_path = str(recovery_event_path)
+    if (
+        backfill_gap_detected
+        and not backfill_gap_filled
+        and config.startup_backfill_context_enabled
+    ):
+        backfill = _run_http_backfill_runtime_candle_capture(config, instrument, cycle_index, now)
+        backfill_report_path = str(backfill.report_json)
+        if backfill.report.get("data_written") is True and backfill.runtime_candles_event:
+            http_candles = _tag_context_candles(
+                _payload_candles(backfill.runtime_candles_event),
+                "DATABENTO_HTTP_BACKFILL",
+            )
+            merged = _merge_context_candles(http_candles, live_candles)
+            backfill_source = "DATABENTO_HTTP_BACKFILL"
+            backfill_gap_filled = len(merged) >= required_1m and _completed_5m_count_from_1m(merged) >= required_5m
+    merged = _merge_context_candles(merged)
+    merged = merged[-max(int(config.max_bars), required_1m):]
+    completed_5m_count = _completed_5m_count_from_1m(merged)
+    context_gap_count = _context_gap_count(merged)
+    latest_decision_bar_source = merged[-1].get("source_tag") if merged else None
+    context_ready = len(merged) >= required_1m and completed_5m_count >= required_5m and context_gap_count == 0
+    live_completed_1m_fresh = _first_bool(
+        live_payload.get("completed_1m_fresh"),
+        live_report_payload.get("completed_1m_fresh"),
+    )
+    live_completed_5m_fresh = _first_bool(
+        live_payload.get("completed_5m_fresh"),
+        live_report_payload.get("completed_5m_fresh"),
+    )
+    if live_completed_1m_fresh is None:
+        latest_1m_age = _first_float(
+            live_payload.get("latest_1m_age_seconds"),
+            live_payload.get("latest_1m_candle_age_seconds"),
+            live_report_payload.get("latest_1m_age_seconds"),
+            live_report_payload.get("latest_1m_candle_age_seconds"),
+        )
+        live_completed_1m_fresh = (
+            latest_1m_age <= float(config.max_latest_1m_age_seconds)
+            if latest_1m_age is not None
+            else _first_bool(live_payload.get("fresh_for_execution"), live_report_payload.get("fresh_for_execution"))
+        )
+    if live_completed_5m_fresh is None:
+        latest_5m_age = _first_float(
+            live_payload.get("latest_completed_5m_age_seconds"),
+            live_payload.get("latest_completed_5m_candle_age_seconds"),
+            live_report_payload.get("latest_completed_5m_age_seconds"),
+            live_report_payload.get("latest_completed_5m_candle_age_seconds"),
+        )
+        live_completed_5m_fresh = (
+            latest_5m_age <= float(config.max_completed_5m_age_seconds)
+            if latest_5m_age is not None
+            else _first_bool(live_payload.get("fresh_for_execution"), live_report_payload.get("fresh_for_execution"))
+        )
+    live_execution_approved = (
+        latest_decision_bar_source == "DATABENTO_LIVE_ARTIFACT"
+        and len(live_candles) >= max(1, int(config.live_execution_min_1m_bars))
+        and _completed_5m_count_from_1m(live_candles) >= max(0, int(config.live_execution_min_completed_5m_bars))
+        and live_completed_1m_fresh is True
+        and live_completed_5m_fresh is True
+    )
+    paper_evaluation_allowed = context_ready and live_execution_approved
+    if not context_ready:
+        classification = "FEATURE_CONTEXT_NOT_READY"
+        context_source = backfill_source
+    elif latest_decision_bar_source != "DATABENTO_LIVE_ARTIFACT":
+        classification = "LATEST_DECISION_BAR_NOT_LIVE"
+        context_source = backfill_source or "NON_EXECUTION_CONTEXT"
+        paper_evaluation_allowed = False
+    elif not live_execution_approved:
+        classification = "LIVE_EXECUTION_NOT_APPROVED"
+        context_source = backfill_source or "DATABENTO_LIVE_ARTIFACT"
+    elif context_ready and not backfill_gap_detected:
+        classification = "READY_WITH_LIVE_ONLY_CONTEXT"
+        context_source = "DATABENTO_LIVE_ARTIFACT"
+    elif context_ready and backfill_gap_filled:
+        classification = "READY_WITH_BACKFILL_SEEDED_CONTEXT"
+        context_source = "MIXED_BACKFILL_SEEDED_CONTEXT"
+    elif backfill_gap_detected and config.startup_backfill_context_enabled and not backfill_gap_filled:
+        classification = "BACKFILL_FAILED" if backfill_report_path else "BACKFILL_REQUIRED_IN_PROGRESS"
+        context_source = backfill_source
+    else:
+        classification = "DIAGNOSTIC_INCONCLUSIVE"
+        context_source = backfill_source
+    diagnostic = {
+        "instrument_family": instrument.instrument_family,
+        "strategy_ids": list(instrument.enabled_strategies),
+        "required_1m_context_bars": required_1m,
+        "available_1m_context_bars": len(merged),
+        "required_5m_context_bars": required_5m,
+        "available_5m_context_bars": completed_5m_count,
+        "live_1m_bars": len(live_candles),
+        "live_completed_5m_bars": _completed_5m_count_from_1m(live_candles),
+        "backfill_gap_detected": backfill_gap_detected,
+        "backfill_gap_filled": backfill_gap_filled,
+        "backfill_source": backfill_source,
+        "context_source": context_source,
+        "backfill_report_path": backfill_report_path,
+        "context_gap_count": context_gap_count,
+        "context_ready": context_ready,
+        "live_transport_connected": True,
+        "live_raw_messages_fresh": None,
+        "live_completed_1m_fresh": live_completed_1m_fresh,
+        "live_completed_5m_fresh": live_completed_5m_fresh,
+        "latest_decision_bar_source": latest_decision_bar_source,
+        "live_execution_approved": live_execution_approved,
+        "strategy_ready": paper_evaluation_allowed,
+        "paper_evaluation_allowed": paper_evaluation_allowed,
+        "blocked_reason": _startup_blocked_reason(
+            context_ready=context_ready,
+            live_execution_approved=live_execution_approved,
+            latest_decision_bar_source=latest_decision_bar_source,
+            context_gap_count=context_gap_count,
+            available_1m=len(merged),
+            required_1m=required_1m,
+            available_5m=completed_5m_count,
+            required_5m=required_5m,
+        ),
+        "classification": classification,
+        "live_event_path": str(live_event_json),
+        "live_report_path": str(live_report_json) if live_report_json.exists() else None,
+    }
+    diagnostic_path = _write_startup_readiness_diagnostic(config=config, instrument_payload=diagnostic, now=now)
+    diagnostic["diagnostic_path"] = str(diagnostic_path)
+    output_payload = dict(live_payload)
+    output_payload.update(
+        {
+            "candle_source_mode": (
+                "DATABENTO_LIVE_WITH_BACKFILL_SEEDED_CONTEXT"
+                if context_source == "MIXED_BACKFILL_SEEDED_CONTEXT"
+                else "DATABENTO_LIVE_RUNTIME_FEED"
+            ),
+            "candles": merged,
+            "candle_history": merged,
+            "bars_available": len(merged),
+            "feature_context_ready": context_ready,
+            "feature_context_source": context_source,
+            "startup_readiness_classification": classification,
+            "latest_decision_bar_source": latest_decision_bar_source,
+            "live_execution_approved": live_execution_approved,
+            "paper_evaluation_allowed": paper_evaluation_allowed,
+            "source_lineage": {
+                "live_event_path": str(live_event_json),
+                "live_report_path": str(live_report_json) if live_report_json.exists() else None,
+                "backfill_report_path": backfill_report_path,
+                "context_source": context_source,
+            },
+        }
+    )
+    return output_payload, diagnostic
+
+
+def _payload_candles(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    for key in ("candles", "candle_history", "runtime_candles", "bars", "ohlcv"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [dict(item) for item in raw if isinstance(item, Mapping)]
+    return []
+
+
+def _tag_context_candles(candles: Sequence[Mapping[str, Any]], source_tag: str) -> list[dict[str, Any]]:
+    tagged: list[dict[str, Any]] = []
+    for candle in candles:
+        item = dict(candle)
+        item["source_tag"] = item.get("source_tag") or source_tag
+        item["source_role"] = "EXECUTION_LIVE" if item["source_tag"] == "DATABENTO_LIVE_ARTIFACT" else "NON_EXECUTION_CONTEXT"
+        tagged.append(item)
+    return tagged
+
+
+def _context_source_tag(payload: Mapping[str, Any], *, default: str) -> str:
+    mode = str(payload.get("candle_source_mode") or "").upper()
+    if "HTTP" in mode or "HISTORICAL" in mode or "BACKFILL" in mode:
+        return "DATABENTO_HTTP_BACKFILL"
+    if "LIVE" in mode:
+        return "RECOVERY_CONTEXT"
+    return default
+
+
+def _merge_context_candles(*groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    by_ts: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for candle in group:
+            ts = _first_text(candle.get("candle_timestamp"), candle.get("timestamp"), candle.get("observed_at"))
+            if not ts:
+                continue
+            try:
+                normalized_ts = _parse_time(ts).isoformat()
+            except ValueError:
+                continue
+            item = dict(candle)
+            item["candle_timestamp"] = normalized_ts
+            existing = by_ts.get(normalized_ts)
+            if existing is None or item.get("source_tag") == "DATABENTO_LIVE_ARTIFACT":
+                by_ts[normalized_ts] = item
+    return [by_ts[key] for key in sorted(by_ts, key=lambda value: _parse_time(value))]
+
+
+def _context_gap_count(candles: Sequence[Mapping[str, Any]]) -> int:
+    if len(candles) < 2:
+        return 0
+    gaps = 0
+    previous = _parse_time(str(candles[0]["candle_timestamp"]))
+    for candle in candles[1:]:
+        current = _parse_time(str(candle["candle_timestamp"]))
+        if current - previous > timedelta(minutes=1):
+            gaps += 1
+        previous = current
+    return gaps
+
+
+def _completed_5m_count_from_1m(candles: Sequence[Mapping[str, Any]]) -> int:
+    groups: dict[datetime, int] = {}
+    for candle in candles:
+        try:
+            ts = _parse_time(str(candle.get("candle_timestamp") or candle.get("timestamp")))
+        except ValueError:
+            continue
+        key = ts.replace(minute=ts.minute - (ts.minute % 5), second=0, microsecond=0)
+        groups[key] = groups.get(key, 0) + 1
+    return sum(1 for count in groups.values() if count >= 5)
+
+
+def _startup_blocked_reason(
+    *,
+    context_ready: bool,
+    live_execution_approved: bool,
+    latest_decision_bar_source: object,
+    context_gap_count: int,
+    available_1m: int,
+    required_1m: int,
+    available_5m: int,
+    required_5m: int,
+) -> str | None:
+    if context_ready and live_execution_approved and latest_decision_bar_source == "DATABENTO_LIVE_ARTIFACT":
+        return None
+    if latest_decision_bar_source != "DATABENTO_LIVE_ARTIFACT":
+        return "Latest decision bar is not sourced from DATABENTO_LIVE_ARTIFACT."
+    if context_gap_count > 0:
+        return f"Startup feature context has {context_gap_count} detected 1m gap(s)."
+    if available_1m < required_1m:
+        return f"Feature context has {available_1m}/{required_1m} required 1m bars."
+    if available_5m < required_5m:
+        return f"Feature context has {available_5m}/{required_5m} required completed 5m bars."
+    if not live_execution_approved:
+        return "Databento Live execution approval is not satisfied."
+    return "Startup readiness is inconclusive."
+
+
+def _write_live_readiness_startup_diagnostic(
+    *,
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    readiness: TrackBLiveFeedReadiness,
+    now: datetime,
+) -> Path:
+    if readiness.live_execution_approved is not True:
+        classification = "LIVE_EXECUTION_NOT_APPROVED"
+    elif readiness.feature_context_ready is not True:
+        classification = "FEATURE_CONTEXT_NOT_READY"
+    else:
+        classification = "READY_WITH_LIVE_ONLY_CONTEXT"
+    payload = {
+        "instrument_family": instrument.instrument_family,
+        "strategy_ids": list(instrument.enabled_strategies),
+        "required_1m_context_bars": readiness.required_1m_count,
+        "available_1m_context_bars": readiness.warmup_1m_count,
+        "required_5m_context_bars": readiness.required_completed_5m_count,
+        "available_5m_context_bars": readiness.warmup_completed_5m_count,
+        "live_1m_bars": readiness.warmup_1m_count,
+        "live_completed_5m_bars": readiness.warmup_completed_5m_count,
+        "backfill_gap_detected": readiness.feature_context_ready is not True,
+        "backfill_gap_filled": False,
+        "backfill_source": None,
+        "context_gap_count": None,
+        "context_ready": readiness.feature_context_ready,
+        "live_transport_connected": readiness.transport_connected,
+        "live_raw_messages_fresh": readiness.raw_messages_fresh,
+        "live_completed_1m_fresh": readiness.completed_1m_fresh,
+        "live_completed_5m_fresh": readiness.completed_5m_fresh,
+        "latest_decision_bar_source": None,
+        "live_execution_approved": readiness.live_execution_approved,
+        "strategy_ready": readiness.strategy_ready,
+        "paper_evaluation_allowed": False,
+        "blocked_reason": readiness.blocker,
+        "classification": classification,
+        "live_event_path": None if readiness.event_path is None else str(readiness.event_path),
+        "live_report_path": None if readiness.report_path is None else str(readiness.report_path),
+    }
+    return _write_startup_readiness_diagnostic(config=config, instrument_payload=payload, now=now)
+
+
+def _write_startup_readiness_diagnostic(
+    *,
+    config: TrackBShadowMonitorConfig,
+    instrument_payload: Mapping[str, Any],
+    now: datetime,
+) -> Path:
+    path = Path(config.diagnostic_output_root) / "latest_track_b_startup_readiness_diagnostic.json"
+    existing = _read_json_optional(path) or {}
+    instruments = existing.get("instruments") if isinstance(existing.get("instruments"), Mapping) else {}
+    updated = dict(instruments)
+    family = str(instrument_payload.get("instrument_family") or "UNKNOWN")
+    updated[family] = dict(instrument_payload)
+    classifications = [
+        str(item.get("classification"))
+        for item in updated.values()
+        if isinstance(item, Mapping) and item.get("classification")
+    ]
+    if any(item == "READY_WITH_BACKFILL_SEEDED_CONTEXT" for item in classifications):
+        classification = "READY_WITH_BACKFILL_SEEDED_CONTEXT"
+    elif all(item == "READY_WITH_LIVE_ONLY_CONTEXT" for item in classifications) and classifications:
+        classification = "READY_WITH_LIVE_ONLY_CONTEXT"
+    elif any(item == "LIVE_EXECUTION_NOT_APPROVED" for item in classifications):
+        classification = "LIVE_EXECUTION_NOT_APPROVED"
+    elif any(item == "LATEST_DECISION_BAR_NOT_LIVE" for item in classifications):
+        classification = "LATEST_DECISION_BAR_NOT_LIVE"
+    elif any(item == "BACKFILL_FAILED" for item in classifications):
+        classification = "BACKFILL_FAILED"
+    elif any(item == "BACKFILL_REQUIRED_IN_PROGRESS" for item in classifications):
+        classification = "BACKFILL_REQUIRED_IN_PROGRESS"
+    elif any(item == "FEATURE_CONTEXT_NOT_READY" for item in classifications):
+        classification = "FEATURE_CONTEXT_NOT_READY"
+    else:
+        classification = "DIAGNOSTIC_INCONCLUSIVE"
+    report = {
+        "schema_version": "track_b_startup_readiness_diagnostic_v1",
+        "generated_at": now.astimezone(UTC).isoformat(),
+        "diagnosis_classification": classification,
+        "instruments": updated,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+        "report_json_path": str(path),
+    }
+    _write_json_file(path, report)
+    return path
 
 
 def _annotate_live_runtime_result(
@@ -2163,6 +2646,13 @@ def _instrument_report_base(
         "live_feed_completed_1m_fresh": None if live_feed is None else live_feed.completed_1m_fresh,
         "live_feed_completed_5m_fresh": None if live_feed is None else live_feed.completed_5m_fresh,
         "live_feed_execution_fresh": None if live_feed is None else live_feed.execution_fresh,
+        "live_execution_approved": None if live_feed is None else live_feed.live_execution_approved,
+        "live_confirmation_1m_count": None if live_feed is None else live_feed.live_confirmation_1m_count,
+        "live_confirmation_completed_5m_count": None if live_feed is None else live_feed.live_confirmation_completed_5m_count,
+        "live_execution_required_1m_count": None if live_feed is None else live_feed.live_execution_required_1m_count,
+        "live_execution_required_completed_5m_count": None
+        if live_feed is None
+        else live_feed.live_execution_required_completed_5m_count,
         "live_feed_latest_1m_age_seconds": None if live_feed is None else live_feed.latest_1m_age_seconds,
         "live_feed_latest_completed_5m_age_seconds": None if live_feed is None else live_feed.latest_completed_5m_age_seconds,
         "live_feed_execution_freshness_blocker": None if live_feed is None else live_feed.execution_freshness_blocker,
@@ -2171,6 +2661,9 @@ def _instrument_report_base(
         "live_feed_warmup_completed_5m_count": None if live_feed is None else live_feed.warmup_completed_5m_count,
         "live_feed_required_1m_count": None if live_feed is None else live_feed.required_1m_count,
         "live_feed_required_completed_5m_count": None if live_feed is None else live_feed.required_completed_5m_count,
+        "feature_context_ready": None if live_feed is None else live_feed.feature_context_ready,
+        "feature_context_source": None if live_feed is None else live_feed.feature_context_source,
+        "paper_evaluation_allowed": False,
         "live_feed_blocker": None if live_feed is None else live_feed.blocker,
         "live_feed_report_path": None if live_feed is None or live_feed.report_path is None else str(live_feed.report_path),
         "live_feed_heartbeat_path": None if live_feed is None or live_feed.heartbeat_path is None else str(live_feed.heartbeat_path),
@@ -2258,14 +2751,32 @@ def _instrument_report_from_stages(
             "live_feed_completed_1m_fresh": base.get("live_feed_completed_1m_fresh"),
             "live_feed_completed_5m_fresh": base.get("live_feed_completed_5m_fresh"),
             "live_feed_execution_fresh": base.get("live_feed_execution_fresh"),
+            "live_execution_approved": base.get("live_execution_approved"),
+            "live_confirmation_1m_count": base.get("live_confirmation_1m_count"),
+            "live_confirmation_completed_5m_count": base.get("live_confirmation_completed_5m_count"),
+            "live_execution_required_1m_count": base.get("live_execution_required_1m_count"),
+            "live_execution_required_completed_5m_count": base.get("live_execution_required_completed_5m_count"),
             "live_feed_latest_1m_age_seconds": base.get("live_feed_latest_1m_age_seconds"),
             "live_feed_latest_completed_5m_age_seconds": base.get("live_feed_latest_completed_5m_age_seconds"),
             "live_feed_execution_freshness_blocker": base.get("live_feed_execution_freshness_blocker"),
-            "live_feed_strategy_ready": base.get("live_feed_strategy_ready"),
+            "live_feed_strategy_ready": (
+                True
+                if runtime_report.get("feature_context_ready") is True
+                and base.get("live_execution_approved") is True
+                and runtime_report.get("fresh_for_execution", False) is True
+                else base.get("live_feed_strategy_ready")
+            ),
             "live_feed_warmup_1m_count": base.get("live_feed_warmup_1m_count"),
             "live_feed_warmup_completed_5m_count": base.get("live_feed_warmup_completed_5m_count"),
             "live_feed_required_1m_count": base.get("live_feed_required_1m_count"),
             "live_feed_required_completed_5m_count": base.get("live_feed_required_completed_5m_count"),
+            "feature_context_ready": runtime_report.get("feature_context_ready", base.get("feature_context_ready")),
+            "feature_context_source": runtime_report.get("feature_context_source") or base.get("feature_context_source"),
+            "paper_evaluation_allowed": bool(
+                runtime_report.get("feature_context_ready", base.get("feature_context_ready")) is True
+                and base.get("live_execution_approved") is True
+                and runtime_report.get("fresh_for_execution", False) is True
+            ),
             "live_feed_blocker": base.get("live_feed_blocker"),
             "live_feed_verdict": runtime_report.get("live_feed_verdict"),
             "latest_record_ts_event": runtime_report.get("latest_record_ts_event"),
@@ -2415,6 +2926,11 @@ def _report_for_cycle(
                 "live_feed_completed_1m_fresh": item.get("live_feed_completed_1m_fresh"),
                 "live_feed_completed_5m_fresh": item.get("live_feed_completed_5m_fresh"),
                 "live_feed_execution_fresh": item.get("live_feed_execution_fresh"),
+                "live_execution_approved": item.get("live_execution_approved"),
+                "live_confirmation_1m_count": item.get("live_confirmation_1m_count"),
+                "live_confirmation_completed_5m_count": item.get("live_confirmation_completed_5m_count"),
+                "live_execution_required_1m_count": item.get("live_execution_required_1m_count"),
+                "live_execution_required_completed_5m_count": item.get("live_execution_required_completed_5m_count"),
                 "live_feed_latest_1m_age_seconds": item.get("live_feed_latest_1m_age_seconds"),
                 "live_feed_latest_completed_5m_age_seconds": item.get("live_feed_latest_completed_5m_age_seconds"),
                 "live_feed_execution_freshness_blocker": item.get("live_feed_execution_freshness_blocker"),
@@ -2423,6 +2939,9 @@ def _report_for_cycle(
                 "live_feed_warmup_completed_5m_count": item.get("live_feed_warmup_completed_5m_count"),
                 "live_feed_required_1m_count": item.get("live_feed_required_1m_count"),
                 "live_feed_required_completed_5m_count": item.get("live_feed_required_completed_5m_count"),
+                "feature_context_ready": item.get("feature_context_ready"),
+                "feature_context_source": item.get("feature_context_source"),
+                "paper_evaluation_allowed": item.get("paper_evaluation_allowed"),
                 "live_feed_blocker": item.get("live_feed_blocker"),
                 "fresh_for_execution": item.get("fresh_for_execution"),
                 "latest_1m_timestamp": item.get("latest_1m_timestamp"),
@@ -2474,6 +2993,9 @@ def _report_for_cycle(
             pnl_summary.get("latest_pnl_summary_path")
             or paper_trade_summary.get("latest_pnl_summary_path")
             or str(DEFAULT_TRACK_B_PNL_SUMMARY_JSON)
+        ),
+        "latest_startup_readiness_diagnostic_path": str(
+            Path(config.diagnostic_output_root) / "latest_track_b_startup_readiness_diagnostic.json"
         ),
         "open_position_count": live_position_status.get("open_position_count", 0),
         "realized_pnl_today": pnl_summary.get("total_realized_pnl_today", "0"),
@@ -2910,6 +3432,14 @@ def _bool_or_none(value: object) -> bool | None:
         return True
     if text in {"false", "0", "no"}:
         return False
+    return None
+
+
+def _first_bool(*values: object) -> bool | None:
+    for value in values:
+        parsed = _bool_or_none(value)
+        if parsed is not None:
+            return parsed
     return None
 
 

@@ -480,6 +480,8 @@ def _normalize_candle(item: Mapping[str, Any], *, index: int) -> dict[str, Any]:
         "volume": None if item.get("volume") in {None, ""} else _decimal_text(_decimal(item.get("volume"), f"candles[{index}].volume")),
         "raw_symbol": item.get("raw_symbol"),
         "provider_symbol": item.get("provider_symbol") or item.get("symbol"),
+        "source_tag": item.get("source_tag"),
+        "source_role": item.get("source_role"),
     }
 
 

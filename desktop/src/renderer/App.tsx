@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { DesktopCommandResult, DesktopState, JsonRecord, OperatorDesktopApi } from "./types";
+import type { DesktopCommandResult, DesktopState, DesktopStateRequestOptions, JsonRecord, OperatorDesktopApi } from "./types";
 import {
   asArray,
   asRecord,
@@ -18,6 +18,7 @@ import {
 } from "../main/shared/operationalReadiness";
 import {
   buildOperatorTriageContract,
+  deriveOperatorLaneSemantics,
   type ConnectionPostureState,
   type OperatorTriage,
   type OperatorTriageCurrentExposure,
@@ -28,6 +29,12 @@ import {
   type RuntimePostureState,
   type TradeAuthorityState,
 } from "../main/shared/operatorTriage";
+import {
+  sortLivePnlLaneRows,
+  type LivePnlLaneSortDirection,
+  type LivePnlLaneSortKey,
+  type LivePnlLaneSortSpec,
+} from "../main/shared/livePnlTableSort";
 import { reportBootstrapEvent } from "./bootstrap";
 
 type PageId =
@@ -1003,7 +1010,7 @@ const DEFAULT_MANUAL_ORDER_FORM: ManualOrderFormState = {
 };
 
 const API_FALLBACK: OperatorDesktopApi = {
-  async getDesktopState() {
+  async getDesktopState(_options?: DesktopStateRequestOptions) {
     return {
       connection: "unavailable",
       dashboard: null,
@@ -1043,6 +1050,7 @@ const API_FALLBACK: OperatorDesktopApi = {
         chosenHost: null,
         chosenPort: null,
         chosenUrl: null,
+        mode: "UNAVAILABLE",
         ownership: "unavailable",
         latestEvent: "Electron preload bridge is unavailable in this renderer context.",
         recentEvents: [],
@@ -1333,9 +1341,9 @@ function dashboardTruthSourceLabel(sourceMode: DesktopState["source"]["mode"] | 
     case "live_api":
       return { label: "Live Dashboard API", tone: "good" };
     case "attached_snapshot_bridge":
-      return { label: "Attached Backend via Snapshot Bridge", tone: "warn" };
+      return { label: "Degraded Attached Snapshot Bridge", tone: "warn" };
     case "snapshot_fallback":
-      return { label: "Persisted Snapshot Fallback", tone: "warn" };
+      return { label: "Degraded Persisted Snapshot Fallback", tone: "warn" };
     case "degraded_reconnecting":
       return { label: "Recovering Live API", tone: "warn" };
     case "backend_down":
@@ -3052,9 +3060,9 @@ function laneTradabilityLabel(status: unknown): string {
     case "WAITING_FOR_NEXT_DECISION_BAR":
       return "Waiting For Next Decision Bar";
     case "SESSION_ELIGIBLE_NO_SETUP":
-      return "Session Eligible / No Setup";
+      return "No Setup";
     case "ELIGIBLE_TO_TRADE":
-      return "Ready This Bar";
+      return "Live-Capable";
     case "INFORMATIONAL_ONLY":
       return "Informational Only";
     case "LOADED_NOT_ELIGIBLE":
@@ -3584,6 +3592,11 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const instrumentRows = asArray<JsonRecord>(trading.instrument_performance);
   const zeroActivityDiagnostic = asRecord(trading.zero_activity_diagnostic);
   const liveFeedFreshnessDiagnostic = asRecord(trading.live_feed_freshness_diagnostic);
+  const startupReadinessDiagnostic = asRecord(trading.startup_readiness_diagnostic);
+  const startupReadinessRows = Object.entries(asRecord(startupReadinessDiagnostic.instruments)).map(([instrument, value]) => ({
+    ...asRecord(value),
+    instrument,
+  }));
   const liveFeedFreshnessRows = asArray<JsonRecord>(liveFeedFreshnessDiagnostic.instrument_reports);
   const missingArtifacts = asArray<string>(trading.summary_artifacts_missing);
   const criticalWarnings = asArray<string>(trading.critical_warnings);
@@ -3679,6 +3692,32 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
           <MetricCard label="Tier 3 Warning" value={formatValue(zeroActivityDiagnostic.tier3_without_recent_candidate_signal_warning)} tone={zeroActivityDiagnostic.tier3_without_recent_candidate_signal_warning === true ? "warn" : "good"} />
         </div>
         <div className="placeholder-note">{formatValue(zeroActivityDiagnostic.path)}</div>
+      </Section>
+
+      <Section title="Startup Readiness" subtitle="Feature context may be backfill-seeded; PAPER evaluation still requires fresh Databento Live approval">
+        <div className={`status-banner ${startupReadinessDiagnostic.available === false ? "warn" : String(startupReadinessDiagnostic.diagnosis_classification ?? "").includes("READY") ? "good" : "warn"}`}>
+          <div className="status-banner-main">
+            <div className="status-banner-title">{formatValue(startupReadinessDiagnostic.diagnosis_classification)}</div>
+            <div className="status-banner-body">Backfill/context readiness is tracked separately from execution-live approval.</div>
+          </div>
+        </div>
+        <DataTable
+          rows={startupReadinessRows}
+          emptyLabel="No Track B startup readiness diagnostic is available yet."
+          rowKey={(row, index) => String(row.instrument ?? index)}
+          columns={[
+            { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument) },
+            { key: "context", label: "Context Ready", render: (row) => <span className={`badge ${row.context_ready === true ? "good" : row.context_ready === false ? "warn" : "muted"}`}>{formatValue(row.context_ready)}</span> },
+            { key: "live", label: "Live Approved", render: (row) => <span className={`badge ${row.live_execution_approved === true ? "good" : row.live_execution_approved === false ? "danger" : "muted"}`}>{formatValue(row.live_execution_approved)}</span> },
+            { key: "allowed", label: "PAPER Eval", render: (row) => <span className={`badge ${row.paper_evaluation_allowed === true ? "good" : row.paper_evaluation_allowed === false ? "warn" : "muted"}`}>{formatValue(row.paper_evaluation_allowed)}</span> },
+            { key: "bars_1m", label: "1m Context", render: (row) => `${formatValue(row.available_1m_context_bars)} / ${formatValue(row.required_1m_context_bars)}` },
+            { key: "bars_5m", label: "5m Context", render: (row) => `${formatValue(row.available_5m_context_bars)} / ${formatValue(row.required_5m_context_bars)}` },
+            { key: "backfill", label: "Backfill", render: (row) => formatValue(row.backfill_source ?? row.backfill_gap_filled) },
+            { key: "decision_source", label: "Decision Bar", render: (row) => formatValue(row.latest_decision_bar_source) },
+            { key: "blocker", label: "Blocker", render: (row) => formatValue(row.blocked_reason) },
+          ]}
+        />
+        <div className="placeholder-note">{formatValue(startupReadinessDiagnostic.path)}</div>
       </Section>
 
       <Section title="Execution Live Freshness" subtitle="Databento Live transport is separate from execution candle freshness">
@@ -4065,10 +4104,10 @@ function blockerClassInfo(
     return { label: "Actionable", tone: "good", reason: String(readinessRow?.tradability_reason ?? "The lane has a broker-routable action on the current completed bar.") };
   }
   if (tradabilityStatus === "WAITING_FOR_NEXT_DECISION_BAR") {
-    return { label: "Waiting For 3m Bar", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and healthy, but it is waiting for the next completed decision bar.") };
+    return { label: "Waiting For Bar", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and healthy, but it is waiting for the next completed decision bar.") };
   }
   if (tradabilityStatus === "SESSION_ELIGIBLE_NO_SETUP") {
-    return { label: "Evaluated / No Setup", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and evaluated, but no setup is currently present.") };
+    return { label: "No Setup", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and evaluated, but no setup is currently present.") };
   }
   if (tradabilityStatus === "HALTED_BY_RISK" || haltReason || String(row?.risk_state ?? "").toUpperCase() !== "OK") {
     return { label: "Risk", tone: "danger", reason: String((readinessRow?.tradability_reason ?? haltReason) || "Risk gating is blocking new entries.") };
@@ -4459,6 +4498,7 @@ export function App() {
   const [calendarPeriod, setCalendarPeriod] = useState<PnlCalendarPeriod>("monthly");
   const [calendarViewMode, setCalendarViewMode] = useState<PnlCalendarViewMode>("calendar");
   const [calendarSource, setCalendarSource] = useState<PnlCalendarSource>("historical_backcast");
+  const [calendarSourceTouched, setCalendarSourceTouched] = useState(false);
   const [calendarPlaybackStrategyKeys, setCalendarPlaybackStrategyKeys] = useState<string[] | null>(null);
   const [calendarResearchStrategyIds, setCalendarResearchStrategyIds] = useState<string[]>([]);
   const [calendarAutoRangeApplied, setCalendarAutoRangeApplied] = useState(false);
@@ -4471,6 +4511,27 @@ export function App() {
   const [calendarCustomEnd, setCalendarCustomEnd] = useState(() => new Date().toISOString().slice(0, 10));
   const [selectedCalendarDay, setSelectedCalendarDay] = useState<string | null>(null);
   const [calendarContextLabel, setCalendarContextLabel] = useState<string | null>(null);
+  const [livePnlLaneSort, setLivePnlLaneSort] = useState<LivePnlLaneSortSpec | null>(null);
+  const calendarRange = useMemo(() => {
+    const anchoredToday = calendarAnchorDate || new Date().toISOString().slice(0, 10);
+    if (calendarPeriod === "weekly") {
+      const start = startOfWeek(calendarAnchorDate);
+      return { start, end: addDays(start, 4) };
+    }
+    if (calendarPeriod === "quarterly") {
+      return { start: startOfQuarter(calendarAnchorDate), end: endOfQuarter(calendarAnchorDate) };
+    }
+    if (calendarPeriod === "ytd") {
+      return { start: startOfYear(anchoredToday), end: anchoredToday };
+    }
+    if (calendarPeriod === "custom") {
+      return {
+        start: calendarCustomStart <= calendarCustomEnd ? calendarCustomStart : calendarCustomEnd,
+        end: calendarCustomEnd >= calendarCustomStart ? calendarCustomEnd : calendarCustomStart,
+      };
+    }
+    return { start: startOfMonth(calendarAnchorDate), end: endOfMonth(calendarAnchorDate) };
+  }, [calendarAnchorDate, calendarCustomEnd, calendarCustomStart, calendarPeriod]);
   const [selectedSameUnderlyingConflictInstrument, setSelectedSameUnderlyingConflictInstrument] = useState("");
   const [sameUnderlyingOperatorLabel, setSameUnderlyingOperatorLabel] = useState("manual operator");
   const [sameUnderlyingReviewNote, setSameUnderlyingReviewNote] = useState("");
@@ -4562,6 +4623,7 @@ export function App() {
       && ["all", "historical_backcast", "live", "paper", "benchmark_replay", "research_execution", "research_analytics"].includes(source)
     ) {
       setCalendarSource(source as PnlCalendarSource);
+      setCalendarSourceTouched(true);
     }
   }, [page]);
 
@@ -4600,13 +4662,25 @@ export function App() {
     return () => document.removeEventListener("visibilitychange", onVisibilityChange);
   }, []);
 
+  function resolveDesktopStateRequestOptions(options?: DesktopStateRequestOptions): DesktopStateRequestOptions {
+    return {
+      ...(options ?? {}),
+      paperTradeLogVisibleRange: page === "calendar"
+        ? {
+            startDate: calendarRange.start,
+            endDate: calendarRange.end,
+          }
+        : null,
+    };
+  }
+
   async function refreshState(options?: { includeHeavyPayload?: boolean }): Promise<void> {
     if (refreshInFlightRef.current) {
       return;
     }
     refreshInFlightRef.current = true;
     try {
-      const state = await api.getDesktopState(options);
+      const state = await api.getDesktopState(resolveDesktopStateRequestOptions(options));
       if (!mountedRef.current) {
         return;
       }
@@ -4664,6 +4738,13 @@ export function App() {
       void refreshState({ includeHeavyPayload: true });
     }
   }, [isVisible]);
+
+  useEffect(() => {
+    if (page !== "calendar" || !isVisible || refreshInFlightRef.current) {
+      return;
+    }
+    void refreshState({ includeHeavyPayload: true });
+  }, [calendarRange.end, calendarRange.start, isVisible, page]);
 
   useEffect(() => {
     if (!settings.refreshSeconds || settings.refreshSeconds <= 0) {
@@ -5207,6 +5288,39 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
   const strategyExecutionLikelihood = asRecord(paperStrategyPerformance.execution_likelihood);
   const strategyExecutionLikelihoodRows = asArray<JsonRecord>(strategyExecutionLikelihood.rows);
   const strategyTradeLogRows = asArray<JsonRecord>(paperStrategyPerformance.trade_log);
+  const strategyTradeLogWindow = asRecord(paperStrategyPerformance.trade_log_window);
+  const strategyTradeLogRequestedRange = asRecord(strategyTradeLogWindow.requested_range);
+  const strategyTradeLogReturnedRange = asRecord(strategyTradeLogWindow.returned_range);
+  const strategyTradeLogTotalCount = numericOrNull(strategyTradeLogWindow.total_trade_count ?? paperStrategyPerformance.trade_log_count);
+  const strategyTradeLogReturnedCount = numericOrNull(strategyTradeLogWindow.returned_trade_count ?? strategyTradeLogRows.length);
+  const paperTradeLogWindowSummary = useMemo(() => {
+    const returnedStart = String(strategyTradeLogReturnedRange.start ?? "").slice(0, 10);
+    const returnedEnd = String(strategyTradeLogReturnedRange.end ?? "").slice(0, 10);
+    const requestedStart = String(strategyTradeLogRequestedRange.startDate ?? "").slice(0, 10);
+    const requestedEnd = String(strategyTradeLogRequestedRange.endDate ?? "").slice(0, 10);
+    const returnedRangeLabel =
+      returnedStart && returnedEnd
+        ? `${formatLongDate(returnedStart)} through ${formatLongDate(returnedEnd)}`
+        : null;
+    const requestedRangeLabel =
+      requestedStart && requestedEnd
+        ? `${formatLongDate(requestedStart)} through ${formatLongDate(requestedEnd)}`
+        : null;
+    return {
+      requestedRangeLabel,
+      returnedRangeLabel,
+      returnedCountLabel: formatShortNumber(strategyTradeLogReturnedCount ?? strategyTradeLogRows.length),
+      totalCountLabel: formatShortNumber(strategyTradeLogTotalCount ?? strategyTradeLogRows.length),
+    };
+  }, [
+    strategyTradeLogRequestedRange.endDate,
+    strategyTradeLogRequestedRange.startDate,
+    strategyTradeLogReturnedCount,
+    strategyTradeLogReturnedRange.end,
+    strategyTradeLogReturnedRange.start,
+    strategyTradeLogRows.length,
+    strategyTradeLogTotalCount,
+  ]);
   const closedStrategyTradeRows = useMemo(
     () =>
       [...strategyTradeLogRows]
@@ -9021,9 +9135,82 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     }
     return lookup;
   }, [dashboardRosterRows]);
+  const readinessFallbackExpressionRows = useMemo(
+    () =>
+      laneEligibilityRows
+        .filter((row) => {
+          const keys = [
+            String(row.lane_id ?? "").trim(),
+            String(row.standalone_strategy_id ?? "").trim(),
+            String(row.tracked_strategy_id ?? "").trim(),
+          ].filter(Boolean);
+          return keys.some((key) => currentPaperUniverseIdentityKeys.has(key));
+        })
+        .map((row) => {
+          const rosterRow =
+            dashboardRosterLookup.get(String(row.lane_id ?? "").trim())
+            ?? dashboardRosterLookup.get(String(row.standalone_strategy_id ?? "").trim())
+            ?? dashboardRosterLookup.get(String(row.tracked_strategy_id ?? "").trim())
+            ?? null;
+          const latestActivityTimestamp = latestTimestamp([
+            row.latest_activity_timestamp,
+            row.last_strategy_evaluated_bar_ts,
+            row.last_processed_bar_end_ts,
+            rosterRow?.latest_activity_timestamp,
+          ]);
+          const latestBlocker =
+            row.first_true_blocker
+            ?? row.latest_fault_or_blocker
+            ?? row.effective_readiness_eligibility_reason
+            ?? row.eligibility_reason
+            ?? null;
+          const barState = String(row.bar_state ?? "").trim().toUpperCase();
+          const auditVerdict =
+            row.can_fire_now === true
+              ? "ACTIONABLE"
+              : barState === "READY_NO_SETUP"
+                ? "NO_SETUP_OBSERVED"
+                : barState === "WAITING_FOR_BAR_CLOSE"
+                  ? "WAITING_FOR_BAR_CLOSE"
+                  : barState === "BAR_RECEIVED_NOT_PROCESSED_YET"
+                    ? "BAR_RECEIVED_NOT_PROCESSED_YET"
+                    : row.market_data_stale === true || barState === "MARKET_DATA_STALE"
+                      ? "MARKET_DATA_STALE"
+                      : latestBlocker
+                        ? "SETUP_GATED"
+                        : "READY";
+          return {
+            ...rosterRow,
+            ...row,
+            strategy_name: row.display_name ?? rosterRow?.strategy_name ?? row.standalone_strategy_id ?? row.lane_id,
+            standalone_strategy_id: row.standalone_strategy_id ?? row.tracked_strategy_id ?? row.lane_id,
+            instrument: row.symbol ?? rosterRow?.instrument ?? rosterRow?.symbol ?? null,
+            audit_verdict: auditVerdict,
+            audit_reason: row.bar_state_reason ?? latestBlocker ?? "Current readiness row",
+            latest_fault_or_blocker: latestBlocker,
+            eligible_now: row.can_fire_now ?? row.eligible_to_trade ?? row.eligible_now ?? false,
+            can_fire_capable: row.session_eligible ?? false,
+            entries_enabled: row.entries_enabled ?? rosterRow?.entries_enabled ?? false,
+            operator_halt: row.operator_halt ?? rosterRow?.operator_halt ?? false,
+            risk_state: row.risk_state ?? asRecord(row.latest_gating_state).risk_state ?? rosterRow?.risk_state ?? "OK",
+            actionable_entry_signal_count: row.can_fire_now === true ? 1 : 0,
+            total_intent_count: numericOrNull(row.total_intent_count) ?? 0,
+            total_fill_count: numericOrNull(row.total_fill_count) ?? 0,
+            last_actionable_signal_timestamp: row.last_actionable_signal_timestamp ?? null,
+            last_intent_timestamp: row.last_intent_timestamp ?? null,
+            last_fill_timestamp: row.last_fill_timestamp ?? null,
+            latest_activity_timestamp: latestActivityTimestamp,
+            ...deriveOperatorLaneSemantics({
+              ...rosterRow,
+              ...row,
+            }),
+          } satisfies JsonRecord;
+        }),
+    [currentPaperUniverseIdentityKeys, dashboardRosterLookup, laneEligibilityRows],
+  );
   const livePaperExpressionRows = useMemo(
     () =>
-      [...signalIntentFillAuditRows]
+      [...(signalIntentFillAuditRows.length > 0 ? signalIntentFillAuditRows : readinessFallbackExpressionRows)]
         .filter((row) => {
           const keys = [
             String(row.lane_id ?? "").trim(),
@@ -9056,14 +9243,24 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
             ...eligibilityRow,
             latest_activity_timestamp: latestActivityTimestamp,
             latest_fault_or_blocker:
-              eligibilityRow?.latest_fault_or_blocker
+              eligibilityRow?.first_true_blocker
+              ?? eligibilityRow?.latest_fault_or_blocker
               ?? rosterRow?.latest_fault_or_blocker
               ?? row.latest_fault_or_blocker
               ?? eligibilityRow?.eligibility_reason
               ?? rosterRow?.eligibility_reason
               ?? asRecord(row.latest_gating_state).latest_fault_or_blocker
               ?? null,
-            eligible_now: eligibilityRow?.eligible_now ?? rosterRow?.eligible_now ?? row.eligible_now,
+            eligible_now:
+              eligibilityRow?.can_fire_now
+              ?? eligibilityRow?.eligible_to_trade
+              ?? eligibilityRow?.eligible_now
+              ?? rosterRow?.eligible_now
+              ?? row.eligible_now,
+            can_fire_capable:
+              eligibilityRow?.session_eligible
+              ?? rosterRow?.session_eligible
+              ?? false,
             entries_enabled: eligibilityRow?.entries_enabled ?? rosterRow?.entries_enabled ?? row.entries_enabled,
             operator_halt: eligibilityRow?.operator_halt ?? rosterRow?.operator_halt ?? row.operator_halt,
             risk_state:
@@ -9074,6 +9271,26 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
               ?? row.risk_state
               ?? asRecord(row.latest_gating_state).risk_state
               ?? "OK",
+            ...deriveOperatorLaneSemantics({
+              ...row,
+              ...rosterRow,
+              ...eligibilityRow,
+              latest_fault_or_blocker:
+                eligibilityRow?.first_true_blocker
+                ?? eligibilityRow?.latest_fault_or_blocker
+                ?? rosterRow?.latest_fault_or_blocker
+                ?? row.latest_fault_or_blocker
+                ?? eligibilityRow?.eligibility_reason
+                ?? rosterRow?.eligibility_reason
+                ?? asRecord(row.latest_gating_state).latest_fault_or_blocker
+                ?? null,
+              eligible_now:
+                eligibilityRow?.can_fire_now
+                ?? eligibilityRow?.eligible_to_trade
+                ?? eligibilityRow?.eligible_now
+                ?? rosterRow?.eligible_now
+                ?? row.eligible_now,
+            }),
           } satisfies JsonRecord;
         })
         .sort((left, right) => {
@@ -9096,17 +9313,36 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
             String(right.strategy_name ?? right.standalone_strategy_id ?? ""),
           );
         }),
-    [currentPaperUniverseIdentityKeys, dashboardRosterLookup, isRiskHaltedAuditRow, laneEligibilityLookup, signalIntentFillAuditRows],
+    [currentPaperUniverseIdentityKeys, dashboardRosterLookup, isRiskHaltedAuditRow, laneEligibilityLookup, readinessFallbackExpressionRows, signalIntentFillAuditRows],
   );
   const livePaperExpressionSummary = useMemo(() => {
     const rows = livePaperExpressionRows;
     const participatedToday = rows.filter((row) => (numericOrNull(row.total_fill_count) ?? 0) > 0).length;
     const wrongSessionCount = rows.filter(
-      (row) => String(row.latest_fault_or_blocker ?? "").trim().toLowerCase() === "wrong_session",
+      (row) => String(row.latest_hard_blocker ?? "").trim().toLowerCase() === "wrong_session",
     ).length;
+    const sessionEligibleNow = rows.filter((row) => row.can_fire_capable === true).length;
+    const liveCapableCount = rows.filter((row) => row.live_capable === true).length;
+    const waitingForBarCount = rows.filter(
+      (row) => String(row.cadence_state ?? "").trim().toUpperCase() === "WAITING_FOR_BAR_CLOSE",
+    ).length;
+    const noSetupCount = rows.filter(
+      (row) => {
+        const cadenceState = String(row.cadence_state ?? "").trim().toUpperCase();
+        return cadenceState === "READY_NO_SETUP" || cadenceState === "NO_SETUP_OBSERVED" || String(row.no_setup_present ?? "") === "true";
+      },
+    ).length;
+    const marketDataStaleCount = rows.filter(
+      (row) => String(row.latest_hard_blocker ?? "").trim().toLowerCase() === "market_data_stale" || row.market_data_stale === true,
+    ).length;
+    const trueBlockedCount = rows.filter((row) => row.true_blocked === true).length;
     return {
       laneCount: rows.length,
-      eligibleNow: rows.filter((row) => row.eligible_now === true).length,
+      actionableThisBar: rows.filter((row) => row.actionable_this_bar === true).length,
+      sessionEligibleNow,
+      liveCapableCount,
+      waitingForBarCount,
+      noSetupCount,
       operatorHalts: rows.filter((row) => row.operator_halt === true).length,
       riskHalts: rows.filter((row) => isRiskHaltedAuditRow(row)).length,
       setupGated: rows.filter((row) => String(row.audit_verdict ?? "") === "SETUP_GATED").length,
@@ -9115,8 +9351,32 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       fills: rows.reduce((sum, row) => sum + (numericOrNull(row.total_fill_count) ?? 0), 0),
       participatedToday,
       wrongSessionCount,
+      marketDataStaleCount,
+      trueBlockedCount,
     };
   }, [isRiskHaltedAuditRow, livePaperExpressionRows]);
+  const selectedLivePaperExpressionRow = useMemo(
+    () =>
+      livePaperExpressionRows.find((row) => standaloneStrategyId(row) === selectedAuditStrategyKey)
+      ?? livePaperExpressionRows[0]
+      ?? null,
+    [livePaperExpressionRows, selectedAuditStrategyKey],
+  );
+  const sortedLivePaperExpressionRows = useMemo(
+    () => sortLivePnlLaneRows(livePaperExpressionRows, livePnlLaneSort),
+    [livePaperExpressionRows, livePnlLaneSort],
+  );
+  const handleLivePnlLaneSort = useCallback((key: LivePnlLaneSortKey) => {
+    setLivePnlLaneSort((current) => {
+      if (!current || current.key !== key) {
+        return { key, direction: "asc" };
+      }
+      return {
+        key,
+        direction: current.direction === "asc" ? "desc" : "asc",
+      };
+    });
+  }, []);
   const atpStrategyRows = useMemo(
     () =>
       [...runtimeRegistryRows, ...approvedModelRows, ...temporaryPaperStrategyRows].filter((row, index, rows) => {
@@ -9932,7 +10192,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     }
     if (tradabilityStatus === "SESSION_ELIGIBLE_NO_SETUP") {
       return {
-        title: "Session Eligible / No Setup",
+        title: "No Setup",
         summary: "The selected lane is session-eligible and evaluated, but no setup is currently present.",
         nextUnlock: "No action needed; wait for a qualifying setup.",
         blockerLabel: "No Setup",
@@ -9946,9 +10206,9 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     }
     if (selectedWorkspaceBlockerClass.label === "Ready" || tradabilityStatus === "ELIGIBLE_TO_TRADE") {
       return {
-        title: "Ready This Bar",
-        summary: "The selected lane is active in the runtime and ready on the current completed decision bar.",
-        nextUnlock: "No action needed; already ready this bar.",
+        title: "Live-Capable",
+        summary: "The selected lane is session-eligible, route-ready, and healthy on the current completed decision bar.",
+        nextUnlock: "No action needed; the lane is currently capable of trading if a qualifying setup is present.",
         blockerLabel: "None",
         blockerMix: "No blocker mix recorded",
         tone: "good" as Tone,
@@ -10576,22 +10836,30 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     if (calendarSource === "all") {
       return "all";
     }
-    if (calendarAvailableSources.includes(calendarSource as Exclude<PnlCalendarSource, "all">)) {
-      return calendarSource;
-    }
-    if (paperCalendarEntries.length > 0) {
-      return "paper";
-    }
-    if (calendarAvailableSources.length > 0) {
-      return calendarAvailableSources[0];
-    }
     return calendarSource;
-  }, [calendarAvailableSources, calendarSource, paperCalendarEntries.length]);
+  }, [calendarSource]);
   useEffect(() => {
-    if (calendarSource !== effectiveCalendarSource) {
-      setCalendarSource(effectiveCalendarSource);
+    const paperMode =
+      String(global.mode ?? global.mode_label ?? "").trim().toUpperCase() === "PAPER"
+      || global.live_disabled === true;
+    if (
+      !calendarSourceTouched
+      && paperMode
+      && playbackLatestStudyItems.length === 0
+      && paperCalendarEntries.length > 0
+      && calendarSource === "historical_backcast"
+    ) {
+      setCalendarSource("paper");
     }
-  }, [calendarSource, effectiveCalendarSource]);
+  }, [
+    calendarSource,
+    calendarSourceTouched,
+    global.live_disabled,
+    global.mode,
+    global.mode_label,
+    paperCalendarEntries.length,
+    playbackLatestStudyItems.length,
+  ]);
   const calendarSourceSelection = useMemo(() => {
     if (effectiveCalendarSource === "all") {
       const includedSources = calendarAvailableSources.length ? calendarAvailableSources : ["historical_backcast"];
@@ -10624,7 +10892,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                   ? `Loaded historical playback studies through ${formatLongDate(historicalBackcastLatestCoverageDate ?? "")}, with subsequent closed-paper-trade continuation. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
                   : `Loaded historical playback studies. ${calendarSelectedPlaybackCount} of ${calendarPlaybackStrategyOptions.length} strategies selected.`
                 : effectiveCalendarSource === "paper"
-                  ? "Persisted paper/runtime trade ledger."
+                  ? `Persisted paper/runtime trade ledger. Loaded ${paperTradeLogWindowSummary.returnedCountLabel} rows${paperTradeLogWindowSummary.returnedRangeLabel ? ` covering ${paperTradeLogWindowSummary.returnedRangeLabel}` : ""}${paperTradeLogWindowSummary.requestedRangeLabel ? ` for the requested calendar window ${paperTradeLogWindowSummary.requestedRangeLabel}` : ""}. Total published closed trades: ${paperTradeLogWindowSummary.totalCountLabel}.`
                   : effectiveCalendarSource === "live"
                     ? "Broker/live closed-fill stream."
                     : effectiveCalendarSource === "benchmark_replay"
@@ -10654,6 +10922,10 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     historicalBackcastContinuationEntries.length,
     historicalBackcastLatestCoverageDate,
     paperCalendarEntries,
+    paperTradeLogWindowSummary.requestedRangeLabel,
+    paperTradeLogWindowSummary.returnedCountLabel,
+    paperTradeLogWindowSummary.returnedRangeLabel,
+    paperTradeLogWindowSummary.totalCountLabel,
   ]);
   const calendarSourceAvailableRange = useMemo(() => {
     const dates = new Set<string>();
@@ -10695,26 +10967,6 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     return `Latest persisted paper fill / closed-trade day is ${formatLongDate(paperCalendarLatestDate)}. Runtime activity after midnight does not count toward the paper calendar until a paper fill or closed trade is published.`;
   }, [currentPaperCalendarDateKey, effectiveCalendarSource, paperCalendarLatestDate]);
   const effectiveCalendarViewMode = calendarPeriod === "ytd" ? "line" : calendarViewMode;
-  const calendarRange = useMemo(() => {
-    const anchoredToday = calendarAnchorDate || new Date().toISOString().slice(0, 10);
-    if (calendarPeriod === "weekly") {
-      const start = startOfWeek(calendarAnchorDate);
-      return { start, end: addDays(start, 4) };
-    }
-    if (calendarPeriod === "quarterly") {
-      return { start: startOfQuarter(calendarAnchorDate), end: endOfQuarter(calendarAnchorDate) };
-    }
-    if (calendarPeriod === "ytd") {
-      return { start: startOfYear(anchoredToday), end: anchoredToday };
-    }
-    if (calendarPeriod === "custom") {
-      return {
-        start: calendarCustomStart <= calendarCustomEnd ? calendarCustomStart : calendarCustomEnd,
-        end: calendarCustomEnd >= calendarCustomStart ? calendarCustomEnd : calendarCustomStart,
-      };
-    }
-    return { start: startOfMonth(calendarAnchorDate), end: endOfMonth(calendarAnchorDate) };
-  }, [calendarAnchorDate, calendarCustomEnd, calendarCustomStart, calendarPeriod]);
   const calendarPeriodTitle = useMemo(
     () => sourcePeriodLabel(calendarPeriod, calendarAnchorDate, calendarRange.start, calendarRange.end),
     [calendarAnchorDate, calendarPeriod, calendarRange.end, calendarRange.start],
@@ -12239,11 +12491,12 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     { label: "Governance Allowed", value: String(readinessLaneStatusSummary.governance_allowed_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.governance_allowed_lanes_count ?? 0) > 0 ? "good" : "warn" },
     { label: "Route Ready Lanes", value: String(readinessLaneStatusSummary.route_ready_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.route_ready_lanes_count ?? 0) > 0 ? "good" : "warn" },
     { label: "Session Eligible", value: String(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0) > 0 ? "good" : "warn" },
-    { label: "Waiting For 3m Bar", value: String(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0), tone: Number(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0) > 0 ? "warn" : "muted" },
-    { label: "Evaluated / No Setup", value: String(readinessLaneStatusSummary.no_setup_count ?? 0), tone: Number(readinessLaneStatusSummary.no_setup_count ?? 0) > 0 ? "warn" : "muted" },
+    { label: "Live-Capable", value: String(readinessLaneStatusSummary.live_capable_count ?? 0), tone: Number(readinessLaneStatusSummary.live_capable_count ?? 0) > 0 ? "good" : "muted" },
+    { label: "Waiting For Bar", value: String(readinessLaneStatusSummary.waiting_for_bar_count ?? readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0), tone: Number(readinessLaneStatusSummary.waiting_for_bar_count ?? readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0) > 0 ? "warn" : "muted" },
+    { label: "No Setup", value: String(readinessLaneStatusSummary.no_setup_count ?? 0), tone: Number(readinessLaneStatusSummary.no_setup_count ?? 0) > 0 ? "warn" : "muted" },
     { label: "Actionable Now", value: String(readinessLaneStatusSummary.actionable_now_count ?? 0), tone: Number(readinessLaneStatusSummary.actionable_now_count ?? 0) > 0 ? "good" : "warn" },
-    { label: "Blocked Lanes", value: String(readinessLaneStatusSummary.blocked_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.blocked_lanes_count ?? 0) > 0 ? "warn" : "good" },
-    { label: "Ready This Bar", value: String(readinessLaneStatusSummary.eligible_to_trade_count ?? 0), tone: Number(readinessLaneStatusSummary.eligible_to_trade_count ?? 0) > 0 ? "good" : "muted" },
+    { label: "True Blocked", value: String(readinessLaneStatusSummary.true_blocked_count ?? readinessLaneStatusSummary.blocked_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.true_blocked_count ?? readinessLaneStatusSummary.blocked_lanes_count ?? 0) > 0 ? "warn" : "good" },
+    { label: "Market Data Stale", value: String(readinessLaneStatusSummary.market_data_stale_count ?? 0), tone: Number(readinessLaneStatusSummary.market_data_stale_count ?? 0) > 0 ? "danger" : "good" },
     { label: "Loaded, Not Ready This Bar", value: String(loadedNotEligibleRows.length), tone: loadedNotEligibleRows.length ? "warn" : "good" },
     { label: "True Faults", value: String(runtimeBlockingFaultRows.length), tone: runtimeBlockingFaultRows.length ? "danger" : "good" },
     { label: "Info Feed Degradation", value: String(readinessDegradedFeeds.length), tone: readinessDegradedFeeds.length ? "warn" : "good" },
@@ -13405,8 +13658,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                 <div className="badge-row">
                   <Badge label="RUNTIME TRUTH" tone={truthBadgeTone("RUNTIME TRUTH")} />
                   <Badge label="PAPER" tone={truthBadgeTone("PAPER")} />
-                  {desktopState?.source.mode === "snapshot_fallback" ? <Badge label="SNAPSHOT FALLBACK" tone={truthBadgeTone("SNAPSHOT FALLBACK")} /> : null}
-                  {desktopState?.source.mode === "attached_snapshot_bridge" ? <Badge label="ATTACHED SNAPSHOT BRIDGE" tone="warn" /> : null}
+                  {desktopState?.source.mode === "snapshot_fallback" ? <Badge label="DEGRADED SNAPSHOT FALLBACK" tone={truthBadgeTone("SNAPSHOT FALLBACK")} /> : null}
+                  {desktopState?.source.mode === "attached_snapshot_bridge" ? <Badge label="DEGRADED ATTACHED SNAPSHOT BRIDGE" tone="warn" /> : null}
                 </div>
                 <div className="metric-grid">
                   {strategyRuntimeMetrics.map((item) => (
@@ -13492,8 +13745,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                 <div className="badge-row">
                   <Badge label="STRATEGY LEDGER" tone={truthBadgeTone("STRATEGY LEDGER")} />
                   <Badge label="PAPER" tone={truthBadgeTone("PAPER")} />
-                  {desktopState?.source.mode === "snapshot_fallback" ? <Badge label="SNAPSHOT FALLBACK" tone={truthBadgeTone("SNAPSHOT FALLBACK")} /> : null}
-                  {desktopState?.source.mode === "attached_snapshot_bridge" ? <Badge label="ATTACHED SNAPSHOT BRIDGE" tone="warn" /> : null}
+                  {desktopState?.source.mode === "snapshot_fallback" ? <Badge label="DEGRADED SNAPSHOT FALLBACK" tone={truthBadgeTone("SNAPSHOT FALLBACK")} /> : null}
+                  {desktopState?.source.mode === "attached_snapshot_bridge" ? <Badge label="DEGRADED ATTACHED SNAPSHOT BRIDGE" tone="warn" /> : null}
                 </div>
                 <div className="metric-grid">
                   {portfolioSnapshotMetrics.map((item) => (
@@ -13622,8 +13875,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
               <Section title="Broker Portfolio Truth" subtitle="Schwab broker account truth kept separate from strategy-ledger and replay truth">
                 <div className="badge-row">
                   <Badge label="LIVE BROKER" tone={truthBadgeTone("LIVE BROKER")} />
-                  {desktopState?.source.mode === "snapshot_fallback" ? <Badge label="SNAPSHOT FALLBACK" tone={truthBadgeTone("SNAPSHOT FALLBACK")} /> : null}
-                  {desktopState?.source.mode === "attached_snapshot_bridge" ? <Badge label="ATTACHED SNAPSHOT BRIDGE" tone="warn" /> : null}
+                  {desktopState?.source.mode === "snapshot_fallback" ? <Badge label="DEGRADED SNAPSHOT FALLBACK" tone={truthBadgeTone("SNAPSHOT FALLBACK")} /> : null}
+                  {desktopState?.source.mode === "attached_snapshot_bridge" ? <Badge label="DEGRADED ATTACHED SNAPSHOT BRIDGE" tone="warn" /> : null}
                 </div>
                 <div className="metric-grid">
                   {brokerSummaryMetrics.map((item) => (
@@ -14556,7 +14809,13 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                 <div className="calendar-filter-row">
                   <label className="settings-field compact">
                     <span>Truth Basis</span>
-                    <select value={effectiveCalendarSource} onChange={(event) => setCalendarSource(event.target.value as PnlCalendarSource)}>
+                    <select
+                      value={effectiveCalendarSource}
+                      onChange={(event) => {
+                        setCalendarSourceTouched(true);
+                        setCalendarSource(event.target.value as PnlCalendarSource);
+                      }}
+                    >
                       {[
                         ["historical_backcast", "Historical Backcast"],
                         ["paper", "Paper Ledger"],
@@ -14564,7 +14823,11 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                         ["research_analytics", "Research Analytics"],
                         ["all", "All Accounts"],
                       ]
-                        .filter(([value]) => value === "all" || calendarAvailableSources.includes(value as Exclude<PnlCalendarSource, "all">))
+                        .filter(([value]) =>
+                          value === "all"
+                          || value === effectiveCalendarSource
+                          || calendarAvailableSources.includes(value as Exclude<PnlCalendarSource, "all">),
+                        )
                         .map(([value, label]) => (
                           <option key={value} value={value}>
                             {label}
@@ -16831,29 +17094,49 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                   <h3 className="subsection-title">Paper Expression Diagnostic</h3>
                   <div className="notice-strip compact">
                     <div>
-                      {formatShortNumber(livePaperExpressionSummary.eligibleNow)} can fire now · {formatShortNumber(livePaperExpressionSummary.participatedToday)} filled earlier today
+                      {formatShortNumber(livePaperExpressionSummary.sessionEligibleNow)} session-eligible now · {formatShortNumber(livePaperExpressionSummary.liveCapableCount)} live-capable · {formatShortNumber(livePaperExpressionSummary.waitingForBarCount)} waiting for bar · {formatShortNumber(livePaperExpressionSummary.noSetupCount)} no setup · {formatShortNumber(livePaperExpressionSummary.actionableThisBar)} actionable this bar
+                      {livePaperExpressionSummary.trueBlockedCount > 0
+                        ? ` · ${formatShortNumber(livePaperExpressionSummary.trueBlockedCount)} true blocked`
+                        : ""}
+                      {livePaperExpressionSummary.marketDataStaleCount > 0
+                        ? ` · ${formatShortNumber(livePaperExpressionSummary.marketDataStaleCount)} market-data stale`
+                        : ""}
                       {livePaperExpressionSummary.wrongSessionCount > 0
-                        ? ` · ${formatShortNumber(livePaperExpressionSummary.wrongSessionCount)} currently session-blocked`
+                        ? ` · ${formatShortNumber(livePaperExpressionSummary.wrongSessionCount)} out of configured session`
                         : ""}
                     </div>
                   </div>
                   <div className="metric-grid account-metric-grid">
                     <MetricCard label="Lanes Monitored" value={formatShortNumber(livePaperExpressionSummary.laneCount)} />
-                    <MetricCard label="Can Fire Now" value={formatShortNumber(livePaperExpressionSummary.eligibleNow)} tone={livePaperExpressionSummary.eligibleNow > 0 ? "good" : "warn"} />
+                    <MetricCard label="Session Eligible Now" value={formatShortNumber(livePaperExpressionSummary.sessionEligibleNow)} tone={livePaperExpressionSummary.sessionEligibleNow > 0 ? "good" : "warn"} />
+                    <MetricCard label="Live-Capable" value={formatShortNumber(livePaperExpressionSummary.liveCapableCount)} tone={livePaperExpressionSummary.liveCapableCount > 0 ? "good" : "muted"} />
+                    <MetricCard label="Actionable This Bar" value={formatShortNumber(livePaperExpressionSummary.actionableThisBar)} tone={livePaperExpressionSummary.actionableThisBar > 0 ? "good" : "muted"} />
+                    <MetricCard label="Waiting For Bar" value={formatShortNumber(livePaperExpressionSummary.waitingForBarCount)} tone={livePaperExpressionSummary.waitingForBarCount > 0 ? "muted" : "good"} />
+                    <MetricCard label="No Setup" value={formatShortNumber(livePaperExpressionSummary.noSetupCount)} tone={livePaperExpressionSummary.noSetupCount > 0 ? "muted" : "good"} />
+                    <MetricCard label="True Blocked" value={formatShortNumber(livePaperExpressionSummary.trueBlockedCount)} tone={livePaperExpressionSummary.trueBlockedCount > 0 ? "danger" : "good"} />
+                    <MetricCard label="Market Data Stale" value={formatShortNumber(livePaperExpressionSummary.marketDataStaleCount)} tone={livePaperExpressionSummary.marketDataStaleCount > 0 ? "danger" : "good"} />
                     <MetricCard label="Filled Today" value={formatShortNumber(livePaperExpressionSummary.participatedToday)} tone={livePaperExpressionSummary.participatedToday > 0 ? "good" : "muted"} />
                     <MetricCard label="Operator Halts" value={formatShortNumber(livePaperExpressionSummary.operatorHalts)} tone={livePaperExpressionSummary.operatorHalts > 0 ? "danger" : "good"} />
                     <MetricCard label="Risk Halts" value={formatShortNumber(livePaperExpressionSummary.riskHalts)} tone={livePaperExpressionSummary.riskHalts > 0 ? "danger" : "good"} />
-                    <MetricCard label="Setup-Gated Lanes" value={formatShortNumber(livePaperExpressionSummary.setupGated)} tone={livePaperExpressionSummary.setupGated > 0 ? "warn" : "good"} />
                     <MetricCard label="Actionable Signals" value={formatShortNumber(livePaperExpressionSummary.actionableSignals)} tone={livePaperExpressionSummary.actionableSignals > 0 ? "good" : "muted"} />
                     <MetricCard label="Order Intents" value={formatShortNumber(livePaperExpressionSummary.intents)} tone={livePaperExpressionSummary.intents > 0 ? "good" : "muted"} />
                     <MetricCard label="Fills" value={formatShortNumber(livePaperExpressionSummary.fills)} tone={livePaperExpressionSummary.fills > 0 ? "good" : "muted"} />
                   </div>
                   <DataTable
-                    columns={[
-                      { key: "strategy_name", label: "Strategy", className: "col-strategy-wide", render: (row) => renderStructuredStrategyLabel(row.strategy_name ?? row.standalone_strategy_id) },
-                      { key: "instrument", label: "Symbol", className: "col-symbol-tight", render: (row) => formatValue(row.instrument) },
-                      { key: "audit_verdict", label: "Verdict", className: "col-verdict", render: (row) => <Badge label={formatValue(row.audit_verdict)} tone={auditVerdictTone(row.audit_verdict)} /> },
-                      { key: "eligible_now", label: "Can Fire Now", className: "col-flag", render: (row) => formatValue(row.eligible_now ?? false) },
+                      columns={[
+                        { key: "strategy_name", label: "Strategy", className: "col-strategy-wide", sortable: true, sortKey: "strategy", render: (row) => renderStructuredStrategyLabel(row.strategy_name ?? row.standalone_strategy_id) },
+                        { key: "instrument", label: "Symbol", className: "col-symbol-tight", sortable: true, sortKey: "symbol", render: (row) => formatValue(row.instrument) },
+                        { key: "audit_verdict", label: "Verdict", className: "col-verdict", sortable: true, sortKey: "verdict", render: (row) => <Badge label={formatValue(row.audit_verdict)} tone={auditVerdictTone(row.audit_verdict)} /> },
+                      { key: "live_capable", label: "Live-Capable", className: "col-flag", sortable: true, sortKey: "live_capable", render: (row) => formatValue(row.live_capable ?? false) },
+                      { key: "actionable_this_bar", label: "Actionable This Bar", className: "col-flag", sortable: true, sortKey: "actionable_this_bar", render: (row) => formatValue(row.actionable_this_bar ?? false) },
+                      {
+                        key: "cadence_state",
+                        label: "Cadence State",
+                        className: "col-blocker-wide",
+                        sortable: true,
+                        sortKey: "cadence_state",
+                        render: (row) => formatValue(sentenceCase(String(row.cadence_state ?? row.bar_state ?? "—").replace(/_/g, " "))),
+                      },
                       { key: "entries_enabled", label: "Entries", className: "col-flag", render: (row) => formatValue(row.entries_enabled ?? false) },
                       { key: "operator_halt", label: "Operator Halt", className: "col-verdict", render: (row) => <Badge label={row.operator_halt === true ? "HALTED" : "CLEAR"} tone={row.operator_halt === true ? "danger" : "good"} /> },
                       {
@@ -16867,26 +17150,29 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                         },
                       },
                       {
-                        key: "latest_fault_or_blocker",
-                        label: "Latest Blocker",
+                        key: "latest_hard_blocker",
+                        label: "Hard Blocker",
                         className: "col-blocker-wide",
+                        sortable: true,
+                        sortKey: "hard_blocker",
                         render: (row) =>
                           formatValue(
-                            row.latest_fault_or_blocker
-                            ?? asRecord(row.latest_gating_state).latest_fault_or_blocker
-                            ?? (String(row.audit_verdict ?? "").trim().toUpperCase() === "NO_SETUP_OBSERVED" ? "no_setup_observed" : "No blocker recorded"),
+                            row.latest_hard_blocker
+                            ?? "—",
                           ),
                       },
-                      { key: "actionable_entry_signal_count", label: "Signals", className: "col-count", render: (row) => formatShortNumber(row.actionable_entry_signal_count) },
-                      { key: "total_intent_count", label: "Intents", className: "col-count", render: (row) => formatShortNumber(row.total_intent_count) },
-                      { key: "total_fill_count", label: "Fills", className: "col-count", render: (row) => formatShortNumber(row.total_fill_count) },
-                      { key: "last_actionable_signal_timestamp", label: "Last Signal", className: "col-timestamp-wide", render: (row) => renderStructuredAuditTimestamp(row.last_actionable_signal_timestamp, row.last_actionable_signal_family) },
-                      { key: "last_intent_timestamp", label: "Last Intent", className: "col-timestamp-wide", render: (row) => renderStructuredAuditTimestamp(row.last_intent_timestamp, row.last_intent_type) },
-                      { key: "last_fill_timestamp", label: "Last Fill", className: "col-timestamp-wide", render: (row) => renderStructuredAuditTimestamp(row.last_fill_timestamp, row.last_fill_price) },
+                      { key: "actionable_entry_signal_count", label: "Signals", className: "col-count", sortable: true, sortKey: "signals", render: (row) => formatShortNumber(row.actionable_entry_signal_count) },
+                      { key: "total_intent_count", label: "Intents", className: "col-count", sortable: true, sortKey: "intents", render: (row) => formatShortNumber(row.total_intent_count) },
+                      { key: "total_fill_count", label: "Fills", className: "col-count", sortable: true, sortKey: "fills", render: (row) => formatShortNumber(row.total_fill_count) },
+                      { key: "last_actionable_signal_timestamp", label: "Last Signal", className: "col-timestamp-wide", sortable: true, sortKey: "last_signal", render: (row) => renderStructuredAuditTimestamp(row.last_actionable_signal_timestamp, row.last_actionable_signal_family) },
+                      { key: "last_intent_timestamp", label: "Last Intent", className: "col-timestamp-wide", sortable: true, sortKey: "last_intent", render: (row) => renderStructuredAuditTimestamp(row.last_intent_timestamp, row.last_intent_type) },
+                      { key: "last_fill_timestamp", label: "Last Fill", className: "col-timestamp-wide", sortable: true, sortKey: "last_fill", render: (row) => renderStructuredAuditTimestamp(row.last_fill_timestamp, row.last_fill_price) },
                       {
                         key: "latest_activity_timestamp",
                         label: "Latest Activity",
                         className: "col-timestamp-wide",
+                        sortable: true,
+                        sortKey: "latest_activity",
                         render: (row) => paperRuntimeActivityLabel({
                           ...row,
                           latest_activity_timestamp: row.latest_activity_timestamp ?? asRecord(row.strategy_performance_summary).latest_activity_timestamp,
@@ -16899,23 +17185,27 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                         render: (row) => (
                           <button
                             className="panel-button"
-                            disabled={standaloneStrategyId(row) === standaloneStrategyId(selectedSignalIntentFillAuditRow)}
+                            disabled={standaloneStrategyId(row) === standaloneStrategyId(selectedLivePaperExpressionRow)}
                             onClick={() => setSelectedAuditStrategyKey(standaloneStrategyId(row))}
                           >
-                            {standaloneStrategyId(row) === standaloneStrategyId(selectedSignalIntentFillAuditRow) ? "Selected" : "View"}
+                            {standaloneStrategyId(row) === standaloneStrategyId(selectedLivePaperExpressionRow) ? "Selected" : "View"}
                           </button>
                         ),
                       },
                     ]}
-                    rows={livePaperExpressionRows}
+                    rows={sortedLivePaperExpressionRows}
                     emptyLabel="No current paper-universe expression rows are available yet."
                     tableClassName="table-readable table-readable-xwide"
+                    activeSortKey={livePnlLaneSort?.key ?? null}
+                    activeSortDirection={livePnlLaneSort?.direction ?? null}
+                    onSortChange={(sortKey) => handleLivePnlLaneSort(sortKey as LivePnlLaneSortKey)}
                   />
-                  {selectedSignalIntentFillAuditRow && livePaperExpressionRows.some((row) => standaloneStrategyId(row) === standaloneStrategyId(selectedSignalIntentFillAuditRow)) ? (
+                  {selectedLivePaperExpressionRow ? (
                     <div className="notice-strip compact">
-                      <div><strong>Selected lane:</strong> {standaloneStrategyLabel(selectedSignalIntentFillAuditRow)} | {formatValue(selectedSignalIntentFillAuditRow.audit_reason)}</div>
-                      <div><strong>Current blocker:</strong> {formatValue(selectedSignalIntentFillAuditRow.latest_fault_or_blocker ?? asRecord(selectedSignalIntentFillAuditRow.latest_gating_state).latest_fault_or_blocker ?? "None recorded")}</div>
-                      <div><strong>Latest gating state:</strong> entries_enabled={formatValue(selectedSignalIntentFillAuditRow.entries_enabled)} | operator_halt={formatValue(selectedSignalIntentFillAuditRow.operator_halt)} | risk_state={formatValue(asRecord(selectedSignalIntentFillAuditRow.latest_gating_state).risk_state ?? selectedSignalIntentFillAuditRow.risk_state ?? "OK")}</div>
+                      <div><strong>Selected lane:</strong> {standaloneStrategyLabel(selectedLivePaperExpressionRow)} | {formatValue(selectedLivePaperExpressionRow.audit_reason)}</div>
+                      <div><strong>Cadence state:</strong> {formatValue(sentenceCase(String(selectedLivePaperExpressionRow.cadence_state ?? selectedLivePaperExpressionRow.bar_state ?? "—").replace(/_/g, " ")))}</div>
+                      <div><strong>Hard blocker:</strong> {formatValue(selectedLivePaperExpressionRow.latest_hard_blocker ?? "—")}</div>
+                      <div><strong>Latest gating state:</strong> live_capable={formatValue(selectedLivePaperExpressionRow.live_capable)} | actionable_this_bar={formatValue(selectedLivePaperExpressionRow.actionable_this_bar)} | entries_enabled={formatValue(selectedLivePaperExpressionRow.entries_enabled)} | operator_halt={formatValue(selectedLivePaperExpressionRow.operator_halt)} | risk_state={formatValue(asRecord(selectedLivePaperExpressionRow.latest_gating_state).risk_state ?? selectedLivePaperExpressionRow.risk_state ?? "OK")}</div>
                     </div>
                   ) : null}
                 </div>
@@ -19091,11 +19381,13 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                   <MetricCard label="Backend State" value={desktopState?.backend.label ?? "Unknown"} tone={statusTone(desktopState?.backend.label)} />
                   <MetricCard label="Broad Session" value={formatValue(paperReadiness.current_broad_trading_session ?? paperReadiness.current_detected_session ?? paperReadiness.runtime_phase ?? global.current_session_date)} />
                   <MetricCard label="Runtime Freshness" value={formatValue(global.stale ? "STALE" : formatRelativeAge(global.last_update_timestamp ?? desktopState?.refreshedAt))} tone={statusTone(global.stale ? "stale" : "fresh")} />
-                  <MetricCard label="Ready This Bar" value={`${laneEligibilityRows.filter((row) => row.eligible_now === true).length}/${laneEligibilityRows.length || 0}`} />
+                  <MetricCard label="Live-Capable" value={formatValue(readinessLaneStatusSummary.live_capable_count ?? 0)} />
                   <MetricCard label="Session Eligible" value={formatValue(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0)} />
-                  <MetricCard label="Waiting For 3m Bar" value={formatValue(readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0)} />
+                  <MetricCard label="Waiting For Bar" value={formatValue(readinessLaneStatusSummary.waiting_for_bar_count ?? readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0)} />
+                  <MetricCard label="No Setup" value={formatValue(readinessLaneStatusSummary.no_setup_count ?? 0)} />
                   <MetricCard label="Actionable Now" value={formatValue(readinessLaneStatusSummary.actionable_now_count ?? 0)} />
-                  <MetricCard label="Lane Risk Rows" value={`${laneRiskRows.length}`} />
+                  <MetricCard label="True Blocked" value={formatValue(readinessLaneStatusSummary.true_blocked_count ?? readinessLaneStatusSummary.blocked_lanes_count ?? 0)} />
+                  <MetricCard label="Market Data Stale" value={formatValue(readinessLaneStatusSummary.market_data_stale_count ?? 0)} />
                 </div>
               </Section>
 
@@ -21175,13 +21467,23 @@ function PaperStartupPanel(props: {
 }
 
 function DataTable(props: {
-  columns: Array<{ key: string; label: string; render?: (row: JsonRecord) => ReactNode; className?: string }>;
+  columns: Array<{
+    key: string;
+    label: string;
+    render?: (row: JsonRecord) => ReactNode;
+    className?: string;
+    sortable?: boolean;
+    sortKey?: string;
+  }>;
   rows: JsonRecord[];
   emptyLabel: string;
   onRowClick?: (row: JsonRecord) => void;
   rowKey?: (row: JsonRecord, index: number) => string;
   selectedRowKey?: string;
   tableClassName?: string;
+  activeSortKey?: string | null;
+  activeSortDirection?: "asc" | "desc" | null;
+  onSortChange?: (sortKey: string) => void;
 }) {
   const rows = useMemo(() => props.rows ?? [], [props.rows]);
   if (!rows.length) {
@@ -21192,9 +21494,27 @@ function DataTable(props: {
       <table className={`data-table ${props.tableClassName ?? ""}`.trim()}>
         <thead>
           <tr>
-            {props.columns.map((column) => (
-              <th key={column.key} className={column.className}>{column.label}</th>
-            ))}
+            {props.columns.map((column) => {
+              const resolvedSortKey = column.sortKey ?? column.key;
+              const active = column.sortable && props.activeSortKey === resolvedSortKey;
+              const indicator = active ? (props.activeSortDirection === "asc" ? "▲" : "▼") : column.sortable ? "↕" : null;
+              return (
+                <th key={column.key} className={column.className}>
+                  {column.sortable && props.onSortChange ? (
+                    <button
+                      type="button"
+                      className={`table-sort-button ${active ? "is-active" : ""}`.trim()}
+                      onClick={() => props.onSortChange?.(resolvedSortKey)}
+                    >
+                      <span>{column.label}</span>
+                      {indicator ? <span className="table-sort-indicator">{indicator}</span> : null}
+                    </button>
+                  ) : (
+                    column.label
+                  )}
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>

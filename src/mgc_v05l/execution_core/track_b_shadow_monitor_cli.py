@@ -88,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-fresh-runtime-artifact-fallback", action="store_true")
     parser.add_argument("--max-latest-1m-age-seconds", type=int, default=900)
     parser.add_argument("--max-completed-5m-age-seconds", type=int, default=900)
+    parser.add_argument("--live-execution-min-1m-bars", type=int, default=3)
+    parser.add_argument("--live-execution-min-completed-5m-bars", type=int, default=1)
+    parser.add_argument("--disable-startup-backfill-context", action="store_true")
     parser.add_argument("--current-quote-report-json", type=Path, default=DEFAULT_CURRENT_QUOTE_REPORT_JSON)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--base-url", default="https://hist.databento.com/v0")
@@ -122,6 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("outputs/track_b_execution_core/track_b_multi_strategy_runtime_cycle"),
     )
     parser.add_argument("--operator-status-output-root", type=Path, default=Path("outputs/track_b_execution_core/operator_status"))
+    parser.add_argument("--diagnostic-output-root", type=Path, default=Path("outputs/track_b_execution_core/diagnostics"))
     parser.add_argument("--backend-health-json", type=Path, default=DEFAULT_BACKEND_HEALTH_JSON)
     parser.add_argument("--lockfile", type=Path, default=DEFAULT_LOCKFILE)
     parser.add_argument("--pidfile", type=Path, default=DEFAULT_PIDFILE)
@@ -185,6 +189,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             allow_fresh_runtime_artifact_fallback=not args.disable_fresh_runtime_artifact_fallback,
             max_latest_1m_age_seconds=args.max_latest_1m_age_seconds,
             max_completed_5m_age_seconds=args.max_completed_5m_age_seconds,
+            live_execution_min_1m_bars=args.live_execution_min_1m_bars,
+            live_execution_min_completed_5m_bars=args.live_execution_min_completed_5m_bars,
+            startup_backfill_context_enabled=not args.disable_startup_backfill_context,
             current_quote_report_json=args.current_quote_report_json,
             env_file=args.env_file,
             base_url=args.base_url,
@@ -199,6 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session_strategy_output_root=args.session_strategy_output_root,
             multi_strategy_output_root=args.multi_strategy_output_root,
             operator_status_output_root=args.operator_status_output_root,
+            diagnostic_output_root=args.diagnostic_output_root,
             backend_health_json=args.backend_health_json,
             lockfile=args.lockfile,
             pidfile=args.pidfile,

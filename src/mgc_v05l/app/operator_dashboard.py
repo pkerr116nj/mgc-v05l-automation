@@ -40,38 +40,8 @@ from ..local_operator_auth import (
     local_operator_auth_surface,
     production_action_risk_bucket,
 )
-from ..config_models import load_data_storage_policy, load_settings_from_files
-from .historical_playback import ensure_strategy_study_artifacts
-from .strategy_study import (
-    build_strategy_study_dashboard_summary,
-    build_strategy_study_catalog_entry,
-    build_strategy_study_preview,
-    normalize_strategy_study_payload,
-)
-from .replay_reporting import build_summary_metrics, build_trade_ledger
 from .session_phase_labels import label_session_phase, session_restriction_matches_timestamp
-from .approved_quant_lanes.dashboard_payloads import load_approved_quant_baselines_snapshot
-from .dashboard_registry import build_dashboard_lane_registry
-from .experimental_canaries_dashboard_payloads import load_experimental_canaries_snapshot
-from .gc_mgc_forced_session_runtime import GC_MGC_FORCED_SESSION_RUNTIME_KIND
-from .index_futures_forced_session_runtime import INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND
-from .operator_surface import build_operator_surface
-from . import probationary_runtime
-from .probationary_runtime import REALIZED_LOSER_SESSION_OVERRIDE_ACTION, submit_probationary_operator_control
-from .research_runtime_bridge import (
-    BRIDGE_MODE_PROSPECTIVE,
-    DEFAULT_PROSPECTIVE_POLL_INTERVAL_SECONDS,
-    DEFAULT_SELECTED_LANES,
-    DEFAULT_WAREHOUSE_ROOT,
-    review_runtime_bridge_anomaly,
-    run_bridge,
-)
-from .strategy_analysis import build_strategy_analysis_payload
-from .strategy_identity import build_standalone_strategy_identity
-from .strategy_runtime_registry import build_standalone_strategy_definitions
-from .tracked_paper_strategies import build_tracked_paper_strategies_payload
 from ..execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
-from ..research.platform import build_discovered_research_analytics_payload, read_research_analytics_dataset
 from ..market_data import (
     SchwabAuthError,
     SchwabOAuthClient,
@@ -123,6 +93,13 @@ DEFAULT_RUNTIME_SUPERVISOR_MAX_AUTO_RESTARTS_PER_WINDOW = 3
 DEFAULT_RUNTIME_SUPERVISOR_RESTART_BACKOFF_SECONDS = 60
 DEFAULT_RUNTIME_SUPERVISOR_RESTART_SUPPRESSION_SECONDS = 900
 DEFAULT_RUNTIME_SUPERVISOR_FAILURE_COOLDOWN_SECONDS = 180
+BRIDGE_MODE_PROSPECTIVE = "PROSPECTIVE_PAPER_RUNTIME"
+DEFAULT_PROSPECTIVE_POLL_INTERVAL_SECONDS = 30
+DEFAULT_SELECTED_LANES = (
+    "gc_asia_early_normal_breakout_retest_hold_turn__GC",
+    "mgc_asia_early_pause_resume_short_turn__MGC",
+)
+DEFAULT_WAREHOUSE_ROOT = REPO_ROOT / "outputs" / "research_platform" / "warehouse" / "historical_evaluator"
 DEFAULT_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS = DEFAULT_PROSPECTIVE_POLL_INTERVAL_SECONDS
 RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_AUTOSTART_ENV = "MGC_SERVICE_HOST_AUTOSTART_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR"
 RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_ENV = "MGC_SERVICE_HOST_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR_INTERVAL_SECONDS"
@@ -160,6 +137,8 @@ PAPER_EXECUTION_CANARY_EXIT_REASON = "paperExecutionCanaryExitNextBar"
 ATPE_CANARY_RUNTIME_KIND = "atpe_canary_observer"
 ATP_COMPANION_BENCHMARK_RUNTIME_KIND = "atp_companion_benchmark_paper"
 GC_MGC_ACCEPTANCE_RUNTIME_KIND = "gc_mgc_london_open_acceptance_temp_paper"
+GC_MGC_FORCED_SESSION_RUNTIME_KIND = "gc_mgc_forced_session_candidate_runtime"
+INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND = "index_futures_forced_session_candidate_runtime"
 STRATEGY_HISTORY_SESSION_BUCKETS = ("ASIA_EARLY", "ASIA_LATE", "LONDON_OPEN", "LONDON_LATE", "US_MIDDAY", "US_LATE", "UNKNOWN")
 DASHBOARD_PAYLOAD_SCHEMA_VERSION = 2
 DEFAULT_DASHBOARD_HTTP_MAX_WORKERS = max(4, min(16, (os.cpu_count() or 4) * 2))
@@ -305,6 +284,8 @@ def _historical_playback_study_catalog_payload(items: Sequence[dict[str, Any]]) 
 def _historical_strategy_study_preview(strategy_study_payload: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(strategy_study_payload, dict):
         return None
+    from .strategy_study import build_strategy_study_preview
+
     return build_strategy_study_preview(strategy_study_payload)
 
 
@@ -520,6 +501,8 @@ class OperatorDashboardService:
             "checked_at": None,
             "error": None,
         }
+        from ..config_models.data_policy import load_data_storage_policy
+
         self._data_policy = load_data_storage_policy(self._repo_root)
         self._research_history_database_path = self._data_policy.resolve_path(self._data_policy.storage_layout.runtime_replay_database_path)
         self._research_daily_capture_latest_path = (
@@ -746,6 +729,8 @@ class OperatorDashboardService:
             carry_forward=carry_forward,
             pre_session_review=pre_session_review,
         )
+        from .experimental_canaries_dashboard_payloads import load_experimental_canaries_snapshot
+
         paper["experimental_canaries"] = load_experimental_canaries_snapshot(self._experimental_canaries_snapshot_path)
         paper["approved_models"] = self._paper_approved_models_payload(paper)
         paper["non_approved_lanes"] = self._paper_non_approved_lanes_payload(paper)
@@ -820,6 +805,9 @@ class OperatorDashboardService:
     ) -> None:
         try:
             generated_at = datetime.now(timezone.utc).isoformat()
+            from .strategy_analysis import build_strategy_analysis_payload
+            from ..research.platform import build_discovered_research_analytics_payload
+
             strategy_analysis = build_strategy_analysis_payload(
                 historical_playback=historical_playback,
                 paper=paper,
@@ -957,6 +945,8 @@ class OperatorDashboardService:
                 market_context = self._market_index_strip_payload()
                 market_context["debug"] = self._market_index_debug_payload(market_context)
                 treasury_curve = self._treasury_curve_payload()
+                from .approved_quant_lanes.dashboard_payloads import load_approved_quant_baselines_snapshot
+
                 approved_quant_baselines = load_approved_quant_baselines_snapshot(self._approved_quant_baselines_path)
                 approved_quant_baselines.setdefault("artifacts", {})
                 approved_quant_baselines["artifacts"].update(
@@ -966,6 +956,8 @@ class OperatorDashboardService:
                         "current_status_markdown": "/api/operator-artifact/approved-quant-baselines-current-status-md",
                     }
                 )
+                from .dashboard_registry import build_dashboard_lane_registry
+
                 lane_registry = build_dashboard_lane_registry(
                     approved_quant_baselines=approved_quant_baselines,
                     paper_approved_models=paper["approved_models"],
@@ -1041,6 +1033,8 @@ class OperatorDashboardService:
                         "Closed trades paired from persisted lane-local intents and fills across approved/admitted paper lanes plus experimental temporary paper strategies."
                     )
                     paper["strategy_performance"] = strategy_performance
+                from .tracked_paper_strategies import build_tracked_paper_strategies_payload
+
                 paper["tracked_strategies"] = build_tracked_paper_strategies_payload(
                     repo_root=self._repo_root,
                     paper=paper,
@@ -1064,6 +1058,8 @@ class OperatorDashboardService:
                     startup_control_plane=startup_control_plane,
                     paper=paper,
                 )
+                from .operator_surface import build_operator_surface
+
                 operator_surface = build_operator_surface(
                     generated_at=generated_at,
                     global_payload={
@@ -1547,7 +1543,6 @@ class OperatorDashboardService:
         degraded["supervised_paper_operability"] = supervised_paper_operability
         return degraded
 
-
     def _paper_runtime_config_warning_payload(self) -> dict[str, Any]:
         warnings = list(self._paper_runtime_config_path_warnings)
         stale_paths = [
@@ -1624,13 +1619,17 @@ class OperatorDashboardService:
         heartbeat = _load_json_file(monitor_root / "latest_track_b_shadow_monitor_heartbeat.json") or {}
         diagnostic_root = self._repo_root / "outputs" / "track_b_execution_core" / "diagnostics"
         live_feed_freshness_diagnostic_path = diagnostic_root / "latest_track_b_live_feed_freshness_diagnostic.json"
+        startup_readiness_diagnostic_path = diagnostic_root / "latest_track_b_startup_readiness_diagnostic.json"
         live_feed_freshness_diagnostic = _load_json_file(live_feed_freshness_diagnostic_path) or {}
+        startup_readiness_diagnostic = _load_json_file(startup_readiness_diagnostic_path) or {}
         if not isinstance(monitor, dict):
             monitor = {}
         if not isinstance(heartbeat, dict):
             heartbeat = {}
         if not isinstance(live_feed_freshness_diagnostic, dict):
             live_feed_freshness_diagnostic = {}
+        if not isinstance(startup_readiness_diagnostic, dict):
+            startup_readiness_diagnostic = {}
         ledger_root = self._repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
         trade_summary = _load_json_file(ledger_root / "latest_track_b_paper_trade_summary.json") or {}
         live_position_status = _load_json_file(ledger_root / "latest_track_b_live_position_status.json") or {}
@@ -1702,6 +1701,10 @@ class OperatorDashboardService:
         put_missing("shadow_monitor_live_feed_completed_1m_fresh", primary_instrument.get("live_feed_completed_1m_fresh"))
         put_missing("shadow_monitor_live_feed_completed_5m_fresh", primary_instrument.get("live_feed_completed_5m_fresh"))
         put_missing("shadow_monitor_live_feed_execution_fresh", primary_instrument.get("live_feed_execution_fresh"))
+        put_missing("shadow_monitor_live_execution_approved", primary_instrument.get("live_execution_approved"))
+        put_missing("shadow_monitor_feature_context_ready", primary_instrument.get("feature_context_ready"))
+        put_missing("shadow_monitor_feature_context_source", primary_instrument.get("feature_context_source"))
+        put_missing("shadow_monitor_paper_evaluation_allowed", primary_instrument.get("paper_evaluation_allowed"))
         put_missing("shadow_monitor_live_feed_latest_1m_age_seconds", primary_instrument.get("live_feed_latest_1m_age_seconds"))
         put_missing(
             "shadow_monitor_live_feed_latest_completed_5m_age_seconds",
@@ -1743,6 +1746,13 @@ class OperatorDashboardService:
             _compact_track_b_live_feed_freshness_diagnostic(
                 live_feed_freshness_diagnostic,
                 live_feed_freshness_diagnostic_path,
+            ),
+        )
+        put_latest_allow_empty(
+            "track_b_startup_readiness_diagnostic",
+            _compact_track_b_startup_readiness_diagnostic(
+                startup_readiness_diagnostic,
+                startup_readiness_diagnostic_path,
             ),
         )
         put_missing("shadow_monitor_submit_allowed", monitor.get("submit_allowed"))
@@ -1831,17 +1841,22 @@ class OperatorDashboardService:
         pnl_summary_path = ledger_root / "latest_track_b_pnl_summary.json"
         zero_activity_diagnostic_path = diagnostic_root / "latest_track_b_zero_activity_diagnostic.json"
         live_feed_freshness_diagnostic_path = diagnostic_root / "latest_track_b_live_feed_freshness_diagnostic.json"
+        startup_readiness_diagnostic_path = diagnostic_root / "latest_track_b_startup_readiness_diagnostic.json"
         trade_summary = _load_json_file(trade_summary_path)
         live_position_status = _load_json_file(live_position_status_path)
         pnl_summary = _load_json_file(pnl_summary_path)
         zero_activity_diagnostic = _load_json_file(zero_activity_diagnostic_path)
         live_feed_freshness_diagnostic = _load_json_file(live_feed_freshness_diagnostic_path)
+        startup_readiness_diagnostic = _load_json_file(startup_readiness_diagnostic_path)
         trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
         live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
         pnl_summary = pnl_summary if isinstance(pnl_summary, dict) else {}
         zero_activity_diagnostic = zero_activity_diagnostic if isinstance(zero_activity_diagnostic, dict) else {}
         live_feed_freshness_diagnostic = (
             live_feed_freshness_diagnostic if isinstance(live_feed_freshness_diagnostic, dict) else {}
+        )
+        startup_readiness_diagnostic = (
+            startup_readiness_diagnostic if isinstance(startup_readiness_diagnostic, dict) else {}
         )
         missing = [
             str(path)
@@ -1942,6 +1957,10 @@ class OperatorDashboardService:
             "live_feed_freshness_diagnostic": _compact_track_b_live_feed_freshness_diagnostic(
                 live_feed_freshness_diagnostic,
                 live_feed_freshness_diagnostic_path,
+            ),
+            "startup_readiness_diagnostic": _compact_track_b_startup_readiness_diagnostic(
+                startup_readiness_diagnostic,
+                startup_readiness_diagnostic_path,
             ),
             "live_money_readiness": live_money_readiness,
             "critical": bool(critical_warnings),
@@ -2147,9 +2166,7 @@ class OperatorDashboardService:
                 stale_sources=[f"cache_age>{DEFAULT_DASHBOARD_API_CACHE_MAX_AGE_SECONDS:.0f}s"],
             )
         stale_sources = self._stale_dashboard_snapshot_sources(payload)
-        if stale_sources:
-            if not allow_stale_instance:
-                return None
+        if stale_sources and allow_stale_instance:
             return self._degraded_cached_dashboard_snapshot(payload, stale_instance=False, stale_sources=stale_sources)
         return payload
 
@@ -2394,6 +2411,24 @@ class OperatorDashboardService:
             "artifact_path": str(self._bootstrap_prerequisites_path),
         }
 
+    def _schwab_sidecar_requirement(self) -> dict[str, Any]:
+        payload = self._dashboard_bootstrap_prerequisites_payload()
+        schwab_item = next(
+            (item for item in list(payload.get("items") or []) if item.get("key") == "schwab_auth_env"),
+            {},
+        )
+        provider_roles = dict(schwab_item.get("provider_roles") or {})
+        explicitly_required = bool(schwab_item.get("required"))
+        required_for_current_route = explicitly_required or any(
+            str(provider_roles.get(key) or "").strip().lower() == "schwab"
+            for key in ("market_data_primary", "broker_truth_provider", "execution_provider")
+        )
+        return {
+            "explicitly_required": explicitly_required,
+            "required_for_current_route": required_for_current_route,
+            "provider_roles": provider_roles,
+        }
+
     def _startup_control_plane_payload(
         self,
         *,
@@ -2556,6 +2591,8 @@ class OperatorDashboardService:
         auth_ready = bool(auth_recovery.get("runtime_ready"))
         auth_reason = str(auth_recovery.get("reason") or ("Schwab connectivity/auth is ready." if auth_ready else "Schwab connectivity/auth is not ready.")).strip()
         paper_running = bool(paper.get("running"))
+        schwab_sidecar_requirement = self._schwab_sidecar_requirement()
+        schwab_required_for_current_route = bool(schwab_sidecar_requirement.get("required_for_current_route"))
 
         market_feed_state = str(market_context.get("feed_state") or "UNAVAILABLE").upper()
         market_note = str(market_context.get("note") or "Market-data feed state is unavailable.").strip()
@@ -2589,7 +2626,7 @@ class OperatorDashboardService:
                 launch_blocking=False,
                 clears_automatically=True,
             )
-        elif auth_ready and paper_running:
+        elif paper_running:
             market_row = _dependency_row(
                 key="market_data_connectivity",
                 label="Market-Data Connectivity",
@@ -2598,7 +2635,7 @@ class OperatorDashboardService:
                 reason="Execution market data is live through the attached paper runtime.",
                 detail=(
                     f"{market_note} Dashboard market-index fetch is currently unavailable, but the attached paper runtime "
-                    "and Schwab auth path are healthy."
+                    "remains the authoritative Databento-backed execution market-data source for supervised paper."
                 ),
                 next_action_label="Refresh",
                 evidence_target=str(market_context.get("diagnostic_artifact") or "/api/operator-artifact/market-index-strip-diagnostics"),
@@ -2622,6 +2659,21 @@ class OperatorDashboardService:
                 launch_blocking=False,
                 clears_automatically=True,
             )
+        elif not schwab_required_for_current_route:
+            market_row = _dependency_row(
+                key="market_data_connectivity",
+                label="Market-Data Connectivity",
+                state="DEGRADED",
+                reason_code="market_data_sidecar_unavailable",
+                reason="Dashboard sidecar market-index fetch is unavailable, but the current supervised paper route is Databento/IBKR-backed.",
+                detail=market_note,
+                next_action_label="Refresh",
+                evidence_target=str(market_context.get("diagnostic_artifact") or "/api/operator-artifact/market-index-strip-diagnostics"),
+                evidence_label="Market-data diagnostics",
+                action_required_now=False,
+                launch_blocking=False,
+                clears_automatically=True,
+            )
         else:
             market_row = _dependency_row(
                 key="market_data_connectivity",
@@ -2637,17 +2689,28 @@ class OperatorDashboardService:
                 launch_blocking=True,
                 clears_automatically=False,
             )
+        auth_state = "READY" if auth_ready else ("WARMING" if auth_recovery.get("auto_recovery_active") else ("DEGRADED" if not schwab_required_for_current_route else "BLOCKED"))
+        auth_reason_code = (
+            "schwab_auth_ready"
+            if auth_ready
+            else ("schwab_auth_sidecar_unavailable" if not schwab_required_for_current_route else "schwab_auth_not_ready")
+        )
+        auth_row_reason = (
+            auth_reason
+            if auth_ready or schwab_required_for_current_route
+            else "Schwab fallback/auth is unavailable, but it is not required for the current IBKR/Databento supervised paper route."
+        )
         auth_row = _dependency_row(
             key="schwab_connectivity",
             label="Schwab Connectivity / Auth",
-            state="READY" if auth_ready else ("WARMING" if auth_recovery.get("auto_recovery_active") else "BLOCKED"),
-            reason_code="schwab_auth_ready" if auth_ready else "schwab_auth_not_ready",
-            reason=auth_reason,
+            state=auth_state,
+            reason_code=auth_reason_code,
+            reason=auth_row_reason,
             detail=(
                 f"Auth source: {auth_status.get('source') or 'unknown'}."
                 if auth_ready
                 else (
-                    f"{auth_reason} Source: {auth_status.get('source') or 'unknown'}."
+                    f"{auth_row_reason} Source: {auth_status.get('source') or 'unknown'}."
                     + (
                         f" Automatic retry is scheduled for {auth_recovery.get('next_recovery_attempt_at')}."
                         if auth_recovery.get("next_recovery_attempt_at")
@@ -2658,8 +2721,8 @@ class OperatorDashboardService:
             next_action_label=str(auth_recovery.get("recommended_action") or auth_status.get("next_action") or "Auth Gate Check"),
             evidence_target="/api/operator-artifact/auth-gate-latest",
             evidence_label="Latest auth-gate result",
-            action_required_now=bool(auth_recovery.get("manual_action_required")),
-            launch_blocking=not auth_ready,
+            action_required_now=bool(auth_recovery.get("manual_action_required")) and schwab_required_for_current_route,
+            launch_blocking=schwab_required_for_current_route and not auth_ready,
             clears_automatically=bool(auth_recovery.get("auto_recovery_active")),
             next_action_detail=(
                 f"Automatic recovery is active. Next retry is scheduled for {auth_recovery.get('next_recovery_attempt_at')}."
@@ -4637,6 +4700,8 @@ class OperatorDashboardService:
         operator_label = self._operator_label_from_payload(payload)
         note = self._note_from_payload(payload, "review_note", "acknowledgement_note", "note", "reason")
         try:
+            from .research_runtime_bridge import review_runtime_bridge_anomaly
+
             result = review_runtime_bridge_anomaly(
                 output_dir=self._research_runtime_bridge_root,
                 anomaly_key=anomaly_key,
@@ -4907,6 +4972,8 @@ class OperatorDashboardService:
             }
         )
         self._write_research_runtime_bridge_supervisor_state(state)
+        from .research_runtime_bridge import run_bridge
+
         result = run_bridge(
             warehouse_root=config["warehouse_root"],
             output_dir=self._research_runtime_bridge_root,
@@ -5724,6 +5791,8 @@ class OperatorDashboardService:
         }
         if dataset_name not in allowed:
             return []
+        from ..research.platform import read_research_analytics_dataset
+
         return read_research_analytics_dataset(
             analytics_platform_root=self._research_analytics_platform_root,
             dataset_name=dataset_name,
@@ -5769,6 +5838,8 @@ class OperatorDashboardService:
                     or not markdown_path.exists()
                 )
             ):
+                from .historical_playback import ensure_strategy_study_artifacts
+
                 rebuilt_json_path, rebuilt_markdown_path = ensure_strategy_study_artifacts(
                     summary_path=summary_path,
                     summary_payload=_read_json(summary_path),
@@ -5865,6 +5936,8 @@ class OperatorDashboardService:
                     or not strategy_study_json_path.exists()
                     or not strategy_study_markdown_path.exists()
                 ):
+                    from .historical_playback import ensure_strategy_study_artifacts
+
                     rebuilt_json_path, rebuilt_markdown_path = ensure_strategy_study_artifacts(
                         summary_path=summary_path,
                         summary_payload=summary_payload,
@@ -5885,6 +5958,8 @@ class OperatorDashboardService:
             if strategy_study_json_path is not None and strategy_study_json_path.exists():
                 artifact_paths.setdefault("strategy_study_json", str(strategy_study_json_path))
                 if strategy_study_payload is None and not entry.get("study_preview"):
+                    from .strategy_study import normalize_strategy_study_payload
+
                     strategy_study_payload = normalize_strategy_study_payload(_read_json(strategy_study_json_path))
             if strategy_study_markdown_path is not None and strategy_study_markdown_path.exists():
                 artifact_paths.setdefault("strategy_study_markdown", str(strategy_study_markdown_path))
@@ -5930,6 +6005,8 @@ class OperatorDashboardService:
                 or dict(selected_catalog_entry.get("artifact_paths") or {}).get("strategy_study_json")
             )
             if selected_study_preview_payload is None and selected_study_path is not None and selected_study_path.exists():
+                from .strategy_study import normalize_strategy_study_payload
+
                 selected_study_payload = normalize_strategy_study_payload(_read_json(selected_study_path))
         if selected_study_payload is None:
             selected_study_payload = strategy_study_payload
@@ -6027,6 +6104,8 @@ class OperatorDashboardService:
                 item = dict(manifest_catalog_entry)
                 item.setdefault("run_stamp", run_stamp)
                 item.setdefault("run_timestamp", run_timestamp)
+                from .strategy_study import build_strategy_study_dashboard_summary, build_strategy_study_preview
+
                 item["summary"] = build_strategy_study_dashboard_summary(item.get("summary"))
                 if item.get("study_preview"):
                     compact_preview = build_strategy_study_preview(dict(item.get("study_preview") or {}))
@@ -6052,6 +6131,8 @@ class OperatorDashboardService:
                     **api_artifact_paths,
                 }
                 if entry.get("study_preview") and not item.get("study_preview"):
+                    from .strategy_study import build_strategy_study_preview
+
                     compact_preview = build_strategy_study_preview(dict(entry.get("study_preview") or {}))
                     if compact_preview is not None:
                         item["study_preview"] = compact_preview
@@ -6073,6 +6154,8 @@ class OperatorDashboardService:
                     or not strategy_study_markdown_path.exists()
                 )
             ):
+                from .historical_playback import ensure_strategy_study_artifacts
+
                 rebuilt_json_path, rebuilt_markdown_path = ensure_strategy_study_artifacts(
                     summary_path=summary_path,
                     summary_payload=summary_payload,
@@ -6083,6 +6166,8 @@ class OperatorDashboardService:
                     strategy_study_markdown_path = rebuilt_markdown_path
             if strategy_study_json_path is None or not strategy_study_json_path.exists():
                 continue
+            from .strategy_study import build_strategy_study_catalog_entry, normalize_strategy_study_payload
+
             normalized_study = normalize_strategy_study_payload(_read_json(strategy_study_json_path))
             if normalized_study is None:
                 continue
@@ -6239,6 +6324,8 @@ class OperatorDashboardService:
         if not all(path.exists() for path in config_paths):
             return {}
         try:
+            from ..config_models.loader import load_settings_from_files
+
             settings = load_settings_from_files(config_paths)
         except Exception:
             return {}
@@ -6298,6 +6385,8 @@ class OperatorDashboardService:
         if not all(path.exists() for path in config_paths):
             return None
         try:
+            from ..config_models.loader import load_settings_from_files
+
             return load_settings_from_files(config_paths)
         except Exception:
             return None
@@ -6356,6 +6445,8 @@ class OperatorDashboardService:
         settings = self._dashboard_base_settings()
         if settings is None:
             return {"rows": [], "row_count": 0}
+        from .strategy_runtime_registry import build_standalone_strategy_definitions
+
         runtime_definitions = build_standalone_strategy_definitions(
             settings,
             runtime_lanes=self._configured_paper_lanes(config_in_force),
@@ -6794,11 +6885,12 @@ class OperatorDashboardService:
             session_fills=session_fills,
             position=position,
         )
-        approved_quant_baselines = (
-            load_approved_quant_baselines_snapshot(self._approved_quant_baselines_path)
-            if runtime_name == "paper"
-            else {}
-        )
+        if runtime_name == "paper":
+            from .approved_quant_lanes.dashboard_payloads import load_approved_quant_baselines_snapshot
+
+            approved_quant_baselines = load_approved_quant_baselines_snapshot(self._approved_quant_baselines_path)
+        else:
+            approved_quant_baselines = {}
         runtime_registry = self._standalone_runtime_registry_payload(
             config_in_force=config_in_force,
             include_approved_quant=runtime_name == "paper",
@@ -7248,6 +7340,8 @@ class OperatorDashboardService:
                     effective_eligibility_reason = "bar_received_not_processed_yet"
                 elif raw_bar_state == "MARKET_DATA_STALE":
                     effective_eligibility_reason = "market_data_stale"
+                elif raw_bar_state == "BAR_AUTHORITY_UNAVAILABLE":
+                    effective_eligibility_reason = "bar_authority_unavailable"
                 elif raw_bar_state == "BAR_PROCESSED_CURRENT":
                     effective_eligibility_reason = ""
             next_expected_decision_bar_ts = _next_expected_decision_bar_timestamp(
@@ -7263,6 +7357,43 @@ class OperatorDashboardService:
             setup_evaluated = str(audit_row.get("audit_verdict") or "") not in {"", "INSUFFICIENT_HISTORY"}
             no_setup_present = str(audit_row.get("audit_verdict") or "") == "NO_SETUP_OBSERVED"
             intent_action = str(route_row.get("intent_action") or route_row.get("current_signal_state") or "NO_ACTION").upper()
+            latest_completed_bar_end_ts = observed_completed_bar_end_ts or expected_completed_bar_end_ts
+            current_bar_executable_state = _current_bar_executable_state(
+                audit_row=audit_row,
+                route_row=route_row,
+                current_processed_bar_end_ts=last_processed_bar_end_ts,
+                latest_completed_bar_end_ts=latest_completed_bar_end_ts,
+            )
+            display_candidate_this_bar = bool(
+                intent_action in {"BUY", "SELL", "EXIT"}
+                and session_eligible
+                and eligible_now
+                and governance_allowed
+                and route_ready
+            )
+            data_fresh = bool(
+                loaded_in_runtime
+                and observed_completed_bar_end_ts
+                and raw_bar_state != "MARKET_DATA_STALE"
+                and not (runtime_stale and not runtime_stale_suppressed)
+            )
+            display_candidate_this_bar = bool(display_candidate_this_bar and data_fresh)
+            executable_actionable_this_bar = bool(
+                session_eligible
+                and eligible_now
+                and governance_allowed
+                and route_ready
+                and data_fresh
+                and (
+                    current_bar_executable_state["current_bar_signal_record"]
+                    or current_bar_executable_state["order_intent_minted"]
+                    or current_bar_executable_state["route_preflight_attempted"]
+                )
+            )
+            surfacing_mismatch_suspected = bool(
+                display_candidate_this_bar
+                and current_bar_executable_state["surfacing_mismatch_suspected"]
+            )
             if loaded_in_runtime and not effective_allowed_session_match and raw_bar_state == "MARKET_DATA_STALE":
                 bar_progress_state = "OUT_OF_SESSION_DORMANT"
             elif session_eligible and raw_bar_state in {
@@ -7271,8 +7402,10 @@ class OperatorDashboardService:
                 "MARKET_DATA_STALE",
             }:
                 bar_progress_state = raw_bar_state
-            elif session_eligible and intent_action in {"BUY", "SELL", "EXIT"} and eligible_now:
+            elif executable_actionable_this_bar:
                 bar_progress_state = "ACTIONABLE"
+            elif surfacing_mismatch_suspected:
+                bar_progress_state = "DISPLAY_CANDIDATE_ONLY"
             elif session_eligible and setup_evaluated and no_setup_present:
                 bar_progress_state = "READY_NO_SETUP"
             elif raw_bar_state:
@@ -7287,7 +7420,11 @@ class OperatorDashboardService:
                 if bar_progress_state == "READY_NO_SETUP":
                     bar_state_reason = "The latest processed completed bar evaluated cleanly and produced no setup."
                 elif bar_progress_state == "ACTIONABLE":
-                    bar_state_reason = "The latest processed completed bar produced an actionable signal."
+                    bar_state_reason = "A durable current-bar executable signal or intent exists for the latest processed decision bar."
+                elif bar_progress_state == "DISPLAY_CANDIDATE_ONLY":
+                    bar_state_reason = (
+                        "Route surfacing shows a current candidate action, but no durable current-bar executable signal or intent was persisted."
+                    )
                 else:
                     bar_state_reason = None
             else:
@@ -7296,24 +7433,15 @@ class OperatorDashboardService:
             bar_received_not_processed_yet = bool(
                 session_eligible and bar_progress_state == "BAR_RECEIVED_NOT_PROCESSED_YET"
             )
+            bar_authority_available = bool(bar_progress_state != "BAR_AUTHORITY_UNAVAILABLE")
+            bar_authority_unavailable = bool(
+                loaded_in_runtime and session_eligible and bar_progress_state == "BAR_AUTHORITY_UNAVAILABLE"
+            )
             market_data_stale = bool(
                 loaded_in_runtime and bar_progress_state == "MARKET_DATA_STALE"
             )
-            latest_completed_bar_end_ts = observed_completed_bar_end_ts or expected_completed_bar_end_ts
-            data_fresh = bool(
-                loaded_in_runtime
-                and observed_completed_bar_end_ts
-                and not market_data_stale
-                and not (runtime_stale and not runtime_stale_suppressed)
-            )
-            actionable_now = bool(
-                intent_action in {"BUY", "SELL", "EXIT"}
-                and session_eligible
-                and eligible_now
-                and governance_allowed
-                and route_ready
-                and data_fresh
-            )
+            actionable_now = bool(executable_actionable_this_bar and data_fresh)
+            surfacing_mismatch_suspected = bool(surfacing_mismatch_suspected and data_fresh)
             session_label_gap_active = bool(
                 fine_grained_phase_label == "UNCLASSIFIED"
                 and broad_trading_session not in {"UNCLASSIFIED", "UNKNOWN"}
@@ -7342,6 +7470,23 @@ class OperatorDashboardService:
                 and governance_allowed
                 and route_ready
                 and session_eligible
+                and bar_authority_available
+                and not market_data_stale
+                and not (runtime_stale and not runtime_stale_suppressed)
+            )
+            live_capable = bool(
+                loaded_in_runtime
+                and session_eligible
+                and bool(row.get("entries_enabled", True))
+                and governance_allowed
+                and route_ready
+                and not bool(row.get("operator_halt"))
+                and not halted_by_risk
+                and not reconciling
+                and not faulted
+                and not market_data_stale
+                and not bar_authority_unavailable
+                and not bar_received_not_processed_yet
                 and not (runtime_stale and not runtime_stale_suppressed)
             )
             first_true_blocker = _first_true_lane_blocker(
@@ -7356,6 +7501,7 @@ class OperatorDashboardService:
                 operator_halt=bool(row.get("operator_halt")),
                 route_ready=route_ready,
                 session_eligible=session_eligible,
+                bar_authority_unavailable=bar_authority_unavailable,
                 waiting_for_completed_bar=waiting_for_completed_bar,
                 bar_received_not_processed_yet=bar_received_not_processed_yet,
                 market_data_stale=market_data_stale,
@@ -7370,12 +7516,14 @@ class OperatorDashboardService:
                 governance_allowed=governance_allowed,
                 route_ready=route_ready,
                 session_eligible=session_eligible,
+                bar_authority_unavailable=bar_authority_unavailable,
                 waiting_for_completed_bar=waiting_for_completed_bar,
                 bar_received_not_processed_yet=bar_received_not_processed_yet,
                 market_data_stale=market_data_stale,
                 setup_evaluated=setup_evaluated,
                 no_setup_present=no_setup_present,
                 actionable_now=actionable_now,
+                surfacing_mismatch_suspected=surfacing_mismatch_suspected,
                 runtime_stale=bool(runtime_stale and not runtime_stale_suppressed),
                 session_label_gap_blocking=session_label_gap_blocking,
                 eligibility_reason=effective_eligibility_reason,
@@ -7402,10 +7550,22 @@ class OperatorDashboardService:
                 tradability_reason = "Wall clock expects a completed market-data bar, but none has been observed beyond the grace window."
                 next_action = "Inspect market data feed health and lane bar ingestion."
                 manual_action_required = True
+            elif bar_authority_unavailable:
+                tradability_status = "BAR_AUTHORITY_UNAVAILABLE"
+                tradability_reason = "Lane is session-eligible, but no observed completed bar / feature authority is currently available for live evaluation."
+                next_action = "Inspect the live feed, lane bar storage, and feature authority for this lane."
+                manual_action_required = True
             elif actionable_now:
                 tradability_status = "ACTIONABLE_NOW"
-                tradability_reason = "Lane has an actionable BUY/SELL/EXIT signal on the current decision bar."
+                tradability_reason = "Lane has durable current-bar executable actionability on the latest processed decision bar."
                 next_action = "Route through the configured broker path if all gates still pass."
+                manual_action_required = False
+            elif surfacing_mismatch_suspected:
+                tradability_status = "SURFACING_MISMATCH_SUSPECTED"
+                tradability_reason = (
+                    "Display routing shows a current BUY/SELL/EXIT candidate, but no durable executable signal or order intent exists for this bar."
+                )
+                next_action = "Treat as diagnostic only; inspect runtime signal-to-intent surfacing if this persists."
                 manual_action_required = False
             elif session_eligible and setup_evaluated and no_setup_present:
                 tradability_status = "SESSION_ELIGIBLE_NO_SETUP"
@@ -7449,6 +7609,7 @@ class OperatorDashboardService:
                     "warmup_incomplete": "Loaded in runtime, but warmup is still incomplete.",
                     "waiting_for_bar_close": "Loaded in runtime, but the current execution bar is still inside the bar-close grace window.",
                     "bar_received_not_processed_yet": "Loaded in runtime, and a completed bar exists, but the strategy loop has not processed it yet.",
+                    "bar_authority_unavailable": "Loaded in runtime, but the lane lacks the observed bar / feature authority required for live evaluation.",
                     "market_data_stale": "Loaded in runtime, but observed market data is stale beyond the bar-close grace window.",
                     "entries_disabled": "Loaded in runtime, but entries are currently disabled.",
                     "operator_halt": "Loaded in runtime, but operator halt is active.",
@@ -7465,6 +7626,7 @@ class OperatorDashboardService:
                     "warmup_incomplete": "Wait for warmup to complete.",
                     "waiting_for_bar_close": "Wait for the current execution bar to close.",
                     "bar_received_not_processed_yet": "Inspect runtime cadence if the processing lag persists.",
+                    "bar_authority_unavailable": "Inspect feed health, lane bar storage, and feature authority for this lane.",
                     "market_data_stale": "Inspect feed health and recent bar ingestion for this lane.",
                     "entries_disabled": "Resume Entries if trading should be re-enabled.",
                     "operator_halt": "Resume Entries when you want this runtime trading again.",
@@ -7488,6 +7650,7 @@ class OperatorDashboardService:
                 snapshot_only=False,
                 loaded_in_runtime=loaded_in_runtime,
             )
+            market_data_recovery = dict(row.get("market_data_recovery") or {})
             lane_eligibility_rows.append(
                 {
                     "lane_id": lane_id,
@@ -7512,11 +7675,22 @@ class OperatorDashboardService:
                     "operator_halt": bool(row.get("operator_halt")),
                     "loaded_in_runtime": loaded_in_runtime,
                     "eligible_to_trade": eligible_to_trade,
+                    "live_capable": live_capable,
                     "can_fire_now": eligible_to_trade,
                     "actionable_now": actionable_now,
+                    "executable_actionable_this_bar": executable_actionable_this_bar,
+                    "display_candidate_this_bar": display_candidate_this_bar,
+                    "surfacing_mismatch_suspected": surfacing_mismatch_suspected,
+                    "order_intent_minted": current_bar_executable_state["order_intent_minted"],
+                    "route_preflight_attempted": current_bar_executable_state["route_preflight_attempted"],
+                    "current_bar_signal_id": current_bar_executable_state["current_bar_signal_id"],
+                    "current_bar_order_intent_id": current_bar_executable_state["current_bar_order_intent_id"],
+                    "current_bar_submit_attempt_id": current_bar_executable_state["current_bar_submit_attempt_id"],
                     "session_eligible": session_eligible,
                     "waiting_for_completed_bar": waiting_for_completed_bar,
                     "bar_received_not_processed_yet": bar_received_not_processed_yet,
+                    "bar_authority_available": bar_authority_available,
+                    "bar_authority_unavailable": bar_authority_unavailable,
                     "market_data_stale": market_data_stale,
                     "data_fresh": data_fresh,
                     "governance_allowed": governance_allowed,
@@ -7558,6 +7732,17 @@ class OperatorDashboardService:
                     "latest_completed_bar_end_ts": latest_completed_bar_end_ts,
                     "processing_lag_seconds": processing_lag_seconds,
                     "market_data_lag_seconds": market_data_lag_seconds,
+                    "market_data_recovery": market_data_recovery,
+                    "market_data_recovery_state": market_data_recovery.get("market_data_recovery_state"),
+                    "last_recovery_attempt_at": market_data_recovery.get("last_recovery_attempt_at"),
+                    "recovery_attempt_count": market_data_recovery.get("recovery_attempt_count"),
+                    "recovery_action": market_data_recovery.get("recovery_action"),
+                    "recovery_result": market_data_recovery.get("recovery_result"),
+                    "recovery_root_cause": market_data_recovery.get("recovery_root_cause"),
+                    "affected_symbols": list(market_data_recovery.get("affected_symbols") or []),
+                    "affected_lanes": list(market_data_recovery.get("affected_lanes") or []),
+                    "latest_observed_bar_after_recovery": market_data_recovery.get("latest_observed_bar_after_recovery"),
+                    "recovered": bool(market_data_recovery.get("recovered", False)),
                     "observed_bar_arrival_age_seconds": bar_authority.get("observed_bar_arrival_age_seconds"),
                     "bar_state": bar_progress_state,
                     "bar_state_reason": bar_state_reason,
@@ -7620,11 +7805,22 @@ class OperatorDashboardService:
                     "session_restriction": row.get("session_restriction"),
                     "loaded_in_runtime": loaded_in_runtime,
                     "eligible_to_trade": eligible_to_trade,
+                    "live_capable": live_capable,
                     "can_fire_now": eligible_to_trade,
                     "actionable_now": actionable_now,
+                    "executable_actionable_this_bar": executable_actionable_this_bar,
+                    "display_candidate_this_bar": display_candidate_this_bar,
+                    "surfacing_mismatch_suspected": surfacing_mismatch_suspected,
+                    "order_intent_minted": current_bar_executable_state["order_intent_minted"],
+                    "route_preflight_attempted": current_bar_executable_state["route_preflight_attempted"],
+                    "current_bar_signal_id": current_bar_executable_state["current_bar_signal_id"],
+                    "current_bar_order_intent_id": current_bar_executable_state["current_bar_order_intent_id"],
+                    "current_bar_submit_attempt_id": current_bar_executable_state["current_bar_submit_attempt_id"],
                     "session_eligible": session_eligible,
                     "waiting_for_completed_bar": waiting_for_completed_bar,
                     "bar_received_not_processed_yet": bar_received_not_processed_yet,
+                    "bar_authority_available": bar_authority_available,
+                    "bar_authority_unavailable": bar_authority_unavailable,
                     "market_data_stale": market_data_stale,
                     "data_fresh": data_fresh,
                     "governance_allowed": governance_allowed,
@@ -7664,6 +7860,17 @@ class OperatorDashboardService:
                     "latest_completed_bar_end_ts": latest_completed_bar_end_ts,
                     "processing_lag_seconds": processing_lag_seconds,
                     "market_data_lag_seconds": market_data_lag_seconds,
+                    "market_data_recovery": market_data_recovery,
+                    "market_data_recovery_state": market_data_recovery.get("market_data_recovery_state"),
+                    "last_recovery_attempt_at": market_data_recovery.get("last_recovery_attempt_at"),
+                    "recovery_attempt_count": market_data_recovery.get("recovery_attempt_count"),
+                    "recovery_action": market_data_recovery.get("recovery_action"),
+                    "recovery_result": market_data_recovery.get("recovery_result"),
+                    "recovery_root_cause": market_data_recovery.get("recovery_root_cause"),
+                    "affected_symbols": list(market_data_recovery.get("affected_symbols") or []),
+                    "affected_lanes": list(market_data_recovery.get("affected_lanes") or []),
+                    "latest_observed_bar_after_recovery": market_data_recovery.get("latest_observed_bar_after_recovery"),
+                    "recovered": bool(market_data_recovery.get("recovered", False)),
                     "observed_bar_arrival_age_seconds": bar_authority.get("observed_bar_arrival_age_seconds"),
                     "bar_state": bar_progress_state,
                     "bar_state_reason": bar_state_reason,
@@ -7721,25 +7928,16 @@ class OperatorDashboardService:
             "governance_allowed_lanes_count": sum(1 for row in lane_status_rows if row.get("governance_allowed")),
             "route_ready_lanes_count": sum(1 for row in lane_status_rows if row.get("route_ready")),
             "session_eligible_lanes_count": sum(1 for row in lane_status_rows if row.get("session_eligible")),
-            "live_capable_count": sum(
-                1
-                for row in lane_status_rows
-                if row.get("session_eligible")
-                and row.get("governance_allowed")
-                and row.get("route_ready")
-                and not row.get("halted_by_risk")
-                and not row.get("reconciling")
-                and not row.get("faulted")
-                and not row.get("market_data_stale")
-                and not row.get("blocked_lane")
-            ),
+            "live_capable_count": sum(1 for row in lane_status_rows if row.get("live_capable")),
             "waiting_for_completed_bar_count": sum(1 for row in lane_status_rows if row.get("waiting_for_completed_bar")),
             "bar_received_not_processed_yet_count": sum(
                 1 for row in lane_status_rows if row.get("bar_received_not_processed_yet")
             ),
+            "bar_authority_unavailable_count": sum(1 for row in lane_status_rows if row.get("bar_authority_unavailable")),
             "market_data_stale_count": sum(1 for row in lane_status_rows if row.get("market_data_stale")),
             "setup_evaluated_count": sum(1 for row in lane_status_rows if row.get("setup_evaluated")),
             "no_setup_count": sum(1 for row in lane_status_rows if row.get("no_setup_present")),
+            "candidate_signal_count": sum(1 for row in lane_status_rows if row.get("display_candidate_this_bar")),
             "actionable_now_count": sum(1 for row in lane_status_rows if row.get("actionable_now")),
             "blocked_lanes_count": sum(1 for row in lane_status_rows if row.get("blocked_lane")),
             "out_of_session_count": sum(1 for row in lane_status_rows if row.get("fireability_classification") == "FIREABLE_OUT_OF_SESSION"),
@@ -7892,8 +8090,10 @@ class OperatorDashboardService:
             "live_capable_count": int(lane_status_summary["live_capable_count"]),
             "waiting_for_bar_count": int(lane_status_summary["waiting_for_completed_bar_count"]),
             "bar_received_not_processed_yet_count": int(lane_status_summary["bar_received_not_processed_yet_count"]),
+            "bar_authority_unavailable_count": int(lane_status_summary["bar_authority_unavailable_count"]),
             "market_data_stale_count": int(lane_status_summary["market_data_stale_count"]),
             "no_setup_count": int(lane_status_summary["no_setup_count"]),
+            "candidate_signal_count": int(lane_status_summary["candidate_signal_count"]),
             "actionable_now_count": int(lane_status_summary["actionable_now_count"]),
             "true_blocked_count": int(lane_status_summary["blocked_lanes_count"]),
             "blocking_fault_count": blocking_fault_count,
@@ -8778,6 +8978,8 @@ class OperatorDashboardService:
         artifacts_dir = Path(str(artifacts_dir_value)) if artifacts_dir_value else None
         session_date = paper.get("status", {}).get("session_date") or _session_date_from_status(paper.get("raw_operator_status") or {})
         latest_events = paper.get("events", {}) or {}
+        from .experimental_canaries_dashboard_payloads import load_experimental_canaries_snapshot
+
         experimental_canaries = paper.get("experimental_canaries") or load_experimental_canaries_snapshot(self._experimental_canaries_snapshot_path)
         full_blotter_rows = self._latest_blotter_dataset(artifacts_dir)[1] if artifacts_dir is not None else []
         approved_long_sources = set((paper.get("raw_operator_status") or {}).get("approved_long_entry_sources", []))
@@ -8839,6 +9041,11 @@ class OperatorDashboardService:
                     ATPE_CANARY_RUNTIME_KIND,
                     GC_MGC_ACCEPTANCE_RUNTIME_KIND,
                 }
+            )
+            exclude_from_strategy_performance = bool(
+                lane_row.get("exclude_from_strategy_performance")
+                if lane_row.get("exclude_from_strategy_performance") is not None
+                else configured.get("exclude_from_strategy_performance")
             )
             if source and source in approved_sources and not is_canary:
                 continue
@@ -9032,6 +9239,7 @@ class OperatorDashboardService:
                     "strategy_family": str(lane_row.get("strategy_family") or configured.get("strategy_family") or source or ""),
                     "non_approved": True,
                     "paper_only": True,
+                    "exclude_from_strategy_performance": exclude_from_strategy_performance,
                     "is_canary": is_canary,
                     "temporary_paper_strategy": temporary_paper_strategy,
                     "paper_strategy_class": (
@@ -12167,6 +12375,8 @@ class OperatorDashboardService:
             }
 
         for lane_row in lane_rows:
+            if bool(lane_row.get("exclude_from_strategy_performance")):
+                continue
             lane_id = str(lane_row.get("lane_id") or "unknown_lane")
             display_name = str(lane_row.get("display_name") or lane_id)
             instrument = str(lane_row.get("symbol") or lane_row.get("instrument") or "UNKNOWN")
@@ -12190,6 +12400,8 @@ class OperatorDashboardService:
                 for index, row in enumerate(all_bars)
                 if row.get("bar_id")
             }
+            from .replay_reporting import build_summary_metrics, build_trade_ledger
+
             ledger = build_trade_ledger(
                 all_intents,
                 all_fills,
@@ -12243,6 +12455,8 @@ class OperatorDashboardService:
                 current_status = f"OPEN_{position_side}"
             elif str(lane_row.get("risk_state") or "OK") not in {"OK", "CLEAR", "READY", ""}:
                 current_status = str(lane_row.get("risk_state"))
+
+            from .strategy_identity import build_standalone_strategy_identity
 
             identity = build_standalone_strategy_identity(
                 instrument=instrument,
@@ -12670,6 +12884,8 @@ class OperatorDashboardService:
                 or list(lane_row.get("short_sources") or [])
             )
             source_family = str(lane_row.get("source_family") or (source_candidates[0] if source_candidates else "UNKNOWN"))
+            from .strategy_identity import build_standalone_strategy_identity
+
             identity = build_standalone_strategy_identity(
                 instrument=instrument,
                 lane_id=lane_id,
@@ -14297,6 +14513,8 @@ class OperatorDashboardService:
         entry_eligibility = paper.get("entry_eligibility") or {}
         operator_state = paper.get("operator_state") or {}
         auth_ready = bool(auth_status.get("runtime_ready"))
+        schwab_sidecar_requirement = self._schwab_sidecar_requirement()
+        schwab_required_for_current_route = bool(schwab_sidecar_requirement.get("required_for_current_route"))
         current_status = str(current_state.get("status") or "").upper()
         attempted_at = _parse_iso_datetime(current_state.get("attempted_at"))
         retention_seconds = max(
@@ -14429,7 +14647,7 @@ class OperatorDashboardService:
                 None,
             )
 
-        if not auth_ready:
+        if schwab_required_for_current_route and not auth_ready:
             return (
                 self._paper_runtime_recovery_manual_payload(
                     status="STOPPED_MANUAL_REQUIRED",
@@ -15732,6 +15950,8 @@ class OperatorDashboardService:
         ]
 
     def _runtime_paths(self, runtime_name: str) -> dict[str, Path]:
+        from ..config_models.loader import load_settings_from_files
+
         if runtime_name == "paper":
             return {
                 "artifacts_dir": self._repo_root / "outputs" / "probationary_pattern_engine" / "paper_session",
@@ -15820,6 +16040,8 @@ class OperatorDashboardService:
             if action in {"start-paper", "start-live-strategy-pilot"}
             else self._load_or_refresh_auth_gate_result(run_if_missing=False)
         )
+        schwab_sidecar_requirement = self._schwab_sidecar_requirement()
+        schwab_required_for_start_paper = bool(schwab_sidecar_requirement.get("required_for_current_route"))
         paper_faulted = paper["status"]["fault_state"] == "FAULTED"
         paper_halted = paper["status"]["operator_halt"]
         desk_risk_state = str((paper.get("desk_risk") or {}).get("desk_risk_state") or "OK")
@@ -15841,16 +16063,29 @@ class OperatorDashboardService:
                 command=None,
                 output="Inherited prior-session risk is active and pre-session review is still pending. Complete the review before starting paper soak.",
             )
-        if action in {"start-paper", "start-live-strategy-pilot"} and not bool(auth_status.get("runtime_ready")):
+        if action == "start-live-strategy-pilot" and not bool(auth_status.get("runtime_ready")):
             auth_output = str(
                 auth_status.get("detail")
                 or auth_status.get("message")
                 or auth_status.get("error")
-                or (
-                    "ATP GC live strategy pilot start is blocked because broker/auth readiness is not green yet."
-                    if action == "start-live-strategy-pilot"
-                    else "Paper runtime start is blocked because broker/auth readiness is not green yet."
-                )
+                or "ATP GC live strategy pilot start is blocked because broker/auth readiness is not green yet."
+            ).strip()
+            result = self._result_record(
+                action=action,
+                ok=False,
+                command=None,
+                output=auth_output,
+            )
+            result["reason_code"] = "AUTH_NOT_READY"
+            result["next_action"] = str(auth_status.get("next_action") or "Auth Gate Check")
+            result["auth"] = auth_status
+            return result
+        if action == "start-paper" and schwab_required_for_start_paper and not bool(auth_status.get("runtime_ready")):
+            auth_output = str(
+                auth_status.get("detail")
+                or auth_status.get("message")
+                or auth_status.get("error")
+                or "Paper runtime start is blocked because broker/auth readiness is not green yet."
             ).strip()
             result = self._result_record(
                 action=action,
@@ -16066,6 +16301,8 @@ class OperatorDashboardService:
                 output="Force Lane Resume rejected because no authenticated local operator identity was supplied.",
             )
         config_paths = self._paper_operator_control_config_paths()
+        from .probationary_runtime import REALIZED_LOSER_SESSION_OVERRIDE_ACTION, submit_probationary_operator_control
+
         queued = submit_probationary_operator_control(
             config_paths,
             REALIZED_LOSER_SESSION_OVERRIDE_ACTION,
@@ -16552,7 +16789,9 @@ class DashboardHTTPServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         try:
-            self._request_executor.shutdown(wait=False, cancel_futures=True)
+            request_executor = getattr(self, "_request_executor", None)
+            if request_executor is not None:
+                request_executor.shutdown(wait=False, cancel_futures=True)
         finally:
             super().server_close()
 
@@ -16787,6 +17026,47 @@ def _compact_track_b_live_feed_freshness_diagnostic(payload: dict[str, Any], pat
         "stale_instruments": payload.get("stale_instruments") or [],
         "instrument_reports": payload.get("instrument_reports") if isinstance(payload.get("instrument_reports"), list) else [],
         "http_backfill_can_satisfy_execution_freshness": payload.get("http_backfill_can_satisfy_execution_freshness"),
+    }
+
+
+def _compact_track_b_startup_readiness_diagnostic(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "path": str(path),
+            "diagnosis_classification": "NOT_PROVIDED",
+            "instruments": {},
+        }
+    instruments = payload.get("instruments") if isinstance(payload.get("instruments"), dict) else {}
+    compact_instruments: dict[str, Any] = {}
+    for key, value in instruments.items():
+        row = value if isinstance(value, dict) else {}
+        compact_instruments[str(key)] = {
+            "classification": row.get("classification"),
+            "required_1m_context_bars": row.get("required_1m_context_bars"),
+            "available_1m_context_bars": row.get("available_1m_context_bars"),
+            "required_5m_context_bars": row.get("required_5m_context_bars"),
+            "available_5m_context_bars": row.get("available_5m_context_bars"),
+            "backfill_gap_detected": row.get("backfill_gap_detected"),
+            "backfill_gap_filled": row.get("backfill_gap_filled"),
+            "backfill_source": row.get("backfill_source"),
+            "context_ready": row.get("context_ready"),
+            "live_execution_approved": row.get("live_execution_approved"),
+            "latest_decision_bar_source": row.get("latest_decision_bar_source"),
+            "paper_evaluation_allowed": row.get("paper_evaluation_allowed"),
+            "blocked_reason": row.get("blocked_reason"),
+        }
+    return {
+        "available": True,
+        "path": str(path),
+        "generated_at": payload.get("generated_at"),
+        "diagnosis_classification": payload.get("diagnosis_classification"),
+        "instruments": compact_instruments,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
     }
 
 
@@ -18613,73 +18893,220 @@ def _archived_paper_trade_log_rows(
     if not lanes_root.exists():
         return rows
 
-    for trades_path in lanes_root.rglob("trades.jsonl"):
-        lane_dir = trades_path.parent
-        lane_id = lane_dir.name
-        for index, trade in enumerate(_all_jsonl_rows(trades_path), start=1):
-            instrument = str(trade.get("symbol") or trade.get("instrument") or "UNKNOWN")
-            source_family = str(trade.get("setup_family") or lane_id or "UNKNOWN")
-            strategy_key = str(trade.get("standalone_strategy_id") or lane_id)
-            strategy_name = str(
-                trade.get("strategy_name")
-                or trade.get("standalone_strategy_id")
-                or lane_id
-                or "Archived Paper Strategy"
-            )
-            side = str(trade.get("direction") or "")
-            trade_pnl = _decimal_or_none(trade.get("realized_pnl") or trade.get("net_pnl"))
-            gross_pnl = _decimal_or_none(trade.get("gross_pnl"))
-            fees = _decimal_or_none(trade.get("fees_paid") or trade.get("fees"))
-            slippage = _decimal_or_none(trade.get("slippage_cost") or trade.get("slippage"))
-            attribution_family_label = _strategy_attribution_family_label(
-                source_family=source_family,
-                side=side,
-            )
-            trade_id = str(trade.get("trade_id") or f"{lane_id}:{index}")
-            row_id = trade_id if trade_id.startswith(f"{strategy_key}:") else f"{strategy_key}:{trade_id}"
-            rows.append(
-                {
-                    "id": row_id,
-                    "strategy_key": strategy_key,
-                    "standalone_strategy_id": strategy_key,
-                    "legacy_strategy_key": None,
-                    "lane_id": lane_id,
-                    "strategy_name": strategy_name,
-                    "instrument": instrument,
-                    "family": source_family,
-                    "source_family": source_family,
-                    "strategy_family": source_family,
-                    "standalone_strategy_root": strategy_name,
-                    "standalone_strategy_label": strategy_name,
-                    "paper_strategy_class": "archived_paper_strategy",
-                    "metrics_bucket": "archived_paper",
-                    "paper_only": True,
-                    "non_approved": False,
-                    "experimental_status": None,
-                    "signal_family_label": attribution_family_label,
-                    "trade_id": trade_id,
-                    "side": side,
-                    "entry_timestamp": trade.get("entry_timestamp"),
-                    "exit_timestamp": trade.get("exit_timestamp"),
-                    "entry_price": _decimal_to_string(_decimal_or_none(trade.get("entry_price"))),
-                    "exit_price": _decimal_to_string(_decimal_or_none(trade.get("exit_price"))),
-                    "quantity": trade.get("quantity") or 1,
-                    "realized_pnl": _decimal_to_string(trade_pnl),
-                    "gross_pnl": _decimal_to_string(gross_pnl if gross_pnl is not None else trade_pnl),
-                    "fees": _decimal_to_string(fees),
-                    "slippage": _decimal_to_string(slippage),
-                    "exit_reason": trade.get("exit_reason"),
-                    "signal_family": source_family,
-                    "entry_session_phase": label_session_phase(_parse_iso_datetime(trade.get("entry_timestamp"))) if trade.get("entry_timestamp") else None,
-                    "exit_session_phase": label_session_phase(_parse_iso_datetime(trade.get("exit_timestamp"))) if trade.get("exit_timestamp") else None,
-                    "status": "CLOSED" if trade.get("exit_timestamp") else "OPEN",
-                    "quality_bucket": trade.get("quality_bucket"),
-                    "quality_bucket_policy": trade.get("quality_bucket_policy"),
-                }
-            )
+    for lane_dir in sorted(path for path in lanes_root.iterdir() if path.is_dir()):
+        trades_path = lane_dir / "trades.jsonl"
+        lane_rows = (
+            _archived_paper_trade_log_rows_from_trades_jsonl(trades_path)
+            if trades_path.exists()
+            else _archived_paper_trade_log_rows_from_alerts(lane_dir)
+        )
+        rows.extend(lane_rows)
 
     rows.sort(key=lambda row: str(row.get("exit_timestamp") or row.get("entry_timestamp") or ""), reverse=True)
     return rows
+
+
+def _archived_paper_trade_log_rows_from_trades_jsonl(trades_path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    lane_dir = trades_path.parent
+    lane_id = lane_dir.name
+    for index, trade in enumerate(_all_jsonl_rows(trades_path), start=1):
+        instrument = str(trade.get("symbol") or trade.get("instrument") or "UNKNOWN")
+        source_family = str(trade.get("setup_family") or lane_id or "UNKNOWN")
+        strategy_key = str(trade.get("standalone_strategy_id") or lane_id)
+        strategy_name = str(
+            trade.get("strategy_name")
+            or trade.get("standalone_strategy_id")
+            or lane_id
+            or "Archived Paper Strategy"
+        )
+        side = str(trade.get("direction") or "")
+        trade_pnl = _decimal_or_none(trade.get("realized_pnl") or trade.get("net_pnl"))
+        gross_pnl = _decimal_or_none(trade.get("gross_pnl"))
+        fees = _decimal_or_none(trade.get("fees_paid") or trade.get("fees"))
+        slippage = _decimal_or_none(trade.get("slippage_cost") or trade.get("slippage"))
+        attribution_family_label = _strategy_attribution_family_label(
+            source_family=source_family,
+            side=side,
+        )
+        trade_id = str(trade.get("trade_id") or f"{lane_id}:{index}")
+        row_id = trade_id if trade_id.startswith(f"{strategy_key}:") else f"{strategy_key}:{trade_id}"
+        rows.append(
+            {
+                "id": row_id,
+                "strategy_key": strategy_key,
+                "standalone_strategy_id": strategy_key,
+                "legacy_strategy_key": None,
+                "lane_id": lane_id,
+                "strategy_name": strategy_name,
+                "instrument": instrument,
+                "family": source_family,
+                "source_family": source_family,
+                "strategy_family": source_family,
+                "standalone_strategy_root": strategy_name,
+                "standalone_strategy_label": strategy_name,
+                "paper_strategy_class": "archived_paper_strategy",
+                "metrics_bucket": "archived_paper",
+                "paper_only": True,
+                "non_approved": False,
+                "experimental_status": None,
+                "signal_family_label": attribution_family_label,
+                "trade_id": trade_id,
+                "side": side,
+                "entry_timestamp": trade.get("entry_timestamp"),
+                "exit_timestamp": trade.get("exit_timestamp"),
+                "entry_price": _decimal_to_string(_decimal_or_none(trade.get("entry_price"))),
+                "exit_price": _decimal_to_string(_decimal_or_none(trade.get("exit_price"))),
+                "quantity": trade.get("quantity") or 1,
+                "realized_pnl": _decimal_to_string(trade_pnl),
+                "gross_pnl": _decimal_to_string(gross_pnl if gross_pnl is not None else trade_pnl),
+                "fees": _decimal_to_string(fees),
+                "slippage": _decimal_to_string(slippage),
+                "exit_reason": trade.get("exit_reason"),
+                "signal_family": source_family,
+                "entry_session_phase": label_session_phase(_parse_iso_datetime(trade.get("entry_timestamp"))) if trade.get("entry_timestamp") else None,
+                "exit_session_phase": label_session_phase(_parse_iso_datetime(trade.get("exit_timestamp"))) if trade.get("exit_timestamp") else None,
+                "status": "CLOSED" if trade.get("exit_timestamp") else "OPEN",
+                "quality_bucket": trade.get("quality_bucket"),
+                "quality_bucket_policy": trade.get("quality_bucket_policy"),
+            }
+        )
+    return rows
+
+
+def _archived_paper_trade_log_rows_from_alerts(lane_dir: Path) -> list[dict[str, Any]]:
+    alerts_path = lane_dir / "alerts.jsonl"
+    if not alerts_path.exists():
+        return []
+
+    order_intents: dict[str, dict[str, Any]] = {}
+    fills: dict[str, dict[str, Any]] = {}
+    instrument = "UNKNOWN"
+    strategy_key = lane_dir.name
+    strategy_name = lane_dir.name
+    strategy_family = lane_dir.name
+
+    for row in _all_jsonl_rows(alerts_path):
+        if str(row.get("event_type") or "") != "alert_event":
+            continue
+        category = str(row.get("category") or row.get("code") or "").strip().lower()
+        detail = row.get("detail") or {}
+        order_intent_id = str(detail.get("order_intent_id") or "").strip()
+        if not order_intent_id:
+            continue
+
+        instrument = str(detail.get("instrument") or detail.get("symbol") or instrument or "UNKNOWN")
+        strategy_key = str(detail.get("standalone_strategy_id") or strategy_key or lane_dir.name)
+        strategy_name = str(detail.get("display_name") or strategy_name or lane_dir.name)
+        strategy_family = str(detail.get("strategy_family") or strategy_family or lane_dir.name)
+        intent_timestamp = (
+            detail.get("occurred_at")
+            or detail.get("fill_timestamp")
+            or row.get("occurred_at")
+            or row.get("logged_at")
+        )
+        if category in {"entry_created", "entry_submitted", "exit_created", "exit_submitted"} and order_intent_id not in order_intents:
+            order_intents[order_intent_id] = {
+                "order_intent_id": order_intent_id,
+                "bar_id": _bar_id_for_archived_order_intent(order_intent_id),
+                "symbol": instrument,
+                "intent_type": detail.get("intent_type"),
+                "quantity": int(detail.get("quantity") or 1),
+                "created_at": intent_timestamp,
+                "reason_code": str(detail.get("reason_code") or strategy_family or "recovered_alert_event"),
+            }
+        if category in {"entry_filled", "exit_filled"} and order_intent_id not in fills:
+            fills[order_intent_id] = {
+                "order_intent_id": order_intent_id,
+                "intent_type": detail.get("intent_type"),
+                "order_status": "FILLED",
+                "fill_timestamp": detail.get("fill_timestamp") or intent_timestamp,
+                "fill_price": detail.get("fill_price"),
+                "broker_order_id": detail.get("broker_order_id"),
+                "quantity": int(detail.get("quantity") or 1),
+            }
+            if order_intent_id not in order_intents:
+                order_intents[order_intent_id] = {
+                    "order_intent_id": order_intent_id,
+                    "bar_id": _bar_id_for_archived_order_intent(order_intent_id),
+                    "symbol": instrument,
+                    "intent_type": detail.get("intent_type"),
+                    "quantity": int(detail.get("quantity") or 1),
+                    "created_at": intent_timestamp,
+                    "reason_code": str(detail.get("reason_code") or strategy_family or "recovered_alert_event"),
+                }
+
+    if not order_intents or not fills:
+        return []
+
+    from .replay_reporting import build_trade_ledger
+
+    ledger = build_trade_ledger(
+        sorted(order_intents.values(), key=lambda item: str(item.get("created_at") or "")),
+        sorted(fills.values(), key=lambda item: str(item.get("fill_timestamp") or "")),
+        {},
+        point_value=_paper_session_shape_point_value(instrument),
+    )
+
+    rows: list[dict[str, Any]] = []
+    for trade in ledger:
+        source_family = str(trade.setup_family or strategy_family or lane_dir.name)
+        side = str(trade.direction or "")
+        attribution_family_label = _strategy_attribution_family_label(
+            source_family=source_family,
+            side=side,
+        )
+        trade_id = f"{lane_dir.name}:{trade.trade_id}"
+        row_id = trade_id if trade_id.startswith(f"{strategy_key}:") else f"{strategy_key}:{trade_id}"
+        rows.append(
+            {
+                "id": row_id,
+                "strategy_key": strategy_key,
+                "standalone_strategy_id": strategy_key,
+                "legacy_strategy_key": None,
+                "lane_id": lane_dir.name,
+                "strategy_name": strategy_name,
+                "instrument": instrument,
+                "family": source_family,
+                "source_family": source_family,
+                "strategy_family": strategy_family,
+                "standalone_strategy_root": strategy_name,
+                "standalone_strategy_label": strategy_name,
+                "paper_strategy_class": "archived_paper_strategy",
+                "metrics_bucket": "archived_paper",
+                "paper_only": True,
+                "non_approved": False,
+                "experimental_status": None,
+                "signal_family_label": attribution_family_label,
+                "trade_id": trade_id,
+                "side": side,
+                "entry_timestamp": trade.entry_ts.isoformat(),
+                "exit_timestamp": trade.exit_ts.isoformat(),
+                "entry_price": _decimal_to_string(trade.entry_px),
+                "exit_price": _decimal_to_string(trade.exit_px),
+                "quantity": trade.qty,
+                "realized_pnl": _decimal_to_string(trade.net_pnl),
+                "gross_pnl": _decimal_to_string(trade.gross_pnl),
+                "fees": _decimal_to_string(trade.fees),
+                "slippage": _decimal_to_string(trade.slippage),
+                "exit_reason": trade.exit_reason,
+                "signal_family": source_family,
+                "entry_session_phase": label_session_phase(trade.entry_ts),
+                "exit_session_phase": label_session_phase(trade.exit_ts),
+                "status": "CLOSED",
+                "quality_bucket": None,
+                "quality_bucket_policy": None,
+            }
+        )
+
+    return rows
+
+
+def _bar_id_for_archived_order_intent(order_intent_id: str) -> str:
+    parts = [segment for segment in str(order_intent_id or "").split("|") if segment]
+    if len(parts) >= 4:
+        return "|".join(parts[:3])
+    return str(order_intent_id or "")
 
 
 def _quant_strategy_performance_payload(
@@ -18723,6 +19150,8 @@ def _quant_strategy_performance_payload(
                 for row in _all_jsonl_rows(lane_dir / "fills.jsonl")
                 if str(row.get("symbol") or "") == str(instrument)
             ]
+
+            from .strategy_identity import build_standalone_strategy_identity
 
             identity = build_standalone_strategy_identity(
                 instrument=instrument,
@@ -19146,6 +19575,8 @@ def _quant_signal_intent_fill_audit_rows(
             if value
         ]
         family = str(approved_scope.get("family") or baseline_row.get("lane_name") or lane_row.get("display_name") or lane_id)
+        from .strategy_identity import build_standalone_strategy_identity
+
         identity = build_standalone_strategy_identity(
             instrument=instrument,
             lane_id=lane_id,
@@ -21957,7 +22388,8 @@ def _resolve_sqlite_database_path(database_url: str | None) -> Path | None:
     if database_url is None or not database_url.startswith("sqlite:///"):
         return None
     raw_path = database_url.removeprefix("sqlite:///")
-    return (REPO_ROOT / raw_path).resolve() if raw_path.startswith("./") else Path(raw_path).resolve()
+    path = (REPO_ROOT / raw_path) if raw_path.startswith("./") else Path(raw_path)
+    return _resolve_sqlite_database_candidate(path)
 
 
 def _read_pid(pid_file: Path) -> int | None:
@@ -22119,8 +22551,31 @@ def _sqlite_path_from_database_url(database_url: str | None) -> Path | None:
         return None
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
-        path = (REPO_ROOT / path).resolve()
-    return path
+        path = REPO_ROOT / path
+    return _resolve_sqlite_database_candidate(path)
+
+
+def _resolve_sqlite_database_candidate(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if resolved.exists():
+        return resolved
+    duplicate_candidates = _duplicate_sqlite_candidates(resolved)
+    if len(duplicate_candidates) == 1:
+        return duplicate_candidates[0]
+    return resolved
+
+
+def _duplicate_sqlite_candidates(path: Path) -> list[Path]:
+    if not path.suffix:
+        return []
+    duplicate_name_pattern = re.compile(rf"^{re.escape(path.stem)} \d+{re.escape(path.suffix)}$")
+    candidates = [
+        candidate.resolve()
+        for candidate in path.parent.glob(f"{path.stem} *{path.suffix}")
+        if candidate.is_file() and duplicate_name_pattern.fullmatch(candidate.name)
+    ]
+    candidates.sort(key=lambda candidate: candidate.stat().st_mtime, reverse=True)
+    return candidates
 
 
 def _latest_sqlite_timestamp(connection: sqlite3.Connection, statement: str, parameters: Sequence[Any]) -> datetime | None:
@@ -22150,32 +22605,25 @@ def _latest_observed_bar_snapshot(
 ) -> tuple[datetime | None, datetime | None, str | None]:
     row = connection.execute(
         """
-        select end_ts, created_at, 'schwab_live_poll'
+        select end_ts, created_at, data_source
         from bars
         where symbol = ?
           and timeframe = ?
-          and data_source = 'schwab_live_poll'
           and coalesce(is_final, 1) = 1
           and end_ts <= ?
-        order by end_ts desc, created_at desc
+        order by
+          end_ts desc,
+          case
+            when data_source = 'databento_live' then 0
+            when data_source like 'databento%' then 1
+            when data_source = 'schwab_live_poll' then 2
+            else 3
+          end asc,
+          created_at desc
         limit 1
         """,
         (symbol, timeframe, evaluation_iso),
     ).fetchone()
-    if row is None:
-        row = connection.execute(
-            """
-            select end_ts, created_at, data_source
-            from bars
-            where symbol = ?
-              and timeframe = ?
-              and coalesce(is_final, 1) = 1
-              and end_ts <= ?
-            order by end_ts desc, created_at desc
-            limit 1
-            """,
-            (symbol, timeframe, evaluation_iso),
-        ).fetchone()
     if row is None:
         return None, None, None
     end_ts_raw, created_at_raw, source = row
@@ -22205,6 +22653,8 @@ def _lane_bar_authority_from_database(
         cache[cache_key] = {}
         return {}
 
+    from . import probationary_runtime
+
     expected_completed_bar_end = probationary_runtime._latest_completed_probationary_bar_end(  # noqa: SLF001
         evaluation_timestamp,
         execution_timeframe,
@@ -22215,7 +22665,12 @@ def _lane_bar_authority_from_database(
         expected_completed_bar_end + timedelta(seconds=grace_seconds)
     )
     try:
-        evaluation_iso = evaluation_timestamp.isoformat()
+        # The lane DB stores bar/feature/processed timestamps in UTC (`+00:00`).
+        # Comparing ISO-8601 strings with mixed offsets lexicographically can
+        # exclude current UTC rows when evaluation_timestamp is in local time
+        # (for example `-04:00`). Normalize the comparison anchor to UTC before
+        # issuing SQLite text comparisons.
+        evaluation_iso = evaluation_timestamp.astimezone(timezone.utc).isoformat()
         with sqlite3.connect(database_path) as connection:
             (
                 observed_completed_bar_end,
@@ -22360,6 +22815,92 @@ def _runtime_stale_should_be_softened(
     return age_seconds <= allowed_age_seconds
 
 
+def _current_bar_executable_state(
+    *,
+    audit_row: dict[str, Any],
+    route_row: dict[str, Any],
+    current_processed_bar_end_ts: str | None,
+    latest_completed_bar_end_ts: str | None,
+) -> dict[str, Any]:
+    current_bar_timestamp = _normalize_iso_timestamp_key(
+        current_processed_bar_end_ts or latest_completed_bar_end_ts
+    )
+    last_actionable_signal_timestamp = _normalize_iso_timestamp_key(
+        audit_row.get("last_actionable_signal_timestamp")
+    )
+    last_signal_timestamp = _normalize_iso_timestamp_key(audit_row.get("last_signal_timestamp"))
+    last_intent_timestamp = _normalize_iso_timestamp_key(audit_row.get("last_intent_timestamp"))
+    latest_intent_summary = (
+        dict(audit_row.get("latest_intent_summary") or {})
+        if isinstance(audit_row.get("latest_intent_summary"), dict)
+        else {}
+    )
+    latest_signal_packet_summary = (
+        dict(audit_row.get("latest_signal_packet_summary") or {})
+        if isinstance(audit_row.get("latest_signal_packet_summary"), dict)
+        else {}
+    )
+    latest_signal_payload = (
+        dict(latest_signal_packet_summary.get("payload") or {})
+        if isinstance(latest_signal_packet_summary.get("payload"), dict)
+        else {}
+    )
+
+    current_bar_signal_record = bool(
+        current_bar_timestamp
+        and last_actionable_signal_timestamp == current_bar_timestamp
+        and (bool(audit_row.get("last_long_entry")) or bool(audit_row.get("last_short_entry")))
+    )
+    current_bar_order_intent_id = (
+        str(audit_row.get("last_order_intent_id") or "") or None
+        if current_bar_timestamp and last_intent_timestamp == current_bar_timestamp
+        else None
+    )
+    current_bar_submit_attempt_id = (
+        str(
+            audit_row.get("current_bar_submit_attempt_id")
+            or latest_intent_summary.get("submit_attempt_id")
+            or route_row.get("submit_attempt_id")
+            or ""
+        )
+        or None
+        if current_bar_order_intent_id
+        else None
+    )
+    current_bar_signal_id = (
+        str(
+            audit_row.get("current_bar_signal_id")
+            or latest_signal_payload.get("signal_id")
+            or latest_signal_payload.get("decision_id")
+            or route_row.get("signal_id")
+            or ""
+        )
+        or None
+        if current_bar_signal_record and current_bar_timestamp and last_signal_timestamp == current_bar_timestamp
+        else None
+    )
+    current_bar_route_candidate = bool(
+        current_bar_timestamp
+        and str(route_row.get("intent_action") or route_row.get("current_signal_state") or "NO_ACTION").upper()
+        in {"BUY", "SELL", "EXIT"}
+    )
+    surfacing_mismatch_suspected = bool(
+        current_bar_route_candidate
+        and not current_bar_signal_record
+        and not current_bar_order_intent_id
+    )
+    return {
+        "current_bar_timestamp": current_bar_timestamp or None,
+        "current_bar_signal_record": current_bar_signal_record,
+        "current_bar_signal_id": current_bar_signal_id,
+        "current_bar_order_intent_id": current_bar_order_intent_id,
+        "current_bar_submit_attempt_id": current_bar_submit_attempt_id,
+        "order_intent_minted": bool(current_bar_order_intent_id),
+        "route_preflight_attempted": bool(current_bar_submit_attempt_id),
+        "surfacing_mismatch_suspected": surfacing_mismatch_suspected,
+    }
+
+
 def _first_true_lane_blocker(
     *,
     loaded_in_runtime: bool,
@@ -22373,6 +22914,7 @@ def _first_true_lane_blocker(
     operator_halt: bool,
     route_ready: bool,
     session_eligible: bool,
+    bar_authority_unavailable: bool,
     waiting_for_completed_bar: bool,
     bar_received_not_processed_yet: bool,
     market_data_stale: bool,
@@ -22399,6 +22941,8 @@ def _first_true_lane_blocker(
         return "route_unready"
     if not session_eligible:
         return effective_eligibility_reason or "wrong_session"
+    if bar_authority_unavailable:
+        return "BAR_AUTHORITY_UNAVAILABLE"
     if market_data_stale:
         return "market_data_stale"
     if bar_received_not_processed_yet:
@@ -22421,12 +22965,14 @@ def _fireability_classification(
     governance_allowed: bool,
     route_ready: bool,
     session_eligible: bool,
+    bar_authority_unavailable: bool,
     waiting_for_completed_bar: bool,
     bar_received_not_processed_yet: bool,
     market_data_stale: bool,
     setup_evaluated: bool,
     no_setup_present: bool,
     actionable_now: bool,
+    surfacing_mismatch_suspected: bool,
     runtime_stale: bool,
     session_label_gap_blocking: bool,
     eligibility_reason: str,
@@ -22435,24 +22981,28 @@ def _fireability_classification(
         return "FIREABLE_UNKNOWN"
     if runtime_stale:
         return "FIREABLE_BLOCKED_STALE_RUNTIME"
+    if session_label_gap_blocking:
+        return "FIREABLE_BLOCKED_SESSION_LABEL_GAP"
+    if not session_eligible or eligibility_reason == "wrong_session":
+        return "FIREABLE_OUT_OF_SESSION"
     if market_data_stale:
         return "FIREABLE_BLOCKED_MARKET_DATA"
+    if bar_authority_unavailable:
+        return "FIREABLE_BLOCKED_BAR_AUTHORITY"
     if not data_fresh:
         return "FIREABLE_BLOCKED_DATA"
     if not route_ready:
         return "FIREABLE_BLOCKED_ROUTE"
     if not governance_allowed:
         return "FIREABLE_UNKNOWN"
-    if session_label_gap_blocking:
-        return "FIREABLE_BLOCKED_SESSION_LABEL_GAP"
-    if not session_eligible or eligibility_reason == "wrong_session":
-        return "FIREABLE_OUT_OF_SESSION"
     if bar_received_not_processed_yet:
         return "FIREABLE_BLOCKED_PROCESSING_LAG"
     if waiting_for_completed_bar:
         return "FIREABLE_WAITING_FOR_BAR"
     if actionable_now:
         return "FIREABLE_ACTIONABLE"
+    if surfacing_mismatch_suspected:
+        return "FIREABLE_CANDIDATE_DISPLAY_ONLY"
     if setup_evaluated and no_setup_present:
         return "FIREABLE_SESSION_ELIGIBLE_NO_SETUP"
     return "FIREABLE_UNKNOWN"

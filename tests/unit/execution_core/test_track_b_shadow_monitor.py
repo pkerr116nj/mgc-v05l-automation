@@ -116,6 +116,26 @@ def completed_5m_payload_for_now(count: int = 8) -> dict[str, object]:
     }
 
 
+def one_minute_candles(start_minute: int, count: int, *, source_tag: str | None = None) -> list[dict[str, object]]:
+    candles: list[dict[str, object]] = []
+    for index in range(count):
+        minute = start_minute + index
+        hour = 11 + minute // 60
+        actual_minute = minute % 60
+        candle: dict[str, object] = {
+            "candle_timestamp": f"2026-05-05T{hour:02d}:{actual_minute:02d}:00+00:00",
+            "open": str(3400 + index / 10),
+            "high": str(3400.2 + index / 10),
+            "low": str(3399.8 + index / 10),
+            "close": str(3400.1 + index / 10),
+            "volume": "1",
+        }
+        if source_tag:
+            candle["source_tag"] = source_tag
+        candles.append(candle)
+    return candles
+
+
 class FakeLiveFeedProcess:
     def __init__(self, pid: int = 4242) -> None:
         self.pid = pid
@@ -153,6 +173,7 @@ def config(tmp_path: Path, **overrides: object) -> TrackBShadowMonitorConfig:
         "session_strategy_output_root": tmp_path / "session",
         "multi_strategy_output_root": tmp_path / "multi",
         "operator_status_output_root": tmp_path / "operator_status",
+        "diagnostic_output_root": tmp_path / "diagnostics",
         "lockfile": tmp_path / "monitor" / "track_b_shadow_monitor.lock",
         "pidfile": tmp_path / "monitor" / "track_b_shadow_monitor.pid",
         "backend_health_json": None,
@@ -518,6 +539,9 @@ def test_default_monitor_evaluates_from_live_feed_artifact(tmp_path: Path) -> No
     cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", live_feed_min_bars=8)
     live_payload = runtime_payload_for_now()
     live_payload["candle_source_mode"] = "DATABENTO_LIVE_RUNTIME_FEED"
+    live_payload["candles"] = one_minute_candles(20, 40, source_tag="DATABENTO_LIVE_ARTIFACT")
+    live_payload["candle_history"] = live_payload["candles"]
+    live_payload["bars_available"] = 40
     write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", live_payload)
     write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now())
     write_json(
@@ -575,7 +599,12 @@ def test_default_monitor_evaluates_from_live_feed_artifact(tmp_path: Path) -> No
 
 
 def test_monitor_reports_live_feed_warming_up_when_bars_are_insufficient(tmp_path: Path) -> None:
-    cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", manage_live_feed=False)
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        manage_live_feed=False,
+        startup_backfill_context_enabled=False,
+    )
     live_payload = runtime_payload_for_now()
     live_payload["candles"] = live_payload["candles"][:5]  # type: ignore[index]
     live_payload["candle_history"] = live_payload["candles"]
@@ -625,6 +654,158 @@ def test_monitor_reports_live_feed_warming_up_when_bars_are_insufficient(tmp_pat
     assert instrument_report["live_feed_strategy_ready"] is False
     assert fake.calls["multi"] == 0
     assert result.report["submit_attempted"] is False
+
+
+def test_backfill_seeded_context_allows_evaluation_without_forty_live_minutes(tmp_path: Path) -> None:
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        live_feed_min_bars=40,
+        max_bars=50,
+        manage_live_feed=False,
+    )
+    context_candles = one_minute_candles(20, 35, source_tag="DATABENTO_HTTP_BACKFILL")
+    live_candles = one_minute_candles(55, 5, source_tag="DATABENTO_LIVE_ARTIFACT")
+    context_payload = {
+        **runtime_payload_for_now(),
+        "candles": context_candles,
+        "candle_history": context_candles,
+        "candle_source_mode": "DATABENTO_HTTP_BACKFILL",
+        "bars_available": len(context_candles),
+    }
+    live_payload = {
+        **runtime_payload_for_now(),
+        "candles": live_candles,
+        "candle_history": live_candles,
+        "candle_source_mode": "DATABENTO_LIVE_RUNTIME_FEED",
+        "fresh_for_execution": False,
+        "completed_1m_fresh": True,
+        "completed_5m_fresh": True,
+        "bars_available": len(live_candles),
+    }
+    write_json(cfg.runtime_candle_capture_output_root / "latest_runtime_mgc_1m_candles.json", context_payload)
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", live_payload)
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now(1))
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "latest_1m_age_seconds": 60,
+            "latest_completed_5m_age_seconds": 300,
+            "bars_available": len(live_candles),
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "latest_1m_age_seconds": 60,
+            "latest_completed_5m_age_seconds": 300,
+        },
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-seeded-context", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.OK_NO_SIGNAL
+    assert fake.calls["multi"] == 1
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["feature_context_ready"] is True
+    assert instrument_report["feature_context_source"] == "MIXED_BACKFILL_SEEDED_CONTEXT"
+    assert instrument_report["live_execution_approved"] is True
+    assert instrument_report["paper_evaluation_allowed"] is True
+    assert instrument_report["live_feed_warmup_1m_count"] == 5
+    diagnostic = json.loads((cfg.diagnostic_output_root / "latest_track_b_startup_readiness_diagnostic.json").read_text())
+    assert diagnostic["instruments"]["MGC"]["classification"] == "READY_WITH_BACKFILL_SEEDED_CONTEXT"
+
+
+def test_backfill_context_without_fresh_live_feed_does_not_evaluate(tmp_path: Path) -> None:
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        live_feed_min_bars=40,
+        manage_live_feed=False,
+    )
+    context_candles = one_minute_candles(20, 40, source_tag="DATABENTO_HTTP_BACKFILL")
+    live_candles = one_minute_candles(55, 5, source_tag="DATABENTO_LIVE_ARTIFACT")
+    write_json(
+        cfg.runtime_candle_capture_output_root / "latest_runtime_mgc_1m_candles.json",
+        {**runtime_payload_for_now(), "candles": context_candles, "candle_history": context_candles},
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json",
+        {
+            **runtime_payload_for_now(),
+            "candles": live_candles,
+            "candle_history": live_candles,
+            "fresh_for_execution": False,
+            "completed_1m_fresh": False,
+            "completed_5m_fresh": True,
+        },
+    )
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now(1))
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "latest_1m_age_seconds": 999,
+            "latest_completed_5m_age_seconds": 300,
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": False,
+            "latest_1m_age_seconds": 999,
+            "latest_completed_5m_age_seconds": 300,
+        },
+    )
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-no-live-approval", now_func=now)
+
+    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_STALE
+    assert fake.calls["multi"] == 0
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["live_execution_approved"] is False
 
 
 def test_monitor_restarts_stale_live_feed_and_reports_warmup(tmp_path: Path) -> None:
@@ -825,6 +1006,9 @@ def test_live_artifact_source_does_not_reuse_stale_runtime_cadence_cache(tmp_pat
     )
     live_payload = runtime_payload_for_now()
     live_payload["candle_source_mode"] = "DATABENTO_LIVE_RUNTIME_FEED"
+    live_payload["candles"] = one_minute_candles(20, 40, source_tag="DATABENTO_LIVE_ARTIFACT")
+    live_payload["candle_history"] = live_payload["candles"]
+    live_payload["bars_available"] = 40
     write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", live_payload)
     write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now())
     write_json(
@@ -1141,7 +1325,13 @@ def test_paper_mode_manual_prices_remain_available_for_manual_policy(tmp_path: P
 
 
 def test_paper_mode_blocks_when_live_feed_is_not_strategy_ready(tmp_path: Path) -> None:
-    cfg = paper_config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", manage_live_feed=False, live_feed_min_bars=8)
+    cfg = paper_config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        manage_live_feed=False,
+        live_feed_min_bars=8,
+        startup_backfill_context_enabled=False,
+    )
     live_payload = runtime_payload_for_now()
     live_payload["candles"] = live_payload["candles"][:5]  # type: ignore[index]
     live_payload["candle_history"] = live_payload["candles"]
