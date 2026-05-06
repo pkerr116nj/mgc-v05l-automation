@@ -344,6 +344,11 @@ class TrackBStartupContextGap:
     repair_succeeded: bool = False
     repair_source: str | None = None
     remaining_blocker: str | None = None
+    repair_request_params: dict[str, Any] | None = None
+    repair_result_count: int | None = None
+    repair_failure_reason: str | None = None
+    alternate_suffix_attempted: bool = False
+    alternate_suffix_result: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -357,6 +362,11 @@ class TrackBStartupContextGap:
             "repair_succeeded": self.repair_succeeded,
             "repair_source": self.repair_source,
             "remaining_blocker": self.remaining_blocker,
+            "repair_request_params": self.repair_request_params,
+            "repair_result_count": self.repair_result_count,
+            "repair_failure_reason": self.repair_failure_reason,
+            "alternate_suffix_attempted": self.alternate_suffix_attempted,
+            "alternate_suffix_result": self.alternate_suffix_result,
         }
 
 
@@ -1697,6 +1707,9 @@ def _startup_context_payload(
     backfill_report_path = None
     gap_repair_attempted = False
     gap_repair_source = None
+    gap_repair_request_params: dict[str, Any] | None = None
+    gap_repair_result_count: int | None = None
+    gap_repair_failure_reason: str | None = None
     initial_gap_details: list[TrackBStartupContextGap] = []
     recovery_event_path = _latest_runtime_1m_path(Path(config.runtime_candle_capture_output_root), instrument)
     recovery_payload = _read_json_optional(recovery_event_path)
@@ -1721,8 +1734,31 @@ def _startup_context_payload(
         and config.startup_backfill_context_enabled
     ):
         gap_repair_attempted = bool(blocking_initial_gaps)
+        requested_window_end = now.astimezone(UTC)
+        requested_window_start = requested_window_end - timedelta(minutes=max(config.lookback_minutes, 1))
+        gap_repair_request_params = {
+            "provider_transport": config.provider_transport,
+            "dataset": instrument.dataset,
+            "requested_symbol": instrument.local_symbol
+            if config.prefer_raw_local_symbol_for_runtime_fetch
+            else instrument.databento_continuous_symbol,
+            "stype_in": "raw_symbol" if config.prefer_raw_local_symbol_for_runtime_fetch else config.stype_in,
+            "stype_out": config.provider_stype_out if config.provider_transport == "http" else None,
+            "requested_window_start": requested_window_start.isoformat(),
+            "requested_window_end": requested_window_end.isoformat(),
+            "lookback_minutes": config.lookback_minutes,
+            "max_bars": config.max_bars,
+        }
         backfill = _run_http_backfill_runtime_candle_capture(config, instrument, cycle_index, now)
         backfill_report_path = str(backfill.report_json)
+        gap_repair_result_count = len(_payload_candles(backfill.runtime_candles_event or {}))
+        if backfill.report.get("data_written") is not True:
+            gap_repair_failure_reason = _first_text(
+                backfill.report.get("primary_blocker"),
+                backfill.report.get("execution_freshness_blocker"),
+                backfill.report.get("runtime_candle_capture_verdict"),
+                backfill.verdict.value if isinstance(backfill.verdict, TrackBRuntimeCandleCaptureVerdict) else backfill.verdict,
+            )
         if backfill.report.get("data_written") is True and backfill.runtime_candles_event:
             http_candles = _tag_context_candles(
                 _payload_candles(backfill.runtime_candles_event),
@@ -1751,6 +1787,30 @@ def _startup_context_payload(
     blocking_gaps = _blocking_context_gaps(gap_details)
     validation_candles = _required_context_window(merged, required_1m=required_1m, required_5m=required_5m)
     completed_5m_count = _completed_5m_count_from_1m(validation_candles)
+    alternate_suffix_attempted = bool(gap_details)
+    if not gap_details:
+        alternate_suffix_result = "NOT_NEEDED"
+    elif not blocking_gaps:
+        alternate_suffix_result = "VALID_REQUIRED_SUFFIX_AVAILABLE"
+    else:
+        alternate_suffix_result = "NO_VALID_REQUIRED_SUFFIX_WITHOUT_BLOCKING_GAP"
+    if gap_details:
+        gap_details = [
+            replace(
+                gap,
+                repair_request_params=gap_repair_request_params if gap.repair_attempted else None,
+                repair_result_count=gap_repair_result_count if gap.repair_attempted else None,
+                repair_failure_reason=(
+                    gap_repair_failure_reason
+                    if gap.repair_attempted and not gap.repair_succeeded
+                    else gap.repair_failure_reason
+                ),
+                alternate_suffix_attempted=alternate_suffix_attempted,
+                alternate_suffix_result=alternate_suffix_result,
+            )
+            for gap in gap_details
+        ]
+        blocking_gaps = _blocking_context_gaps(gap_details)
     context_gap_count = len(blocking_gaps)
     primary_gap = blocking_gaps[0] if blocking_gaps else (gap_details[0] if gap_details else None)
     latest_decision_bar_source = merged[-1].get("source_tag") if merged else None
@@ -1844,6 +1904,11 @@ def _startup_context_payload(
         "gap_repair_attempted": primary_gap.repair_attempted if primary_gap else False,
         "gap_repair_succeeded": primary_gap.repair_succeeded if primary_gap else False,
         "gap_repair_source": primary_gap.repair_source if primary_gap else None,
+        "gap_repair_request_params": primary_gap.repair_request_params if primary_gap else gap_repair_request_params,
+        "gap_repair_result_count": primary_gap.repair_result_count if primary_gap else gap_repair_result_count,
+        "gap_repair_failure_reason": primary_gap.repair_failure_reason if primary_gap else gap_repair_failure_reason,
+        "alternate_suffix_attempted": alternate_suffix_attempted,
+        "alternate_suffix_result": alternate_suffix_result,
         "remaining_blocker": primary_gap.remaining_blocker if primary_gap else None,
         "context_continuity_verdict": "CONTEXT_CONTINUITY_READY" if not blocking_gaps else "CONTEXT_CONTINUITY_BLOCKED",
         "context_gap_count": context_gap_count,

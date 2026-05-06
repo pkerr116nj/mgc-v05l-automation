@@ -922,6 +922,10 @@ def test_repairable_startup_context_gap_is_backfilled_and_allows_evaluation(
     assert mgc["latest_decision_bar_source"] == "DATABENTO_LIVE_ARTIFACT"
     assert mgc["gaps"][0]["classification"] == "REPAIRED_BACKFILL_GAP"
     assert mgc["gaps"][0]["repair_succeeded"] is True
+    assert mgc["gaps"][0]["repair_request_params"]["requested_symbol"] == "MGCM6"
+    assert mgc["gaps"][0]["repair_result_count"] == 40
+    assert mgc["gaps"][0]["repair_failure_reason"] is None
+    assert mgc["alternate_suffix_result"] == "VALID_REQUIRED_SUFFIX_AVAILABLE"
 
 
 def test_startup_context_gap_outside_required_window_does_not_block(tmp_path: Path) -> None:
@@ -1000,6 +1004,8 @@ def test_startup_context_gap_outside_required_window_does_not_block(tmp_path: Pa
     mgc = diagnostic["instruments"]["MGC"]
     assert mgc["context_ready"] is True
     assert mgc["paper_evaluation_allowed"] is True
+    assert mgc["alternate_suffix_attempted"] is False
+    assert mgc["alternate_suffix_result"] == "NOT_NEEDED"
     gaps = shadow_monitor_module._classify_context_gaps(
         shadow_monitor_module._merge_context_candles(context_candles, live_candles),
         required_1m=40,
@@ -1152,6 +1158,9 @@ def test_mgc_context_gap_does_not_block_clean_mnq(tmp_path: Path) -> None:
     diagnostic = json.loads((cfg.diagnostic_output_root / "latest_track_b_startup_readiness_diagnostic.json").read_text())
     assert diagnostic["instruments"]["MGC"]["paper_evaluation_allowed"] is False
     assert diagnostic["instruments"]["MNQ"]["paper_evaluation_allowed"] is True
+    assert diagnostic["instruments"]["MGC"]["gap_repair_result_count"] == 0
+    assert diagnostic["instruments"]["MGC"]["gap_repair_failure_reason"] == "bounded backfill unavailable"
+    assert diagnostic["instruments"]["MGC"]["alternate_suffix_result"] == "NO_VALID_REQUIRED_SUFFIX_WITHOUT_BLOCKING_GAP"
 
 
 def test_mnq_context_gap_does_not_block_clean_mgc(tmp_path: Path) -> None:
