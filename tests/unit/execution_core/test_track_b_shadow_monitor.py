@@ -1410,6 +1410,200 @@ def test_monitor_distinguishes_connected_feed_from_stale_execution_candles(tmp_p
     assert fake.calls["multi"] == 0
 
 
+def test_monitor_writes_liveness_diagnostic_for_warmup_branch(tmp_path: Path) -> None:
+    cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", live_feed_min_bars=8)
+    stale_generated_at = datetime(2026, 5, 5, 11, 0, tzinfo=UTC).isoformat()
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json", runtime_payload_for_now())
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now())
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json",
+        {
+            "generated_at": stale_generated_at,
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+            "bars_available": 20,
+        },
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json",
+        {
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "databento_continuous_symbol": "MGC.v.0",
+            "dataset": "GLBX.MDP3",
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "fresh_for_execution": True,
+        },
+    )
+
+    def start_live_feed(_cfg, _instrument, _source_id, _now):  # type: ignore[no-untyped-def]
+        return FakeLiveFeedProcess(4244)
+
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+        live_feed_starter=start_live_feed,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-liveness-warmup", now_func=now)
+
+    diagnostic = json.loads((cfg.diagnostic_output_root / "latest_track_b_monitor_liveness_diagnostic.json").read_text())
+    heartbeat = json.loads((cfg.output_root / "latest_track_b_shadow_monitor_heartbeat.json").read_text())
+    assert result.verdict == TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP
+    assert diagnostic["last_branch_outcome"] == TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP.value
+    assert diagnostic["last_cycle_number"] == 1
+    assert diagnostic["live_child_statuses"][0]["instrument_family"] == "MGC"
+    assert heartbeat["last_monitor_verdict"] == TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP.value
+
+
+def test_monitor_liveness_diagnostic_classifies_expected_backoff_sleep(tmp_path: Path) -> None:
+    cfg = config(tmp_path, poll_seconds=15, max_backoff_seconds=120)
+    lock = shadow_monitor_module.TrackBShadowMonitorLock(
+        acquired=True,
+        lockfile=cfg.lockfile,
+        pidfile=cfg.pidfile,
+        owner={"pid": 111, "host": "test-host", "monitor_id": "monitor-sleep"},
+    )
+    report_path = write_json(
+        cfg.output_root / "latest_track_b_shadow_monitor_report.json",
+        {
+            "completed_at": now().isoformat(),
+            "cycle_index": 3,
+            "monitor_verdict": TrackBShadowMonitorVerdict.LIVE_FEED_STALE.value,
+            "primary_blocker": "latest completed 5m candle age is unavailable",
+        },
+    )
+    write_json(
+        cfg.output_root / "latest_track_b_shadow_monitor_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "cycle_index": 3,
+            "last_monitor_verdict": TrackBShadowMonitorVerdict.LIVE_FEED_STALE.value,
+            "last_report_path": str(report_path),
+        },
+    )
+
+    path = shadow_monitor_module._write_monitor_liveness_diagnostic(  # noqa: SLF001
+        config=cfg,
+        now=now(),
+        lock=lock,
+        instruments=cfg.instruments,
+        live_feed_processes={},
+        sleep_seconds=60,
+        next_wake_at=datetime(2026, 5, 5, 12, 1, tzinfo=UTC),
+    )
+
+    diagnostic = json.loads(path.read_text())
+    assert diagnostic["suspected_stall_classification"] == "MONITOR_SLEEPING_EXPECTED"
+    assert diagnostic["sleep_seconds"] == 60
+    assert diagnostic["next_wake_at"] == "2026-05-05T12:01:00+00:00"
+
+
+def test_monitor_liveness_diagnostic_classifies_children_advancing_monitor_stale(tmp_path: Path) -> None:
+    cfg = config(tmp_path, live_runtime_feed_output_root=tmp_path / "live", poll_seconds=15)
+    instrument = cfg.instruments[0]
+    stale_time = datetime(2026, 5, 5, 11, 55, tzinfo=UTC).isoformat()
+    write_json(
+        cfg.output_root / "latest_track_b_shadow_monitor_report.json",
+        {
+            "completed_at": stale_time,
+            "cycle_index": 5,
+            "monitor_verdict": TrackBShadowMonitorVerdict.LIVE_FEED_STALE.value,
+            "primary_blocker": "waiting",
+        },
+    )
+    write_json(
+        cfg.output_root / "latest_track_b_shadow_monitor_heartbeat.json",
+        {
+            "generated_at": stale_time,
+            "cycle_index": 5,
+            "last_monitor_verdict": TrackBShadowMonitorVerdict.LIVE_FEED_STALE.value,
+        },
+    )
+    write_live_feed_artifacts(cfg, instrument, one_minute_candles(20, 40, source_tag="DATABENTO_LIVE_ARTIFACT"))
+    lock = shadow_monitor_module.TrackBShadowMonitorLock(
+        acquired=True,
+        lockfile=cfg.lockfile,
+        pidfile=cfg.pidfile,
+        owner={"pid": 222, "host": "test-host", "monitor_id": "monitor-stale"},
+    )
+
+    path = shadow_monitor_module._write_monitor_liveness_diagnostic(  # noqa: SLF001
+        config=cfg,
+        now=now(),
+        lock=lock,
+        instruments=cfg.instruments,
+        live_feed_processes={instrument.instrument_family: shadow_monitor_module.TrackBLiveFeedProcessState(
+            instrument_family=instrument.instrument_family,
+            managed=True,
+            owned_by_monitor=True,
+            pid=4242,
+            status="LIVE_FEED_STARTED",
+        )},
+    )
+
+    diagnostic = json.loads(path.read_text())
+    assert diagnostic["suspected_stall_classification"] == "CHILDREN_ADVANCING_MONITOR_STALE"
+    assert diagnostic["live_child_statuses"][0]["live_feed_pid"] == 4242
+    assert diagnostic["live_child_artifacts_advancing"] is True
+
+
+def test_liveness_diagnostic_reports_missing_mnq_completed_5m_reason(tmp_path: Path) -> None:
+    mnq = TrackBShadowMonitorInstrumentConfig(
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        databento_continuous_symbol="MNQ.v.0",
+        dataset="GLBX.MDP3",
+        enabled_strategies=("MNQ_US_DERIVATIVE_BEAR_TURN_V1",),
+        runtime_chain_wired=True,
+    )
+    cfg = config(tmp_path, instruments=(mnq,), live_runtime_feed_output_root=tmp_path / "live")
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_live_mnq_1m_candles.json",
+        {**runtime_payload_for_now(), "instrument_family": "MNQ", "candles": one_minute_candles(20, 10)},
+    )
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_mnq_heartbeat.json",
+        {
+            "generated_at": now().isoformat(),
+            "live_feed_connected": True,
+            "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+            "latest_1m_timestamp": "2026-05-05T11:59:00+00:00",
+            "latest_1m_age_seconds": 60,
+        },
+    )
+    lock = shadow_monitor_module.TrackBShadowMonitorLock(
+        acquired=True,
+        lockfile=cfg.lockfile,
+        pidfile=cfg.pidfile,
+        owner={"pid": 333, "host": "test-host", "monitor_id": "monitor-mnq"},
+    )
+
+    path = shadow_monitor_module._write_monitor_liveness_diagnostic(  # noqa: SLF001
+        config=cfg,
+        now=now(),
+        lock=lock,
+        instruments=(mnq,),
+        live_feed_processes={},
+    )
+
+    diagnostic = json.loads(path.read_text())
+    mnq_status = diagnostic["live_child_statuses"][0]
+    assert mnq_status["instrument_family"] == "MNQ"
+    assert mnq_status["completed_5m_exists"] is False
+    assert mnq_status["completed_5m_unavailable_reason"] == "artifact missing"
+
+
 def test_live_artifact_source_does_not_reuse_stale_runtime_cadence_cache(tmp_path: Path) -> None:
     cfg = config(
         tmp_path,

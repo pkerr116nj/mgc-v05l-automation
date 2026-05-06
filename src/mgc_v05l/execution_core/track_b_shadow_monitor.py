@@ -80,6 +80,9 @@ DEFAULT_TRACK_B_DIAGNOSTIC_OUTPUT_ROOT = Path("outputs/track_b_execution_core/di
 DEFAULT_TRACK_B_STARTUP_READINESS_DIAGNOSTIC_JSON = (
     DEFAULT_TRACK_B_DIAGNOSTIC_OUTPUT_ROOT / "latest_track_b_startup_readiness_diagnostic.json"
 )
+DEFAULT_TRACK_B_MONITOR_LIVENESS_DIAGNOSTIC_JSON = (
+    DEFAULT_TRACK_B_DIAGNOSTIC_OUTPUT_ROOT / "latest_track_b_monitor_liveness_diagnostic.json"
+)
 DEFAULT_CURRENT_QUOTE_REPORT_JSON = Path(
     "outputs/track_b_execution_core/databento_candle_observer/latest_databento_candle_observer_report.json"
 )
@@ -539,6 +542,12 @@ def run_track_b_shadow_monitor(
                 final_verdict = TrackBShadowMonitorVerdict(str(report["monitor_verdict"]))
                 break
             should_stop = _must_stop(report, config)
+            sleep_seconds = 0.0
+            next_wake_at: datetime | None = None
+            if not should_stop and cycle_index < config.max_cycles:
+                sleep_seconds = _sleep_seconds(config=config, consecutive_failures=consecutive_failures)
+                if sleep_seconds > 0:
+                    next_wake_at = _parse_time(str(report["completed_at"])) + timedelta(seconds=sleep_seconds)
             _write_heartbeat(
                 config=config,
                 monitor_id=actual_monitor_id,
@@ -550,13 +559,24 @@ def run_track_b_shadow_monitor(
                 last_verdict=final_verdict.value,
                 last_report_path=final_report_json,
                 lock=lock,
+                current_blocker=report.get("primary_blocker"),
+                sleep_seconds=sleep_seconds if sleep_seconds > 0 else None,
+                next_wake_at=next_wake_at,
+            )
+            _write_monitor_liveness_diagnostic(
+                config=config,
+                now=_parse_time(str(report["completed_at"])),
+                lock=lock,
+                instruments=instruments,
+                live_feed_processes=live_feed_processes,
+                last_report=report,
+                sleep_seconds=sleep_seconds if sleep_seconds > 0 else None,
+                next_wake_at=next_wake_at,
             )
             if should_stop:
                 break
-            if cycle_index < config.max_cycles:
-                sleep_seconds = _sleep_seconds(config=config, consecutive_failures=consecutive_failures)
-                if sleep_seconds > 0:
-                    actual_stages.sleep(sleep_seconds)
+            if sleep_seconds > 0:
+                actual_stages.sleep(sleep_seconds)
     except KeyboardInterrupt:
         shutdown_reason = "KeyboardInterrupt"
     finally:
@@ -3311,6 +3331,200 @@ def _write_monitor_report(report_json: Path, report: Mapping[str, Any]) -> None:
     latest_report.write_text(payload, encoding="utf-8")
 
 
+def _write_monitor_liveness_diagnostic(
+    *,
+    config: TrackBShadowMonitorConfig,
+    now: datetime,
+    lock: TrackBShadowMonitorLock,
+    instruments: Sequence[TrackBShadowMonitorInstrumentConfig],
+    live_feed_processes: Mapping[str, TrackBLiveFeedProcessState] | None = None,
+    last_report: Mapping[str, Any] | None = None,
+    sleep_seconds: float | None = None,
+    next_wake_at: datetime | None = None,
+) -> Path:
+    path = Path(config.diagnostic_output_root) / "latest_track_b_monitor_liveness_diagnostic.json"
+    latest_report_path = Path(config.output_root) / "latest_track_b_shadow_monitor_report.json"
+    latest_heartbeat_path = Path(config.output_root) / "latest_track_b_shadow_monitor_heartbeat.json"
+    report_payload = _read_json_optional(latest_report_path) or dict(last_report or {})
+    heartbeat_payload = _read_json_optional(latest_heartbeat_path) or {}
+    heartbeat_age = _age_seconds_from_payload(heartbeat_payload, now)
+    report_age = _age_seconds_from_payload(report_payload, now)
+    instrument_statuses = [
+        _live_child_artifact_liveness(
+            config=config,
+            instrument=instrument,
+            state=(live_feed_processes or {}).get(instrument.instrument_family),
+            now=now,
+        )
+        for instrument in instruments
+    ]
+    live_child_artifact_ages = [
+        age
+        for status in instrument_statuses
+        for age in (
+            status.get("heartbeat_artifact_age_seconds"),
+            status.get("one_minute_artifact_age_seconds"),
+            status.get("completed_5m_artifact_age_seconds"),
+        )
+        if isinstance(age, (int, float))
+    ]
+    child_artifacts_fresh = any(
+        age <= max(float(config.max_latest_1m_age_seconds), config.poll_seconds * 3)
+        for age in live_child_artifact_ages
+    )
+    threshold = max(float(config.poll_seconds) * 3, 60.0)
+    now_utc = now.astimezone(UTC)
+    sleeping_expected = next_wake_at is not None and now_utc < next_wake_at.astimezone(UTC)
+    classification = "MONITOR_LIVE"
+    if sleeping_expected:
+        classification = "MONITOR_SLEEPING_EXPECTED"
+    elif child_artifacts_fresh and (
+        (heartbeat_age is not None and heartbeat_age > threshold)
+        or (report_age is not None and report_age > threshold)
+    ):
+        classification = "CHILDREN_ADVANCING_MONITOR_STALE"
+    elif heartbeat_age is not None and heartbeat_age > threshold:
+        classification = "MONITOR_HEARTBEAT_STALE"
+    elif report_age is not None and report_age > threshold:
+        classification = "MONITOR_REPORT_STALE"
+    elif _blocker_mentions_5m(report_payload.get("primary_blocker")):
+        classification = "BLOCKED_ON_5M_AGGREGATION"
+    elif _blocker_mentions_startup(report_payload.get("primary_blocker")):
+        classification = "BLOCKED_ON_STARTUP_READINESS"
+
+    payload = {
+        "schema_version": "track_b_monitor_liveness_diagnostic_v1",
+        "generated_at": now_utc.isoformat(),
+        "monitor_pid": lock.owner.get("pid"),
+        "monitor_id": lock.owner.get("monitor_id"),
+        "monitor_mode": _monitor_mode(config),
+        "runtime_decision_source": _runtime_data_source(config).value,
+        "last_heartbeat_timestamp": _first_text(
+            heartbeat_payload.get("generated_at"),
+            heartbeat_payload.get("completed_at"),
+            heartbeat_payload.get("wall_clock_time"),
+        ),
+        "heartbeat_age_seconds": None if heartbeat_age is None else round(heartbeat_age, 3),
+        "last_report_timestamp": _first_text(
+            report_payload.get("completed_at"),
+            report_payload.get("generated_at"),
+            report_payload.get("wall_clock_time"),
+        ),
+        "report_age_seconds": None if report_age is None else round(report_age, 3),
+        "last_cycle_number": report_payload.get("cycle_index") or heartbeat_payload.get("cycle_index"),
+        "expected_cycle_interval_seconds": config.poll_seconds,
+        "sleep_seconds": None if sleep_seconds is None else round(float(sleep_seconds), 3),
+        "next_wake_at": None if next_wake_at is None else next_wake_at.astimezone(UTC).isoformat(),
+        "last_branch_outcome": report_payload.get("monitor_verdict") or heartbeat_payload.get("last_monitor_verdict"),
+        "current_blocker": report_payload.get("primary_blocker") or heartbeat_payload.get("current_blocker"),
+        "live_child_statuses": instrument_statuses,
+        "live_child_pids": {
+            instrument.instrument_family: (live_feed_processes or {}).get(instrument.instrument_family).pid
+            for instrument in instruments
+            if (live_feed_processes or {}).get(instrument.instrument_family) is not None
+        },
+        "live_child_artifacts_advancing": child_artifacts_fresh,
+        "monitor_artifact_advancing": (
+            (heartbeat_age is not None and heartbeat_age <= threshold)
+            or (report_age is not None and report_age <= threshold)
+        ),
+        "suspected_stall_classification": classification,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+        "report_json_path": str(path),
+    }
+    _write_json_file(path, payload)
+    return path
+
+
+def _live_child_artifact_liveness(
+    *,
+    config: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    state: TrackBLiveFeedProcessState | None,
+    now: datetime,
+) -> dict[str, Any]:
+    root = Path(config.live_runtime_feed_output_root)
+    heartbeat_path = _latest_live_heartbeat_path(root, instrument.instrument_family)
+    one_minute_path = _latest_live_1m_path(root, instrument.instrument_family)
+    completed_5m_path = _latest_live_completed_5m_path(root, instrument.instrument_family)
+    heartbeat_payload = _read_json_optional(heartbeat_path)
+    one_minute_payload = _read_json_optional(one_minute_path)
+    completed_5m_payload = _read_json_optional(completed_5m_path)
+    completed_reason = _completed_5m_unavailable_reason(completed_5m_path, completed_5m_payload)
+    return {
+        "instrument_family": instrument.instrument_family,
+        "live_feed_pid": None if state is None else state.pid,
+        "live_feed_status": None if state is None else state.status,
+        "heartbeat_path": str(heartbeat_path),
+        "heartbeat_exists": heartbeat_path.exists(),
+        "heartbeat_artifact_age_seconds": _path_mtime_age_seconds(heartbeat_path, now),
+        "heartbeat_generated_age_seconds": _age_seconds_from_payload(heartbeat_payload, now),
+        "one_minute_path": str(one_minute_path),
+        "one_minute_exists": one_minute_path.exists(),
+        "one_minute_artifact_age_seconds": _path_mtime_age_seconds(one_minute_path, now),
+        "latest_1m_timestamp": _first_text(
+            (one_minute_payload or {}).get("latest_1m_timestamp"),
+            (heartbeat_payload or {}).get("latest_1m_timestamp"),
+        ),
+        "completed_5m_path": str(completed_5m_path),
+        "completed_5m_exists": completed_5m_path.exists(),
+        "completed_5m_artifact_age_seconds": _path_mtime_age_seconds(completed_5m_path, now),
+        "completed_5m_unavailable_reason": completed_reason,
+        "latest_completed_5m_timestamp": _latest_candle_timestamp(completed_5m_payload)
+        or _first_text((heartbeat_payload or {}).get("latest_completed_5m_timestamp")),
+        "completed_5m_bar_count": _bars_available(completed_5m_payload),
+    }
+
+
+def _path_mtime_age_seconds(path: Path, now: datetime) -> float | None:
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except FileNotFoundError:
+        return None
+    return round(max(0.0, (now.astimezone(UTC) - mtime).total_seconds()), 3)
+
+
+def _latest_candle_timestamp(payload: Mapping[str, Any] | None) -> str | None:
+    candles = _payload_candles(payload or {})
+    if not candles:
+        return None
+    for candle in reversed(candles):
+        text = _first_text(candle.get("candle_timestamp"), candle.get("timestamp"), candle.get("observed_at"))
+        if text:
+            try:
+                return _parse_time(text).isoformat()
+            except ValueError:
+                return None
+    return None
+
+
+def _completed_5m_unavailable_reason(path: Path, payload: Mapping[str, Any] | None) -> str | None:
+    if not path.exists():
+        return "artifact missing"
+    if payload is None:
+        return "timestamp parse failure or unreadable JSON"
+    candles = _payload_candles(payload)
+    if not candles:
+        return "no completed bars yet"
+    latest = _latest_candle_timestamp(payload)
+    if not latest:
+        return "timestamp parse failure"
+    return None
+
+
+def _blocker_mentions_5m(value: object) -> bool:
+    return "5m" in str(value or "").lower()
+
+
+def _blocker_mentions_startup(value: object) -> bool:
+    text = str(value or "").lower()
+    return "startup" in text or "feature context" in text or "confirmation window" in text
+
+
 def _write_heartbeat(
     *,
     config: TrackBShadowMonitorConfig,
@@ -3323,6 +3537,9 @@ def _write_heartbeat(
     last_verdict: str | None,
     last_report_path: Path | None,
     lock: TrackBShadowMonitorLock,
+    current_blocker: object | None = None,
+    sleep_seconds: float | None = None,
+    next_wake_at: datetime | None = None,
 ) -> None:
     path = Path(config.output_root) / "latest_track_b_shadow_monitor_heartbeat.json"
     payload = {
@@ -3341,6 +3558,10 @@ def _write_heartbeat(
         "instrument_families": [instrument.instrument_family for instrument in instruments],
         "last_monitor_verdict": last_verdict,
         "last_report_path": None if last_report_path is None else str(last_report_path),
+        "current_blocker": None if current_blocker is None else str(current_blocker),
+        "sleep_seconds": None if sleep_seconds is None else round(float(sleep_seconds), 3),
+        "next_wake_at": None if next_wake_at is None else next_wake_at.astimezone(UTC).isoformat(),
+        "expected_cycle_interval_seconds": config.poll_seconds,
         "heartbeat_json_path": str(path),
         "submit_allowed": False,
         "submit_attempted": False,
