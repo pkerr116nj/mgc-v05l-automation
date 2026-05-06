@@ -3132,6 +3132,10 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
   const missingReports = asArray<string>(status.reports_missing);
   const latestOutputPaths = asRecord(status.latest_output_paths);
   const instrumentReports = asArray<JsonRecord>(status.shadow_monitor_instrument_reports);
+  const trackBStartupReadiness = asRecord(status.track_b_startup_readiness_diagnostic);
+  const trackBStartupInstruments = asRecord(trackBStartupReadiness.instruments);
+  const primaryInstrumentFamily = String(instrumentReports[0]?.instrument_family ?? "MGC");
+  const primaryStartupReadiness = asRecord(trackBStartupInstruments[primaryInstrumentFamily]);
   const trackBSafetyWarnings = asArray<string>(status.track_b_safety_warnings);
   const trackBSafetyCritical = status.track_b_safety_critical === true;
   const trackBSafetyReviewRequired = status.track_b_safety_review_required === true;
@@ -3248,12 +3252,17 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
               <MetricCard label="Heartbeat Age" value={formatValue(status.shadow_monitor_live_feed_heartbeat_age_seconds)} />
               <MetricCard label="1m Age" value={formatValue(status.shadow_monitor_live_feed_latest_1m_age_seconds)} />
               <MetricCard label="5m Age" value={formatValue(status.shadow_monitor_live_feed_latest_completed_5m_age_seconds)} />
-              <MetricCard label="Strategy Ready" value={formatValue(status.shadow_monitor_live_feed_strategy_ready)} tone={status.shadow_monitor_live_feed_strategy_ready === true ? "good" : status.shadow_monitor_live_feed_strategy_ready === false ? "warn" : "muted"} />
-              <MetricCard label="1m Bars" value={`${formatValue(status.shadow_monitor_live_feed_warmup_1m_count)} / ${formatValue(status.shadow_monitor_live_feed_required_1m_count)}`} />
-              <MetricCard label="5m Bars" value={`${formatValue(status.shadow_monitor_live_feed_warmup_completed_5m_count)} / ${formatValue(status.shadow_monitor_live_feed_required_completed_5m_count)}`} />
+              <MetricCard label="Feature Context" value={formatValue(status.shadow_monitor_feature_context_ready ?? primaryStartupReadiness.context_ready)} tone={(status.shadow_monitor_feature_context_ready ?? primaryStartupReadiness.context_ready) === true ? "good" : (status.shadow_monitor_feature_context_ready ?? primaryStartupReadiness.context_ready) === false ? "warn" : "muted"} />
+              <MetricCard label="Live Approved" value={formatValue(status.shadow_monitor_live_execution_approved ?? primaryStartupReadiness.live_execution_approved)} tone={(status.shadow_monitor_live_execution_approved ?? primaryStartupReadiness.live_execution_approved) === true ? "good" : (status.shadow_monitor_live_execution_approved ?? primaryStartupReadiness.live_execution_approved) === false ? "danger" : "muted"} />
+              <MetricCard label="PAPER Eval" value={formatValue(status.shadow_monitor_paper_evaluation_allowed ?? primaryStartupReadiness.paper_evaluation_allowed)} tone={(status.shadow_monitor_paper_evaluation_allowed ?? primaryStartupReadiness.paper_evaluation_allowed) === true ? "good" : (status.shadow_monitor_paper_evaluation_allowed ?? primaryStartupReadiness.paper_evaluation_allowed) === false ? "warn" : "muted"} />
+              <MetricCard label="Context 1m" value={`${formatValue(primaryStartupReadiness.available_1m_context_bars)} / ${formatValue(primaryStartupReadiness.required_1m_context_bars)}`} />
+              <MetricCard label="Context 5m" value={`${formatValue(primaryStartupReadiness.available_5m_context_bars)} / ${formatValue(primaryStartupReadiness.required_5m_context_bars)}`} />
+              <MetricCard label="Live Confirm 1m" value={`${formatValue(primaryStartupReadiness.live_1m_bars ?? status.shadow_monitor_live_feed_warmup_1m_count)} / ${formatValue(primaryStartupReadiness.required_live_1m_bars ?? status.shadow_monitor_live_execution_required_1m_count)}`} />
+              <MetricCard label="Live Confirm 5m" value={`${formatValue(primaryStartupReadiness.live_completed_5m_bars ?? status.shadow_monitor_live_feed_warmup_completed_5m_count)} / ${formatValue(primaryStartupReadiness.required_live_completed_5m_bars ?? status.shadow_monitor_live_execution_required_completed_5m_count)}`} />
+              <MetricCard label="Decision Bar" value={formatValue(primaryStartupReadiness.latest_decision_bar_source ?? status.shadow_monitor_latest_decision_bar_source)} />
             </div>
             <h3 className="subsection-title">Live Feed Blocker</h3>
-            <div className="placeholder-note">{formatValue(status.shadow_monitor_live_feed_execution_freshness_blocker ?? status.shadow_monitor_live_feed_blocker)}</div>
+            <div className="placeholder-note">{formatValue(primaryStartupReadiness.blocked_reason ?? status.shadow_monitor_live_feed_execution_freshness_blocker ?? status.shadow_monitor_live_feed_blocker)}</div>
           </div>
         </div>
         <div className="metric-grid compact">
@@ -3282,12 +3291,29 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
             { key: "live_feed_pid", label: "Feed PID", render: (row) => formatValue(row.live_feed_pid) },
             { key: "age_1m", label: "1m Age", render: (row) => formatValue(row.live_feed_latest_1m_age_seconds ?? row.latest_1m_age_seconds) },
             { key: "age_5m", label: "5m Age", render: (row) => formatValue(row.live_feed_latest_completed_5m_age_seconds ?? row.latest_completed_5m_age_seconds ?? row.runtime_candle_age_seconds) },
-            { key: "warmup_1m", label: "1m Bars", render: (row) => `${formatValue(row.live_feed_warmup_1m_count)} / ${formatValue(row.live_feed_required_1m_count)}` },
-            { key: "warmup_5m", label: "5m Bars", render: (row) => `${formatValue(row.live_feed_warmup_completed_5m_count)} / ${formatValue(row.live_feed_required_completed_5m_count)}` },
-            { key: "strategy_ready", label: "Strategy Ready", render: (row) => formatValue(row.live_feed_strategy_ready) },
+            { key: "feature_context", label: "Feature Context", render: (row) => <span className={`badge ${(row.feature_context_ready ?? asRecord(trackBStartupInstruments[String(row.instrument_family)]).context_ready) === true ? "good" : (row.feature_context_ready ?? asRecord(trackBStartupInstruments[String(row.instrument_family)]).context_ready) === false ? "warn" : "muted"}`}>{formatValue(row.feature_context_ready ?? asRecord(trackBStartupInstruments[String(row.instrument_family)]).context_ready)}</span> },
+            { key: "live_execution", label: "Live Approved", render: (row) => <span className={`badge ${(row.live_execution_approved ?? asRecord(trackBStartupInstruments[String(row.instrument_family)]).live_execution_approved) === true ? "good" : (row.live_execution_approved ?? asRecord(trackBStartupInstruments[String(row.instrument_family)]).live_execution_approved) === false ? "danger" : "muted"}`}>{formatValue(row.live_execution_approved ?? asRecord(trackBStartupInstruments[String(row.instrument_family)]).live_execution_approved)}</span> },
+            { key: "paper_eval", label: "PAPER Eval", render: (row) => <span className={`badge ${(row.paper_evaluation_allowed ?? asRecord(trackBStartupInstruments[String(row.instrument_family)]).paper_evaluation_allowed) === true ? "good" : (row.paper_evaluation_allowed ?? asRecord(trackBStartupInstruments[String(row.instrument_family)]).paper_evaluation_allowed) === false ? "warn" : "muted"}`}>{formatValue(row.paper_evaluation_allowed ?? asRecord(trackBStartupInstruments[String(row.instrument_family)]).paper_evaluation_allowed)}</span> },
+            { key: "context_1m", label: "Context 1m", render: (row) => {
+              const startup = asRecord(trackBStartupInstruments[String(row.instrument_family)]);
+              return `${formatValue(startup.available_1m_context_bars)} / ${formatValue(startup.required_1m_context_bars)}`;
+            } },
+            { key: "context_5m", label: "Context 5m", render: (row) => {
+              const startup = asRecord(trackBStartupInstruments[String(row.instrument_family)]);
+              return `${formatValue(startup.available_5m_context_bars)} / ${formatValue(startup.required_5m_context_bars)}`;
+            } },
+            { key: "live_confirm_1m", label: "Live Confirm 1m", render: (row) => {
+              const startup = asRecord(trackBStartupInstruments[String(row.instrument_family)]);
+              return `${formatValue(startup.live_1m_bars ?? row.live_confirmation_1m_count ?? row.live_feed_warmup_1m_count)} / ${formatValue(startup.required_live_1m_bars ?? row.live_execution_required_1m_count)}`;
+            } },
+            { key: "live_confirm_5m", label: "Live Confirm 5m", render: (row) => {
+              const startup = asRecord(trackBStartupInstruments[String(row.instrument_family)]);
+              return `${formatValue(startup.live_completed_5m_bars ?? row.live_confirmation_completed_5m_count ?? row.live_feed_warmup_completed_5m_count)} / ${formatValue(startup.required_live_completed_5m_bars ?? row.live_execution_required_completed_5m_count)}`;
+            } },
             { key: "enabled_strategies", label: "Strategies", render: (row) => formatValue(asArray(row.enabled_strategies).length || row.enabled_strategy_count || 0) },
             { key: "evaluated_strategy_count", label: "Evaluated", render: (row) => formatValue(row.evaluated_strategy_count) },
-            { key: "primary_blocker", label: "Blocker", render: (row) => formatValue(row.live_feed_execution_freshness_blocker ?? row.execution_freshness_blocker ?? row.primary_blocker ?? row.live_feed_blocker) },
+            { key: "decision_source", label: "Decision Bar", render: (row) => formatValue(asRecord(trackBStartupInstruments[String(row.instrument_family)]).latest_decision_bar_source ?? row.latest_decision_bar_source) },
+            { key: "primary_blocker", label: "Blocker", render: (row) => formatValue(asRecord(trackBStartupInstruments[String(row.instrument_family)]).blocked_reason ?? row.live_feed_execution_freshness_blocker ?? row.execution_freshness_blocker ?? row.primary_blocker ?? row.live_feed_blocker) },
           ]}
         />
       </Section>
@@ -3593,7 +3619,7 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const zeroActivityDiagnostic = asRecord(trading.zero_activity_diagnostic);
   const liveFeedFreshnessDiagnostic = asRecord(trading.live_feed_freshness_diagnostic);
   const startupReadinessDiagnostic = asRecord(trading.startup_readiness_diagnostic);
-  const startupReadinessRows = Object.entries(asRecord(startupReadinessDiagnostic.instruments)).map(([instrument, value]) => ({
+  const startupReadinessRows: JsonRecord[] = Object.entries(asRecord(startupReadinessDiagnostic.instruments)).map(([instrument, value]) => ({
     ...asRecord(value),
     instrument,
   }));
@@ -3712,6 +3738,8 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
             { key: "allowed", label: "PAPER Eval", render: (row) => <span className={`badge ${row.paper_evaluation_allowed === true ? "good" : row.paper_evaluation_allowed === false ? "warn" : "muted"}`}>{formatValue(row.paper_evaluation_allowed)}</span> },
             { key: "bars_1m", label: "1m Context", render: (row) => `${formatValue(row.available_1m_context_bars)} / ${formatValue(row.required_1m_context_bars)}` },
             { key: "bars_5m", label: "5m Context", render: (row) => `${formatValue(row.available_5m_context_bars)} / ${formatValue(row.required_5m_context_bars)}` },
+            { key: "live_1m", label: "Live Confirm 1m", render: (row) => `${formatValue(row.live_1m_bars)} / ${formatValue(row.required_live_1m_bars)}` },
+            { key: "live_5m", label: "Live Confirm 5m", render: (row) => `${formatValue(row.live_completed_5m_bars)} / ${formatValue(row.required_live_completed_5m_bars)}` },
             { key: "backfill", label: "Backfill", render: (row) => formatValue(row.backfill_source ?? row.backfill_gap_filled) },
             { key: "gaps", label: "Gaps", render: (row) => formatValue(row.context_continuity_verdict ?? row.context_gap_count ?? row.gap_count) },
             { key: "decision_source", label: "Decision Bar", render: (row) => formatValue(row.latest_decision_bar_source) },

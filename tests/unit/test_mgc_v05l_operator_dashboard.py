@@ -3377,6 +3377,10 @@ def test_track_b_paper_trading_payload_includes_startup_readiness_diagnostic(tmp
                         "available_1m_context_bars": 40,
                         "required_5m_context_bars": 8,
                         "available_5m_context_bars": 8,
+                        "live_1m_bars": 3,
+                        "required_live_1m_bars": 3,
+                        "live_completed_5m_bars": 1,
+                        "required_live_completed_5m_bars": 1,
                         "backfill_gap_detected": True,
                         "backfill_gap_filled": True,
                         "backfill_source": "DATABENTO_HTTP_BACKFILL",
@@ -3411,6 +3415,10 @@ def test_track_b_paper_trading_payload_includes_startup_readiness_diagnostic(tmp
     assert diagnostic["diagnosis_classification"] == "READY_WITH_BACKFILL_SEEDED_CONTEXT"
     assert diagnostic["instruments"]["MGC"]["context_ready"] is True
     assert diagnostic["instruments"]["MGC"]["live_execution_approved"] is True
+    assert diagnostic["instruments"]["MGC"]["live_1m_bars"] == 3
+    assert diagnostic["instruments"]["MGC"]["required_live_1m_bars"] == 3
+    assert diagnostic["instruments"]["MGC"]["live_completed_5m_bars"] == 1
+    assert diagnostic["instruments"]["MGC"]["required_live_completed_5m_bars"] == 1
     assert diagnostic["instruments"]["MGC"]["latest_decision_bar_source"] == "DATABENTO_LIVE_ARTIFACT"
     assert diagnostic["instruments"]["MGC"]["paper_evaluation_allowed"] is True
     assert diagnostic["instruments"]["MGC"]["context_continuity_verdict"] == "CONTEXT_CONTINUITY_READY"
