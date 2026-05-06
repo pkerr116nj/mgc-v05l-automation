@@ -1347,6 +1347,14 @@ def _latest_runtime_1m_path(root: Path, instrument: TrackBShadowMonitorInstrumen
     return Path(root) / f"latest_runtime_{symbol}_1m_candles.json"
 
 
+def _latest_runtime_report_path(root: Path, instrument: TrackBShadowMonitorInstrumentConfig) -> Path:
+    symbol = _artifact_symbol(instrument.instrument_family)
+    legacy = Path(root) / "latest_runtime_candle_capture_report.json"
+    if symbol == "mgc" and legacy.exists():
+        return legacy
+    return Path(root) / f"latest_runtime_candle_capture_{symbol}_report.json"
+
+
 def _start_live_feed_process(
     *,
     config: TrackBShadowMonitorConfig,
@@ -2157,8 +2165,13 @@ def _write_startup_readiness_diagnostic(
         for item in updated.values()
         if isinstance(item, Mapping) and item.get("classification")
     ]
-    if any(item == "READY_WITH_BACKFILL_SEEDED_CONTEXT" for item in classifications):
-        classification = "READY_WITH_BACKFILL_SEEDED_CONTEXT"
+    ready_classifications = {"READY_WITH_BACKFILL_SEEDED_CONTEXT", "READY_WITH_LIVE_ONLY_CONTEXT"}
+    if classifications and all(item in ready_classifications for item in classifications):
+        classification = (
+            "READY_WITH_BACKFILL_SEEDED_CONTEXT"
+            if any(item == "READY_WITH_BACKFILL_SEEDED_CONTEXT" for item in classifications)
+            else "READY_WITH_LIVE_ONLY_CONTEXT"
+        )
     elif all(item == "READY_WITH_LIVE_ONLY_CONTEXT" for item in classifications) and classifications:
         classification = "READY_WITH_LIVE_ONLY_CONTEXT"
     elif any(item == "LIVE_EXECUTION_NOT_APPROVED" for item in classifications):
@@ -2283,8 +2296,8 @@ def _run_http_backfill_runtime_candle_capture(
                 requested_window_end=requested_window_end,
             )
     except Exception as exc:  # noqa: BLE001
-        fallback_candidate_report_json = Path(config.runtime_candle_capture_output_root) / "latest_runtime_candle_capture_report.json"
-        fallback_candidate_event_json = Path(config.runtime_candle_capture_output_root) / "latest_runtime_mgc_1m_candles.json"
+        fallback_candidate_report_json = _latest_runtime_report_path(Path(config.runtime_candle_capture_output_root), instrument)
+        fallback_candidate_event_json = _latest_runtime_1m_path(Path(config.runtime_candle_capture_output_root), instrument)
         fallback_candidate_report = _read_json_optional(fallback_candidate_report_json)
         fallback_candidate_payload = _read_json_optional(fallback_candidate_event_json)
         provider_error = write_runtime_candle_capture_provider_error(
@@ -2444,8 +2457,8 @@ def _runtime_artifact_reuse_for_refresh_cadence(
     cycle_index: int,
     now: datetime,
 ) -> TrackBRuntimeCandleCaptureResult | None:
-    event_json = Path(config.runtime_candle_capture_output_root) / "latest_runtime_mgc_1m_candles.json"
-    report_json = Path(config.runtime_candle_capture_output_root) / "latest_runtime_candle_capture_report.json"
+    event_json = _latest_runtime_1m_path(Path(config.runtime_candle_capture_output_root), instrument)
+    report_json = _latest_runtime_report_path(Path(config.runtime_candle_capture_output_root), instrument)
     if not event_json.exists():
         return None
     try:
@@ -2535,8 +2548,8 @@ def _fresh_runtime_artifact_fallback(
 ) -> TrackBRuntimeCandleCaptureResult | None:
     if not config.allow_fresh_runtime_artifact_fallback:
         return None
-    actual_report_json = latest_report_json or Path(config.runtime_candle_capture_output_root) / "latest_runtime_candle_capture_report.json"
-    actual_event_json = latest_event_json or Path(config.runtime_candle_capture_output_root) / "latest_runtime_mgc_1m_candles.json"
+    actual_report_json = latest_report_json or _latest_runtime_report_path(Path(config.runtime_candle_capture_output_root), instrument)
+    actual_event_json = latest_event_json or _latest_runtime_1m_path(Path(config.runtime_candle_capture_output_root), instrument)
     actual_report = latest_report or _read_json_optional(actual_report_json)
     if not actual_report or not actual_event_json.exists():
         return None
@@ -3448,7 +3461,7 @@ def _global_critical_blocker(
     for report in instrument_reports:
         blocker = _critical_mutation_flag(report, config=config)
         if blocker:
-            return f"{blocker} Instrument={report.get('instrument_family')}."
+            return f"GLOBAL_SAFETY_BLOCKER: {blocker} Instrument={report.get('instrument_family')}."
     return None
 
 

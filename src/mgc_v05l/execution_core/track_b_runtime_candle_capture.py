@@ -70,6 +70,18 @@ def _artifact_symbol_from_contract(contract_key: str | None, local_symbol: str |
     return source.split("-", 1)[0].lower() or "mgc"
 
 
+def _instrument_family_from_contract(contract_key: str | None, local_symbol: str | None) -> str:
+    source = str(contract_key or local_symbol or "MGC").strip().upper()
+    if source.startswith("MNQ"):
+        return "MNQ"
+    if source.startswith("MGC"):
+        return "MGC"
+    if "-" in source:
+        return source.split("-", 1)[0] or "MGC"
+    letters = "".join(ch for ch in source if ch.isalpha())
+    return letters or source or "MGC"
+
+
 def capture_track_b_runtime_mgc_1m_candles(
     *,
     runtime_candle_payload: Mapping[str, Any],
@@ -233,7 +245,10 @@ def capture_track_b_runtime_mgc_1m_candles(
                 gap_count=gap_count,
                 quote_evidence=quote_evidence,
                 runtime_event=None,
-                primary_blocker=f"Runtime MGC 1m candle context has {gap_count} detected gaps.",
+                primary_blocker=(
+                    f"Runtime {_instrument_family_from_contract(contract_key, local_symbol)} 1m candle context has "
+                    f"{gap_count} detected gaps."
+                ),
                 required_next_action="Repair or continue runtime candle capture until the bounded window is contiguous.",
                 retention_runs=retention_runs,
                 requested_window_start=requested_window_start,

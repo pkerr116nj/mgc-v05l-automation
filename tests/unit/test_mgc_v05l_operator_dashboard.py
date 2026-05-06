@@ -3064,6 +3064,7 @@ def test_track_b_operator_status_overlay_reads_live_monitor_artifacts(tmp_path: 
     assert payload["shadow_monitor_wired_instrument_count"] == 2
     assert payload["shadow_monitor_instrument_reports"][1]["instrument_family"] == "MNQ"
     assert payload["shadow_monitor_instrument_reports"][1]["enabled_strategies"] == ["MNQ_US_DERIVATIVE_BEAR_TURN_V1"]
+    assert "MGC" not in str(payload["shadow_monitor_instrument_reports"][1].get("primary_blocker") or "")
     assert payload["track_b_paper_results_source"] == "TRACK_B_LIFECYCLE_ARTIFACTS"
     assert payload["track_b_paper_results_broker_reconciled"] is False
     assert payload["paper_trades_attempted_count"] == 0
@@ -3077,6 +3078,45 @@ def test_track_b_operator_status_overlay_reads_live_monitor_artifacts(tmp_path: 
     assert payload["latest_trade_ledger_path"] == "outputs/track_b_execution_core/paper_trade_ledger/track_b_paper_trade_ledger.jsonl"
     assert payload["track_b_live_feed_freshness_diagnostic"]["diagnosis_classification"] == "STALE_LIVE_FEED"
     assert payload["track_b_live_feed_freshness_diagnostic"]["stale_instruments"] == ["MGC"]
+
+
+def test_track_b_dashboard_keeps_startup_blockers_instrument_scoped(tmp_path: Path) -> None:
+    diagnostics_dir = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics"
+    diagnostics_dir.mkdir(parents=True)
+    (diagnostics_dir / "latest_track_b_startup_readiness_diagnostic.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_startup_readiness_diagnostic_v1",
+                "generated_at": "2026-05-06T07:10:00+00:00",
+                "diagnosis_classification": "FEATURE_CONTEXT_NOT_READY",
+                "instruments": {
+                    "MGC": {
+                        "classification": "FEATURE_CONTEXT_NOT_READY",
+                        "context_ready": False,
+                        "live_execution_approved": True,
+                        "paper_evaluation_allowed": False,
+                        "blocked_reason": "Runtime MGC 1m candle context has 1 detected gaps.",
+                    },
+                    "MNQ": {
+                        "classification": "READY_WITH_BACKFILL_SEEDED_CONTEXT",
+                        "context_ready": True,
+                        "live_execution_approved": True,
+                        "paper_evaluation_allowed": True,
+                        "blocked_reason": None,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
+
+    diagnostic = payload["startup_readiness_diagnostic"]
+    assert diagnostic["diagnosis_classification"] == "FEATURE_CONTEXT_NOT_READY"
+    assert diagnostic["instruments"]["MGC"]["paper_evaluation_allowed"] is False
+    assert diagnostic["instruments"]["MNQ"]["paper_evaluation_allowed"] is True
+    assert diagnostic["instruments"]["MNQ"]["blocked_reason"] is None
 
 
 def test_track_b_operator_status_overlay_does_not_scan_full_paper_ledger(tmp_path: Path) -> None:

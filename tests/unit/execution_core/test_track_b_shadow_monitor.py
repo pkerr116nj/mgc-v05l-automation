@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -134,6 +135,77 @@ def one_minute_candles(start_minute: int, count: int, *, source_tag: str | None 
             candle["source_tag"] = source_tag
         candles.append(candle)
     return candles
+
+
+def write_live_feed_artifacts(
+    cfg: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    candles: list[dict[str, object]],
+) -> None:
+    symbol = instrument.instrument_family.lower()
+    write_json(
+        cfg.live_runtime_feed_output_root / f"latest_live_{symbol}_1m_candles.json",
+        {
+            **runtime_payload_for_now(),
+            "contract_key": instrument.contract_key,
+            "instrument_family": instrument.instrument_family,
+            "local_symbol": instrument.local_symbol,
+            "databento_continuous_symbol": instrument.databento_continuous_symbol,
+            "candles": candles,
+            "candle_history": candles,
+            "candle_source_mode": "DATABENTO_LIVE_RUNTIME_FEED",
+            "completed_1m_fresh": True,
+            "completed_5m_fresh": True,
+            "bars_available": len(candles),
+        },
+    )
+    write_json(cfg.live_runtime_feed_output_root / f"latest_live_{symbol}_completed_5m_candles.json", completed_5m_payload_for_now(1))
+    live_status = {
+        "generated_at": now().isoformat(),
+        "contract_key": instrument.contract_key,
+        "instrument_family": instrument.instrument_family,
+        "local_symbol": instrument.local_symbol,
+        "databento_continuous_symbol": instrument.databento_continuous_symbol,
+        "dataset": instrument.dataset,
+        "live_feed_connected": True,
+        "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+        "fresh_for_execution": True,
+        "latest_1m_age_seconds": 60,
+        "latest_completed_5m_age_seconds": 300,
+        "bars_available": len(candles),
+    }
+    write_json(cfg.live_runtime_feed_output_root / f"latest_databento_live_runtime_feed_{symbol}_heartbeat.json", live_status)
+    write_json(cfg.live_runtime_feed_output_root / f"latest_databento_live_runtime_feed_{symbol}_report.json", live_status)
+
+
+def write_recovery_context_artifact(
+    cfg: TrackBShadowMonitorConfig,
+    instrument: TrackBShadowMonitorInstrumentConfig,
+    candles: list[dict[str, object]],
+) -> None:
+    symbol = instrument.instrument_family.lower()
+    payload = {
+        **runtime_payload_for_now(),
+        "contract_key": instrument.contract_key,
+        "instrument_family": instrument.instrument_family,
+        "local_symbol": instrument.local_symbol,
+        "databento_continuous_symbol": instrument.databento_continuous_symbol,
+        "candles": candles,
+        "candle_history": candles,
+        "candle_source_mode": "DATABENTO_HTTP_BACKFILL",
+        "bars_available": len(candles),
+    }
+    write_json(cfg.runtime_candle_capture_output_root / f"latest_runtime_{symbol}_1m_candles.json", payload)
+    write_json(
+        cfg.runtime_candle_capture_output_root / f"latest_runtime_candle_capture_{symbol}_report.json",
+        {
+            "data_written": True,
+            "fresh_for_execution": False,
+            "contract_key": instrument.contract_key,
+            "local_symbol": instrument.local_symbol,
+            "dataset": instrument.dataset,
+        },
+    )
 
 
 class FakeLiveFeedProcess:
@@ -959,6 +1031,150 @@ def test_timestamp_alignment_is_normalized_before_gap_detection() -> None:
         "2026-05-05T11:02:00+00:00",
     ]
     assert shadow_monitor_module._classify_context_gaps(candles, required_1m=3) == []
+
+
+def _mgc_mnq_config(tmp_path: Path) -> tuple[
+    TrackBShadowMonitorConfig,
+    TrackBShadowMonitorInstrumentConfig,
+    TrackBShadowMonitorInstrumentConfig,
+]:
+    mgc = TrackBShadowMonitorInstrumentConfig(
+        instrument_family="MGC",
+        contract_key="MGC-202606",
+        local_symbol="MGCM6",
+        databento_continuous_symbol="MGC.v.0",
+        dataset="GLBX.MDP3",
+        enabled_strategies=("ASIAN_DRIFT_V1",),
+        runtime_chain_wired=True,
+    )
+    mnq = TrackBShadowMonitorInstrumentConfig(
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        databento_continuous_symbol="MNQ.v.0",
+        dataset="GLBX.MDP3",
+        enabled_strategies=("MNQ_US_DERIVATIVE_BEAR_TURN_V1",),
+        runtime_chain_wired=True,
+    )
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        live_feed_min_bars=40,
+        max_bars=50,
+        manage_live_feed=False,
+        instruments=(mgc, mnq),
+    )
+    return cfg, mgc, mnq
+
+
+def _run_multi_instrument_gap_fixture(
+    *,
+    tmp_path: Path,
+    mgc_gap: bool,
+    mnq_gap: bool,
+) -> tuple[TrackBShadowMonitorConfig, dict[str, Any], dict[str, Any]]:
+    cfg, mgc, mnq = _mgc_mnq_config(tmp_path)
+    write_live_feed_artifacts(cfg, mgc, one_minute_candles(55, 5, source_tag="DATABENTO_LIVE_ARTIFACT"))
+    write_live_feed_artifacts(cfg, mnq, one_minute_candles(55, 5, source_tag="DATABENTO_LIVE_ARTIFACT"))
+    write_recovery_context_artifact(
+        cfg,
+        mgc,
+        one_minute_candles(20, 34 if mgc_gap else 35, source_tag="DATABENTO_HTTP_BACKFILL"),
+    )
+    write_recovery_context_artifact(
+        cfg,
+        mnq,
+        one_minute_candles(20, 34 if mnq_gap else 35, source_tag="DATABENTO_HTTP_BACKFILL"),
+    )
+
+    def failed_backfill(*_args: object, **_kwargs: object) -> TrackBRuntimeCandleCaptureResult:
+        report_path = tmp_path / "runtime" / "failed-backfill-report.json"
+        report = {"data_written": False, "primary_blocker": "bounded backfill unavailable"}
+        write_json(report_path, report)
+        return TrackBRuntimeCandleCaptureResult(
+            verdict=TrackBRuntimeCandleCaptureVerdict.FETCH_FAILED,
+            report_json=report_path,
+            report=report,
+            runtime_candles_json=None,
+            runtime_candles_event=None,
+        )
+
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+    original = shadow_monitor_module._run_http_backfill_runtime_candle_capture
+    shadow_monitor_module._run_http_backfill_runtime_candle_capture = failed_backfill  # type: ignore[method-assign]
+    try:
+        result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-multi-gap-scope", now_func=now)
+    finally:
+        shadow_monitor_module._run_http_backfill_runtime_candle_capture = original  # type: ignore[method-assign]
+    reports = {
+        str(item.get("instrument_family")): item
+        for item in result.report["instrument_reports"]
+        if isinstance(item, dict)
+    }
+    return cfg, reports["MGC"], reports["MNQ"]
+
+
+def test_mgc_context_gap_does_not_block_clean_mnq(tmp_path: Path) -> None:
+    cfg, mgc_report, mnq_report = _run_multi_instrument_gap_fixture(tmp_path=tmp_path, mgc_gap=True, mnq_gap=False)
+
+    assert mgc_report["paper_evaluation_allowed"] is False
+    assert "Runtime MGC 1m candle context" in str(mgc_report["primary_blocker"])
+    assert mnq_report["feature_context_ready"] is True
+    assert mnq_report["live_execution_approved"] is True
+    assert mnq_report["paper_evaluation_allowed"] is True
+    assert "MGC" not in str(mnq_report.get("primary_blocker") or "")
+    diagnostic = json.loads((cfg.diagnostic_output_root / "latest_track_b_startup_readiness_diagnostic.json").read_text())
+    assert diagnostic["instruments"]["MGC"]["paper_evaluation_allowed"] is False
+    assert diagnostic["instruments"]["MNQ"]["paper_evaluation_allowed"] is True
+
+
+def test_mnq_context_gap_does_not_block_clean_mgc(tmp_path: Path) -> None:
+    _cfg, mgc_report, mnq_report = _run_multi_instrument_gap_fixture(tmp_path=tmp_path, mgc_gap=False, mnq_gap=True)
+
+    assert mgc_report["paper_evaluation_allowed"] is True
+    assert "MNQ" not in str(mgc_report.get("primary_blocker") or "")
+    assert mnq_report["paper_evaluation_allowed"] is False
+    assert "Runtime MNQ 1m candle context" in str(mnq_report["primary_blocker"])
+
+
+def test_both_context_gaps_keep_instrument_specific_blockers(tmp_path: Path) -> None:
+    _cfg, mgc_report, mnq_report = _run_multi_instrument_gap_fixture(tmp_path=tmp_path, mgc_gap=True, mnq_gap=True)
+
+    assert mgc_report["paper_evaluation_allowed"] is False
+    assert mnq_report["paper_evaluation_allowed"] is False
+    assert "Runtime MGC 1m candle context" in str(mgc_report["primary_blocker"])
+    assert "Runtime MNQ 1m candle context" in str(mnq_report["primary_blocker"])
+
+
+def test_global_safety_blocker_is_labeled_global(tmp_path: Path) -> None:
+    fake = FakeStages(
+        tmp_path,
+        runtime_cycle_overrides={
+            "submit_attempted": True,
+            "paper_proof_invoked": False,
+            "paper_proof_classification": None,
+            "paper_runner_report_path": None,
+        },
+    )
+    result = run_track_b_shadow_monitor(
+        config=config(tmp_path, mode="PAPER", enable_paper_trading=True, paper_on_signal=True, quantity=1),
+        stages=fake.stages(),
+        monitor_id="monitor-global-safety",
+        now_func=now,
+    )
+
+    assert result.verdict == TrackBShadowMonitorVerdict.CRITICAL_UNEXPECTED_MUTATION_FLAG
+    assert str(result.report["primary_blocker"]).startswith("GLOBAL_SAFETY_BLOCKER:")
 
 
 def test_backfill_context_without_fresh_live_feed_does_not_evaluate(tmp_path: Path) -> None:
