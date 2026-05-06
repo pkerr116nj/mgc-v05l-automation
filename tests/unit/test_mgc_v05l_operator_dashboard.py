@@ -3346,6 +3346,26 @@ def test_track_b_paper_trading_payload_includes_compact_zero_activity_diagnostic
                     "latest_tier_counts": {"TIER_1_NO_SETUP_AGGREGATE": 8},
                     "tier3_without_recent_candidate_signal_warning": False,
                 },
+                "completed_decision_bar_audit": {
+                    "schema_version": "track_b_completed_decision_bar_evaluation_audit_v1",
+                    "generated_at": "2026-05-06T06:30:00+00:00",
+                    "classification": "EVALUATING_EACH_COMPLETED_BAR",
+                    "instruments": {
+                        "MGC": {
+                            "classification": "EVALUATING_EACH_COMPLETED_BAR",
+                            "completed_live_5m_bars_observed": 1,
+                            "decision_bars_eligible_for_evaluation": 1,
+                            "decision_bars_actually_evaluated": 1,
+                            "decision_bars_skipped": 0,
+                            "latest_evaluated_decision_bar_timestamp": "2026-05-06T06:25:00+00:00",
+                            "latest_completed_live_5m_bar_timestamp": "2026-05-06T06:25:00+00:00",
+                            "monitor_caught_up_to_latest_completed_bar": True,
+                            "no_signal_count": 9,
+                            "signal_count": 0,
+                            "suppressed_signal_count": 0,
+                        },
+                    },
+                },
             }
         ),
         encoding="utf-8",
@@ -3359,6 +3379,8 @@ def test_track_b_paper_trading_payload_includes_compact_zero_activity_diagnostic
     assert diagnostic["recent_cycles"] == 20
     assert diagnostic["strategies_evaluated"] == 18
     assert diagnostic["signals_seen"] == 0
+    assert diagnostic["completed_decision_bar_audit"]["classification"] == "EVALUATING_EACH_COMPLETED_BAR"
+    assert diagnostic["completed_decision_bar_audit"]["instruments"][0]["decision_bars_actually_evaluated"] == 1
 
 
 def test_track_b_paper_trading_payload_marks_stale_zero_activity_diagnostic(tmp_path: Path) -> None:

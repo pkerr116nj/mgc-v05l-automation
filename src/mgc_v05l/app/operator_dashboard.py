@@ -17026,6 +17026,56 @@ def _compact_track_b_zero_activity_diagnostic(
         "tier3_without_recent_candidate_signal_warning": journal_summary.get(
             "tier3_without_recent_candidate_signal_warning"
         ),
+        "completed_decision_bar_audit": _compact_track_b_completed_decision_bar_audit(
+            payload.get("completed_decision_bar_audit")
+            if isinstance(payload.get("completed_decision_bar_audit"), dict)
+            else {}
+        ),
+    }
+
+
+def _compact_track_b_completed_decision_bar_audit(payload: dict[str, Any]) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "classification": "NOT_PROVIDED",
+            "instruments": [],
+        }
+    instruments = payload.get("instruments") if isinstance(payload.get("instruments"), dict) else {}
+    return {
+        "available": True,
+        "generated_at": payload.get("generated_at"),
+        "classification": payload.get("classification"),
+        "diagnostic_window": payload.get("diagnostic_window") if isinstance(payload.get("diagnostic_window"), dict) else {},
+        "instruments": [
+            {
+                "instrument_family": family,
+                "classification": row.get("classification") if isinstance(row, dict) else None,
+                "completed_live_5m_bars_observed": row.get("completed_live_5m_bars_observed")
+                if isinstance(row, dict)
+                else None,
+                "decision_bars_eligible_for_evaluation": row.get("decision_bars_eligible_for_evaluation")
+                if isinstance(row, dict)
+                else None,
+                "decision_bars_actually_evaluated": row.get("decision_bars_actually_evaluated")
+                if isinstance(row, dict)
+                else None,
+                "decision_bars_skipped": row.get("decision_bars_skipped") if isinstance(row, dict) else None,
+                "latest_evaluated_decision_bar_timestamp": row.get("latest_evaluated_decision_bar_timestamp")
+                if isinstance(row, dict)
+                else None,
+                "latest_completed_live_5m_bar_timestamp": row.get("latest_completed_live_5m_bar_timestamp")
+                if isinstance(row, dict)
+                else None,
+                "monitor_caught_up_to_latest_completed_bar": row.get("monitor_caught_up_to_latest_completed_bar")
+                if isinstance(row, dict)
+                else None,
+                "no_signal_count": row.get("no_signal_count") if isinstance(row, dict) else None,
+                "signal_count": row.get("signal_count") if isinstance(row, dict) else None,
+                "suppressed_signal_count": row.get("suppressed_signal_count") if isinstance(row, dict) else None,
+            }
+            for family, row in sorted(instruments.items())
+        ],
     }
 
 

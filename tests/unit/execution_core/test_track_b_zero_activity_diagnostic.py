@@ -58,6 +58,8 @@ def monitor_report(
     runtime_path: Path | None = None,
     evaluated: int = 1,
     primary_blocker: str | None = None,
+    latest_completed_5m_timestamp: str = "2026-05-06T06:30:00+00:00",
+    paper_evaluation_allowed: bool = True,
 ) -> Path:
     path = (
         tmp_path
@@ -91,7 +93,12 @@ def monitor_report(
                 "live_feed_status": "LIVE_FEED_STRATEGY_READY",
                 "live_feed_strategy_ready": True,
                 "fresh_for_execution": "STALE" not in verdict,
+                "paper_evaluation_allowed": paper_evaluation_allowed,
+                "latest_completed_5m_timestamp": latest_completed_5m_timestamp,
                 "multi_strategy_runtime_cycle_report_path": None if runtime_path is None else str(runtime_path),
+                "strategy_verdicts": [strategy("TEST_STRATEGY_V1", "TEST_NO_SIGNAL_NO_MUTATION")] if evaluated else [],
+                "candidate_signals": [],
+                "suppressed_signals": [],
             }
         ],
     }
@@ -106,6 +113,34 @@ def monitor_report(
         },
     )
     return path
+
+
+def completed_5m_artifact(tmp_path: Path, instrument_family: str, timestamps: list[str]) -> Path:
+    return write_json(
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "databento_live_runtime_feed"
+        / f"latest_live_{instrument_family.lower()}_completed_5m_candles.json",
+        {
+            "schema_version": f"track_b_databento_live_{instrument_family.lower()}_completed_5m_candles_v1",
+            "bars_available": len(timestamps),
+            "candles": [
+                {
+                    "candle_timestamp": timestamp,
+                    "open": "100",
+                    "high": "101",
+                    "low": "99",
+                    "close": "100.5",
+                    "volume": "10",
+                }
+                for timestamp in timestamps
+            ],
+            "submit_allowed": False,
+            "submit_attempted": False,
+            "live_money_readiness": False,
+        },
+    )
 
 
 def compact_summaries(tmp_path: Path, *, trade_count: int = 0) -> None:
@@ -165,6 +200,58 @@ def test_diagnostic_classifies_no_new_completed_bar_heartbeat_separately(tmp_pat
     assert result.report["diagnosis_classification"] == "NO_NEW_COMPLETED_5M_BAR_HEARTBEAT"
     assert result.report["cycle_summary"]["recent_evaluation_cycle_count"] == 1
     assert result.report["cycle_summary"]["recent_heartbeat_only_cycle_count"] == 6
+
+
+def test_completed_decision_bar_audit_allows_normal_no_signal_when_each_bar_evaluated(tmp_path: Path) -> None:
+    compact_summaries(tmp_path)
+    completed_5m_artifact(tmp_path, "MGC", ["2026-05-06T06:30:00+00:00"])
+    runtime = runtime_report(tmp_path, "runtime-1", strategies=[strategy("TEST_STRATEGY_V1", "TEST_NO_SIGNAL_NO_MUTATION")])
+    monitor_report(tmp_path, 1, runtime_path=runtime, latest_completed_5m_timestamp="2026-05-06T06:30:00+00:00")
+    for cycle in range(2, 5):
+        monitor_report(
+            tmp_path,
+            cycle,
+            verdict="TRACK_B_SHADOW_MONITOR_HEARTBEAT_NO_NEW_COMPLETED_BAR",
+            evaluated=0,
+            latest_completed_5m_timestamp="2026-05-06T06:30:00+00:00",
+        )
+
+    result = build_track_b_zero_activity_diagnostic(repo_root=tmp_path, output_root=tmp_path / "diag", now=now())
+
+    audit = result.report["completed_decision_bar_audit"]
+    assert audit["classification"] == "EVALUATING_EACH_COMPLETED_BAR"
+    assert audit["instruments"]["MGC"]["decision_bars_actually_evaluated"] == 1
+    assert result.report["diagnosis_classification"] == "NORMAL_NO_SIGNAL"
+    assert (tmp_path / "diag" / "latest_track_b_completed_decision_bar_evaluation_audit.json").exists()
+
+
+def test_completed_decision_bar_audit_detects_lagging_live_bars(tmp_path: Path) -> None:
+    compact_summaries(tmp_path)
+    completed_5m_artifact(
+        tmp_path,
+        "MGC",
+        ["2026-05-06T06:30:00+00:00", "2026-05-06T06:35:00+00:00"],
+    )
+    runtime = runtime_report(tmp_path, "runtime-1", strategies=[strategy("TEST_STRATEGY_V1", "TEST_NO_SIGNAL_NO_MUTATION")])
+    monitor_report(tmp_path, 1, runtime_path=runtime, latest_completed_5m_timestamp="2026-05-06T06:30:00+00:00")
+    monitor_report(
+        tmp_path,
+        2,
+        verdict="TRACK_B_SHADOW_MONITOR_HEARTBEAT_NO_NEW_COMPLETED_BAR",
+        evaluated=0,
+        latest_completed_5m_timestamp="2026-05-06T06:30:00+00:00",
+    )
+
+    result = build_track_b_zero_activity_diagnostic(
+        repo_root=tmp_path,
+        output_root=tmp_path / "diag",
+        now=datetime(2026, 5, 6, 6, 40, tzinfo=timezone.utc),
+    )
+
+    audit = result.report["completed_decision_bar_audit"]
+    assert audit["classification"] == "EVALUATION_LAGGING_LIVE_BARS"
+    assert audit["instruments"]["MGC"]["decision_bars_skipped"] == 1
+    assert result.report["diagnosis_classification"] == "EVALUATION_LAGGING_LIVE_BARS"
 
 
 def test_diagnostic_classifies_intermittent_live_execution_failures(tmp_path: Path) -> None:

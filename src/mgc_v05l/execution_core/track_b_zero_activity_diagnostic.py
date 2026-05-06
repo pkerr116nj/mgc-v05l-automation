@@ -11,7 +11,7 @@ import json
 import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,7 +22,11 @@ DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_OUTPUT_ROOT = Path("outputs/track_b_exe
 DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_JSON = (
     DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_OUTPUT_ROOT / "latest_track_b_zero_activity_diagnostic.json"
 )
+DEFAULT_TRACK_B_COMPLETED_DECISION_BAR_AUDIT_JSON = (
+    DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_OUTPUT_ROOT / "latest_track_b_completed_decision_bar_evaluation_audit.json"
+)
 DEFAULT_RECENT_CYCLE_LIMIT = 120
+DEFAULT_DECISION_BAR_AUDIT_WINDOW_MINUTES = 60
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 
 
@@ -37,6 +41,7 @@ def build_track_b_zero_activity_diagnostic(
     repo_root: Path = Path("."),
     output_root: Path = DEFAULT_TRACK_B_ZERO_ACTIVITY_DIAGNOSTIC_OUTPUT_ROOT,
     recent_cycle_limit: int = DEFAULT_RECENT_CYCLE_LIMIT,
+    decision_bar_audit_window_minutes: int = DEFAULT_DECISION_BAR_AUDIT_WINDOW_MINUTES,
     now: datetime | None = None,
     write: bool = True,
 ) -> TrackBZeroActivityDiagnosticResult:
@@ -96,6 +101,13 @@ def build_track_b_zero_activity_diagnostic(
     journal = _summarize_journal(latest_journal_summary, recent_monitor_reports)
     live_feed = _summarize_live_feed(latest_monitor, latest_live_feed)
     safety = _summarize_safety(latest_monitor, recent_monitor_reports)
+    completed_decision_bar_audit = _build_completed_decision_bar_evaluation_audit_report(
+        repo_root=root,
+        now=actual_now,
+        recent_monitor_reports=recent_monitor_reports,
+        enabled_by_instrument=enabled_by_instrument,
+        window_minutes=decision_bar_audit_window_minutes,
+    )
     diagnosis, next_action = _classify_diagnosis(
         latest_monitor=latest_monitor,
         cycle_summary=cycle_summary,
@@ -103,9 +115,11 @@ def build_track_b_zero_activity_diagnostic(
         signals=signals,
         ledger=ledger,
         live_feed=live_feed,
+        completed_decision_bar_audit=completed_decision_bar_audit,
     )
 
     report_json = Path(output_root) / "latest_track_b_zero_activity_diagnostic.json"
+    completed_decision_bar_audit_json = Path(output_root) / "latest_track_b_completed_decision_bar_evaluation_audit.json"
     report = {
         "schema_version": "track_b_zero_activity_diagnostic_v1",
         "generated_at": actual_now.isoformat(),
@@ -129,6 +143,7 @@ def build_track_b_zero_activity_diagnostic(
         "enabled_strategies_by_instrument": enabled_by_instrument,
         "live_feed_summary": live_feed,
         "cycle_summary": cycle_summary,
+        "completed_decision_bar_audit": completed_decision_bar_audit,
         "per_strategy_recent_result_counts": strategy_summary["per_strategy_recent_result_counts"],
         "top_not_ready_reasons": strategy_summary["top_not_ready_reasons"],
         "top_no_signal_predicate_blockers": strategy_summary["top_no_signal_predicate_blockers"],
@@ -151,10 +166,12 @@ def build_track_b_zero_activity_diagnostic(
             "latest_trade_summary": str(latest_trade_summary_path),
             "latest_live_position_status": str(latest_position_status_path),
             "latest_pnl_summary": str(latest_pnl_summary_path),
+            "latest_completed_decision_bar_audit": str(completed_decision_bar_audit_json),
         },
         "operator_status_verdict": latest_operator_status.get("status_verdict"),
     }
     if write:
+        _write_json(completed_decision_bar_audit_json, completed_decision_bar_audit)
         _write_json(report_json, report)
     return TrackBZeroActivityDiagnosticResult(report_json=report_json, report=report)
 
@@ -495,6 +512,262 @@ def _summarize_safety(latest_monitor: Mapping[str, Any], recent_monitor_reports:
     }
 
 
+def _build_completed_decision_bar_evaluation_audit_report(
+    *,
+    repo_root: Path,
+    now: datetime,
+    recent_monitor_reports: list[Mapping[str, Any]],
+    enabled_by_instrument: Mapping[str, list[str]],
+    window_minutes: int,
+) -> dict[str, Any]:
+    require_aware_datetime(now, "now")
+    requested_window_start = now.astimezone(UTC) - timedelta(minutes=max(1, int(window_minutes)))
+    requested_window_end = now.astimezone(UTC)
+    monitor_times = [
+        parsed
+        for parsed in (_parse_datetime(item.get("completed_at")) for item in recent_monitor_reports)
+        if parsed is not None
+    ]
+    # Keep the audited decision-bar window inside retained monitor history. If
+    # a completed bar is older than the first retained report, its evaluation
+    # may already have been pruned and should not be counted as skipped.
+    bounded_window_start = (
+        max(requested_window_start, min(monitor_times))
+        if monitor_times
+        else requested_window_start
+    )
+    instruments: dict[str, Any] = {}
+    classifications: Counter[str] = Counter()
+    for instrument, strategies in sorted(enabled_by_instrument.items()):
+        if not strategies:
+            continue
+        row = _completed_decision_bar_audit_for_instrument(
+            repo_root=repo_root,
+            instrument_family=str(instrument),
+            enabled_strategies=[str(item) for item in strategies],
+            recent_monitor_reports=recent_monitor_reports,
+            window_start=bounded_window_start,
+            window_end=requested_window_end,
+        )
+        instruments[str(instrument)] = row
+        classifications[str(row.get("classification") or "DIAGNOSTIC_INCONCLUSIVE")] += 1
+    classification = _classify_completed_decision_bar_audit(instruments)
+    return {
+        "schema_version": "track_b_completed_decision_bar_evaluation_audit_v1",
+        "generated_at": now.isoformat(),
+        "diagnostic_window": {
+            "requested_window_minutes": max(1, int(window_minutes)),
+            "requested_window_start": requested_window_start.isoformat(),
+            "requested_window_end": requested_window_end.isoformat(),
+            "bounded_monitor_report_window_start": bounded_window_start.isoformat(),
+            "bounded_monitor_report_count": len(recent_monitor_reports),
+            "bounded_policy": "Reads latest completed 5m live artifacts and bounded recent monitor/runtime-cycle reports only.",
+        },
+        "classification": classification,
+        "instrument_classification_counts": dict(classifications),
+        "instruments": instruments,
+        "full_paper_trade_ledger_scanned": False,
+        "full_decision_journal_scanned": False,
+    }
+
+
+def _completed_decision_bar_audit_for_instrument(
+    *,
+    repo_root: Path,
+    instrument_family: str,
+    enabled_strategies: list[str],
+    recent_monitor_reports: list[Mapping[str, Any]],
+    window_start: datetime,
+    window_end: datetime,
+) -> dict[str, Any]:
+    completed_5m_path = _latest_live_completed_5m_path(repo_root, instrument_family)
+    completed_payload = _load_json(completed_5m_path)
+    completed_timestamp_sources: dict[str, set[str]] = defaultdict(set)
+    for item in _completed_5m_bars(completed_payload):
+        timestamp = str(item.get("candle_timestamp") or item.get("timestamp") or "")
+        bar_ts = _parse_datetime(timestamp)
+        if timestamp and bar_ts is not None and window_start <= bar_ts <= window_end:
+            completed_timestamp_sources[timestamp].add("LIVE_COMPLETED_5M_ARTIFACT")
+    rows_by_bar: dict[str, list[tuple[Mapping[str, Any], Mapping[str, Any]]]] = defaultdict(list)
+    for report in recent_monitor_reports:
+        for row in _instrument_reports(report):
+            if str(row.get("instrument_family") or "") != instrument_family:
+                continue
+            timestamp = str(row.get("latest_completed_5m_timestamp") or "")
+            if timestamp:
+                rows_by_bar[timestamp].append((report, row))
+                bar_ts = _parse_datetime(timestamp)
+                if bar_ts is not None and window_start <= bar_ts <= window_end and row.get("runtime_decision_source") == "DATABENTO_LIVE_ARTIFACT":
+                    completed_timestamp_sources[timestamp].add("MONITOR_LIVE_DECISION_CONTEXT")
+    completed_timestamps = sorted(completed_timestamp_sources)
+
+    decision_bars: list[dict[str, Any]] = []
+    eligible_count = 0
+    evaluated_count = 0
+    skipped_count = 0
+    total_no_signal = 0
+    total_signal = 0
+    total_suppressed = 0
+    for timestamp in completed_timestamps:
+        rows = rows_by_bar.get(timestamp, [])
+        eligible_rows = [row for _, row in rows if row.get("paper_evaluation_allowed") is True]
+        evaluated_rows = [
+            row
+            for _, row in rows
+            if int(row.get("evaluated_strategy_count") or 0) > 0 or bool(row.get("multi_strategy_runtime_cycle_report_path"))
+        ]
+        strategies_evaluated = max((int(row.get("evaluated_strategy_count") or 0) for row in evaluated_rows), default=0)
+        strategy_verdicts = []
+        for row in evaluated_rows:
+            raw = row.get("strategy_verdicts")
+            if isinstance(raw, list) and len(raw) > len(strategy_verdicts):
+                strategy_verdicts = [item for item in raw if isinstance(item, Mapping)]
+        no_signal_count = sum(1 for item in strategy_verdicts if str(item.get("decision") or "").upper() == "NO_SIGNAL")
+        signal_count = max(
+            sum(1 for item in strategy_verdicts if item.get("signal_emitted") is True or str(item.get("decision") or "").upper() == "SIGNAL"),
+            max((len(row.get("candidate_signals") or []) for row in evaluated_rows), default=0),
+        )
+        suppressed_count = max((len(row.get("suppressed_signals") or []) for row in evaluated_rows), default=0)
+        skipped_reason = None
+        if not evaluated_rows:
+            skipped_count += 1
+            skipped_reason = _skipped_decision_bar_reason(rows)
+        else:
+            evaluated_count += 1
+        if eligible_rows or evaluated_rows:
+            eligible_count += 1
+        total_no_signal += no_signal_count
+        total_signal += signal_count
+        total_suppressed += suppressed_count
+        decision_bars.append(
+            {
+                "completed_5m_timestamp": timestamp,
+                "paper_evaluation_allowed": bool(eligible_rows or evaluated_rows),
+                "evaluated": bool(evaluated_rows),
+                "skipped": not bool(evaluated_rows),
+                "skipped_reason": skipped_reason,
+                "strategies_evaluated": strategies_evaluated,
+                "no_signal_count": no_signal_count,
+                "signal_count": signal_count,
+                "suppressed_signal_count": suppressed_count,
+                "completed_bar_sources": sorted(completed_timestamp_sources.get(timestamp, set())),
+                "monitor_cycle_indices": [report.get("cycle_index") for report, _ in rows],
+                "runtime_cycle_report_paths": [
+                    str(row.get("multi_strategy_runtime_cycle_report_path"))
+                    for row in evaluated_rows
+                    if row.get("multi_strategy_runtime_cycle_report_path")
+                ],
+            }
+        )
+
+    latest_completed = completed_timestamps[-1] if completed_timestamps else None
+    latest_evaluated = next(
+        (item["completed_5m_timestamp"] for item in reversed(decision_bars) if item.get("evaluated")),
+        None,
+    )
+    latest_bar_caught_up = latest_completed is not None and latest_completed == latest_evaluated
+    classification = _classify_completed_decision_bar_instrument(
+        completed_count=len(completed_timestamps),
+        eligible_count=eligible_count,
+        skipped_count=skipped_count,
+        latest_completed=latest_completed,
+        latest_evaluated=latest_evaluated,
+    )
+    return {
+        "instrument_family": instrument_family,
+        "classification": classification,
+        "completed_live_5m_artifact_path": str(completed_5m_path),
+        "completed_live_5m_artifact_available": bool(completed_payload),
+        "enabled_strategies": enabled_strategies,
+        "enabled_strategy_count": len(enabled_strategies),
+        "completed_live_5m_bars_observed": len(completed_timestamps),
+        "completed_live_5m_bar_timestamps": completed_timestamps,
+        "decision_bars_eligible_for_evaluation": eligible_count,
+        "decision_bars_actually_evaluated": evaluated_count,
+        "decision_bars_skipped": skipped_count,
+        "latest_evaluated_decision_bar_timestamp": latest_evaluated,
+        "latest_completed_live_5m_bar_timestamp": latest_completed,
+        "monitor_caught_up_to_latest_completed_bar": latest_bar_caught_up,
+        "no_signal_count": total_no_signal,
+        "signal_count": total_signal,
+        "suppressed_signal_count": total_suppressed,
+        "decision_bars": decision_bars,
+    }
+
+
+def _latest_live_completed_5m_path(repo_root: Path, instrument_family: str) -> Path:
+    return (
+        repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "databento_live_runtime_feed"
+        / f"latest_live_{instrument_family.lower()}_completed_5m_candles.json"
+    )
+
+
+def _completed_5m_bars(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    for key in ("candles", "bars", "completed_5m_candles"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, Mapping)]
+    return []
+
+
+def _skipped_decision_bar_reason(rows: list[tuple[Mapping[str, Any], Mapping[str, Any]]]) -> str:
+    if not rows:
+        return "NO_MONITOR_REPORT_FOR_COMPLETED_BAR"
+    blockers = [
+        str(row.get("primary_blocker") or report.get("primary_blocker") or "")
+        for report, row in rows
+        if row.get("primary_blocker") or report.get("primary_blocker")
+    ]
+    if not any(row.get("paper_evaluation_allowed") is True for _, row in rows):
+        return f"PAPER_NOT_ALLOWED_DURING_BAR: {blockers[0]}" if blockers else "PAPER_NOT_ALLOWED_DURING_BAR"
+    verdicts = [str(row.get("instrument_verdict") or report.get("monitor_verdict") or "") for report, row in rows]
+    heartbeat = next((item for item in verdicts if "HEARTBEAT_NO_NEW_COMPLETED_BAR" in item), None)
+    if heartbeat:
+        return "ELIGIBLE_COMPLETED_BAR_HEARTBEAT_WITHOUT_EVALUATION"
+    return "ELIGIBLE_COMPLETED_BAR_NOT_EVALUATED"
+
+
+def _classify_completed_decision_bar_instrument(
+    *,
+    completed_count: int,
+    eligible_count: int,
+    skipped_count: int,
+    latest_completed: str | None,
+    latest_evaluated: str | None,
+) -> str:
+    if completed_count <= 0:
+        return "NO_COMPLETED_BARS_IN_WINDOW"
+    if eligible_count <= 0:
+        return "PAPER_NOT_ALLOWED_DURING_BARS"
+    if skipped_count > 0 and latest_completed and latest_evaluated and latest_completed > latest_evaluated:
+        return "EVALUATION_LAGGING_LIVE_BARS"
+    if skipped_count > 0:
+        return "COMPLETED_BARS_SKIPPED"
+    if latest_completed and latest_completed == latest_evaluated:
+        return "EVALUATING_EACH_COMPLETED_BAR"
+    return "DIAGNOSTIC_INCONCLUSIVE"
+
+
+def _classify_completed_decision_bar_audit(instruments: Mapping[str, Any]) -> str:
+    if not instruments:
+        return "DIAGNOSTIC_INCONCLUSIVE"
+    classifications = [str(row.get("classification") or "DIAGNOSTIC_INCONCLUSIVE") for row in instruments.values()]
+    if all(item == "NO_COMPLETED_BARS_IN_WINDOW" for item in classifications):
+        return "NO_COMPLETED_BARS_IN_WINDOW"
+    if any(item == "EVALUATION_LAGGING_LIVE_BARS" for item in classifications):
+        return "EVALUATION_LAGGING_LIVE_BARS"
+    if any(item == "COMPLETED_BARS_SKIPPED" for item in classifications):
+        return "COMPLETED_BARS_SKIPPED"
+    if any(item == "PAPER_NOT_ALLOWED_DURING_BARS" for item in classifications):
+        return "PAPER_NOT_ALLOWED_DURING_BARS"
+    if all(item in {"EVALUATING_EACH_COMPLETED_BAR", "NO_COMPLETED_BARS_IN_WINDOW"} for item in classifications):
+        return "EVALUATING_EACH_COMPLETED_BAR"
+    return "DIAGNOSTIC_INCONCLUSIVE"
+
+
 def _classify_diagnosis(
     *,
     latest_monitor: Mapping[str, Any],
@@ -503,6 +776,7 @@ def _classify_diagnosis(
     signals: Mapping[str, Any],
     ledger: Mapping[str, Any],
     live_feed: Mapping[str, Any],
+    completed_decision_bar_audit: Mapping[str, Any],
 ) -> tuple[str, str]:
     cycle_count = int(cycle_summary.get("recent_monitor_cycle_count") or 0)
     eval_cycles = int(cycle_summary.get("recent_evaluation_cycle_count") or 0)
@@ -566,6 +840,21 @@ def _classify_diagnosis(
         return (
             "INPUTS_NOT_READY",
             "Strategies are being evaluated but repeatedly return NOT_READY; inspect top_not_ready_reasons.",
+        )
+    audit_classification = str(completed_decision_bar_audit.get("classification") or "")
+    if heartbeat_only_cycles > 0 and eval_cycles > 0 and audit_classification == "EVALUATING_EACH_COMPLETED_BAR":
+        return (
+            "NORMAL_NO_SIGNAL",
+            "Completed decision-bar audit shows every eligible completed bar was evaluated and recent evaluated bars produced no candidate signals.",
+        )
+    if heartbeat_only_cycles > 0 and eval_cycles > 0 and audit_classification in {
+        "COMPLETED_BARS_SKIPPED",
+        "EVALUATION_LAGGING_LIVE_BARS",
+        "PAPER_NOT_ALLOWED_DURING_BARS",
+    }:
+        return (
+            audit_classification,
+            "Completed decision-bar audit found that monitor-cycle heartbeats are hiding missed, lagging, or ineligible completed decision bars.",
         )
     if heartbeat_only_cycles > 0 and eval_cycles > 0:
         return (
