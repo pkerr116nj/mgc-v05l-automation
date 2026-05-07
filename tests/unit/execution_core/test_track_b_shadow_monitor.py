@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,9 @@ from mgc_v05l.execution_core.track_b_asian_drift_watch_chain import (
 from mgc_v05l.execution_core.track_b_multi_strategy_runtime_cycle import (
     TrackBMultiStrategyRuntimeCycleResult,
     TrackBMultiStrategyRuntimeCycleVerdict,
+)
+from mgc_v05l.execution_core.track_b_managed_open_position_maintenance import (
+    TrackBManagedOpenPositionMaintenanceResult,
 )
 from mgc_v05l.execution_core.track_b_runtime_candle_capture import (
     TrackBRuntimeCandleCaptureResult,
@@ -2257,3 +2261,60 @@ def test_monitor_source_has_no_private_broker_submit_path() -> None:
     assert "placeOrder" not in source
     assert "cancelOrder" not in source
     assert "paper_proof_cli" not in source
+
+
+def test_monitor_re_evaluates_managed_open_positions_each_cycle(tmp_path: Path) -> None:
+    fake = FakeStages(tmp_path)
+    calls: list[str] = []
+
+    def maintenance(_config, maintenance_now):
+        calls.append(maintenance_now.isoformat())
+        report = {
+            "schema_version": "track_b_managed_open_position_maintenance_v1",
+            "generated_at": maintenance_now.isoformat(),
+            "positions": [
+                {
+                    "lifecycle_id": "strategy_managed_open",
+                    "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+                    "completed_bars_since_entry": 3,
+                    "exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+                    "close_intent_created": True,
+                    "close_submitted": True,
+                    "close_filled": True,
+                    "final_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+                    "final_position_status": "CLOSED_FLAT",
+                    "review_required": False,
+                }
+            ],
+            "close_intent_created_count": 1,
+            "close_submitted_count": 1,
+            "close_filled_count": 1,
+            "review_required_count": 0,
+            "broker_state_mutated": True,
+            "submit_attempted": True,
+            "paper_proof_invoked": False,
+            "live_money_readiness": False,
+        }
+        path = write_json(tmp_path / "diagnostics" / "latest_track_b_managed_open_position_maintenance.json", report)
+        return TrackBManagedOpenPositionMaintenanceResult(report_json=path, report=report, lifecycle_results=())
+
+    stages = replace(fake.stages(), managed_open_position_maintenance=maintenance)
+    result = run_track_b_shadow_monitor(
+        config=config(
+            tmp_path,
+            mode="PAPER",
+            enable_paper_trading=True,
+            paper_on_signal=True,
+            quantity=1,
+            max_cycles=2,
+        ),
+        stages=stages,
+        monitor_id="monitor-managed-maintenance",
+        now_func=now,
+    )
+
+    assert len(calls) == 2
+    assert result.report["managed_open_position_maintenance_close_intent_created_count"] == 1
+    assert result.report["managed_open_position_maintenance_close_filled_count"] == 1
+    assert result.report["latest_managed_close_intent_status"] == "CLOSE_INTENT_CREATED"
+    assert result.report["paper_proof_invoked"] is False

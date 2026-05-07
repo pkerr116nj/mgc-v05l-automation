@@ -223,6 +223,119 @@ def run_track_b_strategy_managed_paper_lifecycle(
     )
 
 
+def maintain_open_track_b_strategy_managed_paper_lifecycle(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    existing_lifecycle_report: Mapping[str, Any],
+    stages: TrackBStrategyManagedPaperLifecycleStages | None = None,
+    now: datetime | None = None,
+) -> TrackBStrategyManagedPaperLifecycleResult:
+    """Re-evaluate exit policy for an existing OPEN_MANAGED lifecycle.
+
+    This path never submits another entry. It only consumes an existing
+    broker-confirmed entry fill and, if the configured managed exit policy is
+    eligible, sends the close leg through the guarded strategy-managed lifecycle.
+    """
+
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    lifecycle_id = str(existing_lifecycle_report.get("lifecycle_id") or "")
+    if not lifecycle_id:
+        lifecycle_id = f"strategy_managed_{uuid.uuid4().hex}"
+    report_json = Path(config.output_root) / lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    actual_stages = stages or default_managed_lifecycle_stages()
+
+    entry_intent = _mapping(existing_lifecycle_report.get("entry_intent")) or _entry_intent(
+        config=config,
+        lifecycle_id=lifecycle_id,
+        now=actual_now,
+    )
+    entry_submit = _mapping(existing_lifecycle_report.get("entry_submit_attempt"))
+    entry_fill = _mapping(existing_lifecycle_report.get("entry_fill"))
+    close_intent: Mapping[str, Any] | None = None
+    close_submit: Mapping[str, Any] | None = None
+    close_fill: Mapping[str, Any] | None = None
+    open_state: Mapping[str, Any] | None = None
+    submit_attempted = bool((entry_submit or {}).get("submitted") or (entry_submit or {}).get("submit_attempted"))
+    broker_state_mutated = False
+    primary_blocker: str | None = None
+    required_next_action = "Position is open under strategy-managed PAPER state; wait for strategy exit policy."
+
+    guard_blocker = _guard_blocker(config)
+    exit_policy_id = _normalized_exit_policy(config.managed_exit_policy_id)
+    if guard_blocker:
+        classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+        primary_blocker = guard_blocker
+        required_next_action = "Resolve managed PAPER lifecycle guard before retrying close maintenance."
+    elif exit_policy_id in {"", TrackBManagedExitPolicy.EXIT_NOT_AVAILABLE.value}:
+        classification = TrackBManagedPaperLifecycleClassification.EXIT_POLICY_MISSING
+        primary_blocker = f"{config.strategy_id} has no managed PAPER exit policy."
+        required_next_action = "Add an explicit managed exit policy before allowing strategy-managed PAPER close maintenance."
+    elif not entry_fill:
+        classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+        primary_blocker = "Existing OPEN_MANAGED lifecycle has no broker-confirmed entry fill."
+        required_next_action = "Review lifecycle artifacts before attempting managed close."
+    else:
+        try:
+            open_state = _open_state(
+                config=config,
+                lifecycle_id=lifecycle_id,
+                entry_intent=entry_intent,
+                entry_fill=entry_fill,
+            )
+            close_intent = actual_stages.exit_policy(config, open_state)
+            if close_intent is None:
+                classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+            else:
+                close_submit = dict(actual_stages.close_submitter(config, close_intent))
+                submit_attempted = submit_attempted or bool(close_submit.get("submitted") or close_submit.get("submit_attempted"))
+                broker_state_mutated = bool(close_submit.get("broker_state_mutated"))
+                close_fill = _mapping(close_submit.get("close_fill") or close_submit.get("fill"))
+                if close_submit.get("review_required") is True:
+                    classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+                    primary_blocker = str(close_submit.get("primary_blocker") or "Managed close submit requires review.")
+                    required_next_action = "Review managed close diagnostics before retrying."
+                elif close_fill:
+                    classification = TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+                    required_next_action = "Managed PAPER lifecycle closed flat."
+                else:
+                    classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+                    primary_blocker = str(close_submit.get("primary_blocker") or "Managed close submit/fill was not confirmed.")
+                    required_next_action = "Review managed close order state and reconcile before another handoff."
+        except Exception as exc:  # noqa: BLE001 - maintenance errors must become artifacts.
+            classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+            primary_blocker = f"Managed PAPER lifecycle close maintenance error: {exc}"
+            required_next_action = "Review managed lifecycle diagnostics before retrying."
+
+    report = _build_report(
+        config=config,
+        lifecycle_id=lifecycle_id,
+        now=actual_now,
+        classification=classification,
+        entry_intent=entry_intent,
+        entry_submit=entry_submit,
+        entry_fill=entry_fill,
+        open_state=open_state,
+        close_intent=close_intent,
+        close_submit=close_submit,
+        close_fill=close_fill,
+        submit_attempted=submit_attempted,
+        broker_state_mutated=broker_state_mutated,
+        primary_blocker=primary_blocker,
+        required_next_action=required_next_action,
+        report_json=report_json,
+    )
+    report["maintenance_invoked"] = True
+    report["maintenance_generated_at"] = actual_now.isoformat()
+    _write_report(report_json, report)
+    return TrackBStrategyManagedPaperLifecycleResult(
+        lifecycle_id=lifecycle_id,
+        classification=classification,
+        report_json=report_json,
+        report=report,
+    )
+
+
 def _entry_intent(
     *,
     config: TrackBStrategyManagedPaperLifecycleConfig,

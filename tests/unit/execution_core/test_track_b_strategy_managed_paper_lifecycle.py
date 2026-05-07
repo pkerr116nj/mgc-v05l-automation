@@ -10,6 +10,7 @@ from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     TrackBManagedPaperLifecycleClassification,
     TrackBStrategyManagedPaperLifecycleConfig,
     TrackBStrategyManagedPaperLifecycleStages,
+    maintain_open_track_b_strategy_managed_paper_lifecycle,
     run_track_b_strategy_managed_paper_lifecycle,
 )
 
@@ -99,6 +100,55 @@ def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleSt
         exit_policy=exit_policy,
         close_submitter=close_submitter,
     )
+
+
+def open_managed_report() -> dict[str, object]:
+    return {
+        "lifecycle_id": "open-managed-existing",
+        "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+        "instrument_family": "MNQ",
+        "contract_key": "MNQ-202606",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "account_id": "DUM882026",
+        "expected_account_id": "DUM882026",
+        "managed_exit_policy_id": TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        "managed_exit_policy_max_completed_5m_bars": 3,
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "final_position_status": "OPEN_MANAGED",
+        "entry_intent": {
+            "lifecycle_id": "open-managed-existing",
+            "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
+            "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+            "instrument_family": "MNQ",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "account_id": "DUM882026",
+            "expected_account_id": "DUM882026",
+            "side": "LONG",
+            "order_action": "BUY",
+            "quantity": 1,
+            "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+            "entry_limit_price": "28729",
+            "managed_exit_policy_id": TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        },
+        "entry_submit_attempt": {
+            "submitted": True,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "broker_order_id": "11",
+        },
+        "entry_fill": {
+            "broker_order_id": "11",
+            "execution_id": "exec-1",
+            "price": "28729",
+            "quantity": "1",
+            "filled_at": "2026-05-07T16:26:07+00:00",
+        },
+        "review_required": False,
+        "broker_reconciled": False,
+    }
 
 
 def test_missing_exit_policy_does_not_submit(tmp_path: Path) -> None:
@@ -324,6 +374,117 @@ def test_time_boxed_exit_policy_creates_close_intent_after_required_completed_ba
     assert result.report["close_intent_status"] == "CLOSE_INTENT_CREATED"
     assert result.report["broker_state_mutated"] is True
     assert result.report["paper_proof_invoked"] is False
+
+
+def test_maintenance_open_managed_age_zero_keeps_waiting_without_entry_resubmit(tmp_path: Path) -> None:
+    calls = {"entry": 0, "close": 0}
+
+    def entry_submitter(_config, _entry_intent):
+        calls["entry"] += 1
+        raise AssertionError("maintenance must not resubmit entry")
+
+    def close_submitter(_config, _close_intent):
+        calls["close"] += 1
+        return {}
+
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=entry_submitter,
+        exit_policy=fake_stages().exit_policy,
+        close_submitter=close_submitter,
+    )
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+            instrument_family="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            side="LONG",
+            entry_limit_price="28729",
+            close_limit_price="28728.5",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=0,
+        ),
+        existing_lifecycle_report=open_managed_report(),
+        stages=stages,
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+    assert result.report["open_position_age_completed_5m_bars"] == 0
+    assert result.report["close_intent_status"] == "WAITING_FOR_EXIT_POLICY_CONDITION"
+    assert result.report["close_intent"] is None
+    assert calls == {"entry": 0, "close": 0}
+
+
+def test_maintenance_open_managed_age_three_closes_flat_without_paper_proof(tmp_path: Path) -> None:
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+            instrument_family="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            side="LONG",
+            entry_limit_price="28729",
+            close_limit_price="28728.5",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+        ),
+        existing_lifecycle_report=open_managed_report(),
+        stages=fake_stages(),
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
+    assert result.report["close_intent"]["elapsed_completed_5m_bars"] == 3
+    assert result.report["close_submit_attempt"]["broker_order_id"] == "1002"
+    assert result.report["close_fill"]["price"] == "4705.1"
+    assert result.report["final_position_status"] == "CLOSED_FLAT"
+    assert result.report["paper_proof_invoked"] is False
+
+
+def test_maintenance_close_submit_without_fill_marks_review_required(tmp_path: Path) -> None:
+    def close_without_fill(_config, close_intent):
+        return {
+            "submitted": True,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "broker_order_id": "1002",
+            "close_intent": dict(close_intent),
+            "primary_blocker": "close fill callback missing",
+        }
+
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=fake_stages().entry_submitter,
+        exit_policy=fake_stages().exit_policy,
+        close_submitter=close_without_fill,
+    )
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+            instrument_family="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            side="LONG",
+            entry_limit_price="28729",
+            close_limit_price="28728.5",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+        ),
+        existing_lifecycle_report=open_managed_report(),
+        stages=stages,
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+    assert result.report["review_required"] is True
+    assert result.report["primary_blocker"] == "close fill callback missing"
 
 
 def test_missing_broker_exact_position_callback_becomes_review_required(tmp_path: Path) -> None:

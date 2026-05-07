@@ -536,11 +536,12 @@ def build_track_b_paper_trade_summaries(
     raw_records = [dict(item) for item in ledger_records]
     records = _apply_manual_flat_reconciliations(raw_records)
     trade_records = [item for item in records if not _is_reconciliation_record(item)]
+    latest_trade_records = _latest_trade_records_by_lifecycle(trade_records)
     today = actual_now.date().isoformat()
     week_start = (actual_now.date() - timedelta(days=actual_now.weekday())).isoformat()
     month_start = actual_now.date().replace(day=1).isoformat()
     year_start = actual_now.date().replace(month=1, day=1).isoformat()
-    pnl_records = [item for item in trade_records if _is_pnl_trade_record(item)]
+    pnl_records = [item for item in latest_trade_records if _is_pnl_trade_record(item)]
     today_records = [item for item in pnl_records if _date_prefix(item.get("exit_timestamp") or item.get("created_at")) == today]
     week_records = [
         item
@@ -557,19 +558,19 @@ def build_track_b_paper_trade_summaries(
         for item in pnl_records
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= year_start
     ]
-    open_records = [item for item in trade_records if _is_open_position_record(item)]
-    review_required = [item for item in trade_records if item.get("review_required") is True and not _is_manual_flat_reviewed(item)]
-    managed_records = [item for item in trade_records if _is_meaningful_managed_trade_record(item)]
-    broker_backed_records = [item for item in trade_records if _is_broker_backed_trade_record(item)]
-    proof_canary_records = [item for item in trade_records if _is_proof_canary_record(item)]
-    archived_manual_flat = [item for item in trade_records if _is_manual_flat_reviewed(item)]
+    open_records = [item for item in latest_trade_records if _is_open_position_record(item)]
+    review_required = [item for item in latest_trade_records if item.get("review_required") is True and not _is_manual_flat_reviewed(item)]
+    managed_records = [item for item in latest_trade_records if _is_meaningful_managed_trade_record(item)]
+    broker_backed_records = [item for item in latest_trade_records if _is_broker_backed_trade_record(item)]
+    proof_canary_records = [item for item in latest_trade_records if _is_proof_canary_record(item)]
+    archived_manual_flat = [item for item in latest_trade_records if _is_manual_flat_reviewed(item)]
     last_trade = max(
         broker_backed_records,
         key=lambda item: str(item.get("entry_timestamp") or item.get("created_at") or ""),
         default=None,
     )
     recent_trades = sorted(
-        trade_records,
+        latest_trade_records,
         key=lambda item: str(item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at") or ""),
         reverse=True,
     )[:20]
@@ -582,16 +583,16 @@ def build_track_b_paper_trade_summaries(
         "trade_count": len(trade_records),
         "lifecycle_attempt_count": len(trade_records),
         "broker_backed_trade_count": len(broker_backed_records),
-        "closed_trade_count": sum(1 for item in trade_records if _is_flat_closed_trade(item)),
-        "completed_trade_count": sum(1 for item in trade_records if _is_flat_closed_trade(item)),
+        "closed_trade_count": sum(1 for item in latest_trade_records if _is_flat_closed_trade(item)),
+        "completed_trade_count": sum(1 for item in latest_trade_records if _is_flat_closed_trade(item)),
         "managed_strategy_trade_count": len(managed_records),
         "meaningful_strategy_trade_count": len(managed_records),
         "proof_canary_trade_count": len(proof_canary_records),
         "archived_manual_flat_count": len(archived_manual_flat),
         "app_only_position_from_unfilled_entry_count": sum(
-            1 for item in trade_records if _is_app_only_position_from_unfilled_entry(item)
+            1 for item in latest_trade_records if _is_app_only_position_from_unfilled_entry(item)
         ),
-        "pending_or_unfilled_lifecycle_count": sum(1 for item in trade_records if _is_unfilled_lifecycle_attempt(item)),
+        "pending_or_unfilled_lifecycle_count": sum(1 for item in latest_trade_records if _is_unfilled_lifecycle_attempt(item)),
         "open_position_count": len(open_records),
         "review_required_count": len(review_required),
         "paper_trades_attempted_count": len(broker_backed_records),
@@ -615,8 +616,8 @@ def build_track_b_paper_trade_summaries(
         "account_id": _first(records, "account_id"),
         "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
         "broker_reconciled": False,
-        "positions_by_instrument": _positions_by(trade_records, "contract_key", actual_now),
-        "positions_by_strategy": _positions_by(trade_records, "strategy_id", actual_now),
+        "positions_by_instrument": _positions_by(latest_trade_records, "contract_key", actual_now),
+        "positions_by_strategy": _positions_by(latest_trade_records, "strategy_id", actual_now),
         "open_position_count": len(open_records),
         "open_order_count": 0,
         "total_unrealized_pnl": "0",
@@ -885,6 +886,17 @@ def _latest_lifecycle_record(records: Iterable[Mapping[str, Any]], lifecycle_id:
         if str(item.get("lifecycle_id") or "") == lifecycle_id and not _is_reconciliation_record(item)
     ]
     return matches[-1] if matches else None
+
+
+def _latest_trade_records_by_lifecycle(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for index, item in enumerate(records):
+        lifecycle_id = str(item.get("lifecycle_id") or item.get("trade_id") or f"record-{index}")
+        if lifecycle_id not in latest:
+            order.append(lifecycle_id)
+        latest[lifecycle_id] = dict(item)
+    return [latest[lifecycle_id] for lifecycle_id in order if lifecycle_id in latest]
 
 
 def _existing_manual_flat_reconciliation(records: Iterable[Mapping[str, Any]], lifecycle_id: str) -> dict[str, Any] | None:

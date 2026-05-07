@@ -39,6 +39,11 @@ from .track_b_multi_strategy_runtime_cycle import (
     run_track_b_multi_strategy_runtime_cycle,
 )
 from .track_b_databento_live_runtime_feed import DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
+from .track_b_managed_open_position_maintenance import (
+    TrackBManagedOpenPositionMaintenanceConfig,
+    TrackBManagedOpenPositionMaintenanceResult,
+    run_track_b_managed_open_position_maintenance,
+)
 from .track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
@@ -261,6 +266,10 @@ class TrackBShadowMonitorStages:
         subprocess.Popen[Any],
     ] | None = None
     live_feed_terminator: Callable[[subprocess.Popen[Any]], None] | None = None
+    managed_open_position_maintenance: Callable[
+        [TrackBManagedOpenPositionMaintenanceConfig, datetime],
+        TrackBManagedOpenPositionMaintenanceResult,
+    ] | None = None
 
 
 @dataclass(frozen=True)
@@ -460,6 +469,7 @@ def default_stages() -> TrackBShadowMonitorStages:
         operator_status=_run_operator_status,
         sleep=time.sleep,
         pid_is_alive=_pid_is_alive,
+        managed_open_position_maintenance=_run_managed_open_position_maintenance,
     )
 
 
@@ -733,6 +743,7 @@ def _run_one_cycle(
     report_json = Path(config.output_root) / cycle_id / "track_b_shadow_monitor_report.json"
     instrument_reports: list[dict[str, Any]] = []
     runtime_cycle_report_json: Path | None = None
+    maintenance_result: TrackBManagedOpenPositionMaintenanceResult | None = None
     cycle_config = replace(config, paper_trades_attempted_count=paper_trades_attempted_count)
     try:
         for instrument in instruments:
@@ -751,6 +762,11 @@ def _run_one_cycle(
             instrument_reports.append(instrument_report)
             if maybe_runtime_cycle_report_json is not None:
                 runtime_cycle_report_json = maybe_runtime_cycle_report_json
+        maintenance_result = _maybe_run_managed_open_position_maintenance(
+            config=config,
+            stages=stages,
+            now=now_func(),
+        )
     except Exception as exc:  # noqa: BLE001 - monitor errors must become artifacts.
         instrument_reports.append(
             _instrument_report_base(
@@ -780,6 +796,7 @@ def _run_one_cycle(
         required_next_action=_required_next_action(verdict),
         lock=lock,
         paper_trades_attempted_count=paper_trades_attempted_count + _paper_trade_attempt_count_delta(instrument_reports),
+        maintenance_result=maintenance_result,
     )
     return _finalize_cycle(
         config,
@@ -2975,6 +2992,44 @@ def _run_operator_status(
     )
 
 
+def _run_managed_open_position_maintenance(
+    config: TrackBManagedOpenPositionMaintenanceConfig,
+    now: datetime,
+) -> TrackBManagedOpenPositionMaintenanceResult:
+    return run_track_b_managed_open_position_maintenance(config=config, now=now)
+
+
+def _maybe_run_managed_open_position_maintenance(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    now: datetime,
+) -> TrackBManagedOpenPositionMaintenanceResult | None:
+    if _monitor_mode(config) != "PAPER":
+        return None
+    stage = stages.managed_open_position_maintenance or _run_managed_open_position_maintenance
+    maintenance_config = TrackBManagedOpenPositionMaintenanceConfig(
+        mode=_monitor_mode(config),
+        account_id=config.account_id,
+        expected_account_id=config.expected_account_id,
+        submit_enabled=_monitor_paper_submit_requested(config),
+        host=config.host,
+        port=config.port,
+        client_id=config.client_id,
+        order_type="LMT",
+        time_in_force="DAY",
+        live_money_readiness=False,
+        live_runtime_feed_output_root=config.live_runtime_feed_output_root,
+        managed_lifecycle_output_root=Path("outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"),
+        paper_trade_ledger_output_root=DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+        paper_trade_summary_json=DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON,
+        live_position_status_json=DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
+        diagnostic_json=Path(config.diagnostic_output_root) / "latest_track_b_managed_open_position_maintenance.json",
+        paper_exit_price_offset_ticks=config.paper_exit_price_offset_ticks,
+    )
+    return stage(maintenance_config, now)
+
+
 def _instrument_report_base(
     *,
     instrument: TrackBShadowMonitorInstrumentConfig | None = None,
@@ -3238,12 +3293,14 @@ def _report_for_cycle(
     required_next_action: str,
     lock: TrackBShadowMonitorLock,
     paper_trades_attempted_count: int,
+    maintenance_result: TrackBManagedOpenPositionMaintenanceResult | None = None,
 ) -> dict[str, Any]:
     completed_at = completed_at.astimezone(UTC)
     aggregate_tiers = _aggregate_tier_counts(instrument_reports)
     paper_trade_summary = _read_json_optional(DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON) or {}
     live_position_status = _read_json_optional(DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON) or {}
     pnl_summary = _read_json_optional(DEFAULT_TRACK_B_PNL_SUMMARY_JSON) or {}
+    maintenance_report = maintenance_result.report if maintenance_result is not None else {}
     all_strategy_verdicts = [
         verdict
         for item in instrument_reports
@@ -3366,13 +3423,16 @@ def _report_for_cycle(
             item.get("intent_blocked_reason") for item in instrument_reports
         ),
         "latest_paper_lifecycle_report_path": _first_nonempty(item.get("paper_runner_report_path") for item in instrument_reports),
-        "latest_managed_exit_policy_id": _first_nonempty(item.get("managed_exit_policy_id") for item in instrument_reports),
+        "latest_managed_exit_policy_id": _first_nonempty(item.get("managed_exit_policy_id") for item in instrument_reports)
+        or _maintenance_latest_field(maintenance_report, "exit_policy_id"),
         "latest_managed_expected_exit_condition": _first_nonempty(
             item.get("managed_expected_exit_condition") for item in instrument_reports
-        ),
+        )
+        or _maintenance_expected_exit_condition(maintenance_report),
         "latest_managed_close_intent_status": _first_nonempty(
             item.get("managed_close_intent_status") for item in instrument_reports
-        ),
+        )
+        or _maintenance_close_intent_status(maintenance_report),
         "latest_broker_state_classification": _first_nonempty(
             item.get("latest_broker_state_classification") for item in instrument_reports
         ),
@@ -3403,6 +3463,13 @@ def _report_for_cycle(
         "last_trade_strategy": pnl_summary.get("last_trade_strategy"),
         "last_trade_pnl": pnl_summary.get("last_trade_pnl"),
         "review_required_count": pnl_summary.get("review_required_count", paper_trade_summary.get("review_required_count", 0)),
+        "managed_open_position_maintenance_path": str(maintenance_result.report_json) if maintenance_result else None,
+        "managed_open_position_maintenance": maintenance_report or None,
+        "managed_open_position_maintenance_close_intent_created_count": maintenance_report.get(
+            "close_intent_created_count"
+        ),
+        "managed_open_position_maintenance_close_submitted_count": maintenance_report.get("close_submitted_count"),
+        "managed_open_position_maintenance_close_filled_count": maintenance_report.get("close_filled_count"),
         "paper_results_source": (
             paper_trade_summary.get("source")
             or live_position_status.get("source")
@@ -3419,11 +3486,14 @@ def _report_for_cycle(
         "operator_status_path": None,
         "operator_status_verdict": None,
         "dashboard_backend_health": None,
-        "submit_allowed": any(item.get("submit_allowed") is True for item in instrument_reports),
+        "submit_allowed": any(item.get("submit_allowed") is True for item in instrument_reports)
+        or bool(maintenance_report.get("submit_attempted")),
         "readiness_invoked": any(item.get("readiness_invoked") is True for item in instrument_reports),
         "paper_proof_invoked": any(item.get("paper_proof_invoked") is True for item in instrument_reports),
-        "submit_attempted": any(item.get("submit_attempted") is True for item in instrument_reports),
-        "broker_state_mutated": any(item.get("broker_state_mutated") is True for item in instrument_reports),
+        "submit_attempted": any(item.get("submit_attempted") is True for item in instrument_reports)
+        or bool(maintenance_report.get("submit_attempted")),
+        "broker_state_mutated": any(item.get("broker_state_mutated") is True for item in instrument_reports)
+        or bool(maintenance_report.get("broker_state_mutated")),
         "live_money_readiness": any(item.get("live_money_readiness") is True for item in instrument_reports),
         "monitor_verdict": verdict.value,
         "primary_blocker": None if primary_blocker is None else str(primary_blocker),
@@ -4317,6 +4387,34 @@ def _first_nonempty(values: Sequence[object] | Any) -> object:
     for value in values:
         if value:
             return value
+    return {}
+
+
+def _maintenance_latest_field(report: Mapping[str, Any], field: str) -> object:
+    for item in report.get("positions", []) or []:
+        if isinstance(item, Mapping) and item.get(field):
+            return item.get(field)
+    return {}
+
+
+def _maintenance_close_intent_status(report: Mapping[str, Any]) -> object:
+    for item in report.get("positions", []) or []:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("close_intent_created") is True:
+            return "CLOSE_INTENT_CREATED"
+        if item.get("final_classification") == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED":
+            return "WAITING_FOR_EXIT_POLICY_CONDITION"
+    return {}
+
+
+def _maintenance_expected_exit_condition(report: Mapping[str, Any]) -> object:
+    for item in report.get("positions", []) or []:
+        if not isinstance(item, Mapping):
+            continue
+        required = item.get("required_completed_5m_bars")
+        if required:
+            return f"TIME_BOXED_EXIT_AFTER_{required}_COMPLETED_5M_BARS"
     return {}
 
 
