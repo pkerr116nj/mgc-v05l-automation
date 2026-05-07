@@ -291,28 +291,34 @@ def build_track_b_paper_trade_summaries(
     week_start = (actual_now.date() - timedelta(days=actual_now.weekday())).isoformat()
     month_start = actual_now.date().replace(day=1).isoformat()
     year_start = actual_now.date().replace(month=1, day=1).isoformat()
-    today_records = [item for item in trade_records if _date_prefix(item.get("exit_timestamp") or item.get("created_at")) == today]
+    pnl_records = [item for item in trade_records if _is_pnl_trade_record(item)]
+    today_records = [item for item in pnl_records if _date_prefix(item.get("exit_timestamp") or item.get("created_at")) == today]
     week_records = [
         item
-        for item in trade_records
+        for item in pnl_records
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= week_start
     ]
     month_records = [
         item
-        for item in trade_records
+        for item in pnl_records
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= month_start
     ]
     ytd_records = [
         item
-        for item in trade_records
+        for item in pnl_records
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= year_start
     ]
     open_records = [item for item in trade_records if _is_open_position_record(item)]
     review_required = [item for item in trade_records if item.get("review_required") is True and not _is_manual_flat_reviewed(item)]
-    managed_records = [item for item in trade_records if item.get("paper_lifecycle_type") == "STRATEGY_MANAGED"]
+    managed_records = [item for item in trade_records if _is_meaningful_managed_trade_record(item)]
+    broker_backed_records = [item for item in trade_records if _is_broker_backed_trade_record(item)]
     proof_canary_records = [item for item in trade_records if _is_proof_canary_record(item)]
     archived_manual_flat = [item for item in trade_records if _is_manual_flat_reviewed(item)]
-    last_trade = max(trade_records, key=lambda item: str(item.get("entry_timestamp") or item.get("created_at") or ""), default=None)
+    last_trade = max(
+        broker_backed_records,
+        key=lambda item: str(item.get("entry_timestamp") or item.get("created_at") or ""),
+        default=None,
+    )
     recent_trades = sorted(
         trade_records,
         key=lambda item: str(item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at") or ""),
@@ -325,16 +331,24 @@ def build_track_b_paper_trade_summaries(
         "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
         "broker_reconciled": False,
         "trade_count": len(trade_records),
+        "lifecycle_attempt_count": len(trade_records),
+        "broker_backed_trade_count": len(broker_backed_records),
         "closed_trade_count": sum(1 for item in trade_records if _is_flat_closed_trade(item)),
         "completed_trade_count": sum(1 for item in trade_records if _is_flat_closed_trade(item)),
         "managed_strategy_trade_count": len(managed_records),
         "meaningful_strategy_trade_count": len(managed_records),
         "proof_canary_trade_count": len(proof_canary_records),
         "archived_manual_flat_count": len(archived_manual_flat),
+        "app_only_position_from_unfilled_entry_count": sum(
+            1 for item in trade_records if _is_app_only_position_from_unfilled_entry(item)
+        ),
+        "pending_or_unfilled_lifecycle_count": sum(1 for item in trade_records if _is_unfilled_lifecycle_attempt(item)),
         "open_position_count": len(open_records),
         "review_required_count": len(review_required),
-        "paper_trades_attempted_count": len(trade_records),
+        "paper_trades_attempted_count": len(broker_backed_records),
         "proof_canary_excluded_from_meaningful_strategy_counts": True,
+        "app_only_lifecycles_excluded_from_open_positions": True,
+        "app_only_lifecycles_excluded_from_pnl": True,
         "recent_trades": [_compact_trade_row(item) for item in recent_trades],
         "last_trade_time": None if last_trade is None else last_trade.get("entry_timestamp") or last_trade.get("created_at"),
         "last_trade_strategy": None if last_trade is None else last_trade.get("strategy_id"),
@@ -364,8 +378,8 @@ def build_track_b_paper_trade_summaries(
         "broker_truth_warning": "Artifact-derived status is not broker truth until source=BROKER_RECONCILED.",
     }
 
-    wins = [item for item in trade_records if (_decimal(item.get("realized_pnl")) or Decimal("0")) > 0]
-    losses = [item for item in trade_records if (_decimal(item.get("realized_pnl")) or Decimal("0")) < 0]
+    wins = [item for item in pnl_records if (_decimal(item.get("realized_pnl")) or Decimal("0")) > 0]
+    losses = [item for item in pnl_records if (_decimal(item.get("realized_pnl")) or Decimal("0")) < 0]
     pnl_summary = {
         "schema_version": PNL_SCHEMA_VERSION,
         "as_of": actual_now.isoformat(),
@@ -391,10 +405,10 @@ def build_track_b_paper_trade_summaries(
         "losses": len(losses),
         "avg_win": _average_decimal(wins, "realized_pnl"),
         "avg_loss": _average_decimal(losses, "realized_pnl"),
-        "by_strategy": _pnl_groups(trade_records, "strategy_id", actual_now),
-        "by_instrument": _pnl_groups(trade_records, "contract_key", actual_now),
-        "by_side": _pnl_groups(trade_records, "side", actual_now),
-        "by_lifecycle_classification": _pnl_groups(trade_records, "paper_lifecycle_classification", actual_now),
+        "by_strategy": _pnl_groups(pnl_records, "strategy_id", actual_now),
+        "by_instrument": _pnl_groups(pnl_records, "contract_key", actual_now),
+        "by_side": _pnl_groups(pnl_records, "side", actual_now),
+        "by_lifecycle_classification": _pnl_groups(pnl_records, "paper_lifecycle_classification", actual_now),
         "review_required_count": len(review_required),
         "last_trade_time": trade_summary["last_trade_time"],
         "last_trade_strategy": trade_summary["last_trade_strategy"],
@@ -526,6 +540,9 @@ def _managed_trade_record_from_runner_report(
     close_fill = _mapping(runner_report.get("managed_close_fill")) or _mapping(lifecycle_report.get("close_fill"))
     entry_submit = _mapping(runner_report.get("managed_entry_submit_attempt")) or _mapping(lifecycle_report.get("entry_submit_attempt"))
     close_submit = _mapping(runner_report.get("managed_close_submit_attempt")) or _mapping(lifecycle_report.get("close_submit_attempt"))
+    entry_submit_attempted = bool(entry_submit)
+    entry_order_id = entry_fill.get("broker_order_id") or entry_submit.get("broker_order_id")
+    exit_order_id = close_fill.get("broker_order_id") or close_submit.get("broker_order_id")
     contract_key = str(runner_report.get("contract_key") or lifecycle_report.get("contract_key") or entry_intent.get("contract_key") or "")
     instrument_family = str(
         runner_report.get("strategy_registry_instrument_family")
@@ -549,6 +566,14 @@ def _managed_trade_record_from_runner_report(
     lifecycle_id = str(lifecycle_report.get("lifecycle_id") or runner_report.get("managed_lifecycle_id") or runner_report.get("track_b_strategy_paper_runner_id"))
     strategy_id = str(runner_report.get("strategy_id") or lifecycle_report.get("strategy_id") or entry_intent.get("strategy_id") or "UNKNOWN")
     classification = str(runner_report.get("managed_lifecycle_classification") or lifecycle_report.get("strategy_managed_lifecycle_classification") or "")
+    entry_fill_confirmed = entry_fill_price is not None
+    broker_backed_position_confirmed = entry_fill_confirmed or bool(lifecycle_report.get("broker_reconciled"))
+    app_only_no_broker_transmission = entry_submit_attempted is False and entry_fill_confirmed is False
+    transmission_classification = _managed_transmission_classification(
+        entry_submit=entry_submit,
+        entry_fill=entry_fill,
+        broker_backed_position_confirmed=broker_backed_position_confirmed,
+    )
     return {
         "ledger_schema_version": LEDGER_SCHEMA_VERSION,
         "trade_id": f"{strategy_id}:{lifecycle_id}",
@@ -563,13 +588,13 @@ def _managed_trade_record_from_runner_report(
         "monitor_mode": runner_report.get("mode"),
         "runtime_decision_source": runner_report.get("runtime_decision_source") or entry_intent.get("latest_decision_bar_source"),
         "signal_timestamp": runner_report.get("signal_timestamp") or entry_intent.get("signal_timestamp"),
-        "entry_timestamp": entry_fill.get("filled_at") or entry_submit.get("submitted_at") or entry_intent.get("created_at"),
+        "entry_timestamp": entry_fill.get("filled_at") or entry_submit.get("submitted_at"),
         "exit_timestamp": close_fill.get("filled_at") or close_submit.get("submitted_at") or (close_intent or {}).get("created_at"),
         "side": side,
         "order_action": entry_intent.get("order_action"),
         "quantity": _decimal_text(quantity),
-        "entry_order_id": entry_fill.get("broker_order_id") or entry_submit.get("broker_order_id"),
-        "exit_order_id": close_fill.get("broker_order_id") or close_submit.get("broker_order_id"),
+        "entry_order_id": entry_order_id,
+        "exit_order_id": exit_order_id,
         "entry_limit_price": _string_or_none(entry_intent.get("entry_limit_price")),
         "entry_fill_price": _decimal_text(entry_fill_price),
         "exit_limit_price": _string_or_none((close_intent or {}).get("close_limit_price")),
@@ -585,6 +610,11 @@ def _managed_trade_record_from_runner_report(
         "paper_lifecycle_classification": classification or lifecycle_report.get("paper_lifecycle_classification"),
         "paper_proof_classification": None,
         "managed_exit_policy_id": runner_report.get("managed_exit_policy_id") or lifecycle_report.get("managed_exit_policy_id"),
+        "entry_submit_attempted": entry_submit_attempted,
+        "entry_fill_confirmed": entry_fill_confirmed,
+        "broker_backed_position_confirmed": broker_backed_position_confirmed,
+        "app_only_no_broker_transmission": app_only_no_broker_transmission,
+        "transmission_classification": transmission_classification,
         "final_broker_state_classification": runner_report.get("final_broker_state_classification") or lifecycle_report.get("final_broker_state_classification") or classification,
         "final_position_status": runner_report.get("final_position_status") or lifecycle_report.get("final_position_status"),
         "review_required": bool(lifecycle_report.get("review_required")) or "REVIEW" in classification or "MISMATCH" in classification,
@@ -923,6 +953,8 @@ def _is_flat_closed_trade(item: Mapping[str, Any]) -> bool:
         return (
             item.get("paper_lifecycle_classification") == "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT"
             and item.get("final_position_status") == "CLOSED_FLAT"
+            and _has_entry_fill(item)
+            and _has_exit_fill(item)
         )
     return (
         item.get("paper_proof_classification") == "TRACK_B_PAPER_PROOF_PASSED"
@@ -932,7 +964,71 @@ def _is_flat_closed_trade(item: Mapping[str, Any]) -> bool:
 
 
 def _is_open_position_record(item: Mapping[str, Any]) -> bool:
-    return not _is_reconciliation_record(item) and not _is_flat_closed_trade(item) and not _is_manual_flat_reviewed(item)
+    if _is_reconciliation_record(item) or _is_flat_closed_trade(item) or _is_manual_flat_reviewed(item):
+        return False
+    if item.get("paper_lifecycle_type") == "STRATEGY_MANAGED":
+        return _has_entry_fill(item) and not _has_exit_fill(item)
+    if _is_proof_canary_record(item):
+        return _has_entry_fill(item) and not _has_exit_fill(item)
+    return False
+
+
+def _is_meaningful_managed_trade_record(item: Mapping[str, Any]) -> bool:
+    return item.get("paper_lifecycle_type") == "STRATEGY_MANAGED" and _has_entry_fill(item)
+
+
+def _is_broker_backed_trade_record(item: Mapping[str, Any]) -> bool:
+    if _is_reconciliation_record(item) or _is_manual_flat_reviewed(item):
+        return False
+    if item.get("broker_backed_position_confirmed") is True:
+        return True
+    return _has_entry_fill(item)
+
+
+def _is_pnl_trade_record(item: Mapping[str, Any]) -> bool:
+    return _is_broker_backed_trade_record(item)
+
+
+def _is_unfilled_lifecycle_attempt(item: Mapping[str, Any]) -> bool:
+    return (
+        not _is_reconciliation_record(item)
+        and not _is_manual_flat_reviewed(item)
+        and item.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        and not _has_entry_fill(item)
+    )
+
+
+def _is_app_only_position_from_unfilled_entry(item: Mapping[str, Any]) -> bool:
+    return (
+        item.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        and item.get("review_required") is True
+        and not _has_entry_fill(item)
+    )
+
+
+def _has_entry_fill(item: Mapping[str, Any]) -> bool:
+    return item.get("entry_fill_confirmed") is True or item.get("entry_fill_price") not in {None, ""}
+
+
+def _has_exit_fill(item: Mapping[str, Any]) -> bool:
+    return item.get("exit_fill_price") not in {None, ""}
+
+
+def _managed_transmission_classification(
+    *,
+    entry_submit: Mapping[str, Any],
+    entry_fill: Mapping[str, Any],
+    broker_backed_position_confirmed: bool,
+) -> str:
+    if broker_backed_position_confirmed:
+        return "BROKER_BACKED_POSITION_CONFIRMED"
+    if not entry_submit:
+        return "LIFECYCLE_CREATED_NO_SUBMIT"
+    if entry_submit.get("transmitted") is False or entry_submit.get("transmit") is False:
+        return "SUBMIT_ATTEMPT_CREATED_NOT_TRANSMITTED"
+    if entry_submit.get("broker_order_id") and not entry_fill:
+        return "FILL_MISSING"
+    return "ORDER_STATUS_MISSING"
 
 
 def _is_reconciliation_record(item: Mapping[str, Any]) -> bool:
@@ -1015,6 +1111,16 @@ def _records_since(records: Iterable[Mapping[str, Any]], date_key: str, *, exact
 
 
 def _compact_trade_row(item: Mapping[str, Any]) -> dict[str, Any]:
+    app_only_no_broker_transmission = (
+        item.get("app_only_no_broker_transmission")
+        if item.get("app_only_no_broker_transmission") is not None
+        else _is_app_only_position_from_unfilled_entry(item)
+    )
+    entry_submit_attempted = item.get("entry_submit_attempted")
+    if entry_submit_attempted is None and app_only_no_broker_transmission:
+        entry_submit_attempted = False
+    entry_timestamp = None if app_only_no_broker_transmission else item.get("entry_timestamp")
+    row_time = item.get("exit_timestamp") or entry_timestamp or item.get("created_at")
     return {
         "trade_id": item.get("trade_id"),
         "lifecycle_id": item.get("lifecycle_id"),
@@ -1025,8 +1131,8 @@ def _compact_trade_row(item: Mapping[str, Any]) -> dict[str, Any]:
         "local_symbol": item.get("local_symbol"),
         "con_id": item.get("con_id"),
         "account_id": item.get("account_id"),
-        "time": item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at"),
-        "entry_timestamp": item.get("entry_timestamp"),
+        "time": row_time,
+        "entry_timestamp": entry_timestamp,
         "exit_timestamp": item.get("exit_timestamp"),
         "side": item.get("side"),
         "order_action": item.get("order_action"),
@@ -1039,6 +1145,18 @@ def _compact_trade_row(item: Mapping[str, Any]) -> dict[str, Any]:
         "paper_lifecycle_classification": item.get("paper_lifecycle_classification"),
         "final_broker_state_classification": item.get("final_broker_state_classification"),
         "final_position_status": item.get("final_position_status"),
+        "entry_order_id": item.get("entry_order_id"),
+        "exit_order_id": item.get("exit_order_id"),
+        "entry_submit_attempted": entry_submit_attempted,
+        "entry_fill_confirmed": _has_entry_fill(item),
+        "broker_backed_position_confirmed": _is_broker_backed_trade_record(item),
+        "app_only_no_broker_transmission": app_only_no_broker_transmission,
+        "transmission_classification": item.get("transmission_classification")
+        or (
+            "APP_ONLY_POSITION_FROM_UNFILLED_ENTRY"
+            if _is_app_only_position_from_unfilled_entry(item)
+            else None
+        ),
         "artifact_reconciliation_classification": item.get("artifact_reconciliation_classification"),
         "paper_lifecycle_type": item.get("paper_lifecycle_type"),
         "broker_reconciled": item.get("broker_reconciled"),

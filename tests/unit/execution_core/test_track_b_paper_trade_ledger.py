@@ -324,6 +324,168 @@ def test_strategy_managed_lifecycle_trade_is_separated_from_proof(tmp_path: Path
     assert summary["meaningful_strategy_trade_count"] == 1
 
 
+def test_strategy_managed_lifecycle_without_submit_does_not_create_open_position(tmp_path: Path) -> None:
+    lifecycle_path = write_json(
+        tmp_path / "managed" / "track_b_strategy_managed_paper_lifecycle_report.json",
+        {
+            "lifecycle_id": "managed-no-submit-001",
+            "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "account_id": "DUM882026",
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+            "strategy_managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+            "entry_intent": {
+                "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "side": "SHORT",
+                "order_action": "SELL",
+                "quantity": 1,
+                "entry_limit_price": "4756.6",
+                "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+                "created_at": "2026-05-07T12:56:05+00:00",
+            },
+            "entry_submit_attempt": None,
+            "entry_fill": None,
+            "close_intent": None,
+            "close_submit_attempt": None,
+            "close_fill": None,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "final_position_status": "REVIEW_REQUIRED",
+            "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+            "review_required": True,
+            "broker_reconciled": False,
+        },
+    )
+    runner = {
+        "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+        "mode": "PAPER",
+        "runtime_decision_source": "DATABENTO_LIVE_ARTIFACT",
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "quantity": 1,
+        "managed_lifecycle_invoked": True,
+        "managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        "managed_lifecycle_report_path": str(lifecycle_path),
+        "strategy_paper_runner_verdict": "TRACK_B_STRATEGY_PAPER_RUNNER_REVIEW_REQUIRED",
+        "paper_proof_invoked": False,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+    }
+
+    result = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=runner,
+        runner_report_json=tmp_path / "runner.json",
+        output_root=tmp_path / "paper_trade_ledger",
+        now=aware_now(),
+    )
+
+    assert result.trade_record_written is True
+    row = json.loads(result.ledger_jsonl.read_text(encoding="utf-8").strip())
+    assert row["paper_lifecycle_type"] == "STRATEGY_MANAGED"
+    assert row["entry_submit_attempted"] is False
+    assert row["entry_fill_confirmed"] is False
+    assert row["broker_backed_position_confirmed"] is False
+    assert row["app_only_no_broker_transmission"] is True
+    assert row["transmission_classification"] == "LIFECYCLE_CREATED_NO_SUBMIT"
+    assert row["entry_timestamp"] is None
+
+    summary = json.loads(result.trade_summary_json.read_text(encoding="utf-8"))
+    assert summary["trade_count"] == 1
+    assert summary["broker_backed_trade_count"] == 0
+    assert summary["managed_strategy_trade_count"] == 0
+    assert summary["meaningful_strategy_trade_count"] == 0
+    assert summary["paper_trades_attempted_count"] == 0
+    assert summary["open_position_count"] == 0
+    assert summary["review_required_count"] == 1
+    assert summary["app_only_position_from_unfilled_entry_count"] == 1
+    assert summary["recent_trades"][0]["broker_backed_position_confirmed"] is False
+    assert summary["recent_trades"][0]["app_only_no_broker_transmission"] is True
+
+    status = json.loads(result.live_position_status_json.read_text(encoding="utf-8"))
+    assert status["open_position_count"] == 0
+    assert status["positions_by_instrument"] == {}
+    assert status["review_required_positions"] == []
+
+    pnl = json.loads(result.pnl_summary_json.read_text(encoding="utf-8"))
+    assert pnl["trades_today"] == 0
+    assert pnl["total_realized_pnl_today"] == "0"
+    assert pnl["by_strategy"] == {}
+
+
+def test_strategy_managed_lifecycle_submit_attempt_without_fill_does_not_create_open_position(tmp_path: Path) -> None:
+    lifecycle_path = write_json(
+        tmp_path / "managed" / "track_b_strategy_managed_paper_lifecycle_report.json",
+        {
+            "lifecycle_id": "managed-submit-no-fill-001",
+            "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "account_id": "DUM882026",
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+            "strategy_managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+            "entry_intent": {
+                "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "side": "SHORT",
+                "order_action": "SELL",
+                "quantity": 1,
+                "entry_limit_price": "4756.6",
+                "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+            },
+            "entry_submit_attempt": {
+                "broker_order_id": "301",
+                "submitted_at": "2026-05-07T12:56:06+00:00",
+            },
+            "entry_fill": None,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "final_position_status": "REVIEW_REQUIRED",
+            "review_required": True,
+            "broker_reconciled": False,
+        },
+    )
+    runner = {
+        "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+        "mode": "PAPER",
+        "runtime_decision_source": "DATABENTO_LIVE_ARTIFACT",
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "quantity": 1,
+        "managed_lifecycle_invoked": True,
+        "managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        "managed_lifecycle_report_path": str(lifecycle_path),
+        "paper_proof_invoked": False,
+    }
+
+    result = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=runner,
+        runner_report_json=tmp_path / "runner.json",
+        output_root=tmp_path / "paper_trade_ledger",
+        now=aware_now(),
+    )
+
+    row = json.loads(result.ledger_jsonl.read_text(encoding="utf-8").strip())
+    assert row["entry_submit_attempted"] is True
+    assert row["entry_order_id"] == "301"
+    assert row["entry_fill_confirmed"] is False
+    assert row["transmission_classification"] == "FILL_MISSING"
+    assert result.trade_summary["open_position_count"] == 0
+    assert result.trade_summary["managed_strategy_trade_count"] == 0
+    assert result.live_position_status["open_position_count"] == 0
+
+
 def test_stale_proof_lifecycle_broker_flat_archives_manual_review_and_clears_compact_open_position(tmp_path: Path) -> None:
     report_path, payload = stale_mgc_proof_runner_report(tmp_path)
     initial = update_track_b_paper_trade_ledger_from_runner_report(
@@ -435,6 +597,7 @@ def test_strategy_managed_lifecycle_is_not_archived_as_proof_canary(tmp_path: Pa
                 "account_id": "DUM882026",
                 "quantity": "1",
                 "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+                "entry_fill_price": "4704.6",
                 "review_required": True,
                 "created_at": "2026-05-06T23:11:12+00:00",
             },
