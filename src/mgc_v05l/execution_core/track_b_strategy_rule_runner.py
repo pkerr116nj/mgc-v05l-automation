@@ -723,9 +723,10 @@ def _evaluate_asian_drift_v1(
     feature_version = _first_text(event, metadata, "feature_version")
     calibration_profile = _first_text(event, metadata, "calibration_profile")
     signal_states = {"ENTRY_ARMED", "REQUALIFIED_CANDIDATE"}
+    direction_required = state in signal_states or entry_ready is True
     conditions = {
         "state_is_entry_eligible": state in signal_states,
-        "direction_is_explicit": direction in {"LONG", "SHORT"},
+        "direction_is_explicit": direction in {"LONG", "SHORT"} if direction_required else True,
         "entry_ready": entry_ready is True,
         "entry_window_open": entry_window_open is True,
         "in_scope": in_scope is True,
@@ -734,8 +735,18 @@ def _evaluate_asian_drift_v1(
         "calibration_profile_present": calibration_profile is not None,
     }
     failed = [name for name, passed in conditions.items() if passed is False]
-    blockers = []
-    if direction not in {"LONG", "SHORT"}:
+    blocker_labels = {
+        "state_is_entry_eligible": "Asian Drift state is not entry eligible.",
+        "direction_is_explicit": "Asian Drift direction is not explicit LONG/SHORT.",
+        "entry_ready": "Asian Drift hypothetical entry readiness is false.",
+        "entry_window_open": "Asian Drift entry window is closed.",
+        "in_scope": "Asian Drift is outside execution session scope.",
+        "session_not_timeout": "Asian Drift session timed out.",
+        "feature_version_present": "Asian Drift feature version is missing.",
+        "calibration_profile_present": "Asian Drift calibration profile is missing.",
+    }
+    blockers = [blocker_labels.get(name, name) for name in failed]
+    if direction_required and direction not in {"LONG", "SHORT"} and blocker_labels["direction_is_explicit"] not in blockers:
         blockers.append("Asian Drift direction is not explicit LONG/SHORT.")
     if failed:
         decision_reason = "Asian Drift v1 conditions did not pass: " + ", ".join(failed)
@@ -749,6 +760,7 @@ def _evaluate_asian_drift_v1(
             "asia_drift_state": state,
             "asia_drift_regime": regime,
             "direction": direction,
+            "direction_required": direction_required,
             "entry_window_open": entry_window_open,
             "in_scope": in_scope,
             "session_timeout": session_timeout,

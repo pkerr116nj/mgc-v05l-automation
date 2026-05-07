@@ -487,6 +487,9 @@ def test_asian_drift_v1_no_signal_on_non_setup_snapshot(tmp_path: Path) -> None:
     assert result.report["paper_proof_cli_called"] is False
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+    assert result.report["rule_inputs"]["direction_required"] is False
+    assert "Asian Drift direction is not explicit LONG/SHORT." not in result.report["rule_blockers"]
+    assert "Asian Drift state is not entry eligible." in result.report["rule_blockers"]
 
 
 def test_asian_drift_v1_emits_signal_on_explicit_entry_armed_snapshot(tmp_path: Path) -> None:
@@ -530,6 +533,37 @@ def test_asian_drift_v1_emits_signal_on_explicit_entry_armed_snapshot(tmp_path: 
     assert result.output_batch_json is not None
     batch = json.loads(result.output_batch_json.read_text(encoding="utf-8"))
     assert batch["signal_items"][0]["signal"]["signal_direction"] == "LONG"
+
+
+def test_asian_drift_v1_maps_directional_regime_to_explicit_side(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=asian_drift_event(
+            tmp_path,
+            asia_drift_state="ENTRY_ARMED",
+            asia_drift_regime="ASIA_DRIFT_SHORT",
+            direction=None,
+            hypothetical_entry_ready=True,
+        ),
+        input_event_path=tmp_path / "asian_drift_state_snapshot.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_asian_drift_regime_side",
+        rule_id="asian_drift_v1",
+        rule_mode="ASIAN_DRIFT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        strategy_adapter_output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        runner_id="rule-runner-asian-drift-regime-side",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert result.report["decision"] == "SHORT"
+    assert result.report["signal_direction"] == "SHORT"
+    assert result.report["rule_inputs"]["direction_required"] is True
+    assert result.report["rule_blockers"] == []
 
 
 def test_asian_drift_v1_missing_snapshot_fields_not_ready_for_tonight(tmp_path: Path) -> None:
