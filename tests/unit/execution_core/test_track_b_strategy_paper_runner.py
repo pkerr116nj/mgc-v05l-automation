@@ -32,6 +32,11 @@ from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     TrackBManagedPaperLifecycleClassification,
     TrackBStrategyManagedPaperLifecycleResult,
 )
+from mgc_v05l.execution_core.track_b_strategy_trade_intent import (
+    TrackBStrategyTradeIntentConfig,
+    TrackBStrategyTradeIntentResult,
+    create_track_b_strategy_trade_intent,
+)
 from mgc_v05l.execution_core.track_b_strategy_paper_runner_cli import main as strategy_paper_runner_cli_main
 from mgc_v05l.execution_core.track_b_strategy_rule_runner import (
     TrackBStrategyRuleRunnerResult,
@@ -50,6 +55,7 @@ class Calls:
         self.feature = 0
         self.strategy = 0
         self.readiness = 0
+        self.intent = 0
         self.managed_lifecycle = 0
         self.proof = 0
         self.operator_status = 0
@@ -69,6 +75,7 @@ def base_config(tmp_path: Path, **overrides: object) -> TrackBStrategyPaperRunne
             "metadata": {"fixture": True},
         },
         "inbox_dir": tmp_path / "inbox",
+        "strategy_id": "mgc_ema_momentum_reclaim_long_v1",
         "allow_fixture_input": True,
         "output_root": tmp_path / "paper_runner",
         "strategy_rule_output_root": tmp_path / "rule_runner",
@@ -77,6 +84,7 @@ def base_config(tmp_path: Path, **overrides: object) -> TrackBStrategyPaperRunne
         "writer_output_root": tmp_path / "writer",
         "readiness_output_root": tmp_path / "readiness",
         "paper_proof_output_root": tmp_path / "proof",
+        "strategy_trade_intent_output_root": tmp_path / "intents",
         "operator_status_output_root": tmp_path / "operator_status",
     }
     payload.update(overrides)
@@ -325,6 +333,9 @@ def strategy_result(tmp_path: Path, *, verdict: str = "TRACK_B_STRATEGY_RULE_RUN
         "strategy_registry_timeframe": "1m",
         "strategy_registry_paper_eligible": True,
         "strategy_registry_live_money_eligible": False,
+        "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+        "runtime_decision_source": "DATABENTO_LIVE_ARTIFACT",
+        "decision_bar_timestamp": aware_now().isoformat(),
         "output_batch_path": str(tmp_path / "inbox" / "signal_batch.json") if emitted else None,
         "primary_blocker": None,
         "required_next_action": "strategy next",
@@ -659,6 +670,7 @@ def stages(
     market_history: TrackBMarketHistoryResult | None = None,
     feature: TrackBFeatureBuilderResult | None = None,
     readiness: TrackBReadinessCheckRunnerResult | None = None,
+    intent: TrackBStrategyTradeIntentResult | None = None,
     managed_lifecycle: TrackBStrategyManagedPaperLifecycleResult | None = None,
     proof: PaperProofResult | None = None,
 ) -> TrackBStrategyPaperRunnerStages:
@@ -713,6 +725,38 @@ def stages(
         assert proof is not None
         return proof
 
+    def intent_stage(
+        config: TrackBStrategyPaperRunnerConfig,
+        strategy_report: dict[str, object],
+    ) -> TrackBStrategyTradeIntentResult:
+        calls.intent += 1
+        if intent is not None:
+            return intent
+        return create_track_b_strategy_trade_intent(
+            config=TrackBStrategyTradeIntentConfig(
+                mode=config.mode,
+                account_id=config.account_id,
+                expected_account_id=config.expected_account_id,
+                strategy_id=config.strategy_id,
+                instrument_family=str(strategy_report.get("strategy_registry_instrument_family") or "MGC"),
+                contract_key=config.contract_key,
+                local_symbol=config.allowlisted_local_symbol,
+                con_id=config.con_id,
+                side=config.side,
+                quantity=config.quantity,
+                runtime_source=config.runtime_decision_source,
+                latest_decision_bar_source=str(strategy_report.get("latest_decision_bar_source") or "DATABENTO_LIVE_ARTIFACT"),
+                pricing_policy=config.paper_order_pricing_policy,
+                managed_exit_policy_id=config.managed_exit_policy_id,
+                output_root=config.strategy_trade_intent_output_root,
+                paper_trade_ledger_output_root=config.paper_trade_ledger_output_root
+                or Path(config.strategy_trade_intent_output_root).parent / "paper_trade_ledger",
+            ),
+            strategy_report=strategy_report,
+            intent_id="intent-test",
+            now=aware_now(),
+        )
+
     def managed_lifecycle_stage(
         config: TrackBStrategyPaperRunnerConfig,
         strategy_report: dict[str, object],
@@ -733,6 +777,7 @@ def stages(
         feature_builder=feature_stage,
         strategy_rule=strategy_stage,
         readiness=readiness_stage,
+        strategy_trade_intent=intent_stage,
         managed_lifecycle=managed_lifecycle_stage,
         paper_proof=proof_stage,
         operator_status=operator_status_stage,
@@ -860,10 +905,13 @@ def test_real_strategy_signal_does_not_route_to_paper_proof_by_default(tmp_path:
 
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_EXIT_POLICY_MISSING
     assert calls.proof == 0
+    assert calls.intent == 1
     assert calls.managed_lifecycle == 0
     assert result.report["paper_execution_path"] == "STRATEGY_MANAGED"
     assert result.report["paper_proof_invoked"] is False
     assert result.report["managed_lifecycle_invoked"] is False
+    assert result.report["strategy_trade_intent_created"] is False
+    assert result.report["strategy_trade_intent_classification"] == "INTENT_BLOCKED_MISSING_EXIT_POLICY"
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
     assert "paper_proof is not a strategy-management fallback" in result.report["primary_blocker"]
@@ -895,8 +943,12 @@ def test_real_strategy_signal_with_exit_policy_routes_to_managed_lifecycle(tmp_p
     )
 
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_OPEN_MANAGED
+    assert calls.intent == 1
     assert calls.managed_lifecycle == 1
     assert calls.proof == 0
+    assert result.report["strategy_trade_intent_created"] is True
+    assert result.report["strategy_trade_intent_classification"] == "STRATEGY_TRADE_INTENT_CREATED"
+    assert result.report["strategy_trade_intent_report_path"]
     assert result.report["paper_proof_invoked"] is False
     assert result.report["managed_lifecycle_invoked"] is True
     assert result.report["managed_lifecycle_classification"] == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"

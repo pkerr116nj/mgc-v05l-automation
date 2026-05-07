@@ -3157,6 +3157,11 @@ def _instrument_report_from_stages(
             "multi_strategy_runtime_cycle_verdict": runtime_cycle_report.get("multi_strategy_runtime_cycle_verdict"),
             "paper_runner_report_path": runtime_cycle_report.get("paper_runner_report_path"),
             "paper_runner_verdict": runtime_cycle_report.get("paper_runner_verdict"),
+            "strategy_trade_intent_created": runtime_cycle_report.get("strategy_trade_intent_created"),
+            "strategy_trade_intent_classification": runtime_cycle_report.get("strategy_trade_intent_classification"),
+            "strategy_trade_intent_id": runtime_cycle_report.get("strategy_trade_intent_id"),
+            "strategy_trade_intent_report_path": runtime_cycle_report.get("strategy_trade_intent_report_path"),
+            "intent_blocked_reason": runtime_cycle_report.get("intent_blocked_reason"),
             "paper_execution_path": runtime_cycle_report.get("paper_execution_path"),
             "managed_lifecycle_invoked": bool(runtime_cycle_report.get("managed_lifecycle_invoked", False)),
             "managed_lifecycle_classification": runtime_cycle_report.get("managed_lifecycle_classification"),
@@ -3329,6 +3334,18 @@ def _report_for_cycle(
         "chosen_signal": _first_nonempty(item.get("chosen_signal") for item in instrument_reports),
         "latest_signal_strategy_id": _latest_signal_field(instrument_reports, "strategy_id"),
         "latest_signal_side": _latest_signal_field(instrument_reports, "signal_direction"),
+        "latest_strategy_trade_intent_path": _first_nonempty(
+            item.get("strategy_trade_intent_report_path") for item in instrument_reports
+        ),
+        "latest_strategy_trade_intent_classification": _first_nonempty(
+            item.get("strategy_trade_intent_classification") for item in instrument_reports
+        ),
+        "latest_strategy_trade_intent_created": _first_nonempty(
+            item.get("strategy_trade_intent_created") for item in instrument_reports
+        ),
+        "latest_strategy_trade_intent_blocked_reason": _first_nonempty(
+            item.get("intent_blocked_reason") for item in instrument_reports
+        ),
         "latest_paper_lifecycle_report_path": _first_nonempty(item.get("paper_runner_report_path") for item in instrument_reports),
         "latest_broker_state_classification": _first_nonempty(
             item.get("latest_broker_state_classification") for item in instrument_reports

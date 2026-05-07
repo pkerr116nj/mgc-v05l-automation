@@ -30,6 +30,13 @@ from .track_b_strategy_managed_paper_lifecycle import (
     TrackBStrategyManagedPaperLifecycleResult,
     run_track_b_strategy_managed_paper_lifecycle,
 )
+from .track_b_strategy_trade_intent import (
+    DEFAULT_TRACK_B_STRATEGY_TRADE_INTENT_OUTPUT_ROOT,
+    TrackBStrategyTradeIntentClassification,
+    TrackBStrategyTradeIntentConfig,
+    TrackBStrategyTradeIntentResult,
+    create_track_b_strategy_trade_intent,
+)
 from .track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
     update_track_b_paper_trade_ledger_from_runner_report,
@@ -152,6 +159,9 @@ class TrackBStrategyPaperRunnerConfig:
     manual_close_limit_price: str | Decimal | None = None
     paper_execution_path: str = "STRATEGY_MANAGED"
     managed_exit_policy_id: str | None = None
+    runtime_decision_source: str = "DATABENTO_LIVE_ARTIFACT"
+    paper_order_pricing_policy: str | None = None
+    strategy_trade_intent_output_root: Path = DEFAULT_TRACK_B_STRATEGY_TRADE_INTENT_OUTPUT_ROOT
     managed_lifecycle_output_root: Path = DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT
     broker_order_id: str | None = None
     perm_id: str | None = None
@@ -212,6 +222,7 @@ class TrackBStrategyPaperRunnerStages:
     feature_builder: Callable[[TrackBStrategyPaperRunnerConfig], TrackBFeatureBuilderResult]
     strategy_rule: Callable[[TrackBStrategyPaperRunnerConfig], TrackBStrategyRuleRunnerResult]
     readiness: Callable[[TrackBStrategyPaperRunnerConfig], TrackBReadinessCheckRunnerResult]
+    strategy_trade_intent: Callable[[TrackBStrategyPaperRunnerConfig, Mapping[str, object]], TrackBStrategyTradeIntentResult]
     managed_lifecycle: Callable[[TrackBStrategyPaperRunnerConfig, Mapping[str, object]], TrackBStrategyManagedPaperLifecycleResult]
     paper_proof: Callable[[TrackBStrategyPaperRunnerConfig], PaperProofResult]
     operator_status: Callable[[TrackBStrategyPaperRunnerConfig, Path], None]
@@ -228,6 +239,7 @@ class TrackBStrategyPaperRunnerResult:
     strategy_rule_result: TrackBStrategyRuleRunnerResult | None = None
     readiness_result: TrackBReadinessCheckRunnerResult | None = None
     managed_lifecycle_result: TrackBStrategyManagedPaperLifecycleResult | None = None
+    strategy_trade_intent_result: TrackBStrategyTradeIntentResult | None = None
     paper_proof_result: PaperProofResult | None = None
 
 
@@ -243,6 +255,7 @@ def default_stages(
         feature_builder=_run_feature_builder,
         strategy_rule=_run_strategy_rule,
         readiness=lambda config: _run_readiness(config, readiness_stages=readiness_stages),
+        strategy_trade_intent=_run_strategy_trade_intent,
         managed_lifecycle=_run_managed_lifecycle,
         paper_proof=lambda config: _run_paper_proof(config, proof_runner=proof_runner),
         operator_status=_run_operator_status,
@@ -266,6 +279,7 @@ def run_track_b_strategy_paper(
     feature_builder: TrackBFeatureBuilderResult | None = None
     strategy_rule: TrackBStrategyRuleRunnerResult | None = None
     readiness: TrackBReadinessCheckRunnerResult | None = None
+    strategy_trade_intent: TrackBStrategyTradeIntentResult | None = None
     managed_lifecycle: TrackBStrategyManagedPaperLifecycleResult | None = None
     proof: PaperProofResult | None = None
 
@@ -283,6 +297,7 @@ def run_track_b_strategy_paper(
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
+                strategy_trade_intent=strategy_trade_intent,
                 proof=proof,
                 primary_blocker=mode_error,
                 required_next_action="Set --mode PAPER. Live-money execution is not implemented.",
@@ -302,6 +317,7 @@ def run_track_b_strategy_paper(
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
+                strategy_trade_intent=strategy_trade_intent,
                 proof=proof,
                 primary_blocker=submit_error,
                 required_next_action="Provide explicit PAPER submit flags, quantity, and manual open/close limit prices before retrying.",
@@ -321,6 +337,7 @@ def run_track_b_strategy_paper(
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
+                strategy_trade_intent=strategy_trade_intent,
                 proof=proof,
                 primary_blocker=candle_history_request_error,
                 required_next_action="Provide both bounded candle history and a current quote report before running the history producer.",
@@ -708,27 +725,48 @@ def run_track_b_strategy_paper(
             )
 
         managed_exit_policy_id = _managed_exit_policy_id(config, strategy_rule.report if strategy_rule else {})
-        if not managed_exit_policy_id or managed_exit_policy_id == "EXIT_NOT_AVAILABLE":
+        managed_config = replace(config, managed_exit_policy_id=managed_exit_policy_id)
+        strategy_trade_intent = actual_stages.strategy_trade_intent(managed_config, strategy_rule.report if strategy_rule else {})
+        if strategy_trade_intent.classification != TrackBStrategyTradeIntentClassification.CREATED:
+            is_missing_exit_policy = (
+                strategy_trade_intent.classification
+                == TrackBStrategyTradeIntentClassification.BLOCKED_MISSING_EXIT_POLICY
+            )
             return _finalize(
                 config=config,
                 report_json=report_json,
                 now=actual_now,
                 runner_id=actual_runner_id,
-                verdict=TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_EXIT_POLICY_MISSING,
+                verdict=(
+                    TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_EXIT_POLICY_MISSING
+                    if is_missing_exit_policy
+                    else TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_LIFECYCLE_NOT_AVAILABLE
+                ),
                 candle_history_producer=candle_history_producer,
                 market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
+                strategy_trade_intent=strategy_trade_intent,
                 managed_lifecycle=managed_lifecycle,
                 proof=proof,
-                primary_blocker=f"{config.strategy_id} has no managed PAPER exit policy; paper_proof is not a strategy-management fallback.",
-                required_next_action="Declare a managed exit policy before allowing autonomous strategy-managed PAPER entry.",
+                primary_blocker=strategy_trade_intent.report.get("primary_blocker")
+                or f"{config.strategy_id} strategy trade intent was not created.",
+                required_next_action=str(
+                    strategy_trade_intent.report.get("required_next_action")
+                    or "Resolve strategy trade intent blocker before invoking managed lifecycle."
+                ),
                 operator_status_stage=actual_stages.operator_status,
             )
 
-        managed_config = replace(config, managed_exit_policy_id=managed_exit_policy_id)
-        managed_lifecycle = actual_stages.managed_lifecycle(managed_config, strategy_rule.report if strategy_rule else {})
+        managed_lifecycle = actual_stages.managed_lifecycle(
+            managed_config,
+            {
+                **(strategy_rule.report if strategy_rule else {}),
+                "strategy_trade_intent": strategy_trade_intent.report,
+                "strategy_trade_intent_path": str(strategy_trade_intent.latest_intent_json),
+            },
+        )
         verdict = _managed_lifecycle_runner_verdict(managed_lifecycle.classification)
         primary_blocker = managed_lifecycle.report.get("primary_blocker")
         required_next_action = str(
@@ -746,6 +784,7 @@ def run_track_b_strategy_paper(
             feature_builder=feature_builder,
             strategy_rule=strategy_rule,
             readiness=readiness,
+            strategy_trade_intent=strategy_trade_intent,
             managed_lifecycle=managed_lifecycle,
             proof=proof,
             primary_blocker=primary_blocker,
@@ -969,6 +1008,48 @@ def _run_managed_lifecycle(
     return run_track_b_strategy_managed_paper_lifecycle(config=managed_config)
 
 
+def _run_strategy_trade_intent(
+    config: TrackBStrategyPaperRunnerConfig,
+    strategy_report: Mapping[str, object],
+) -> TrackBStrategyTradeIntentResult:
+    instrument_family = str(
+        strategy_report.get("strategy_registry_instrument_family")
+        or _instrument_family_from_contract(config.contract_key)
+        or "UNKNOWN"
+    )
+    latest_decision_bar_source = (
+        strategy_report.get("latest_decision_bar_source")
+        or strategy_report.get("runtime_decision_source")
+        or strategy_report.get("runtime_data_source")
+        or config.runtime_decision_source
+    )
+    intent_config = TrackBStrategyTradeIntentConfig(
+        mode=config.mode,
+        account_id=config.account_id,
+        expected_account_id=config.expected_account_id,
+        strategy_id=config.strategy_id,
+        instrument_family=instrument_family,
+        contract_key=config.contract_key,
+        local_symbol=config.allowlisted_local_symbol,
+        con_id=config.con_id,
+        side=config.side,
+        quantity=config.quantity,
+        runtime_source=config.runtime_decision_source,
+        latest_decision_bar_source=_string_or_none(latest_decision_bar_source),
+        pricing_policy=config.paper_order_pricing_policy,
+        managed_exit_policy_id=config.managed_exit_policy_id,
+        live_money_readiness=False,
+        output_root=config.strategy_trade_intent_output_root,
+        paper_trade_ledger_output_root=_paper_trade_ledger_output_root(config),
+        source_artifact_paths={
+            "strategy_rule_report_json": strategy_report.get("report_json_path"),
+            "runtime_candle_context_json": str(config.runtime_candle_context_json) if config.runtime_candle_context_json else None,
+            "input_event_json": str(config.input_event_json) if config.input_event_json else None,
+        },
+    )
+    return create_track_b_strategy_trade_intent(config=intent_config, strategy_report=strategy_report)
+
+
 def _run_paper_proof(config: TrackBStrategyPaperRunnerConfig, *, proof_runner: ProofRunner | None) -> PaperProofResult:
     paper_config = PaperProofConfig(
         mode=config.mode,
@@ -1086,6 +1167,7 @@ def _finalize(
     operator_status_stage: Callable[[TrackBStrategyPaperRunnerConfig, Path], None],
     proof_classification: str | None = None,
     managed_lifecycle: TrackBStrategyManagedPaperLifecycleResult | None = None,
+    strategy_trade_intent: TrackBStrategyTradeIntentResult | None = None,
 ) -> TrackBStrategyPaperRunnerResult:
     report = _build_report(
         config=config,
@@ -1098,6 +1180,7 @@ def _finalize(
         feature_builder=feature_builder,
         strategy_rule=strategy_rule,
         readiness=readiness,
+        strategy_trade_intent=strategy_trade_intent,
         managed_lifecycle=managed_lifecycle,
         proof=proof,
         primary_blocker=primary_blocker,
@@ -1141,6 +1224,7 @@ def _finalize(
         strategy_rule_result=strategy_rule,
         readiness_result=readiness,
         managed_lifecycle_result=managed_lifecycle,
+        strategy_trade_intent_result=strategy_trade_intent,
         paper_proof_result=proof,
     )
 
@@ -1157,6 +1241,7 @@ def _build_report(
     feature_builder: TrackBFeatureBuilderResult | None,
     strategy_rule: TrackBStrategyRuleRunnerResult | None,
     readiness: TrackBReadinessCheckRunnerResult | None,
+    strategy_trade_intent: TrackBStrategyTradeIntentResult | None,
     managed_lifecycle: TrackBStrategyManagedPaperLifecycleResult | None,
     proof: PaperProofResult | None,
     primary_blocker: object | None,
@@ -1168,10 +1253,12 @@ def _build_report(
     feature_report = feature_builder.report if feature_builder else {}
     strategy_report = strategy_rule.report if strategy_rule else {}
     readiness_report = readiness.report if readiness else {}
+    strategy_trade_intent_report = strategy_trade_intent.report if strategy_trade_intent else {}
     managed_report = managed_lifecycle.report if managed_lifecycle else {}
     proof_report = proof.report if proof else {}
     proof_payload = proof_report.get("proof_payload") if isinstance(proof_report.get("proof_payload"), Mapping) else proof_report
     paper_proof_invoked = proof is not None
+    strategy_trade_intent_invoked = strategy_trade_intent is not None
     managed_lifecycle_invoked = managed_lifecycle is not None
     managed_submit_attempted = bool(managed_report.get("submit_attempted")) if managed_report else False
     managed_broker_state_mutated = bool(managed_report.get("broker_state_mutated")) if managed_report else False
@@ -1294,6 +1381,18 @@ def _build_report(
         "quote_provider_mode": readiness_report.get("quote_provider_mode"),
         "paper_submit_requested": _paper_submit_requested(config),
         "paper_submit_flags_present": bool(config.submit_paper and config.confirm_paper_submit),
+        "strategy_trade_intent_invoked": strategy_trade_intent_invoked,
+        "strategy_trade_intent_created": bool(strategy_trade_intent_report.get("intent_created")) if strategy_trade_intent_report else False,
+        "strategy_trade_intent_classification": strategy_trade_intent_report.get("intent_classification")
+        or strategy_trade_intent_report.get("classification"),
+        "strategy_trade_intent_id": strategy_trade_intent_report.get("intent_id"),
+        "strategy_trade_intent_report_path": str(strategy_trade_intent.latest_intent_json) if strategy_trade_intent else None,
+        "strategy_trade_intent_jsonl_path": str(strategy_trade_intent.intent_jsonl) if strategy_trade_intent else None,
+        "latest_signal_strategy_id": strategy_trade_intent_report.get("strategy_id")
+        or strategy_report.get("strategy_registry_id"),
+        "latest_signal_side": strategy_trade_intent_report.get("side") or strategy_report.get("signal_direction"),
+        "intent_blocked_reason": strategy_trade_intent_report.get("primary_blocker"),
+        "lifecycle_mode": strategy_trade_intent_report.get("lifecycle_mode"),
         "paper_proof_invoked": paper_proof_invoked,
         "paper_proof_classification": proof_classification or (proof.classification.value if proof else None),
         "paper_proof_report_path": str(proof.report_json) if proof else None,
@@ -1368,6 +1467,7 @@ def _build_report(
             ),
             "strategy_rule_report_json": str(strategy_rule.report_json) if strategy_rule else None,
             "readiness_runner_report_json": str(readiness.report_json) if readiness else None,
+            "strategy_trade_intent_json": str(strategy_trade_intent.latest_intent_json) if strategy_trade_intent else None,
             "paper_proof_report_json": str(proof.report_json) if proof else None,
             "managed_lifecycle_report_json": str(managed_lifecycle.report_json) if managed_lifecycle else None,
             "runner_report_json": str(report_json),
