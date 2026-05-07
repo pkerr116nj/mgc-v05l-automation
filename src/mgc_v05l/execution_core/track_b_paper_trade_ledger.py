@@ -29,10 +29,15 @@ DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON = (
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT / "latest_track_b_live_position_status.json"
 )
 DEFAULT_TRACK_B_PNL_SUMMARY_JSON = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT / "latest_track_b_pnl_summary.json"
+DEFAULT_TRACK_B_ARTIFACT_RECONCILIATION_REPORT_JSON = (
+    Path("outputs/track_b_execution_core/diagnostics") / "latest_track_b_artifact_reconciliation_report.json"
+)
 LEDGER_SCHEMA_VERSION = "track_b_paper_trade_ledger_v1"
+RECONCILIATION_SCHEMA_VERSION = "track_b_artifact_reconciliation_v1"
 SUMMARY_SCHEMA_VERSION = "track_b_paper_trade_summary_v1"
 POSITION_SCHEMA_VERSION = "track_b_live_position_status_v1"
 PNL_SCHEMA_VERSION = "track_b_pnl_summary_v1"
+MANUALLY_FLATTENED_REVIEWED = "MANUALLY_FLATTENED_REVIEWED"
 POINT_VALUE_BY_FAMILY = {
     "MGC": Decimal("10"),
     "GC": Decimal("100"),
@@ -62,6 +67,148 @@ class TrackBPaperTradeLedgerResult:
     trade_summary: dict[str, Any]
     live_position_status: dict[str, Any]
     pnl_summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TrackBArtifactReconciliationResult:
+    ledger_jsonl: Path
+    trade_summary_json: Path
+    live_position_status_json: Path
+    pnl_summary_json: Path
+    reconciliation_report_json: Path
+    reconciliation_record_written: bool
+    reconciliation_report: dict[str, Any]
+    trade_summary: dict[str, Any]
+    live_position_status: dict[str, Any]
+    pnl_summary: dict[str, Any]
+
+
+def reconcile_manually_flattened_proof_lifecycle(
+    *,
+    lifecycle_id: str,
+    preflight_report_json: Path,
+    recovery_report_json: Path | None = None,
+    ledger_jsonl: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_JSONL,
+    output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    diagnostics_root: Path = Path("outputs/track_b_execution_core/diagnostics"),
+    expected_account_id: str | None = None,
+    expected_contract_key: str | None = None,
+    expected_local_symbol: str | None = None,
+    expected_con_id: int | None = None,
+    now: datetime | None = None,
+) -> TrackBArtifactReconciliationResult:
+    """Archive a stale proof/canary ledger row after read-only broker flat proof.
+
+    This is an artifact-only read-model repair. It never calls a broker and only
+    trusts broker truth already captured in read-only preflight/recovery reports.
+    """
+
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    ledger_path = Path(ledger_jsonl)
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    diagnostics_root.mkdir(parents=True, exist_ok=True)
+    if not ledger_path.exists():
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.touch()
+    trade_summary_json = root / "latest_track_b_paper_trade_summary.json"
+    live_position_status_json = root / "latest_track_b_live_position_status.json"
+    pnl_summary_json = root / "latest_track_b_pnl_summary.json"
+    reconciliation_report_json = diagnostics_root / "latest_track_b_artifact_reconciliation_report.json"
+
+    records = _read_ledger_records(ledger_path)
+    target = _latest_lifecycle_record(records, lifecycle_id)
+    preflight = _load_json_path(preflight_report_json)
+    recovery = _load_json_path(recovery_report_json) if recovery_report_json else {}
+    broker_check = _broker_flat_confirmation(
+        preflight=preflight,
+        recovery=recovery,
+        target=target,
+        expected_account_id=expected_account_id,
+        expected_contract_key=expected_contract_key,
+        expected_local_symbol=expected_local_symbol,
+        expected_con_id=expected_con_id,
+    )
+    proof_check = _proof_canary_confirmation(target)
+    existing_resolution = _existing_manual_flat_reconciliation(records, lifecycle_id)
+    can_archive = target is not None and proof_check["is_proof_canary"] is True and broker_check["broker_flat_confirmed"] is True
+    action = MANUALLY_FLATTENED_REVIEWED if can_archive else "NO_ARCHIVE_REVIEW_REQUIRED"
+    report = {
+        "schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "generated_at": actual_now.isoformat(),
+        "lifecycle_id": lifecycle_id,
+        "strategy_id": None if target is None else target.get("strategy_id"),
+        "instrument": None if target is None else target.get("contract_key"),
+        "contract_key": None if target is None else target.get("contract_key"),
+        "local_symbol": None if target is None else target.get("local_symbol"),
+        "con_id": None if target is None else target.get("con_id"),
+        "prior_artifact_state": _prior_artifact_state(target),
+        "proof_canary_confirmation": proof_check,
+        "broker_flat_confirmation": broker_check,
+        "open_orders_confirmation": {
+            "open_orders_none": broker_check["open_orders_none"],
+            "open_order_count": broker_check["open_order_count"],
+        },
+        "reconciliation_action": action,
+        "new_artifact_classification": action if can_archive else None,
+        "compact_summaries_updated": False,
+        "proof_canary_excluded_from_managed_trade_counts": True,
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+        "reconciliation_source": "READ_ONLY_PREFLIGHT_RECOVERY_REPORTS",
+        "preflight_report_path": str(preflight_report_json),
+        "recovery_report_path": str(recovery_report_json) if recovery_report_json else None,
+        "existing_resolution_record_found": existing_resolution is not None,
+        "remaining_blocker": None if can_archive else _reconciliation_blocker(target, proof_check, broker_check),
+    }
+    wrote = False
+    if can_archive and existing_resolution is None:
+        reconciliation_record = _manual_flat_reconciliation_record(
+            target=target,
+            broker_check=broker_check,
+            preflight_report_json=preflight_report_json,
+            recovery_report_json=recovery_report_json,
+            now=actual_now,
+        )
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(to_jsonable(reconciliation_record), sort_keys=True) + "\n")
+        records.append(reconciliation_record)
+        wrote = True
+
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=records,
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        now=actual_now,
+    )
+    _write_json(trade_summary_json, summaries["trade_summary"])
+    _write_json(live_position_status_json, summaries["live_position_status"])
+    _write_json(pnl_summary_json, summaries["pnl_summary"])
+    report["compact_summaries_updated"] = True
+    report["post_reconciliation_summary"] = {
+        "open_position_count": summaries["trade_summary"].get("open_position_count"),
+        "review_required_count": summaries["trade_summary"].get("review_required_count"),
+        "managed_strategy_trade_count": summaries["trade_summary"].get("managed_strategy_trade_count"),
+        "proof_canary_trade_count": summaries["trade_summary"].get("proof_canary_trade_count"),
+        "archived_manual_flat_count": summaries["trade_summary"].get("archived_manual_flat_count"),
+    }
+    _write_json(reconciliation_report_json, report)
+    return TrackBArtifactReconciliationResult(
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        reconciliation_report_json=reconciliation_report_json,
+        reconciliation_record_written=wrote,
+        reconciliation_report=report,
+        trade_summary=summaries["trade_summary"],
+        live_position_status=summaries["live_position_status"],
+        pnl_summary=summaries["pnl_summary"],
+    )
 
 
 def update_track_b_paper_trade_ledger_from_runner_report(
@@ -137,32 +284,37 @@ def build_track_b_paper_trade_summaries(
 ) -> dict[str, dict[str, Any]]:
     actual_now = now or datetime.now(UTC)
     require_aware_datetime(actual_now, "now")
-    records = [dict(item) for item in ledger_records]
+    raw_records = [dict(item) for item in ledger_records]
+    records = _apply_manual_flat_reconciliations(raw_records)
+    trade_records = [item for item in records if not _is_reconciliation_record(item)]
     today = actual_now.date().isoformat()
     week_start = (actual_now.date() - timedelta(days=actual_now.weekday())).isoformat()
     month_start = actual_now.date().replace(day=1).isoformat()
     year_start = actual_now.date().replace(month=1, day=1).isoformat()
-    today_records = [item for item in records if _date_prefix(item.get("exit_timestamp") or item.get("created_at")) == today]
+    today_records = [item for item in trade_records if _date_prefix(item.get("exit_timestamp") or item.get("created_at")) == today]
     week_records = [
         item
-        for item in records
+        for item in trade_records
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= week_start
     ]
     month_records = [
         item
-        for item in records
+        for item in trade_records
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= month_start
     ]
     ytd_records = [
         item
-        for item in records
+        for item in trade_records
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= year_start
     ]
-    open_records = [item for item in records if not _is_flat_closed_trade(item)]
-    review_required = [item for item in records if item.get("review_required") is True]
-    last_trade = max(records, key=lambda item: str(item.get("entry_timestamp") or item.get("created_at") or ""), default=None)
+    open_records = [item for item in trade_records if _is_open_position_record(item)]
+    review_required = [item for item in trade_records if item.get("review_required") is True and not _is_manual_flat_reviewed(item)]
+    managed_records = [item for item in trade_records if item.get("paper_lifecycle_type") == "STRATEGY_MANAGED"]
+    proof_canary_records = [item for item in trade_records if _is_proof_canary_record(item)]
+    archived_manual_flat = [item for item in trade_records if _is_manual_flat_reviewed(item)]
+    last_trade = max(trade_records, key=lambda item: str(item.get("entry_timestamp") or item.get("created_at") or ""), default=None)
     recent_trades = sorted(
-        records,
+        trade_records,
         key=lambda item: str(item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at") or ""),
         reverse=True,
     )[:20]
@@ -172,12 +324,17 @@ def build_track_b_paper_trade_summaries(
         "as_of": actual_now.isoformat(),
         "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
         "broker_reconciled": False,
-        "trade_count": len(records),
-        "closed_trade_count": sum(1 for item in records if _is_flat_closed_trade(item)),
-        "completed_trade_count": sum(1 for item in records if _is_flat_closed_trade(item)),
+        "trade_count": len(trade_records),
+        "closed_trade_count": sum(1 for item in trade_records if _is_flat_closed_trade(item)),
+        "completed_trade_count": sum(1 for item in trade_records if _is_flat_closed_trade(item)),
+        "managed_strategy_trade_count": len(managed_records),
+        "meaningful_strategy_trade_count": len(managed_records),
+        "proof_canary_trade_count": len(proof_canary_records),
+        "archived_manual_flat_count": len(archived_manual_flat),
         "open_position_count": len(open_records),
         "review_required_count": len(review_required),
-        "paper_trades_attempted_count": len(records),
+        "paper_trades_attempted_count": len(trade_records),
+        "proof_canary_excluded_from_meaningful_strategy_counts": True,
         "recent_trades": [_compact_trade_row(item) for item in recent_trades],
         "last_trade_time": None if last_trade is None else last_trade.get("entry_timestamp") or last_trade.get("created_at"),
         "last_trade_strategy": None if last_trade is None else last_trade.get("strategy_id"),
@@ -195,20 +352,20 @@ def build_track_b_paper_trade_summaries(
         "account_id": _first(records, "account_id"),
         "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
         "broker_reconciled": False,
-        "positions_by_instrument": _positions_by(records, "contract_key", actual_now),
-        "positions_by_strategy": _positions_by(records, "strategy_id", actual_now),
+        "positions_by_instrument": _positions_by(trade_records, "contract_key", actual_now),
+        "positions_by_strategy": _positions_by(trade_records, "strategy_id", actual_now),
         "open_position_count": len(open_records),
         "open_order_count": 0,
         "total_unrealized_pnl": "0",
         "realized_pnl_today": _sum_decimal(today_records, "realized_pnl"),
         "review_required_positions": [item for item in open_records if item.get("review_required") is True],
         "last_broker_reconciliation_time": None,
-        "source_artifact_paths": _source_paths(records),
+        "source_artifact_paths": _source_paths(trade_records),
         "broker_truth_warning": "Artifact-derived status is not broker truth until source=BROKER_RECONCILED.",
     }
 
-    wins = [item for item in records if (_decimal(item.get("realized_pnl")) or Decimal("0")) > 0]
-    losses = [item for item in records if (_decimal(item.get("realized_pnl")) or Decimal("0")) < 0]
+    wins = [item for item in trade_records if (_decimal(item.get("realized_pnl")) or Decimal("0")) > 0]
+    losses = [item for item in trade_records if (_decimal(item.get("realized_pnl")) or Decimal("0")) < 0]
     pnl_summary = {
         "schema_version": PNL_SCHEMA_VERSION,
         "as_of": actual_now.isoformat(),
@@ -234,10 +391,10 @@ def build_track_b_paper_trade_summaries(
         "losses": len(losses),
         "avg_win": _average_decimal(wins, "realized_pnl"),
         "avg_loss": _average_decimal(losses, "realized_pnl"),
-        "by_strategy": _pnl_groups(records, "strategy_id", actual_now),
-        "by_instrument": _pnl_groups(records, "contract_key", actual_now),
-        "by_side": _pnl_groups(records, "side", actual_now),
-        "by_lifecycle_classification": _pnl_groups(records, "paper_lifecycle_classification", actual_now),
+        "by_strategy": _pnl_groups(trade_records, "strategy_id", actual_now),
+        "by_instrument": _pnl_groups(trade_records, "contract_key", actual_now),
+        "by_side": _pnl_groups(trade_records, "side", actual_now),
+        "by_lifecycle_classification": _pnl_groups(trade_records, "paper_lifecycle_classification", actual_now),
         "review_required_count": len(review_required),
         "last_trade_time": trade_summary["last_trade_time"],
         "last_trade_strategy": trade_summary["last_trade_strategy"],
@@ -442,6 +599,199 @@ def _managed_trade_record_from_runner_report(
     }
 
 
+def _latest_lifecycle_record(records: Iterable[Mapping[str, Any]], lifecycle_id: str) -> dict[str, Any] | None:
+    matches = [
+        dict(item)
+        for item in records
+        if str(item.get("lifecycle_id") or "") == lifecycle_id and not _is_reconciliation_record(item)
+    ]
+    return matches[-1] if matches else None
+
+
+def _existing_manual_flat_reconciliation(records: Iterable[Mapping[str, Any]], lifecycle_id: str) -> dict[str, Any] | None:
+    matches = [
+        dict(item)
+        for item in records
+        if _is_reconciliation_record(item)
+        and str(item.get("lifecycle_id") or "") == lifecycle_id
+        and item.get("new_artifact_classification") == MANUALLY_FLATTENED_REVIEWED
+    ]
+    return matches[-1] if matches else None
+
+
+def _proof_canary_confirmation(target: Mapping[str, Any] | None) -> dict[str, Any]:
+    is_proof = False if target is None else _is_proof_canary_record(target)
+    return {
+        "is_proof_canary": is_proof,
+        "paper_lifecycle_type": None if target is None else target.get("paper_lifecycle_type"),
+        "paper_proof_classification": None if target is None else target.get("paper_proof_classification"),
+        "lifecycle_id": None if target is None else target.get("lifecycle_id"),
+    }
+
+
+def _broker_flat_confirmation(
+    *,
+    preflight: Mapping[str, Any],
+    recovery: Mapping[str, Any],
+    target: Mapping[str, Any] | None,
+    expected_account_id: str | None,
+    expected_contract_key: str | None,
+    expected_local_symbol: str | None,
+    expected_con_id: int | None,
+) -> dict[str, Any]:
+    position = _mapping(preflight.get("position"))
+    contract = _mapping(preflight.get("contract"))
+    raw_rows = _nested_get(position, ("raw", "rows"))
+    first_row = raw_rows[0] if isinstance(raw_rows, list) and raw_rows and isinstance(raw_rows[0], Mapping) else {}
+    open_orders = preflight.get("open_orders")
+    open_order_count = len(open_orders) if isinstance(open_orders, list) else None
+    target_account = expected_account_id or (None if target is None else _string_or_none(target.get("account_id")))
+    target_contract = expected_contract_key or (None if target is None else _string_or_none(target.get("contract_key")))
+    target_local_symbol = expected_local_symbol or (None if target is None else _string_or_none(target.get("local_symbol")))
+    target_con_id = expected_con_id if expected_con_id is not None else (None if target is None else target.get("con_id"))
+    signed_quantity = _decimal(position.get("signed_quantity"))
+    con_id_value = contract.get("con_id") or first_row.get("con_id")
+    local_symbol_value = contract.get("local_symbol") or first_row.get("local_symbol")
+    contract_key_value = preflight.get("contract_key") or position.get("contract_key") or contract.get("contract_key")
+    account_value = preflight.get("account_id") or position.get("account_id") or first_row.get("account_id")
+    checks = preflight.get("checks") if isinstance(preflight.get("checks"), list) else []
+    check_map = {str(item.get("name")): bool(item.get("passed")) for item in checks if isinstance(item, Mapping)}
+    submit_attempted = bool(preflight.get("submit_attempted") or _nested_get(preflight, ("safety", "submit_attempted")))
+    recovery_clean = recovery in ({}, None) or str(recovery.get("classification") or "") == "RECOVERY_READY_CLEAN"
+    contract_matches = (
+        (target_contract in {None, "", str(contract_key_value)})
+        and (target_local_symbol in {None, "", str(local_symbol_value)})
+        and (target_con_id in {None, "", con_id_value, str(con_id_value)})
+        and (target_account in {None, "", str(account_value)})
+    )
+    flat = signed_quantity == Decimal("0")
+    open_orders_none = open_order_count == 0
+    preflight_ready = str(preflight.get("classification") or "") == "READY_READ_ONLY"
+    broker_flat_confirmed = (
+        preflight_ready
+        and recovery_clean
+        and contract_matches
+        and flat
+        and open_orders_none
+        and submit_attempted is False
+    )
+    return {
+        "broker_flat_confirmed": broker_flat_confirmed,
+        "preflight_classification": preflight.get("classification"),
+        "recovery_classification": recovery.get("classification") if recovery else None,
+        "account_id": account_value,
+        "contract_key": contract_key_value,
+        "local_symbol": local_symbol_value,
+        "con_id": con_id_value,
+        "signed_quantity": _decimal_text(signed_quantity),
+        "open_orders_none": open_orders_none,
+        "open_order_count": open_order_count,
+        "contract_matches_lifecycle": contract_matches,
+        "submit_attempted": submit_attempted,
+        "proof_position_flat_check_passed": check_map.get("proof_position_flat"),
+        "proof_open_orders_clean_check_passed": check_map.get("proof_open_orders_clean"),
+    }
+
+
+def _prior_artifact_state(target: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if target is None:
+        return None
+    return {
+        "trade_id": target.get("trade_id"),
+        "lifecycle_id": target.get("lifecycle_id"),
+        "paper_lifecycle_classification": target.get("paper_lifecycle_classification"),
+        "paper_proof_classification": target.get("paper_proof_classification"),
+        "final_broker_state_classification": target.get("final_broker_state_classification"),
+        "final_position_status": target.get("final_position_status"),
+        "review_required": target.get("review_required"),
+        "broker_reconciled": target.get("broker_reconciled"),
+        "entry_fill_price": target.get("entry_fill_price"),
+        "exit_fill_price": target.get("exit_fill_price"),
+        "quantity": target.get("quantity"),
+    }
+
+
+def _reconciliation_blocker(
+    target: Mapping[str, Any] | None,
+    proof_check: Mapping[str, Any],
+    broker_check: Mapping[str, Any],
+) -> str:
+    if target is None:
+        return "LIFECYCLE_NOT_FOUND_IN_LEDGER"
+    if proof_check.get("is_proof_canary") is not True:
+        return "LIFECYCLE_IS_NOT_PROOF_CANARY"
+    if broker_check.get("broker_flat_confirmed") is not True:
+        return "BROKER_FLAT_CONFIRMATION_FAILED"
+    return "DIAGNOSTIC_INCONCLUSIVE"
+
+
+def _manual_flat_reconciliation_record(
+    *,
+    target: Mapping[str, Any],
+    broker_check: Mapping[str, Any],
+    preflight_report_json: Path,
+    recovery_report_json: Path | None,
+    now: datetime,
+) -> dict[str, Any]:
+    return {
+        "ledger_schema_version": LEDGER_SCHEMA_VERSION,
+        "record_type": "ARTIFACT_RECONCILIATION",
+        "reconciliation_schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "trade_id": f"{target.get('trade_id')}:manual_flat_review",
+        "lifecycle_id": target.get("lifecycle_id"),
+        "strategy_id": target.get("strategy_id"),
+        "instrument_family": target.get("instrument_family"),
+        "contract_key": target.get("contract_key"),
+        "local_symbol": target.get("local_symbol"),
+        "con_id": target.get("con_id"),
+        "account_id": target.get("account_id"),
+        "prior_artifact_classification": target.get("paper_lifecycle_classification"),
+        "prior_review_required": target.get("review_required"),
+        "reconciliation_action": MANUALLY_FLATTENED_REVIEWED,
+        "new_artifact_classification": MANUALLY_FLATTENED_REVIEWED,
+        "final_position_status": MANUALLY_FLATTENED_REVIEWED,
+        "review_required": False,
+        "broker_reconciled": False,
+        "broker_flat_confirmed": True,
+        "broker_signed_quantity": broker_check.get("signed_quantity"),
+        "broker_open_order_count": broker_check.get("open_order_count"),
+        "source": "READ_ONLY_PREFLIGHT_RECOVERY_REPORTS",
+        "preflight_report_path": str(preflight_report_json),
+        "recovery_report_path": str(recovery_report_json) if recovery_report_json else None,
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+        "created_at": now.isoformat(),
+    }
+
+
+def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    reconciled_lifecycle_ids = {
+        str(item.get("lifecycle_id"))
+        for item in records
+        if _is_reconciliation_record(item) and item.get("new_artifact_classification") == MANUALLY_FLATTENED_REVIEWED
+    }
+    if not reconciled_lifecycle_ids:
+        return records
+    normalized: list[dict[str, Any]] = []
+    for item in records:
+        row = dict(item)
+        if (
+            not _is_reconciliation_record(row)
+            and str(row.get("lifecycle_id") or "") in reconciled_lifecycle_ids
+            and _is_proof_canary_record(row)
+        ):
+            row["artifact_reconciliation_classification"] = MANUALLY_FLATTENED_REVIEWED
+            row["manual_flat_reviewed"] = True
+            row["review_required"] = False
+            row["prior_paper_lifecycle_classification"] = row.get("paper_lifecycle_classification")
+            row["paper_lifecycle_classification"] = MANUALLY_FLATTENED_REVIEWED
+            row["final_position_status"] = MANUALLY_FLATTENED_REVIEWED
+            row["final_broker_state_classification"] = MANUALLY_FLATTENED_REVIEWED
+        normalized.append(row)
+    return normalized
+
+
 def _read_ledger_records(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if not path.exists():
@@ -567,6 +917,8 @@ def _review_required(
 
 
 def _is_flat_closed_trade(item: Mapping[str, Any]) -> bool:
+    if _is_manual_flat_reviewed(item):
+        return False
     if item.get("paper_lifecycle_type") == "STRATEGY_MANAGED":
         return (
             item.get("paper_lifecycle_classification") == "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT"
@@ -576,6 +928,29 @@ def _is_flat_closed_trade(item: Mapping[str, Any]) -> bool:
         item.get("paper_proof_classification") == "TRACK_B_PAPER_PROOF_PASSED"
         and item.get("paper_lifecycle_classification") == "PROOF_COMPLETE_FLAT"
         and item.get("final_position_status") in {"CLEAN", "PROOF_COMPLETE_FLAT"}
+    )
+
+
+def _is_open_position_record(item: Mapping[str, Any]) -> bool:
+    return not _is_reconciliation_record(item) and not _is_flat_closed_trade(item) and not _is_manual_flat_reviewed(item)
+
+
+def _is_reconciliation_record(item: Mapping[str, Any]) -> bool:
+    return item.get("record_type") == "ARTIFACT_RECONCILIATION"
+
+
+def _is_proof_canary_record(item: Mapping[str, Any]) -> bool:
+    if item.get("paper_lifecycle_type") == "STRATEGY_MANAGED":
+        return False
+    lifecycle_id = str(item.get("lifecycle_id") or "")
+    return lifecycle_id.startswith("paper_proof_") or item.get("paper_proof_classification") is not None
+
+
+def _is_manual_flat_reviewed(item: Mapping[str, Any]) -> bool:
+    return (
+        item.get("artifact_reconciliation_classification") == MANUALLY_FLATTENED_REVIEWED
+        or item.get("new_artifact_classification") == MANUALLY_FLATTENED_REVIEWED
+        or item.get("manual_flat_reviewed") is True
     )
 
 
@@ -610,7 +985,7 @@ def _pnl_groups(records: Iterable[Mapping[str, Any]], key: str, now: datetime) -
         name: {
             "trade_count": len(items),
             "trades": len(items),
-            "open_position_count": sum(1 for item in items if not _is_flat_closed_trade(item)),
+            "open_position_count": sum(1 for item in items if _is_open_position_record(item)),
             "realized_pnl": _sum_decimal(items, "realized_pnl"),
             "realized_pnl_today": _sum_decimal(_records_since(items, today, exact_date=True), "realized_pnl"),
             "realized_pnl_week": _sum_decimal(_records_since(items, week_start), "realized_pnl"),
@@ -623,7 +998,7 @@ def _pnl_groups(records: Iterable[Mapping[str, Any]], key: str, now: datetime) -
                 (str(item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at") or "") for item in items),
                 default=None,
             ),
-            "review_required_count": sum(1 for item in items if item.get("review_required") is True),
+            "review_required_count": sum(1 for item in items if item.get("review_required") is True and not _is_manual_flat_reviewed(item)),
         }
         for name, items in sorted(grouped.items())
     }
@@ -664,6 +1039,8 @@ def _compact_trade_row(item: Mapping[str, Any]) -> dict[str, Any]:
         "paper_lifecycle_classification": item.get("paper_lifecycle_classification"),
         "final_broker_state_classification": item.get("final_broker_state_classification"),
         "final_position_status": item.get("final_position_status"),
+        "artifact_reconciliation_classification": item.get("artifact_reconciliation_classification"),
+        "paper_lifecycle_type": item.get("paper_lifecycle_type"),
         "broker_reconciled": item.get("broker_reconciled"),
         "review_required": item.get("review_required"),
         "paper_lifecycle_report_path": item.get("paper_lifecycle_report_path"),
@@ -673,7 +1050,7 @@ def _compact_trade_row(item: Mapping[str, Any]) -> dict[str, Any]:
 def _positions_by(records: Iterable[Mapping[str, Any]], key: str, now: datetime) -> dict[str, dict[str, Any]]:
     positions: dict[str, dict[str, Any]] = {}
     for item in records:
-        if _is_flat_closed_trade(item):
+        if not _is_open_position_record(item):
             continue
         name = str(item.get(key) or "UNKNOWN")
         quantity = _decimal(item.get("quantity")) or Decimal("0")

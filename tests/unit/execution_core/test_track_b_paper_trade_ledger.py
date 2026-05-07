@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.operator_status import OperatorStatusInputs, create_operator_status_summary
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
+    reconcile_manually_flattened_proof_lifecycle,
     update_track_b_paper_trade_ledger_from_runner_report,
 )
 
@@ -81,6 +82,98 @@ def runner_report(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         "strategy_paper_runner_verdict": "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED",
     }
     report_path = write_json(tmp_path / "runner" / "track_b_strategy_paper_runner_report.json", payload)
+    return report_path, payload
+
+
+def write_clean_mgc_preflight(tmp_path: Path, *, signed_quantity: int = 0, open_orders: list[dict[str, object]] | None = None) -> Path:
+    return write_json(
+        tmp_path / "preflight" / "preflight_report.json",
+        {
+            "classification": "READY_READ_ONLY",
+            "account_id": "DUM882026",
+            "contract_key": "MGC-202606",
+            "safety": {"submit_attempted": False},
+            "contract": {"con_id": 712565978, "contract_key": "MGC-202606", "local_symbol": "MGCM6"},
+            "position": {
+                "account_id": "DUM882026",
+                "contract_key": "MGC-202606",
+                "signed_quantity": signed_quantity,
+                "raw": {
+                    "rows": [
+                        {
+                            "account_id": "DUM882026",
+                            "con_id": 712565978,
+                            "local_symbol": "MGCM6",
+                            "signed_quantity": signed_quantity,
+                        }
+                    ]
+                },
+            },
+            "open_orders": [] if open_orders is None else open_orders,
+            "checks": [
+                {"name": "proof_position_flat", "passed": signed_quantity == 0},
+                {"name": "proof_open_orders_clean", "passed": not open_orders},
+            ],
+        },
+    )
+
+
+def write_clean_recovery(tmp_path: Path) -> Path:
+    return write_json(
+        tmp_path / "recovery" / "recovery_status_report.json",
+        {
+            "classification": "RECOVERY_READY_CLEAN",
+            "account_id": "DUM882026",
+            "contract_key": "MGC-202606",
+            "submit_attempted": False,
+            "primary_blocker": None,
+        },
+    )
+
+
+def stale_mgc_proof_runner_report(tmp_path: Path) -> tuple[Path, dict[str, object]]:
+    proof_path = write_json(
+        tmp_path / "proof" / "paper_proof_report.json",
+        {
+            "classification": "TRACK_B_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED",
+            "account_id": "DUM882026",
+            "contract_key": "MGC-202606",
+            "proof_payload": {
+                "run_id": "paper_proof_f9d713f6cf94415c93663b9085e05b06",
+                "proof_lifecycle_status": "OPEN_FILLED",
+                "open_intent": {
+                    "account_id": "DUM882026",
+                    "action": "BUY",
+                    "contract_key": "MGC-202606",
+                    "created_at": "2026-05-06T23:11:11+00:00",
+                    "limit_price": "4705.5",
+                    "quantity": "1",
+                },
+                "open_fill": {
+                    "broker_order_id": "7",
+                    "filled_at": "2026-05-06T23:11:12+00:00",
+                    "price": "4704.6",
+                    "quantity": "1",
+                },
+            },
+        },
+    )
+    payload: dict[str, object] = {
+        "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "signal_direction": "LONG",
+        "mode": "PAPER",
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "quantity": 1,
+        "paper_proof_invoked": True,
+        "paper_proof_classification": "TRACK_B_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED",
+        "paper_proof_lifecycle_status": "OPEN_FILLED",
+        "paper_proof_report_path": str(proof_path),
+        "strategy_paper_runner_verdict": "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED",
+    }
+    report_path = write_json(tmp_path / "runner" / "stale_mgc_runner_report.json", payload)
     return report_path, payload
 
 
@@ -227,6 +320,144 @@ def test_strategy_managed_lifecycle_trade_is_separated_from_proof(tmp_path: Path
     assert row["realized_pnl"] == "5"
     summary = json.loads(result.trade_summary_json.read_text(encoding="utf-8"))
     assert summary["completed_trade_count"] == 1
+    assert summary["managed_strategy_trade_count"] == 1
+    assert summary["meaningful_strategy_trade_count"] == 1
+
+
+def test_stale_proof_lifecycle_broker_flat_archives_manual_review_and_clears_compact_open_position(tmp_path: Path) -> None:
+    report_path, payload = stale_mgc_proof_runner_report(tmp_path)
+    initial = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=payload,
+        runner_report_json=report_path,
+        output_root=tmp_path / "paper_trade_ledger",
+        now=aware_now(),
+    )
+    assert initial.trade_summary["open_position_count"] == 1
+    assert initial.trade_summary["review_required_count"] == 1
+
+    result = reconcile_manually_flattened_proof_lifecycle(
+        lifecycle_id="paper_proof_f9d713f6cf94415c93663b9085e05b06",
+        preflight_report_json=write_clean_mgc_preflight(tmp_path),
+        recovery_report_json=write_clean_recovery(tmp_path),
+        ledger_jsonl=initial.ledger_jsonl,
+        output_root=tmp_path / "paper_trade_ledger",
+        diagnostics_root=tmp_path / "diagnostics",
+        expected_account_id="DUM882026",
+        expected_contract_key="MGC-202606",
+        expected_local_symbol="MGCM6",
+        expected_con_id=712565978,
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is True
+    assert result.reconciliation_report["reconciliation_action"] == "MANUALLY_FLATTENED_REVIEWED"
+    assert result.reconciliation_report["broker_flat_confirmation"]["broker_flat_confirmed"] is True
+    assert result.trade_summary["open_position_count"] == 0
+    assert result.trade_summary["review_required_count"] == 0
+    assert result.trade_summary["proof_canary_excluded_from_meaningful_strategy_counts"] is True
+    assert result.trade_summary["managed_strategy_trade_count"] == 0
+    assert result.trade_summary["meaningful_strategy_trade_count"] == 0
+    assert result.trade_summary["proof_canary_trade_count"] == 1
+    assert result.trade_summary["archived_manual_flat_count"] == 1
+    assert result.trade_summary["recent_trades"][0]["paper_lifecycle_classification"] == "MANUALLY_FLATTENED_REVIEWED"
+    assert result.trade_summary["recent_trades"][0]["artifact_reconciliation_classification"] == "MANUALLY_FLATTENED_REVIEWED"
+    assert result.live_position_status["open_position_count"] == 0
+    assert result.live_position_status["positions_by_instrument"] == {}
+    report = json.loads(result.reconciliation_report_json.read_text(encoding="utf-8"))
+    assert report["broker_mutation_attempted"] is False
+    assert report["paper_proof_cli_invoked"] is False
+
+
+def test_stale_proof_lifecycle_broker_non_flat_remains_review_required(tmp_path: Path) -> None:
+    report_path, payload = stale_mgc_proof_runner_report(tmp_path)
+    initial = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=payload,
+        runner_report_json=report_path,
+        output_root=tmp_path / "paper_trade_ledger",
+        now=aware_now(),
+    )
+
+    result = reconcile_manually_flattened_proof_lifecycle(
+        lifecycle_id="paper_proof_f9d713f6cf94415c93663b9085e05b06",
+        preflight_report_json=write_clean_mgc_preflight(tmp_path, signed_quantity=1),
+        recovery_report_json=write_clean_recovery(tmp_path),
+        ledger_jsonl=initial.ledger_jsonl,
+        output_root=tmp_path / "paper_trade_ledger",
+        diagnostics_root=tmp_path / "diagnostics",
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is False
+    assert result.reconciliation_report["reconciliation_action"] == "NO_ARCHIVE_REVIEW_REQUIRED"
+    assert result.reconciliation_report["remaining_blocker"] == "BROKER_FLAT_CONFIRMATION_FAILED"
+    assert result.trade_summary["open_position_count"] == 1
+    assert result.trade_summary["review_required_count"] == 1
+
+
+def test_stale_proof_lifecycle_open_orders_remain_review_required(tmp_path: Path) -> None:
+    report_path, payload = stale_mgc_proof_runner_report(tmp_path)
+    initial = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=payload,
+        runner_report_json=report_path,
+        output_root=tmp_path / "paper_trade_ledger",
+        now=aware_now(),
+    )
+
+    result = reconcile_manually_flattened_proof_lifecycle(
+        lifecycle_id="paper_proof_f9d713f6cf94415c93663b9085e05b06",
+        preflight_report_json=write_clean_mgc_preflight(tmp_path, open_orders=[{"order_id": 7}]),
+        recovery_report_json=write_clean_recovery(tmp_path),
+        ledger_jsonl=initial.ledger_jsonl,
+        output_root=tmp_path / "paper_trade_ledger",
+        diagnostics_root=tmp_path / "diagnostics",
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is False
+    assert result.reconciliation_report["open_orders_confirmation"]["open_orders_none"] is False
+    assert result.trade_summary["open_position_count"] == 1
+    assert result.trade_summary["review_required_count"] == 1
+
+
+def test_strategy_managed_lifecycle_is_not_archived_as_proof_canary(tmp_path: Path) -> None:
+    ledger_jsonl = tmp_path / "paper_trade_ledger" / "track_b_paper_trade_ledger.jsonl"
+    ledger_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    ledger_jsonl.write_text(
+        json.dumps(
+            {
+                "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+                "paper_lifecycle_type": "STRATEGY_MANAGED",
+                "lifecycle_id": "managed-open-001",
+                "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "con_id": 712565978,
+                "account_id": "DUM882026",
+                "quantity": "1",
+                "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+                "review_required": True,
+                "created_at": "2026-05-06T23:11:12+00:00",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_manually_flattened_proof_lifecycle(
+        lifecycle_id="managed-open-001",
+        preflight_report_json=write_clean_mgc_preflight(tmp_path),
+        recovery_report_json=write_clean_recovery(tmp_path),
+        ledger_jsonl=ledger_jsonl,
+        output_root=tmp_path / "paper_trade_ledger",
+        diagnostics_root=tmp_path / "diagnostics",
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is False
+    assert result.reconciliation_report["remaining_blocker"] == "LIFECYCLE_IS_NOT_PROOF_CANARY"
+    assert result.trade_summary["open_position_count"] == 1
+    assert result.trade_summary["review_required_count"] == 1
 
 
 def test_operator_status_exposes_compact_paper_results(tmp_path: Path) -> None:
