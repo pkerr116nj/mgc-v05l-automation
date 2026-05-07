@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1531,6 +1531,94 @@ def test_monitor_liveness_diagnostic_classifies_expected_backoff_sleep(tmp_path:
     assert diagnostic["suspected_stall_classification"] == "MONITOR_SLEEPING_EXPECTED"
     assert diagnostic["sleep_seconds"] == 60
     assert diagnostic["next_wake_at"] == "2026-05-05T12:01:00+00:00"
+
+
+def test_monitor_heartbeat_and_report_advance_during_backoff_sleep(tmp_path: Path) -> None:
+    cfg = config(tmp_path, poll_seconds=15, max_backoff_seconds=120)
+    instrument = cfg.instruments[0]
+    write_live_feed_artifacts(cfg, instrument, one_minute_candles(20, 40, source_tag="DATABENTO_LIVE_ARTIFACT"))
+    lock = shadow_monitor_module.TrackBShadowMonitorLock(
+        acquired=True,
+        lockfile=cfg.lockfile,
+        pidfile=cfg.pidfile,
+        owner={"pid": 333, "host": "test-host", "monitor_id": "monitor-backoff"},
+    )
+    report_json = cfg.output_root / "cycle-0001" / "track_b_shadow_monitor_report.json"
+    initial_time = now()
+    report = {
+        "completed_at": initial_time.isoformat(),
+        "cycle_index": 1,
+        "monitor_verdict": TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP.value,
+        "primary_blocker": "Databento Live confirmation window is incomplete.",
+        "report_json_path": str(report_json),
+        "latest_report_json_path": str(cfg.output_root / "latest_track_b_shadow_monitor_report.json"),
+    }
+    write_json(report_json, report)
+    write_json(cfg.output_root / "latest_track_b_shadow_monitor_report.json", report)
+
+    current_time = initial_time
+    sleep_calls: list[float] = []
+
+    def clock() -> datetime:
+        return current_time
+
+    def sleep(seconds: float) -> None:
+        nonlocal current_time
+        sleep_calls.append(seconds)
+        current_time = current_time + timedelta(seconds=seconds)
+
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=fake.runtime,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    shadow_monitor_module._sleep_with_monitor_liveness_updates(  # noqa: SLF001
+        config=cfg,
+        stages=stages,
+        monitor_id="monitor-backoff",
+        cycle_id="monitor-backoff-cycle-1",
+        cycle_index=1,
+        instruments=cfg.instruments,
+        lock=lock,
+        last_verdict=TrackBShadowMonitorVerdict.LIVE_FEED_WARMING_UP.value,
+        last_report_path=report_json,
+        last_report=report,
+        live_feed_processes={
+            instrument.instrument_family: shadow_monitor_module.TrackBLiveFeedProcessState(
+                instrument_family=instrument.instrument_family,
+                managed=True,
+                owned_by_monitor=True,
+                pid=4242,
+                status="LIVE_FEED_STARTED",
+            )
+        },
+        sleep_seconds=45,
+        next_wake_at=initial_time + timedelta(seconds=45),
+        now_func=clock,
+    )
+
+    heartbeat = json.loads((cfg.output_root / "latest_track_b_shadow_monitor_heartbeat.json").read_text())
+    latest_report = json.loads((cfg.output_root / "latest_track_b_shadow_monitor_report.json").read_text())
+    diagnostic = json.loads((cfg.diagnostic_output_root / "latest_track_b_monitor_liveness_diagnostic.json").read_text())
+    assert sleep_calls == [15, 15, 15]
+    assert heartbeat["generated_at"] == "2026-05-05T12:00:30+00:00"
+    assert heartbeat["sleep_seconds"] == 15
+    assert heartbeat["next_wake_at"] == "2026-05-05T12:00:45+00:00"
+    assert latest_report["completed_at"] == "2026-05-05T12:00:30+00:00"
+    assert latest_report["cycle_completed_at"] == "2026-05-05T12:00:00+00:00"
+    assert latest_report["monitor_sleeping_expected"] is True
+    assert latest_report["sleep_remaining_seconds"] == 15
+    assert latest_report["current_blocker"] == "Databento Live confirmation window is incomplete."
+    assert diagnostic["generated_at"] == "2026-05-05T12:00:30+00:00"
+    assert diagnostic["suspected_stall_classification"] == "MONITOR_SLEEPING_EXPECTED"
+    assert diagnostic["live_child_artifacts_advancing"] is True
 
 
 def test_monitor_liveness_diagnostic_classifies_children_advancing_monitor_stale(tmp_path: Path) -> None:

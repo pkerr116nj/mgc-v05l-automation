@@ -590,7 +590,22 @@ def run_track_b_shadow_monitor(
             if should_stop:
                 break
             if sleep_seconds > 0:
-                actual_stages.sleep(sleep_seconds)
+                _sleep_with_monitor_liveness_updates(
+                    config=config,
+                    stages=actual_stages,
+                    monitor_id=actual_monitor_id,
+                    cycle_id=cycle_id,
+                    cycle_index=cycle_index,
+                    instruments=instruments,
+                    lock=lock,
+                    last_verdict=final_verdict.value,
+                    last_report_path=final_report_json,
+                    last_report=report,
+                    live_feed_processes=live_feed_processes,
+                    sleep_seconds=sleep_seconds,
+                    next_wake_at=next_wake_at,
+                    now_func=clock,
+                )
     except KeyboardInterrupt:
         shutdown_reason = "KeyboardInterrupt"
     finally:
@@ -3478,6 +3493,101 @@ def _write_monitor_report(report_json: Path, report: Mapping[str, Any]) -> None:
     latest_report = Path(str(report["latest_report_json_path"]))
     latest_report.parent.mkdir(parents=True, exist_ok=True)
     latest_report.write_text(payload, encoding="utf-8")
+
+
+def _sleep_liveness_update_interval(config: TrackBShadowMonitorConfig) -> float:
+    if config.poll_seconds <= 0:
+        return 1.0
+    return max(1.0, min(float(config.poll_seconds), 15.0))
+
+
+def _sleep_with_monitor_liveness_updates(
+    *,
+    config: TrackBShadowMonitorConfig,
+    stages: TrackBShadowMonitorStages,
+    monitor_id: str,
+    cycle_id: str,
+    cycle_index: int,
+    instruments: Sequence[TrackBShadowMonitorInstrumentConfig],
+    lock: TrackBShadowMonitorLock,
+    last_verdict: str | None,
+    last_report_path: Path | None,
+    last_report: Mapping[str, Any],
+    live_feed_processes: Mapping[str, TrackBLiveFeedProcessState],
+    sleep_seconds: float,
+    next_wake_at: datetime | None,
+    now_func: Callable[[], datetime],
+) -> None:
+    """Sleep in observable slices so long backoff never looks like a dead monitor."""
+    remaining = max(0.0, float(sleep_seconds))
+    update_interval = _sleep_liveness_update_interval(config)
+    while remaining > 0:
+        generated_at = now_func()
+        require_aware_datetime(generated_at, "monitor_sleep_liveness_generated_at")
+        _write_sleeping_monitor_report(
+            report_json=last_report_path,
+            report=last_report,
+            generated_at=generated_at,
+            sleep_seconds=sleep_seconds,
+            sleep_remaining_seconds=remaining,
+            next_wake_at=next_wake_at,
+            current_blocker=last_report.get("primary_blocker"),
+        )
+        _write_heartbeat(
+            config=config,
+            monitor_id=monitor_id,
+            cycle_id=cycle_id,
+            cycle_index=cycle_index,
+            generated_at=generated_at,
+            monitor_running=True,
+            instruments=instruments,
+            last_verdict=last_verdict,
+            last_report_path=last_report_path,
+            lock=lock,
+            current_blocker=last_report.get("primary_blocker"),
+            sleep_seconds=remaining,
+            next_wake_at=next_wake_at,
+        )
+        _write_monitor_liveness_diagnostic(
+            config=config,
+            now=generated_at,
+            lock=lock,
+            instruments=instruments,
+            live_feed_processes=live_feed_processes,
+            last_report=last_report,
+            sleep_seconds=remaining,
+            next_wake_at=next_wake_at,
+        )
+        chunk = min(update_interval, remaining)
+        stages.sleep(chunk)
+        remaining = max(0.0, remaining - chunk)
+
+
+def _write_sleeping_monitor_report(
+    *,
+    report_json: Path | None,
+    report: Mapping[str, Any],
+    generated_at: datetime,
+    sleep_seconds: float,
+    sleep_remaining_seconds: float,
+    next_wake_at: datetime | None,
+    current_blocker: object | None,
+) -> None:
+    if report_json is None:
+        return
+    sleep_report = dict(report)
+    sleep_report.setdefault("cycle_completed_at", report.get("completed_at"))
+    sleep_report["completed_at"] = generated_at.astimezone(UTC).isoformat()
+    sleep_report["monitor_sleeping_expected"] = True
+    sleep_report["sleep_backoff_active"] = True
+    sleep_report["sleep_status_updated_at"] = generated_at.astimezone(UTC).isoformat()
+    sleep_report["sleep_seconds"] = round(float(sleep_seconds), 3)
+    sleep_report["sleep_remaining_seconds"] = round(float(sleep_remaining_seconds), 3)
+    sleep_report["next_wake_at"] = None if next_wake_at is None else next_wake_at.astimezone(UTC).isoformat()
+    sleep_report["expected_next_cycle_time"] = sleep_report["next_wake_at"]
+    sleep_report["current_blocker"] = None if current_blocker is None else str(current_blocker)
+    sleep_report["monitor_liveness_state"] = "MONITOR_SLEEPING_EXPECTED"
+    _write_monitor_report(report_json, sleep_report)
 
 
 def _write_monitor_liveness_diagnostic(
