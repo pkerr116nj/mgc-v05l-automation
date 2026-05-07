@@ -1934,6 +1934,13 @@ class OperatorDashboardService:
             },
             "paper_trades_attempted_count": trade_summary.get("paper_trades_attempted_count", 0),
             "completed_trade_count": trade_summary.get("completed_trade_count", trade_summary.get("closed_trade_count", 0)),
+            "managed_strategy_trade_count": trade_summary.get("managed_strategy_trade_count", 0),
+            "meaningful_strategy_trade_count": trade_summary.get("meaningful_strategy_trade_count", 0),
+            "proof_canary_trade_count": trade_summary.get("proof_canary_trade_count", 0),
+            "archived_manual_flat_count": trade_summary.get("archived_manual_flat_count", 0),
+            "proof_canary_excluded_from_meaningful_strategy_counts": bool(
+                trade_summary.get("proof_canary_excluded_from_meaningful_strategy_counts", True)
+            ),
             "open_position_count": live_position_status.get("open_position_count", trade_summary.get("open_position_count", 0)),
             "realized_pnl_today": pnl_summary.get("total_realized_pnl_today", "0"),
             "realized_pnl_session": pnl_summary.get("total_realized_pnl_session", "0"),

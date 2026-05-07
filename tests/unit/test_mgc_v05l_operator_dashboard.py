@@ -3208,6 +3208,11 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
                 "broker_reconciled": False,
                 "paper_trades_attempted_count": 1,
                 "completed_trade_count": 1,
+                "managed_strategy_trade_count": 0,
+                "meaningful_strategy_trade_count": 0,
+                "proof_canary_trade_count": 1,
+                "archived_manual_flat_count": 0,
+                "proof_canary_excluded_from_meaningful_strategy_counts": True,
                 "recent_trades": [
                     {
                         "trade_id": "trade-1",
@@ -3311,6 +3316,11 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     assert "not broker truth" in payload["broker_truth_warning"]
     assert payload["paper_trades_attempted_count"] == 1
     assert payload["completed_trade_count"] == 1
+    assert payload["managed_strategy_trade_count"] == 0
+    assert payload["meaningful_strategy_trade_count"] == 0
+    assert payload["proof_canary_trade_count"] == 1
+    assert payload["archived_manual_flat_count"] == 0
+    assert payload["proof_canary_excluded_from_meaningful_strategy_counts"] is True
     assert payload["open_position_count"] == 1
     assert payload["realized_pnl_today"] == "8.5"
     assert payload["realized_pnl_month"] == "8.5"

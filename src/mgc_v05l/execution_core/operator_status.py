@@ -751,6 +751,14 @@ def _report(
             else track_b_shadow_monitor.get("paper_trades_attempted_count", 0)
         ),
         "completed_trade_count": track_b_paper_trade_summary.get("completed_trade_count", track_b_paper_trade_summary.get("closed_trade_count", 0)),
+        "managed_strategy_trade_count": track_b_paper_trade_summary.get("managed_strategy_trade_count", 0),
+        "meaningful_strategy_trade_count": track_b_paper_trade_summary.get("meaningful_strategy_trade_count", 0),
+        "proof_canary_trade_count": track_b_paper_trade_summary.get("proof_canary_trade_count", 0),
+        "archived_manual_flat_count": track_b_paper_trade_summary.get("archived_manual_flat_count", 0),
+        "proof_canary_excluded_from_meaningful_strategy_counts": track_b_paper_trade_summary.get(
+            "proof_canary_excluded_from_meaningful_strategy_counts",
+            True,
+        ),
         "track_b_recent_trades": track_b_paper_trade_summary.get("recent_trades") or [],
         "open_position_count": (
             track_b_live_position_status.get("open_position_count")
