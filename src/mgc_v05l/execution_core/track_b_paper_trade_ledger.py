@@ -35,6 +35,10 @@ DEFAULT_TRACK_B_ARTIFACT_RECONCILIATION_REPORT_JSON = (
 DEFAULT_TRACK_B_APP_ONLY_RECONCILIATION_REPORT_JSON = (
     Path("outputs/track_b_execution_core/diagnostics") / "latest_track_b_app_only_lifecycle_reconciliation_report.json"
 )
+DEFAULT_TRACK_B_IBKR_CONTRACT_REJECTION_RECONCILIATION_REPORT_JSON = (
+    Path("outputs/track_b_execution_core/diagnostics")
+    / "latest_track_b_ibkr_contract_rejection_reconciliation_report.json"
+)
 LEDGER_SCHEMA_VERSION = "track_b_paper_trade_ledger_v1"
 RECONCILIATION_SCHEMA_VERSION = "track_b_artifact_reconciliation_v1"
 SUMMARY_SCHEMA_VERSION = "track_b_paper_trade_summary_v1"
@@ -42,6 +46,7 @@ POSITION_SCHEMA_VERSION = "track_b_live_position_status_v1"
 PNL_SCHEMA_VERSION = "track_b_pnl_summary_v1"
 MANUALLY_FLATTENED_REVIEWED = "MANUALLY_FLATTENED_REVIEWED"
 APP_ONLY_UNFILLED_REVIEWED = "APP_ONLY_UNFILLED_REVIEWED"
+IBKR_CONTRACT_REJECTED_REVIEWED = "IBKR_CONTRACT_REJECTED_REVIEWED"
 POINT_VALUE_BY_FAMILY = {
     "MGC": Decimal("10"),
     "GC": Decimal("100"),
@@ -186,6 +191,130 @@ def reconcile_app_only_unfilled_managed_lifecycles(
         },
         "broker_mutation_attempted": False,
         "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+    }
+    _write_json(reconciliation_report_json, report)
+    return TrackBArtifactReconciliationResult(
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        reconciliation_report_json=reconciliation_report_json,
+        reconciliation_record_written=bool(reconciliation_records),
+        reconciliation_report=report,
+        trade_summary=summaries["trade_summary"],
+        live_position_status=summaries["live_position_status"],
+        pnl_summary=summaries["pnl_summary"],
+    )
+
+
+def reconcile_ibkr_contract_rejected_managed_lifecycles(
+    *,
+    lifecycle_ids: Iterable[str] | None = None,
+    ledger_jsonl: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_JSONL,
+    output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    diagnostics_root: Path = Path("outputs/track_b_execution_core/diagnostics"),
+    now: datetime | None = None,
+) -> TrackBArtifactReconciliationResult:
+    """Archive managed lifecycle rows rejected by IBKR contract detail validation.
+
+    This is artifact-only reconciliation. It requires a recorded IBKR error 478,
+    no entry fill, no order/fill callbacks, and no open position in the compact
+    artifact view. It does not query or mutate a broker.
+    """
+
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    ledger_path = Path(ledger_jsonl)
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    diagnostics_root.mkdir(parents=True, exist_ok=True)
+    if not ledger_path.exists():
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.touch()
+    trade_summary_json = root / "latest_track_b_paper_trade_summary.json"
+    live_position_status_json = root / "latest_track_b_live_position_status.json"
+    pnl_summary_json = root / "latest_track_b_pnl_summary.json"
+    reconciliation_report_json = (
+        diagnostics_root / "latest_track_b_ibkr_contract_rejection_reconciliation_report.json"
+    )
+
+    records = _read_ledger_records(ledger_path)
+    requested_ids = {str(item) for item in lifecycle_ids or [] if str(item)}
+    targets = _ibkr_contract_rejected_targets(records, requested_ids=requested_ids)
+    existing_resolutions = {
+        str(item.get("lifecycle_id"))
+        for item in records
+        if _is_reconciliation_record(item)
+        and item.get("new_artifact_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
+    }
+    live_status = _load_json_path(live_position_status_json)
+    reconciliation_records: list[dict[str, Any]] = []
+    target_reports: list[dict[str, Any]] = []
+    for target in targets:
+        lifecycle_id = str(target.get("lifecycle_id") or "")
+        evidence = _ibkr_contract_rejected_evidence(target=target, live_status=live_status)
+        already_archived = lifecycle_id in existing_resolutions
+        can_archive = evidence["ibkr_contract_rejection_confirmed"] and not already_archived
+        target_reports.append(
+            {
+                "lifecycle_id": lifecycle_id,
+                "strategy_id": target.get("strategy_id"),
+                "contract_key": target.get("contract_key"),
+                "local_symbol": target.get("local_symbol"),
+                "prior_artifact_state": _prior_artifact_state(target),
+                "ibkr_contract_rejection_evidence": evidence,
+                "canonicalization_fix_commits": ["8eccc87d27", "1ee9f20248"],
+                "already_archived": already_archived,
+                "reconciliation_action": IBKR_CONTRACT_REJECTED_REVIEWED
+                if evidence["ibkr_contract_rejection_confirmed"]
+                else "NO_ARCHIVE_REVIEW_REQUIRED",
+                "remaining_blocker": None if evidence["ibkr_contract_rejection_confirmed"] else evidence["blocker"],
+            }
+        )
+        if can_archive:
+            reconciliation_records.append(
+                _ibkr_contract_rejected_reconciliation_record(target=target, evidence=evidence, now=actual_now)
+            )
+
+    if reconciliation_records:
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            for record in reconciliation_records:
+                handle.write(json.dumps(to_jsonable(record), sort_keys=True) + "\n")
+                records.append(record)
+
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=records,
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        now=actual_now,
+    )
+    _write_json(trade_summary_json, summaries["trade_summary"])
+    _write_json(live_position_status_json, summaries["live_position_status"])
+    _write_json(pnl_summary_json, summaries["pnl_summary"])
+    report = {
+        "schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "generated_at": actual_now.isoformat(),
+        "reconciliation_action": IBKR_CONTRACT_REJECTED_REVIEWED,
+        "reconciliation_source": "ARTIFACT_ONLY_IBKR_ERROR_478_NO_FILL",
+        "requested_lifecycle_ids": sorted(requested_ids),
+        "target_count": len(targets),
+        "reconciliation_record_count": len(reconciliation_records),
+        "targets": target_reports,
+        "compact_summaries_updated": True,
+        "post_reconciliation_summary": {
+            "open_position_count": summaries["trade_summary"].get("open_position_count"),
+            "review_required_count": summaries["trade_summary"].get("review_required_count"),
+            "managed_strategy_trade_count": summaries["trade_summary"].get("managed_strategy_trade_count"),
+            "meaningful_strategy_trade_count": summaries["trade_summary"].get("meaningful_strategy_trade_count"),
+            "app_only_position_from_unfilled_entry_count": summaries["trade_summary"].get(
+                "app_only_position_from_unfilled_entry_count"
+            ),
+        },
+        "broker_mutation_attempted_by_reconciliation": False,
+        "submit_attempted_by_reconciliation": False,
         "paper_proof_cli_invoked": False,
     }
     _write_json(reconciliation_report_json, report)
@@ -1018,6 +1147,137 @@ def _app_only_unfilled_reconciliation_record(
     }
 
 
+def _ibkr_contract_rejected_targets(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    requested_ids: set[str],
+) -> list[dict[str, Any]]:
+    latest_by_lifecycle: dict[str, dict[str, Any]] = {}
+    for item in records:
+        if _is_reconciliation_record(item):
+            continue
+        lifecycle_id = str(item.get("lifecycle_id") or "")
+        if not lifecycle_id:
+            continue
+        if requested_ids and lifecycle_id not in requested_ids:
+            continue
+        if item.get("paper_lifecycle_type") != "STRATEGY_MANAGED":
+            continue
+        if item.get("review_required") is not True:
+            continue
+        latest_by_lifecycle[lifecycle_id] = dict(item)
+    return list(latest_by_lifecycle.values())
+
+
+def _ibkr_contract_rejected_evidence(
+    *,
+    target: Mapping[str, Any],
+    live_status: Mapping[str, Any],
+) -> dict[str, Any]:
+    lifecycle_report = _load_json_path(target.get("paper_lifecycle_report_path"))
+    entry_submit = _mapping(lifecycle_report.get("entry_submit_attempt"))
+    submit_diagnostics = _mapping(entry_submit.get("submit_diagnostics"))
+    error_callbacks = list(submit_diagnostics.get("error_callbacks_after_submit") or [])
+    error_478 = next((dict(item) for item in error_callbacks if dict(item).get("error_code") == 478), {})
+    entry_fill = _mapping(lifecycle_report.get("entry_fill"))
+    has_fill = _has_entry_fill(target) or bool(entry_fill)
+    open_order_seen = bool(submit_diagnostics.get("openOrder_seen") or submit_diagnostics.get("orderStatus_seen"))
+    fill_seen = bool(submit_diagnostics.get("execDetails_seen") or has_fill)
+    compact_open_position_count = int(live_status.get("open_position_count") or 0)
+    compact_open_order_count = int(live_status.get("open_order_count") or 0)
+    error_message = str(error_478.get("error_string") or lifecycle_report.get("ibkr_error_message") or "")
+    rejection_matches_contract = "requested expiry 202606" in error_message and "20260626" in error_message
+    confirmed = (
+        target.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        and bool(error_478)
+        and rejection_matches_contract
+        and not has_fill
+        and not open_order_seen
+        and not fill_seen
+        and compact_open_position_count == 0
+        and compact_open_order_count == 0
+    )
+    blocker = None
+    if target.get("paper_lifecycle_type") != "STRATEGY_MANAGED":
+        blocker = "LIFECYCLE_IS_NOT_STRATEGY_MANAGED"
+    elif not error_478:
+        blocker = "IBKR_ERROR_478_NOT_FOUND"
+    elif not rejection_matches_contract:
+        blocker = "IBKR_ERROR_478_NOT_CANONICAL_EXPIRY_REJECTION"
+    elif has_fill:
+        blocker = "ENTRY_FILL_PRESENT"
+    elif open_order_seen:
+        blocker = "ORDER_CALLBACK_PRESENT"
+    elif fill_seen:
+        blocker = "FILL_CALLBACK_PRESENT"
+    elif compact_open_position_count != 0:
+        blocker = "COMPACT_OPEN_POSITION_PRESENT"
+    elif compact_open_order_count != 0:
+        blocker = "COMPACT_OPEN_ORDER_PRESENT"
+    return {
+        "ibkr_contract_rejection_confirmed": confirmed,
+        "blocker": blocker,
+        "ibkr_error_code": error_478.get("error_code"),
+        "ibkr_error_message": error_message or None,
+        "entry_order_id": target.get("entry_order_id") or entry_submit.get("broker_order_id"),
+        "entry_fill_present": has_fill,
+        "open_order_callback_present": open_order_seen,
+        "fill_callback_present": fill_seen,
+        "place_order_called": bool(submit_diagnostics.get("place_order_called")),
+        "transmit_true": submit_diagnostics.get("order_transmit_flag"),
+        "contract_fields_submitted_to_ibkr": submit_diagnostics.get("contract_fields_submitted_to_ibkr")
+        or lifecycle_report.get("contract_fields_submitted_to_ibkr"),
+        "canonical_broker_contract_fields": submit_diagnostics.get("canonical_broker_contract_fields")
+        or lifecycle_report.get("canonical_broker_contract_fields"),
+        "compact_open_position_count": compact_open_position_count,
+        "compact_open_order_count": compact_open_order_count,
+        "broker_reconciled": bool(live_status.get("broker_reconciled")),
+        "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+        "lifecycle_report_path": target.get("paper_lifecycle_report_path"),
+    }
+
+
+def _ibkr_contract_rejected_reconciliation_record(
+    *,
+    target: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    return {
+        "ledger_schema_version": LEDGER_SCHEMA_VERSION,
+        "record_type": "ARTIFACT_RECONCILIATION",
+        "reconciliation_schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "trade_id": f"{target.get('trade_id')}:ibkr_contract_rejected_review",
+        "lifecycle_id": target.get("lifecycle_id"),
+        "strategy_id": target.get("strategy_id"),
+        "instrument_family": target.get("instrument_family"),
+        "contract_key": target.get("contract_key"),
+        "local_symbol": target.get("local_symbol"),
+        "con_id": target.get("con_id"),
+        "account_id": target.get("account_id"),
+        "prior_artifact_classification": target.get("paper_lifecycle_classification"),
+        "prior_review_required": target.get("review_required"),
+        "reconciliation_action": IBKR_CONTRACT_REJECTED_REVIEWED,
+        "new_artifact_classification": IBKR_CONTRACT_REJECTED_REVIEWED,
+        "final_position_status": IBKR_CONTRACT_REJECTED_REVIEWED,
+        "review_required": False,
+        "broker_reconciled": False,
+        "broker_backed_position_confirmed": False,
+        "entry_order_id": evidence.get("entry_order_id"),
+        "entry_fill_present": evidence.get("entry_fill_present"),
+        "ibkr_error_code": evidence.get("ibkr_error_code"),
+        "ibkr_error_message": evidence.get("ibkr_error_message"),
+        "contract_fields_submitted_to_ibkr": evidence.get("contract_fields_submitted_to_ibkr"),
+        "canonical_broker_contract_fields": evidence.get("canonical_broker_contract_fields"),
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+        "source": "ARTIFACT_ONLY_IBKR_ERROR_478_NO_FILL_CANONICALIZATION_FIX_APPLIED",
+        "paper_lifecycle_report_path": target.get("paper_lifecycle_report_path"),
+        "created_at": now.isoformat(),
+    }
+
+
 def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     reconciled_lifecycle_ids = {
         str(item.get("lifecycle_id"))
@@ -1029,7 +1289,13 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
         for item in records
         if _is_reconciliation_record(item) and item.get("new_artifact_classification") == APP_ONLY_UNFILLED_REVIEWED
     }
-    if not reconciled_lifecycle_ids and not app_only_reviewed_lifecycle_ids:
+    ibkr_rejected_reviewed_lifecycle_ids = {
+        str(item.get("lifecycle_id"))
+        for item in records
+        if _is_reconciliation_record(item)
+        and item.get("new_artifact_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
+    }
+    if not reconciled_lifecycle_ids and not app_only_reviewed_lifecycle_ids and not ibkr_rejected_reviewed_lifecycle_ids:
         return records
     normalized: list[dict[str, Any]] = []
     for item in records:
@@ -1058,6 +1324,18 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
             row["paper_lifecycle_classification"] = APP_ONLY_UNFILLED_REVIEWED
             row["final_position_status"] = APP_ONLY_UNFILLED_REVIEWED
             row["final_broker_state_classification"] = APP_ONLY_UNFILLED_REVIEWED
+        if (
+            not _is_reconciliation_record(row)
+            and str(row.get("lifecycle_id") or "") in ibkr_rejected_reviewed_lifecycle_ids
+            and row.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        ):
+            row["artifact_reconciliation_classification"] = IBKR_CONTRACT_REJECTED_REVIEWED
+            row["ibkr_contract_rejected_reviewed"] = True
+            row["review_required"] = False
+            row["prior_paper_lifecycle_classification"] = row.get("paper_lifecycle_classification")
+            row["paper_lifecycle_classification"] = IBKR_CONTRACT_REJECTED_REVIEWED
+            row["final_position_status"] = IBKR_CONTRACT_REJECTED_REVIEWED
+            row["final_broker_state_classification"] = IBKR_CONTRACT_REJECTED_REVIEWED
         normalized.append(row)
     return normalized
 
@@ -1290,6 +1568,9 @@ def _is_manual_flat_reviewed(item: Mapping[str, Any]) -> bool:
         or item.get("artifact_reconciliation_classification") == APP_ONLY_UNFILLED_REVIEWED
         or item.get("new_artifact_classification") == APP_ONLY_UNFILLED_REVIEWED
         or item.get("app_only_unfilled_reviewed") is True
+        or item.get("artifact_reconciliation_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
+        or item.get("new_artifact_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
+        or item.get("ibkr_contract_rejected_reviewed") is True
     )
 
 
