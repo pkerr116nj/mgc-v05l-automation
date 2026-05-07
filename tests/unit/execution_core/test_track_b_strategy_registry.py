@@ -77,6 +77,8 @@ def test_asia_early_pause_resume_short_registry_metadata_is_valid() -> None:
     assert entry.timeframe == "5m"
     assert entry.paper_eligible is True
     assert entry.live_money_eligible is False
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
     assert "metadata.asia_early_pause_resume_short_features.normalized_curvature" in entry.required_feature_schema
     assert "metadata.asia_early_pause_resume_short_state.derivative_phase" in entry.required_state_schema
 
@@ -99,6 +101,22 @@ def test_asia_early_normal_breakout_retest_hold_long_registry_metadata_is_valid(
     assert "metadata.asia_early_normal_breakout_retest_hold_long_state.asia_early_or_gc_mgc_london_open" in entry.required_state_schema
 
 
+def test_asian_drift_registry_metadata_has_managed_exit_policy() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="ASIAN_DRIFT_V1",
+        rule_id="asian_drift_v1",
+        strategy_id="asian_drift_v1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
+
+
 def test_first_bull_snap_turn_registry_metadata_is_valid() -> None:
     entry = resolve_track_b_strategy_registry_entry(
         rule_mode="FIRST_BULL_SNAP_TURN_V1",
@@ -111,6 +129,8 @@ def test_first_bull_snap_turn_registry_metadata_is_valid() -> None:
     assert entry.timeframe == "5m"
     assert entry.paper_eligible is True
     assert entry.live_money_eligible is False
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
     assert entry.feature_version == "first_bull_snap_turn_v1_phase1"
     assert entry.calibration_profile == "probationary_baseline_v1"
     assert "metadata.first_bull_snap_turn_features.first_bull_snap_turn" in entry.required_feature_schema
@@ -129,6 +149,8 @@ def test_first_bear_snap_turn_registry_metadata_is_valid() -> None:
     assert entry.timeframe == "5m"
     assert entry.paper_eligible is True
     assert entry.live_money_eligible is False
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
     assert entry.feature_version == "first_bear_snap_turn_v1_phase1"
     assert entry.calibration_profile == "probationary_baseline_v1"
     assert "metadata.first_bear_snap_turn_features.first_bear_snap_turn" in entry.required_feature_schema
@@ -167,6 +189,8 @@ def test_asia_late_flat_pullback_pause_resume_long_registry_metadata_is_valid() 
     assert entry.timeframe == "5m"
     assert entry.paper_eligible is True
     assert entry.live_money_eligible is False
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
     assert entry.feature_version == "asia_late_flat_pullback_pause_resume_long_v1_phase1"
     assert entry.calibration_profile == "probationary_baseline_v1"
     assert "metadata.asia_late_flat_pullback_pause_resume_long_features.bull_snap_close_strong" in entry.required_feature_schema
@@ -271,6 +295,11 @@ def test_current_relevant_track_b_strategies_have_managed_exit_coverage() -> Non
         "US_DERIVATIVE_BEAR_TURN_V1",
         "US_LATE_PAUSE_RESUME_LONG_V1",
         "LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+        "asian_drift_v1",
+        "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+        "FIRST_BULL_SNAP_TURN_V1",
+        "FIRST_BEAR_SNAP_TURN_V1",
+        "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
     }
 
     for strategy_id in expected:

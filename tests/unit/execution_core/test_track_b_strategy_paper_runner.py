@@ -416,6 +416,8 @@ def asian_strategy_result(
     result.report["strategy_registry_timeframe"] = "5m"
     result.report["strategy_registry_paper_eligible"] = True
     result.report["strategy_registry_live_money_eligible"] = False
+    result.report["strategy_registry_managed_exit_policy_id"] = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    result.report["strategy_registry_exit_not_available"] = False
     result.report["asian_drift_watch_verdict"] = (
         "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT" if emitted else "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
     )
@@ -444,6 +446,8 @@ def pause_resume_short_strategy_result(
     result.report["strategy_registry_timeframe"] = "5m"
     result.report["strategy_registry_paper_eligible"] = paper_eligible
     result.report["strategy_registry_live_money_eligible"] = False
+    result.report["strategy_registry_managed_exit_policy_id"] = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    result.report["strategy_registry_exit_not_available"] = False
     result.report["asia_early_pause_resume_short_watch_verdict"] = (
         "ASIA_EARLY_PAUSE_RESUME_SHORT_SIGNAL_READY_NO_SUBMIT"
         if emitted
@@ -507,9 +511,39 @@ def first_snap_turn_strategy_result(
     result.report["strategy_registry_timeframe"] = "5m"
     result.report["strategy_registry_paper_eligible"] = paper_eligible
     result.report["strategy_registry_live_money_eligible"] = False
+    result.report["strategy_registry_managed_exit_policy_id"] = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    result.report["strategy_registry_exit_not_available"] = False
     watch_key = "first_bull_snap_turn_watch_verdict" if strategy_id == "FIRST_BULL_SNAP_TURN_V1" else "first_bear_snap_turn_watch_verdict"
     prefix = "FIRST_BULL_SNAP_TURN" if strategy_id == "FIRST_BULL_SNAP_TURN_V1" else "FIRST_BEAR_SNAP_TURN"
     result.report[watch_key] = f"{prefix}_SIGNAL_READY_NO_SUBMIT" if emitted else f"{prefix}_NO_SIGNAL_NO_MUTATION"
+    result.report_json.write_text(json.dumps(result.report), encoding="utf-8")
+    return result
+
+
+def managed_ready_strategy_result(
+    tmp_path: Path,
+    *,
+    strategy_id: str,
+    rule_mode: str | None = None,
+    rule_id: str | None = None,
+    signal_direction: str,
+    instrument_family: str = "MGC",
+) -> TrackBStrategyRuleRunnerResult:
+    result = strategy_result(tmp_path, decision=signal_direction, emitted=True)
+    result.report["signal_source"] = strategy_id
+    result.report["real_strategy_signal"] = True
+    result.report["rule_mode"] = rule_mode or strategy_id
+    result.report["rule_name"] = strategy_id.lower()
+    result.report["signal_direction"] = signal_direction
+    result.report["strategy_registry_id"] = strategy_id
+    result.report["strategy_registry_rule_id"] = rule_id or strategy_id
+    result.report["strategy_registry_rule_mode"] = rule_mode or strategy_id
+    result.report["strategy_registry_instrument_family"] = instrument_family
+    result.report["strategy_registry_timeframe"] = "5m"
+    result.report["strategy_registry_paper_eligible"] = True
+    result.report["strategy_registry_live_money_eligible"] = False
+    result.report["strategy_registry_managed_exit_policy_id"] = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    result.report["strategy_registry_exit_not_available"] = False
     result.report_json.write_text(json.dumps(result.report), encoding="utf-8")
     return result
 
@@ -1062,6 +1096,82 @@ def test_registry_managed_exit_policy_enables_mnq_first_bear_snap_turn(tmp_path:
     assert result.report["strategy_registry_managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
     assert result.report["strategy_trade_intent_created"] is True
     assert result.report["paper_proof_invoked"] is False
+
+
+def test_remaining_ported_strategy_signals_route_to_managed_lifecycle(tmp_path: Path) -> None:
+    cases = (
+        ("asian_drift_v1", "ASIAN_DRIFT_V1", "asian_drift_v1", "LONG"),
+        ("ASIA_EARLY_PAUSE_RESUME_SHORT_V1", None, None, "SHORT"),
+        ("FIRST_BULL_SNAP_TURN_V1", None, None, "LONG"),
+        ("FIRST_BEAR_SNAP_TURN_V1", None, None, "SHORT"),
+        ("ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1", None, None, "LONG"),
+    )
+
+    for strategy_id, rule_mode, rule_id, direction in cases:
+        case_dir = tmp_path / strategy_id.lower()
+        calls = Calls()
+        managed = managed_lifecycle_result(
+            case_dir,
+            TrackBManagedPaperLifecycleClassification.OPEN_MANAGED,
+            managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        )
+        strategy = (
+            asian_strategy_result(case_dir, decision=direction, emitted=True, signal_direction=direction)
+            if strategy_id == "asian_drift_v1"
+            else managed_ready_strategy_result(
+                case_dir,
+                strategy_id=strategy_id,
+                rule_mode=rule_mode,
+                rule_id=rule_id,
+                signal_direction=direction,
+            )
+        )
+
+        result = run_track_b_strategy_paper(
+            config=base_config(
+                case_dir,
+                input_event_payload=(
+                    asian_drift_state_payload(
+                        asia_drift_state="ENTRY_ARMED",
+                        asia_drift_regime=f"ASIA_DRIFT_{direction}",
+                        direction=direction,
+                        hypothetical_entry_ready=True,
+                    )
+                    if strategy_id == "asian_drift_v1"
+                    else base_config(case_dir).input_event_payload
+                ),
+                strategy_id=strategy_id,
+                rule_id=rule_id or strategy_id,
+                rule_mode=rule_mode or strategy_id,
+                side="SELL" if direction == "SHORT" else "BUY",
+                emit_signal=True,
+                submit_paper=True,
+                confirm_paper_submit=True,
+                quantity=1,
+                manual_open_limit_price="4575.3",
+                manual_close_limit_price="4575.0",
+            ),
+            stages=stages(
+                calls=calls,
+                strategy=strategy,
+                readiness=readiness_result(case_dir),
+                managed_lifecycle=managed,
+                proof=proof_result(case_dir, TerminalClassification.PASSED),
+            ),
+            runner_id=f"paper-managed-{strategy_id.lower()}",
+            now=aware_now(),
+        )
+
+        assert result.verdict == TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_OPEN_MANAGED
+        assert calls.intent == 1
+        assert calls.managed_lifecycle == 1
+        assert calls.proof == 0
+        assert result.report["paper_execution_path"] == "STRATEGY_MANAGED"
+        assert result.report["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+        assert result.report["strategy_trade_intent_created"] is True
+        assert result.report["strategy_trade_intent_classification"] == "STRATEGY_TRADE_INTENT_CREATED"
+        assert result.report["paper_proof_invoked"] is False
+        assert result.report["live_money_readiness"] is False
 
 
 def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path: Path) -> None:

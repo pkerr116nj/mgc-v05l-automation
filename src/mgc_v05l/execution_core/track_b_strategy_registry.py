@@ -101,6 +101,8 @@ ASIAN_DRIFT_V1 = TrackBStrategyRegistryEntry(
     calibration_profile="recovery_confirmed",
     paper_eligible=True,
     live_money_eligible=False,
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("asian_drift_v1",),
     accepted_rule_ids=("asian_drift_v1",),
 )
@@ -136,6 +138,8 @@ ASIA_EARLY_PAUSE_RESUME_SHORT_V1 = TrackBStrategyRegistryEntry(
     calibration_profile="probationary_baseline_v1",
     paper_eligible=True,
     live_money_eligible=False,
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("ASIA_EARLY_PAUSE_RESUME_SHORT_V1",),
     accepted_rule_ids=("ASIA_EARLY_PAUSE_RESUME_SHORT_V1",),
 )
@@ -199,6 +203,8 @@ FIRST_BULL_SNAP_TURN_V1 = TrackBStrategyRegistryEntry(
     calibration_profile="probationary_baseline_v1",
     paper_eligible=True,
     live_money_eligible=False,
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("FIRST_BULL_SNAP_TURN_V1",),
     accepted_rule_ids=("FIRST_BULL_SNAP_TURN_V1",),
 )
@@ -232,6 +238,8 @@ FIRST_BEAR_SNAP_TURN_V1 = TrackBStrategyRegistryEntry(
     calibration_profile="probationary_baseline_v1",
     paper_eligible=True,
     live_money_eligible=False,
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("FIRST_BEAR_SNAP_TURN_V1",),
     accepted_rule_ids=("FIRST_BEAR_SNAP_TURN_V1",),
 )
@@ -302,6 +310,8 @@ ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1 = TrackBStrategyRegistryEntry(
     calibration_profile="probationary_baseline_v1",
     paper_eligible=True,
     live_money_eligible=False,
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",),
     accepted_rule_ids=("ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",),
 )
