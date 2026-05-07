@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping
 from .ibkr_paper_adapter import IbkrPaperAdapter
 from .models import require_aware_datetime, to_jsonable
 from .models import IntentKind, OrderIntent, SubmitAttempt, SubmitAttemptState
+from .preflight import ReadOnlyPreflightConfig
 from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
 
 
@@ -338,6 +339,13 @@ def _build_report(
         "managed_paper_submit_enabled": bool(config.submit_enabled),
         "managed_submit_blocked_reason": _managed_submit_blocked_reason(config, entry_submit, primary_blocker),
         "ibkr_adapter_available": True,
+        "contract_fields_submitted_to_ibkr": _submit_diagnostic_value(entry_submit, "contract_fields_submitted_to_ibkr"),
+        "canonical_broker_contract_fields": _submit_diagnostic_value(entry_submit, "canonical_broker_contract_fields"),
+        "contract_consistency_check_passed": _submit_diagnostic_value(entry_submit, "contract_consistency_check_passed"),
+        "contract_mismatch_reason": _submit_diagnostic_value(entry_submit, "contract_mismatch_reason"),
+        "pre_submit_blocked": _submit_diagnostic_value(entry_submit, "pre_submit_blocked"),
+        "ibkr_error_code": _submit_error_value(entry_submit, "ibkr_error_code"),
+        "ibkr_error_message": _submit_error_value(entry_submit, "ibkr_error_message"),
         "entry_intent": dict(entry_intent),
         "entry_submit_attempt": dict(entry_submit) if entry_submit else None,
         "entry_fill": dict(entry_fill) if entry_fill else None,
@@ -399,6 +407,30 @@ def _managed_submit_blocked_reason(
     if "not enabled" in blocker:
         return "SUBMIT_DISABLED"
     return None
+
+
+def _submit_diagnostic_value(entry_submit: Mapping[str, Any] | None, key: str) -> Any:
+    diagnostics = dict((entry_submit or {}).get("submit_diagnostics") or {})
+    return diagnostics.get(key)
+
+
+def _submit_error_value(entry_submit: Mapping[str, Any] | None, key: str) -> Any:
+    if entry_submit is None:
+        return None
+    if key in entry_submit:
+        return entry_submit.get(key)
+    return _ibkr_error_summary(dict(entry_submit.get("submit_diagnostics") or {})).get(key)
+
+
+def _ibkr_error_summary(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    errors = list(diagnostics.get("error_callbacks_after_submit") or [])
+    if not errors:
+        return {"ibkr_error_code": None, "ibkr_error_message": None}
+    first = dict(errors[0])
+    return {
+        "ibkr_error_code": first.get("error_code"),
+        "ibkr_error_message": first.get("error_string"),
+    }
 
 
 def _existing_review_required_blocker(config: TrackBStrategyManagedPaperLifecycleConfig) -> str | None:
@@ -611,6 +643,10 @@ def _submit_managed_limit_order(
         diagnostics = adapter.submit_diagnostics(submit_attempt.submit_attempt_id)
         place_order_called = bool(diagnostics.get("place_order_called"))
         broker_order_id = diagnostics.get("broker_order_id_allocated")
+        error_summary = _ibkr_error_summary(diagnostics)
+        primary_blocker = f"Managed PAPER adapter submit stage failed: {exc}"
+        if error_summary.get("ibkr_error_code") == 478:
+            primary_blocker = f"IBKR_CONTRACT_REJECTED: {error_summary.get('ibkr_error_message')}"
         return {
             "submitted": False,
             "submit_attempted": place_order_called or broker_order_id is not None,
@@ -619,8 +655,9 @@ def _submit_managed_limit_order(
             "broker_order_id": str(broker_order_id) if broker_order_id is not None else None,
             "submit_attempt_id": submit_attempt.submit_attempt_id,
             "submitted_at": submit_attempt.submitted_at.isoformat(),
-            "primary_blocker": f"Managed PAPER adapter submit stage failed: {exc}",
+            "primary_blocker": primary_blocker,
             "adapter_exception": repr(exc),
+            **error_summary,
             "submit_diagnostics": diagnostics,
         }
     finally:
@@ -628,7 +665,8 @@ def _submit_managed_limit_order(
 
 
 def _contract_allowlist_entry(config: TrackBStrategyManagedPaperLifecycleConfig) -> dict[str, Any]:
-    return {
+    canonical = dict(ReadOnlyPreflightConfig().contract_allowlist.get(config.contract_key) or {})
+    fallback = {
         "symbol": config.instrument_family,
         "security_type": "FUT",
         "exchange": config.exchange,
@@ -639,6 +677,17 @@ def _contract_allowlist_entry(config: TrackBStrategyManagedPaperLifecycleConfig)
         "expiry": _contract_month(config.contract_key),
         "tick_size": config.tick_size,
     }
+    if not canonical:
+        return fallback
+    matches_config = (
+        str(canonical.get("local_symbol") or "") == str(config.local_symbol or "")
+        and int(canonical.get("con_id") or 0) == int(config.con_id or 0)
+    )
+    if not matches_config:
+        return fallback
+    merged = dict(fallback)
+    merged.update({key: value for key, value in canonical.items() if value not in {None, ""}})
+    return merged
 
 
 def _contract_month(contract_key: str) -> str:

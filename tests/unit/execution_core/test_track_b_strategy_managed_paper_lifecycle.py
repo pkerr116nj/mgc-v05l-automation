@@ -150,6 +150,11 @@ def test_adapter_stage_failure_preserves_submit_attempt_diagnostics(tmp_path: Pa
             "broker_order_id": "1001",
             "primary_blocker": "Managed PAPER adapter submit stage failed: missing openOrder/orderStatus callback",
             "submit_diagnostics": {
+                "contract_fields_submitted_to_ibkr": {"lastTradeDateOrContractMonth": "202606"},
+                "canonical_broker_contract_fields": {"lastTradeDateOrContractMonth": "20260626"},
+                "contract_consistency_check_passed": True,
+                "contract_mismatch_reason": None,
+                "pre_submit_blocked": False,
                 "place_order_called": True,
                 "order_transmit_flag": True,
                 "broker_order_id_allocated": "1001",
@@ -179,10 +184,67 @@ def test_adapter_stage_failure_preserves_submit_attempt_diagnostics(tmp_path: Pa
     assert result.report["entry_submit_attempt"]["submit_attempted"] is True
     assert result.report["entry_submit_attempt"]["submit_diagnostics"]["place_order_called"] is True
     assert result.report["entry_submit_attempt"]["submit_diagnostics"]["order_transmit_flag"] is True
+    assert result.report["contract_fields_submitted_to_ibkr"] == {"lastTradeDateOrContractMonth": "202606"}
+    assert result.report["canonical_broker_contract_fields"] == {"lastTradeDateOrContractMonth": "20260626"}
+    assert result.report["contract_consistency_check_passed"] is True
+    assert result.report["pre_submit_blocked"] is False
     assert result.report["entry_fill"] is None
     assert result.report["submit_attempted"] is True
     assert result.report["broker_state_mutated"] is True
     assert result.report["review_required"] is True
+
+
+def test_adapter_stage_error_478_is_classified_as_contract_rejected(tmp_path: Path) -> None:
+    def rejected_entry(
+        config: TrackBStrategyManagedPaperLifecycleConfig,
+        entry_intent: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return {
+            "submitted": False,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "review_required": True,
+            "broker_order_id": "10",
+            "primary_blocker": (
+                "IBKR_CONTRACT_REJECTED: Parameters in request conflicts with contract parameters received by contract id: "
+                "requested expiry 202606, in contract 20260626;"
+            ),
+            "ibkr_error_code": 478,
+            "ibkr_error_message": "Parameters in request conflicts with contract parameters received by contract id: requested expiry 202606, in contract 20260626;",
+            "submit_diagnostics": {
+                "place_order_called": True,
+                "order_transmit_flag": True,
+                "broker_order_id_allocated": "10",
+                "error_callbacks_after_submit": [
+                    {
+                        "error_code": 478,
+                        "error_string": "Parameters in request conflicts with contract parameters received by contract id: requested expiry 202606, in contract 20260626;",
+                    }
+                ],
+            },
+        }
+
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=rejected_entry,
+        exit_policy=lambda config, open_state: None,
+        close_submitter=lambda config, close_intent: {},
+    )
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            submit_enabled=True,
+        ),
+        stages=stages,
+        lifecycle_id="contract-rejected",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+    assert result.report["primary_blocker"].startswith("IBKR_CONTRACT_REJECTED")
+    assert result.report["ibkr_error_code"] == 478
+    assert "20260626" in result.report["ibkr_error_message"]
+    assert result.report["paper_proof_invoked"] is False
 
 
 def test_valid_exit_policy_creates_open_managed_state(tmp_path: Path) -> None:

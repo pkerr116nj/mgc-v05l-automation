@@ -157,3 +157,64 @@ def test_managed_submit_diagnostic_shows_adapter_attempt_when_submit_diagnostics
     assert report["transmit_true"] is True
     assert report["order_id_assigned"] is True
     assert report["order_status_callback_received"] is False
+
+
+def test_managed_submit_diagnostic_classifies_ibkr_contract_rejected(tmp_path: Path) -> None:
+    lifecycle_path = write_json(
+        tmp_path / "managed" / "report.json",
+        {
+            "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "submit_enabled": True,
+            "entry_intent": {"strategy_id": "FIRST_BEAR_SNAP_TURN_V1"},
+            "entry_submit_attempt": {
+                "submit_attempted": True,
+                "broker_state_mutated": True,
+                "broker_order_id": "10",
+                "primary_blocker": "IBKR_CONTRACT_REJECTED: Parameters in request conflicts with contract parameters received by contract id: requested expiry 202606, in contract 20260626;",
+                "submit_diagnostics": {
+                    "place_order_called": True,
+                    "order_transmit_flag": True,
+                    "broker_order_id_allocated": "10",
+                    "contract_fields_submitted_to_ibkr": {"lastTradeDateOrContractMonth": "202606"},
+                    "canonical_broker_contract_fields": {"lastTradeDateOrContractMonth": "20260626"},
+                    "contract_consistency_check_passed": True,
+                    "error_callbacks_after_submit": [
+                        {
+                            "error_code": 478,
+                            "error_string": "Parameters in request conflicts with contract parameters received by contract id: requested expiry 202606, in contract 20260626;",
+                        }
+                    ],
+                },
+            },
+            "primary_blocker": "IBKR_CONTRACT_REJECTED: Parameters in request conflicts with contract parameters received by contract id: requested expiry 202606, in contract 20260626;",
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+        },
+    )
+    runner_path = write_json(
+        tmp_path / "runner.json",
+        {
+            "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "paper_submit_requested": True,
+            "paper_submit_flags_present": True,
+            "managed_lifecycle_invoked": True,
+            "managed_lifecycle_report_path": str(lifecycle_path),
+        },
+    )
+
+    report = run_track_b_managed_submit_invocation_diagnostic(
+        runner_report_json=runner_path,
+        diagnostic_json=tmp_path / "diagnostics" / "latest.json",
+        diagnostic_md=tmp_path / "diagnostics" / "latest.md",
+        now=aware_now(),
+    )
+
+    assert report["classification"] == "IBKR_CONTRACT_REJECTED"
+    assert report["ibkr_error_code"] == 478
+    assert "20260626" in report["ibkr_error_message"]
+    assert report["contract_fields_submitted_to_ibkr"]["lastTradeDateOrContractMonth"] == "202606"
+    assert report["canonical_broker_contract_fields"]["lastTradeDateOrContractMonth"] == "20260626"

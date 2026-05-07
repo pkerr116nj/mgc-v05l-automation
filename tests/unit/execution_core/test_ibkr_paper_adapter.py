@@ -383,8 +383,81 @@ def test_submit_limit_order_places_lmt_day_only_after_explicit_enablement() -> N
     assert diagnostics["contract_key"] == "MGC-202606"
     assert diagnostics["contract_local_symbol"] == "MGCM6"
     assert diagnostics["contract_con_id"] == 12345
+    assert diagnostics["contract_fields_submitted_to_ibkr"]["lastTradeDateOrContractMonth"] == "20260626"
+    assert diagnostics["contract_consistency_check_passed"] is True
+    assert diagnostics["pre_submit_blocked"] is False
     assert diagnostics["isConnected_before_placeOrder"] is True
     assert diagnostics["isConnected_after_placeOrder"] is True
+
+
+def test_submit_limit_order_canonicalizes_mgc_shorthand_expiry_for_known_conid_local_symbol() -> None:
+    mgc_allowlist = allowlist()
+    mgc_allowlist["MGC-202606"]["con_id"] = "712565978"
+    mgc_allowlist["MGC-202606"]["expiry"] = "202606"
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader(), contract_allowlist=mgc_allowlist)
+    paper.connect()
+
+    paper.submit_limit_order(submit_attempt=submit_attempt(broker_order_id="1001"), order_intent=order_intent())
+
+    placed = paper.bridge_for_test().placed_orders[0]
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert placed["contract"].conId == 712565978
+    assert placed["contract"].localSymbol == "MGCM6"
+    assert placed["contract"].lastTradeDateOrContractMonth == "20260626"
+    assert diagnostics["canonical_broker_contract_fields"]["lastTradeDateOrContractMonth"] == "20260626"
+    assert diagnostics["contract_fields_submitted_to_ibkr"]["lastTradeDateOrContractMonth"] == "20260626"
+    assert diagnostics["contract_consistency_check_passed"] is True
+    assert diagnostics["place_order_called"] is True
+
+
+def test_submit_limit_order_blocks_expiry_mismatch_before_place_order() -> None:
+    mgc_allowlist = allowlist()
+    mgc_allowlist["MGC-202606"]["con_id"] = "712565978"
+    mgc_allowlist["MGC-202606"]["expiry"] = "20260726"
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader(), contract_allowlist=mgc_allowlist)
+    paper.connect()
+
+    with pytest.raises(IbkrPaperConfigError, match="CONTRACT_EXPIRY_MISMATCH_PRE_SUBMIT"):
+        paper.submit_limit_order(submit_attempt=submit_attempt(broker_order_id="1001"), order_intent=order_intent())
+
+    assert paper.bridge_for_test().placed_orders == []
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert diagnostics["contract_consistency_check_passed"] is False
+    assert diagnostics["contract_mismatch_reason"] == "configured expiry 20260726 conflicts with canonical IBKR expiry 20260626"
+    assert diagnostics["pre_submit_blocked"] is True
+    assert diagnostics["place_order_called"] is False
+    assert diagnostics["broker_order_id_allocated"] is None
+
+
+def test_submit_limit_order_canonicalizes_mnq_shorthand_expiry() -> None:
+    mnq_allowlist = {
+        "MNQ-202606": {
+            "symbol": "MNQ",
+            "security_type": "FUT",
+            "exchange": "CME",
+            "currency": "USD",
+            "local_symbol": "MNQM6",
+            "con_id": "770561201",
+            "contract_month": "202606",
+            "expiry": "202606",
+            "multiplier": "2",
+            "tick_size": "0.25",
+        }
+    }
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader(), contract_allowlist=mnq_allowlist)
+    paper.connect()
+
+    paper.submit_limit_order(
+        submit_attempt=submit_attempt(broker_order_id="1001"),
+        order_intent=order_intent(symbol="MNQ", contract_key="MNQ-202606", limit_price="28750.25"),
+    )
+
+    placed = paper.bridge_for_test().placed_orders[0]
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert placed["contract"].conId == 770561201
+    assert placed["contract"].localSymbol == "MNQM6"
+    assert placed["contract"].lastTradeDateOrContractMonth == "20260618"
+    assert diagnostics["contract_fields_submitted_to_ibkr"]["lastTradeDateOrContractMonth"] == "20260618"
 
 
 @pytest.mark.parametrize(

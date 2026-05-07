@@ -51,6 +51,30 @@ class IbkrPaperSubmitDisabledError(IbkrPaperAdapterError):
     """Raised when submit is requested while submit_enabled is false."""
 
 
+CANONICAL_FUTURES_CONTRACTS: dict[tuple[str, str], dict[str, str]] = {
+    ("712565978", "MGCM6"): {
+        "symbol": "MGC",
+        "secType": "FUT",
+        "exchange": "COMEX",
+        "currency": "USD",
+        "localSymbol": "MGCM6",
+        "conId": "712565978",
+        "lastTradeDateOrContractMonth": "20260626",
+        "multiplier": "10",
+    },
+    ("770561201", "MNQM6"): {
+        "symbol": "MNQ",
+        "secType": "FUT",
+        "exchange": "CME",
+        "currency": "USD",
+        "localSymbol": "MNQM6",
+        "conId": "770561201",
+        "lastTradeDateOrContractMonth": "20260618",
+        "multiplier": "2",
+    },
+}
+
+
 @dataclass(frozen=True)
 class SubmitContext:
     submit_attempt: SubmitAttempt
@@ -433,30 +457,30 @@ class IbkrPaperAdapter:
             order_intent=order_intent,
             created_at=submit_attempt.submitted_at,
         )
-        bridge = self._require_bridge()
-        local_order_id = self._allocate_local_order_id(submit_attempt)
-        self._local_order_to_submit[str(local_order_id)] = submit_attempt.submit_attempt_id
-        self._order_ready.setdefault(submit_attempt.submit_attempt_id, threading.Event())
-        self._fill_ready.setdefault(submit_attempt.submit_attempt_id, threading.Event())
-        contract = self._contract_from_allowlist(order_intent.contract_key)
-        order = self._order_from_intent(order_intent)
         diagnostics = self._submit_diagnostics.setdefault(submit_attempt.submit_attempt_id, {})
+        entry = self._require_allowlisted_contract(order_intent.contract_key)
+        contract_check = _contract_consistency_check(entry)
         diagnostics.update(
             {
                 "submit_attempt_id": submit_attempt.submit_attempt_id,
                 "place_order_called": False,
                 "place_order_called_at": None,
-                "broker_order_id_allocated": str(local_order_id),
-                "order_transmit_flag": bool(getattr(order, "transmit", False)),
-                "order_action": getattr(order, "action", None),
-                "order_type": getattr(order, "orderType", None),
+                "broker_order_id_allocated": None,
+                "order_transmit_flag": None,
+                "order_action": order_intent.action.value,
+                "order_type": order_intent.order_type,
                 "limit_price": str(order_intent.limit_price),
-                "tif": getattr(order, "tif", None),
+                "tif": order_intent.time_in_force,
                 "client_id": self.client_id,
                 "account_id": order_intent.account_id,
                 "contract_key": order_intent.contract_key,
-                "contract_local_symbol": getattr(contract, "localSymbol", None),
-                "contract_con_id": getattr(contract, "conId", None),
+                "contract_local_symbol": entry.get("local_symbol"),
+                "contract_con_id": entry.get("con_id"),
+                "contract_fields_submitted_to_ibkr": None,
+                "canonical_broker_contract_fields": contract_check.get("canonical_broker_contract_fields"),
+                "contract_consistency_check_passed": contract_check["contract_consistency_check_passed"],
+                "contract_mismatch_reason": contract_check.get("contract_mismatch_reason"),
+                "pre_submit_blocked": not contract_check["contract_consistency_check_passed"],
                 "callback_wait_timeout_seconds": self.request_timeout_seconds,
                 "openOrder_seen": False,
                 "orderStatus_seen": False,
@@ -467,6 +491,28 @@ class IbkrPaperAdapter:
                 "isConnected_after_placeOrder": None,
                 "isConnected_after_callback_wait": None,
                 "place_order_exception": None,
+            }
+        )
+        if not contract_check["contract_consistency_check_passed"]:
+            raise IbkrPaperConfigError(f"CONTRACT_EXPIRY_MISMATCH_PRE_SUBMIT: {contract_check['contract_mismatch_reason']}")
+        bridge = self._require_bridge()
+        local_order_id = self._allocate_local_order_id(submit_attempt)
+        self._local_order_to_submit[str(local_order_id)] = submit_attempt.submit_attempt_id
+        self._order_ready.setdefault(submit_attempt.submit_attempt_id, threading.Event())
+        self._fill_ready.setdefault(submit_attempt.submit_attempt_id, threading.Event())
+        contract = self._contract_from_allowlist(order_intent.contract_key, contract_check=contract_check)
+        order = self._order_from_intent(order_intent)
+        diagnostics.update(
+            {
+                "broker_order_id_allocated": str(local_order_id),
+                "order_transmit_flag": bool(getattr(order, "transmit", False)),
+                "order_action": getattr(order, "action", None),
+                "order_type": getattr(order, "orderType", None),
+                "tif": getattr(order, "tif", None),
+                "contract_fields_submitted_to_ibkr": _contract_fields(contract),
+                "contract_local_symbol": getattr(contract, "localSymbol", None),
+                "contract_con_id": getattr(contract, "conId", None),
+                "pre_submit_blocked": False,
             }
         )
         try:
@@ -603,16 +649,21 @@ class IbkrPaperAdapter:
         self.next_valid_id += 1
         return local_order_id
 
-    def _contract_from_allowlist(self, contract_key: str) -> Any:
+    def _contract_from_allowlist(self, contract_key: str, *, contract_check: Mapping[str, Any] | None = None) -> Any:
         entry = self._require_allowlisted_contract(contract_key)
         if self._contract_cls is None:
             self._load_module("ibapi.contract")
+        check = dict(contract_check or _contract_consistency_check(entry))
+        if not check["contract_consistency_check_passed"]:
+            raise IbkrPaperConfigError(f"CONTRACT_EXPIRY_MISMATCH_PRE_SUBMIT: {check['contract_mismatch_reason']}")
         contract = self._contract_cls()
         contract.symbol = str(entry.get("symbol") or "")
         contract.secType = str(entry.get("security_type") or entry.get("secType") or "FUT")
         contract.exchange = str(entry.get("exchange") or "")
         contract.currency = str(entry.get("currency") or "USD")
-        contract.lastTradeDateOrContractMonth = str(entry.get("expiry") or entry.get("contract_month") or "")
+        contract.lastTradeDateOrContractMonth = str(
+            check.get("submitted_lastTradeDateOrContractMonth") or entry.get("expiry") or entry.get("contract_month") or ""
+        )
         if entry.get("local_symbol"):
             contract.localSymbol = str(entry["local_symbol"])
         if entry.get("con_id") is not None:
@@ -883,6 +934,53 @@ def _contract_fields(contract: Any) -> dict[str, Any]:
     }
 
 
+def _contract_consistency_check(entry: Mapping[str, Any]) -> dict[str, Any]:
+    requested_expiry = _digits(entry.get("expiry") or entry.get("contract_month"))
+    canonical = _canonical_futures_contract_fields(entry)
+    canonical_expiry = _digits(canonical.get("lastTradeDateOrContractMonth") if canonical else None)
+    submitted_expiry = requested_expiry
+    mismatch_reason = None
+    if canonical_expiry:
+        if requested_expiry and len(requested_expiry) >= 8 and requested_expiry != canonical_expiry:
+            mismatch_reason = (
+                f"configured expiry {requested_expiry} conflicts with canonical IBKR expiry {canonical_expiry}"
+            )
+        elif requested_expiry and len(requested_expiry) == 6 and not canonical_expiry.startswith(requested_expiry):
+            mismatch_reason = (
+                f"configured contract month {requested_expiry} conflicts with canonical IBKR expiry {canonical_expiry}"
+            )
+        else:
+            submitted_expiry = canonical_expiry
+    return {
+        "contract_consistency_check_passed": mismatch_reason is None,
+        "contract_mismatch_reason": mismatch_reason,
+        "requested_lastTradeDateOrContractMonth": requested_expiry or None,
+        "submitted_lastTradeDateOrContractMonth": submitted_expiry or None,
+        "canonical_broker_contract_fields": canonical,
+    }
+
+
+def _canonical_futures_contract_fields(entry: Mapping[str, Any]) -> dict[str, str] | None:
+    con_id = str(entry.get("con_id") or entry.get("conId") or "").strip()
+    local_symbol = str(entry.get("local_symbol") or entry.get("localSymbol") or "").strip().upper()
+    canonical = CANONICAL_FUTURES_CONTRACTS.get((con_id, local_symbol))
+    if canonical is not None:
+        return dict(canonical)
+    exact_expiry = _digits(entry.get("expiry"))
+    if len(exact_expiry) >= 8:
+        return {
+            "symbol": str(entry.get("symbol") or ""),
+            "secType": str(entry.get("security_type") or entry.get("secType") or "FUT"),
+            "exchange": str(entry.get("exchange") or ""),
+            "currency": str(entry.get("currency") or "USD"),
+            "localSymbol": local_symbol,
+            "conId": con_id,
+            "lastTradeDateOrContractMonth": exact_expiry[:8],
+            "multiplier": str(entry.get("multiplier") or ""),
+        }
+    return None
+
+
 def _contract_month_match(fields: Mapping[str, Any], entry: Mapping[str, Any]) -> bool:
     symbol_ok = _normalize_symbol(fields.get("symbol")) == _normalize_symbol(entry.get("symbol"))
     sec_type_ok = _normalize_symbol(fields.get("secType")) == _normalize_symbol(entry.get("security_type") or entry.get("secType") or "FUT")
@@ -903,6 +1001,10 @@ def _normalize_symbol(value: Any) -> str:
 def _normalize_contract_month(value: Any) -> str:
     raw = "".join(ch for ch in str(value or "").strip() if ch.isdigit())
     return raw[:8] if len(raw) >= 8 else raw[:6]
+
+
+def _digits(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").strip() if ch.isdigit())
 
 
 def _positive_int_or_none(value: Any) -> int | None:

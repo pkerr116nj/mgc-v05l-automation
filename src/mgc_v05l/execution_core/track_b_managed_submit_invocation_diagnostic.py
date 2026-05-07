@@ -88,6 +88,20 @@ def run_track_b_managed_submit_invocation_diagnostic(
             submit_diagnostics.get("openOrder_seen") or submit_diagnostics.get("orderStatus_seen")
         ),
         "fill_callback_received": bool(lifecycle.get("entry_fill") or runner.get("managed_entry_fill")),
+        "contract_fields_submitted_to_ibkr": lifecycle.get("contract_fields_submitted_to_ibkr")
+        or submit_diagnostics.get("contract_fields_submitted_to_ibkr"),
+        "canonical_broker_contract_fields": lifecycle.get("canonical_broker_contract_fields")
+        or submit_diagnostics.get("canonical_broker_contract_fields"),
+        "contract_consistency_check_passed": lifecycle.get("contract_consistency_check_passed")
+        if lifecycle.get("contract_consistency_check_passed") is not None
+        else submit_diagnostics.get("contract_consistency_check_passed"),
+        "contract_mismatch_reason": lifecycle.get("contract_mismatch_reason")
+        or submit_diagnostics.get("contract_mismatch_reason"),
+        "pre_submit_blocked": lifecycle.get("pre_submit_blocked")
+        if lifecycle.get("pre_submit_blocked") is not None
+        else submit_diagnostics.get("pre_submit_blocked"),
+        "ibkr_error_code": lifecycle.get("ibkr_error_code") or _ibkr_error_value(submit_diagnostics, "error_code"),
+        "ibkr_error_message": lifecycle.get("ibkr_error_message") or _ibkr_error_value(submit_diagnostics, "error_string"),
         "managed_submit_blocked_reason": lifecycle.get("managed_submit_blocked_reason")
         or entry_submit.get("managed_submit_blocked_reason")
         or _blocked_reason_from_classification(classification),
@@ -122,6 +136,10 @@ def _classify(
         return "REVIEW_REQUIRED_BLOCKED_SUBMIT"
     if "Account guard" in primary_blocker or "local symbol" in primary_blocker or "conId" in primary_blocker:
         return "ACCOUNT_OR_CONTRACT_GUARD_BLOCKED"
+    if "CONTRACT_EXPIRY_MISMATCH_PRE_SUBMIT" in primary_blocker:
+        return "ACCOUNT_OR_CONTRACT_GUARD_BLOCKED"
+    if "IBKR_CONTRACT_REJECTED" in primary_blocker or _ibkr_error_value(_mapping(entry_submit.get("submit_diagnostics")), "error_code") == 478:
+        return "IBKR_CONTRACT_REJECTED"
     if not paper_submit_requested:
         return "PAPER_SUBMIT_NOT_REQUESTED"
     if not submit_flags_present:
@@ -146,7 +164,16 @@ def _blocked_reason_from_classification(classification: str) -> str | None:
         return "REVIEW_REQUIRED_BLOCKED_SUBMIT"
     if classification == "ACCOUNT_OR_CONTRACT_GUARD_BLOCKED":
         return "ACCOUNT_OR_CONTRACT_GUARD_BLOCKED"
+    if classification == "IBKR_CONTRACT_REJECTED":
+        return "IBKR_CONTRACT_REJECTED"
     return None
+
+
+def _ibkr_error_value(submit_diagnostics: Mapping[str, Any], key: str) -> Any:
+    errors = list(submit_diagnostics.get("error_callbacks_after_submit") or [])
+    if not errors:
+        return None
+    return dict(errors[0]).get(key)
 
 
 def _operator_change_required(classification: str) -> str:
@@ -188,6 +215,9 @@ def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
         f"- Entry submit attempt recorded: `{report.get('entry_submit_attempt_recorded')}`",
         f"- IBKR adapter invoked: `{report.get('ibkr_adapter_invoked')}`",
         f"- placeOrder called: `{report.get('place_order_called')}`",
+        f"- Contract consistency passed: `{report.get('contract_consistency_check_passed')}`",
+        f"- Contract mismatch reason: `{report.get('contract_mismatch_reason')}`",
+        f"- IBKR error: `{report.get('ibkr_error_code')}` `{report.get('ibkr_error_message')}`",
         f"- Primary blocker: `{report.get('primary_blocker')}`",
         "",
         str(report.get("operator_change_required_for_real_managed_paper_submits") or ""),
