@@ -3614,7 +3614,9 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const brokerReconciled = trading.broker_reconciled === true;
   const positions = asArray<JsonRecord>(trading.positions);
   const recentTrades = asArray<JsonRecord>(trading.recent_trades);
-  const managedExitReadinessRows = asArray<JsonRecord>(trading.managed_exit_readiness);
+  const managedLifecycleReadinessRows = asArray<JsonRecord>(trading.managed_paper_lifecycle_readiness).length
+    ? asArray<JsonRecord>(trading.managed_paper_lifecycle_readiness)
+    : asArray<JsonRecord>(trading.managed_exit_readiness);
   const strategyRows = asArray<JsonRecord>(trading.strategy_performance);
   const instrumentRows = asArray<JsonRecord>(trading.instrument_performance);
   const zeroActivityDiagnostic = asRecord(trading.zero_activity_diagnostic);
@@ -3760,14 +3762,16 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
           <MetricCard label="Review Required" value={formatValue(trading.review_required_count ?? 0)} tone={reviewRequired ? "danger" : "good"} />
         </div>
         <DataTable
-          rows={managedExitReadinessRows}
-          emptyLabel="No Track B managed exit readiness metadata is available yet."
+          rows={managedLifecycleReadinessRows}
+          emptyLabel="No Track B managed PAPER lifecycle readiness metadata is available yet."
           rowKey={(row, index) => `${formatValue(row.instrument)}-${formatValue(row.strategy_id)}-${index}`}
           columns={[
             { key: "strategy", label: "Strategy", render: (row) => formatValue(row.strategy_id) },
             { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument) },
-            { key: "policy", label: "Managed Exit", render: (row) => formatValue(row.managed_exit_policy_id ?? "MISSING") },
-            { key: "ready", label: "Managed Ready", render: (row) => <Badge label={formatValue(row.managed_paper_ready)} tone={row.managed_paper_ready === true ? "good" : "warn"} /> },
+            { key: "entry", label: "Entry Ready", render: (row) => <Badge label={formatValue(row.managed_entry_ready)} tone={row.managed_entry_ready === true ? "good" : "warn"} /> },
+            { key: "exit", label: "Exit Ready", render: (row) => <Badge label={formatValue(row.managed_exit_ready)} tone={row.managed_exit_ready === true ? "good" : "warn"} /> },
+            { key: "ready", label: "Managed PAPER", render: (row) => <Badge label={formatValue(row.managed_paper_ready)} tone={row.managed_paper_ready === true ? "good" : "warn"} /> },
+            { key: "policy", label: "Exit Policy", render: (row) => formatValue(row.managed_exit_policy_id ?? "MISSING") },
             { key: "blocker", label: "Blocker", render: (row) => formatValue(row.managed_paper_blocker ?? "None") },
           ]}
         />

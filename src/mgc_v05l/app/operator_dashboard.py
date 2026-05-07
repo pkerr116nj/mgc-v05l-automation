@@ -41,7 +41,10 @@ from ..local_operator_auth import (
     production_action_risk_bucket,
 )
 from .session_phase_labels import label_session_phase, session_restriction_matches_timestamp
-from ..execution_core.track_b_strategy_registry import get_track_b_strategy_registry
+from ..execution_core.track_b_strategy_registry import (
+    PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    get_track_b_strategy_registry,
+)
 from ..execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from ..market_data import (
     SchwabAuthError,
@@ -1920,6 +1923,7 @@ class OperatorDashboardService:
             review_required_numeric = 0
         if review_required_numeric > 0:
             critical_warnings.append("REVIEW_REQUIRED: one or more Track B PAPER lifecycle records require review.")
+        managed_paper_lifecycle_readiness = _track_b_managed_paper_lifecycle_readiness_rows()
         return {
             "schema_version": "track_b_paper_trading_results_v1",
             "available": bool(trade_summary or live_position_status or pnl_summary),
@@ -1953,7 +1957,8 @@ class OperatorDashboardService:
             "last_trade_pnl": pnl_summary.get("last_trade_pnl") if pnl_summary else trade_summary.get("last_trade_pnl"),
             "last_trade_time": pnl_summary.get("last_trade_time") or trade_summary.get("last_trade_time"),
             "review_required_count": review_required_count or 0,
-            "managed_exit_readiness": _track_b_managed_exit_readiness_rows(),
+            "managed_paper_lifecycle_readiness": managed_paper_lifecycle_readiness,
+            "managed_exit_readiness": managed_paper_lifecycle_readiness,
             "positions": positions,
             "recent_trades": recent_trades[:20],
             "strategy_performance": _track_b_paper_performance_rows(by_strategy, row_key="strategy"),
@@ -17317,37 +17322,123 @@ def _track_b_paper_performance_rows(payload: dict[str, Any], *, row_key: str) ->
     return rows
 
 
-def _track_b_managed_exit_readiness_rows() -> list[dict[str, Any]]:
+def _track_b_managed_paper_lifecycle_readiness_rows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for entry in get_track_b_strategy_registry():
-        managed_ready = (
-            entry.paper_eligible is True
-            and entry.live_money_eligible is False
-            and bool(entry.managed_exit_policy_id)
+        side_action = _track_b_strategy_side_action_readiness(entry.strategy_id)
+        strategy_registered = True
+        paper_eligible = entry.paper_eligible is True
+        live_money_disabled = entry.live_money_eligible is False
+        contract_account_context_valid = entry.instrument_family in {"MGC", "MNQ"}
+        managed_exit_policy_present = bool(entry.managed_exit_policy_id) and entry.exit_not_available is False
+        signal_to_intent_ready = (
+            strategy_registered
+            and paper_eligible
+            and live_money_disabled
+            and side_action["side_action_explicit"] is True
+            and contract_account_context_valid
+            and managed_exit_policy_present
+        )
+        strategy_managed_route_available = paper_eligible and live_money_disabled
+        no_paper_proof_fallback = True
+        managed_entry_ready = (
+            signal_to_intent_ready
+            and strategy_managed_route_available
+            and no_paper_proof_fallback
+        )
+        exit_policy_can_generate_close_intent = (
+            entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
             and entry.exit_not_available is False
         )
+        close_leg_can_be_tracked = exit_policy_can_generate_close_intent
+        final_state_classification_supported = exit_policy_can_generate_close_intent
+        managed_exit_ready = (
+            managed_exit_policy_present
+            and exit_policy_can_generate_close_intent
+            and close_leg_can_be_tracked
+            and final_state_classification_supported
+        )
+        managed_ready = managed_entry_ready and managed_exit_ready
+        blockers: list[str] = []
         if entry.live_money_eligible is not False:
-            reason = "live_money_eligible must remain false"
-        elif entry.paper_eligible is not True:
-            reason = "strategy is not paper_eligible"
-        elif not entry.managed_exit_policy_id or entry.exit_not_available is True:
-            reason = "managed exit policy missing"
-        else:
-            reason = None
+            blockers.append("live_money_eligible must remain false")
+        if entry.paper_eligible is not True:
+            blockers.append("strategy is not paper_eligible")
+        if side_action["side_action_explicit"] is not True:
+            blockers.append(str(side_action["side_action_blocker"]))
+        if not contract_account_context_valid:
+            blockers.append("contract/account context is not available for this instrument")
+        if not strategy_managed_route_available:
+            blockers.append("STRATEGY_MANAGED route is not available")
+        if not managed_exit_policy_present:
+            blockers.append("managed exit policy missing")
+        elif not exit_policy_can_generate_close_intent:
+            blockers.append("managed exit policy cannot generate close intent")
         rows.append(
             {
                 "strategy_id": entry.strategy_id,
                 "instrument": entry.instrument_family,
                 "timeframe": entry.timeframe,
+                "strategy_registered": strategy_registered,
                 "paper_eligible": entry.paper_eligible,
                 "live_money_eligible": entry.live_money_eligible,
+                "side": side_action["side"],
+                "order_action": side_action["order_action"],
+                "side_action_explicit": side_action["side_action_explicit"],
+                "side_action_detail": side_action["side_action_detail"],
+                "contract_account_context_valid": contract_account_context_valid,
+                "signal_to_intent_bridge_can_create_intent": signal_to_intent_ready,
+                "strategy_managed_route_available": strategy_managed_route_available,
+                "paper_proof_fallback_allowed_for_real_signals": False,
                 "managed_exit_policy_id": entry.managed_exit_policy_id,
                 "exit_not_available": entry.exit_not_available,
+                "managed_exit_policy_present": managed_exit_policy_present,
+                "exit_policy_can_generate_close_intent": exit_policy_can_generate_close_intent,
+                "close_leg_can_be_tracked": close_leg_can_be_tracked,
+                "final_state_classification_supported": final_state_classification_supported,
+                "managed_entry_ready": managed_entry_ready,
+                "managed_exit_ready": managed_exit_ready,
                 "managed_paper_ready": managed_ready,
-                "managed_paper_blocker": reason,
+                "managed_paper_blockers": blockers,
+                "managed_paper_blocker": "; ".join(blockers) if blockers else None,
             }
         )
     return rows
+
+
+def _track_b_strategy_side_action_readiness(strategy_id: str) -> dict[str, Any]:
+    normalized = strategy_id.upper()
+    if strategy_id == "asian_drift_v1":
+        return {
+            "side": "RUNTIME_EXPLICIT_LONG_OR_SHORT",
+            "order_action": "RUNTIME_EXPLICIT_BUY_OR_SELL",
+            "side_action_explicit": True,
+            "side_action_detail": "Asian Drift signals must carry explicit LONG/SHORT direction at runtime before intent creation.",
+            "side_action_blocker": None,
+        }
+    if "SHORT" in normalized or "BEAR" in normalized:
+        return {
+            "side": "SHORT",
+            "order_action": "SELL",
+            "side_action_explicit": True,
+            "side_action_detail": "Strategy id/adapter semantics define SHORT/SELL signal direction.",
+            "side_action_blocker": None,
+        }
+    if "LONG" in normalized or "BULL" in normalized or normalized.endswith("_RECLAIM_LONG_V1"):
+        return {
+            "side": "LONG",
+            "order_action": "BUY",
+            "side_action_explicit": True,
+            "side_action_detail": "Strategy id/adapter semantics define LONG/BUY signal direction.",
+            "side_action_blocker": None,
+        }
+    return {
+        "side": None,
+        "order_action": None,
+        "side_action_explicit": False,
+        "side_action_detail": None,
+        "side_action_blocker": "side/action is not explicit for managed PAPER lifecycle",
+    }
 
 
 def _bind_dashboard_server(host: str, preferred_port: int, handler, *, allow_port_fallback: bool):

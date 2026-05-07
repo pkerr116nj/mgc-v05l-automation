@@ -3330,12 +3330,29 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     assert payload["recent_trades"][0]["strategy_id"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     assert payload["strategy_performance"][0]["strategy"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     assert payload["instrument_performance"][0]["instrument"] == "MNQ-202606"
-    managed_readiness = {row["strategy_id"]: row for row in payload["managed_exit_readiness"]}
+    managed_readiness = {row["strategy_id"]: row for row in payload["managed_paper_lifecycle_readiness"]}
+    assert payload["managed_exit_readiness"] == payload["managed_paper_lifecycle_readiness"]
     assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["managed_paper_ready"] is True
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["managed_entry_ready"] is True
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["managed_exit_ready"] is True
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["side_action_explicit"] is True
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["signal_to_intent_bridge_can_create_intent"] is True
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["strategy_managed_route_available"] is True
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["paper_proof_fallback_allowed_for_real_signals"] is False
     assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["exit_policy_can_generate_close_intent"] is True
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["close_leg_can_be_tracked"] is True
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["final_state_classification_supported"] is True
     assert managed_readiness["asian_drift_v1"]["managed_paper_ready"] is True
+    assert managed_readiness["asian_drift_v1"]["managed_entry_ready"] is True
+    assert managed_readiness["asian_drift_v1"]["managed_exit_ready"] is True
+    assert managed_readiness["asian_drift_v1"]["side_action_explicit"] is True
+    assert managed_readiness["asian_drift_v1"]["side"] == "RUNTIME_EXPLICIT_LONG_OR_SHORT"
     assert managed_readiness["asian_drift_v1"]["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
     assert managed_readiness["mgc_ema_momentum_reclaim_long_v1"]["managed_paper_ready"] is False
+    assert managed_readiness["mgc_ema_momentum_reclaim_long_v1"]["managed_entry_ready"] is False
+    assert managed_readiness["mgc_ema_momentum_reclaim_long_v1"]["signal_to_intent_bridge_can_create_intent"] is False
+    assert managed_readiness["mgc_ema_momentum_reclaim_long_v1"]["managed_exit_ready"] is False
     assert managed_readiness["mgc_ema_momentum_reclaim_long_v1"]["managed_paper_blocker"] == "managed exit policy missing"
 
 
