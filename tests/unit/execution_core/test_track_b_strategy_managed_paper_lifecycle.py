@@ -116,6 +116,75 @@ def test_missing_exit_policy_does_not_submit(tmp_path: Path) -> None:
     assert result.report["live_money_readiness"] is False
 
 
+def test_submit_disabled_reports_managed_submit_blocked_without_position(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            submit_enabled=False,
+        ),
+        lifecycle_id="submit-disabled",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.LIFECYCLE_NOT_AVAILABLE
+    assert result.report["submit_enabled"] is False
+    assert result.report["managed_paper_submit_enabled"] is False
+    assert result.report["managed_submit_blocked_reason"] == "SUBMIT_DISABLED"
+    assert result.report["entry_submit_attempt"]["submit_attempted"] is False
+    assert result.report["entry_fill"] is None
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+
+
+def test_adapter_stage_failure_preserves_submit_attempt_diagnostics(tmp_path: Path) -> None:
+    def bad_entry(
+        config: TrackBStrategyManagedPaperLifecycleConfig,
+        entry_intent: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return {
+            "submitted": False,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "review_required": True,
+            "broker_order_id": "1001",
+            "primary_blocker": "Managed PAPER adapter submit stage failed: missing openOrder/orderStatus callback",
+            "submit_diagnostics": {
+                "place_order_called": True,
+                "order_transmit_flag": True,
+                "broker_order_id_allocated": "1001",
+                "openOrder_seen": False,
+                "orderStatus_seen": False,
+            },
+        }
+
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=bad_entry,
+        exit_policy=lambda config, open_state: None,
+        close_submitter=lambda config, close_intent: {},
+    )
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            submit_enabled=True,
+        ),
+        stages=stages,
+        lifecycle_id="adapter-stage-failure",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+    assert result.report["submit_enabled"] is True
+    assert result.report["entry_submit_attempt"]["submit_attempted"] is True
+    assert result.report["entry_submit_attempt"]["submit_diagnostics"]["place_order_called"] is True
+    assert result.report["entry_submit_attempt"]["submit_diagnostics"]["order_transmit_flag"] is True
+    assert result.report["entry_fill"] is None
+    assert result.report["submit_attempted"] is True
+    assert result.report["broker_state_mutated"] is True
+    assert result.report["review_required"] is True
+
+
 def test_valid_exit_policy_creates_open_managed_state(tmp_path: Path) -> None:
     result = run_track_b_strategy_managed_paper_lifecycle(
         config=base_config(

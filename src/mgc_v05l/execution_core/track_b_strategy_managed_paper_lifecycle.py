@@ -160,7 +160,11 @@ def run_track_b_strategy_managed_paper_lifecycle(
             submit_attempted = bool(entry_submit.get("submitted") or entry_submit.get("submit_attempted"))
             broker_state_mutated = bool(entry_submit.get("broker_state_mutated"))
             entry_fill = _mapping(entry_submit.get("entry_fill") or entry_submit.get("fill"))
-            if not submit_attempted:
+            if entry_submit.get("review_required") is True:
+                classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+                primary_blocker = str(entry_submit.get("primary_blocker") or "Managed entry submit requires review.")
+                required_next_action = "Review managed entry submit diagnostics before retrying."
+            elif not submit_attempted:
                 classification = TrackBManagedPaperLifecycleClassification.LIFECYCLE_NOT_AVAILABLE
                 primary_blocker = str(entry_submit.get("primary_blocker") or "Managed broker submit adapter is not configured.")
                 required_next_action = "Configure the guarded managed PAPER lifecycle adapter before retrying."
@@ -330,6 +334,10 @@ def _build_report(
         "close_intent_status": _close_intent_status(classification, close_intent),
         "strategy_managed_lifecycle_classification": classification.value,
         "paper_lifecycle_classification": classification.value,
+        "submit_enabled": bool(config.submit_enabled),
+        "managed_paper_submit_enabled": bool(config.submit_enabled),
+        "managed_submit_blocked_reason": _managed_submit_blocked_reason(config, entry_submit, primary_blocker),
+        "ibkr_adapter_available": True,
         "entry_intent": dict(entry_intent),
         "entry_submit_attempt": dict(entry_submit) if entry_submit else None,
         "entry_fill": dict(entry_fill) if entry_fill else None,
@@ -374,6 +382,25 @@ def _guard_blocker(config: TrackBStrategyManagedPaperLifecycleConfig) -> str | N
     return None
 
 
+def _managed_submit_blocked_reason(
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    entry_submit: Mapping[str, Any] | None,
+    primary_blocker: str | None,
+) -> str | None:
+    if config.submit_enabled is not True:
+        return "SUBMIT_DISABLED"
+    if entry_submit and entry_submit.get("managed_submit_blocked_reason"):
+        return str(entry_submit.get("managed_submit_blocked_reason"))
+    blocker = str(primary_blocker or "")
+    if "review-required" in blocker:
+        return "REVIEW_REQUIRED_BLOCKED_SUBMIT"
+    if "Account guard" in blocker or "local symbol" in blocker or "conId" in blocker:
+        return "ACCOUNT_OR_CONTRACT_GUARD_BLOCKED"
+    if "not enabled" in blocker:
+        return "SUBMIT_DISABLED"
+    return None
+
+
 def _existing_review_required_blocker(config: TrackBStrategyManagedPaperLifecycleConfig) -> str | None:
     status_path = Path(config.live_position_status_json) if config.live_position_status_json else Path(config.paper_trade_ledger_output_root) / "latest_track_b_live_position_status.json"
     try:
@@ -402,6 +429,7 @@ def _default_entry_submitter(
             "submit_attempted": False,
             "broker_state_mutated": False,
             "entry_intent": dict(entry_intent),
+            "managed_submit_blocked_reason": "SUBMIT_DISABLED",
             "primary_blocker": "Managed PAPER submit is not enabled for this lifecycle invocation.",
         }
     return _submit_managed_limit_order(
@@ -566,6 +594,8 @@ def _submit_managed_limit_order(
             "submit_attempted": True,
             "broker_state_mutated": True,
             "broker_order_id": str(broker_order_id),
+            "submit_attempt_id": submit_attempt.submit_attempt_id,
+            "submitted_at": submit_attempt.submitted_at.isoformat(),
             "broker_order": broker_order.to_json_dict(),
             field: {
                 "price": _decimal_text(fill.price),
@@ -576,6 +606,22 @@ def _submit_managed_limit_order(
                 "execution_id": fill.execution_id,
             },
             "submit_diagnostics": adapter.submit_diagnostics(submit_attempt.submit_attempt_id),
+        }
+    except Exception as exc:  # noqa: BLE001 - adapter stage failures must become artifacts.
+        diagnostics = adapter.submit_diagnostics(submit_attempt.submit_attempt_id)
+        place_order_called = bool(diagnostics.get("place_order_called"))
+        broker_order_id = diagnostics.get("broker_order_id_allocated")
+        return {
+            "submitted": False,
+            "submit_attempted": place_order_called or broker_order_id is not None,
+            "broker_state_mutated": place_order_called,
+            "review_required": place_order_called,
+            "broker_order_id": str(broker_order_id) if broker_order_id is not None else None,
+            "submit_attempt_id": submit_attempt.submit_attempt_id,
+            "submitted_at": submit_attempt.submitted_at.isoformat(),
+            "primary_blocker": f"Managed PAPER adapter submit stage failed: {exc}",
+            "adapter_exception": repr(exc),
+            "submit_diagnostics": diagnostics,
         }
     finally:
         adapter.disconnect()
