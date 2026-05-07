@@ -94,6 +94,12 @@ def create_track_b_strategy_activity_calibration(
         trade_summary=trade_summary,
         target_date=target_date,
     )
+    signal_to_trade_funnel = _signal_to_trade_funnel(
+        repo_root=repo_root,
+        runtime_reports=analysis_reports,
+        trade_summary=trade_summary,
+    )
+    strategy_activity_drop_offs = _strategy_activity_drop_off_ledger(strategy_rows)
     instruments = _instrument_rows(strategy_rows)
     recommendations = _recommendations(strategy_rows, track1_preflight, track1_breakpoint, track1_parity)
     report = {
@@ -113,6 +119,9 @@ def create_track_b_strategy_activity_calibration(
         "active_strategies": list(ACTIVE_TRACK_B_STRATEGIES),
         "instruments": instruments,
         "strategies": strategy_rows,
+        "signal_to_trade_funnel": signal_to_trade_funnel,
+        "strategy_activity_drop_off_ledger": strategy_activity_drop_offs,
+        "opportunity_capture_posture": _opportunity_capture_posture(signal_to_trade_funnel, strategy_activity_drop_offs),
         "totals": _totals(strategy_rows, trade_summary),
         "track1_expectations": _track1_expectations(track1_preflight, track1_breakpoint, track1_parity),
         "classification_summary": _classification_summary(strategy_rows),
@@ -236,6 +245,348 @@ def classify_quiet_strategy(row: Mapping[str, Any]) -> str:
     if near > 0 or top_failed:
         return "QUIET_DUE_TO_PREDICATES_TOO_STRICT"
     return "QUIET_BUT_EXPECTED_FOR_REGIME"
+
+
+def _strategy_activity_drop_off_ledger(strategy_rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in strategy_rows:
+        classification = _strategy_activity_drop_off_classification(row)
+        if classification is None:
+            continue
+        rows.append(
+            {
+                "drop_type": "strategy_activity",
+                "strategy_id": row.get("strategy_id"),
+                "instrument": row.get("instrument"),
+                "session": row.get("session"),
+                "side": row.get("side"),
+                "strategy_evaluations": row.get("strategy_evaluations"),
+                "hard_signals": row.get("hard_signals"),
+                "intent_count": row.get("intent_count"),
+                "meaningful_managed_trade_count": row.get("meaningful_managed_trade_count"),
+                "one_predicate_away": row.get("one_predicate_away"),
+                "two_predicates_away": row.get("two_predicates_away"),
+                "top_failed_predicates": row.get("top_failed_predicates"),
+                "drop_off_classification": classification,
+                "drop_off_reason": _strategy_activity_drop_off_reason(row, classification),
+                "minimum_action": row.get("recommended_minimum_change"),
+            }
+        )
+    return rows
+
+
+def _strategy_activity_drop_off_classification(row: Mapping[str, Any]) -> str | None:
+    classification = str(row.get("classification") or "")
+    if classification == "QUIET_DUE_TO_NOT_MIGRATED_OR_NOT_ENABLED":
+        return "DROPPED_BY_MISSING_STRATEGY_WIRING"
+    if classification == "QUIET_DUE_TO_SESSION_FILTER":
+        return "DROPPED_BY_SESSION_FILTER"
+    if classification == "QUIET_DUE_TO_FIELD_OR_SESSION_MISMATCH":
+        return "DROPPED_BY_DATA_NOT_READY"
+    if classification == "QUIET_DUE_TO_ARBITRATION":
+        return "DROPPED_BY_ARBITRATION"
+    if classification in {"QUIET_DUE_TO_EXTRA_TRACK_B_GATE", "QUIET_DUE_TO_PREDICATES_TOO_STRICT"}:
+        return "DROPPED_BY_BUSINESS_RULE"
+    return None
+
+
+def _strategy_activity_drop_off_reason(row: Mapping[str, Any], classification: str) -> str:
+    strategy_id = str(row.get("strategy_id") or "")
+    if classification == "DROPPED_BY_MISSING_STRATEGY_WIRING":
+        return f"{strategy_id} is in active inventory but produced zero completed-bar evaluations in the retained window."
+    if classification == "DROPPED_BY_SESSION_FILTER":
+        return f"{strategy_id} was evaluated, but session/phase predicates were the dominant opportunity blocker."
+    if classification == "DROPPED_BY_DATA_NOT_READY":
+        return f"{strategy_id} had missing/defaulted fields or session mapping mismatches before a qualified opportunity could form."
+    if classification == "DROPPED_BY_ARBITRATION":
+        return f"{strategy_id} produced candidate activity that arbitration suppressed."
+    top = row.get("top_failed_predicates") or []
+    top_reason = None if not top else top[0].get("reason")
+    if classification == "DROPPED_BY_BUSINESS_RULE":
+        return f"{strategy_id} was muted by strategy/business predicates; dominant blocker was `{top_reason}`."
+    return f"{strategy_id} drop-off reason is not known from current artifacts."
+
+
+def _signal_to_trade_funnel(
+    *,
+    repo_root: Path,
+    runtime_reports: Iterable[Mapping[str, Any]],
+    trade_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    trade_rows_by_lifecycle = _trade_rows_by_lifecycle(trade_summary)
+    ledger: list[dict[str, Any]] = []
+    for runtime in runtime_reports:
+        candidates = [item for item in runtime.get("candidate_signals") or [] if isinstance(item, Mapping)]
+        if not candidates:
+            continue
+        selected_strategy_id = _selected_strategy_id(runtime)
+        suppressed_ids = _suppressed_strategy_ids(runtime)
+        runner_report = _load_runner_report(repo_root, runtime.get("paper_runner_report_path"))
+        for candidate in candidates:
+            strategy_id = str(candidate.get("strategy_id") or candidate.get("signal_source") or "")
+            selected = strategy_id == selected_strategy_id or (not selected_strategy_id and len(candidates) == 1)
+            row = _signal_drop_off_row(
+                runtime=runtime,
+                candidate=candidate,
+                selected=selected,
+                suppressed=strategy_id in suppressed_ids,
+                runner_report=runner_report if selected else {},
+                trade_rows_by_lifecycle=trade_rows_by_lifecycle,
+            )
+            ledger.append(row)
+    drop_rows = [item for item in ledger if item.get("drop_off_classification")]
+    return {
+        "schema_version": "track_b_signal_to_trade_funnel_v1",
+        "funnel_definition": [
+            "strategy_evaluation",
+            "hard_signal",
+            "eligible_signal",
+            "trade_intent",
+            "entry_submit",
+            "broker_confirmed_fill",
+            "OPEN_MANAGED",
+            "exit_trigger",
+            "exit_submit",
+            "broker_confirmed_close",
+            "CLOSED_FLAT_RECONCILED_PNL",
+        ],
+        "stage_counts": _signal_funnel_stage_counts(ledger),
+        "drop_off_summary": _counter_rows(Counter(str(item.get("drop_off_classification")) for item in drop_rows), 20),
+        "signal_drop_off_ledger": ledger,
+        "interpretation": _signal_funnel_interpretation(ledger),
+    }
+
+
+def _signal_drop_off_row(
+    *,
+    runtime: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    selected: bool,
+    suppressed: bool,
+    runner_report: Mapping[str, Any],
+    trade_rows_by_lifecycle: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    strategy_id = str(candidate.get("strategy_id") or candidate.get("signal_source") or runner_report.get("strategy_id") or "")
+    lifecycle_id = str(runner_report.get("managed_lifecycle_id") or "")
+    trade_row = trade_rows_by_lifecycle.get(lifecycle_id, {}) if lifecycle_id else {}
+    intent_created = runner_report.get("strategy_trade_intent_created") is True
+    entry_submit_attempted = _truthy(runner_report.get("submit_attempted")) or bool(runner_report.get("managed_entry_submit_attempt"))
+    entry_fill_confirmed = bool(runner_report.get("managed_entry_fill")) or trade_row.get("entry_fill_confirmed") is True
+    open_managed = str(runner_report.get("final_position_status") or trade_row.get("final_position_status") or "") == "OPEN_MANAGED"
+    close_intent_created = bool(runner_report.get("managed_close_intent")) or bool(trade_row.get("exit_order_id"))
+    close_submit_attempted = bool(runner_report.get("managed_close_submit_attempt")) or bool(trade_row.get("exit_order_id"))
+    close_fill_confirmed = bool(runner_report.get("managed_close_fill")) or bool(trade_row.get("exit_fill_price"))
+    closed_flat = _is_closed_flat(runner_report, trade_row)
+    classification, reason = _signal_drop_off_classification(
+        runtime=runtime,
+        runner_report=runner_report,
+        trade_row=trade_row,
+        selected=selected,
+        suppressed=suppressed,
+        intent_created=intent_created,
+        entry_submit_attempted=entry_submit_attempted,
+        entry_fill_confirmed=entry_fill_confirmed,
+        closed_flat=closed_flat,
+    )
+    return {
+        "cycle_generated_at": runtime.get("generated_at"),
+        "cycle_id": runtime.get("track_b_multi_strategy_runtime_cycle_id"),
+        "strategy_id": strategy_id,
+        "instrument": candidate.get("instrument_family") or candidate.get("instrument") or runner_report.get("strategy_registry_instrument_family"),
+        "side": candidate.get("signal_direction") or candidate.get("side") or runner_report.get("latest_signal_side"),
+        "selected_by_arbitration": selected,
+        "suppressed_by_arbitration": suppressed,
+        "runner_report_path": runtime.get("paper_runner_report_path"),
+        "runner_verdict": runner_report.get("strategy_paper_runner_verdict"),
+        "primary_blocker": runner_report.get("primary_blocker") or runtime.get("primary_blocker"),
+        "hard_signal": True,
+        "eligible_signal": selected and not suppressed,
+        "intent_created": intent_created,
+        "intent_id": runner_report.get("strategy_trade_intent_id"),
+        "lifecycle_mode": runner_report.get("lifecycle_mode"),
+        "lifecycle_id": lifecycle_id or None,
+        "entry_submit_attempted": entry_submit_attempted,
+        "broker_state_mutated": _truthy(runner_report.get("broker_state_mutated")),
+        "entry_fill_confirmed": entry_fill_confirmed,
+        "open_managed": open_managed,
+        "exit_trigger_seen": close_intent_created,
+        "exit_submit_attempted": close_submit_attempted,
+        "close_fill_confirmed": close_fill_confirmed,
+        "closed_flat_reconciled_pnl": closed_flat,
+        "realized_pnl": trade_row.get("realized_pnl"),
+        "drop_off_classification": classification,
+        "drop_off_reason": reason,
+    }
+
+
+def _signal_drop_off_classification(
+    *,
+    runtime: Mapping[str, Any],
+    runner_report: Mapping[str, Any],
+    trade_row: Mapping[str, Any],
+    selected: bool,
+    suppressed: bool,
+    intent_created: bool,
+    entry_submit_attempted: bool,
+    entry_fill_confirmed: bool,
+    closed_flat: bool,
+) -> tuple[str | None, str | None]:
+    if suppressed or not selected:
+        return "DROPPED_BY_ARBITRATION", "Signal was not selected by arbitration."
+    blocker = str(runner_report.get("primary_blocker") or runtime.get("primary_blocker") or "")
+    verdict = str(runner_report.get("strategy_paper_runner_verdict") or runtime.get("multi_strategy_runtime_cycle_verdict") or "")
+    if not runner_report:
+        return "DROPPED_NO_INTENT_CREATED", "No paper runner report was written for the selected signal."
+    if not intent_created:
+        if _contains_any(blocker, ("quote", "Databento", "runtime", "candle", "data")):
+            return "DROPPED_BY_DATA_NOT_READY", blocker or "Data readiness blocked the selected signal before intent creation."
+        if _contains_any(blocker, ("exit policy", "non-flat", "unresolved", "review")):
+            return "DROPPED_BY_BUSINESS_RULE", blocker
+        if _contains_any(blocker, ("nextValidId", "callback", "adapter", "preflight")):
+            return "DROPPED_BY_EXECUTION_GUARD", blocker
+        return "DROPPED_NO_INTENT_CREATED", blocker or "Selected hard signal did not create a durable trade intent."
+    if closed_flat:
+        return None, None
+    if _trade_or_runner_has_ibkr_rejection(runner_report, trade_row):
+        return "DROPPED_BY_BROKER_REJECTION", "IBKR rejected the managed submit before a broker-confirmed fill."
+    if not entry_submit_attempted:
+        return "DROPPED_BY_EXECUTION_GUARD", blocker or "Managed lifecycle created entry intent but did not reach entry submit."
+    if not entry_fill_confirmed:
+        return "DROPPED_BY_EXECUTION_GUARD", blocker or "Entry submit did not produce a broker-confirmed fill."
+    if entry_fill_confirmed and not closed_flat:
+        if _contains_any(verdict + " " + blocker, ("REVIEW", "MISMATCH", "AMBIGUOUS")):
+            return "DROPPED_BY_EXECUTION_GUARD", blocker or "Filled managed lifecycle requires review before clean close/P&L."
+        return "DROPPED_REASON_UNKNOWN_DEFECT", "Broker-filled managed lifecycle did not reach CLOSED_FLAT/P&L in this window."
+    return "DROPPED_REASON_UNKNOWN_DEFECT", blocker or "Drop-off reason is not classified by current artifacts."
+
+
+def _signal_funnel_stage_counts(ledger: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    rows = list(ledger)
+    return {
+        "hard_signal": len(rows),
+        "eligible_signal": sum(1 for item in rows if item.get("eligible_signal")),
+        "trade_intent": sum(1 for item in rows if item.get("intent_created")),
+        "entry_submit": sum(1 for item in rows if item.get("entry_submit_attempted")),
+        "broker_confirmed_fill": sum(1 for item in rows if item.get("entry_fill_confirmed")),
+        "open_managed": sum(1 for item in rows if item.get("open_managed") or item.get("entry_fill_confirmed")),
+        "exit_trigger": sum(1 for item in rows if item.get("exit_trigger_seen")),
+        "exit_submit": sum(1 for item in rows if item.get("exit_submit_attempted")),
+        "broker_confirmed_close": sum(1 for item in rows if item.get("close_fill_confirmed")),
+        "closed_flat_reconciled_pnl": sum(1 for item in rows if item.get("closed_flat_reconciled_pnl")),
+    }
+
+
+def _signal_funnel_interpretation(ledger: Iterable[Mapping[str, Any]]) -> str:
+    counts = _signal_funnel_stage_counts(ledger)
+    hard = counts.get("hard_signal", 0)
+    intents = counts.get("trade_intent", 0)
+    closed = counts.get("closed_flat_reconciled_pnl", 0)
+    if hard and intents < hard:
+        return f"Track B is a PAPER-stage trading engine, but the funnel is leaking before durable intent creation: {hard} hard signals became {intents} intents and {closed} closed-flat broker-backed managed trades."
+    if intents and closed < intents:
+        return f"Track B creates intents, but managed lifecycle completion is leaking: {intents} intents became {closed} closed-flat broker-backed managed trades."
+    return "No unexplained signal-to-trade leak is visible in the retained signal window."
+
+
+def _opportunity_capture_posture(
+    signal_to_trade_funnel: Mapping[str, Any],
+    strategy_drop_offs: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    stage_counts = signal_to_trade_funnel.get("stage_counts") if isinstance(signal_to_trade_funnel.get("stage_counts"), Mapping) else {}
+    drop_off_rows = list(strategy_drop_offs)
+    hard_signals = int(stage_counts.get("hard_signal") or 0)
+    closed = int(stage_counts.get("closed_flat_reconciled_pnl") or 0)
+    missing_wiring = [row for row in drop_off_rows if row.get("drop_off_classification") == "DROPPED_BY_MISSING_STRATEGY_WIRING"]
+    session_filtered = [row for row in drop_off_rows if row.get("drop_off_classification") == "DROPPED_BY_SESSION_FILTER"]
+    business_rule = [row for row in drop_off_rows if row.get("drop_off_classification") == "DROPPED_BY_BUSINESS_RULE"]
+    return {
+        "current_phase": "PAPER_ONLY_TRADING_ENGINE",
+        "future_destination": "LIVE_TRADING_AFTER_PROMOTION_GATES",
+        "default_question": "Which qualified opportunities failed to become controlled, attributable, broker-reconciled PAPER trades?",
+        "safety_definition": "Controlled, attributable, broker-reconciled PAPER trading with explicit gates; non-participation is not itself a success condition.",
+        "product_defect_policy": "Unexplained silence or unexplained signal-to-trade drop-off is treated as a product defect until classified.",
+        "posture": "OPPORTUNITY_CAPTURE_DEFECTS_PRESENT" if hard_signals > closed or drop_off_rows else "OPPORTUNITY_CAPTURE_HEALTHY_IN_WINDOW",
+        "primary_focus": _opportunity_primary_focus(
+            hard_signals=hard_signals,
+            closed=closed,
+            missing_wiring=len(missing_wiring),
+            session_filtered=len(session_filtered),
+            business_rule=len(business_rule),
+        ),
+    }
+
+
+def _opportunity_primary_focus(
+    *,
+    hard_signals: int,
+    closed: int,
+    missing_wiring: int,
+    session_filtered: int,
+    business_rule: int,
+) -> str:
+    if hard_signals > closed:
+        return "Repair and calibrate the signal-to-trade funnel before broad threshold changes."
+    if missing_wiring:
+        return "Wire or remove active-inventory strategies that never evaluate."
+    if session_filtered:
+        return "Verify session/phase parity so valid market windows are not treated as off-limits by accident."
+    if business_rule:
+        return "Research business-rule predicate calibration against opportunity fixtures before loosening thresholds."
+    return "Continue collecting completed decision-bar evidence."
+
+
+def _load_runner_report(repo_root: Path, path_value: Any) -> dict[str, Any]:
+    if not path_value:
+        return {}
+    path = _resolve(repo_root, Path(str(path_value)))
+    return _load_json(path)
+
+
+def _trade_rows_by_lifecycle(trade_summary: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    rows: dict[str, Mapping[str, Any]] = {}
+    for item in trade_summary.get("recent_trades") or []:
+        if isinstance(item, Mapping) and item.get("lifecycle_id"):
+            rows[str(item.get("lifecycle_id"))] = item
+    return rows
+
+
+def _selected_strategy_id(runtime: Mapping[str, Any]) -> str:
+    chosen = runtime.get("chosen_signal")
+    if isinstance(chosen, Mapping):
+        return str(chosen.get("strategy_id") or chosen.get("signal_source") or "")
+    return str(runtime.get("chosen_strategy_id") or "")
+
+
+def _is_closed_flat(runner_report: Mapping[str, Any], trade_row: Mapping[str, Any]) -> bool:
+    trade_final_status = str(trade_row.get("final_position_status") or "")
+    trade_classification = str(trade_row.get("final_broker_state_classification") or "")
+    runner_final_status = str(runner_report.get("final_position_status") or "")
+    runner_classification = str(runner_report.get("final_broker_state_classification") or "")
+    has_close_fill = bool(trade_row.get("exit_fill_price") or runner_report.get("managed_close_fill"))
+    return has_close_fill and (
+        "CLOSED_FLAT" in trade_final_status
+        or "CLOSED_FLAT" in trade_classification
+        or "CLOSED_FLAT" in runner_final_status
+        or "CLOSED_FLAT" in runner_classification
+    )
+
+
+def _trade_or_runner_has_ibkr_rejection(runner_report: Mapping[str, Any], trade_row: Mapping[str, Any]) -> bool:
+    text = json.dumps(to_jsonable({"runner": runner_report, "trade": trade_row}), sort_keys=True)
+    return "IBKR_CONTRACT_REJECTED" in text or "error_code" in text and "478" in text or "contract parameters" in text
+
+
+def _contains_any(value: str, needles: Iterable[str]) -> bool:
+    lowered = value.lower()
+    return any(str(item).lower() in lowered for item in needles)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).lower() in {"true", "1", "yes"}
 
 
 def _empty_strategy_row(strategy_id: str, entry: TrackBStrategyRegistryEntry | None) -> dict[str, Any]:
@@ -728,6 +1079,10 @@ def _markdown(report: Mapping[str, Any]) -> str:
         "",
         _plain_answer(report),
         "",
+        "## Signal-To-Trade Funnel",
+        "",
+        _funnel_markdown(report),
+        "",
         "## Instrument Summary",
         "",
     ]
@@ -788,6 +1143,10 @@ def _markdown(report: Mapping[str, Any]) -> str:
 def _plain_answer(report: Mapping[str, Any]) -> str:
     totals = report.get("totals") if isinstance(report.get("totals"), Mapping) else {}
     classifications = {item.get("reason"): item.get("count") for item in report.get("classification_summary") or []}
+    funnel = report.get("signal_to_trade_funnel") if isinstance(report.get("signal_to_trade_funnel"), Mapping) else {}
+    stage_counts = funnel.get("stage_counts") if isinstance(funnel.get("stage_counts"), Mapping) else {}
+    if int(stage_counts.get("hard_signal") or 0) > int(stage_counts.get("closed_flat_reconciled_pnl") or 0):
+        return str(funnel.get("interpretation") or "Track B has unexplained signal-to-trade drop-off; inspect the drop-off ledger before changing thresholds.")
     if int(totals.get("strategy_evaluations") or 0) <= 0:
         return "Track B did not produce enough completed-bar evaluations in the retained window to calibrate trade frequency."
     if int(totals.get("hard_signals") or 0) > int(totals.get("meaningful_managed_trades") or 0):
@@ -795,3 +1154,48 @@ def _plain_answer(report: Mapping[str, Any]) -> str:
     if classifications.get("QUIET_DUE_TO_PREDICATES_TOO_STRICT") or classifications.get("QUIET_DUE_TO_SESSION_FILTER"):
         return "Track B is evaluating, but the active strategies are mostly muted by session filters and strict structure/predicate gates. The smallest safe next step is parity/field checks plus replay sensitivity on dominant failed predicates, not blind threshold loosening."
     return "Track B is quiet in the retained window, but this diagnostic did not isolate a single dominant blocker."
+
+
+def _funnel_markdown(report: Mapping[str, Any]) -> str:
+    funnel = report.get("signal_to_trade_funnel") if isinstance(report.get("signal_to_trade_funnel"), Mapping) else {}
+    counts = funnel.get("stage_counts") if isinstance(funnel.get("stage_counts"), Mapping) else {}
+    posture = report.get("opportunity_capture_posture") if isinstance(report.get("opportunity_capture_posture"), Mapping) else {}
+    lines = [
+        f"Posture: `{posture.get('posture', 'NOT_PROVIDED')}`. {posture.get('primary_focus', '')}",
+        "",
+        str(funnel.get("interpretation") or "Signal-to-trade funnel was not available."),
+        "",
+        (
+            f"- hard signal `{counts.get('hard_signal', 0)}` -> eligible signal `{counts.get('eligible_signal', 0)}` "
+            f"-> trade intent `{counts.get('trade_intent', 0)}` -> entry submit `{counts.get('entry_submit', 0)}` "
+            f"-> broker fill `{counts.get('broker_confirmed_fill', 0)}` -> close fill `{counts.get('broker_confirmed_close', 0)}` "
+            f"-> CLOSED_FLAT/P&L `{counts.get('closed_flat_reconciled_pnl', 0)}`"
+        ),
+        "",
+        "Drop-off summary:",
+    ]
+    summary = funnel.get("drop_off_summary") or []
+    if not summary:
+        lines.append("- None from this bounded signal window.")
+    for item in summary:
+        lines.append(f"- `{item.get('reason')}`: `{item.get('count')}`")
+    lines.extend(["", "Signal drop-off ledger:"])
+    ledger = funnel.get("signal_drop_off_ledger") or []
+    if not ledger:
+        lines.append("- No hard signals were observed in this bounded window.")
+    for item in ledger:
+        classification = item.get("drop_off_classification") or "COMPLETED_CLOSED_FLAT"
+        lines.append(
+            f"- `{item.get('cycle_generated_at')}` `{item.get('strategy_id')}` "
+            f"{item.get('side') or ''}: `{classification}`; {item.get('drop_off_reason') or 'broker-backed managed trade closed flat with P&L.'}"
+        )
+    strategy_drop_offs = report.get("strategy_activity_drop_off_ledger") or []
+    lines.extend(["", "Strategy activity drop-off ledger:"])
+    if not strategy_drop_offs:
+        lines.append("- No strategy activity drop-offs were classified.")
+    for item in strategy_drop_offs:
+        lines.append(
+            f"- `{item.get('strategy_id')}`: `{item.get('drop_off_classification')}`; "
+            f"{item.get('drop_off_reason')} Minimum action: {item.get('minimum_action')}"
+        )
+    return "\n".join(lines)

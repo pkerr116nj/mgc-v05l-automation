@@ -139,9 +139,29 @@ def test_activity_calibration_writes_json_and_markdown(tmp_path: Path) -> None:
             "generated_at": "2026-05-07T16:25:00+00:00",
             "candidate_signals": [{"strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1"}],
             "paper_runner_report_path": "outputs/runner.json",
+            "chosen_strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
             "evaluated_strategies": [
                 strategy("MNQ_FIRST_BULL_SNAP_TURN_V1", instrument="MNQ", decision="SIGNAL"),
             ],
+        },
+    )
+    write_json(
+        tmp_path / "outputs/runner.json",
+        {
+            "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+            "strategy_paper_runner_verdict": "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_CLOSED_FLAT",
+            "strategy_trade_intent_created": True,
+            "strategy_trade_intent_id": "intent-1",
+            "lifecycle_mode": "STRATEGY_MANAGED",
+            "managed_lifecycle_invoked": True,
+            "managed_lifecycle_id": "managed-1",
+            "managed_entry_submit_attempt": {"submit_attempted": True},
+            "managed_entry_fill": {"price": "100"},
+            "managed_close_intent": {"close_reason": "TIME_BOXED_EXIT"},
+            "managed_close_submit_attempt": {"submit_attempted": True},
+            "managed_close_fill": {"price": "101"},
+            "final_position_status": "CLOSED_FLAT",
+            "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
         },
     )
     intents_jsonl = write_jsonl(
@@ -162,10 +182,13 @@ def test_activity_calibration_writes_json_and_markdown(tmp_path: Path) -> None:
             "review_required_count": 0,
             "recent_trades": [
                 {
+                    "lifecycle_id": "managed-1",
                     "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
                     "paper_lifecycle_type": "STRATEGY_MANAGED",
                     "broker_backed_position_confirmed": True,
                     "final_position_status": "CLOSED_FLAT",
+                    "exit_fill_price": "101",
+                    "realized_pnl": "2",
                 }
             ],
         },
@@ -196,5 +219,107 @@ def test_activity_calibration_writes_json_and_markdown(tmp_path: Path) -> None:
     assert strategies["FIRST_BULL_SNAP_TURN_V1"]["one_predicate_away"] == 1
     assert strategies["MNQ_FIRST_BULL_SNAP_TURN_V1"]["hard_signals"] == 1
     assert result.report["totals"]["meaningful_managed_trades"] == 1
+    assert result.report["signal_to_trade_funnel"]["stage_counts"]["hard_signal"] == 1
+    assert result.report["signal_to_trade_funnel"]["stage_counts"]["closed_flat_reconciled_pnl"] == 1
+    strategy_drop_classes = {row["drop_off_classification"] for row in result.report["strategy_activity_drop_off_ledger"]}
+    assert "DROPPED_BY_SESSION_FILTER" in strategy_drop_classes
+    assert "DROPPED_BY_MISSING_STRATEGY_WIRING" in strategy_drop_classes
+    assert result.report["opportunity_capture_posture"]["current_phase"] == "PAPER_ONLY_TRADING_ENGINE"
     assert result.report["broker_commands_invoked"] is False
+    assert "Signal-To-Trade Funnel" in result.report_md.read_text(encoding="utf-8")
     assert "Track B Strategy Activity Calibration" in result.report_md.read_text(encoding="utf-8")
+
+
+def test_signal_to_trade_funnel_classifies_drop_offs(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_report(
+        runtime_root / "signal-no-intent",
+        {
+            "generated_at": "2026-05-07T10:00:00+00:00",
+            "chosen_strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+            "candidate_signals": [{"strategy_id": "FIRST_BEAR_SNAP_TURN_V1", "signal_direction": "SHORT"}],
+            "paper_runner_report_path": "outputs/no-intent-runner.json",
+            "evaluated_strategies": [strategy("FIRST_BEAR_SNAP_TURN_V1", decision="SIGNAL")],
+        },
+    )
+    write_json(
+        tmp_path / "outputs/no-intent-runner.json",
+        {
+            "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+            "strategy_paper_runner_verdict": "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_READINESS",
+            "strategy_trade_intent_created": False,
+            "paper_submit_requested": True,
+            "primary_blocker": "Current Databento quote is not available after bounded wait.",
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+        },
+    )
+    runtime_report(
+        runtime_root / "intent-rejected",
+        {
+            "generated_at": "2026-05-07T10:05:00+00:00",
+            "chosen_strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+            "candidate_signals": [{"strategy_id": "FIRST_BEAR_SNAP_TURN_V1", "signal_direction": "SHORT"}],
+            "paper_runner_report_path": "outputs/rejected-runner.json",
+            "evaluated_strategies": [strategy("FIRST_BEAR_SNAP_TURN_V1", decision="SIGNAL")],
+        },
+    )
+    write_json(
+        tmp_path / "outputs/rejected-runner.json",
+        {
+            "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+            "strategy_trade_intent_created": True,
+            "strategy_trade_intent_id": "intent-2",
+            "lifecycle_mode": "STRATEGY_MANAGED",
+            "managed_lifecycle_id": "managed-2",
+            "managed_entry_submit_attempt": {
+                "submit_attempted": True,
+                "submit_diagnostics": {
+                    "error_callbacks_after_submit": [{"error_code": 478}],
+                    "place_order_called": True,
+                },
+            },
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "final_broker_state_classification": "IBKR_CONTRACT_REJECTED",
+        },
+    )
+    trade_summary = write_json(
+        tmp_path / "summary.json",
+        {
+            "managed_strategy_trade_count": 0,
+            "open_position_count": 0,
+            "review_required_count": 0,
+            "recent_trades": [
+                {
+                    "lifecycle_id": "managed-2",
+                    "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+                    "paper_lifecycle_type": "STRATEGY_MANAGED",
+                    "final_position_status": "IBKR_CONTRACT_REJECTED_REVIEWED",
+                    "final_broker_state_classification": "IBKR_CONTRACT_REJECTED_REVIEWED",
+                }
+            ],
+        },
+    )
+
+    result = create_track_b_strategy_activity_calibration(
+        config=TrackBStrategyActivityCalibrationConfig(
+            repo_root=tmp_path,
+            runtime_cycle_root=Path("runtime"),
+            intents_jsonl=write_jsonl(tmp_path / "intents.jsonl", []),
+            trade_summary_json=trade_summary,
+            track1_preflight_json=Path("missing-preflight.json"),
+            track1_breakpoint_json=Path("missing-breakpoint.json"),
+            track1_parity_json=Path("missing-parity.json"),
+            output_json=Path("diagnostics/calibration.json"),
+            output_md=Path("diagnostics/calibration.md"),
+        ),
+        now=aware_now(),
+    )
+
+    funnel = result.report["signal_to_trade_funnel"]
+    assert funnel["stage_counts"]["hard_signal"] == 2
+    assert funnel["stage_counts"]["trade_intent"] == 1
+    classifications = {item["drop_off_classification"] for item in funnel["signal_drop_off_ledger"]}
+    assert "DROPPED_BY_DATA_NOT_READY" in classifications
+    assert "DROPPED_BY_BROKER_REJECTION" in classifications

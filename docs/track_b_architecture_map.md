@@ -6,7 +6,30 @@ Track B. The long-term destination is not Track B feeding back into Track A.
 
 ## Current Chain
 
-The current Track B no-submit chain is:
+Track B is now a PAPER-stage trading engine, not a passive monitor and not a
+broker-safety demo. The current phase is PAPER-only, while the intended future
+destination is live trading after explicit promotion gates. Qualified strategy
+signals are expected to become controlled, attributable, broker-backed PAPER
+trades when business rules, data readiness, contract/account guards, and managed
+lifecycle rules allow.
+
+The current Track B signal-to-trade funnel is:
+
+```text
+strategy evaluation
+-> hard signal
+-> eligible signal
+-> strategy trade intent
+-> managed PAPER entry submit
+-> broker-confirmed fill
+-> OPEN_MANAGED
+-> managed exit trigger
+-> managed PAPER exit submit
+-> broker-confirmed close
+-> CLOSED_FLAT / reconciled P&L
+```
+
+The broader artifact chain is:
 
 ```text
 Databento market-data observer, optionally
@@ -34,12 +57,15 @@ Databento market-data observer, optionally
 -> attrition_report
 -> readiness_summary
 -> track_b_readiness_check_runner for bounded no-submit pre-proof evidence
--> recovery / preflight / proof timing
--> paper_proof_cli / paper proof lifecycle, only through explicit PAPER gates
+-> recovery / preflight / managed lifecycle timing
+-> strategy-managed PAPER lifecycle, only through explicit PAPER gates
 ```
 
-The chain is file/report driven today. It is not a strategy engine, scheduler,
-dashboard runtime, or broker route.
+The chain is file/report driven today, but its product purpose is opportunity
+capture under PAPER controls. Safety means controlled, attributable,
+broker-reconciled trading, not unexplained non-participation. Unexplained
+silence or unexplained signal-to-trade drop-off is a product defect until the
+drop-off is classified.
 
 ## Mode And Lane Lifecycle
 
@@ -52,20 +78,24 @@ implemented and will require future live-specific gates.
 
 ## Phase 2 Paper Execution Stance
 
-Track B Phase 1 proved the PAPER open/guarded-close/flat lifecycle. Phase 2 may
-therefore execute PAPER trades when, and only when, a Track B-controlled submit
-path is explicitly configured. Default strategy, listener, replay, operator
-status, and UI flows remain no-submit.
+Track B Phase 1 proved the PAPER open/guarded-close/flat lifecycle. The current
+PAPER phase is trading-oriented: real strategy signals should move through the
+strategy-managed PAPER lifecycle when the signal-to-trade funnel qualifies them.
+Listener, replay, operator status, and UI flows remain read-only surfaces, not
+execution authority.
 
 The current stance is:
 
 - PAPER execution is allowed through Track B-controlled paths after explicit
-  readiness and submit gates pass.
-- Strategy-rule runners may hand off to readiness and paper proof only when
-  explicit operator/config flags request that handoff.
+  readiness, business-rule, contract/account, and managed lifecycle gates pass.
+- Strategy-rule runners may hand off real qualified strategy signals to durable
+  trade intent creation and the strategy-managed PAPER lifecycle. `paper_proof`
+  remains explicit proof/debug/canary only, not the normal strategy path.
 - No strategy rule, listener, observation runner, operator status report, or UI
   state may create hidden submit authority.
-- No live-money execution is implemented or implied.
+- Live-money execution is not active in the current phase. Live trading is the
+  future destination only after promotion gates, live-specific readiness, risk
+  controls, and explicit live authority exist.
 - UI/dashboard surfaces remain read models and controls over explicit Track B
   APIs only; they are not execution authority.
 - Every PAPER execution must write durable artifacts, including submit
@@ -506,15 +536,12 @@ Dashboard implication:
   explicit `NOT_PROVIDED` inputs instead of silently reporting zero.
 - `readiness_summary` summarizes broker/session/quote state. It does not submit
   and does not override proof gates.
-- `paper_proof_cli` remains the only current Track B submit path. It owns the
-  explicit PAPER proof lifecycle: open submit, open-fill verification, guarded
-  close-only submit, close-fill verification, and final flat reconciliation.
-  After an open proof fill, Track B may submit the close-only order only when
-  broker truth shows the expected exact one-lot position for the configured
-  PAPER account/contract and no working same-contract broker orders. It refuses
-  the close with `BLOCKED_POSITION_NOT_EXPECTED` or
-  `BLOCKED_WORKING_ORDER_EXISTS` when those guards fail. A clean open/close
-  proof ends with `PROOF_COMPLETE_FLAT`; manual cleanup is fallback only.
+- Strategy-managed PAPER lifecycle is the normal route for real strategy
+  signals: durable intent, guarded entry submit, broker-confirmed fill,
+  `OPEN_MANAGED`, managed exit trigger, guarded close submit, broker-confirmed
+  close, and `CLOSED_FLAT` / reconciled P&L. `paper_proof_cli` is retained for
+  explicit proof/debug/canary work only and must not be used as a fallback for
+  real strategy signals.
 - Databento is market data authority only. Databento symbols and continuous
   selectors are not executable broker contracts.
 - IBKR allowlist and the local execution contract key remain execution
@@ -570,16 +597,22 @@ or enables submit.
 
 ## Safety Invariants
 
-- Current Track B flow is PAPER only.
+- Current Track B phase is PAPER-only trading.
+- Qualified signals may submit only through the guarded strategy-managed PAPER
+  lifecycle when explicit PAPER submit gates pass.
 - No-submit artifacts report `submit_allowed=false`.
 - No-submit artifacts report `submit_attempted=false`.
-- No-submit artifacts report `live_money_readiness=false` unless a future
-  live-readiness phase explicitly changes this.
+- Current PAPER artifacts report `live_money_readiness=false`; live trading is
+  future destination work after promotion gates, not current authority.
 - Track B must not import `mgc_v05l.execution.*`, dashboard modules, Track A
   runtime/cache/snapshot authority, Schwab, or desktop UI.
 - Dashboard/cache/snapshot data is never authority for Track B execution.
 - No broker submit may occur while unresolved broker state exists for the same
   account/contract.
+- Unexplained silence, zero strategy evaluation for an active strategy, hard
+  signals without durable intents, intents without broker-backed lifecycle
+  completion, and managed entries without clean close/reconciliation are
+  product defects until classified.
 - The current known `PendingCancel` order for `DUM882026` / `MGC-202606` blocks
   additional proof submits on that account/contract until broker state is
   terminal and clean.
