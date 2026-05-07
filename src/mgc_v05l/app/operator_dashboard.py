@@ -41,6 +41,7 @@ from ..local_operator_auth import (
     production_action_risk_bucket,
 )
 from .session_phase_labels import label_session_phase, session_restriction_matches_timestamp
+from ..execution_core.track_b_strategy_registry import get_track_b_strategy_registry
 from ..execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from ..market_data import (
     SchwabAuthError,
@@ -1952,6 +1953,7 @@ class OperatorDashboardService:
             "last_trade_pnl": pnl_summary.get("last_trade_pnl") if pnl_summary else trade_summary.get("last_trade_pnl"),
             "last_trade_time": pnl_summary.get("last_trade_time") or trade_summary.get("last_trade_time"),
             "review_required_count": review_required_count or 0,
+            "managed_exit_readiness": _track_b_managed_exit_readiness_rows(),
             "positions": positions,
             "recent_trades": recent_trades[:20],
             "strategy_performance": _track_b_paper_performance_rows(by_strategy, row_key="strategy"),
@@ -17312,6 +17314,39 @@ def _track_b_paper_performance_rows(payload: dict[str, Any], *, row_key: str) ->
         row.setdefault("unrealized_pnl", row.get("unrealized_pnl", "0"))
         row.setdefault("review_required_count", row.get("review_required_count", 0))
         rows.append(row)
+    return rows
+
+
+def _track_b_managed_exit_readiness_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for entry in get_track_b_strategy_registry():
+        managed_ready = (
+            entry.paper_eligible is True
+            and entry.live_money_eligible is False
+            and bool(entry.managed_exit_policy_id)
+            and entry.exit_not_available is False
+        )
+        if entry.live_money_eligible is not False:
+            reason = "live_money_eligible must remain false"
+        elif entry.paper_eligible is not True:
+            reason = "strategy is not paper_eligible"
+        elif not entry.managed_exit_policy_id or entry.exit_not_available is True:
+            reason = "managed exit policy missing"
+        else:
+            reason = None
+        rows.append(
+            {
+                "strategy_id": entry.strategy_id,
+                "instrument": entry.instrument_family,
+                "timeframe": entry.timeframe,
+                "paper_eligible": entry.paper_eligible,
+                "live_money_eligible": entry.live_money_eligible,
+                "managed_exit_policy_id": entry.managed_exit_policy_id,
+                "exit_not_available": entry.exit_not_available,
+                "managed_paper_ready": managed_ready,
+                "managed_paper_blocker": reason,
+            }
+        )
     return rows
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from mgc_v05l.execution_core.track_b_strategy_registry import (
+    PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
     TrackBStrategyRegistryEntry,
     TrackBStrategyRegistryVerdict,
     arbitrate_track_b_strategy_candidates,
@@ -146,6 +147,8 @@ def test_london_late_pause_resume_short_registry_metadata_is_valid() -> None:
     assert entry.timeframe == "5m"
     assert entry.paper_eligible is True
     assert entry.live_money_eligible is False
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
     assert entry.feature_version == "london_late_pause_resume_short_v1_phase1"
     assert entry.calibration_profile == "probationary_baseline_v1"
     assert "metadata.london_late_pause_resume_short_features.normalized_slope" in entry.required_feature_schema
@@ -182,6 +185,8 @@ def test_us_derivative_bear_turn_registry_metadata_is_valid() -> None:
     assert entry.timeframe == "5m"
     assert entry.paper_eligible is True
     assert entry.live_money_eligible is False
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
     assert entry.evaluation_mode == "COMPLETED_BAR_ONLY"
     assert entry.feature_version == "us_derivative_bear_turn_v1_phase1"
     assert entry.calibration_profile == "probationary_baseline_v1"
@@ -201,6 +206,8 @@ def test_us_late_pause_resume_long_registry_metadata_is_valid() -> None:
     assert entry.timeframe == "5m"
     assert entry.paper_eligible is True
     assert entry.live_money_eligible is False
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
     assert entry.evaluation_mode == "COMPLETED_BAR_ONLY"
     assert entry.feature_version == "us_late_pause_resume_long_v1_phase1"
     assert entry.calibration_profile == "probationary_baseline_v1"
@@ -223,6 +230,8 @@ def test_mnq_first_bear_snap_turn_registry_metadata_is_valid() -> None:
     assert entry.evaluation_mode == "COMPLETED_BAR_ONLY"
     assert entry.required_1m_context_bars == 40
     assert entry.required_5m_context_bars == 8
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
     assert entry.feature_version == "mnq_first_bear_snap_turn_v1_phase1"
     assert entry.calibration_profile == "probationary_baseline_v1"
     assert "metadata.mnq_first_bear_snap_turn_features.first_bear_snap_turn" in entry.required_feature_schema
@@ -250,6 +259,26 @@ def test_mnq_first_bull_snap_turn_registry_metadata_is_valid() -> None:
     assert entry.calibration_profile == "probationary_baseline_v1"
     assert "metadata.mnq_first_bull_snap_turn_features.first_bull_snap_turn" in entry.required_feature_schema
     assert "metadata.mnq_first_bull_snap_turn_state.session_allowed" in entry.required_state_schema
+
+
+def test_current_relevant_track_b_strategies_have_managed_exit_coverage() -> None:
+    entries = {entry.strategy_id: entry for entry in get_track_b_strategy_registry()}
+    expected = {
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "MNQ_FIRST_BULL_SNAP_TURN_V1",
+        "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+        "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        "US_DERIVATIVE_BEAR_TURN_V1",
+        "US_LATE_PAUSE_RESUME_LONG_V1",
+        "LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+    }
+
+    for strategy_id in expected:
+        entry = entries[strategy_id]
+        assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+        assert entry.exit_not_available is False
+        assert entry.paper_eligible is True
+        assert entry.live_money_eligible is False
 
 
 def test_missing_required_state_fields_are_not_ready() -> None:

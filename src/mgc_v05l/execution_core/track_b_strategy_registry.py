@@ -269,6 +269,8 @@ LONDON_LATE_PAUSE_RESUME_SHORT_V1 = TrackBStrategyRegistryEntry(
     calibration_profile="probationary_baseline_v1",
     paper_eligible=True,
     live_money_eligible=False,
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("LONDON_LATE_PAUSE_RESUME_SHORT_V1",),
     accepted_rule_ids=("LONDON_LATE_PAUSE_RESUME_SHORT_V1",),
 )
@@ -344,6 +346,8 @@ US_DERIVATIVE_BEAR_TURN_V1 = TrackBStrategyRegistryEntry(
     paper_eligible=True,
     live_money_eligible=False,
     evaluation_mode="COMPLETED_BAR_ONLY",
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("US_DERIVATIVE_BEAR_TURN_V1",),
     accepted_rule_ids=("US_DERIVATIVE_BEAR_TURN_V1",),
 )
@@ -388,6 +392,8 @@ MNQ_US_DERIVATIVE_BEAR_TURN_V1 = TrackBStrategyRegistryEntry(
     paper_eligible=True,
     live_money_eligible=False,
     evaluation_mode="COMPLETED_BAR_ONLY",
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("MNQ_US_DERIVATIVE_BEAR_TURN_V1",),
     accepted_rule_ids=("MNQ_US_DERIVATIVE_BEAR_TURN_V1",),
 )
@@ -424,6 +430,8 @@ MNQ_FIRST_BEAR_SNAP_TURN_V1 = TrackBStrategyRegistryEntry(
     evaluation_mode="COMPLETED_BAR_ONLY",
     required_1m_context_bars=40,
     required_5m_context_bars=8,
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("MNQ_FIRST_BEAR_SNAP_TURN_V1",),
     accepted_rule_ids=("MNQ_FIRST_BEAR_SNAP_TURN_V1",),
 )
@@ -494,6 +502,8 @@ US_LATE_PAUSE_RESUME_LONG_V1 = TrackBStrategyRegistryEntry(
     paper_eligible=True,
     live_money_eligible=False,
     evaluation_mode="COMPLETED_BAR_ONLY",
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
     accepted_strategy_ids=("US_LATE_PAUSE_RESUME_LONG_V1",),
     accepted_rule_ids=("US_LATE_PAUSE_RESUME_LONG_V1",),
 )

@@ -3330,6 +3330,11 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     assert payload["recent_trades"][0]["strategy_id"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     assert payload["strategy_performance"][0]["strategy"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     assert payload["instrument_performance"][0]["instrument"] == "MNQ-202606"
+    managed_readiness = {row["strategy_id"]: row for row in payload["managed_exit_readiness"]}
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["managed_paper_ready"] is True
+    assert managed_readiness["MNQ_FIRST_BEAR_SNAP_TURN_V1"]["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert managed_readiness["asian_drift_v1"]["managed_paper_ready"] is False
+    assert managed_readiness["asian_drift_v1"]["managed_paper_blocker"] == "managed exit policy missing"
 
 
 def test_track_b_paper_trading_payload_includes_compact_zero_activity_diagnostic(tmp_path: Path) -> None:

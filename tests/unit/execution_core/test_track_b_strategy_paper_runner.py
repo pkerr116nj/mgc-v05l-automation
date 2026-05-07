@@ -1007,6 +1007,63 @@ def test_registry_managed_exit_policy_enables_selected_breakout_strategy(tmp_pat
     assert result.report["paper_proof_invoked"] is False
 
 
+def test_registry_managed_exit_policy_enables_mnq_first_bear_snap_turn(tmp_path: Path) -> None:
+    calls = Calls()
+    managed = managed_lifecycle_result(
+        tmp_path,
+        TrackBManagedPaperLifecycleClassification.OPEN_MANAGED,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+    )
+    strategy = first_snap_turn_strategy_result(
+        tmp_path,
+        strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+        decision="SHORT",
+        emitted=True,
+        signal_direction="SHORT",
+    )
+    strategy.report["strategy_registry_instrument_family"] = "MNQ"
+    strategy.report["strategy_registry_managed_exit_policy_id"] = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    strategy.report["strategy_registry_exit_not_available"] = False
+    strategy.report_json.write_text(json.dumps(strategy.report), encoding="utf-8")
+
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+            rule_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+            rule_mode="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+            contract_key="MNQ-202606",
+            allowlisted_local_symbol="MNQM6",
+            con_id=770561201,
+            side="SELL",
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="28775.0",
+            manual_close_limit_price="28776.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=strategy,
+            readiness=readiness_result(tmp_path),
+            managed_lifecycle=managed,
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-managed-mnq-bear-registry-policy",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_OPEN_MANAGED
+    assert calls.intent == 1
+    assert calls.managed_lifecycle == 1
+    assert calls.proof == 0
+    assert result.report["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert result.report["strategy_registry_managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert result.report["strategy_trade_intent_created"] is True
+    assert result.report["paper_proof_invoked"] is False
+
+
 def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(

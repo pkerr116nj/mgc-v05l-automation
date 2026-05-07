@@ -3614,6 +3614,7 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const brokerReconciled = trading.broker_reconciled === true;
   const positions = asArray<JsonRecord>(trading.positions);
   const recentTrades = asArray<JsonRecord>(trading.recent_trades);
+  const managedExitReadinessRows = asArray<JsonRecord>(trading.managed_exit_readiness);
   const strategyRows = asArray<JsonRecord>(trading.strategy_performance);
   const instrumentRows = asArray<JsonRecord>(trading.instrument_performance);
   const zeroActivityDiagnostic = asRecord(trading.zero_activity_diagnostic);
@@ -3758,6 +3759,18 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
           <MetricCard label="Completed Trades" value={formatValue(trading.completed_trade_count ?? 0)} />
           <MetricCard label="Review Required" value={formatValue(trading.review_required_count ?? 0)} tone={reviewRequired ? "danger" : "good"} />
         </div>
+        <DataTable
+          rows={managedExitReadinessRows}
+          emptyLabel="No Track B managed exit readiness metadata is available yet."
+          rowKey={(row, index) => `${formatValue(row.instrument)}-${formatValue(row.strategy_id)}-${index}`}
+          columns={[
+            { key: "strategy", label: "Strategy", render: (row) => formatValue(row.strategy_id) },
+            { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument) },
+            { key: "policy", label: "Managed Exit", render: (row) => formatValue(row.managed_exit_policy_id ?? "MISSING") },
+            { key: "ready", label: "Managed Ready", render: (row) => <Badge label={formatValue(row.managed_paper_ready)} tone={row.managed_paper_ready === true ? "good" : "warn"} /> },
+            { key: "blocker", label: "Blocker", render: (row) => formatValue(row.managed_paper_blocker ?? "None") },
+          ]}
+        />
       </Section>
 
       <Section title="Zero Activity Diagnosis" subtitle="Bounded read-only explanation for no PAPER trades">
