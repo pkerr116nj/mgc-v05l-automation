@@ -177,6 +177,8 @@ def _strategy_rows(
             row["strategy_evaluations"] = int(row["strategy_evaluations"]) + 1
             row["hard_signals"] = int(row["hard_signals"]) + (1 if result == "SIGNAL" else 0)
             row["no_signal_count"] = int(row["no_signal_count"]) + (1 if result == "NO_SIGNAL" else 0)
+            row["not_ready_count"] = int(row["not_ready_count"]) + (1 if result == "NOT_READY" else 0)
+            row["error_count"] = int(row["error_count"]) + (1 if result == "ERROR" else 0)
             row["suppressed_count"] = int(row["suppressed_count"]) + (1 if result == "SUPPRESSED" else 0)
             row["handoff_seen_count"] = int(row["handoff_seen_count"]) + (1 if result == "SIGNAL" and handoff_seen else 0)
             row["_failed"].update(blockers)
@@ -607,6 +609,8 @@ def _empty_strategy_row(strategy_id: str, entry: TrackBStrategyRegistryEntry | N
         "strategy_evaluations": 0,
         "hard_signals": 0,
         "no_signal_count": 0,
+        "not_ready_count": 0,
+        "error_count": 0,
         "suppressed_count": 0,
         "handoff_seen_count": 0,
         "intent_count": 0,
@@ -746,6 +750,8 @@ def _totals(strategy_rows: list[Mapping[str, Any]], trade_summary: Mapping[str, 
         },
         "strategy_evaluations": sum(int(row.get("strategy_evaluations") or 0) for row in strategy_rows),
         "hard_signals": sum(int(row.get("hard_signals") or 0) for row in strategy_rows),
+        "not_ready": sum(int(row.get("not_ready_count") or 0) for row in strategy_rows),
+        "errors": sum(int(row.get("error_count") or 0) for row in strategy_rows),
         "one_predicate_away": sum(int(row.get("one_predicate_away") or 0) for row in strategy_rows),
         "two_predicates_away": sum(int(row.get("two_predicates_away") or 0) for row in strategy_rows),
         "suppressed": sum(int(row.get("suppressed_count") or 0) for row in strategy_rows),
@@ -846,6 +852,12 @@ def _strategy_result(strategy: Mapping[str, Any], *, candidate_ids: set[str], su
         return "SUPPRESSED"
     if strategy_id in candidate_ids or strategy.get("signal_emitted") is True or str(strategy.get("decision") or "").upper() == "SIGNAL":
         return "SIGNAL"
+    runtime_verdict = str(strategy.get("strategy_runtime_verdict") or "").upper()
+    runner_verdict = str(strategy.get("strategy_rule_runner_verdict") or "").upper()
+    if "NOT_READY" in runtime_verdict or runner_verdict in {"NOT_INVOKED"}:
+        return "NOT_READY"
+    if "ERROR" in runtime_verdict or "ERROR" in runner_verdict:
+        return "ERROR"
     decision = str(strategy.get("decision") or "").upper()
     return decision if decision in {"NO_SIGNAL", "NOT_READY", "ERROR"} else "NO_SIGNAL"
 
@@ -1069,6 +1081,7 @@ def _markdown(report: Mapping[str, Any]) -> str:
         f"- Window: `{report.get('window_start')}` to `{report.get('window_end')}`",
         f"- Runtime reports scanned: `{report.get('runtime_reports_scanned')}`",
         f"- Strategy evaluations: `{totals.get('strategy_evaluations')}`",
+        f"- NOT_READY evaluations: `{totals.get('not_ready')}`",
         f"- Hard signals: `{totals.get('hard_signals')}`",
         f"- Intents: `{totals.get('intents')}`",
         f"- Meaningful managed trades: `{totals.get('meaningful_managed_trades')}`",
@@ -1100,6 +1113,7 @@ def _markdown(report: Mapping[str, Any]) -> str:
         lines.append(
             f"- `{row.get('strategy_id')}` [{row.get('instrument')}, {row.get('side')}, {row.get('session')}]: "
             f"evals `{row.get('strategy_evaluations')}`, signals `{row.get('hard_signals')}`, "
+            f"not_ready `{row.get('not_ready_count')}`, no_signal `{row.get('no_signal_count')}`, "
             f"intents `{row.get('intent_count')}`, trades `{row.get('meaningful_managed_trade_count')}`, "
             f"near `{row.get('one_predicate_away')}`/`{row.get('two_predicates_away')}`, "
             f"classification `{row.get('classification')}`. Top blockers: {top_text}. "

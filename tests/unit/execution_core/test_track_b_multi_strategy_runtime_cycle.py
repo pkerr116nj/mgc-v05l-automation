@@ -664,6 +664,22 @@ def test_missing_envelope_is_not_ready(tmp_path: Path) -> None:
     assert result.report["submit_attempted"] is False
 
 
+def test_asian_drift_enabled_by_rule_mode_alias_is_evaluated(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(tmp_path, enabled_strategy_ids=("ASIAN_DRIFT_V1",)),
+        stages=stages_for(tmp_path, calls, default_reports()),
+        cycle_id="cycle-asian-drift-rule-mode-alias",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION
+    assert calls.strategy == ["asian_drift_v1"]
+    assert result.report["evaluated_strategies"][0]["strategy_id"] == "asian_drift_v1"
+    assert result.report["evaluated_strategies"][0]["rule_mode"] == "ASIAN_DRIFT_V1"
+    assert result.report["submit_attempted"] is False
+
+
 def test_demo_signal_is_rejected_as_real_candidate(tmp_path: Path) -> None:
     calls = Calls()
     reports = default_reports()

@@ -475,7 +475,21 @@ def _strategy_inputs(config: TrackBMultiStrategyRuntimeCycleConfig) -> tuple[Tra
     enabled = {str(item) for item in config.enabled_strategy_ids if str(item)}
     if not enabled:
         return inputs
-    return tuple(item for item in inputs if item.strategy_id in enabled)
+    return tuple(item for item in inputs if _strategy_input_enabled(item, enabled))
+
+
+def _strategy_input_enabled(strategy_input: TrackBMultiStrategyInput, enabled_strategy_ids: set[str]) -> bool:
+    return bool(
+        {
+            strategy_input.strategy_id,
+            strategy_input.rule_id,
+            strategy_input.rule_mode,
+            str(strategy_input.strategy_id).upper(),
+            str(strategy_input.rule_id).upper(),
+            str(strategy_input.rule_mode).upper(),
+        }
+        & enabled_strategy_ids
+    )
 
 
 def _payload_for_strategy_input(strategy_input: TrackBMultiStrategyInput) -> Mapping[str, object]:

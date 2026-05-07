@@ -218,6 +218,7 @@ def test_activity_calibration_writes_json_and_markdown(tmp_path: Path) -> None:
     assert strategies["ASIA_EARLY_PAUSE_RESUME_SHORT_V1"]["classification"] == "QUIET_DUE_TO_SESSION_FILTER"
     assert strategies["FIRST_BULL_SNAP_TURN_V1"]["one_predicate_away"] == 1
     assert strategies["MNQ_FIRST_BULL_SNAP_TURN_V1"]["hard_signals"] == 1
+    assert strategies["asian_drift_v1"]["not_ready_count"] == 0
     assert result.report["totals"]["meaningful_managed_trades"] == 1
     assert result.report["signal_to_trade_funnel"]["stage_counts"]["hard_signal"] == 1
     assert result.report["signal_to_trade_funnel"]["stage_counts"]["closed_flat_reconciled_pnl"] == 1
