@@ -93,6 +93,8 @@ class TrackBSnapTurnNearMissAmplificationConfig:
     mnq_live_5m: Path = DEFAULT_MNQ_LIVE_5M
     output_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_near_miss_amplification.json"
     output_md: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_near_miss_amplification.md"
+    scorable_snapshots_jsonl: Path = DEFAULT_DIAGNOSTICS_ROOT / "track_b_snap_turn_scorable_snapshots.jsonl"
+    latest_scorable_snapshots_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_scorable_snapshots.json"
     max_runtime_reports: int = 1800
     max_examples_per_strategy: int = 12
     future_horizon_bars: int = 6
@@ -136,6 +138,18 @@ def create_track_b_snap_turn_near_miss_amplification(
         )
         for strategy_id in SNAP_TURN_STRATEGIES
     ]
+    scorable_snapshots = _scorable_snapshots(
+        rows=evaluated_rows,
+        candle_index=candle_index,
+        future_horizon_bars=actual_config.future_horizon_bars,
+    )
+    scorable_snapshot_summary = _write_scorable_snapshots(
+        repo_root=repo_root,
+        jsonl_path=actual_config.scorable_snapshots_jsonl,
+        latest_json_path=actual_config.latest_scorable_snapshots_json,
+        snapshots=scorable_snapshots,
+        generated_at=actual_now,
+    )
     report = {
         "schema_version": "track_b_snap_turn_near_miss_amplification_v1",
         "generated_at": actual_now.isoformat(),
@@ -180,10 +194,16 @@ def create_track_b_snap_turn_near_miss_amplification(
         "strategies": strategies,
         "variant_candidates": _variant_candidates(strategies),
         "defects_or_parity_checks": _defects_or_parity_checks(strategies),
+        "scorable_snapshot_retention": scorable_snapshot_summary,
+        "improvement_methods_to_test": _improvement_methods_to_test(),
+        "immediate_replay_backfill_path": _immediate_replay_backfill_path(scorable_snapshot_summary),
+        "output_classifications": _output_classifications(strategies, scorable_snapshot_summary),
         "conclusion": _conclusion(strategies),
         "outputs": {
             "json": str(actual_config.output_json),
             "markdown": str(actual_config.output_md),
+            "scorable_snapshots_jsonl": str(actual_config.scorable_snapshots_jsonl),
+            "latest_scorable_snapshots_json": str(actual_config.latest_scorable_snapshots_json),
         },
     }
     output_json = _resolve(repo_root, actual_config.output_json)
@@ -600,6 +620,153 @@ def _future_excursion(*, row: Mapping[str, Any], candles: list[dict[str, Any]], 
     }
 
 
+def _scorable_snapshots(
+    *,
+    rows: Iterable[Mapping[str, Any]],
+    candle_index: Mapping[str, list[dict[str, Any]]],
+    future_horizon_bars: int,
+) -> list[dict[str, Any]]:
+    snapshots: list[dict[str, Any]] = []
+    for row in rows:
+        strategy_id = str(row.get("strategy_id") or "")
+        if strategy_id not in SNAP_TURN_STRATEGIES:
+            continue
+        meta = SNAP_TURN_STRATEGIES[strategy_id]
+        eligibility = _eligibility(row, expected_instrument=str(meta["instrument"]))
+        primitives = _primitive_predicates(row)
+        primitive_rows = [
+            {
+                "predicate": item.get("predicate"),
+                "passed": item.get("passed"),
+                "actual": _json_value(item.get("actual")),
+                "threshold": _json_value(item.get("threshold")),
+                "pass_margin": _json_value(item.get("distance")),
+                "numeric_distance_available": isinstance(item.get("distance"), Decimal),
+                "classification": _predicate_classification(str(item.get("predicate") or ""), row),
+            }
+            for item in primitives
+        ]
+        failed_primitives = [item for item in primitive_rows if item.get("passed") is not True]
+        hard_signal = row.get("result") == "SIGNAL"
+        future = _future_excursion(
+            row=row,
+            candles=candle_index.get(str(meta["instrument"]), []),
+            horizon_bars=future_horizon_bars,
+        )
+        envelope_available = bool(row.get("state")) and bool(row.get("features"))
+        snapshots.append(
+            {
+                "snapshot_schema_version": "track_b_snap_turn_scorable_snapshot_v1",
+                "decision_bar_timestamp": row.get("decision_bar_timestamp"),
+                "instrument": meta["instrument"],
+                "strategy_id": strategy_id,
+                "side": meta["side"],
+                "session": _session_bucket(row.get("state") if isinstance(row.get("state") or {}, Mapping) else {}),
+                "regime": _regime_bucket(row),
+                "eligibility": eligibility,
+                "feature_envelope_available": envelope_available,
+                "feature_envelope_missing_is_product_defect": not envelope_available,
+                "hard_signal": hard_signal,
+                "result": row.get("result"),
+                "primitive_predicates": primitive_rows,
+                "primitive_failed_predicates_count": len(failed_primitives),
+                "failed_primitive_predicates": [item.get("predicate") for item in failed_primitives],
+                "failed_rule_predicates": row.get("failed_rule_predicates") or [],
+                "no_signal_reason": None
+                if hard_signal
+                else _no_signal_reason(row.get("failed_rule_predicates") or [], failed_primitives, envelope_available),
+                "near_miss_bucket": (
+                    "NOT_SCORABLE"
+                    if not envelope_available
+                    else _near_miss_bucket(len(failed_primitives), result=str(row.get("result") or "NO_SIGNAL"))
+                ),
+                "numeric_distance_available": any(item.get("numeric_distance_available") is True for item in primitive_rows),
+                "future_excursion": future,
+                "input_event_path": row.get("input_event_path"),
+            }
+        )
+    return snapshots
+
+
+def _write_scorable_snapshots(
+    *,
+    repo_root: Path,
+    jsonl_path: Path,
+    latest_json_path: Path,
+    snapshots: list[dict[str, Any]],
+    generated_at: datetime,
+) -> dict[str, Any]:
+    actual_jsonl = _resolve(repo_root, jsonl_path)
+    actual_latest = _resolve(repo_root, latest_json_path)
+    actual_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    existing = actual_jsonl.read_text(encoding="utf-8").splitlines() if actual_jsonl.exists() else []
+    existing_keys: set[str] = set()
+    for line in existing:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, Mapping):
+            existing_keys.add(_snapshot_key(payload))
+    appended = 0
+    with actual_jsonl.open("a", encoding="utf-8") as handle:
+        for snapshot in snapshots:
+            key = _snapshot_key(snapshot)
+            if key in existing_keys:
+                continue
+            handle.write(json.dumps(to_jsonable(snapshot), sort_keys=True) + "\n")
+            appended += 1
+            existing_keys.add(key)
+    missing_envelopes = [item for item in snapshots if item.get("feature_envelope_available") is not True]
+    numeric_available = [item for item in snapshots if item.get("numeric_distance_available") is True]
+    latest_payload = {
+        "schema_version": "track_b_snap_turn_scorable_snapshots_latest_v1",
+        "generated_at": generated_at.isoformat(),
+        "source": "TRACK_B_COMPLETED_DECISION_BAR_RUNTIME_ARTIFACTS",
+        "snapshot_count": len(snapshots),
+        "appended_snapshot_count": appended,
+        "jsonl_path": str(jsonl_path),
+        "feature_envelope_missing_count": len(missing_envelopes),
+        "feature_envelope_missing_is_product_defect": bool(missing_envelopes),
+        "numeric_distance_available_count": len(numeric_available),
+        "snapshots": snapshots,
+    }
+    _write_json(actual_latest, latest_payload)
+    return {
+        "status": "EVIDENCE_RETENTION_REPAIRED",
+        "jsonl_path": str(jsonl_path),
+        "latest_json_path": str(latest_json_path),
+        "snapshot_count": len(snapshots),
+        "appended_snapshot_count": appended,
+        "feature_envelope_missing_count": len(missing_envelopes),
+        "feature_envelope_missing_is_product_defect": bool(missing_envelopes),
+        "numeric_distance_available_count": len(numeric_available),
+        "replay_backfill_required": bool(missing_envelopes) or len(numeric_available) < len(snapshots),
+    }
+
+
+def _snapshot_key(snapshot: Mapping[str, Any]) -> str:
+    return "|".join(
+        [
+            str(snapshot.get("decision_bar_timestamp") or ""),
+            str(snapshot.get("instrument") or ""),
+            str(snapshot.get("strategy_id") or ""),
+        ]
+    )
+
+
+def _no_signal_reason(failed_rule_predicates: Iterable[Any], failed_primitives: Iterable[Mapping[str, Any]], envelope_available: bool) -> str:
+    if not envelope_available:
+        return "FEATURE_ENVELOPE_MISSING_REPLAY_BACKFILL_REQUIRED"
+    primitive_names = [str(item.get("predicate") or "") for item in failed_primitives]
+    if primitive_names:
+        return "FAILED_PRIMITIVE_PREDICATES: " + ", ".join(primitive_names)
+    failed_rule_names = [str(item) for item in failed_rule_predicates]
+    if failed_rule_names:
+        return "FAILED_RULE_PREDICATES: " + ", ".join(failed_rule_names)
+    return "NO_SIGNAL_REASON_NOT_PROVIDED"
+
+
 def _eligibility(row: Mapping[str, Any], *, expected_instrument: str) -> dict[str, Any]:
     event = row.get("event") if isinstance(row.get("event") or {}, Mapping) else {}
     state = row.get("state") if isinstance(row.get("state") or {}, Mapping) else {}
@@ -858,6 +1025,100 @@ def _conclusion(strategies: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "too_quiet_strategy_count": len(too_quiet),
         "methodology_inconclusive_strategy_count": len(inconclusive),
         "reason": reason,
+    }
+
+
+def _output_classifications(
+    strategies: Iterable[Mapping[str, Any]],
+    snapshot_summary: Mapping[str, Any],
+) -> list[str]:
+    classifications = ["EVIDENCE_RETENTION_REPAIRED"]
+    strategy_list = list(strategies)
+    if snapshot_summary.get("replay_backfill_required") is True:
+        classifications.append("REPLAY_BACKFILL_REQUIRED")
+    if _variant_candidates(strategy_list):
+        classifications.append("SNAP_TURN_IMPROVEMENT_CANDIDATE_FOUND")
+    if any(item.get("frequency_classification") == "TOO_QUIET" for item in strategy_list):
+        classifications.append("SNAP_TURN_TOO_QUIET_CONFIRMED")
+    if not strategy_list or all(item.get("frequency_classification") == "METHODOLOGY_INCONCLUSIVE" for item in strategy_list):
+        classifications.append("SNAP_TURN_INSUFFICIENT_EVIDENCE_BLOCKED")
+    return classifications
+
+
+def _improvement_methods_to_test() -> list[dict[str, Any]]:
+    return [
+        {
+            "method": "remove_accidental_track_b_only_gates",
+            "evidence_required": [
+                "Track 1/reference snap-turn predicate list lacks the gate.",
+                "Track B rejected bars pass all Track 1 predicates except the Track B-only gate.",
+                "Subsequent MFE/MAE does not show systematic false positives.",
+            ],
+            "false_positive_risk": "May reintroduce churn or duplicate first-snap entries that Track B deliberately prevented.",
+        },
+        {
+            "method": "simplify_over_specified_predicate_stack",
+            "evidence_required": [
+                "Closest failed bars repeatedly miss the same low-value predicate while passing core stretch/reversal/location logic.",
+                "Replay of removed/simplified predicate improves opportunity capture without worse MAE tails.",
+            ],
+            "false_positive_risk": "Can turn a snap-turn strategy into generic reversal chasing.",
+        },
+        {
+            "method": "session_window_adjustment",
+            "evidence_required": [
+                "Session/phase filter is dominant blocker during bars that otherwise look entry-capable.",
+                "Track 1/research expected the wider session or replay validates the added window.",
+            ],
+            "false_positive_risk": "Adds trades in liquidity/behavior regimes the strategy was not designed for.",
+        },
+        {
+            "method": "volatility_or_regime_specific_variant",
+            "evidence_required": [
+                "Failed threshold distances cluster by volatility/regime bucket.",
+                "Variant replay improves MFE/MAE only in that bucket, not globally.",
+            ],
+            "false_positive_risk": "Overfits one volatility regime and degrades across normal active conditions.",
+        },
+        {
+            "method": "closest_failed_bar_variant",
+            "evidence_required": [
+                "Closest failed bars are repeatedly commercially favorable after the decision bar.",
+                "One/two/few-predicate failures are attributable and replayable.",
+            ],
+            "false_positive_risk": "Optimizes to hindsight if control windows and false-positive bars are not included.",
+        },
+        {
+            "method": "separate_trend_continuation_coverage",
+            "evidence_required": [
+                "Rejected bars are trend-continuation regimes, not snap-turn regimes.",
+                "Trend overlay detects the opportunity without weakening snap-turn semantics.",
+            ],
+            "false_positive_risk": "Forcing continuation into snap-turn can corrupt both strategy families.",
+        },
+    ]
+
+
+def _immediate_replay_backfill_path(snapshot_summary: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": "REPLAY_BACKFILL_REQUIRED"
+        if snapshot_summary.get("replay_backfill_required") is True
+        else "EVIDENCE_RETENTION_REPAIRED",
+        "objective": "Reconstruct scorable snap-turn decision rows from retained completed 5m candles/features instead of waiting weeks.",
+        "smallest_path": [
+            "Use retained completed 5m candle payloads for MGC/MNQ decision windows.",
+            "Re-run track_b_snap_turn_envelope_producer on each completed decision bar window.",
+            "Persist the compact scorable snapshot before rotating full envelopes.",
+            "Run this audit on the persisted snapshot JSONL, not on fragile latest envelope paths.",
+        ],
+        "required_inputs": [
+            "completed 5m candle window with at least snap-turn feature lookback",
+            "instrument family / local symbol / contract context",
+            "prior snap cooldown state if available, otherwise classify cooldown distance as not provided",
+        ],
+        "current_blocker": "Historical event envelopes are rotated/missing for some retained runtime reports."
+        if snapshot_summary.get("feature_envelope_missing_is_product_defect") is True
+        else None,
     }
 
 
@@ -1147,6 +1408,12 @@ def _decimal_str(value: Any) -> str | None:
     return format(value, "f")
 
 
+def _json_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return _decimal_str(value)
+    return value
+
+
 def _bool(value: Any) -> bool | None:
     if value is True:
         return True
@@ -1233,4 +1500,18 @@ def _markdown(report: Mapping[str, Any]) -> str:
         )
     if not report.get("variant_candidates"):
         lines.append("- None with enough one/two-predicate-away evidence in this bounded window.")
+    lines.extend(["", "## Evidence Retention", ""])
+    retention = report.get("scorable_snapshot_retention") or {}
+    lines.append(f"- Status: {retention.get('status')}")
+    lines.append(f"- Snapshots retained this run: {retention.get('snapshot_count')}")
+    lines.append(f"- Appended snapshots: {retention.get('appended_snapshot_count')}")
+    lines.append(f"- Missing feature envelopes: {retention.get('feature_envelope_missing_count')}")
+    lines.append(f"- Replay/backfill required: {retention.get('replay_backfill_required')}")
+    lines.append(f"- Snapshot JSONL: {retention.get('jsonl_path')}")
+    lines.extend(["", "## Improvement Methods To Test", ""])
+    for item in report.get("improvement_methods_to_test") or []:
+        lines.append(f"- {item.get('method')}: risk={item.get('false_positive_risk')}")
+    lines.extend(["", "## Output Classifications", ""])
+    for item in report.get("output_classifications") or []:
+        lines.append(f"- {item}")
     return "\n".join(lines) + "\n"

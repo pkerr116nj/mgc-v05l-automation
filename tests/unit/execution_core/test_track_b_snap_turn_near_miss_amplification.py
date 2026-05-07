@@ -128,6 +128,8 @@ def test_snap_turn_audit_counts_primitive_near_miss_and_mfe_mae(tmp_path: Path) 
             mnq_live_5m=tmp_path / "missing_mnq.json",
             output_json=tmp_path / "diagnostic.json",
             output_md=tmp_path / "diagnostic.md",
+            scorable_snapshots_jsonl=tmp_path / "snapshots.jsonl",
+            latest_scorable_snapshots_json=tmp_path / "latest_snapshots.json",
         ),
         now=datetime(2026, 5, 7, 14, 10, tzinfo=UTC),
     )
@@ -146,6 +148,12 @@ def test_snap_turn_audit_counts_primitive_near_miss_and_mfe_mae(tmp_path: Path) 
     assert predicate["subsequent_excursion_after_near_misses"]["average_mfe_points"] == "5"
     assert predicate["subsequent_excursion_after_near_misses"]["average_mae_points"] == "-0.5"
     assert result.report["conclusion"]["posture"] == "SNAP_TURN_VARIANT_CANDIDATE_FOUND"
+    assert "EVIDENCE_RETENTION_REPAIRED" in result.report["output_classifications"]
+    latest = json.loads((tmp_path / "latest_snapshots.json").read_text(encoding="utf-8"))
+    assert latest["snapshot_count"] == 1
+    predicates = {item["predicate"]: item for item in latest["snapshots"][0]["primitive_predicates"]}
+    assert predicates["bull_snap_close_strong"]["pass_margin"] == "-0.02"
+    assert latest["snapshots"][0]["future_excursion"]["mfe_points"] == "5"
     assert result.report["paper_proof_cli_invoked"] is False
     assert result.report["submit_cancel_place_order_invoked"] is False
 
@@ -321,3 +329,42 @@ def test_snap_turn_audit_dedupes_monitor_repeats_by_completed_bar_and_preserves_
     assert result.report["completed_decision_strategy_rows_after_dedup"] == 1
     assert strategy["evaluated_completed_bars_total"] == 1
     assert strategy["hard_signals"] == 1
+
+
+def test_snap_turn_audit_marks_missing_envelope_as_replay_backfill_required(tmp_path: Path) -> None:
+    missing_event = tmp_path / "events" / "rotated.json"
+    _runtime_report(
+        tmp_path / "runtime" / "cycle-1",
+        {
+            "generated_at": "2026-05-07T14:00:01+00:00",
+            "evaluated_strategies": [
+                {
+                    "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+                    "decision": "NO_SIGNAL",
+                    "signal_emitted": False,
+                    "input_event_path": str(missing_event),
+                    "rule_conditions": {"first_bull_snap_turn": False},
+                }
+            ],
+        },
+    )
+
+    result = create_track_b_snap_turn_near_miss_amplification(
+        config=TrackBSnapTurnNearMissAmplificationConfig(
+            repo_root=tmp_path,
+            runtime_cycle_root=tmp_path / "runtime",
+            snap_turn_root=tmp_path / "snap_turn_state",
+            output_json=tmp_path / "diagnostic.json",
+            output_md=tmp_path / "diagnostic.md",
+            scorable_snapshots_jsonl=tmp_path / "snapshots.jsonl",
+            latest_scorable_snapshots_json=tmp_path / "latest_snapshots.json",
+        ),
+        now=datetime(2026, 5, 7, 14, 5, tzinfo=UTC),
+    )
+
+    assert result.report["scorable_snapshot_retention"]["feature_envelope_missing_is_product_defect"] is True
+    assert result.report["scorable_snapshot_retention"]["replay_backfill_required"] is True
+    assert "REPLAY_BACKFILL_REQUIRED" in result.report["output_classifications"]
+    latest = json.loads((tmp_path / "latest_snapshots.json").read_text(encoding="utf-8"))
+    assert latest["snapshots"][0]["feature_envelope_missing_is_product_defect"] is True
+    assert latest["snapshots"][0]["no_signal_reason"] == "FEATURE_ENVELOPE_MISSING_REPLAY_BACKFILL_REQUIRED"
