@@ -133,15 +133,19 @@ def test_snap_turn_audit_counts_primitive_near_miss_and_mfe_mae(tmp_path: Path) 
     )
 
     strategy = next(row for row in result.report["strategies"] if row["strategy_id"] == "FIRST_BULL_SNAP_TURN_V1")
+    assert strategy["evaluated_completed_bars_total"] == 1
     assert strategy["eligible_completed_bars_evaluated"] == 1
+    assert strategy["denominator_validation"]["session_phase_ready_bars"] == 1
     assert strategy["hard_signals"] == 0
     assert strategy["one_predicate_away"] == 1
+    assert strategy["closest_failed_bars"][0]["primitive_failed_predicates_count"] == 1
     predicate = strategy["dominant_failed_primitive_predicates"][0]
     assert predicate["predicate"] == "bull_snap_close_strong"
     assert predicate["classification"] == "VARIANT_CANDIDATE"
     assert predicate["numeric_distance"]["average_pass_margin_points_or_units"] == "-0.02"
     assert predicate["subsequent_excursion_after_near_misses"]["average_mfe_points"] == "5"
     assert predicate["subsequent_excursion_after_near_misses"]["average_mae_points"] == "-0.5"
+    assert result.report["conclusion"]["posture"] == "SNAP_TURN_VARIANT_CANDIDATE_FOUND"
     assert result.report["paper_proof_cli_invoked"] is False
     assert result.report["submit_cancel_place_order_invoked"] is False
 
@@ -200,3 +204,120 @@ def test_snap_turn_audit_counts_hard_signals_without_broker_routes(tmp_path: Pat
     assert strategy["two_predicates_away"] == 0
     assert result.report["broker_commands_invoked"] is False
 
+
+def test_snap_turn_audit_validates_eligible_denominator_separately(tmp_path: Path) -> None:
+    inactive_event = _write_json(
+        tmp_path / "events" / "inactive.json",
+        {
+            "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+            "instrument_family": "MGC",
+            "candle_timestamp": "2026-05-07T13:00:00+00:00",
+            "open": "100",
+            "high": "101",
+            "low": "99",
+            "close": "100.5",
+            "metadata": {
+                "feature_diagnostics": {"atr": "2"},
+                "first_bull_snap_turn_state": {
+                    "session_allowed": False,
+                    "derivative_phase": "OFF_SESSION",
+                    "prior_bars_since_bull_snap_gt_cooldown": True,
+                },
+                "first_bull_snap_turn_features": {
+                    "bull_snap_downside_stretch_ok": True,
+                    "bull_snap_range_ok": True,
+                    "bull_snap_body_ok": True,
+                    "bull_snap_close_strong": True,
+                    "bull_snap_velocity_ok": True,
+                    "bull_snap_reversal_bar": True,
+                    "bull_snap_location_ok": True,
+                    "bull_snap_raw": True,
+                    "bull_snap_turn_candidate": True,
+                    "first_bull_snap_turn": False,
+                },
+            },
+        },
+    )
+    _runtime_report(
+        tmp_path / "runtime" / "cycle-1",
+        {
+            "generated_at": "2026-05-07T13:00:01+00:00",
+            "evaluated_strategies": [
+                {
+                    "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+                    "decision": "NO_SIGNAL",
+                    "signal_emitted": False,
+                    "input_event_path": str(inactive_event),
+                    "rule_conditions": {"session_allowed": False, "first_bull_snap_turn": False},
+                }
+            ],
+        },
+    )
+
+    result = create_track_b_snap_turn_near_miss_amplification(
+        config=TrackBSnapTurnNearMissAmplificationConfig(
+            repo_root=tmp_path,
+            runtime_cycle_root=tmp_path / "runtime",
+            snap_turn_root=tmp_path / "snap_turn_state",
+            output_json=tmp_path / "diagnostic.json",
+            output_md=tmp_path / "diagnostic.md",
+        ),
+        now=datetime(2026, 5, 7, 13, 5, tzinfo=UTC),
+    )
+
+    strategy = next(row for row in result.report["strategies"] if row["strategy_id"] == "FIRST_BULL_SNAP_TURN_V1")
+    assert strategy["evaluated_completed_bars_total"] == 1
+    assert strategy["eligible_completed_bars_evaluated"] == 0
+    assert strategy["hard_signal_rate_eligible"] is None
+    assert strategy["frequency_classification"] == "METHODOLOGY_INCONCLUSIVE"
+    assert strategy["denominator_validation"]["ineligible_reason_counts"][0]["reason"] == "SESSION_OR_PHASE_FILTER_INACTIVE"
+
+
+def test_snap_turn_audit_dedupes_monitor_repeats_by_completed_bar_and_preserves_signal(tmp_path: Path) -> None:
+    event_path = _bull_event(tmp_path / "events" / "bull.json", timestamp="2026-05-07T14:00:00+00:00")
+    _runtime_report(
+        tmp_path / "runtime" / "cycle-1",
+        {
+            "generated_at": "2026-05-07T14:00:01+00:00",
+            "evaluated_strategies": [
+                {
+                    "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+                    "decision": "LONG",
+                    "signal_emitted": True,
+                    "input_event_path": str(event_path),
+                    "rule_conditions": {"first_bull_snap_turn": True},
+                }
+            ],
+        },
+    )
+    _runtime_report(
+        tmp_path / "runtime" / "cycle-2",
+        {
+            "generated_at": "2026-05-07T14:00:05+00:00",
+            "evaluated_strategies": [
+                {
+                    "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+                    "decision": "NO_SIGNAL",
+                    "signal_emitted": False,
+                    "input_event_path": str(event_path),
+                    "rule_conditions": {"first_bull_snap_turn": False},
+                }
+            ],
+        },
+    )
+
+    result = create_track_b_snap_turn_near_miss_amplification(
+        config=TrackBSnapTurnNearMissAmplificationConfig(
+            repo_root=tmp_path,
+            runtime_cycle_root=tmp_path / "runtime",
+            snap_turn_root=tmp_path / "snap_turn_state",
+            output_json=tmp_path / "diagnostic.json",
+            output_md=tmp_path / "diagnostic.md",
+        ),
+        now=datetime(2026, 5, 7, 14, 5, tzinfo=UTC),
+    )
+
+    strategy = next(row for row in result.report["strategies"] if row["strategy_id"] == "FIRST_BULL_SNAP_TURN_V1")
+    assert result.report["completed_decision_strategy_rows_after_dedup"] == 1
+    assert strategy["evaluated_completed_bars_total"] == 1
+    assert strategy["hard_signals"] == 1

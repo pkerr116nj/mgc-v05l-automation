@@ -59,6 +59,29 @@ SNAP_TURN_STRATEGIES: dict[str, dict[str, str]] = {
     },
 }
 
+SNAP_TURN_EXPECTED_FREQUENCY: dict[str, dict[str, Any]] = {
+    "FIRST_BULL_SNAP_TURN_V1": {
+        "expected_eligible_bars_per_day": [80, 260],
+        "expected_hard_signals_per_day": [1.0, 2.0],
+        "expectation_source": "OPERATOR_EXPECTATION_PROVISIONAL_TRACK_B_CONTRACT",
+    },
+    "FIRST_BEAR_SNAP_TURN_V1": {
+        "expected_eligible_bars_per_day": [80, 260],
+        "expected_hard_signals_per_day": [1.0, 2.0],
+        "expectation_source": "OPERATOR_EXPECTATION_PROVISIONAL_TRACK_B_CONTRACT",
+    },
+    "MNQ_FIRST_BULL_SNAP_TURN_V1": {
+        "expected_eligible_bars_per_day": [80, 260],
+        "expected_hard_signals_per_day": [1.0, 2.0],
+        "expectation_source": "OPERATOR_EXPECTATION_PROVISIONAL_TRACK_B_CONTRACT",
+    },
+    "MNQ_FIRST_BEAR_SNAP_TURN_V1": {
+        "expected_eligible_bars_per_day": [80, 260],
+        "expected_hard_signals_per_day": [1.0, 2.0],
+        "expectation_source": "OPERATOR_EXPECTATION_PROVISIONAL_TRACK_B_CONTRACT",
+    },
+}
+
 
 @dataclass(frozen=True)
 class TrackBSnapTurnNearMissAmplificationConfig:
@@ -121,12 +144,38 @@ def create_track_b_snap_turn_near_miss_amplification(
             "Near-miss buckets use deduplicated primitive snap-turn gates. Raw/candidate/first "
             "snap-turn composites are still reported separately so they do not hide the underlying predicate."
         ),
+        "near_miss_math_validation": {
+            "one_predicate_away": "Exactly one failed deduplicated primitive gate after session/data/instrument eligibility.",
+            "two_predicates_away": "Exactly two failed deduplicated primitive gates after session/data/instrument eligibility.",
+            "composites_counted_separately": [
+                "bull_snap_raw",
+                "bear_snap_raw",
+                "bull_snap_turn_candidate",
+                "bear_snap_turn_candidate",
+                "first_bull_snap_turn",
+                "first_bear_snap_turn",
+            ],
+            "closest_failed_bars": (
+                "All scoreable NO_SIGNAL bars are ranked by primitive failed-predicate count, then by "
+                "aggregate numeric miss distance where available; this catches commercially close bars "
+                "that are still more than two predicates away."
+            ),
+        },
+        "predicate_hierarchy_validation": {
+            "rule_runner_evaluates_all_conditions_without_early_exit": True,
+            "primitive_gates_reconstructed_from_feature_envelope": True,
+            "downstream_skip_risk": (
+                "LOW when state/feature envelope is available because all rule_conditions are materialized. "
+                "METHODOLOGY_INCONCLUSIVE for rotated/missing envelopes."
+            ),
+        },
         "broker_commands_invoked": False,
         "paper_proof_cli_invoked": False,
         "submit_cancel_place_order_invoked": False,
         "production_thresholds_changed": False,
         "runtime_reports_scanned": len(runtime_reports),
         "bounded_runtime_report_limit": actual_config.max_runtime_reports,
+        "completed_decision_strategy_rows_after_dedup": len(evaluated_rows),
         "future_excursion_horizon_bars": actual_config.future_horizon_bars,
         "strategies": strategies,
         "variant_candidates": _variant_candidates(strategies),
@@ -161,6 +210,8 @@ def _strategy_report(
     session_buckets: Counter[str] = Counter()
     regime_buckets: Counter[str] = Counter()
     near_examples: list[dict[str, Any]] = []
+    closest_failed_examples: list[dict[str, Any]] = []
+    eligibility_counts: Counter[str] = Counter()
     hard_signals = 0
     one_predicate_away = 0
     two_predicates_away = 0
@@ -168,6 +219,16 @@ def _strategy_report(
     no_signal = 0
     not_ready = 0
     for row in rows:
+        eligibility = _eligibility(row, expected_instrument=str(meta["instrument"]))
+        eligibility_counts.update(["evaluated"])
+        if eligibility["instrument_match"]:
+            eligibility_counts.update(["instrument_match"])
+        if eligibility["data_ready"]:
+            eligibility_counts.update(["data_ready"])
+        if eligibility["session_phase_ready"]:
+            eligibility_counts.update(["session_phase_ready"])
+        if eligibility["eligible"]:
+            eligibility_counts.update(["eligible"])
         result = row["result"]
         if result == "SIGNAL":
             hard_signals += 1
@@ -227,13 +288,62 @@ def _strategy_report(
                     "source_event_path": row.get("input_event_path"),
                 }
             )
+        if bucket not in {"NOT_SCORABLE", "SIGNAL"} and failed_primitives:
+            excursion = _future_excursion(
+                row=row,
+                candles=candle_index.get(str(meta["instrument"]), []),
+                horizon_bars=future_horizon_bars,
+            )
+            closest_failed_examples.append(
+                {
+                    "decision_bar_timestamp": row["decision_bar_timestamp"],
+                    "instrument": meta["instrument"],
+                    "strategy_id": strategy_id,
+                    "side": meta["side"],
+                    "primitive_failed_predicates_count": len(failed_primitives),
+                    "failed_primitive_predicates": failed_primitive_names,
+                    "numeric_distances": _distance_rows(failed_primitives),
+                    "aggregate_negative_pass_margin": _decimal_str(_aggregate_negative_margin(failed_primitives)),
+                    "session_bucket": _session_bucket(state),
+                    "regime_bucket": _regime_bucket(row),
+                    "future_excursion": excursion,
+                    "source_event_path": row.get("input_event_path"),
+                }
+            )
         _ = features
+    closest_failed_examples.sort(
+        key=lambda item: (
+            int(item.get("primitive_failed_predicates_count") or 999),
+            _decimal(item.get("aggregate_negative_pass_margin")).copy_abs(),
+            str(item.get("decision_bar_timestamp") or ""),
+        )
+    )
+    eligible_count = int(eligibility_counts.get("eligible", 0))
+    frequency = _expected_frequency_validation(
+        strategy_id=strategy_id,
+        hard_signals=hard_signals,
+        eligible_bars=eligible_count,
+        evaluated_bars=len(rows),
+        not_scorable=not_scorable,
+        rows=rows,
+    )
     return {
         "strategy_id": strategy_id,
         "instrument": meta["instrument"],
         "side": meta["side"],
-        "eligible_completed_bars_evaluated": len(rows),
+        "evaluated_completed_bars_total": len(rows),
+        "eligible_completed_bars_evaluated": eligible_count,
+        "denominator_validation": {
+            "evaluated_bars": int(eligibility_counts.get("evaluated", 0)),
+            "instrument_match_bars": int(eligibility_counts.get("instrument_match", 0)),
+            "data_ready_bars": int(eligibility_counts.get("data_ready", 0)),
+            "session_phase_ready_bars": int(eligibility_counts.get("session_phase_ready", 0)),
+            "eligible_bars": eligible_count,
+            "ineligible_reason_counts": _ineligible_reason_counts(rows, expected_instrument=str(meta["instrument"])),
+        },
         "hard_signals": hard_signals,
+        "hard_signal_rate_total_evaluated": _rate(hard_signals, len(rows)),
+        "hard_signal_rate_eligible": _rate(hard_signals, eligible_count),
         "no_signal": no_signal,
         "not_ready": not_ready,
         "one_predicate_away": one_predicate_away,
@@ -252,11 +362,15 @@ def _strategy_report(
             "regimes": _counter_rows(regime_buckets, limit=8),
         },
         "near_miss_examples": near_examples[:max_examples],
+        "closest_failed_bars": closest_failed_examples[:max_examples],
+        "expected_frequency_validation": frequency,
+        "frequency_classification": frequency["classification"],
         "amplification_posture": _strategy_posture(
             hard_signals=hard_signals,
             one_predicate_away=one_predicate_away,
             two_predicates_away=two_predicates_away,
             failed_primitives=failed_primitive_counts,
+            frequency_classification=str(frequency["classification"]),
         ),
     }
 
@@ -298,8 +412,31 @@ def _evaluated_snap_turn_rows(runtime_reports: Iterable[Mapping[str, Any]], *, r
                     "ohlc": _ohlc(event),
                 }
             )
-    rows.sort(key=lambda item: (str(item.get("decision_bar_timestamp") or ""), str(item.get("strategy_id") or "")))
-    return rows
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (str(row.get("strategy_id") or ""), str(row.get("decision_bar_timestamp") or ""))
+        existing = deduped.get(key)
+        if existing is None or _prefer_snap_row(row, existing):
+            deduped[key] = row
+    final_rows = list(deduped.values())
+    final_rows.sort(key=lambda item: (str(item.get("decision_bar_timestamp") or ""), str(item.get("strategy_id") or "")))
+    return final_rows
+
+
+def _prefer_snap_row(candidate: Mapping[str, Any], existing: Mapping[str, Any]) -> bool:
+    candidate_signal = candidate.get("result") == "SIGNAL"
+    existing_signal = existing.get("result") == "SIGNAL"
+    if candidate_signal != existing_signal:
+        return candidate_signal
+    candidate_ready = bool(candidate.get("state")) and bool(candidate.get("features"))
+    existing_ready = bool(existing.get("state")) and bool(existing.get("features"))
+    if candidate_ready != existing_ready:
+        return candidate_ready
+    candidate_generated = _parse_dt(str(candidate.get("generated_at") or ""))
+    existing_generated = _parse_dt(str(existing.get("generated_at") or ""))
+    if candidate_generated and existing_generated:
+        return candidate_generated > existing_generated
+    return False
 
 
 def _primitive_predicates(row: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -463,6 +600,104 @@ def _future_excursion(*, row: Mapping[str, Any], candles: list[dict[str, Any]], 
     }
 
 
+def _eligibility(row: Mapping[str, Any], *, expected_instrument: str) -> dict[str, Any]:
+    event = row.get("event") if isinstance(row.get("event") or {}, Mapping) else {}
+    state = row.get("state") if isinstance(row.get("state") or {}, Mapping) else {}
+    features = row.get("features") if isinstance(row.get("features") or {}, Mapping) else {}
+    instrument = _event_instrument(event)
+    instrument_match = instrument == expected_instrument
+    data_ready = bool(state and features)
+    session_phase_ready = data_ready and state.get("session_allowed") is True
+    result = str(row.get("result") or "")
+    eligible = instrument_match and data_ready and session_phase_ready and result != "NOT_READY"
+    reasons: list[str] = []
+    if not instrument_match:
+        reasons.append("INSTRUMENT_MISMATCH_OR_MISSING")
+    if not data_ready:
+        reasons.append("FEATURE_ENVELOPE_MISSING")
+    if data_ready and not session_phase_ready:
+        reasons.append("SESSION_OR_PHASE_FILTER_INACTIVE")
+    if result == "NOT_READY":
+        reasons.append("NOT_READY")
+    return {
+        "eligible": eligible,
+        "instrument_match": instrument_match,
+        "data_ready": data_ready,
+        "session_phase_ready": session_phase_ready,
+        "ineligible_reasons": reasons,
+    }
+
+
+def _ineligible_reason_counts(rows: Iterable[Mapping[str, Any]], *, expected_instrument: str) -> list[dict[str, Any]]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        eligibility = _eligibility(row, expected_instrument=expected_instrument)
+        if eligibility["eligible"]:
+            continue
+        counter.update(eligibility["ineligible_reasons"])
+    return _counter_rows(counter, limit=8)
+
+
+def _expected_frequency_validation(
+    *,
+    strategy_id: str,
+    hard_signals: int,
+    eligible_bars: int,
+    evaluated_bars: int,
+    not_scorable: int,
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    expected = SNAP_TURN_EXPECTED_FREQUENCY[strategy_id]
+    expected_eligible = expected["expected_eligible_bars_per_day"]
+    expected_signals = expected["expected_hard_signals_per_day"]
+    midpoint_eligible = Decimal(str(sum(expected_eligible) / 2))
+    active_day_equivalents = Decimal(eligible_bars) / midpoint_eligible if midpoint_eligible else Decimal("0")
+    observed_signals_per_active_day = (
+        Decimal(hard_signals) / active_day_equivalents if active_day_equivalents > 0 else Decimal("0")
+    )
+    classification = "METHODOLOGY_INCONCLUSIVE"
+    not_scorable_ratio = Decimal(not_scorable) / Decimal(evaluated_bars) if evaluated_bars > 0 else Decimal("0")
+    if eligible_bars >= 20 and active_day_equivalents >= Decimal("0.25") and not_scorable_ratio <= Decimal("0.10"):
+        if observed_signals_per_active_day < Decimal(str(expected_signals[0])):
+            classification = "TOO_QUIET"
+        elif observed_signals_per_active_day > Decimal(str(expected_signals[1])):
+            classification = "TOO_ACTIVE"
+        else:
+            classification = "ACCEPTABLE"
+    return {
+        "expected_eligible_bars_per_day": expected_eligible,
+        "expected_hard_signals_per_day": expected_signals,
+        "expectation_source": expected["expectation_source"],
+        "active_day_equivalents_from_eligible_bars": _decimal_str(active_day_equivalents),
+        "observed_hard_signals_per_active_day": _decimal_str(observed_signals_per_active_day),
+        "observed_hard_signal_rate_eligible": _rate(hard_signals, eligible_bars),
+        "not_scorable_ratio": _decimal_str(not_scorable_ratio),
+        "classification": classification,
+        "methodology": (
+            "Active-day equivalents are eligible_bars divided by midpoint expected eligible bars/day. "
+            "Frequency classification requires at least 20 eligible bars, >=0.25 active-day equivalents, "
+            "and <=10% not-scorable evaluated bars."
+        ),
+        "sample_window_start": _min_time(row.get("decision_bar_timestamp") for row in rows),
+        "sample_window_end": _max_time(row.get("decision_bar_timestamp") for row in rows),
+    }
+
+
+def _aggregate_negative_margin(predicates: Iterable[Mapping[str, Any]]) -> Decimal:
+    total = Decimal("0")
+    for item in predicates:
+        distance = item.get("distance")
+        if isinstance(distance, Decimal) and distance < 0:
+            total += distance
+    return total
+
+
+def _rate(numerator: int, denominator: int) -> str | None:
+    if denominator <= 0:
+        return None
+    return format((Decimal(numerator) / Decimal(denominator)) * Decimal("100"), ".4f")
+
+
 def _primitive_rows(
     counter: Counter[str],
     *,
@@ -546,7 +781,33 @@ def _variant_candidates(strategies: Iterable[Mapping[str, Any]]) -> list[dict[st
                     ),
                 }
             )
-    candidates.sort(key=lambda item: (int(item.get("near_miss_excursion_sample_count") or 0), int(item.get("failed_count") or 0)), reverse=True)
+        if strategy.get("frequency_classification") == "TOO_QUIET":
+            for example in strategy.get("closest_failed_bars") or []:
+                excursion = example.get("future_excursion") if isinstance(example.get("future_excursion") or {}, Mapping) else {}
+                failed_count = int(example.get("primitive_failed_predicates_count") or 999)
+                if failed_count > 4 or not _favorable_excursion(excursion):
+                    continue
+                candidates.append(
+                    {
+                        "strategy_id": strategy.get("strategy_id"),
+                        "instrument": strategy.get("instrument"),
+                        "side": strategy.get("side"),
+                        "predicate": ",".join(str(item) for item in (example.get("failed_primitive_predicates") or [])[:4]),
+                        "failed_count": failed_count,
+                        "near_miss_excursion_sample_count": 1,
+                        "average_mfe_points": excursion.get("mfe_points"),
+                        "average_mae_points": excursion.get("mae_points"),
+                        "decision_bar_timestamp": example.get("decision_bar_timestamp"),
+                        "next_step": "Replay this closest rejected bar as a bounded snap-turn variant candidate before any threshold change.",
+                    }
+                )
+    candidates.sort(
+        key=lambda item: (
+            -int(item.get("near_miss_excursion_sample_count") or 0),
+            int(item.get("failed_count") or 999),
+            str(item.get("strategy_id") or ""),
+        )
+    )
     return candidates[:3]
 
 
@@ -571,19 +832,31 @@ def _conclusion(strategies: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     strategy_list = list(strategies)
     total_near = sum(int(item.get("one_predicate_away") or 0) + int(item.get("two_predicates_away") or 0) for item in strategy_list)
     total_signals = sum(int(item.get("hard_signals") or 0) for item in strategy_list)
-    if total_near <= 0:
-        posture = "PAUSE_BROAD_SNAP_TURN_AMPLIFICATION"
-        reason = "No one/two-primitive-predicate-away snap-turn bars were found in the bounded evaluated window."
-    elif total_signals > 0:
-        posture = "PROCEED_TO_BOUNDED_VARIANT_REPLAY"
-        reason = "Hard signals and near-misses exist; rank variants with replay before predicate changes."
+    too_quiet = [item for item in strategy_list if item.get("frequency_classification") == "TOO_QUIET"]
+    inconclusive = [item for item in strategy_list if item.get("frequency_classification") == "METHODOLOGY_INCONCLUSIVE"]
+    variants = _variant_candidates(strategy_list)
+    defects = _defects_or_parity_checks(strategy_list)
+    if defects:
+        posture = "SNAP_TURN_PARITY_OR_IMPLEMENTATION_DEFECT_FOUND"
+        reason = "At least one predicate/feature path was classified as a parity or implementation defect."
+    elif variants:
+        posture = "SNAP_TURN_VARIANT_CANDIDATE_FOUND"
+        reason = "Closest rejected bars or one/two-predicate near-misses have favorable subsequent excursion evidence."
+    elif inconclusive:
+        posture = "SNAP_TURN_AUDIT_METHODOLOGY_INCONCLUSIVE"
+        reason = "At least one strategy lacks enough eligible/scorable denominator evidence."
+    elif too_quiet:
+        posture = "SNAP_TURN_TOO_QUIET_CONFIRMED"
+        reason = "At least one snap-turn strategy is below the provisional expected-frequency contract on eligible bars."
     else:
-        posture = "PROCEED_TO_BOUNDED_VARIANT_REPLAY"
-        reason = "Near-misses exist but hard signals are absent; replay top predicates before changing production."
+        posture = "SNAP_TURN_HEALTHY"
+        reason = "Observed hard-signal frequency is inside the provisional expected-frequency contract."
     return {
         "posture": posture,
         "hard_signals": total_signals,
         "near_miss_count": total_near,
+        "too_quiet_strategy_count": len(too_quiet),
+        "methodology_inconclusive_strategy_count": len(inconclusive),
         "reason": reason,
     }
 
@@ -686,7 +959,12 @@ def _strategy_posture(
     one_predicate_away: int,
     two_predicates_away: int,
     failed_primitives: Counter[str],
+    frequency_classification: str,
 ) -> str:
+    if frequency_classification == "TOO_QUIET":
+        return "SNAP_TURN_TOO_QUIET_REQUIRES_CLOSEST_BAR_REPLAY"
+    if frequency_classification == "METHODOLOGY_INCONCLUSIVE":
+        return "SNAP_TURN_AUDIT_METHODOLOGY_INCONCLUSIVE"
     if one_predicate_away or two_predicates_away:
         return "SNAP_TURN_VARIANT_REPLAY_CANDIDATE"
     if hard_signals > 0:
@@ -738,6 +1016,27 @@ def _strategy_id(strategy: Mapping[str, Any]) -> str:
         or strategy.get("rule_mode")
         or ""
     )
+
+
+def _favorable_excursion(excursion: Mapping[str, Any]) -> bool:
+    if excursion.get("available") is not True:
+        return False
+    directional = _decimal(excursion.get("directional_close_excursion_points"))
+    mfe = _decimal(excursion.get("mfe_points"))
+    mae = _decimal(excursion.get("mae_points")).copy_abs()
+    return directional > 0 or (mfe > 0 and mfe >= mae)
+
+
+def _min_time(values: Iterable[Any]) -> str | None:
+    parsed = [_parse_dt(str(value or "")) for value in values]
+    valid = [value for value in parsed if value is not None]
+    return min(valid).isoformat() if valid else None
+
+
+def _max_time(values: Iterable[Any]) -> str | None:
+    parsed = [_parse_dt(str(value or "")) for value in values]
+    valid = [value for value in parsed if value is not None]
+    return max(valid).isoformat() if valid else None
 
 
 def _strategy_result(strategy: Mapping[str, Any]) -> str:
@@ -887,10 +1186,20 @@ def _markdown(report: Mapping[str, Any]) -> str:
     for strategy in report.get("strategies") or []:
         lines.append(f"### {strategy.get('strategy_id')}")
         lines.append(f"- Instrument/side: {strategy.get('instrument')} {strategy.get('side')}")
-        lines.append(f"- Eligible completed bars evaluated: {strategy.get('eligible_completed_bars_evaluated')}")
-        lines.append(f"- Hard signals: {strategy.get('hard_signals')}")
+        lines.append(f"- Total evaluated bars: {strategy.get('evaluated_completed_bars_total')}")
+        lines.append(f"- Eligible completed bars: {strategy.get('eligible_completed_bars_evaluated')}")
+        lines.append(
+            f"- Hard signals: {strategy.get('hard_signals')} "
+            f"(eligible rate {strategy.get('hard_signal_rate_eligible')}%)"
+        )
         lines.append(f"- One-predicate-away: {strategy.get('one_predicate_away')}")
         lines.append(f"- Two-predicates-away: {strategy.get('two_predicates_away')}")
+        expected = strategy.get("expected_frequency_validation") or {}
+        lines.append(
+            f"- Expected-frequency classification: {strategy.get('frequency_classification')} "
+            f"(observed {expected.get('observed_hard_signals_per_active_day')} hard signals/active day, "
+            f"expected {expected.get('expected_hard_signals_per_day')})"
+        )
         lines.append(f"- Posture: {strategy.get('amplification_posture')}")
         top = strategy.get("dominant_failed_primitive_predicates") or []
         if top:
@@ -903,6 +1212,17 @@ def _markdown(report: Mapping[str, Any]) -> str:
                     f"{item.get('predicate')}: {item.get('count')} "
                     f"({item.get('classification')}); avg distance={distance.get('average_pass_margin_points_or_units')}; "
                     f"near-miss avg MFE={excursion.get('average_mfe_points')}, MAE={excursion.get('average_mae_points')}"
+                )
+        closest = strategy.get("closest_failed_bars") or []
+        if closest:
+            lines.append("- Closest rejected bars:")
+            for item in closest[:3]:
+                excursion = item.get("future_excursion") or {}
+                lines.append(
+                    "  - "
+                    f"{item.get('decision_bar_timestamp')}: failed {item.get('primitive_failed_predicates_count')} primitives "
+                    f"{item.get('failed_primitive_predicates')}; MFE={excursion.get('mfe_points')}, "
+                    f"MAE={excursion.get('mae_points')}, directional={excursion.get('directional_close_excursion_points')}"
                 )
         lines.append("")
     lines.extend(["## Top Variant Candidates", ""])
