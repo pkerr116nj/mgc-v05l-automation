@@ -18,7 +18,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .ibkr_paper_adapter import IbkrPaperAdapter
 from .models import require_aware_datetime, to_jsonable
+from .models import IntentKind, OrderIntent, SubmitAttempt, SubmitAttemptState
 from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
 
 
@@ -42,6 +44,7 @@ class TrackBManagedExitPolicy(str, Enum):
     EXIT_NOT_AVAILABLE = "EXIT_NOT_AVAILABLE"
     MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL = "MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL"
     DIAGNOSTIC_TIME_EXIT_IMMEDIATE = "DIAGNOSTIC_TIME_EXIT_IMMEDIATE"
+    PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1 = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,17 @@ class TrackBStrategyManagedPaperLifecycleConfig:
     entry_limit_price: str | Decimal | None = None
     close_limit_price: str | Decimal | None = None
     managed_exit_policy_id: str | None = None
+    managed_exit_policy_max_completed_5m_bars: int = 3
+    completed_5m_bars_since_entry: int | None = None
+    submit_enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 7497
+    client_id: int = 17086
+    order_type: str = "LMT"
+    time_in_force: str = "DAY"
+    exchange: str = "COMEX"
+    currency: str = "USD"
+    tick_size: str = "0.1"
     source_id: str = "track_b_strategy_managed_paper_lifecycle"
     output_root: Path = DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT
     paper_trade_ledger_output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
@@ -119,6 +133,7 @@ def run_track_b_strategy_managed_paper_lifecycle(
     close_submit: Mapping[str, Any] | None = None
     entry_fill: Mapping[str, Any] | None = None
     close_fill: Mapping[str, Any] | None = None
+    open_state: Mapping[str, Any] | None = None
     broker_state_mutated = False
     submit_attempted = False
     primary_blocker: str | None = None
@@ -184,6 +199,7 @@ def run_track_b_strategy_managed_paper_lifecycle(
         entry_intent=entry_intent,
         entry_submit=entry_submit,
         entry_fill=entry_fill,
+        open_state=open_state,
         close_intent=close_intent,
         close_submit=close_submit,
         close_fill=close_fill,
@@ -258,6 +274,10 @@ def _open_state(
         "entry_price": _decimal_text(entry_fill.get("price") or entry_fill.get("avg_price")),
         "entry_timestamp": entry_fill.get("filled_at") or entry_fill.get("timestamp"),
         "current_state": TrackBManagedPaperLifecycleClassification.OPEN_MANAGED.value,
+        "open_position_age_completed_5m_bars": int(config.completed_5m_bars_since_entry or 0),
+        "managed_exit_policy_id": _normalized_exit_policy(config.managed_exit_policy_id),
+        "managed_exit_policy_max_completed_5m_bars": int(config.managed_exit_policy_max_completed_5m_bars),
+        "expected_exit_condition": _expected_exit_condition(config),
         "broker_reconciled": bool(config.broker_reconciled),
         "review_required": False,
     }
@@ -272,6 +292,7 @@ def _build_report(
     entry_intent: Mapping[str, Any],
     entry_submit: Mapping[str, Any] | None,
     entry_fill: Mapping[str, Any] | None,
+    open_state: Mapping[str, Any] | None,
     close_intent: Mapping[str, Any] | None,
     close_submit: Mapping[str, Any] | None,
     close_fill: Mapping[str, Any] | None,
@@ -301,6 +322,12 @@ def _build_report(
         "expected_account_id": config.expected_account_id,
         "mode": config.mode,
         "managed_exit_policy_id": _normalized_exit_policy(config.managed_exit_policy_id),
+        "managed_exit_policy_max_completed_5m_bars": int(config.managed_exit_policy_max_completed_5m_bars),
+        "open_position_age_completed_5m_bars": None
+        if open_state is None
+        else open_state.get("open_position_age_completed_5m_bars"),
+        "expected_exit_condition": _expected_exit_condition(config),
+        "close_intent_status": _close_intent_status(classification, close_intent),
         "strategy_managed_lifecycle_classification": classification.value,
         "paper_lifecycle_classification": classification.value,
         "entry_intent": dict(entry_intent),
@@ -369,20 +396,29 @@ def _default_entry_submitter(
     config: TrackBStrategyManagedPaperLifecycleConfig,
     entry_intent: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    return {
-        "submitted": False,
-        "submit_attempted": False,
-        "broker_state_mutated": False,
-        "entry_intent": dict(entry_intent),
-        "primary_blocker": "No managed PAPER broker submit adapter is configured.",
-    }
+    if config.submit_enabled is not True:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "entry_intent": dict(entry_intent),
+            "primary_blocker": "Managed PAPER submit is not enabled for this lifecycle invocation.",
+        }
+    return _submit_managed_limit_order(
+        config=config,
+        intent_payload=entry_intent,
+        intent_kind=IntentKind.OPEN,
+        limit_price=config.entry_limit_price,
+        submit_index=1,
+    )
 
 
 def _default_exit_policy(
     config: TrackBStrategyManagedPaperLifecycleConfig,
     open_state: Mapping[str, Any],
 ) -> Mapping[str, Any] | None:
-    if _normalized_exit_policy(config.managed_exit_policy_id) == TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value:
+    policy_id = _normalized_exit_policy(config.managed_exit_policy_id)
+    if policy_id == TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value:
         return {
             "intent_schema_version": "track_b_strategy_managed_paper_close_intent_v1",
             "lifecycle_id": open_state.get("lifecycle_id"),
@@ -398,6 +434,29 @@ def _default_exit_policy(
             "close_limit_price": _decimal_text(config.close_limit_price),
             "close_reason": "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
         }
+    if policy_id == TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value:
+        elapsed = int(config.completed_5m_bars_since_entry or 0)
+        required = int(config.managed_exit_policy_max_completed_5m_bars)
+        if elapsed < required:
+            return None
+        return {
+            "intent_schema_version": "track_b_strategy_managed_paper_close_intent_v1",
+            "lifecycle_id": open_state.get("lifecycle_id"),
+            "trade_id": open_state.get("trade_id"),
+            "strategy_id": config.strategy_id,
+            "account_id": config.account_id,
+            "contract_key": config.contract_key,
+            "local_symbol": config.local_symbol,
+            "con_id": config.con_id,
+            "side": open_state.get("side"),
+            "order_action": "SELL" if open_state.get("side") == "LONG" else "BUY",
+            "quantity": config.quantity,
+            "close_limit_price": _decimal_text(config.close_limit_price),
+            "close_reason": "TIME_BOXED_EXIT",
+            "managed_exit_policy_id": policy_id,
+            "elapsed_completed_5m_bars": elapsed,
+            "required_completed_5m_bars": required,
+        }
     return None
 
 
@@ -405,13 +464,142 @@ def _default_close_submitter(
     config: TrackBStrategyManagedPaperLifecycleConfig,
     close_intent: Mapping[str, Any],
 ) -> Mapping[str, Any]:
+    if config.submit_enabled is not True:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "close_intent": dict(close_intent),
+            "primary_blocker": "Managed PAPER close submit is not enabled for this lifecycle invocation.",
+        }
+    return _submit_managed_limit_order(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price=close_intent.get("close_limit_price") or config.close_limit_price,
+        submit_index=2,
+    )
+
+
+def _submit_managed_limit_order(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    intent_payload: Mapping[str, Any],
+    intent_kind: IntentKind,
+    limit_price: object,
+    submit_index: int,
+) -> Mapping[str, Any]:
+    if limit_price in {None, ""}:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "primary_blocker": f"Managed PAPER {intent_kind.value.lower()} requires a derived limit price.",
+        }
+    adapter = IbkrPaperAdapter(
+        mode=config.mode,
+        host=config.host,
+        port=config.port,
+        client_id=config.client_id,
+        account_id=config.account_id,
+        contract_allowlist={config.contract_key: _contract_allowlist_entry(config)},
+        submit_enabled=True,
+    )
+    run_id = str(intent_payload.get("lifecycle_id") or f"strategy_managed_{uuid.uuid4().hex}")
+    order_intent = OrderIntent(
+        order_intent_id=f"managed_{intent_kind.value.lower()}_intent_{run_id}_{submit_index}",
+        signal_event_id=str(intent_payload.get("signal_id") or intent_payload.get("lifecycle_id") or run_id),
+        run_id=run_id,
+        intent_kind=intent_kind,
+        account_id=config.account_id,
+        symbol=config.instrument_family,
+        contract_key=config.contract_key,
+        action=str(intent_payload.get("order_action") or ""),
+        quantity=config.quantity or 0,
+        order_type=config.order_type,
+        limit_price=limit_price,
+        time_in_force=config.time_in_force,
+        paper_only=True,
+        created_at=datetime.now(UTC),
+        reason=str(intent_payload.get("close_reason") or config.signal_reason or config.strategy_id),
+    )
+    submit_attempt = SubmitAttempt(
+        submit_attempt_id=f"managed_{intent_kind.value.lower()}_submit_{run_id}_{submit_index}",
+        order_intent_id=order_intent.order_intent_id,
+        run_id=run_id,
+        account_id=config.account_id,
+        broker="IBKR",
+        environment={
+            "mode": config.mode,
+            "host": config.host,
+            "port": config.port,
+            "client_id": config.client_id,
+            "broker": "IBKR",
+            "environment": "PAPER",
+            "lifecycle_mode": "STRATEGY_MANAGED",
+        },
+        pre_submit_reconciliation_id=f"managed_pre_submit_recon_{run_id}_{submit_index}",
+        open_order_baseline_event_id=f"managed_open_orders_{run_id}_{submit_index}",
+        request_digest=f"{order_intent.order_intent_id}:{order_intent.limit_price}",
+        state=SubmitAttemptState.CREATED,
+        submitted_at=datetime.now(UTC),
+    )
+    try:
+        adapter.connect()
+        adapter.managed_accounts()
+        adapter.require_configured_account()
+        open_orders = adapter.refresh_open_orders(contract_key=config.contract_key)
+        if open_orders:
+            return {
+                "submitted": False,
+                "submit_attempted": False,
+                "broker_state_mutated": False,
+                "primary_blocker": "Existing working order for exact contract blocks managed PAPER submit.",
+                "working_order_count": len(open_orders),
+            }
+        broker_order_id = adapter.submit_limit_order(submit_attempt=submit_attempt, order_intent=order_intent)
+        broker_order = adapter.wait_for_broker_order(submit_attempt_id=submit_attempt.submit_attempt_id)
+        fill = adapter.wait_for_fill(submit_attempt_id=submit_attempt.submit_attempt_id)
+        field = "entry_fill" if intent_kind == IntentKind.OPEN else "close_fill"
+        return {
+            "submitted": True,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "broker_order_id": str(broker_order_id),
+            "broker_order": broker_order.to_json_dict(),
+            field: {
+                "price": _decimal_text(fill.price),
+                "quantity": _decimal_text(fill.quantity),
+                "filled_at": fill.filled_at.isoformat(),
+                "broker_order_id": fill.broker_order_id,
+                "perm_id": fill.perm_id,
+                "execution_id": fill.execution_id,
+            },
+            "submit_diagnostics": adapter.submit_diagnostics(submit_attempt.submit_attempt_id),
+        }
+    finally:
+        adapter.disconnect()
+
+
+def _contract_allowlist_entry(config: TrackBStrategyManagedPaperLifecycleConfig) -> dict[str, Any]:
     return {
-        "submitted": False,
-        "submit_attempted": False,
-        "broker_state_mutated": False,
-        "close_intent": dict(close_intent),
-        "primary_blocker": "No managed PAPER close adapter is configured.",
+        "symbol": config.instrument_family,
+        "security_type": "FUT",
+        "exchange": config.exchange,
+        "currency": config.currency,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "contract_month": _contract_month(config.contract_key),
+        "expiry": _contract_month(config.contract_key),
+        "tick_size": config.tick_size,
     }
+
+
+def _contract_month(contract_key: str) -> str:
+    raw = str(contract_key or "")
+    if "-" not in raw:
+        return ""
+    return "".join(ch for ch in raw.split("-", 1)[1] if ch.isdigit())[:6]
 
 
 def _write_report(report_json: Path, report: Mapping[str, Any]) -> None:
@@ -425,6 +613,30 @@ def _write_report(report_json: Path, report: Mapping[str, Any]) -> None:
 
 def _normalized_exit_policy(value: str | None) -> str:
     return str(value or TrackBManagedExitPolicy.EXIT_NOT_AVAILABLE.value).strip().upper()
+
+
+def _expected_exit_condition(config: TrackBStrategyManagedPaperLifecycleConfig) -> str:
+    policy_id = _normalized_exit_policy(config.managed_exit_policy_id)
+    if policy_id == TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value:
+        return f"TIME_BOXED_EXIT_AFTER_{int(config.managed_exit_policy_max_completed_5m_bars)}_COMPLETED_5M_BARS"
+    if policy_id == TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value:
+        return "DIAGNOSTIC_IMMEDIATE_CLOSE"
+    if policy_id == TrackBManagedExitPolicy.MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL.value:
+        return "EXTERNAL_STRATEGY_EXIT_SIGNAL_REQUIRED"
+    return "EXIT_POLICY_MISSING"
+
+
+def _close_intent_status(
+    classification: TrackBManagedPaperLifecycleClassification,
+    close_intent: Mapping[str, Any] | None,
+) -> str:
+    if close_intent is not None:
+        return "CLOSE_INTENT_CREATED"
+    if classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED:
+        return "WAITING_FOR_EXIT_POLICY_CONDITION"
+    if classification == TrackBManagedPaperLifecycleClassification.EXIT_POLICY_MISSING:
+        return "EXIT_POLICY_MISSING"
+    return "NOT_APPLICABLE"
 
 
 def _normalized_side(value: str | None) -> str:

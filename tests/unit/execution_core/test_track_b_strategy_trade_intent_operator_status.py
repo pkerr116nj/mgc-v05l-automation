@@ -29,6 +29,11 @@ def test_operator_status_exposes_strategy_trade_intent_from_paper_runner(tmp_pat
             "strategy_trade_intent_report_path": "outputs/track_b_execution_core/strategy_trade_intents/latest_track_b_strategy_trade_intent.json",
             "intent_blocked_reason": None,
             "lifecycle_mode": "STRATEGY_MANAGED",
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+            "managed_exit_policy_max_completed_5m_bars": 3,
+            "managed_open_position_age_completed_5m_bars": 1,
+            "managed_expected_exit_condition": "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS",
+            "managed_close_intent_status": "WAITING_FOR_EXIT_POLICY_CONDITION",
             "paper_proof_invoked": False,
             "submit_attempted": False,
             "broker_state_mutated": False,
@@ -53,6 +58,10 @@ def test_operator_status_exposes_strategy_trade_intent_from_paper_runner(tmp_pat
     assert result.report["strategy_trade_intent_classification"] == "STRATEGY_TRADE_INTENT_CREATED"
     assert result.report["strategy_trade_intent_id"] == "intent-001"
     assert result.report["strategy_trade_intent_lifecycle_mode"] == "STRATEGY_MANAGED"
+    assert result.report["strategy_managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert result.report["strategy_managed_open_position_age_completed_5m_bars"] == 1
+    assert result.report["strategy_managed_expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS"
+    assert result.report["strategy_managed_close_intent_status"] == "WAITING_FOR_EXIT_POLICY_CONDITION"
     assert result.report["strategy_paper_proof_invoked"] is False
 
 
@@ -68,6 +77,9 @@ def test_operator_status_exposes_strategy_trade_intent_from_shadow_monitor(tmp_p
             "latest_strategy_trade_intent_classification": "INTENT_BLOCKED_MISSING_EXIT_POLICY",
             "latest_strategy_trade_intent_path": "outputs/track_b_execution_core/strategy_trade_intents/latest_track_b_strategy_trade_intent.json",
             "latest_strategy_trade_intent_blocked_reason": "missing managed exit policy",
+            "latest_managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+            "latest_managed_expected_exit_condition": "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS",
+            "latest_managed_close_intent_status": "WAITING_FOR_EXIT_POLICY_CONDITION",
             "paper_trades_attempted_count": 0,
             "candidate_signals": [],
             "suppressed_signals": [],
@@ -97,4 +109,7 @@ def test_operator_status_exposes_strategy_trade_intent_from_shadow_monitor(tmp_p
     assert result.report["shadow_monitor_strategy_trade_intent_created"] is False
     assert result.report["shadow_monitor_strategy_trade_intent_classification"] == "INTENT_BLOCKED_MISSING_EXIT_POLICY"
     assert result.report["shadow_monitor_strategy_trade_intent_blocked_reason"] == "missing managed exit policy"
+    assert result.report["shadow_monitor_managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert result.report["shadow_monitor_managed_expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS"
+    assert result.report["shadow_monitor_managed_close_intent_status"] == "WAITING_FOR_EXIT_POLICY_CONDITION"
     assert result.report["shadow_monitor_paper_proof_invoked"] is False

@@ -577,6 +577,19 @@ def _report(
         "strategy_trade_intent_report_path": track_b_strategy_paper_runner.get("strategy_trade_intent_report_path") or NOT_PROVIDED,
         "strategy_trade_intent_blocked_reason": track_b_strategy_paper_runner.get("intent_blocked_reason") or NOT_PROVIDED,
         "strategy_trade_intent_lifecycle_mode": track_b_strategy_paper_runner.get("lifecycle_mode") or NOT_PROVIDED,
+        "strategy_managed_exit_policy_id": track_b_strategy_paper_runner.get("managed_exit_policy_id") or NOT_PROVIDED,
+        "strategy_managed_exit_policy_max_completed_5m_bars": track_b_strategy_paper_runner.get(
+            "managed_exit_policy_max_completed_5m_bars",
+            NOT_PROVIDED,
+        ),
+        "strategy_managed_open_position_age_completed_5m_bars": track_b_strategy_paper_runner.get(
+            "managed_open_position_age_completed_5m_bars",
+            NOT_PROVIDED,
+        ),
+        "strategy_managed_expected_exit_condition": track_b_strategy_paper_runner.get("managed_expected_exit_condition")
+        or NOT_PROVIDED,
+        "strategy_managed_close_intent_status": track_b_strategy_paper_runner.get("managed_close_intent_status")
+        or NOT_PROVIDED,
         "strategy_paper_proof_invoked": track_b_strategy_paper_runner.get("paper_proof_invoked") if track_b_strategy_paper_runner else NOT_PROVIDED,
         "strategy_paper_proof_classification": track_b_strategy_paper_runner.get("paper_proof_classification") or NOT_PROVIDED,
         "strategy_paper_proof_report_path": track_b_strategy_paper_runner.get("paper_proof_report_path") or NOT_PROVIDED,
@@ -686,6 +699,11 @@ def _report(
         "shadow_monitor_strategy_trade_intent_classification": track_b_shadow_monitor.get("latest_strategy_trade_intent_classification") or NOT_PROVIDED,
         "shadow_monitor_strategy_trade_intent_path": track_b_shadow_monitor.get("latest_strategy_trade_intent_path") or NOT_PROVIDED,
         "shadow_monitor_strategy_trade_intent_blocked_reason": track_b_shadow_monitor.get("latest_strategy_trade_intent_blocked_reason") or NOT_PROVIDED,
+        "shadow_monitor_managed_exit_policy_id": track_b_shadow_monitor.get("latest_managed_exit_policy_id") or NOT_PROVIDED,
+        "shadow_monitor_managed_expected_exit_condition": track_b_shadow_monitor.get("latest_managed_expected_exit_condition")
+        or NOT_PROVIDED,
+        "shadow_monitor_managed_close_intent_status": track_b_shadow_monitor.get("latest_managed_close_intent_status")
+        or NOT_PROVIDED,
         "shadow_monitor_decision_journal_tier_counts": track_b_shadow_monitor.get("decision_journal_tier_counts") or {},
         "shadow_monitor_submit_allowed": track_b_shadow_monitor.get("submit_allowed") if track_b_shadow_monitor else NOT_PROVIDED,
         "shadow_monitor_submit_attempted": track_b_shadow_monitor.get("submit_attempted") if track_b_shadow_monitor else NOT_PROVIDED,

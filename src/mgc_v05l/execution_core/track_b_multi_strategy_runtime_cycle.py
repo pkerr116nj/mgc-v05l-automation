@@ -968,6 +968,10 @@ def _build_report(
         "managed_lifecycle_classification": paper_report.get("managed_lifecycle_classification"),
         "managed_lifecycle_report_path": paper_report.get("managed_lifecycle_report_path"),
         "managed_exit_policy_id": paper_report.get("managed_exit_policy_id") or config.managed_exit_policy_id,
+        "managed_exit_policy_max_completed_5m_bars": paper_report.get("managed_exit_policy_max_completed_5m_bars"),
+        "managed_open_position_age_completed_5m_bars": paper_report.get("managed_open_position_age_completed_5m_bars"),
+        "managed_expected_exit_condition": paper_report.get("managed_expected_exit_condition"),
+        "managed_close_intent_status": paper_report.get("managed_close_intent_status"),
         "paper_proof_classification": paper_report.get("paper_proof_classification"),
         "final_broker_state_classification": (
             paper_report.get("managed_lifecycle_classification")

@@ -64,13 +64,19 @@ def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleSt
         config: TrackBStrategyManagedPaperLifecycleConfig,
         open_state: Mapping[str, Any],
     ) -> Mapping[str, Any] | None:
-        if not close:
+        time_boxed_ready = (
+            config.managed_exit_policy_id == TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value
+            and int(config.completed_5m_bars_since_entry or 0) >= int(config.managed_exit_policy_max_completed_5m_bars)
+        )
+        if not close and not time_boxed_ready:
             return None
         return {
             "order_action": "SELL",
             "quantity": 1,
             "close_limit_price": "4705.1",
-            "close_reason": "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
+            "close_reason": "TIME_BOXED_EXIT" if time_boxed_ready else "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
+            "elapsed_completed_5m_bars": config.completed_5m_bars_since_entry,
+            "required_completed_5m_bars": config.managed_exit_policy_max_completed_5m_bars,
         }
 
     def close_submitter(
@@ -145,6 +151,48 @@ def test_exit_policy_generates_close_and_closed_flat(tmp_path: Path) -> None:
     assert result.report["close_fill"]["price"] == "4705.1"
     assert result.report["realized_pnl"] == "0.5"
     assert result.report["final_position_status"] == "CLOSED_FLAT"
+
+
+def test_time_boxed_exit_policy_waits_until_required_completed_bars(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=2,
+        ),
+        stages=fake_stages(),
+        lifecycle_id="time-boxed-wait",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+    assert result.report["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert result.report["managed_exit_policy_max_completed_5m_bars"] == 3
+    assert result.report["open_position_age_completed_5m_bars"] == 2
+    assert result.report["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS"
+    assert result.report["close_intent_status"] == "WAITING_FOR_EXIT_POLICY_CONDITION"
+    assert result.report["close_intent"] is None
+
+
+def test_time_boxed_exit_policy_creates_close_intent_after_required_completed_bars(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+        ),
+        stages=fake_stages(),
+        lifecycle_id="time-boxed-close-pending",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
+    assert result.report["close_intent"]["elapsed_completed_5m_bars"] == 3
+    assert result.report["close_intent"]["required_completed_5m_bars"] == 3
+    assert result.report["close_intent_status"] == "CLOSE_INTENT_CREATED"
+    assert result.report["broker_state_mutated"] is True
+    assert result.report["paper_proof_invoked"] is False
 
 
 def test_missing_broker_exact_position_callback_becomes_review_required(tmp_path: Path) -> None:

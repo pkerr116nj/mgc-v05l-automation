@@ -474,6 +474,8 @@ def breakout_retest_hold_long_strategy_result(
     result.report["strategy_registry_timeframe"] = "5m"
     result.report["strategy_registry_paper_eligible"] = paper_eligible
     result.report["strategy_registry_live_money_eligible"] = False
+    result.report["strategy_registry_managed_exit_policy_id"] = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    result.report["strategy_registry_exit_not_available"] = False
     result.report["asia_early_normal_breakout_retest_hold_long_watch_verdict"] = (
         "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_SIGNAL_READY_NO_SUBMIT"
         if emitted
@@ -600,6 +602,8 @@ def proof_result(tmp_path: Path, classification: TerminalClassification) -> Pape
 def managed_lifecycle_result(
     tmp_path: Path,
     classification: TrackBManagedPaperLifecycleClassification,
+    *,
+    managed_exit_policy_id: str = "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
 ) -> TrackBStrategyManagedPaperLifecycleResult:
     report_json = tmp_path / "managed_lifecycle_report.json"
     report = {
@@ -613,7 +617,7 @@ def managed_lifecycle_result(
         "con_id": 712565978,
         "account_id": "DUM882026",
         "mode": "PAPER",
-        "managed_exit_policy_id": "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
+        "managed_exit_policy_id": managed_exit_policy_id,
         "strategy_managed_lifecycle_classification": classification.value,
         "paper_lifecycle_classification": classification.value,
         "entry_intent": {
@@ -919,7 +923,11 @@ def test_real_strategy_signal_does_not_route_to_paper_proof_by_default(tmp_path:
 
 def test_real_strategy_signal_with_exit_policy_routes_to_managed_lifecycle(tmp_path: Path) -> None:
     calls = Calls()
-    managed = managed_lifecycle_result(tmp_path, TrackBManagedPaperLifecycleClassification.OPEN_MANAGED)
+    managed = managed_lifecycle_result(
+        tmp_path,
+        TrackBManagedPaperLifecycleClassification.OPEN_MANAGED,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+    )
     result = run_track_b_strategy_paper(
         config=base_config(
             tmp_path,
@@ -956,6 +964,47 @@ def test_real_strategy_signal_with_exit_policy_routes_to_managed_lifecycle(tmp_p
     assert result.report["submit_attempted"] is True
     assert result.report["broker_state_mutated"] is True
     assert result.report["live_money_readiness"] is False
+
+
+def test_registry_managed_exit_policy_enables_selected_breakout_strategy(tmp_path: Path) -> None:
+    calls = Calls()
+    managed = managed_lifecycle_result(
+        tmp_path,
+        TrackBManagedPaperLifecycleClassification.OPEN_MANAGED,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+    )
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            strategy_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+            rule_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+            rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=breakout_retest_hold_long_strategy_result(tmp_path, emitted=True),
+            readiness=readiness_result(tmp_path),
+            managed_lifecycle=managed,
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-managed-breakout-registry-policy",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_OPEN_MANAGED
+    assert calls.intent == 1
+    assert calls.managed_lifecycle == 1
+    assert calls.proof == 0
+    assert result.report["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert result.report["strategy_registry_managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert result.report["strategy_trade_intent_created"] is True
+    assert result.report["paper_proof_invoked"] is False
 
 
 def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path: Path) -> None:

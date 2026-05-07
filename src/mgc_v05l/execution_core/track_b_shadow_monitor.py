@@ -3167,6 +3167,10 @@ def _instrument_report_from_stages(
             "managed_lifecycle_classification": runtime_cycle_report.get("managed_lifecycle_classification"),
             "managed_lifecycle_report_path": runtime_cycle_report.get("managed_lifecycle_report_path"),
             "managed_exit_policy_id": runtime_cycle_report.get("managed_exit_policy_id"),
+            "managed_exit_policy_max_completed_5m_bars": runtime_cycle_report.get("managed_exit_policy_max_completed_5m_bars"),
+            "managed_open_position_age_completed_5m_bars": runtime_cycle_report.get("managed_open_position_age_completed_5m_bars"),
+            "managed_expected_exit_condition": runtime_cycle_report.get("managed_expected_exit_condition"),
+            "managed_close_intent_status": runtime_cycle_report.get("managed_close_intent_status"),
             "paper_proof_classification": runtime_cycle_report.get("paper_proof_classification"),
             "paper_order_parameters": runtime_cycle_report.get("paper_order_parameters") or {},
             "paper_order_parameter_blocker": runtime_cycle_report.get("paper_order_parameter_blocker"),
@@ -3347,6 +3351,13 @@ def _report_for_cycle(
             item.get("intent_blocked_reason") for item in instrument_reports
         ),
         "latest_paper_lifecycle_report_path": _first_nonempty(item.get("paper_runner_report_path") for item in instrument_reports),
+        "latest_managed_exit_policy_id": _first_nonempty(item.get("managed_exit_policy_id") for item in instrument_reports),
+        "latest_managed_expected_exit_condition": _first_nonempty(
+            item.get("managed_expected_exit_condition") for item in instrument_reports
+        ),
+        "latest_managed_close_intent_status": _first_nonempty(
+            item.get("managed_close_intent_status") for item in instrument_reports
+        ),
         "latest_broker_state_classification": _first_nonempty(
             item.get("latest_broker_state_classification") for item in instrument_reports
         ),
