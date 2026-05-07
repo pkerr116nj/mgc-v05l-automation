@@ -429,6 +429,69 @@ def test_submit_limit_order_blocks_expiry_mismatch_before_place_order() -> None:
     assert diagnostics["broker_order_id_allocated"] is None
 
 
+def test_submit_limit_order_blocks_unknown_shorthand_expiry_before_place_order() -> None:
+    shorthand_only = {
+        "ABC-202606": {
+            "symbol": "ABC",
+            "security_type": "FUT",
+            "exchange": "CME",
+            "currency": "USD",
+            "local_symbol": "ABCM6",
+            "con_id": "999001",
+            "contract_month": "202606",
+            "expiry": "202606",
+            "multiplier": "1",
+            "tick_size": "0.25",
+        }
+    }
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader(), contract_allowlist=shorthand_only)
+    paper.connect()
+
+    with pytest.raises(IbkrPaperConfigError, match="CONTRACT_EXPIRY_MISMATCH_PRE_SUBMIT"):
+        paper.submit_limit_order(
+            submit_attempt=submit_attempt(broker_order_id="1001"),
+            order_intent=order_intent(symbol="ABC", contract_key="ABC-202606", limit_price="123.25"),
+        )
+
+    assert paper.bridge_for_test().placed_orders == []
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert diagnostics["contract_consistency_check_passed"] is False
+    assert "no canonical IBKR expiry" in diagnostics["contract_mismatch_reason"]
+    assert diagnostics["pre_submit_blocked"] is True
+    assert diagnostics["place_order_called"] is False
+
+
+def test_submit_limit_order_preserves_exact_allowlist_expiry_for_future_contract() -> None:
+    exact_allowlist = {
+        "ABC-202606": {
+            "symbol": "ABC",
+            "security_type": "FUT",
+            "exchange": "CME",
+            "currency": "USD",
+            "local_symbol": "ABCM6",
+            "con_id": "999001",
+            "contract_month": "202606",
+            "expiry": "20260617",
+            "multiplier": "1",
+            "tick_size": "0.25",
+        }
+    }
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader(), contract_allowlist=exact_allowlist)
+    paper.connect()
+
+    paper.submit_limit_order(
+        submit_attempt=submit_attempt(broker_order_id="1001"),
+        order_intent=order_intent(symbol="ABC", contract_key="ABC-202606", limit_price="123.25"),
+    )
+
+    placed = paper.bridge_for_test().placed_orders[0]
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert placed["contract"].lastTradeDateOrContractMonth == "20260617"
+    assert diagnostics["contract_fields_submitted_to_ibkr"]["lastTradeDateOrContractMonth"] == "20260617"
+    assert diagnostics["canonical_broker_contract_fields"]["lastTradeDateOrContractMonth"] == "20260617"
+    assert diagnostics["contract_consistency_check_passed"] is True
+
+
 def test_submit_limit_order_canonicalizes_mnq_shorthand_expiry() -> None:
     mnq_allowlist = {
         "MNQ-202606": {

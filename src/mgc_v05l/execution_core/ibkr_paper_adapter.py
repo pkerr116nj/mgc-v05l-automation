@@ -951,6 +951,11 @@ def _contract_consistency_check(entry: Mapping[str, Any]) -> dict[str, Any]:
             )
         else:
             submitted_expiry = canonical_expiry
+    elif requested_expiry and len(requested_expiry) == 6:
+        mismatch_reason = (
+            f"configured shorthand contract month {requested_expiry} has no canonical IBKR expiry; "
+            "provide exact lastTradeDateOrContractMonth before submit"
+        )
     return {
         "contract_consistency_check_passed": mismatch_reason is None,
         "contract_mismatch_reason": mismatch_reason,
