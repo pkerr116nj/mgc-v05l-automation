@@ -484,7 +484,6 @@ def update_track_b_paper_trade_ledger_from_runner_report(
     ledger_jsonl.touch(exist_ok=True)
 
     existing_records = _read_ledger_records(ledger_jsonl)
-    existing_trade_ids = {str(item.get("trade_id")) for item in existing_records if item.get("trade_id")}
     trade_record = _trade_record_from_runner_report(
         runner_report=runner_report,
         runner_report_json=runner_report_json,
@@ -492,7 +491,7 @@ def update_track_b_paper_trade_ledger_from_runner_report(
         now=actual_now,
     )
     wrote = False
-    if trade_record is not None and str(trade_record["trade_id"]) not in existing_trade_ids:
+    if trade_record is not None and _should_append_trade_record(existing_records, trade_record):
         with ledger_jsonl.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(to_jsonable(trade_record), sort_keys=True) + "\n")
         existing_records.append(trade_record)
@@ -520,6 +519,37 @@ def update_track_b_paper_trade_ledger_from_runner_report(
         live_position_status=summaries["live_position_status"],
         pnl_summary=summaries["pnl_summary"],
     )
+
+
+def _should_append_trade_record(
+    existing_records: Iterable[Mapping[str, Any]],
+    trade_record: Mapping[str, Any],
+) -> bool:
+    trade_id = str(trade_record.get("trade_id") or "")
+    if not trade_id:
+        return True
+    matching = [
+        dict(item)
+        for item in existing_records
+        if not _is_reconciliation_record(item) and str(item.get("trade_id") or "") == trade_id
+    ]
+    if not matching:
+        return True
+    latest = max(
+        matching,
+        key=lambda item: str(item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at") or ""),
+    )
+    comparable_fields = (
+        "paper_lifecycle_classification",
+        "final_position_status",
+        "final_broker_state_classification",
+        "exit_order_id",
+        "exit_fill_price",
+        "exit_timestamp",
+        "realized_pnl",
+        "review_required",
+    )
+    return any(str(latest.get(field)) != str(trade_record.get(field)) for field in comparable_fields)
 
 
 def build_track_b_paper_trade_summaries(

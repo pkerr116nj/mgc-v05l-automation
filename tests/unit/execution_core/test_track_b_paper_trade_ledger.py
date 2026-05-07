@@ -243,6 +243,86 @@ def test_trade_ledger_update_is_idempotent(tmp_path: Path) -> None:
     assert len(second.ledger_jsonl.read_text(encoding="utf-8").splitlines()) == 1
 
 
+def test_strategy_managed_lifecycle_update_appends_close_for_same_trade_id(tmp_path: Path) -> None:
+    lifecycle_path = tmp_path / "managed" / "track_b_strategy_managed_paper_lifecycle_report.json"
+    open_payload = {
+        "lifecycle_id": "managed-update-001",
+        "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+        "instrument_family": "MNQ",
+        "contract_key": "MNQ-202606",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "account_id": "DUM882026",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        "strategy_managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "entry_intent": {
+            "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "side": "LONG",
+            "order_action": "BUY",
+            "quantity": 1,
+            "entry_limit_price": "28729",
+            "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+        },
+        "entry_submit_attempt": {"broker_order_id": "11", "submitted_at": "2026-05-07T16:26:05+00:00"},
+        "entry_fill": {"broker_order_id": "11", "filled_at": "2026-05-07T16:26:07+00:00", "price": "28729", "quantity": 1},
+        "final_position_status": "OPEN_MANAGED",
+        "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "review_required": False,
+    }
+    write_json(lifecycle_path, open_payload)
+    runner = {
+        "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+        "mode": "PAPER",
+        "runtime_decision_source": "DATABENTO_LIVE_ARTIFACT",
+        "account_id": "DUM882026",
+        "contract_key": "MNQ-202606",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": 1,
+        "managed_lifecycle_invoked": True,
+        "managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "managed_lifecycle_report_path": str(lifecycle_path),
+        "paper_proof_invoked": False,
+    }
+
+    first = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=runner,
+        runner_report_json=tmp_path / "runner.json",
+        output_root=tmp_path / "paper_trade_ledger",
+        now=datetime(2026, 5, 7, 16, 26, tzinfo=timezone.utc),
+    )
+    closed_payload = {
+        **open_payload,
+        "strategy_managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+        "close_intent": {"order_action": "SELL", "quantity": 1, "close_limit_price": "28668.75"},
+        "close_submit_attempt": {"broker_order_id": "12", "submitted_at": "2026-05-07T18:11:45+00:00"},
+        "close_fill": {"broker_order_id": "12", "filled_at": "2026-05-07T18:11:45+00:00", "price": "28682.5", "quantity": 1},
+        "final_position_status": "CLOSED_FLAT",
+        "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+        "review_required": False,
+    }
+    write_json(lifecycle_path, closed_payload)
+    runner = {**runner, "managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT"}
+
+    second = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=runner,
+        runner_report_json=tmp_path / "runner.json",
+        output_root=tmp_path / "paper_trade_ledger",
+        now=datetime(2026, 5, 7, 18, 11, tzinfo=timezone.utc),
+    )
+
+    assert first.trade_record_written is True
+    assert second.trade_record_written is True
+    assert len(second.ledger_jsonl.read_text(encoding="utf-8").splitlines()) == 2
+    assert second.trade_summary["open_position_count"] == 0
+    assert second.trade_summary["completed_trade_count"] == 1
+    assert second.pnl_summary["total_realized_pnl_today"] == "-93"
+    assert second.live_position_status["open_position_count"] == 0
+
+
 def test_no_paper_lifecycle_writes_zero_summaries_only(tmp_path: Path) -> None:
     result = update_track_b_paper_trade_ledger_from_runner_report(
         runner_report={"paper_proof_invoked": False},
