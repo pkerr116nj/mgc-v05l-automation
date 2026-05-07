@@ -41,11 +41,20 @@ from mgc_v05l.execution_core.track_b_strategy_paper_runner_cli import main as st
 from mgc_v05l.execution_core.track_b_strategy_rule_runner import (
     TrackBStrategyRuleRunnerResult,
     TrackBStrategyRuleRunnerVerdict,
+    run_track_b_strategy_rule,
 )
 
 
 def aware_now() -> datetime:
     return datetime(2026, 5, 4, 14, 30, tzinfo=timezone.utc)
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def asian_drift_entry_fixture(name: str) -> Path:
+    return repo_root() / "examples" / "track_b_signal_amplification" / name
 
 
 class Calls:
@@ -695,6 +704,57 @@ def managed_lifecycle_result(
     return TrackBStrategyManagedPaperLifecycleResult(
         lifecycle_id="managed-test",
         classification=classification,
+        report_json=report_json,
+        report=report,
+    )
+
+
+def managed_lifecycle_no_submit_result(
+    tmp_path: Path,
+    *,
+    managed_exit_policy_id: str = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+) -> TrackBStrategyManagedPaperLifecycleResult:
+    report_json = tmp_path / "managed_lifecycle_no_submit_report.json"
+    report = {
+        "schema_version": "track_b_strategy_managed_paper_lifecycle_v1",
+        "lifecycle_id": "strategy_managed_fixture_no_submit",
+        "trade_id": None,
+        "strategy_id": "asian_drift_v1",
+        "instrument_family": "MGC",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "account_id": "DUM882026",
+        "mode": "PAPER",
+        "managed_exit_policy_id": managed_exit_policy_id,
+        "strategy_managed_lifecycle_classification": TrackBManagedPaperLifecycleClassification.LIFECYCLE_NOT_AVAILABLE.value,
+        "paper_lifecycle_classification": TrackBManagedPaperLifecycleClassification.LIFECYCLE_NOT_AVAILABLE.value,
+        "entry_intent": None,
+        "entry_submit_attempt": None,
+        "entry_fill": None,
+        "close_intent": None,
+        "close_submit_attempt": None,
+        "close_fill": None,
+        "final_position_status": "NO_BROKER_SUBMIT_TEST_FIXTURE",
+        "final_broker_state_classification": TrackBManagedPaperLifecycleClassification.LIFECYCLE_NOT_AVAILABLE.value,
+        "review_required": False,
+        "broker_reconciled": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "paper_proof_cli_called": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+        "primary_blocker": "Test fixture stopped after strategy trade intent creation; no broker adapter invoked.",
+        "required_next_action": "Fixture proof complete; do not submit.",
+        "report_json_path": str(report_json),
+        "latest_report_json_path": str(tmp_path / "latest_managed_lifecycle_no_submit_report.json"),
+    }
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(json.dumps(report), encoding="utf-8")
+    return TrackBStrategyManagedPaperLifecycleResult(
+        lifecycle_id="strategy_managed_fixture_no_submit",
+        classification=TrackBManagedPaperLifecycleClassification.LIFECYCLE_NOT_AVAILABLE,
         report_json=report_json,
         report=report,
     )
@@ -1972,6 +2032,124 @@ def test_asian_drift_signal_without_paper_flags_reports_signal_ready_no_submit(t
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_asian_drift_entry_capable_fixture_creates_managed_trade_intent_without_broker_submit(
+    tmp_path: Path,
+) -> None:
+    fixture_path = asian_drift_entry_fixture("asian_drift_entry_capable_long_state.json")
+    fixture_payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    strategy_result = run_track_b_strategy_rule(
+        input_event_payload=fixture_payload,
+        input_event_path=fixture_path,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="asian_drift_entry_capable_fixture",
+        strategy_id="asian_drift_v1",
+        rule_id="asian_drift_v1",
+        rule_mode="ASIAN_DRIFT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_runner",
+        strategy_adapter_output_root=tmp_path / "adapter",
+        candle_producer_output_root=tmp_path / "candle",
+        writer_output_root=tmp_path / "writer",
+        runner_id="asian-drift-entry-capable-rule",
+        now=aware_now(),
+    )
+
+    assert strategy_result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert strategy_result.report["decision"] == "LONG"
+    assert strategy_result.report["signal_direction"] == "LONG"
+    assert strategy_result.report["rule_inputs"]["asia_drift_regime"] == "ASIA_DRIFT_LONG"
+    assert strategy_result.report["rule_inputs"]["direction_required"] is True
+    assert strategy_result.report["rule_blockers"] == []
+
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            input_event_json=fixture_path,
+            input_event_payload=fixture_payload,
+            rule_id="asian_drift_v1",
+            rule_mode="ASIAN_DRIFT_V1",
+            emit_signal=True,
+            strategy_id="asian_drift_v1",
+            side="BUY",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            paper_execution_path="STRATEGY_MANAGED",
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=strategy_result,
+            readiness=readiness_result(tmp_path),
+            managed_lifecycle=managed_lifecycle_no_submit_result(tmp_path),
+        ),
+        runner_id="paper-asian-drift-entry-capable-intent",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_LIFECYCLE_NOT_AVAILABLE
+    assert calls.readiness == 1
+    assert calls.intent == 1
+    assert calls.managed_lifecycle == 1
+    assert calls.proof == 0
+    assert result.report["signal_source"] == "ASIAN_DRIFT_V1"
+    assert result.report["signal_direction"] == "LONG"
+    assert result.report["strategy_trade_intent_created"] is True
+    assert result.report["strategy_trade_intent_classification"] == "STRATEGY_TRADE_INTENT_CREATED"
+    assert result.report["strategy_trade_intent_id"] == "intent-test"
+    assert result.report["lifecycle_mode"] == "STRATEGY_MANAGED"
+    assert result.report["paper_execution_path"] == "STRATEGY_MANAGED"
+    assert result.report["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+    intent_path = Path(str(result.report["strategy_trade_intent_report_path"]))
+    assert intent_path.exists()
+    intent_payload = json.loads(intent_path.read_text(encoding="utf-8"))
+    assert intent_payload["strategy_id"] == "asian_drift_v1"
+    assert intent_payload["side"] == "LONG"
+    assert intent_payload["order_action"] == "BUY"
+    assert intent_payload["lifecycle_mode"] == "STRATEGY_MANAGED"
+    assert intent_payload["latest_decision_bar_source"] == "DATABENTO_LIVE_ARTIFACT"
+    assert intent_payload["live_money_readiness"] is False
+
+
+def test_asian_drift_entry_capable_short_fixture_maps_to_short_signal(tmp_path: Path) -> None:
+    fixture_path = asian_drift_entry_fixture("asian_drift_entry_capable_short_state.json")
+    fixture_payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    result = run_track_b_strategy_rule(
+        input_event_payload=fixture_payload,
+        input_event_path=fixture_path,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="asian_drift_entry_capable_short_fixture",
+        strategy_id="asian_drift_v1",
+        rule_id="asian_drift_v1",
+        rule_mode="ASIAN_DRIFT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_runner",
+        strategy_adapter_output_root=tmp_path / "adapter",
+        candle_producer_output_root=tmp_path / "candle",
+        writer_output_root=tmp_path / "writer",
+        runner_id="asian-drift-entry-capable-short-rule",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert result.report["decision"] == "SHORT"
+    assert result.report["signal_direction"] == "SHORT"
+    assert result.report["rule_inputs"]["asia_drift_regime"] == "ASIA_DRIFT_SHORT"
+    assert result.report["rule_inputs"]["direction_required"] is True
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
 
 
 def test_asian_drift_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp_path: Path) -> None:
