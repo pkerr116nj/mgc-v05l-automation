@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.operator_status import OperatorStatusInputs, create_operator_status_summary
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
+    reconcile_app_only_unfilled_managed_lifecycles,
     reconcile_manually_flattened_proof_lifecycle,
     update_track_b_paper_trade_ledger_from_runner_report,
 )
@@ -484,6 +485,126 @@ def test_strategy_managed_lifecycle_submit_attempt_without_fill_does_not_create_
     assert result.trade_summary["open_position_count"] == 0
     assert result.trade_summary["managed_strategy_trade_count"] == 0
     assert result.live_position_status["open_position_count"] == 0
+
+
+def test_app_only_unfilled_managed_lifecycle_archives_review_without_trade_counts(tmp_path: Path) -> None:
+    lifecycle_path = write_json(
+        tmp_path / "managed" / "track_b_strategy_managed_paper_lifecycle_report.json",
+        {
+            "lifecycle_id": "managed-app-only-001",
+            "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "account_id": "DUM882026",
+            "strategy_managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+            "entry_intent": {
+                "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "side": "LONG",
+                "order_action": "BUY",
+                "quantity": 1,
+                "entry_limit_price": "4750",
+            },
+            "entry_submit_attempt": None,
+            "entry_fill": None,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "final_position_status": "REVIEW_REQUIRED",
+            "review_required": True,
+            "broker_reconciled": False,
+        },
+    )
+    runner = {
+        "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+        "mode": "PAPER",
+        "runtime_decision_source": "DATABENTO_LIVE_ARTIFACT",
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "quantity": 1,
+        "managed_lifecycle_invoked": True,
+        "managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        "managed_lifecycle_report_path": str(lifecycle_path),
+        "paper_proof_invoked": False,
+    }
+    initial = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=runner,
+        runner_report_json=tmp_path / "runner.json",
+        output_root=tmp_path / "paper_trade_ledger",
+        now=aware_now(),
+    )
+    assert initial.trade_summary["review_required_count"] == 1
+    assert initial.trade_summary["open_position_count"] == 0
+
+    result = reconcile_app_only_unfilled_managed_lifecycles(
+        lifecycle_ids=["managed-app-only-001"],
+        ledger_jsonl=initial.ledger_jsonl,
+        output_root=tmp_path / "paper_trade_ledger",
+        diagnostics_root=tmp_path / "diagnostics",
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is True
+    assert result.reconciliation_report["reconciliation_record_count"] == 1
+    assert result.reconciliation_report["targets"][0]["app_only_unfilled_evidence"]["app_only_unfilled_confirmed"] is True
+    assert result.trade_summary["open_position_count"] == 0
+    assert result.trade_summary["review_required_count"] == 0
+    assert result.trade_summary["managed_strategy_trade_count"] == 0
+    assert result.trade_summary["meaningful_strategy_trade_count"] == 0
+    assert result.trade_summary["app_only_position_from_unfilled_entry_count"] == 0
+    assert result.trade_summary["recent_trades"][0]["artifact_reconciliation_classification"] == "APP_ONLY_UNFILLED_REVIEWED"
+    assert result.live_position_status["open_position_count"] == 0
+    assert result.live_position_status["review_required_positions"] == []
+    assert result.pnl_summary["trades_today"] == 0
+
+
+def test_app_only_unfilled_reconciliation_does_not_archive_submit_attempt(tmp_path: Path) -> None:
+    lifecycle_path = write_json(
+        tmp_path / "managed" / "track_b_strategy_managed_paper_lifecycle_report.json",
+        {
+            "lifecycle_id": "managed-submit-attempt-001",
+            "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "entry_intent": {"strategy_id": "FIRST_BULL_SNAP_TURN_V1"},
+            "entry_submit_attempt": {"broker_order_id": "123"},
+            "entry_fill": None,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "review_required": True,
+        },
+    )
+    runner = {
+        "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "managed_lifecycle_invoked": True,
+        "managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        "managed_lifecycle_report_path": str(lifecycle_path),
+        "paper_proof_invoked": False,
+    }
+    initial = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=runner,
+        runner_report_json=tmp_path / "runner.json",
+        output_root=tmp_path / "paper_trade_ledger",
+        now=aware_now(),
+    )
+
+    result = reconcile_app_only_unfilled_managed_lifecycles(
+        ledger_jsonl=initial.ledger_jsonl,
+        output_root=tmp_path / "paper_trade_ledger",
+        diagnostics_root=tmp_path / "diagnostics",
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is False
+    assert result.reconciliation_report["targets"][0]["remaining_blocker"] == "ENTRY_ORDER_ID_PRESENT"
+    assert result.trade_summary["review_required_count"] == 1
 
 
 def test_stale_proof_lifecycle_broker_flat_archives_manual_review_and_clears_compact_open_position(tmp_path: Path) -> None:

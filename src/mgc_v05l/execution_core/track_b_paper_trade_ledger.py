@@ -32,12 +32,16 @@ DEFAULT_TRACK_B_PNL_SUMMARY_JSON = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROO
 DEFAULT_TRACK_B_ARTIFACT_RECONCILIATION_REPORT_JSON = (
     Path("outputs/track_b_execution_core/diagnostics") / "latest_track_b_artifact_reconciliation_report.json"
 )
+DEFAULT_TRACK_B_APP_ONLY_RECONCILIATION_REPORT_JSON = (
+    Path("outputs/track_b_execution_core/diagnostics") / "latest_track_b_app_only_lifecycle_reconciliation_report.json"
+)
 LEDGER_SCHEMA_VERSION = "track_b_paper_trade_ledger_v1"
 RECONCILIATION_SCHEMA_VERSION = "track_b_artifact_reconciliation_v1"
 SUMMARY_SCHEMA_VERSION = "track_b_paper_trade_summary_v1"
 POSITION_SCHEMA_VERSION = "track_b_live_position_status_v1"
 PNL_SCHEMA_VERSION = "track_b_pnl_summary_v1"
 MANUALLY_FLATTENED_REVIEWED = "MANUALLY_FLATTENED_REVIEWED"
+APP_ONLY_UNFILLED_REVIEWED = "APP_ONLY_UNFILLED_REVIEWED"
 POINT_VALUE_BY_FAMILY = {
     "MGC": Decimal("10"),
     "GC": Decimal("100"),
@@ -81,6 +85,122 @@ class TrackBArtifactReconciliationResult:
     trade_summary: dict[str, Any]
     live_position_status: dict[str, Any]
     pnl_summary: dict[str, Any]
+
+
+def reconcile_app_only_unfilled_managed_lifecycles(
+    *,
+    lifecycle_ids: Iterable[str] | None = None,
+    ledger_jsonl: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_JSONL,
+    output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    diagnostics_root: Path = Path("outputs/track_b_execution_core/diagnostics"),
+    now: datetime | None = None,
+) -> TrackBArtifactReconciliationResult:
+    """Archive app-only managed lifecycle rows that never reached broker submit/fill.
+
+    This is artifact-only reconciliation: it only trusts the managed lifecycle,
+    runner, and ledger artifacts that already prove no broker order id/fill and
+    no broker mutation for the target lifecycle.
+    """
+
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    ledger_path = Path(ledger_jsonl)
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    diagnostics_root.mkdir(parents=True, exist_ok=True)
+    if not ledger_path.exists():
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.touch()
+    trade_summary_json = root / "latest_track_b_paper_trade_summary.json"
+    live_position_status_json = root / "latest_track_b_live_position_status.json"
+    pnl_summary_json = root / "latest_track_b_pnl_summary.json"
+    reconciliation_report_json = diagnostics_root / "latest_track_b_app_only_lifecycle_reconciliation_report.json"
+
+    records = _read_ledger_records(ledger_path)
+    requested_ids = {str(item) for item in lifecycle_ids or [] if str(item)}
+    targets = _app_only_unfilled_targets(records, requested_ids=requested_ids)
+    existing_resolutions = {
+        str(item.get("lifecycle_id"))
+        for item in records
+        if _is_reconciliation_record(item)
+        and item.get("new_artifact_classification") == APP_ONLY_UNFILLED_REVIEWED
+    }
+    reconciliation_records: list[dict[str, Any]] = []
+    target_reports: list[dict[str, Any]] = []
+    for target in targets:
+        lifecycle_id = str(target.get("lifecycle_id") or "")
+        evidence = _app_only_unfilled_evidence(target)
+        already_archived = lifecycle_id in existing_resolutions
+        can_archive = evidence["app_only_unfilled_confirmed"] and not already_archived
+        target_reports.append(
+            {
+                "lifecycle_id": lifecycle_id,
+                "strategy_id": target.get("strategy_id"),
+                "contract_key": target.get("contract_key"),
+                "local_symbol": target.get("local_symbol"),
+                "prior_artifact_state": _prior_artifact_state(target),
+                "app_only_unfilled_evidence": evidence,
+                "already_archived": already_archived,
+                "reconciliation_action": APP_ONLY_UNFILLED_REVIEWED if evidence["app_only_unfilled_confirmed"] else "NO_ARCHIVE_REVIEW_REQUIRED",
+                "remaining_blocker": None if evidence["app_only_unfilled_confirmed"] else evidence["blocker"],
+            }
+        )
+        if can_archive:
+            reconciliation_records.append(_app_only_unfilled_reconciliation_record(target=target, evidence=evidence, now=actual_now))
+
+    if reconciliation_records:
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            for record in reconciliation_records:
+                handle.write(json.dumps(to_jsonable(record), sort_keys=True) + "\n")
+                records.append(record)
+
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=records,
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        now=actual_now,
+    )
+    _write_json(trade_summary_json, summaries["trade_summary"])
+    _write_json(live_position_status_json, summaries["live_position_status"])
+    _write_json(pnl_summary_json, summaries["pnl_summary"])
+    report = {
+        "schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "generated_at": actual_now.isoformat(),
+        "reconciliation_action": APP_ONLY_UNFILLED_REVIEWED,
+        "reconciliation_source": "ARTIFACT_ONLY_NO_SUBMIT_OR_FILL_EVIDENCE",
+        "requested_lifecycle_ids": sorted(requested_ids),
+        "target_count": len(targets),
+        "reconciliation_record_count": len(reconciliation_records),
+        "targets": target_reports,
+        "compact_summaries_updated": True,
+        "post_reconciliation_summary": {
+            "open_position_count": summaries["trade_summary"].get("open_position_count"),
+            "review_required_count": summaries["trade_summary"].get("review_required_count"),
+            "managed_strategy_trade_count": summaries["trade_summary"].get("managed_strategy_trade_count"),
+            "meaningful_strategy_trade_count": summaries["trade_summary"].get("meaningful_strategy_trade_count"),
+            "app_only_position_from_unfilled_entry_count": summaries["trade_summary"].get(
+                "app_only_position_from_unfilled_entry_count"
+            ),
+        },
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+    }
+    _write_json(reconciliation_report_json, report)
+    return TrackBArtifactReconciliationResult(
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        reconciliation_report_json=reconciliation_report_json,
+        reconciliation_record_written=bool(reconciliation_records),
+        reconciliation_report=report,
+        trade_summary=summaries["trade_summary"],
+        live_position_status=summaries["live_position_status"],
+        pnl_summary=summaries["pnl_summary"],
+    )
 
 
 def reconcile_manually_flattened_proof_lifecycle(
@@ -795,13 +915,121 @@ def _manual_flat_reconciliation_record(
     }
 
 
+def _app_only_unfilled_targets(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    requested_ids: set[str],
+) -> list[dict[str, Any]]:
+    latest_by_lifecycle: dict[str, dict[str, Any]] = {}
+    for item in records:
+        if _is_reconciliation_record(item):
+            continue
+        lifecycle_id = str(item.get("lifecycle_id") or "")
+        if not lifecycle_id:
+            continue
+        if requested_ids and lifecycle_id not in requested_ids:
+            continue
+        if item.get("paper_lifecycle_type") != "STRATEGY_MANAGED":
+            continue
+        if item.get("review_required") is not True:
+            continue
+        latest_by_lifecycle[lifecycle_id] = dict(item)
+    return list(latest_by_lifecycle.values())
+
+
+def _app_only_unfilled_evidence(target: Mapping[str, Any]) -> dict[str, Any]:
+    lifecycle_report = _load_json_path(target.get("paper_lifecycle_report_path"))
+    entry_submit = _mapping(lifecycle_report.get("entry_submit_attempt"))
+    entry_fill = _mapping(lifecycle_report.get("entry_fill"))
+    submit_attempted = bool(lifecycle_report.get("submit_attempted") or target.get("submit_attempted"))
+    broker_state_mutated = bool(lifecycle_report.get("broker_state_mutated") or target.get("broker_state_mutated"))
+    has_order_id = target.get("entry_order_id") not in {None, ""} or entry_submit.get("broker_order_id") not in {None, ""}
+    has_fill = _has_entry_fill(target) or bool(entry_fill)
+    confirmed = (
+        target.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        and not has_order_id
+        and not has_fill
+        and not entry_submit
+        and not submit_attempted
+        and not broker_state_mutated
+    )
+    blocker = None
+    if target.get("paper_lifecycle_type") != "STRATEGY_MANAGED":
+        blocker = "LIFECYCLE_IS_NOT_STRATEGY_MANAGED"
+    elif has_order_id:
+        blocker = "ENTRY_ORDER_ID_PRESENT"
+    elif has_fill:
+        blocker = "ENTRY_FILL_PRESENT"
+    elif entry_submit:
+        blocker = "ENTRY_SUBMIT_ATTEMPT_PRESENT"
+    elif submit_attempted:
+        blocker = "SUBMIT_ATTEMPTED_TRUE"
+    elif broker_state_mutated:
+        blocker = "BROKER_STATE_MUTATED_TRUE"
+    return {
+        "app_only_unfilled_confirmed": confirmed,
+        "blocker": blocker,
+        "entry_order_id_present": has_order_id,
+        "entry_fill_present": has_fill,
+        "entry_submit_attempt_present": bool(entry_submit),
+        "submit_attempted": submit_attempted,
+        "broker_state_mutated": broker_state_mutated,
+        "broker_backed_position_confirmed": False,
+        "paper_proof_cli_invoked": False,
+        "lifecycle_report_path": target.get("paper_lifecycle_report_path"),
+    }
+
+
+def _app_only_unfilled_reconciliation_record(
+    *,
+    target: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    return {
+        "ledger_schema_version": LEDGER_SCHEMA_VERSION,
+        "record_type": "ARTIFACT_RECONCILIATION",
+        "reconciliation_schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "trade_id": f"{target.get('trade_id')}:app_only_unfilled_review",
+        "lifecycle_id": target.get("lifecycle_id"),
+        "strategy_id": target.get("strategy_id"),
+        "instrument_family": target.get("instrument_family"),
+        "contract_key": target.get("contract_key"),
+        "local_symbol": target.get("local_symbol"),
+        "con_id": target.get("con_id"),
+        "account_id": target.get("account_id"),
+        "prior_artifact_classification": target.get("paper_lifecycle_classification"),
+        "prior_review_required": target.get("review_required"),
+        "reconciliation_action": APP_ONLY_UNFILLED_REVIEWED,
+        "new_artifact_classification": APP_ONLY_UNFILLED_REVIEWED,
+        "final_position_status": APP_ONLY_UNFILLED_REVIEWED,
+        "review_required": False,
+        "broker_reconciled": False,
+        "broker_backed_position_confirmed": False,
+        "entry_order_id_present": evidence.get("entry_order_id_present"),
+        "entry_fill_present": evidence.get("entry_fill_present"),
+        "entry_submit_attempt_present": evidence.get("entry_submit_attempt_present"),
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+        "source": "ARTIFACT_ONLY_NO_SUBMIT_OR_FILL_EVIDENCE",
+        "paper_lifecycle_report_path": target.get("paper_lifecycle_report_path"),
+        "created_at": now.isoformat(),
+    }
+
+
 def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     reconciled_lifecycle_ids = {
         str(item.get("lifecycle_id"))
         for item in records
         if _is_reconciliation_record(item) and item.get("new_artifact_classification") == MANUALLY_FLATTENED_REVIEWED
     }
-    if not reconciled_lifecycle_ids:
+    app_only_reviewed_lifecycle_ids = {
+        str(item.get("lifecycle_id"))
+        for item in records
+        if _is_reconciliation_record(item) and item.get("new_artifact_classification") == APP_ONLY_UNFILLED_REVIEWED
+    }
+    if not reconciled_lifecycle_ids and not app_only_reviewed_lifecycle_ids:
         return records
     normalized: list[dict[str, Any]] = []
     for item in records:
@@ -818,6 +1046,18 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
             row["paper_lifecycle_classification"] = MANUALLY_FLATTENED_REVIEWED
             row["final_position_status"] = MANUALLY_FLATTENED_REVIEWED
             row["final_broker_state_classification"] = MANUALLY_FLATTENED_REVIEWED
+        if (
+            not _is_reconciliation_record(row)
+            and str(row.get("lifecycle_id") or "") in app_only_reviewed_lifecycle_ids
+            and row.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        ):
+            row["artifact_reconciliation_classification"] = APP_ONLY_UNFILLED_REVIEWED
+            row["app_only_unfilled_reviewed"] = True
+            row["review_required"] = False
+            row["prior_paper_lifecycle_classification"] = row.get("paper_lifecycle_classification")
+            row["paper_lifecycle_classification"] = APP_ONLY_UNFILLED_REVIEWED
+            row["final_position_status"] = APP_ONLY_UNFILLED_REVIEWED
+            row["final_broker_state_classification"] = APP_ONLY_UNFILLED_REVIEWED
         normalized.append(row)
     return normalized
 
@@ -1047,6 +1287,9 @@ def _is_manual_flat_reviewed(item: Mapping[str, Any]) -> bool:
         item.get("artifact_reconciliation_classification") == MANUALLY_FLATTENED_REVIEWED
         or item.get("new_artifact_classification") == MANUALLY_FLATTENED_REVIEWED
         or item.get("manual_flat_reviewed") is True
+        or item.get("artifact_reconciliation_classification") == APP_ONLY_UNFILLED_REVIEWED
+        or item.get("new_artifact_classification") == APP_ONLY_UNFILLED_REVIEWED
+        or item.get("app_only_unfilled_reviewed") is True
     )
 
 
