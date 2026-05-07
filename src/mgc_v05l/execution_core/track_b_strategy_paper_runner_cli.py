@@ -55,6 +55,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirm-paper-submit", action="store_true")
     parser.add_argument("--manual-open-limit-price")
     parser.add_argument("--manual-close-limit-price")
+    parser.add_argument(
+        "--paper-execution-path",
+        default="STRATEGY_MANAGED",
+        choices=["STRATEGY_MANAGED", "PAPER_PROOF_DEBUG", "PAPER_PROOF_CANARY"],
+        help="Real strategy signals use STRATEGY_MANAGED by default; proof paths are explicit debug/canary only.",
+    )
+    parser.add_argument("--managed-exit-policy-id")
     parser.add_argument("--broker-order-id")
     parser.add_argument("--perm-id")
     parser.add_argument("--market-data-mode", default="DELAYED")
@@ -115,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--current-quote-output-root", type=Path, default=Path("outputs/track_b_execution_core/current_quotes"))
     parser.add_argument("--readiness-summary-output-root", type=Path, default=Path("outputs/track_b_execution_core/readiness_summary"))
     parser.add_argument("--paper-proof-output-root", type=Path, default=Path("outputs/track_b_execution_core/paper_proof"))
+    parser.add_argument(
+        "--managed-lifecycle-output-root",
+        type=Path,
+        default=Path("outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"),
+    )
     parser.add_argument("--operator-status-output-root", type=Path, default=Path("outputs/track_b_execution_core/operator_status"))
     return parser
 
@@ -153,6 +165,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             confirm_paper_submit=args.confirm_paper_submit,
             manual_open_limit_price=args.manual_open_limit_price,
             manual_close_limit_price=args.manual_close_limit_price,
+            paper_execution_path=args.paper_execution_path,
+            managed_exit_policy_id=args.managed_exit_policy_id,
             broker_order_id=args.broker_order_id,
             perm_id=args.perm_id,
             market_data_mode=args.market_data_mode,
@@ -200,6 +214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             current_quote_output_root=args.current_quote_output_root,
             readiness_summary_output_root=args.readiness_summary_output_root,
             paper_proof_output_root=args.paper_proof_output_root,
+            managed_lifecycle_output_root=args.managed_lifecycle_output_root,
             operator_status_output_root=args.operator_status_output_root,
         )
     )
@@ -244,6 +259,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "readiness_runner_verdict": result.report["readiness_runner_verdict"],
                 "readiness_verdict": result.report["readiness_verdict"],
                 "paper_submit_requested": result.report["paper_submit_requested"],
+                "paper_execution_path": result.report["paper_execution_path"],
+                "managed_exit_policy_id": result.report["managed_exit_policy_id"],
+                "managed_lifecycle_invoked": result.report["managed_lifecycle_invoked"],
+                "managed_lifecycle_classification": result.report["managed_lifecycle_classification"],
+                "managed_lifecycle_report_path": result.report["managed_lifecycle_report_path"],
                 "paper_proof_invoked": result.report["paper_proof_invoked"],
                 "paper_proof_classification": result.report["paper_proof_classification"],
                 "paper_proof_report_path": result.report["paper_proof_report_path"],
@@ -265,11 +285,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         TrackBStrategyPaperRunnerVerdict.ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT,
         TrackBStrategyPaperRunnerVerdict.PAPER_READY_NO_SUBMIT_REQUESTED,
         TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED,
+        TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_OPEN_MANAGED,
+        TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_CLOSED_FLAT,
     }:
         return 0
     if result.verdict in {
         TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED,
         TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE,
+        TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_REVIEW_REQUIRED,
+        TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_EXIT_PENDING,
     }:
         return 3
     return 2

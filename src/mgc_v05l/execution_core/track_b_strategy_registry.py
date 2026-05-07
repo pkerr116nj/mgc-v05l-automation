@@ -37,6 +37,8 @@ class TrackBStrategyRegistryEntry:
     evaluation_mode: str = "COMPLETED_BAR_ONLY"
     required_1m_context_bars: int = 40
     required_5m_context_bars: int = 8
+    managed_exit_policy_id: str | None = None
+    exit_not_available: bool = True
     rule_id: str | None = None
     accepted_strategy_ids: tuple[str, ...] = ()
     accepted_rule_ids: tuple[str, ...] = ()
@@ -57,6 +59,8 @@ class TrackBStrategyRegistryEntry:
             "strategy_registry_evaluation_mode": self.evaluation_mode,
             "strategy_registry_required_1m_context_bars": self.required_1m_context_bars,
             "strategy_registry_required_5m_context_bars": self.required_5m_context_bars,
+            "strategy_registry_managed_exit_policy_id": self.managed_exit_policy_id,
+            "strategy_registry_exit_not_available": self.exit_not_available,
         }
 
 

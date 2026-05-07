@@ -28,6 +28,10 @@ from mgc_v05l.execution_core.track_b_strategy_paper_runner import (
     TrackBStrategyPaperRunnerVerdict,
     run_track_b_strategy_paper,
 )
+from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
+    TrackBManagedPaperLifecycleClassification,
+    TrackBStrategyManagedPaperLifecycleResult,
+)
 from mgc_v05l.execution_core.track_b_strategy_paper_runner_cli import main as strategy_paper_runner_cli_main
 from mgc_v05l.execution_core.track_b_strategy_rule_runner import (
     TrackBStrategyRuleRunnerResult,
@@ -46,6 +50,7 @@ class Calls:
         self.feature = 0
         self.strategy = 0
         self.readiness = 0
+        self.managed_lifecycle = 0
         self.proof = 0
         self.operator_status = 0
 
@@ -581,6 +586,71 @@ def proof_result(tmp_path: Path, classification: TerminalClassification) -> Pape
     )
 
 
+def managed_lifecycle_result(
+    tmp_path: Path,
+    classification: TrackBManagedPaperLifecycleClassification,
+) -> TrackBStrategyManagedPaperLifecycleResult:
+    report_json = tmp_path / "managed_lifecycle_report.json"
+    report = {
+        "schema_version": "track_b_strategy_managed_paper_lifecycle_v1",
+        "lifecycle_id": "managed-test",
+        "trade_id": "mgc_ema_momentum_reclaim_long_v1:managed-test",
+        "strategy_id": "mgc_ema_momentum_reclaim_long_v1",
+        "instrument_family": "MGC",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "account_id": "DUM882026",
+        "mode": "PAPER",
+        "managed_exit_policy_id": "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
+        "strategy_managed_lifecycle_classification": classification.value,
+        "paper_lifecycle_classification": classification.value,
+        "entry_intent": {
+            "strategy_id": "mgc_ema_momentum_reclaim_long_v1",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "side": "LONG",
+            "order_action": "BUY",
+            "quantity": 1,
+            "entry_limit_price": "4575.3",
+            "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+        },
+        "entry_submit_attempt": {"submitted": True, "broker_state_mutated": True, "broker_order_id": "101"},
+        "entry_fill": {"price": "4575.3", "quantity": 1, "filled_at": aware_now().isoformat()},
+        "close_intent": {"order_action": "SELL", "quantity": 1, "close_limit_price": "4575.6"},
+        "close_submit_attempt": {"submitted": classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT},
+        "close_fill": (
+            {"price": "4575.6", "quantity": 1, "filled_at": aware_now().isoformat()}
+            if classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+            else None
+        ),
+        "final_position_status": "CLOSED_FLAT"
+        if classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+        else "OPEN_MANAGED",
+        "final_broker_state_classification": classification.value,
+        "review_required": classification == TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED,
+        "broker_reconciled": False,
+        "submit_allowed": True,
+        "submit_attempted": True,
+        "paper_proof_invoked": False,
+        "paper_proof_cli_called": False,
+        "broker_state_mutated": True,
+        "live_money_readiness": False,
+        "required_next_action": "managed next",
+        "primary_blocker": None,
+        "report_json_path": str(report_json),
+        "latest_report_json_path": str(tmp_path / "latest_managed_lifecycle_report.json"),
+    }
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(json.dumps(report), encoding="utf-8")
+    return TrackBStrategyManagedPaperLifecycleResult(
+        lifecycle_id="managed-test",
+        classification=classification,
+        report_json=report_json,
+        report=report,
+    )
+
+
 def stages(
     *,
     calls: Calls,
@@ -589,6 +659,7 @@ def stages(
     market_history: TrackBMarketHistoryResult | None = None,
     feature: TrackBFeatureBuilderResult | None = None,
     readiness: TrackBReadinessCheckRunnerResult | None = None,
+    managed_lifecycle: TrackBStrategyManagedPaperLifecycleResult | None = None,
     proof: PaperProofResult | None = None,
 ) -> TrackBStrategyPaperRunnerStages:
     def candle_history_stage(config: TrackBStrategyPaperRunnerConfig) -> TrackBMgcCandleHistoryProducerResult:
@@ -642,6 +713,16 @@ def stages(
         assert proof is not None
         return proof
 
+    def managed_lifecycle_stage(
+        config: TrackBStrategyPaperRunnerConfig,
+        strategy_report: dict[str, object],
+    ) -> TrackBStrategyManagedPaperLifecycleResult:
+        calls.managed_lifecycle += 1
+        assert managed_lifecycle is not None
+        assert config.managed_exit_policy_id is not None
+        assert strategy_report["real_strategy_signal"] is True
+        return managed_lifecycle
+
     def operator_status_stage(config: TrackBStrategyPaperRunnerConfig, runner_report_json: Path) -> None:
         calls.operator_status += 1
 
@@ -652,6 +733,7 @@ def stages(
         feature_builder=feature_stage,
         strategy_rule=strategy_stage,
         readiness=readiness_stage,
+        managed_lifecycle=managed_lifecycle_stage,
         paper_proof=proof_stage,
         operator_status=operator_status_stage,
     )
@@ -754,6 +836,76 @@ def test_signal_and_green_readiness_without_submit_flags_stops_ready_no_submit(t
     assert result.report["submit_attempted"] is False
 
 
+def test_real_strategy_signal_does_not_route_to_paper_proof_by_default(tmp_path: Path) -> None:
+    calls = Calls()
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-managed-missing-exit-policy",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_EXIT_POLICY_MISSING
+    assert calls.proof == 0
+    assert calls.managed_lifecycle == 0
+    assert result.report["paper_execution_path"] == "STRATEGY_MANAGED"
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["managed_lifecycle_invoked"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert "paper_proof is not a strategy-management fallback" in result.report["primary_blocker"]
+
+
+def test_real_strategy_signal_with_exit_policy_routes_to_managed_lifecycle(tmp_path: Path) -> None:
+    calls = Calls()
+    managed = managed_lifecycle_result(tmp_path, TrackBManagedPaperLifecycleClassification.OPEN_MANAGED)
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            emit_signal=True,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.0",
+            managed_exit_policy_id="DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path),
+            managed_lifecycle=managed,
+            proof=proof_result(tmp_path, TerminalClassification.PASSED),
+        ),
+        runner_id="paper-managed-open",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_OPEN_MANAGED
+    assert calls.managed_lifecycle == 1
+    assert calls.proof == 0
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["managed_lifecycle_invoked"] is True
+    assert result.report["managed_lifecycle_classification"] == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+    assert result.report["managed_entry_intent"] is not None
+    assert result.report["submit_attempted"] is True
+    assert result.report["broker_state_mutated"] is True
+    assert result.report["live_money_readiness"] is False
+
+
 def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
@@ -762,6 +914,7 @@ def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -809,6 +962,7 @@ def test_feature_builder_signal_readiness_green_and_explicit_submit_invokes_pape
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -853,6 +1007,7 @@ def test_full_history_feature_rule_readiness_green_and_explicit_submit_invokes_p
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -905,6 +1060,7 @@ def test_maintained_history_feature_rule_submit_uses_maintenance_without_history
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -953,6 +1109,7 @@ def test_stale_maintained_history_blocks_only_when_intraday_freshness_required(t
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -1000,6 +1157,7 @@ def test_maintained_history_age_961s_passes_as_historical_context_by_default(tmp
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -1045,6 +1203,7 @@ def test_maintained_history_age_961s_blocks_when_intraday_policy_explicit(tmp_pa
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -1399,6 +1558,7 @@ def test_demo_wiring_signal_is_explicitly_labeled_and_can_invoke_paper_proof(tmp
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -1563,6 +1723,7 @@ def test_asian_drift_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp
             strategy_id="asian_drift_v1",
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -1611,6 +1772,7 @@ def test_demo_wiring_signal_cannot_drive_asian_drift_paper_path(tmp_path: Path) 
             strategy_id="asian_drift_v1",
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -1686,6 +1848,7 @@ def test_first_bear_snap_turn_signal_with_paper_flags_delegates_once_to_guarded_
             side="SELL",
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.0",
             manual_close_limit_price="4575.3",
@@ -1735,6 +1898,7 @@ def test_demo_wiring_signal_cannot_drive_first_bull_snap_turn_paper_path(tmp_pat
             strategy_id="FIRST_BULL_SNAP_TURN_V1",
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -1772,6 +1936,7 @@ def test_first_bull_snap_turn_long_signal_requires_buy_side_for_paper_submit(tmp
             side="SELL",
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -1819,6 +1984,7 @@ def test_asian_drift_short_signal_requires_sell_side_for_paper_submit(tmp_path: 
             side="BUY",
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -1945,6 +2111,7 @@ def test_pause_resume_short_signal_with_paper_flags_delegates_once_to_guarded_pr
             side="SELL",
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.0",
             manual_close_limit_price="4575.3",
@@ -2193,6 +2360,7 @@ def test_breakout_retest_hold_long_signal_with_paper_flags_delegates_once_to_gua
             side="BUY",
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -2566,6 +2734,7 @@ def test_ambiguous_paper_proof_requires_manual_review(tmp_path: Path) -> None:
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",
@@ -2595,6 +2764,7 @@ def test_flat_but_close_provenance_incomplete_is_not_paper_proof_passed(tmp_path
             emit_signal=True,
             submit_paper=True,
             confirm_paper_submit=True,
+            paper_execution_path="PAPER_PROOF_DEBUG",
             quantity=1,
             manual_open_limit_price="4575.3",
             manual_close_limit_price="4575.0",

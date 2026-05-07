@@ -258,6 +258,13 @@ def _trade_record_from_runner_report(
     monitor_report_json: Path | None,
     now: datetime,
 ) -> dict[str, Any] | None:
+    if runner_report.get("managed_lifecycle_invoked") is True or runner_report.get("strategy_managed_lifecycle_invoked") is True:
+        return _managed_trade_record_from_runner_report(
+            runner_report=runner_report,
+            runner_report_json=runner_report_json,
+            monitor_report_json=monitor_report_json,
+            now=now,
+        )
     if runner_report.get("paper_proof_invoked") is not True:
         return None
     proof_report = _load_json_path(runner_report.get("paper_proof_report_path"))
@@ -343,6 +350,95 @@ def _trade_record_from_runner_report(
         "created_at": now.isoformat(),
         "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
         "broker_reconciled": False,
+    }
+
+
+def _managed_trade_record_from_runner_report(
+    *,
+    runner_report: Mapping[str, Any],
+    runner_report_json: Path | None,
+    monitor_report_json: Path | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    lifecycle_report = _load_json_path(runner_report.get("managed_lifecycle_report_path"))
+    entry_intent = _mapping(runner_report.get("managed_entry_intent")) or _mapping(lifecycle_report.get("entry_intent"))
+    if not entry_intent:
+        return None
+    close_intent = _mapping(runner_report.get("managed_close_intent")) or _mapping(lifecycle_report.get("close_intent"))
+    entry_fill = _mapping(runner_report.get("managed_entry_fill")) or _mapping(lifecycle_report.get("entry_fill"))
+    close_fill = _mapping(runner_report.get("managed_close_fill")) or _mapping(lifecycle_report.get("close_fill"))
+    entry_submit = _mapping(runner_report.get("managed_entry_submit_attempt")) or _mapping(lifecycle_report.get("entry_submit_attempt"))
+    close_submit = _mapping(runner_report.get("managed_close_submit_attempt")) or _mapping(lifecycle_report.get("close_submit_attempt"))
+    contract_key = str(runner_report.get("contract_key") or lifecycle_report.get("contract_key") or entry_intent.get("contract_key") or "")
+    instrument_family = str(
+        runner_report.get("strategy_registry_instrument_family")
+        or lifecycle_report.get("instrument_family")
+        or _instrument_family(contract_key, runner_report.get("local_symbol"))
+    )
+    side = str(entry_intent.get("side") or runner_report.get("signal_direction") or "UNKNOWN")
+    quantity = _decimal(runner_report.get("quantity") or entry_fill.get("quantity") or entry_intent.get("quantity"))
+    entry_fill_price = _decimal(entry_fill.get("price") or entry_fill.get("avg_price"))
+    exit_fill_price = _decimal(close_fill.get("price") or close_fill.get("avg_price"))
+    realized = _realized_pnl(
+        side=side,
+        quantity=quantity,
+        entry=entry_fill_price,
+        exit=exit_fill_price,
+        instrument_family=instrument_family,
+    )
+    tick_size = TICK_SIZE_BY_FAMILY.get(instrument_family)
+    points = _points_pnl(side=side, entry=entry_fill_price, exit=exit_fill_price)
+    ticks = None if points is None or tick_size in {None, Decimal("0")} else points / tick_size
+    lifecycle_id = str(lifecycle_report.get("lifecycle_id") or runner_report.get("managed_lifecycle_id") or runner_report.get("track_b_strategy_paper_runner_id"))
+    strategy_id = str(runner_report.get("strategy_id") or lifecycle_report.get("strategy_id") or entry_intent.get("strategy_id") or "UNKNOWN")
+    classification = str(runner_report.get("managed_lifecycle_classification") or lifecycle_report.get("strategy_managed_lifecycle_classification") or "")
+    return {
+        "ledger_schema_version": LEDGER_SCHEMA_VERSION,
+        "trade_id": f"{strategy_id}:{lifecycle_id}",
+        "lifecycle_id": lifecycle_id,
+        "signal_id": str(entry_intent.get("signal_id") or entry_intent.get("lifecycle_id") or lifecycle_id),
+        "strategy_id": strategy_id,
+        "instrument_family": instrument_family,
+        "contract_key": contract_key or None,
+        "local_symbol": runner_report.get("local_symbol") or lifecycle_report.get("local_symbol") or entry_intent.get("local_symbol"),
+        "con_id": runner_report.get("con_id") or lifecycle_report.get("con_id") or entry_intent.get("con_id"),
+        "account_id": runner_report.get("account_id") or lifecycle_report.get("account_id") or entry_intent.get("account_id"),
+        "monitor_mode": runner_report.get("mode"),
+        "runtime_decision_source": runner_report.get("runtime_decision_source") or entry_intent.get("latest_decision_bar_source"),
+        "signal_timestamp": runner_report.get("signal_timestamp") or entry_intent.get("signal_timestamp"),
+        "entry_timestamp": entry_fill.get("filled_at") or entry_submit.get("submitted_at") or entry_intent.get("created_at"),
+        "exit_timestamp": close_fill.get("filled_at") or close_submit.get("submitted_at") or (close_intent or {}).get("created_at"),
+        "side": side,
+        "order_action": entry_intent.get("order_action"),
+        "quantity": _decimal_text(quantity),
+        "entry_order_id": entry_fill.get("broker_order_id") or entry_submit.get("broker_order_id"),
+        "exit_order_id": close_fill.get("broker_order_id") or close_submit.get("broker_order_id"),
+        "entry_limit_price": _string_or_none(entry_intent.get("entry_limit_price")),
+        "entry_fill_price": _decimal_text(entry_fill_price),
+        "exit_limit_price": _string_or_none((close_intent or {}).get("close_limit_price")),
+        "exit_fill_price": _decimal_text(exit_fill_price),
+        "realized_pnl": _decimal_text(realized),
+        "pnl_currency": "USD",
+        "ticks_pnl": _decimal_text(ticks),
+        "points_pnl": _decimal_text(points),
+        "commissions": None,
+        "slippage_vs_reference": None,
+        "strategy_verdict": runner_report.get("strategy_paper_runner_verdict"),
+        "paper_lifecycle_type": "STRATEGY_MANAGED",
+        "paper_lifecycle_classification": classification or lifecycle_report.get("paper_lifecycle_classification"),
+        "paper_proof_classification": None,
+        "managed_exit_policy_id": runner_report.get("managed_exit_policy_id") or lifecycle_report.get("managed_exit_policy_id"),
+        "final_broker_state_classification": runner_report.get("final_broker_state_classification") or lifecycle_report.get("final_broker_state_classification") or classification,
+        "final_position_status": runner_report.get("final_position_status") or lifecycle_report.get("final_position_status"),
+        "review_required": bool(lifecycle_report.get("review_required")) or "REVIEW" in classification or "MISMATCH" in classification,
+        "paper_lifecycle_report_path": str(runner_report.get("managed_lifecycle_report_path") or lifecycle_report.get("report_json_path") or ""),
+        "decision_journal_record_id": None,
+        "decision_journal_record_path": runner_report.get("decision_journal_record_path"),
+        "monitor_report_path": str(monitor_report_json) if monitor_report_json else runner_report.get("monitor_report_path"),
+        "strategy_paper_runner_report_path": str(runner_report_json) if runner_report_json else runner_report.get("report_json_path"),
+        "created_at": now.isoformat(),
+        "source": "TRACK_B_STRATEGY_MANAGED_LIFECYCLE",
+        "broker_reconciled": bool(lifecycle_report.get("broker_reconciled")),
     }
 
 
@@ -471,6 +567,11 @@ def _review_required(
 
 
 def _is_flat_closed_trade(item: Mapping[str, Any]) -> bool:
+    if item.get("paper_lifecycle_type") == "STRATEGY_MANAGED":
+        return (
+            item.get("paper_lifecycle_classification") == "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT"
+            and item.get("final_position_status") == "CLOSED_FLAT"
+        )
     return (
         item.get("paper_proof_classification") == "TRACK_B_PAPER_PROOF_PASSED"
         and item.get("paper_lifecycle_classification") == "PROOF_COMPLETE_FLAT"

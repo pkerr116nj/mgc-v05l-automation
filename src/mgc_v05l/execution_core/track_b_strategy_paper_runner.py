@@ -1,10 +1,9 @@
 """Track B controlled PAPER strategy execution runner.
 
 This Phase 2 boundary is the explicit handoff from a strategy signal to
-readiness and the Track B paper-proof lifecycle. It defaults to dry-run/no
-submit. Broker mutation is possible only through ``run_paper_proof`` when the
-operator supplies PAPER mode, submit/confirm flags, quantity, and manual open
-and close limit prices.
+readiness and Track B PAPER lifecycle management. It defaults to dry-run/no
+submit. Real strategy signals route to the strategy-managed lifecycle; the
+paper-proof lifecycle is retained only for explicit proof/debug/canary use.
 """
 
 from __future__ import annotations
@@ -24,6 +23,13 @@ from .ibkr_readonly_transport import IbkrReadOnlyTransportConfig, IbkrReadOnlyTw
 from .models import TerminalClassification, require_aware_datetime, to_jsonable
 from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatusInputs, create_operator_status_summary
 from .paper_proof import DEFAULT_PAPER_PROOF_OUTPUT_ROOT, PaperProofConfig, PaperProofResult, ProofRunner, run_paper_proof
+from .track_b_strategy_managed_paper_lifecycle import (
+    DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
+    TrackBManagedPaperLifecycleClassification,
+    TrackBStrategyManagedPaperLifecycleConfig,
+    TrackBStrategyManagedPaperLifecycleResult,
+    run_track_b_strategy_managed_paper_lifecycle,
+)
 from .track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
     update_track_b_paper_trade_ledger_from_runner_report,
@@ -97,6 +103,12 @@ class TrackBStrategyPaperRunnerVerdict(str, Enum):
     PAPER_PROOF_BLOCKED = "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_BLOCKED"
     PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE = "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE"
     PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED = "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED"
+    STRATEGY_MANAGED_LIFECYCLE_NOT_AVAILABLE = "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_LIFECYCLE_NOT_AVAILABLE"
+    STRATEGY_MANAGED_EXIT_POLICY_MISSING = "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_EXIT_POLICY_MISSING"
+    STRATEGY_MANAGED_OPEN_MANAGED = "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_OPEN_MANAGED"
+    STRATEGY_MANAGED_EXIT_PENDING = "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_EXIT_PENDING"
+    STRATEGY_MANAGED_CLOSED_FLAT = "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_CLOSED_FLAT"
+    STRATEGY_MANAGED_REVIEW_REQUIRED = "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_REVIEW_REQUIRED"
     BLOCKED_STAGE_ERROR = "TRACK_B_STRATEGY_PAPER_RUNNER_BLOCKED_STAGE_ERROR"
 
 
@@ -138,6 +150,9 @@ class TrackBStrategyPaperRunnerConfig:
     confirm_paper_submit: bool = False
     manual_open_limit_price: str | Decimal | None = None
     manual_close_limit_price: str | Decimal | None = None
+    paper_execution_path: str = "STRATEGY_MANAGED"
+    managed_exit_policy_id: str | None = None
+    managed_lifecycle_output_root: Path = DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT
     broker_order_id: str | None = None
     perm_id: str | None = None
     market_data_mode: str = "DELAYED"
@@ -197,6 +212,7 @@ class TrackBStrategyPaperRunnerStages:
     feature_builder: Callable[[TrackBStrategyPaperRunnerConfig], TrackBFeatureBuilderResult]
     strategy_rule: Callable[[TrackBStrategyPaperRunnerConfig], TrackBStrategyRuleRunnerResult]
     readiness: Callable[[TrackBStrategyPaperRunnerConfig], TrackBReadinessCheckRunnerResult]
+    managed_lifecycle: Callable[[TrackBStrategyPaperRunnerConfig, Mapping[str, object]], TrackBStrategyManagedPaperLifecycleResult]
     paper_proof: Callable[[TrackBStrategyPaperRunnerConfig], PaperProofResult]
     operator_status: Callable[[TrackBStrategyPaperRunnerConfig, Path], None]
 
@@ -211,6 +227,7 @@ class TrackBStrategyPaperRunnerResult:
     feature_builder_result: TrackBFeatureBuilderResult | None = None
     strategy_rule_result: TrackBStrategyRuleRunnerResult | None = None
     readiness_result: TrackBReadinessCheckRunnerResult | None = None
+    managed_lifecycle_result: TrackBStrategyManagedPaperLifecycleResult | None = None
     paper_proof_result: PaperProofResult | None = None
 
 
@@ -226,6 +243,7 @@ def default_stages(
         feature_builder=_run_feature_builder,
         strategy_rule=_run_strategy_rule,
         readiness=lambda config: _run_readiness(config, readiness_stages=readiness_stages),
+        managed_lifecycle=_run_managed_lifecycle,
         paper_proof=lambda config: _run_paper_proof(config, proof_runner=proof_runner),
         operator_status=_run_operator_status,
     )
@@ -248,6 +266,7 @@ def run_track_b_strategy_paper(
     feature_builder: TrackBFeatureBuilderResult | None = None
     strategy_rule: TrackBStrategyRuleRunnerResult | None = None
     readiness: TrackBReadinessCheckRunnerResult | None = None
+    managed_lifecycle: TrackBStrategyManagedPaperLifecycleResult | None = None
     proof: PaperProofResult | None = None
 
     try:
@@ -648,27 +667,74 @@ def run_track_b_strategy_paper(
                 operator_status_stage=actual_stages.operator_status,
             )
 
-        proof = actual_stages.paper_proof(config)
-        proof_classification = proof.classification.value
-        if proof.classification == TerminalClassification.PASSED:
-            verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
-            primary_blocker = None
-            required_next_action = "PAPER strategy proof lifecycle passed and final broker state is flat."
-        elif proof.classification == TerminalClassification.BLOCKED:
-            verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_BLOCKED
-            primary_blocker = _proof_blocker(proof.report)
-            required_next_action = _proof_required_action(proof.report, "Resolve paper proof blocker before retrying.")
-        elif proof.classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE:
-            verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
-            primary_blocker = _proof_blocker(proof.report)
-            required_next_action = _proof_required_action(
-                proof.report,
-                "Verify broker activity and rerun read-only recovery before any further PAPER submit.",
+        if _paper_execution_path(config) in {"PAPER_PROOF_DEBUG", "PAPER_PROOF_CANARY"}:
+            proof = actual_stages.paper_proof(config)
+            proof_classification = proof.classification.value
+            if proof.classification == TerminalClassification.PASSED:
+                verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+                primary_blocker = None
+                required_next_action = "PAPER strategy proof lifecycle passed and final broker state is flat."
+            elif proof.classification == TerminalClassification.BLOCKED:
+                verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_BLOCKED
+                primary_blocker = _proof_blocker(proof.report)
+                required_next_action = _proof_required_action(proof.report, "Resolve paper proof blocker before retrying.")
+            elif proof.classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE:
+                verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
+                primary_blocker = _proof_blocker(proof.report)
+                required_next_action = _proof_required_action(
+                    proof.report,
+                    "Verify broker activity and rerun read-only recovery before any further PAPER submit.",
+                )
+            else:
+                verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED
+                primary_blocker = _proof_blocker(proof.report)
+                required_next_action = _proof_required_action(proof.report, "Manual review required; do not run another open proof until broker state is reconciled.")
+            return _finalize(
+                config=config,
+                report_json=report_json,
+                now=actual_now,
+                runner_id=actual_runner_id,
+                verdict=verdict,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
+                feature_builder=feature_builder,
+                strategy_rule=strategy_rule,
+                readiness=readiness,
+                proof=proof,
+                primary_blocker=primary_blocker,
+                required_next_action=required_next_action,
+                operator_status_stage=actual_stages.operator_status,
+                proof_classification=proof_classification,
             )
-        else:
-            verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED
-            primary_blocker = _proof_blocker(proof.report)
-            required_next_action = _proof_required_action(proof.report, "Manual review required; do not run another open proof until broker state is reconciled.")
+
+        managed_exit_policy_id = _managed_exit_policy_id(config, strategy_rule.report if strategy_rule else {})
+        if not managed_exit_policy_id or managed_exit_policy_id == "EXIT_NOT_AVAILABLE":
+            return _finalize(
+                config=config,
+                report_json=report_json,
+                now=actual_now,
+                runner_id=actual_runner_id,
+                verdict=TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_EXIT_POLICY_MISSING,
+                candle_history_producer=candle_history_producer,
+                market_history=market_history,
+                feature_builder=feature_builder,
+                strategy_rule=strategy_rule,
+                readiness=readiness,
+                managed_lifecycle=managed_lifecycle,
+                proof=proof,
+                primary_blocker=f"{config.strategy_id} has no managed PAPER exit policy; paper_proof is not a strategy-management fallback.",
+                required_next_action="Declare a managed exit policy before allowing autonomous strategy-managed PAPER entry.",
+                operator_status_stage=actual_stages.operator_status,
+            )
+
+        managed_config = replace(config, managed_exit_policy_id=managed_exit_policy_id)
+        managed_lifecycle = actual_stages.managed_lifecycle(managed_config, strategy_rule.report if strategy_rule else {})
+        verdict = _managed_lifecycle_runner_verdict(managed_lifecycle.classification)
+        primary_blocker = managed_lifecycle.report.get("primary_blocker")
+        required_next_action = str(
+            managed_lifecycle.report.get("required_next_action")
+            or "Review strategy-managed PAPER lifecycle report."
+        )
         return _finalize(
             config=config,
             report_json=report_json,
@@ -680,11 +746,11 @@ def run_track_b_strategy_paper(
             feature_builder=feature_builder,
             strategy_rule=strategy_rule,
             readiness=readiness,
+            managed_lifecycle=managed_lifecycle,
             proof=proof,
             primary_blocker=primary_blocker,
             required_next_action=required_next_action,
             operator_status_stage=actual_stages.operator_status,
-            proof_classification=proof_classification,
         )
     except Exception as exc:  # noqa: BLE001 - runner errors must become artifacts.
         return _finalize(
@@ -857,6 +923,52 @@ def _run_readiness(
     return run_track_b_readiness_check(config=readiness_config, stages=readiness_stages)
 
 
+def _run_managed_lifecycle(
+    config: TrackBStrategyPaperRunnerConfig,
+    strategy_report: Mapping[str, object],
+) -> TrackBStrategyManagedPaperLifecycleResult:
+    instrument_family = str(
+        strategy_report.get("strategy_registry_instrument_family")
+        or _instrument_family_from_contract(config.contract_key)
+        or "UNKNOWN"
+    )
+    signal_reason = strategy_report.get("candidate_reason") or strategy_report.get("primary_signal_reason") or strategy_report.get("decision")
+    latest_decision_bar_source = (
+        strategy_report.get("latest_decision_bar_source")
+        or strategy_report.get("runtime_decision_source")
+        or strategy_report.get("runtime_data_source")
+        or "DATABENTO_LIVE_ARTIFACT"
+    )
+    managed_config = TrackBStrategyManagedPaperLifecycleConfig(
+        mode=config.mode,
+        account_id=config.account_id,
+        expected_account_id=config.expected_account_id,
+        strategy_id=config.strategy_id,
+        instrument_family=instrument_family,
+        contract_key=config.contract_key,
+        local_symbol=config.allowlisted_local_symbol,
+        con_id=config.con_id,
+        side=config.side,
+        quantity=config.quantity,
+        signal_timestamp=_string_or_none(strategy_report.get("signal_timestamp") or strategy_report.get("decision_bar_timestamp")),
+        signal_reason=_string_or_none(signal_reason),
+        decision_bar_timestamp=_string_or_none(strategy_report.get("decision_bar_timestamp") or strategy_report.get("candle_timestamp")),
+        latest_decision_bar_source=_string_or_none(latest_decision_bar_source),
+        pricing_policy=_string_or_none(strategy_report.get("pricing_policy") or "TRACK_B_RUNNER_CONFIG"),
+        reference_price_source=_string_or_none(strategy_report.get("reference_price_source")),
+        reference_price=strategy_report.get("reference_price"),
+        entry_limit_price=config.manual_open_limit_price,
+        close_limit_price=config.manual_close_limit_price,
+        managed_exit_policy_id=config.managed_exit_policy_id,
+        source_id=config.source_id,
+        output_root=config.managed_lifecycle_output_root,
+        paper_trade_ledger_output_root=_paper_trade_ledger_output_root(config),
+        live_money_readiness=False,
+        broker_reconciled=False,
+    )
+    return run_track_b_strategy_managed_paper_lifecycle(config=managed_config)
+
+
 def _run_paper_proof(config: TrackBStrategyPaperRunnerConfig, *, proof_runner: ProofRunner | None) -> PaperProofResult:
     paper_config = PaperProofConfig(
         mode=config.mode,
@@ -911,6 +1023,51 @@ def _paper_trade_ledger_output_root(config: TrackBStrategyPaperRunnerConfig) -> 
     return Path(config.output_root).parent / "paper_trade_ledger"
 
 
+def _paper_execution_path(config: TrackBStrategyPaperRunnerConfig) -> str:
+    return str(config.paper_execution_path or "STRATEGY_MANAGED").strip().upper()
+
+
+def _managed_exit_policy_id(
+    config: TrackBStrategyPaperRunnerConfig,
+    strategy_report: Mapping[str, object],
+) -> str:
+    configured = config.managed_exit_policy_id or strategy_report.get("strategy_registry_managed_exit_policy_id")
+    if configured:
+        return str(configured).strip().upper()
+    if strategy_report.get("strategy_registry_exit_not_available") is False:
+        return ""
+    return "EXIT_NOT_AVAILABLE"
+
+
+def _managed_lifecycle_runner_verdict(
+    classification: TrackBManagedPaperLifecycleClassification,
+) -> TrackBStrategyPaperRunnerVerdict:
+    if classification == TrackBManagedPaperLifecycleClassification.EXIT_POLICY_MISSING:
+        return TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_EXIT_POLICY_MISSING
+    if classification == TrackBManagedPaperLifecycleClassification.LIFECYCLE_NOT_AVAILABLE:
+        return TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_LIFECYCLE_NOT_AVAILABLE
+    if classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED:
+        return TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_OPEN_MANAGED
+    if classification == TrackBManagedPaperLifecycleClassification.EXIT_PENDING:
+        return TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_EXIT_PENDING
+    if classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT:
+        return TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_CLOSED_FLAT
+    return TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_REVIEW_REQUIRED
+
+
+def _instrument_family_from_contract(contract_key: object) -> str | None:
+    raw = str(contract_key or "")
+    if "-" in raw:
+        return raw.split("-", 1)[0]
+    return None
+
+
+def _string_or_none(value: object) -> str | None:
+    if value in {None, ""}:
+        return None
+    return str(value)
+
+
 def _finalize(
     *,
     config: TrackBStrategyPaperRunnerConfig,
@@ -928,6 +1085,7 @@ def _finalize(
     required_next_action: str,
     operator_status_stage: Callable[[TrackBStrategyPaperRunnerConfig, Path], None],
     proof_classification: str | None = None,
+    managed_lifecycle: TrackBStrategyManagedPaperLifecycleResult | None = None,
 ) -> TrackBStrategyPaperRunnerResult:
     report = _build_report(
         config=config,
@@ -940,6 +1098,7 @@ def _finalize(
         feature_builder=feature_builder,
         strategy_rule=strategy_rule,
         readiness=readiness,
+        managed_lifecycle=managed_lifecycle,
         proof=proof,
         primary_blocker=primary_blocker,
         required_next_action=required_next_action,
@@ -981,6 +1140,7 @@ def _finalize(
         feature_builder_result=feature_builder,
         strategy_rule_result=strategy_rule,
         readiness_result=readiness,
+        managed_lifecycle_result=managed_lifecycle,
         paper_proof_result=proof,
     )
 
@@ -997,6 +1157,7 @@ def _build_report(
     feature_builder: TrackBFeatureBuilderResult | None,
     strategy_rule: TrackBStrategyRuleRunnerResult | None,
     readiness: TrackBReadinessCheckRunnerResult | None,
+    managed_lifecycle: TrackBStrategyManagedPaperLifecycleResult | None,
     proof: PaperProofResult | None,
     primary_blocker: object | None,
     required_next_action: str,
@@ -1007,10 +1168,16 @@ def _build_report(
     feature_report = feature_builder.report if feature_builder else {}
     strategy_report = strategy_rule.report if strategy_rule else {}
     readiness_report = readiness.report if readiness else {}
+    managed_report = managed_lifecycle.report if managed_lifecycle else {}
     proof_report = proof.report if proof else {}
     proof_payload = proof_report.get("proof_payload") if isinstance(proof_report.get("proof_payload"), Mapping) else proof_report
     paper_proof_invoked = proof is not None
-    submit_allowed = _paper_submit_requested(config) and proof is not None
+    managed_lifecycle_invoked = managed_lifecycle is not None
+    managed_submit_attempted = bool(managed_report.get("submit_attempted")) if managed_report else False
+    managed_broker_state_mutated = bool(managed_report.get("broker_state_mutated")) if managed_report else False
+    submit_allowed = _paper_submit_requested(config) and (
+        proof is not None or bool(managed_report.get("submit_allowed"))
+    )
     maintained_history_status = _maintained_history_status(config, now=now)
     runtime_candle_status = _runtime_candle_context_status(config)
     required_next_action_text = (
@@ -1056,6 +1223,10 @@ def _build_report(
         "strategy_registry_calibration_profile": strategy_report.get("strategy_registry_calibration_profile"),
         "strategy_registry_paper_eligible": strategy_report.get("strategy_registry_paper_eligible"),
         "strategy_registry_live_money_eligible": strategy_report.get("strategy_registry_live_money_eligible"),
+        "strategy_registry_managed_exit_policy_id": strategy_report.get("strategy_registry_managed_exit_policy_id"),
+        "strategy_registry_exit_not_available": strategy_report.get("strategy_registry_exit_not_available"),
+        "paper_execution_path": _paper_execution_path(config),
+        "managed_exit_policy_id": _managed_exit_policy_id(config, strategy_report),
         "signal_source": strategy_report.get("signal_source") or _signal_source_from_rule_mode(config.rule_mode),
         "real_strategy_signal": (
             bool(strategy_report.get("real_strategy_signal"))
@@ -1127,6 +1298,13 @@ def _build_report(
         "paper_proof_classification": proof_classification or (proof.classification.value if proof else None),
         "paper_proof_report_path": str(proof.report_json) if proof else None,
         "paper_proof_lifecycle_status": proof_payload.get("proof_lifecycle_status"),
+        "strategy_managed_lifecycle_invoked": managed_lifecycle_invoked,
+        "managed_lifecycle_invoked": managed_lifecycle_invoked,
+        "managed_lifecycle_classification": managed_report.get("strategy_managed_lifecycle_classification"),
+        "managed_lifecycle_report_path": str(managed_lifecycle.report_json) if managed_lifecycle else None,
+        "managed_lifecycle_id": managed_report.get("lifecycle_id"),
+        "managed_trade_id": managed_report.get("trade_id"),
+        "managed_exit_policy_id": managed_report.get("managed_exit_policy_id") or _managed_exit_policy_id(config, strategy_report),
         "open_intent": proof_payload.get("open_intent"),
         "open_submit_attempt": proof_payload.get("open_submit_attempt"),
         "open_broker_order": proof_payload.get("open_broker_order"),
@@ -1135,12 +1313,23 @@ def _build_report(
         "close_submit_attempt": proof_payload.get("close_submit_attempt"),
         "close_broker_order": proof_payload.get("close_broker_order"),
         "close_fill": proof_payload.get("close_fill"),
+        "managed_entry_intent": managed_report.get("entry_intent"),
+        "managed_entry_submit_attempt": managed_report.get("entry_submit_attempt"),
+        "managed_entry_fill": managed_report.get("entry_fill"),
+        "managed_close_intent": managed_report.get("close_intent"),
+        "managed_close_submit_attempt": managed_report.get("close_submit_attempt"),
+        "managed_close_fill": managed_report.get("close_fill"),
         "close_only_guard_reports": proof_payload.get("close_only_guard_reports"),
         "flat_after_close_guard_reports": proof_payload.get("flat_after_close_guard_reports"),
         "final_reconciliation": proof_payload.get("final_reconciliation"),
         "final_position_snapshot": _final_position_snapshot(proof_payload),
         "final_open_orders_snapshot": _final_open_orders_snapshot(proof_payload),
-        "final_position_status": _final_position_status(proof_payload),
+        "final_broker_state_classification": (
+            managed_report.get("final_broker_state_classification")
+            or proof_payload.get("proof_lifecycle_status")
+            or proof_classification
+        ),
+        "final_position_status": managed_report.get("final_position_status") or _final_position_status(proof_payload),
         "final_flat": _final_flat(proof_payload, proof),
         "quantity": config.quantity,
         "order_type": config.order_type,
@@ -1151,10 +1340,10 @@ def _build_report(
         "secondary_blockers": _secondary_blockers(strategy_report, readiness_report, proof_report),
         "required_next_action": required_next_action_text,
         "submit_allowed": submit_allowed,
-        "submit_attempted": paper_proof_invoked,
+        "submit_attempted": paper_proof_invoked or managed_submit_attempted,
         "live_money_readiness": False,
         "paper_proof_cli_called": paper_proof_invoked,
-        "broker_state_mutated": paper_proof_invoked,
+        "broker_state_mutated": paper_proof_invoked or managed_broker_state_mutated,
         "ui_authority": False,
         "hidden_submit": False,
         "live_money_submit_allowed": False,
@@ -1180,6 +1369,7 @@ def _build_report(
             "strategy_rule_report_json": str(strategy_rule.report_json) if strategy_rule else None,
             "readiness_runner_report_json": str(readiness.report_json) if readiness else None,
             "paper_proof_report_json": str(proof.report_json) if proof else None,
+            "managed_lifecycle_report_json": str(managed_lifecycle.report_json) if managed_lifecycle else None,
             "runner_report_json": str(report_json),
             "latest_runner_report_json": str(report_json.parent.parent / "latest_track_b_strategy_paper_runner_report.json"),
         },

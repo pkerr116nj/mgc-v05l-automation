@@ -3157,6 +3157,11 @@ def _instrument_report_from_stages(
             "multi_strategy_runtime_cycle_verdict": runtime_cycle_report.get("multi_strategy_runtime_cycle_verdict"),
             "paper_runner_report_path": runtime_cycle_report.get("paper_runner_report_path"),
             "paper_runner_verdict": runtime_cycle_report.get("paper_runner_verdict"),
+            "paper_execution_path": runtime_cycle_report.get("paper_execution_path"),
+            "managed_lifecycle_invoked": bool(runtime_cycle_report.get("managed_lifecycle_invoked", False)),
+            "managed_lifecycle_classification": runtime_cycle_report.get("managed_lifecycle_classification"),
+            "managed_lifecycle_report_path": runtime_cycle_report.get("managed_lifecycle_report_path"),
+            "managed_exit_policy_id": runtime_cycle_report.get("managed_exit_policy_id"),
             "paper_proof_classification": runtime_cycle_report.get("paper_proof_classification"),
             "paper_order_parameters": runtime_cycle_report.get("paper_order_parameters") or {},
             "paper_order_parameter_blocker": runtime_cycle_report.get("paper_order_parameter_blocker"),
@@ -3803,7 +3808,14 @@ def _global_critical_blocker(
 
 
 def _has_guarded_paper_lifecycle_provenance(report: Mapping[str, Any]) -> bool:
-    return bool(report.get("paper_runner_report_path") and report.get("paper_proof_classification"))
+    return bool(
+        report.get("paper_runner_report_path")
+        and (
+            report.get("paper_proof_classification")
+            or report.get("managed_lifecycle_classification")
+            or report.get("managed_lifecycle_report_path")
+        )
+    )
 
 
 def _must_stop(report: Mapping[str, Any], config: TrackBShadowMonitorConfig) -> bool:
@@ -3831,7 +3843,12 @@ def _must_stop(report: Mapping[str, Any], config: TrackBShadowMonitorConfig) -> 
 
 
 def _paper_trade_attempt_count_delta(instrument_reports: Sequence[Mapping[str, Any]]) -> int:
-    return sum(1 for report in instrument_reports if report.get("paper_proof_invoked") is True)
+    return sum(
+        1
+        for report in instrument_reports
+        if report.get("paper_proof_invoked") is True
+        or (report.get("managed_lifecycle_invoked") is True and report.get("submit_attempted") is True)
+    )
 
 
 def _failure_counts_for_backoff(report: Mapping[str, Any]) -> bool:

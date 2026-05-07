@@ -1,9 +1,9 @@
 """Bounded Track B multi-strategy runtime cycle.
 
-This boundary evaluates the registered Asia strategy adapters together and
-arbitrates at most one PAPER candidate. It does not create a broker path: any
-PAPER mutation is delegated to ``track_b_strategy_paper_runner`` and therefore
-to the existing guarded Track B paper-proof lifecycle.
+This boundary evaluates the registered strategy adapters together and
+arbitrates at most one PAPER candidate. It does not create a direct broker
+path: any PAPER mutation is delegated to ``track_b_strategy_paper_runner`` and
+therefore to the guarded Track B strategy-managed PAPER lifecycle.
 """
 
 from __future__ import annotations
@@ -49,6 +49,9 @@ class TrackBMultiStrategyRuntimeCycleVerdict(str, Enum):
     ARBITRATION_BLOCKED = "TRACK_B_MULTI_STRATEGY_RUNTIME_ARBITRATION_BLOCKED"
     PAPER_PROOF_PASSED = "TRACK_B_MULTI_STRATEGY_RUNTIME_PAPER_PROOF_PASSED"
     PAPER_PROOF_REVIEW_REQUIRED = "TRACK_B_MULTI_STRATEGY_RUNTIME_PAPER_PROOF_REVIEW_REQUIRED"
+    STRATEGY_MANAGED_OPEN_MANAGED = "TRACK_B_MULTI_STRATEGY_RUNTIME_STRATEGY_MANAGED_OPEN_MANAGED"
+    STRATEGY_MANAGED_CLOSED_FLAT = "TRACK_B_MULTI_STRATEGY_RUNTIME_STRATEGY_MANAGED_CLOSED_FLAT"
+    STRATEGY_MANAGED_REVIEW_REQUIRED = "TRACK_B_MULTI_STRATEGY_RUNTIME_STRATEGY_MANAGED_REVIEW_REQUIRED"
     BLOCKED_STAGE_ERROR = "TRACK_B_MULTI_STRATEGY_RUNTIME_BLOCKED_STAGE_ERROR"
 
 
@@ -105,6 +108,8 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     confirm_paper_submit: bool = False
     manual_open_limit_price: str | None = None
     manual_close_limit_price: str | None = None
+    paper_execution_path: str = "STRATEGY_MANAGED"
+    managed_exit_policy_id: str | None = None
     paper_order_pricing_policy: str = "MANUAL_LIMIT_PRICES"
     paper_order_price_offset_ticks: int = 2
     paper_exit_price_offset_ticks: int = 2
@@ -221,12 +226,7 @@ def run_track_b_multi_strategy_runtime_cycle(
                     paper_result = actual_stages.paper_runner(paper_config, chosen_input, chosen_signal or {})
                     paper_order_parameters["paper_runner_config_open_limit_price"] = paper_config.manual_open_limit_price
                     paper_order_parameters["paper_runner_config_close_limit_price"] = paper_config.manual_close_limit_price
-                    verdict = (
-                        TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
-                        if paper_result.report.get("strategy_paper_runner_verdict")
-                        == "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED"
-                        else TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_REVIEW_REQUIRED
-                    )
+                    verdict = _paper_result_cycle_verdict(paper_result)
                     primary_blocker = paper_result.report.get("primary_blocker")
                     required_next_action = str(paper_result.report.get("required_next_action") or "Review strategy PAPER runner report.")
 
@@ -306,6 +306,26 @@ def _run_strategy_rule(
     )
 
 
+def _paper_result_cycle_verdict(
+    paper_result: TrackBStrategyPaperRunnerResult,
+) -> TrackBMultiStrategyRuntimeCycleVerdict:
+    runner_verdict = str(paper_result.report.get("strategy_paper_runner_verdict") or "")
+    if runner_verdict == "TRACK_B_STRATEGY_PAPER_RUNNER_PAPER_PROOF_PASSED":
+        return TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
+    if runner_verdict == "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_OPEN_MANAGED":
+        return TrackBMultiStrategyRuntimeCycleVerdict.STRATEGY_MANAGED_OPEN_MANAGED
+    if runner_verdict == "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_CLOSED_FLAT":
+        return TrackBMultiStrategyRuntimeCycleVerdict.STRATEGY_MANAGED_CLOSED_FLAT
+    if runner_verdict in {
+        "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_EXIT_PENDING",
+        "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_REVIEW_REQUIRED",
+        "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_LIFECYCLE_NOT_AVAILABLE",
+        "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_EXIT_POLICY_MISSING",
+    }:
+        return TrackBMultiStrategyRuntimeCycleVerdict.STRATEGY_MANAGED_REVIEW_REQUIRED
+    return TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_REVIEW_REQUIRED
+
+
 def _run_strategy_paper_runner(
     config: TrackBMultiStrategyRuntimeCycleConfig,
     strategy_input: TrackBMultiStrategyInput,
@@ -336,6 +356,8 @@ def _run_strategy_paper_runner(
             confirm_paper_submit=config.confirm_paper_submit,
             manual_open_limit_price=config.manual_open_limit_price,
             manual_close_limit_price=config.manual_close_limit_price,
+            paper_execution_path=config.paper_execution_path,
+            managed_exit_policy_id=config.managed_exit_policy_id,
             allowlisted_local_symbol=config.allowlisted_local_symbol,
             con_id=config.con_id,
             tick_size=config.tick_size,
@@ -934,8 +956,16 @@ def _build_report(
         "broker_state_mutated": bool(paper_report.get("broker_state_mutated")) if paper_report else False,
         "paper_runner_report_path": str(paper_result.report_json) if paper_result else None,
         "paper_runner_verdict": paper_report.get("strategy_paper_runner_verdict"),
+        "paper_execution_path": paper_report.get("paper_execution_path") or config.paper_execution_path,
+        "managed_lifecycle_invoked": bool(paper_report.get("managed_lifecycle_invoked")) if paper_report else False,
+        "managed_lifecycle_classification": paper_report.get("managed_lifecycle_classification"),
+        "managed_lifecycle_report_path": paper_report.get("managed_lifecycle_report_path"),
+        "managed_exit_policy_id": paper_report.get("managed_exit_policy_id") or config.managed_exit_policy_id,
         "paper_proof_classification": paper_report.get("paper_proof_classification"),
-        "final_broker_state_classification": paper_report.get("paper_proof_lifecycle_status"),
+        "final_broker_state_classification": (
+            paper_report.get("managed_lifecycle_classification")
+            or paper_report.get("paper_proof_lifecycle_status")
+        ),
         "final_flat": paper_report.get("final_flat"),
         "primary_blocker": None if primary_blocker is None else str(primary_blocker),
         "required_next_action": required_next_action,

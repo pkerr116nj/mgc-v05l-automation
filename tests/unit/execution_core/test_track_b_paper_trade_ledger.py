@@ -162,6 +162,73 @@ def test_no_paper_lifecycle_writes_zero_summaries_only(tmp_path: Path) -> None:
     assert summary["paper_trades_attempted_count"] == 0
 
 
+def test_strategy_managed_lifecycle_trade_is_separated_from_proof(tmp_path: Path) -> None:
+    lifecycle_path = write_json(
+        tmp_path / "managed" / "track_b_strategy_managed_paper_lifecycle_report.json",
+        {
+            "lifecycle_id": "managed-001",
+            "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "account_id": "DUM882026",
+            "managed_exit_policy_id": "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
+            "strategy_managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+            "entry_intent": {
+                "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "side": "LONG",
+                "order_action": "BUY",
+                "quantity": 1,
+                "entry_limit_price": "4704.6",
+                "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+            },
+            "entry_submit_attempt": {"broker_order_id": "201", "submitted_at": "2026-05-05T22:00:01+00:00"},
+            "entry_fill": {"broker_order_id": "201", "filled_at": "2026-05-05T22:00:02+00:00", "price": "4704.6", "quantity": 1},
+            "close_intent": {"order_action": "SELL", "quantity": 1, "close_limit_price": "4705.1"},
+            "close_submit_attempt": {"broker_order_id": "202", "submitted_at": "2026-05-05T22:05:01+00:00"},
+            "close_fill": {"broker_order_id": "202", "filled_at": "2026-05-05T22:05:02+00:00", "price": "4705.1", "quantity": 1},
+            "final_position_status": "CLOSED_FLAT",
+            "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+            "review_required": False,
+            "broker_reconciled": False,
+        },
+    )
+    runner = {
+        "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "mode": "PAPER",
+        "runtime_decision_source": "DATABENTO_LIVE_ARTIFACT",
+        "account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "quantity": 1,
+        "managed_lifecycle_invoked": True,
+        "managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+        "managed_lifecycle_report_path": str(lifecycle_path),
+        "strategy_paper_runner_verdict": "TRACK_B_STRATEGY_PAPER_RUNNER_STRATEGY_MANAGED_CLOSED_FLAT",
+        "paper_proof_invoked": False,
+    }
+
+    result = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=runner,
+        runner_report_json=tmp_path / "runner.json",
+        output_root=tmp_path / "paper_trade_ledger",
+        now=aware_now(),
+    )
+
+    assert result.trade_record_written is True
+    row = json.loads(result.ledger_jsonl.read_text(encoding="utf-8").strip())
+    assert row["paper_lifecycle_type"] == "STRATEGY_MANAGED"
+    assert row["paper_proof_classification"] is None
+    assert row["paper_lifecycle_classification"] == "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT"
+    assert row["realized_pnl"] == "5"
+    summary = json.loads(result.trade_summary_json.read_text(encoding="utf-8"))
+    assert summary["completed_trade_count"] == 1
+
+
 def test_operator_status_exposes_compact_paper_results(tmp_path: Path) -> None:
     report_path, payload = runner_report(tmp_path)
     ledger = update_track_b_paper_trade_ledger_from_runner_report(
