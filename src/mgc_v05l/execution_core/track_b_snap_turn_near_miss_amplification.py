@@ -157,6 +157,24 @@ class TrackBSnapTurnLocationVariantResearchResult:
     report: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class TrackBSnapTurnLocationVariantExitSensitivityConfig:
+    repo_root: Path = Path(".")
+    research_replay_config: TrackBSnapTurnLocationVariantResearchConfig | None = None
+    refresh_research_replay: bool = True
+    research_replay_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_location_variant_research_replay.json"
+    output_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_location_variant_exit_sensitivity.json"
+    output_md: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_location_variant_exit_sensitivity.md"
+    minimum_sample_count: int = 20
+
+
+@dataclass(frozen=True)
+class TrackBSnapTurnLocationVariantExitSensitivityResult:
+    report_json: Path
+    report_md: Path
+    report: dict[str, Any]
+
+
 def create_track_b_snap_turn_near_miss_amplification(
     *,
     config: TrackBSnapTurnNearMissAmplificationConfig | None = None,
@@ -457,6 +475,73 @@ def create_track_b_snap_turn_location_variant_research_replay(
     _write_json(output_json, report)
     _write_text(output_md, _location_variant_markdown(report))
     return TrackBSnapTurnLocationVariantResearchResult(report_json=output_json, report_md=output_md, report=report)
+
+
+def create_track_b_snap_turn_location_variant_exit_sensitivity(
+    *,
+    config: TrackBSnapTurnLocationVariantExitSensitivityConfig | None = None,
+    now: datetime | None = None,
+) -> TrackBSnapTurnLocationVariantExitSensitivityResult:
+    actual_config = config or TrackBSnapTurnLocationVariantExitSensitivityConfig()
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    repo_root = Path(actual_config.repo_root)
+    research_report: Mapping[str, Any] = {}
+    if actual_config.refresh_research_replay:
+        research_config = actual_config.research_replay_config or TrackBSnapTurnLocationVariantResearchConfig(
+            repo_root=repo_root
+        )
+        research_report = create_track_b_snap_turn_location_variant_research_replay(
+            config=research_config,
+            now=actual_now,
+        ).report
+    else:
+        research_report = _load_json(_resolve(repo_root, actual_config.research_replay_json))
+    samples = [item for item in research_report.get("samples") or [] if isinstance(item, Mapping)]
+    policy_summary = _policy_summary(samples, include_exit_sensitivity=True)
+    early_favorable_count = sum(1 for item in samples if item.get("early_favorable_move_before_failing") is True)
+    immediate_loser_count = sum(1 for item in samples if item.get("loser_failed_immediately") is True)
+    sample_count = len(samples)
+    classification = _exit_sensitivity_classification(
+        sample_count=sample_count,
+        minimum_sample_count=actual_config.minimum_sample_count,
+        policy_summary=policy_summary,
+        early_favorable_count=early_favorable_count,
+        immediate_loser_count=immediate_loser_count,
+    )
+    report = {
+        "schema_version": "track_b_snap_turn_location_variant_exit_sensitivity_v1",
+        "generated_at": actual_now.isoformat(),
+        "candidate_name": research_report.get("candidate_name")
+        or "MNQ_FIRST_BEAR_SNAP_TURN_LOCATION_VARIANT_RESEARCH_V1",
+        "candidate_status": "RESEARCH_ONLY",
+        "paper_eligible": False,
+        "production_thresholds_changed": False,
+        "production_strategy_changed": False,
+        "broker_commands_invoked": False,
+        "paper_proof_cli_invoked": False,
+        "submit_cancel_place_order_invoked": False,
+        "classification": classification,
+        "sample_count": sample_count,
+        "early_favorable_move_count": early_favorable_count,
+        "early_favorable_move_rate": _ratio_str(early_favorable_count, sample_count),
+        "loser_failed_immediately_count": immediate_loser_count,
+        "loser_failed_immediately_rate": _ratio_str(immediate_loser_count, sample_count),
+        "policy_summary": policy_summary,
+        "best_policy": _best_policy(policy_summary),
+        "samples": samples,
+        "answer": _exit_sensitivity_answer(classification, policy_summary),
+        "research_replay_source": {
+            "refreshed": actual_config.refresh_research_replay,
+            "research_replay_json": str(actual_config.research_replay_json),
+            "research_replay_classification": research_report.get("classification"),
+        },
+    }
+    output_json = _resolve(repo_root, actual_config.output_json)
+    output_md = _resolve(repo_root, actual_config.output_md)
+    _write_json(output_json, report)
+    _write_text(output_md, _exit_sensitivity_markdown(report))
+    return TrackBSnapTurnLocationVariantExitSensitivityResult(report_json=output_json, report_md=output_md, report=report)
 
 
 def _strategy_report(
@@ -1640,6 +1725,78 @@ def _research_sample_result(
     risk = _risk_from_snapshot(snapshot)
     future = [item for item in candles if timestamp is not None and item["timestamp"] > timestamp][:max_horizon_bars]
     mfe_mae = _path_mfe_mae(entry=entry, future=future, side="SHORT")
+    bar_excursions = _bar_excursions(entry=entry, risk=risk, future=future, side="SHORT", bars=(1, 2, 3, 5))
+    policies = {
+        "target_1r_stop_1r": _stop_target_policy(
+            entry=entry,
+            risk=risk,
+            future=future,
+            side="SHORT",
+            target_r=Decimal("1.0"),
+        ),
+        "target_1_5r_stop_1r": _stop_target_policy(
+            entry=entry,
+            risk=risk,
+            future=future,
+            side="SHORT",
+            target_r=Decimal("1.5"),
+        ),
+        "time_boxed_3x5m": _time_box_policy(entry=entry, risk=risk, future=future, side="SHORT", bars=time_box_bars),
+        "quick_scalp_0_5r_stop_1r": _stop_target_policy(
+            entry=entry,
+            risk=risk,
+            future=future,
+            side="SHORT",
+            target_r=Decimal("0.5"),
+        ),
+        "breakeven_after_0_5r": _breakeven_after_favorable_policy(
+            entry=entry,
+            risk=risk,
+            future=future,
+            side="SHORT",
+            trigger_r=Decimal("0.5"),
+            target_r=Decimal("1.0"),
+        ),
+        "trail_after_first_favorable_bar": _trail_after_first_favorable_bar_policy(
+            entry=entry,
+            risk=risk,
+            future=future,
+            side="SHORT",
+            bars=time_box_bars,
+        ),
+        "failed_followthrough_exit_1bar": _failed_followthrough_exit_policy(
+            entry=entry,
+            risk=risk,
+            future=future,
+            side="SHORT",
+            confirmation_bars=1,
+            fallback_bars=time_box_bars,
+        ),
+        "failed_followthrough_exit_2bar": _failed_followthrough_exit_policy(
+            entry=entry,
+            risk=risk,
+            future=future,
+            side="SHORT",
+            confirmation_bars=2,
+            fallback_bars=time_box_bars,
+        ),
+        "vol_scaled_0_75r_target_0_75r_stop": _stop_target_policy(
+            entry=entry,
+            risk=risk,
+            future=future,
+            side="SHORT",
+            target_r=Decimal("0.75"),
+            stop_r=Decimal("0.75"),
+        ),
+        "vwap_ema_invalidation_exit": _vwap_ema_invalidation_policy(snapshot=snapshot),
+        "time_stop_no_favorable_1bar": _time_stop_no_favorable_policy(
+            entry=entry,
+            risk=risk,
+            future=future,
+            side="SHORT",
+            bars=time_box_bars,
+        ),
+    }
     return {
         "timestamp": snapshot.get("decision_bar_timestamp"),
         "session": snapshot.get("session"),
@@ -1652,11 +1809,13 @@ def _research_sample_result(
         "mfe_occurred_before_mae": mfe_mae["mfe_before_mae"],
         "time_to_mfe_bars": mfe_mae["time_to_mfe_bars"],
         "time_to_mae_bars": mfe_mae["time_to_mae_bars"],
-        "policies": {
-            "target_1r_stop_1r": _stop_target_policy(entry=entry, risk=risk, future=future, side="SHORT", target_r=Decimal("1.0")),
-            "target_1_5r_stop_1r": _stop_target_policy(entry=entry, risk=risk, future=future, side="SHORT", target_r=Decimal("1.5")),
-            "time_boxed_3x5m": _time_box_policy(entry=entry, risk=risk, future=future, side="SHORT", bars=time_box_bars),
-        },
+        "bar_excursions": bar_excursions,
+        "early_favorable_move_before_failing": _early_favorable_before_failing(
+            bar_excursions=bar_excursions,
+            policies=policies,
+        ),
+        "loser_failed_immediately": _loser_failed_immediately(bar_excursions=bar_excursions, policies=policies),
+        "policies": policies,
     }
 
 
@@ -1706,20 +1865,21 @@ def _stop_target_policy(
     future: list[dict[str, Any]],
     side: str,
     target_r: Decimal,
+    stop_r: Decimal = Decimal("1.0"),
 ) -> dict[str, Any]:
     if risk <= 0 or not future:
         return {"outcome": "NO_FUTURE_BARS", "r": None}
     target = entry - target_r * risk if side == "SHORT" else entry + target_r * risk
-    stop = entry + risk if side == "SHORT" else entry - risk
+    stop = entry + stop_r * risk if side == "SHORT" else entry - stop_r * risk
     for index, bar in enumerate(future, start=1):
         high = _decimal(bar.get("high"))
         low = _decimal(bar.get("low"))
         target_hit = low <= target if side == "SHORT" else high >= target
         stop_hit = high >= stop if side == "SHORT" else low <= stop
         if target_hit and stop_hit:
-            return {"outcome": "STOP_FIRST_SAME_BAR_CONSERVATIVE", "r": "-1", "bars": index}
+            return {"outcome": "STOP_FIRST_SAME_BAR_CONSERVATIVE", "r": _decimal_str(-stop_r), "bars": index}
         if stop_hit:
-            return {"outcome": "STOP", "r": "-1", "bars": index}
+            return {"outcome": "STOP", "r": _decimal_str(-stop_r), "bars": index}
         if target_hit:
             return {"outcome": "TARGET", "r": _decimal_str(target_r), "bars": index}
     close = _decimal(future[-1].get("close"))
@@ -1736,13 +1896,203 @@ def _time_box_policy(*, entry: Decimal, risk: Decimal, future: list[dict[str, An
     return {"outcome": "TIME_BOX_EXIT", "r": _decimal_str(r_value), "bars": min(len(future), bars)}
 
 
-def _policy_summary(samples: list[Mapping[str, Any]]) -> dict[str, Any]:
+def _bar_excursions(
+    *,
+    entry: Decimal,
+    risk: Decimal,
+    future: list[dict[str, Any]],
+    side: str,
+    bars: Iterable[int],
+) -> dict[str, Any]:
+    rows: dict[str, Any] = {}
+    for count in bars:
+        window = future[:count]
+        if not window or risk <= 0:
+            rows[str(count)] = {"available": False}
+            continue
+        mfe_mae = _path_mfe_mae(entry=entry, future=window, side=side)
+        close = _decimal(window[-1].get("close"))
+        close_excursion = entry - close if side == "SHORT" else close - entry
+        rows[str(count)] = {
+            "available": True,
+            "bars": len(window),
+            "mfe_points": _decimal_str(mfe_mae["mfe"]),
+            "mae_points": _decimal_str(mfe_mae["mae"]),
+            "mfe_r": _decimal_str(mfe_mae["mfe"] / risk),
+            "mae_r": _decimal_str(mfe_mae["mae"] / risk),
+            "close_excursion_points": _decimal_str(close_excursion),
+            "close_excursion_r": _decimal_str(close_excursion / risk),
+        }
+    return rows
+
+
+def _breakeven_after_favorable_policy(
+    *,
+    entry: Decimal,
+    risk: Decimal,
+    future: list[dict[str, Any]],
+    side: str,
+    trigger_r: Decimal,
+    target_r: Decimal,
+) -> dict[str, Any]:
+    if risk <= 0 or not future:
+        return {"outcome": "NO_FUTURE_BARS", "r": None}
+    target = entry - target_r * risk if side == "SHORT" else entry + target_r * risk
+    stop = entry + risk if side == "SHORT" else entry - risk
+    breakeven_armed = False
+    for index, bar in enumerate(future, start=1):
+        high = _decimal(bar.get("high"))
+        low = _decimal(bar.get("low"))
+        target_hit = low <= target if side == "SHORT" else high >= target
+        stop_hit = high >= stop if side == "SHORT" else low <= stop
+        breakeven_hit = high >= entry if side == "SHORT" else low <= entry
+        trigger_hit = low <= entry - trigger_r * risk if side == "SHORT" else high >= entry + trigger_r * risk
+        if target_hit and stop_hit:
+            return {"outcome": "STOP_FIRST_SAME_BAR_CONSERVATIVE", "r": "-1", "bars": index}
+        if stop_hit:
+            return {"outcome": "STOP", "r": "-1", "bars": index}
+        if breakeven_armed and breakeven_hit:
+            return {"outcome": "BREAKEVEN_STOP", "r": "0", "bars": index}
+        if target_hit:
+            return {"outcome": "TARGET", "r": _decimal_str(target_r), "bars": index}
+        if trigger_hit:
+            breakeven_armed = True
+    close = _decimal(future[-1].get("close"))
+    r_value = (entry - close) / risk if side == "SHORT" else (close - entry) / risk
+    return {"outcome": "TIMEOUT_MARK_TO_CLOSE", "r": _decimal_str(r_value), "bars": len(future)}
+
+
+def _trail_after_first_favorable_bar_policy(
+    *,
+    entry: Decimal,
+    risk: Decimal,
+    future: list[dict[str, Any]],
+    side: str,
+    bars: int,
+) -> dict[str, Any]:
+    if risk <= 0 or not future:
+        return {"outcome": "NO_FUTURE_BARS", "r": None}
+    window = future[:bars]
+    first = window[0]
+    first_close = _decimal(first.get("close"))
+    first_favorable = first_close < entry if side == "SHORT" else first_close > entry
+    if not first_favorable:
+        return _time_box_policy(entry=entry, risk=risk, future=window, side=side, bars=1) | {
+            "outcome": "NO_FIRST_BAR_FOLLOW_THROUGH_EXIT"
+        }
+    trail_stop = min(entry, _decimal(first.get("high"))) if side == "SHORT" else max(entry, _decimal(first.get("low")))
+    for index, bar in enumerate(window[1:], start=2):
+        high = _decimal(bar.get("high"))
+        low = _decimal(bar.get("low"))
+        if (side == "SHORT" and high >= trail_stop) or (side != "SHORT" and low <= trail_stop):
+            r_value = (entry - trail_stop) / risk if side == "SHORT" else (trail_stop - entry) / risk
+            return {"outcome": "TRAIL_STOP", "r": _decimal_str(r_value), "bars": index}
+        trail_stop = min(trail_stop, high) if side == "SHORT" else max(trail_stop, low)
+    close = _decimal(window[-1].get("close"))
+    r_value = (entry - close) / risk if side == "SHORT" else (close - entry) / risk
+    return {"outcome": "TRAIL_TIMEOUT_MARK_TO_CLOSE", "r": _decimal_str(r_value), "bars": len(window)}
+
+
+def _failed_followthrough_exit_policy(
+    *,
+    entry: Decimal,
+    risk: Decimal,
+    future: list[dict[str, Any]],
+    side: str,
+    confirmation_bars: int,
+    fallback_bars: int,
+) -> dict[str, Any]:
+    if risk <= 0 or not future:
+        return {"outcome": "NO_FUTURE_BARS", "r": None}
+    confirmation = future[:confirmation_bars]
+    if not confirmation:
+        return {"outcome": "NO_FUTURE_BARS", "r": None}
+    close = _decimal(confirmation[-1].get("close"))
+    favorable_close = close < entry if side == "SHORT" else close > entry
+    if not favorable_close:
+        r_value = (entry - close) / risk if side == "SHORT" else (close - entry) / risk
+        return {
+            "outcome": f"FAILED_FOLLOW_THROUGH_{confirmation_bars}BAR_EXIT",
+            "r": _decimal_str(r_value),
+            "bars": len(confirmation),
+        }
+    return _time_box_policy(entry=entry, risk=risk, future=future, side=side, bars=fallback_bars) | {
+        "outcome": f"FOLLOW_THROUGH_CONFIRMED_TIME_BOX_{fallback_bars}BARS"
+    }
+
+
+def _vwap_ema_invalidation_policy(*, snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    predicates = {str(item.get("predicate")): item for item in snapshot.get("primitive_predicates") or [] if isinstance(item, Mapping)}
+    has_invalidation_inputs = any("vwap" in key.lower() or "ema" in key.lower() for key in predicates)
+    if not has_invalidation_inputs:
+        return {
+            "available": False,
+            "outcome": "NOT_AVAILABLE",
+            "r": None,
+            "reason": "VWAP/EMA invalidation path values are not retained in the scorable snapshot.",
+        }
     return {
+        "available": False,
+        "outcome": "NOT_IMPLEMENTED_FROM_STATIC_SNAPSHOT",
+        "r": None,
+        "reason": "VWAP/EMA predicate values exist, but per-bar invalidation path values are not retained.",
+    }
+
+
+def _time_stop_no_favorable_policy(
+    *,
+    entry: Decimal,
+    risk: Decimal,
+    future: list[dict[str, Any]],
+    side: str,
+    bars: int,
+) -> dict[str, Any]:
+    if risk <= 0 or not future:
+        return {"outcome": "NO_FUTURE_BARS", "r": None}
+    first = _path_mfe_mae(entry=entry, future=future[:1], side=side)
+    if first["mfe"] <= 0:
+        return _time_box_policy(entry=entry, risk=risk, future=future[:1], side=side, bars=1) | {
+            "outcome": "TIME_STOP_NO_FAVORABLE_MOVE_1BAR"
+        }
+    return _time_box_policy(entry=entry, risk=risk, future=future, side=side, bars=bars) | {
+        "outcome": f"FAVORABLE_MOVE_OBSERVED_TIME_BOX_{bars}BARS"
+    }
+
+
+def _early_favorable_before_failing(*, bar_excursions: Mapping[str, Any], policies: Mapping[str, Any]) -> bool:
+    one_bar = bar_excursions.get("1") if isinstance(bar_excursions.get("1") or {}, Mapping) else {}
+    three_bar = policies.get("time_boxed_3x5m") if isinstance(policies.get("time_boxed_3x5m") or {}, Mapping) else {}
+    return _decimal(one_bar.get("mfe_r")) >= Decimal("0.25") and _decimal(three_bar.get("r")) <= 0
+
+
+def _loser_failed_immediately(*, bar_excursions: Mapping[str, Any], policies: Mapping[str, Any]) -> bool:
+    one_bar = bar_excursions.get("1") if isinstance(bar_excursions.get("1") or {}, Mapping) else {}
+    one_r = policies.get("target_1r_stop_1r") if isinstance(policies.get("target_1r_stop_1r") or {}, Mapping) else {}
+    return _decimal(one_bar.get("mae_r")) <= Decimal("-1") or (
+        one_r.get("outcome") in {"STOP", "STOP_FIRST_SAME_BAR_CONSERVATIVE"} and one_r.get("bars") == 1
+    )
+
+
+def _policy_summary(samples: list[Mapping[str, Any]], *, include_exit_sensitivity: bool = False) -> dict[str, Any]:
+    summary = {
         "sample_count": len(samples),
         "target_1r_stop_1r": _single_policy_summary(samples, "target_1r_stop_1r"),
         "target_1_5r_stop_1r": _single_policy_summary(samples, "target_1_5r_stop_1r"),
         "time_boxed_3x5m": _single_policy_summary(samples, "time_boxed_3x5m"),
     }
+    if include_exit_sensitivity:
+        for policy in (
+            "quick_scalp_0_5r_stop_1r",
+            "breakeven_after_0_5r",
+            "trail_after_first_favorable_bar",
+            "failed_followthrough_exit_1bar",
+            "failed_followthrough_exit_2bar",
+            "vol_scaled_0_75r_target_0_75r_stop",
+            "vwap_ema_invalidation_exit",
+            "time_stop_no_favorable_1bar",
+        ):
+            summary[policy] = _single_policy_summary(samples, policy)
+    return summary
 
 
 def _single_policy_summary(samples: list[Mapping[str, Any]], policy: str) -> dict[str, Any]:
@@ -1818,6 +2168,84 @@ def _location_variant_answer(classification: str, policy_summary: Mapping[str, A
     if classification == "INSUFFICIENT_SAMPLE":
         return "The sample is too small for a profitability claim; keep research-only and collect/replay more windows."
     return "The candidate remains research-only: raw MFE/MAE is interesting, but simple policy replay is not strong enough for promotion."
+
+
+def _exit_sensitivity_classification(
+    *,
+    sample_count: int,
+    minimum_sample_count: int,
+    policy_summary: Mapping[str, Any],
+    early_favorable_count: int,
+    immediate_loser_count: int,
+) -> str:
+    if sample_count < minimum_sample_count:
+        return "INSUFFICIENT_SAMPLE"
+    best = _best_policy(policy_summary)
+    best_avg = _decimal(best.get("average_r"))
+    best_policy = str(best.get("policy") or "")
+    early_rate = Decimal(early_favorable_count) / Decimal(sample_count) if sample_count else Decimal("0")
+    immediate_loser_rate = Decimal(immediate_loser_count) / Decimal(sample_count) if sample_count else Decimal("0")
+    if best_avg > Decimal("0.05"):
+        if best_policy.startswith("quick_scalp"):
+            return "SCALP_ONLY_CANDIDATE"
+        if best_policy.startswith("vol_scaled"):
+            return "NEEDS_VOLATILITY_SCALED_MANAGEMENT"
+        return "EXIT_POLICY_MISMATCH"
+    if immediate_loser_rate >= Decimal("0.50") and early_rate < Decimal("0.35"):
+        return "ENTRY_EDGE_REJECTED"
+    return "REJECT_ALL_TESTED_POLICIES"
+
+
+def _best_policy(policy_summary: Mapping[str, Any]) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for policy, summary in policy_summary.items():
+        if policy == "sample_count" or not isinstance(summary, Mapping):
+            continue
+        if summary.get("average_r") is None:
+            continue
+        candidates.append(
+            {
+                "policy": policy,
+                "average_r": summary.get("average_r"),
+                "win_rate": summary.get("win_rate"),
+                "worst_r": summary.get("worst_r"),
+                "max_drawdown_r": summary.get("max_drawdown_r"),
+                "sample_count": summary.get("sample_count"),
+            }
+        )
+    if not candidates:
+        return {"policy": None, "average_r": None}
+    return max(candidates, key=lambda item: _decimal(item.get("average_r")))
+
+
+def _exit_sensitivity_answer(classification: str, policy_summary: Mapping[str, Any]) -> str:
+    best = _best_policy(policy_summary)
+    best_policy = best.get("policy")
+    best_avg = best.get("average_r")
+    if classification == "SCALP_ONLY_CANDIDATE":
+        return (
+            "The location variant still should not be promoted to PAPER, but entry quality is not fully rejected: "
+            f"the best tested result is the quick-scalp policy ({best_policy}) at average R {best_avg}. "
+            "Next work should test a research-only scalp management variant with controls, not loosen production."
+        )
+    if classification == "EXIT_POLICY_MISMATCH":
+        return (
+            "The entry may contain early signal value, but crude exits are mismatched. Keep research-only and test the "
+            f"best management family ({best_policy}, average R {best_avg}) against broader replay/control windows."
+        )
+    if classification == "NEEDS_VOLATILITY_SCALED_MANAGEMENT":
+        return (
+            "The best result came from volatility-scaled management. Keep research-only and test ATR-scaled exits "
+            "before changing any production snap-turn predicate."
+        )
+    if classification == "ENTRY_EDGE_REJECTED":
+        return "The variant samples mostly failed before giving favorable excursion; reject this entry edge for now."
+    if classification == "INSUFFICIENT_SAMPLE":
+        return "The sample is still too small for an exit-design conclusion; retain research-only and replay more windows."
+    return (
+        "Do not kill the idea solely because the first exits failed, but every additional bounded management policy also "
+        "failed here. Keep it research-only and require a better entry/management hypothesis before more work."
+    )
 
 
 def _outlier_sensitivity(samples: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -2172,6 +2600,12 @@ def _avg_decimal(values: Iterable[Any]) -> Decimal | None:
     return sum(decimals, Decimal("0")) / Decimal(len(decimals))
 
 
+def _ratio_str(numerator: int, denominator: int) -> str | None:
+    if denominator <= 0:
+        return None
+    return _decimal_str(Decimal(numerator) / Decimal(denominator))
+
+
 def _counter_rows(counter: Counter[str], *, limit: int) -> list[dict[str, Any]]:
     return [{"reason": key, "count": value} for key, value in counter.most_common(limit)]
 
@@ -2346,4 +2780,72 @@ def _location_variant_markdown(report: Mapping[str, Any]) -> str:
             f"MFE_before_MAE={sample.get('mfe_occurred_before_mae')} time_box_R={time_box.get('r')}"
         )
     lines.extend(["", "## Answer", "", str(report.get("expected_answer") or "")])
+    return "\n".join(lines) + "\n"
+
+
+def _exit_sensitivity_markdown(report: Mapping[str, Any]) -> str:
+    lines = [
+        "# Track B Snap-Turn Location Variant Exit Sensitivity",
+        "",
+        f"Generated: {report.get('generated_at')}",
+        "",
+        f"Candidate: {report.get('candidate_name')}",
+        f"Classification: {report.get('classification')}",
+        "",
+        "This is research-only. It does not change production thresholds, promote to PAPER, or submit orders.",
+        "",
+        "## Entry-vs-Exit Evidence",
+        "",
+        f"- Sample count: {report.get('sample_count')}",
+        f"- Early favorable move before failing: {report.get('early_favorable_move_count')} "
+        f"({report.get('early_favorable_move_rate')})",
+        f"- Losers failed immediately: {report.get('loser_failed_immediately_count')} "
+        f"({report.get('loser_failed_immediately_rate')})",
+    ]
+    best = report.get("best_policy") or {}
+    lines.extend(
+        [
+            f"- Best tested policy: {best.get('policy')} avgR={best.get('average_r')} "
+            f"win_rate={best.get('win_rate')} worstR={best.get('worst_r')}",
+            "",
+            "## Policy Summary",
+            "",
+        ]
+    )
+    policy_summary = report.get("policy_summary") or {}
+    for policy in (
+        "target_1r_stop_1r",
+        "target_1_5r_stop_1r",
+        "time_boxed_3x5m",
+        "quick_scalp_0_5r_stop_1r",
+        "breakeven_after_0_5r",
+        "trail_after_first_favorable_bar",
+        "failed_followthrough_exit_1bar",
+        "failed_followthrough_exit_2bar",
+        "vol_scaled_0_75r_target_0_75r_stop",
+        "vwap_ema_invalidation_exit",
+        "time_stop_no_favorable_1bar",
+    ):
+        summary = policy_summary.get(policy) or {}
+        lines.append(
+            f"- {policy}: n={summary.get('sample_count')}, win_rate={summary.get('win_rate')}, "
+            f"avgR={summary.get('average_r')}, worstR={summary.get('worst_r')}, maxDD={summary.get('max_drawdown_r')}"
+        )
+    lines.extend(["", "## Samples", ""])
+    for sample in (report.get("samples") or [])[:30]:
+        excursions = sample.get("bar_excursions") or {}
+        one = excursions.get("1") or {}
+        two = excursions.get("2") or {}
+        five = excursions.get("5") or {}
+        best_policy = (sample.get("policies") or {}).get(str(best.get("policy") or "")) or {}
+        lines.append(
+            f"- {sample.get('timestamp')} {sample.get('session')} {sample.get('regime')}: "
+            f"MFE={sample.get('mfe_points')} MAE={sample.get('mae_points')} "
+            f"MFE_before_MAE={sample.get('mfe_occurred_before_mae')} "
+            f"1barR={one.get('close_excursion_r')} 2barR={two.get('close_excursion_r')} "
+            f"5barR={five.get('close_excursion_r')} best_policy_R={best_policy.get('r')} "
+            f"early_favorable={sample.get('early_favorable_move_before_failing')} "
+            f"failed_immediately={sample.get('loser_failed_immediately')}"
+        )
+    lines.extend(["", "## Answer", "", str(report.get("answer") or "")])
     return "\n".join(lines) + "\n"

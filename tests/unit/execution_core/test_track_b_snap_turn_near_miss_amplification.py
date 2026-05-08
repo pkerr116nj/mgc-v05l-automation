@@ -6,9 +6,11 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_snap_turn_near_miss_amplification import (
     TrackBSnapTurnNearMissAmplificationConfig,
+    TrackBSnapTurnLocationVariantExitSensitivityConfig,
     TrackBSnapTurnLocationVariantResearchConfig,
     TrackBSnapTurnReplayBackfillConfig,
     create_track_b_snap_turn_near_miss_amplification,
+    create_track_b_snap_turn_location_variant_exit_sensitivity,
     create_track_b_snap_turn_location_variant_research_replay,
     create_track_b_snap_turn_replay_backfill,
 )
@@ -490,4 +492,69 @@ def test_location_variant_research_replay_promotes_only_to_replay_candidate(tmp_
     assert result.report["sample_count"] == 21
     assert result.report["classification"] == "PROMOTE_TO_REPLAY_CANDIDATE"
     assert result.report["policy_summary"]["time_boxed_3x5m"]["average_r"] is not None
+    assert result.report["submit_cancel_place_order_invoked"] is False
+
+
+def test_location_variant_exit_sensitivity_keeps_quick_scalp_research_only(tmp_path: Path) -> None:
+    samples = []
+    for index, quick_r in enumerate(("0.5", "0.5", "-1", "0.5")):
+        samples.append(
+            {
+                "timestamp": f"2026-05-07T14:{index * 5:02d}:00+00:00",
+                "session": "US",
+                "regime": "DOWNSLOPE",
+                "mfe_points": "1",
+                "mae_points": "-1",
+                "mfe_occurred_before_mae": True,
+                "time_to_mfe_bars": 1,
+                "time_to_mae_bars": 2,
+                "bar_excursions": {
+                    "1": {"available": True, "close_excursion_r": "0.25", "mfe_r": "0.5", "mae_r": "-0.1"},
+                    "2": {"available": True, "close_excursion_r": "-0.2", "mfe_r": "0.5", "mae_r": "-0.8"},
+                    "3": {"available": True, "close_excursion_r": "-0.3", "mfe_r": "0.5", "mae_r": "-1"},
+                    "5": {"available": True, "close_excursion_r": "-0.4", "mfe_r": "0.5", "mae_r": "-1"},
+                },
+                "early_favorable_move_before_failing": True,
+                "loser_failed_immediately": False,
+                "policies": {
+                    "target_1r_stop_1r": {"outcome": "STOP", "r": "-1", "bars": 2},
+                    "target_1_5r_stop_1r": {"outcome": "STOP", "r": "-1", "bars": 2},
+                    "time_boxed_3x5m": {"outcome": "TIME_BOX_EXIT", "r": "-0.3", "bars": 3},
+                    "quick_scalp_0_5r_stop_1r": {"outcome": "TARGET", "r": quick_r, "bars": 1},
+                    "breakeven_after_0_5r": {"outcome": "BREAKEVEN_STOP", "r": "0", "bars": 2},
+                    "trail_after_first_favorable_bar": {"outcome": "TRAIL_STOP", "r": "0.1", "bars": 2},
+                    "failed_followthrough_exit_1bar": {"outcome": "TIME_BOX_EXIT", "r": "-0.3", "bars": 3},
+                    "failed_followthrough_exit_2bar": {"outcome": "FAILED_FOLLOW_THROUGH_2BAR_EXIT", "r": "-0.2", "bars": 2},
+                    "vol_scaled_0_75r_target_0_75r_stop": {"outcome": "STOP", "r": "-0.75", "bars": 2},
+                    "vwap_ema_invalidation_exit": {"outcome": "NOT_AVAILABLE", "r": None},
+                    "time_stop_no_favorable_1bar": {"outcome": "TIME_BOX_EXIT", "r": "-0.3", "bars": 3},
+                },
+            }
+        )
+    research_json = _write_json(
+        tmp_path / "research.json",
+        {
+            "candidate_name": "MNQ_FIRST_BEAR_SNAP_TURN_LOCATION_VARIANT_RESEARCH_V1",
+            "classification": "REJECT_FALSE_POSITIVE",
+            "samples": samples,
+        },
+    )
+
+    result = create_track_b_snap_turn_location_variant_exit_sensitivity(
+        config=TrackBSnapTurnLocationVariantExitSensitivityConfig(
+            repo_root=tmp_path,
+            refresh_research_replay=False,
+            research_replay_json=research_json,
+            output_json=tmp_path / "exit_sensitivity.json",
+            output_md=tmp_path / "exit_sensitivity.md",
+            minimum_sample_count=4,
+        ),
+        now=datetime(2026, 5, 7, 17, 0, tzinfo=UTC),
+    )
+
+    assert result.report["candidate_status"] == "RESEARCH_ONLY"
+    assert result.report["paper_eligible"] is False
+    assert result.report["classification"] == "SCALP_ONLY_CANDIDATE"
+    assert result.report["best_policy"]["policy"] == "quick_scalp_0_5r_stop_1r"
+    assert result.report["production_thresholds_changed"] is False
     assert result.report["submit_cancel_place_order_invoked"] is False
