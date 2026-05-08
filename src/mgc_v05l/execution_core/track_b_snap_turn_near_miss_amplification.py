@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
+from .track_b_snap_turn_envelope_producer import produce_track_b_snap_turn_envelopes
 
 
 DEFAULT_DIAGNOSTICS_ROOT = Path("outputs/track_b_execution_core/diagnostics")
@@ -102,6 +103,30 @@ class TrackBSnapTurnNearMissAmplificationConfig:
 
 @dataclass(frozen=True)
 class TrackBSnapTurnNearMissAmplificationResult:
+    report_json: Path
+    report_md: Path
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TrackBSnapTurnReplayBackfillConfig:
+    repo_root: Path = Path(".")
+    mgc_candle_payloads: tuple[Path, ...] = (DEFAULT_MGC_LIVE_5M,)
+    mnq_candle_payloads: tuple[Path, ...] = (DEFAULT_MNQ_LIVE_5M,)
+    retained_5m_context_root: Path = Path("outputs/track_b_execution_core/asian_drift_state")
+    replay_envelope_root: Path = DEFAULT_DIAGNOSTICS_ROOT / "snap_turn_replay_backfill_envelopes"
+    output_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_replay_backfill.json"
+    output_md: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_replay_backfill.md"
+    scorable_snapshots_jsonl: Path = DEFAULT_DIAGNOSTICS_ROOT / "track_b_snap_turn_replay_scorable_snapshots.jsonl"
+    latest_scorable_snapshots_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_replay_scorable_snapshots.json"
+    min_window_bars: int = 8
+    max_windows_per_instrument: int = 240
+    future_horizon_bars: int = 6
+    max_examples_per_strategy: int = 20
+
+
+@dataclass(frozen=True)
+class TrackBSnapTurnReplayBackfillResult:
     report_json: Path
     report_md: Path
     report: dict[str, Any]
@@ -211,6 +236,90 @@ def create_track_b_snap_turn_near_miss_amplification(
     _write_json(output_json, report)
     _write_text(output_md, _markdown(report))
     return TrackBSnapTurnNearMissAmplificationResult(report_json=output_json, report_md=output_md, report=report)
+
+
+def create_track_b_snap_turn_replay_backfill(
+    *,
+    config: TrackBSnapTurnReplayBackfillConfig | None = None,
+    now: datetime | None = None,
+) -> TrackBSnapTurnReplayBackfillResult:
+    actual_config = config or TrackBSnapTurnReplayBackfillConfig()
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    repo_root = Path(actual_config.repo_root)
+    instrument_candles = {
+        "MGC": _load_replay_candles(
+            repo_root=repo_root,
+            paths=actual_config.mgc_candle_payloads,
+            instrument="MGC",
+            retained_5m_context_root=actual_config.retained_5m_context_root,
+        ),
+        "MNQ": _load_replay_candles(
+            repo_root=repo_root,
+            paths=actual_config.mnq_candle_payloads,
+            instrument="MNQ",
+            retained_5m_context_root=actual_config.retained_5m_context_root,
+        ),
+    }
+    rows: list[dict[str, Any]] = []
+    reconstruction: dict[str, Any] = {}
+    for instrument, candles in instrument_candles.items():
+        instrument_rows, instrument_summary = _reconstruct_snap_turn_rows_for_instrument(
+            repo_root=repo_root,
+            instrument=instrument,
+            candles=candles,
+            config=actual_config,
+            now=actual_now,
+        )
+        rows.extend(instrument_rows)
+        reconstruction[instrument] = instrument_summary
+    candle_index = {instrument: candles for instrument, candles in instrument_candles.items()}
+    strategies = [
+        _strategy_report(
+            strategy_id=strategy_id,
+            rows=[row for row in rows if row["strategy_id"] == strategy_id],
+            candle_index=candle_index,
+            future_horizon_bars=actual_config.future_horizon_bars,
+            max_examples=actual_config.max_examples_per_strategy,
+        )
+        for strategy_id in SNAP_TURN_STRATEGIES
+    ]
+    snapshots = _scorable_snapshots(rows=rows, candle_index=candle_index, future_horizon_bars=actual_config.future_horizon_bars)
+    snapshot_summary = _write_scorable_snapshots(
+        repo_root=repo_root,
+        jsonl_path=actual_config.scorable_snapshots_jsonl,
+        latest_json_path=actual_config.latest_scorable_snapshots_json,
+        snapshots=snapshots,
+        generated_at=actual_now,
+    )
+    classifications = _replay_classifications(strategies, snapshot_summary)
+    report = {
+        "schema_version": "track_b_snap_turn_replay_backfill_v1",
+        "generated_at": actual_now.isoformat(),
+        "source": "RETAINED_COMPLETED_5M_CANDLE_REPLAY_BACKFILL",
+        "broker_commands_invoked": False,
+        "paper_proof_cli_invoked": False,
+        "submit_cancel_place_order_invoked": False,
+        "production_thresholds_changed": False,
+        "managed_paper_lifecycle_changed": False,
+        "instrument_reconstruction": reconstruction,
+        "dense_scorable_snapshot_output": snapshot_summary,
+        "strategies": strategies,
+        "classifications": classifications,
+        "variant_candidates": _variant_candidates(strategies),
+        "simplest_methodology_change_to_test_first": _simplest_methodology_change(strategies),
+        "outputs": {
+            "json": str(actual_config.output_json),
+            "markdown": str(actual_config.output_md),
+            "scorable_snapshots_jsonl": str(actual_config.scorable_snapshots_jsonl),
+            "latest_scorable_snapshots_json": str(actual_config.latest_scorable_snapshots_json),
+        },
+    }
+    output_json = _resolve(repo_root, actual_config.output_json)
+    output_md = _resolve(repo_root, actual_config.output_md)
+    _write_json(output_json, report)
+    _write_text(output_md, _replay_markdown(report))
+    return TrackBSnapTurnReplayBackfillResult(report_json=output_json, report_md=output_md, report=report)
 
 
 def _strategy_report(
@@ -392,6 +501,195 @@ def _strategy_report(
             failed_primitives=failed_primitive_counts,
             frequency_classification=str(frequency["classification"]),
         ),
+    }
+
+
+def _reconstruct_snap_turn_rows_for_instrument(
+    *,
+    repo_root: Path,
+    instrument: str,
+    candles: list[dict[str, Any]],
+    config: TrackBSnapTurnReplayBackfillConfig,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    blocked: Counter[str] = Counter()
+    windows = _replay_windows(candles, min_window_bars=config.min_window_bars, max_windows=config.max_windows_per_instrument)
+    for index, window in enumerate(windows):
+        payload = _replay_payload(instrument=instrument, candles=window, now=now)
+        result = produce_track_b_snap_turn_envelopes(
+            runtime_5m_payload=payload,
+            runtime_5m_payload_path=None,
+            source_id="track_b_snap_turn_replay_backfill",
+            output_root=_resolve(repo_root, config.replay_envelope_root),
+            min_completed_bars=config.min_window_bars,
+            max_completed_5m_age_seconds=None,
+            now=now,
+            producer_id=f"track_b_snap_turn_replay_{instrument.lower()}_{index:05d}",
+        )
+        if "WROTE_ENVELOPES" not in result.verdict.value:
+            blocked.update([str(result.report.get("primary_blocker") or result.verdict.value)])
+            continue
+        for event in (result.first_bull_snap_turn_event, result.first_bear_snap_turn_event):
+            if not isinstance(event, Mapping):
+                continue
+            rows.append(_row_from_replay_event(event))
+    return rows, {
+        "instrument": instrument,
+        "input_candle_count": len(candles),
+        "replay_windows_attempted": len(windows),
+        "strategy_rows_reconstructed": len(rows),
+        "blocked_window_reasons": _counter_rows(blocked, limit=8),
+        "first_candle_timestamp": candles[0]["timestamp"].isoformat() if candles else None,
+        "last_candle_timestamp": candles[-1]["timestamp"].isoformat() if candles else None,
+    }
+
+
+def _row_from_replay_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    strategy_id = str(event.get("strategy_id") or "")
+    meta = SNAP_TURN_STRATEGIES[strategy_id]
+    raw_metadata = event.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+    raw_state = metadata.get(meta["state_key"])
+    raw_features = metadata.get(meta["features_key"])
+    raw_diagnostics = metadata.get("feature_diagnostics")
+    state = raw_state if isinstance(raw_state, Mapping) else {}
+    features = raw_features if isinstance(raw_features, Mapping) else {}
+    diagnostics = raw_diagnostics if isinstance(raw_diagnostics, Mapping) else {}
+    signal_key = "first_bull_snap_turn" if meta["prefix"] == "bull" else "first_bear_snap_turn"
+    hard_signal = features.get(signal_key) is True
+    primitive = _primitive_predicates(
+        {
+            "strategy_id": strategy_id,
+            "state": dict(state),
+            "features": dict(features),
+            "diagnostics": dict(diagnostics),
+            "event": dict(event),
+        }
+    )
+    return {
+        "strategy_id": strategy_id,
+        "result": "SIGNAL" if hard_signal else "NO_SIGNAL",
+        "decision_bar_timestamp": _event_timestamp(event),
+        "generated_at": event.get("generated_at"),
+        "state": dict(state),
+        "features": dict(features),
+        "diagnostics": dict(diagnostics),
+        "event": dict(event),
+        "failed_rule_predicates": [str(item.get("predicate")) for item in primitive if item.get("passed") is not True],
+        "rule_conditions": {str(item.get("predicate")): item.get("passed") is True for item in primitive},
+        "input_event_path": None,
+        "ohlc": _ohlc(event),
+    }
+
+
+def _load_replay_candles(
+    *,
+    repo_root: Path,
+    paths: Iterable[Path],
+    instrument: str,
+    retained_5m_context_root: Path,
+) -> list[dict[str, Any]]:
+    by_timestamp: dict[datetime, dict[str, Any]] = {}
+    candidate_paths = list(paths)
+    retained_root = _resolve(repo_root, retained_5m_context_root)
+    if retained_root.exists():
+        candidate_paths.extend(path.relative_to(repo_root) if path.is_relative_to(repo_root) else path for path in retained_root.glob("**/asian_drift_5m_candles.json"))
+    for path in candidate_paths:
+        payload = _load_json(_resolve(repo_root, path))
+        payload_instrument = str(payload.get("instrument_family") or payload.get("symbol") or instrument)
+        if payload_instrument != instrument:
+            continue
+        for candle in _candles_from_payload(payload):
+            timestamp = candle.get("timestamp")
+            if isinstance(timestamp, datetime):
+                by_timestamp[timestamp] = candle
+    return [by_timestamp[key] for key in sorted(by_timestamp)]
+
+
+def _candles_from_payload(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    raw = payload.get("candles") or payload.get("candle_history") or payload.get("completed_5m_candles") or []
+    if not isinstance(raw, list):
+        return []
+    candles: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        timeframe = str(item.get("timeframe") or payload.get("timeframe") or payload.get("source_timeframe") or "5m")
+        if timeframe != "5m":
+            continue
+        timestamp = _parse_dt(
+            str(
+                item.get("candle_timestamp")
+                or item.get("timestamp")
+                or item.get("observed_at")
+                or item.get("source_end_timestamp")
+                or ""
+            )
+        )
+        if timestamp is None:
+            continue
+        candles.append(
+            {
+                "timestamp": timestamp,
+                "candle_timestamp": timestamp.isoformat(),
+                "open": str(item.get("open")),
+                "high": str(item.get("high")),
+                "low": str(item.get("low")),
+                "close": str(item.get("close")),
+                "volume": str(item.get("volume") or "0"),
+                "completed": True,
+                "timeframe": "5m",
+            }
+        )
+    return candles
+
+
+def _replay_windows(
+    candles: list[dict[str, Any]],
+    *,
+    min_window_bars: int,
+    max_windows: int,
+) -> list[list[dict[str, Any]]]:
+    windows = [candles[index - min_window_bars + 1 : index + 1] for index in range(min_window_bars - 1, len(candles))]
+    return windows[-max_windows:]
+
+
+def _replay_payload(*, instrument: str, candles: list[dict[str, Any]], now: datetime) -> dict[str, Any]:
+    is_mnq = instrument == "MNQ"
+    return {
+        "schema_version": "track_b_snap_turn_replay_backfill_input_v1",
+        "source_id": "track_b_snap_turn_replay_backfill",
+        "diagnostic_replay_only": True,
+        "instrument_family": instrument,
+        "symbol": instrument,
+        "contract_key": "MNQ-202606" if is_mnq else "MGC-202606",
+        "local_symbol": "MNQM6" if is_mnq else "MGCM6",
+        "dataset": "GLBX.MDP3",
+        "timeframe": "5m",
+        "quote_provider_mode": "REALTIME",
+        "realtime_quote_received": True,
+        "current_quote_available": True,
+        "quote_freshness_verdict": "REPLAY_BACKFILL_DIAGNOSTIC_ONLY",
+        "generated_at": now.isoformat(),
+        "candles": [
+            {
+                "candle_timestamp": item["timestamp"].isoformat(),
+                "timestamp": item["timestamp"].isoformat(),
+                "open": item["open"],
+                "high": item["high"],
+                "low": item["low"],
+                "close": item["close"],
+                "volume": item.get("volume"),
+                "completed": True,
+                "timeframe": "5m",
+            }
+            for item in candles
+        ],
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
     }
 
 
@@ -931,6 +1229,10 @@ def _variant_candidates(strategies: Iterable[Mapping[str, Any]]) -> list[dict[st
             sample_count = int((predicate.get("subsequent_excursion_after_near_misses") or {}).get("sample_count") or 0)
             if sample_count <= 0:
                 continue
+            avg_mfe = (predicate.get("subsequent_excursion_after_near_misses") or {}).get("average_mfe_points")
+            avg_mae = (predicate.get("subsequent_excursion_after_near_misses") or {}).get("average_mae_points")
+            if not _average_excursion_favorable(avg_mfe, avg_mae):
+                continue
             candidates.append(
                 {
                     "strategy_id": strategy.get("strategy_id"),
@@ -939,8 +1241,8 @@ def _variant_candidates(strategies: Iterable[Mapping[str, Any]]) -> list[dict[st
                     "predicate": predicate.get("predicate"),
                     "failed_count": predicate.get("count"),
                     "near_miss_excursion_sample_count": sample_count,
-                    "average_mfe_points": (predicate.get("subsequent_excursion_after_near_misses") or {}).get("average_mfe_points"),
-                    "average_mae_points": (predicate.get("subsequent_excursion_after_near_misses") or {}).get("average_mae_points"),
+                    "average_mfe_points": avg_mfe,
+                    "average_mae_points": avg_mae,
                     "next_step": (
                         "Replay a bounded candidate variant for this predicate before any threshold change."
                         if sample_count
@@ -1122,6 +1424,47 @@ def _immediate_replay_backfill_path(snapshot_summary: Mapping[str, Any]) -> dict
     }
 
 
+def _replay_classifications(strategies: Iterable[Mapping[str, Any]], snapshot_summary: Mapping[str, Any]) -> list[str]:
+    strategy_list = list(strategies)
+    if int(snapshot_summary.get("snapshot_count") or 0) <= 0:
+        return ["REPLAY_BACKFILL_INSUFFICIENT"]
+    if _defects_or_parity_checks(strategy_list):
+        return ["SNAP_TURN_PARITY_OR_IMPLEMENTATION_DEFECT_FOUND"]
+    if _variant_candidates(strategy_list):
+        return ["SNAP_TURN_IMPROVEMENT_CANDIDATE_FOUND"]
+    if any(item.get("frequency_classification") == "TOO_QUIET" for item in strategy_list):
+        return ["SNAP_TURN_TOO_QUIET_CONFIRMED"]
+    if any(item.get("frequency_classification") == "METHODOLOGY_INCONCLUSIVE" for item in strategy_list):
+        return ["REPLAY_BACKFILL_INSUFFICIENT"]
+    return ["SNAP_TURN_HEALTHY"]
+
+
+def _simplest_methodology_change(strategies: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    candidates = _variant_candidates(list(strategies))
+    if candidates:
+        first = candidates[0]
+        return {
+            "method": "closest_failed_bar_variant",
+            "candidate": first,
+            "promotion_status": "RESEARCH_REPLAY_ONLY",
+            "do_not_promote_to_paper": True,
+        }
+    quiet = [item for item in strategies if item.get("frequency_classification") == "TOO_QUIET"]
+    if quiet:
+        return {
+            "method": "closest_failed_bar_variant",
+            "target_strategy": quiet[0].get("strategy_id"),
+            "promotion_status": "RESEARCH_REPLAY_ONLY",
+            "do_not_promote_to_paper": True,
+            "evidence_needed": "Replay closest failed bars and compare MFE/MAE against control windows before predicate changes.",
+        }
+    return {
+        "method": "none_yet",
+        "reason": "Replay/backfill did not produce a sufficient improvement candidate.",
+        "promotion_status": "NO_PRODUCTION_CHANGE",
+    }
+
+
 def _candle_index(
     *,
     evaluated_rows: Iterable[Mapping[str, Any]],
@@ -1286,6 +1629,12 @@ def _favorable_excursion(excursion: Mapping[str, Any]) -> bool:
     mfe = _decimal(excursion.get("mfe_points"))
     mae = _decimal(excursion.get("mae_points")).copy_abs()
     return directional > 0 or (mfe > 0 and mfe >= mae)
+
+
+def _average_excursion_favorable(avg_mfe: Any, avg_mae: Any) -> bool:
+    mfe = _decimal(avg_mfe)
+    mae_abs = _decimal(avg_mae).copy_abs()
+    return mfe > 0 and mfe >= mae_abs
 
 
 def _min_time(values: Iterable[Any]) -> str | None:
@@ -1514,4 +1863,55 @@ def _markdown(report: Mapping[str, Any]) -> str:
     lines.extend(["", "## Output Classifications", ""])
     for item in report.get("output_classifications") or []:
         lines.append(f"- {item}")
+    return "\n".join(lines) + "\n"
+
+
+def _replay_markdown(report: Mapping[str, Any]) -> str:
+    lines = [
+        "# Track B Snap-Turn Replay Backfill",
+        "",
+        f"Generated: {report.get('generated_at')}",
+        "",
+        "This is diagnostic replay/backfill only. It does not change production thresholds or submit orders.",
+        "",
+        "## Classifications",
+        "",
+    ]
+    for item in report.get("classifications") or []:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Reconstruction", ""])
+    for instrument, summary in (report.get("instrument_reconstruction") or {}).items():
+        lines.append(
+            f"- {instrument}: candles={summary.get('input_candle_count')}, "
+            f"windows={summary.get('replay_windows_attempted')}, rows={summary.get('strategy_rows_reconstructed')}"
+        )
+    lines.extend(["", "## Strategy Counts", ""])
+    for strategy in report.get("strategies") or []:
+        lines.append(f"### {strategy.get('strategy_id')}")
+        lines.append(f"- Completed bars reconstructed: {strategy.get('evaluated_completed_bars_total')}")
+        lines.append(f"- Eligible bars: {strategy.get('eligible_completed_bars_evaluated')}")
+        lines.append(f"- Hard signals: {strategy.get('hard_signals')}")
+        lines.append(f"- One-predicate-away: {strategy.get('one_predicate_away')}")
+        lines.append(f"- Two-predicates-away: {strategy.get('two_predicates_away')}")
+        lines.append(f"- Frequency classification: {strategy.get('frequency_classification')}")
+        closest = strategy.get("closest_failed_bars") or []
+        if closest:
+            lines.append("- Closest failed bars:")
+            for item in closest[:5]:
+                excursion = item.get("future_excursion") or {}
+                lines.append(
+                    "  - "
+                    f"{item.get('decision_bar_timestamp')}: failed={item.get('primitive_failed_predicates_count')} "
+                    f"MFE={excursion.get('mfe_points')} MAE={excursion.get('mae_points')} "
+                    f"directional={excursion.get('directional_close_excursion_points')}"
+                )
+        lines.append("")
+    lines.extend(["## Next Methodology Change To Test", ""])
+    method = report.get("simplest_methodology_change_to_test_first") or {}
+    lines.append(f"- Method: {method.get('method')}")
+    lines.append(f"- Promotion status: {method.get('promotion_status')}")
+    if method.get("candidate"):
+        lines.append(f"- Candidate: {method.get('candidate')}")
+    if method.get("reason"):
+        lines.append(f"- Reason: {method.get('reason')}")
     return "\n".join(lines) + "\n"

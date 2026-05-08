@@ -6,7 +6,9 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_snap_turn_near_miss_amplification import (
     TrackBSnapTurnNearMissAmplificationConfig,
+    TrackBSnapTurnReplayBackfillConfig,
     create_track_b_snap_turn_near_miss_amplification,
+    create_track_b_snap_turn_replay_backfill,
 )
 
 
@@ -368,3 +370,49 @@ def test_snap_turn_audit_marks_missing_envelope_as_replay_backfill_required(tmp_
     latest = json.loads((tmp_path / "latest_snapshots.json").read_text(encoding="utf-8"))
     assert latest["snapshots"][0]["feature_envelope_missing_is_product_defect"] is True
     assert latest["snapshots"][0]["no_signal_reason"] == "FEATURE_ENVELOPE_MISSING_REPLAY_BACKFILL_REQUIRED"
+
+
+def test_snap_turn_replay_backfill_reconstructs_dense_scorable_snapshots(tmp_path: Path) -> None:
+    candles = []
+    for index in range(10):
+        base = 100 + index
+        candles.append(
+            {
+                "candle_timestamp": f"2026-05-07T14:{index * 5:02d}:00+00:00",
+                "timestamp": f"2026-05-07T14:{index * 5:02d}:00+00:00",
+                "open": str(base),
+                "high": str(base + 2),
+                "low": str(base - 1),
+                "close": str(base + 1),
+                "volume": "100",
+                "completed": True,
+            }
+        )
+    mgc_payload = _write_json(tmp_path / "mgc_5m.json", {"candles": candles, "instrument_family": "MGC"})
+
+    result = create_track_b_snap_turn_replay_backfill(
+        config=TrackBSnapTurnReplayBackfillConfig(
+            repo_root=tmp_path,
+            mgc_candle_payloads=(mgc_payload,),
+            mnq_candle_payloads=(),
+            replay_envelope_root=tmp_path / "replay_envelopes",
+            output_json=tmp_path / "replay.json",
+            output_md=tmp_path / "replay.md",
+            scorable_snapshots_jsonl=tmp_path / "replay_snapshots.jsonl",
+            latest_scorable_snapshots_json=tmp_path / "latest_replay_snapshots.json",
+            min_window_bars=8,
+        ),
+        now=datetime(2026, 5, 7, 15, 0, tzinfo=UTC),
+    )
+
+    assert result.report["broker_commands_invoked"] is False
+    assert result.report["submit_cancel_place_order_invoked"] is False
+    assert result.report["instrument_reconstruction"]["MGC"]["replay_windows_attempted"] == 3
+    assert result.report["instrument_reconstruction"]["MGC"]["strategy_rows_reconstructed"] == 6
+    bull = next(row for row in result.report["strategies"] if row["strategy_id"] == "FIRST_BULL_SNAP_TURN_V1")
+    bear = next(row for row in result.report["strategies"] if row["strategy_id"] == "FIRST_BEAR_SNAP_TURN_V1")
+    assert bull["evaluated_completed_bars_total"] == 3
+    assert bear["evaluated_completed_bars_total"] == 3
+    latest = json.loads((tmp_path / "latest_replay_snapshots.json").read_text(encoding="utf-8"))
+    assert latest["snapshot_count"] == 6
+    assert latest["numeric_distance_available_count"] > 0
