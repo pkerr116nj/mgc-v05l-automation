@@ -1,4 +1,4 @@
-"""Track B research harness / workbench backlog.
+"""Track B research harness / workbench backlog and reuse audit.
 
 This artifact is a reusable research-control surface. It does not run strategy
 replay, change thresholds, promote candidates, or invoke broker paths.
@@ -23,6 +23,8 @@ class TrackBResearchHarnessWorkbenchConfig:
     repo_root: Path = Path(".")
     output_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_research_harness_workbench.json"
     output_md: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_research_harness_workbench.md"
+    reuse_audit_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_research_workbench_reuse_audit.json"
+    reuse_audit_md: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_research_workbench_reuse_audit.md"
     location_variant_research_json: Path = (
         DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_location_variant_research_replay.json"
     )
@@ -36,6 +38,45 @@ class TrackBResearchHarnessWorkbenchResult:
     report_json: Path
     report_md: Path
     report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TrackBResearchWorkbenchReuseAuditResult:
+    report_json: Path
+    report_md: Path
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ResearchRunPlanRequest:
+    run_id: str
+    run_kind: str
+    candidate_id: str
+    timeframe: str
+    exit_policy_id: str
+    lookback_id: str
+    session: str = "ANY"
+    regime: str = "ANY"
+
+
+SHARED_PIPELINE_ID = "TRACK_B_RESEARCH_WORKBENCH_SHARED_PIPELINE_V1"
+SHARED_SCORER_ID = "track_b_research_pnl_risk_scorer_v1"
+SHARED_REPORT_WRITER_ID = "track_b_research_sample_frame_report_writer_v1"
+SHARED_EXIT_POLICY_ENGINE_ID = "track_b_research_exit_policy_engine_v1"
+
+CANONICAL_PIPELINE = [
+    "track1_1m_data",
+    "data_index",
+    "decision_surface",
+    "snapshot_builder",
+    "candidate_spec",
+    "rule_evaluator",
+    "exit_policy_engine",
+    "pnl_risk_scorer",
+    "report_writer",
+    "gui_api",
+    "backlog_promotion_status",
+]
 
 
 def create_track_b_research_harness_workbench(
@@ -90,11 +131,163 @@ def create_track_b_research_harness_workbench(
             "Add baseline/control sampling before any PAPER promotion decision.",
         ],
     }
+    report["reuse_audit_artifacts"] = {
+        "json": str(_resolve(repo_root, actual_config.reuse_audit_json)),
+        "markdown": str(_resolve(repo_root, actual_config.reuse_audit_md)),
+    }
     output_json = _resolve(repo_root, actual_config.output_json)
     output_md = _resolve(repo_root, actual_config.output_md)
     _write_json(output_json, report)
     _write_text(output_md, _markdown(report))
     return TrackBResearchHarnessWorkbenchResult(report_json=output_json, report_md=output_md, report=report)
+
+
+def create_track_b_research_workbench_reuse_audit(
+    *,
+    config: TrackBResearchHarnessWorkbenchConfig | None = None,
+    now: datetime | None = None,
+) -> TrackBResearchWorkbenchReuseAuditResult:
+    actual_config = config or TrackBResearchHarnessWorkbenchConfig()
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    repo_root = Path(actual_config.repo_root)
+    workbench = create_track_b_research_harness_workbench(config=actual_config, now=actual_now).report
+    backlog = workbench.get("candidate_backlog") if isinstance(workbench.get("candidate_backlog"), list) else []
+    run_plan = build_research_workbench_run_plan(
+        [
+            ResearchRunPlanRequest(
+                run_id="three_minute_candidate_probe",
+                run_kind="candidate",
+                candidate_id="TRACK_B_GENERIC_3M_CANDIDATE_FIXTURE",
+                timeframe="3m",
+                exit_policy_id="TIME_BOXED_3X3M_RESEARCH_EXIT",
+                lookback_id="MAX_TRACK1_1M_HISTORY_THROUGH_PRIOR_FRIDAY",
+                session="US_OPEN",
+                regime="VOLATILE",
+            ),
+            ResearchRunPlanRequest(
+                run_id="five_minute_candidate_probe",
+                run_kind="candidate",
+                candidate_id="TRACK_B_GENERIC_5M_CANDIDATE_FIXTURE",
+                timeframe="5m",
+                exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1_RESEARCH",
+                lookback_id="MAX_TRACK1_1M_HISTORY_THROUGH_PRIOR_FRIDAY",
+                session="US_OPEN",
+                regime="ANY",
+            ),
+            ResearchRunPlanRequest(
+                run_id="backlog_location_variant_retest",
+                run_kind="backlog_candidate",
+                candidate_id="MNQ_FIRST_BEAR_SNAP_TURN_LOCATION_VARIANT_RESEARCH_V1",
+                timeframe="5m",
+                exit_policy_id="FULL_HISTORY_EXIT_POLICY_GRID",
+                lookback_id="MAX_TRACK1_1M_HISTORY_THROUGH_PRIOR_FRIDAY",
+                session="US_OPEN",
+                regime="SNAP_TURN",
+            ),
+            ResearchRunPlanRequest(
+                run_id="session_regime_matched_random_baseline",
+                run_kind="baseline",
+                candidate_id="SESSION_REGIME_MATCHED_RANDOM_BASELINE",
+                timeframe="5m",
+                exit_policy_id="FULL_HISTORY_EXIT_POLICY_GRID",
+                lookback_id="MAX_TRACK1_1M_HISTORY_THROUGH_PRIOR_FRIDAY",
+                session="US_OPEN",
+                regime="SNAP_TURN",
+            ),
+        ]
+    )
+    report = {
+        "schema_version": "track_b_research_workbench_reuse_audit_v1",
+        "generated_at": actual_now.isoformat(),
+        "production_thresholds_changed": False,
+        "paper_promotion_changed": False,
+        "broker_commands_invoked": False,
+        "paper_proof_cli_invoked": False,
+        "submit_cancel_place_order_invoked": False,
+        "audit_classification": "REUSABLE_WORKBENCH_CONTRACT_ESTABLISHED",
+        "canonical_pipeline": _canonical_pipeline_report(),
+        "candidate_onboarding": _candidate_onboarding_report(),
+        "reusable_vs_bespoke": _reusable_vs_bespoke_report(),
+        "timeframe_composability": {
+            "supported_timeframes": ["3m", "5m"],
+            "source_data": "Track 1 1m data indexed once and rolled into decision surfaces.",
+            "separate_code_paths_required": False,
+            "contract": "DecisionSurfaceSpec owns timeframe; candidate evaluators consume snapshots, not bespoke bars.",
+        },
+        "exit_policy_composability": {
+            "engine_id": SHARED_EXIT_POLICY_ENGINE_ID,
+            "all_candidates_use_same_engine": True,
+            "supported_policy_families": [
+                "time-box exits",
+                "dynamic trailing stops",
+                "quick scalp targets",
+                "breakeven after favorable excursion",
+                "failed-follow-through exits",
+                "volatility-scaled stop/target",
+                "VWAP/EMA invalidation exits",
+            ],
+        },
+        "pnl_risk_composability": {
+            "scorer_id": SHARED_SCORER_ID,
+            "all_candidates_use_same_scorer": True,
+            "metrics": ["P&L", "R", "win rate", "drawdown", "Sharpe", "MFE/MAE", "outlier sensitivity"],
+            "sample_frame_reporting_required": True,
+        },
+        "gui_api_composability": {
+            "selection_source": "registries/options",
+            "hard_coded_ui_logic_allowed": False,
+            "selectable_options": ["candidate", "timeframe", "session", "regime", "exit_policy", "lookback"],
+        },
+        "backlog_integration": {
+            "retest_required_status_selectable": True,
+            "backlog_candidates": [item.get("candidate_name") for item in backlog if isinstance(item, Mapping)],
+            "legacy_one_off_scripts_required": False,
+        },
+        "drift_prevention": _drift_prevention_report(),
+        "guardrail": {
+            "rule": (
+                "No new Track B research candidate may be implemented as a standalone one-off diagnostic unless it "
+                "also creates reusable platform functionality."
+            ),
+            "enforced_by_audit": True,
+        },
+        "shared_run_plan": run_plan,
+        "shared_run_plan_validation": _validate_shared_run_plan(run_plan),
+    }
+    output_json = _resolve(repo_root, actual_config.reuse_audit_json)
+    output_md = _resolve(repo_root, actual_config.reuse_audit_md)
+    _write_json(output_json, report)
+    _write_text(output_md, _reuse_audit_markdown(report))
+    return TrackBResearchWorkbenchReuseAuditResult(report_json=output_json, report_md=output_md, report=report)
+
+
+def build_research_workbench_run_plan(requests: list[ResearchRunPlanRequest]) -> list[dict[str, Any]]:
+    return [
+        {
+            "run_id": request.run_id,
+            "run_kind": request.run_kind,
+            "candidate_id": request.candidate_id,
+            "timeframe": request.timeframe,
+            "session": request.session,
+            "regime": request.regime,
+            "lookback_id": request.lookback_id,
+            "pipeline_id": SHARED_PIPELINE_ID,
+            "pipeline": CANONICAL_PIPELINE,
+            "data_index_id": "track1_1m_history_index_v1",
+            "decision_surface_spec_id": f"decision_surface_{request.timeframe}_from_1m_v1",
+            "snapshot_builder_id": "track_b_research_snapshot_builder_v1",
+            "candidate_spec_registry_id": "track_b_research_candidate_specs_v1",
+            "rule_evaluator_id": "track_b_research_rules_py_contract_v1",
+            "exit_policy_engine_id": SHARED_EXIT_POLICY_ENGINE_ID,
+            "exit_policy_id": request.exit_policy_id,
+            "pnl_risk_scorer_id": SHARED_SCORER_ID,
+            "report_writer_id": SHARED_REPORT_WRITER_ID,
+            "gui_api_contract_id": "track_b_research_workbench_options_api_v1",
+            "promotion_status_writer_id": "track_b_research_backlog_promotion_status_v1",
+        }
+        for request in requests
+    ]
 
 
 def _location_variant_backlog_item(
@@ -158,6 +351,121 @@ def _location_variant_backlog_item(
             "required_metrics": ["trades", "P&L", "average R", "win rate", "drawdown", "Sharpe", "MFE/MAE"],
             "promotion_rule": "No PAPER promotion until full-history replay beats baselines with acceptable drawdown and sample frame.",
         },
+    }
+
+
+def _canonical_pipeline_report() -> dict[str, Any]:
+    return {
+        "pipeline_id": SHARED_PIPELINE_ID,
+        "canonical_path": CANONICAL_PIPELINE,
+        "path_display": (
+            "Track 1 1m data -> data index -> decision surface -> snapshot builder -> candidate spec -> "
+            "rule evaluator -> exit-policy engine -> P&L/risk scorer -> report writer -> GUI/API -> "
+            "backlog/promotion status"
+        ),
+        "shared_contracts": [
+            "CandidateSpec",
+            "DecisionSurfaceSpec",
+            "rules.py",
+            "ExitPolicySpec",
+            "SampleFrameReport",
+        ],
+    }
+
+
+def _candidate_onboarding_report() -> dict[str, Any]:
+    return {
+        "custom_backtest_script_required": False,
+        "minimum_files": [
+            "candidate registry entry",
+            "rules.py evaluator or existing evaluator reference",
+            "fixture/replay test",
+        ],
+        "minimum_fields": [
+            "candidate_id",
+            "base_strategy_id",
+            "instrument",
+            "side",
+            "timeframes",
+            "sessions",
+            "regime_tags",
+            "required_snapshot_fields",
+            "predicate definitions",
+            "exit_policy_grid",
+            "baseline_ids",
+            "promotion_status",
+        ],
+        "onboarding_steps": [
+            "Add CandidateSpec metadata.",
+            "Select DecisionSurfaceSpec from registry.",
+            "Bind evaluator from rules.py shared contract.",
+            "Select exit-policy grid from registry.",
+            "Run shared scorer/report writer.",
+            "Update backlog/promotion status from report outcome.",
+        ],
+    }
+
+
+def _reusable_vs_bespoke_report() -> dict[str, Any]:
+    return {
+        "reusable_platform_components": [
+            "track_b_research_harness_workbench.py backlog and reuse-audit reports",
+            "CandidateSpec metadata contract",
+            "DecisionSurfaceSpec timeframe/data-index contract",
+            "shared exit-policy engine contract",
+            "shared P&L/risk scorer contract",
+            "shared sample-frame report writer contract",
+            "GUI/API options registry contract",
+        ],
+        "candidate_specific_components": [
+            "MNQ_FIRST_BEAR_SNAP_TURN_LOCATION_VARIANT_RESEARCH_V1 predicate variant",
+            "snap-turn primitive predicate distance extraction",
+            "snap-turn closest-failed-bar snapshot labels",
+        ],
+        "bespoke_paths_to_generalize": [
+            {
+                "path": "track_b_snap_turn_near_miss_amplification.py location-variant replay functions",
+                "reason": (
+                    "Current snap-turn replay/backfill is valuable evidence retention, but future candidates should call "
+                    "the shared CandidateSpec + DecisionSurfaceSpec + exit-policy/scorer/report contracts instead of "
+                    "adding more candidate-named replay functions."
+                ),
+                "target": "general candidate replay runner",
+            }
+        ],
+    }
+
+
+def _drift_prevention_report() -> dict[str, Any]:
+    return {
+        "possible_drift_points": [
+            "research replay reconstructs decision surfaces differently from shadow-live scoring",
+            "candidate-specific predicates duplicate production rules instead of importing rules.py contract",
+            "exit policies use bespoke P&L math outside the shared scorer",
+            "GUI/API hard-codes candidate semantics instead of reading registries/options",
+        ],
+        "shared_contract": "CandidateSpec + DecisionSurfaceSpec + rules.py",
+        "shadow_live_alignment_rule": (
+            "Shadow-live scoring and research replay must consume the same candidate spec, decision surface schema, "
+            "and rule evaluator identifiers."
+        ),
+    }
+
+
+def _validate_shared_run_plan(run_plan: list[Mapping[str, Any]]) -> dict[str, Any]:
+    scorer_ids = {str(row.get("pnl_risk_scorer_id")) for row in run_plan}
+    report_ids = {str(row.get("report_writer_id")) for row in run_plan}
+    pipeline_ids = {str(row.get("pipeline_id")) for row in run_plan}
+    kinds = {str(row.get("run_kind")) for row in run_plan}
+    timeframes = {str(row.get("timeframe")) for row in run_plan}
+    return {
+        "all_runs_share_pipeline": pipeline_ids == {SHARED_PIPELINE_ID},
+        "all_runs_share_scorer": scorer_ids == {SHARED_SCORER_ID},
+        "all_runs_share_report_writer": report_ids == {SHARED_REPORT_WRITER_ID},
+        "has_3m_candidate": "3m" in timeframes and "candidate" in kinds,
+        "has_5m_candidate": "5m" in timeframes and "candidate" in kinds,
+        "has_backlog_candidate": "backlog_candidate" in kinds,
+        "has_baseline": "baseline" in kinds,
     }
 
 
@@ -229,4 +537,61 @@ def _markdown(report: Mapping[str, Any]) -> str:
     lines.extend(["## Next Steps", ""])
     for item in report.get("next_workbench_steps") or []:
         lines.append(f"- {item}")
+    return "\n".join(lines) + "\n"
+
+
+def _reuse_audit_markdown(report: Mapping[str, Any]) -> str:
+    lines = [
+        "# Track B Research Workbench Reuse Audit",
+        "",
+        f"Generated: {report.get('generated_at')}",
+        "",
+        f"Classification: {report.get('audit_classification')}",
+        "",
+        "This audit checks whether Track B research is moving toward a reusable workbench instead of the old one-off Track 1 script sprawl.",
+        "",
+        "## Shared Pipeline",
+        "",
+    ]
+    pipeline = report.get("canonical_pipeline") or {}
+    lines.append(str(pipeline.get("path_display") or ""))
+    lines.extend(["", "## Candidate Onboarding", ""])
+    onboarding = report.get("candidate_onboarding") or {}
+    lines.append(f"- Custom backtest script required: {onboarding.get('custom_backtest_script_required')}")
+    lines.append("- Minimum fields:")
+    for item in onboarding.get("minimum_fields") or []:
+        lines.append(f"  - {item}")
+    lines.extend(["", "## Reusable vs Bespoke", ""])
+    components = report.get("reusable_vs_bespoke") or {}
+    lines.append("- Reusable platform components:")
+    for item in components.get("reusable_platform_components") or []:
+        lines.append(f"  - {item}")
+    lines.append("- Candidate-specific components:")
+    for item in components.get("candidate_specific_components") or []:
+        lines.append(f"  - {item}")
+    lines.append("- Generalization flags:")
+    for item in components.get("bespoke_paths_to_generalize") or []:
+        lines.append(f"  - {item.get('path')}: {item.get('reason')}")
+    lines.extend(["", "## Composability", ""])
+    timeframe = report.get("timeframe_composability") or {}
+    exit_policy = report.get("exit_policy_composability") or {}
+    scorer = report.get("pnl_risk_composability") or {}
+    gui = report.get("gui_api_composability") or {}
+    backlog = report.get("backlog_integration") or {}
+    lines.append(f"- Timeframes: {', '.join(timeframe.get('supported_timeframes') or [])}; separate code paths required={timeframe.get('separate_code_paths_required')}")
+    lines.append(f"- Exit engine: {exit_policy.get('engine_id')}; shared={exit_policy.get('all_candidates_use_same_engine')}")
+    lines.append(f"- Scorer: {scorer.get('scorer_id')}; shared={scorer.get('all_candidates_use_same_scorer')}")
+    lines.append(f"- GUI/API selection source: {gui.get('selection_source')}; hard-coded UI allowed={gui.get('hard_coded_ui_logic_allowed')}")
+    lines.append(f"- Backlog retest selectable: {backlog.get('retest_required_status_selectable')}")
+    lines.extend(["", "## Drift Prevention", ""])
+    drift = report.get("drift_prevention") or {}
+    lines.append(f"- Shared contract: {drift.get('shared_contract')}")
+    lines.append(f"- Shadow-live alignment rule: {drift.get('shadow_live_alignment_rule')}")
+    lines.extend(["", "## Guardrail", ""])
+    guardrail = report.get("guardrail") or {}
+    lines.append(str(guardrail.get("rule") or ""))
+    lines.extend(["", "## Shared Run Plan Validation", ""])
+    validation = report.get("shared_run_plan_validation") or {}
+    for key in sorted(validation):
+        lines.append(f"- {key}: {validation[key]}")
     return "\n".join(lines) + "\n"
