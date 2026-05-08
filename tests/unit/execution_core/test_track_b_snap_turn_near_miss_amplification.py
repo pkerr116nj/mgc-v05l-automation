@@ -488,7 +488,12 @@ def test_location_variant_research_replay_promotes_only_to_replay_candidate(tmp_
         now=datetime(2026, 5, 7, 16, 0, tzinfo=UTC),
     )
 
-    assert result.report["candidate_status"] == "RESEARCH_ONLY"
+    assert result.report["candidate_status"] == "NOT_PROMOTED"
+    assert result.report["candidate_status_reasons"] == [
+        "REJECTED_IN_SINGLE_WINDOW_DIAGNOSTIC",
+        "RETEST_REQUIRED_ON_FULL_HISTORY_RESEARCH_ENGINE",
+    ]
+    assert result.report["research_inventory_action"] == "KEEP_IN_FUTURE_RESEARCH_HARNESS_BACKLOG"
     assert result.report["paper_eligible"] is False
     assert result.report["production_thresholds_changed"] is False
     assert result.report["sample_count"] == 21
@@ -556,7 +561,12 @@ def test_location_variant_exit_sensitivity_keeps_quick_scalp_research_only(tmp_p
         now=datetime(2026, 5, 7, 17, 0, tzinfo=UTC),
     )
 
-    assert result.report["candidate_status"] == "RESEARCH_ONLY"
+    assert result.report["candidate_status"] == "NOT_PROMOTED"
+    assert result.report["candidate_status_reasons"] == [
+        "REJECTED_IN_SINGLE_WINDOW_DIAGNOSTIC",
+        "RETEST_REQUIRED_ON_FULL_HISTORY_RESEARCH_ENGINE",
+    ]
+    assert result.report["research_inventory_action"] == "KEEP_IN_FUTURE_RESEARCH_HARNESS_BACKLOG"
     assert result.report["paper_eligible"] is False
     assert result.report["classification"] == "SCALP_ONLY_CANDIDATE"
     assert result.report["sample_frame"]["lookback_classification"] == "SINGLE_WINDOW_DIAGNOSTIC"

@@ -466,13 +466,16 @@ def create_track_b_snap_turn_location_variant_research_replay(
         baseline_summary=baseline_summary,
         minimum_sample_count=actual_config.minimum_sample_count,
     )
+    candidate_status = _candidate_status_for_sample_frame(sample_frame=sample_frame, classification=classification)
     report = {
         "schema_version": "track_b_snap_turn_location_variant_research_replay_v1",
         "generated_at": actual_now.isoformat(),
         "candidate_name": actual_config.candidate_name,
         "candidate_strategy_id": actual_config.candidate_strategy_id,
         "candidate_predicate": actual_config.candidate_predicate,
-        "candidate_status": "RESEARCH_ONLY",
+        "candidate_status": candidate_status["candidate_status"],
+        "candidate_status_reasons": candidate_status["candidate_status_reasons"],
+        "research_inventory_action": candidate_status["research_inventory_action"],
         "paper_eligible": False,
         "live_money_eligible": False,
         "production_thresholds_changed": False,
@@ -546,12 +549,15 @@ def create_track_b_snap_turn_location_variant_exit_sensitivity(
         early_favorable_count=early_favorable_count,
         immediate_loser_count=immediate_loser_count,
     )
+    candidate_status = _candidate_status_for_sample_frame(sample_frame=sample_frame, classification=classification)
     report = {
         "schema_version": "track_b_snap_turn_location_variant_exit_sensitivity_v1",
         "generated_at": actual_now.isoformat(),
         "candidate_name": research_report.get("candidate_name")
         or "MNQ_FIRST_BEAR_SNAP_TURN_LOCATION_VARIANT_RESEARCH_V1",
-        "candidate_status": "RESEARCH_ONLY",
+        "candidate_status": candidate_status["candidate_status"],
+        "candidate_status_reasons": candidate_status["candidate_status_reasons"],
+        "research_inventory_action": candidate_status["research_inventory_action"],
         "paper_eligible": False,
         "production_thresholds_changed": False,
         "production_strategy_changed": False,
@@ -2398,11 +2404,15 @@ def _location_variant_answer(classification: str, policy_summary: Mapping[str, A
     baseline_time = baseline_summary.get("time_boxed_3x5m") or {}
     if classification == "PROMOTE_TO_REPLAY_CANDIDATE":
         return (
-            "Relaxing/modifying bear_snap_location_ok is credible enough for a bounded replay candidate, "
-            f"with time-box average R {candidate_time.get('average_r')} versus baseline {baseline_time.get('average_r')}."
+            "This bounded replay showed enough local promise to remain in research inventory, "
+            f"with time-box average R {candidate_time.get('average_r')} versus baseline {baseline_time.get('average_r')}. "
+            "Because the current sample frame is not a full-history replay, do not promote to PAPER."
         )
     if classification == "REJECT_FALSE_POSITIVE":
-        return "The near-misses looked attractive in raw MFE/MAE but failed simple policy replay; reject this false-positive lane."
+        return (
+            "The single-window near-misses failed the tested simple policy replay. This is not a broad strategy rejection; "
+            "retain the candidate for full-history research-engine retest."
+        )
     if classification == "INSUFFICIENT_SAMPLE":
         return "The sample is too small for a profitability claim; keep research-only and collect/replay more windows."
     return "The candidate remains research-only: raw MFE/MAE is interesting, but simple policy replay is not strong enough for promotion."
@@ -2434,6 +2444,30 @@ def _exit_sensitivity_classification(
     return "REJECT_ALL_TESTED_POLICIES"
 
 
+def _candidate_status_for_sample_frame(*, sample_frame: Mapping[str, Any], classification: str) -> dict[str, Any]:
+    lookback = str(sample_frame.get("lookback_classification") or "")
+    if lookback == "SINGLE_WINDOW_DIAGNOSTIC":
+        return {
+            "candidate_status": "NOT_PROMOTED",
+            "candidate_status_reasons": [
+                "REJECTED_IN_SINGLE_WINDOW_DIAGNOSTIC",
+                "RETEST_REQUIRED_ON_FULL_HISTORY_RESEARCH_ENGINE",
+            ],
+            "research_inventory_action": "KEEP_IN_FUTURE_RESEARCH_HARNESS_BACKLOG",
+        }
+    if classification in {"PROMOTE_TO_REPLAY_CANDIDATE", "SCALP_ONLY_CANDIDATE", "EXIT_POLICY_MISMATCH"}:
+        return {
+            "candidate_status": "NOT_PROMOTED",
+            "candidate_status_reasons": ["REPLAY_CANDIDATE_REQUIRES_FULL_HISTORY_CONFIRMATION"],
+            "research_inventory_action": "KEEP_IN_FUTURE_RESEARCH_HARNESS_BACKLOG",
+        }
+    return {
+        "candidate_status": "NOT_PROMOTED",
+        "candidate_status_reasons": ["RESEARCH_ONLY_NOT_PAPER_ELIGIBLE"],
+        "research_inventory_action": "KEEP_IN_RESEARCH_INVENTORY",
+    }
+
+
 def _best_policy(policy_summary: Mapping[str, Any]) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     for policy, summary in policy_summary.items():
@@ -2462,9 +2496,9 @@ def _exit_sensitivity_answer(classification: str, policy_summary: Mapping[str, A
     best_avg = best.get("average_r")
     if classification == "SCALP_ONLY_CANDIDATE":
         return (
-            "The location variant still should not be promoted to PAPER, but entry quality is not fully rejected: "
+            "The location variant remains not promoted and should not be promoted to PAPER, but entry quality is not fully rejected: "
             f"the best tested result is the quick-scalp policy ({best_policy}) at average R {best_avg}. "
-            "Next work should test a research-only scalp management variant with controls, not loosen production."
+            "Next work should retest in the full-history research harness with controls, not loosen production."
         )
     if classification == "EXIT_POLICY_MISMATCH":
         return (
@@ -2481,8 +2515,9 @@ def _exit_sensitivity_answer(classification: str, policy_summary: Mapping[str, A
     if classification == "INSUFFICIENT_SAMPLE":
         return "The sample is still too small for an exit-design conclusion; retain research-only and replay more windows."
     return (
-        "Do not kill the idea solely because the first exits failed, but every additional bounded management policy also "
-        "failed here. Keep it research-only and require a better entry/management hypothesis before more work."
+        "Do not kill the idea solely because this single-window exit audit failed, but every additional bounded management "
+        "policy also failed here. Keep it not promoted, retain it in research inventory, and require a full-history "
+        "research-harness retest before more bespoke work."
     )
 
 
@@ -2991,6 +3026,9 @@ def _location_variant_markdown(report: Mapping[str, Any]) -> str:
         f"Generated: {report.get('generated_at')}",
         "",
         f"Candidate: {report.get('candidate_name')}",
+        f"Candidate status: {report.get('candidate_status')}",
+        f"Candidate status reasons: {', '.join(report.get('candidate_status_reasons') or [])}",
+        f"Research inventory action: {report.get('research_inventory_action')}",
         f"Classification: {report.get('classification')}",
         "",
         "This is research-only. It does not change production thresholds, submit orders, or promote to PAPER.",
@@ -3032,6 +3070,9 @@ def _exit_sensitivity_markdown(report: Mapping[str, Any]) -> str:
         f"Generated: {report.get('generated_at')}",
         "",
         f"Candidate: {report.get('candidate_name')}",
+        f"Candidate status: {report.get('candidate_status')}",
+        f"Candidate status reasons: {', '.join(report.get('candidate_status_reasons') or [])}",
+        f"Research inventory action: {report.get('research_inventory_action')}",
         f"Classification: {report.get('classification')}",
         "",
         "This is research-only. It does not change production thresholds, promote to PAPER, or submit orders.",
