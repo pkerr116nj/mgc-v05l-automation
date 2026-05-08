@@ -413,6 +413,8 @@ def test_snap_turn_replay_backfill_reconstructs_dense_scorable_snapshots(tmp_pat
     assert result.report["submit_cancel_place_order_invoked"] is False
     assert result.report["instrument_reconstruction"]["MGC"]["replay_windows_attempted"] == 3
     assert result.report["instrument_reconstruction"]["MGC"]["strategy_rows_reconstructed"] == 6
+    assert result.report["sample_frame"]["lookback_classification"] == "SINGLE_WINDOW_DIAGNOSTIC"
+    assert result.report["sample_frame"]["completed_5m_bars_by_instrument_session"]["MGC"]["completed_5m_bars_total"] == 3
     bull = next(row for row in result.report["strategies"] if row["strategy_id"] == "FIRST_BULL_SNAP_TURN_V1")
     bear = next(row for row in result.report["strategies"] if row["strategy_id"] == "FIRST_BEAR_SNAP_TURN_V1")
     assert bull["evaluated_completed_bars_total"] == 3
@@ -491,6 +493,8 @@ def test_location_variant_research_replay_promotes_only_to_replay_candidate(tmp_
     assert result.report["production_thresholds_changed"] is False
     assert result.report["sample_count"] == 21
     assert result.report["classification"] == "PROMOTE_TO_REPLAY_CANDIDATE"
+    assert result.report["sample_frame"]["lookback_classification"] == "SINGLE_WINDOW_DIAGNOSTIC"
+    assert result.report["sample_frame"]["completed_5m_bars_by_instrument_session"]["MNQ"]["completed_5m_bars_total"] == 21
     assert result.report["policy_summary"]["time_boxed_3x5m"]["average_r"] is not None
     assert result.report["submit_cancel_place_order_invoked"] is False
 
@@ -555,6 +559,8 @@ def test_location_variant_exit_sensitivity_keeps_quick_scalp_research_only(tmp_p
     assert result.report["candidate_status"] == "RESEARCH_ONLY"
     assert result.report["paper_eligible"] is False
     assert result.report["classification"] == "SCALP_ONLY_CANDIDATE"
+    assert result.report["sample_frame"]["lookback_classification"] == "SINGLE_WINDOW_DIAGNOSTIC"
+    assert result.report["sample_frame"]["completed_5m_bars_by_instrument_session"]["MNQ"]["completed_5m_bars_total"] == 4
     assert result.report["best_policy"]["policy"] == "quick_scalp_0_5r_stop_1r"
     assert result.report["production_thresholds_changed"] is False
     assert result.report["submit_cancel_place_order_invoked"] is False

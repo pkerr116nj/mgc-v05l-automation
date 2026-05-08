@@ -304,6 +304,15 @@ def create_track_b_snap_turn_replay_backfill(
             retained_5m_context_root=actual_config.retained_5m_context_root,
         ),
     }
+    source_files = {
+        instrument: _replay_source_file_summary(
+            repo_root=repo_root,
+            paths=actual_config.mgc_candle_payloads if instrument == "MGC" else actual_config.mnq_candle_payloads,
+            instrument=instrument,
+            retained_5m_context_root=actual_config.retained_5m_context_root,
+        )
+        for instrument in ("MGC", "MNQ")
+    }
     rows: list[dict[str, Any]] = []
     reconstruction: dict[str, Any] = {}
     for instrument, candles in instrument_candles.items():
@@ -335,11 +344,20 @@ def create_track_b_snap_turn_replay_backfill(
         snapshots=snapshots,
         generated_at=actual_now,
     )
+    sample_frame = _sample_frame_from_rows(
+        rows=rows,
+        source_data_files=[item for values in source_files.values() for item in values],
+        sample_source_type="RETAINED_ROLLING_COMPLETED_5M_CONTEXT",
+        sample_unit="completed_5m_decision_bars",
+        missing_limitations=_replay_missing_limitations(reconstruction=reconstruction, source_files=source_files),
+        preferred_classification=None,
+    )
     classifications = _replay_classifications(strategies, snapshot_summary)
     report = {
         "schema_version": "track_b_snap_turn_replay_backfill_v1",
         "generated_at": actual_now.isoformat(),
         "source": "RETAINED_COMPLETED_5M_CANDLE_REPLAY_BACKFILL",
+        "sample_frame": sample_frame,
         "broker_commands_invoked": False,
         "paper_proof_cli_invoked": False,
         "submit_cancel_place_order_invoked": False,
@@ -433,6 +451,15 @@ def create_track_b_snap_turn_location_variant_research_replay(
     policy_summary = _policy_summary(sample_results)
     baseline_summary = _policy_summary(baseline_results)
     production_summary = _policy_summary(production_results)
+    sample_frame = _sample_frame_from_rows(
+        rows=sample_results,
+        source_data_files=(replay_report.get("sample_frame") or {}).get("source_data_files") or [],
+        sample_source_type="LOCATION_VARIANT_RESEARCH_SAMPLE_FROM_REPLAY_BACKFILL",
+        sample_unit="candidate_near_miss_samples",
+        missing_limitations=_sample_frame_limitations_from_parent(replay_report),
+        preferred_classification=None,
+        instrument_fallback="MNQ",
+    )
     classification = _location_variant_classification(
         sample_count=len(sample_results),
         policy_summary=policy_summary,
@@ -453,6 +480,7 @@ def create_track_b_snap_turn_location_variant_research_replay(
         "broker_commands_invoked": False,
         "paper_proof_cli_invoked": False,
         "submit_cancel_place_order_invoked": False,
+        "sample_frame": sample_frame,
         "classification": classification,
         "sample_count": len(sample_results),
         "production_signal_sample_count": len(production_results),
@@ -499,6 +527,15 @@ def create_track_b_snap_turn_location_variant_exit_sensitivity(
         research_report = _load_json(_resolve(repo_root, actual_config.research_replay_json))
     samples = [item for item in research_report.get("samples") or [] if isinstance(item, Mapping)]
     policy_summary = _policy_summary(samples, include_exit_sensitivity=True)
+    sample_frame = _sample_frame_from_rows(
+        rows=samples,
+        source_data_files=(research_report.get("sample_frame") or {}).get("source_data_files") or [],
+        sample_source_type="EXIT_SENSITIVITY_SAMPLE_FROM_LOCATION_VARIANT_RESEARCH_REPLAY",
+        sample_unit="candidate_near_miss_samples",
+        missing_limitations=_sample_frame_limitations_from_parent(research_report),
+        preferred_classification=None,
+        instrument_fallback="MNQ",
+    )
     early_favorable_count = sum(1 for item in samples if item.get("early_favorable_move_before_failing") is True)
     immediate_loser_count = sum(1 for item in samples if item.get("loser_failed_immediately") is True)
     sample_count = len(samples)
@@ -521,6 +558,7 @@ def create_track_b_snap_turn_location_variant_exit_sensitivity(
         "broker_commands_invoked": False,
         "paper_proof_cli_invoked": False,
         "submit_cancel_place_order_invoked": False,
+        "sample_frame": sample_frame,
         "classification": classification,
         "sample_count": sample_count,
         "early_favorable_move_count": early_favorable_count,
@@ -813,12 +851,8 @@ def _load_replay_candles(
     retained_5m_context_root: Path,
 ) -> list[dict[str, Any]]:
     by_timestamp: dict[datetime, dict[str, Any]] = {}
-    candidate_paths = list(paths)
-    retained_root = _resolve(repo_root, retained_5m_context_root)
-    if retained_root.exists():
-        candidate_paths.extend(path.relative_to(repo_root) if path.is_relative_to(repo_root) else path for path in retained_root.glob("**/asian_drift_5m_candles.json"))
-    for path in candidate_paths:
-        payload = _load_json(_resolve(repo_root, path))
+    for path in _replay_candidate_paths(repo_root=repo_root, paths=paths, retained_5m_context_root=retained_5m_context_root):
+        payload = _load_json(path)
         payload_instrument = str(payload.get("instrument_family") or payload.get("symbol") or instrument)
         if payload_instrument != instrument:
             continue
@@ -827,6 +861,210 @@ def _load_replay_candles(
             if isinstance(timestamp, datetime):
                 by_timestamp[timestamp] = candle
     return [by_timestamp[key] for key in sorted(by_timestamp)]
+
+
+def _replay_candidate_paths(*, repo_root: Path, paths: Iterable[Path], retained_5m_context_root: Path) -> list[Path]:
+    candidate_paths = [_resolve(repo_root, path) for path in paths]
+    retained_root = _resolve(repo_root, retained_5m_context_root)
+    if retained_root.exists():
+        candidate_paths.extend(sorted(retained_root.glob("**/asian_drift_5m_candles.json")))
+    deduped: dict[str, Path] = {}
+    for path in candidate_paths:
+        deduped[str(path)] = path
+    return list(deduped.values())
+
+
+def _replay_source_file_summary(
+    *,
+    repo_root: Path,
+    paths: Iterable[Path],
+    instrument: str,
+    retained_5m_context_root: Path,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in _replay_candidate_paths(repo_root=repo_root, paths=paths, retained_5m_context_root=retained_5m_context_root):
+        payload = _load_json(path)
+        payload_instrument = str(payload.get("instrument_family") or payload.get("symbol") or instrument)
+        if payload_instrument != instrument:
+            continue
+        candles = _candles_from_payload(payload)
+        if not candles:
+            continue
+        timestamps = [item["timestamp"] for item in candles if isinstance(item.get("timestamp"), datetime)]
+        rows.append(
+            {
+                "path": _display_path(repo_root, path),
+                "instrument": instrument,
+                "candle_count": len(candles),
+                "first_timestamp": min(timestamps).isoformat() if timestamps else None,
+                "last_timestamp": max(timestamps).isoformat() if timestamps else None,
+            }
+        )
+    rows.sort(key=lambda item: (str(item.get("instrument") or ""), str(item.get("path") or "")))
+    return rows
+
+
+def _display_path(repo_root: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(repo_root))
+    except ValueError:
+        return str(path)
+
+
+def _sample_frame_from_rows(
+    *,
+    rows: Iterable[Mapping[str, Any]],
+    source_data_files: Iterable[Mapping[str, Any]],
+    sample_source_type: str,
+    sample_unit: str,
+    missing_limitations: Iterable[str],
+    preferred_classification: str | None,
+    instrument_fallback: str | None = None,
+) -> dict[str, Any]:
+    row_list = [item for item in rows if isinstance(item, Mapping)]
+    source_list = [dict(item) for item in source_data_files if isinstance(item, Mapping)]
+    by_instrument: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in row_list:
+        instrument = _row_instrument(row, fallback=instrument_fallback)
+        if instrument:
+            by_instrument[instrument].append(row)
+    represented_instruments = set(by_instrument)
+    if represented_instruments:
+        source_list = [
+            item for item in source_list if str(item.get("instrument") or "") in represented_instruments
+        ]
+    instrument_frames: dict[str, Any] = {}
+    all_timestamps: list[datetime] = []
+    all_sessions: Counter[str] = Counter()
+    all_session_days: set[str] = set()
+    for instrument, instrument_rows in sorted(by_instrument.items()):
+        timestamps = [_row_timestamp(row) for row in instrument_rows]
+        valid_timestamps = [item for item in timestamps if item is not None]
+        all_timestamps.extend(valid_timestamps)
+        sessions = Counter(_row_session(row) for row in instrument_rows)
+        sessions.pop("", None)
+        all_sessions.update(sessions)
+        session_days = {item.date().isoformat() for item in valid_timestamps}
+        all_session_days.update(session_days)
+        bars_by_session = [
+            {
+                "session": session,
+                "completed_5m_bars": _unique_bar_count(
+                    row for row in instrument_rows if _row_session(row) == session
+                ),
+            }
+            for session in sorted(sessions)
+        ]
+        instrument_frames[instrument] = {
+            "instrument": instrument,
+            "start_timestamp": min(valid_timestamps).isoformat() if valid_timestamps else None,
+            "end_timestamp": max(valid_timestamps).isoformat() if valid_timestamps else None,
+            "calendar_days": _calendar_days(valid_timestamps),
+            "trading_session_days": len(session_days),
+            "sessions_represented": sorted(sessions),
+            "completed_5m_bars_total": _unique_bar_count(instrument_rows),
+            "completed_5m_bars_by_session": bars_by_session,
+        }
+    lookback_classification = preferred_classification or _lookback_classification(
+        timestamps=all_timestamps,
+        trading_session_days=len(all_session_days),
+        sessions=all_sessions,
+        source_type=sample_source_type,
+    )
+    return {
+        "sample_source_type": sample_source_type,
+        "sample_unit": sample_unit,
+        "lookback_classification": lookback_classification,
+        "source_data_files": source_list,
+        "start_timestamp": min(all_timestamps).isoformat() if all_timestamps else None,
+        "end_timestamp": max(all_timestamps).isoformat() if all_timestamps else None,
+        "calendar_days": _calendar_days(all_timestamps),
+        "trading_session_days": len(all_session_days),
+        "sessions_represented": sorted(all_sessions),
+        "completed_5m_bars_by_instrument_session": instrument_frames,
+        "source_data_file_count": len(source_list),
+        "missing_windows_or_rotated_data_limitations": list(missing_limitations),
+    }
+
+
+def _row_instrument(row: Mapping[str, Any], *, fallback: str | None) -> str | None:
+    direct = row.get("instrument")
+    if direct:
+        return str(direct)
+    strategy_id = str(row.get("strategy_id") or "")
+    if strategy_id in SNAP_TURN_STRATEGIES:
+        return SNAP_TURN_STRATEGIES[strategy_id]["instrument"]
+    return fallback
+
+
+def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
+    return _parse_dt(str(row.get("decision_bar_timestamp") or row.get("timestamp") or ""))
+
+
+def _row_session(row: Mapping[str, Any]) -> str:
+    if row.get("session"):
+        return str(row.get("session"))
+    state = row.get("state") if isinstance(row.get("state") or {}, Mapping) else {}
+    return _session_bucket(state)
+
+
+def _unique_bar_count(rows: Iterable[Mapping[str, Any]]) -> int:
+    return len({str(_row_timestamp(row) or row.get("decision_bar_timestamp") or row.get("timestamp") or "") for row in rows})
+
+
+def _calendar_days(timestamps: Iterable[datetime]) -> int:
+    valid = list(timestamps)
+    if not valid:
+        return 0
+    return (max(valid).date() - min(valid).date()).days + 1
+
+
+def _lookback_classification(
+    *,
+    timestamps: list[datetime],
+    trading_session_days: int,
+    sessions: Counter[str],
+    source_type: str,
+) -> str:
+    if not timestamps:
+        return "INSUFFICIENT_LOOKBACK"
+    if "HOLDOUT" in source_type:
+        return "HOLDOUT_REPLAY"
+    if trading_session_days <= 1:
+        return "SINGLE_WINDOW_DIAGNOSTIC"
+    if "RETAINED_ROLLING" in source_type:
+        return "MULTI_SESSION_SAMPLE"
+    if trading_session_days > 1 and len(sessions) > 1:
+        return "MULTI_DAY_REPLAY"
+    return "MULTI_SESSION_SAMPLE"
+
+
+def _replay_missing_limitations(
+    *,
+    reconstruction: Mapping[str, Any],
+    source_files: Mapping[str, list[Mapping[str, Any]]],
+) -> list[str]:
+    limitations: list[str] = []
+    for instrument, summary in reconstruction.items():
+        if not source_files.get(str(instrument)):
+            limitations.append(f"{instrument}: no source candle files contributed rows")
+        for blocker in summary.get("blocked_window_reasons") or []:
+            if isinstance(blocker, Mapping):
+                limitations.append(f"{instrument}: blocked windows {blocker.get('reason')} count={blocker.get('count')}")
+        attempted = int(summary.get("replay_windows_attempted") or 0)
+        source_count = int(summary.get("input_candle_count") or 0)
+        if attempted and source_count > attempted:
+            limitations.append(
+                f"{instrument}: replay uses rolling suffix of {attempted} windows from {source_count} retained candles"
+            )
+    return limitations
+
+
+def _sample_frame_limitations_from_parent(parent_report: Mapping[str, Any]) -> list[str]:
+    raw_sample_frame = parent_report.get("sample_frame")
+    sample_frame = raw_sample_frame if isinstance(raw_sample_frame, Mapping) else {}
+    limitations = sample_frame.get("missing_windows_or_rotated_data_limitations")
+    return [str(item) for item in limitations] if isinstance(limitations, list) else []
 
 
 def _candles_from_payload(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -2707,6 +2945,7 @@ def _replay_markdown(report: Mapping[str, Any]) -> str:
     ]
     for item in report.get("classifications") or []:
         lines.append(f"- {item}")
+    lines.extend(_sample_frame_markdown(report.get("sample_frame") or {}))
     lines.extend(["", "## Reconstruction", ""])
     for instrument, summary in (report.get("instrument_reconstruction") or {}).items():
         lines.append(
@@ -2756,9 +2995,12 @@ def _location_variant_markdown(report: Mapping[str, Any]) -> str:
         "",
         "This is research-only. It does not change production thresholds, submit orders, or promote to PAPER.",
         "",
+    ]
+    lines.extend(_sample_frame_markdown(report.get("sample_frame") or {}))
+    lines.extend([
         "## Policy Summary",
         "",
-    ]
+    ])
     policy_summary = report.get("policy_summary") or {}
     for policy in ("target_1r_stop_1r", "target_1_5r_stop_1r", "time_boxed_3x5m"):
         summary = policy_summary.get(policy) or {}
@@ -2794,6 +3036,9 @@ def _exit_sensitivity_markdown(report: Mapping[str, Any]) -> str:
         "",
         "This is research-only. It does not change production thresholds, promote to PAPER, or submit orders.",
         "",
+    ]
+    lines.extend(_sample_frame_markdown(report.get("sample_frame") or {}))
+    lines.extend([
         "## Entry-vs-Exit Evidence",
         "",
         f"- Sample count: {report.get('sample_count')}",
@@ -2801,7 +3046,7 @@ def _exit_sensitivity_markdown(report: Mapping[str, Any]) -> str:
         f"({report.get('early_favorable_move_rate')})",
         f"- Losers failed immediately: {report.get('loser_failed_immediately_count')} "
         f"({report.get('loser_failed_immediately_rate')})",
-    ]
+    ])
     best = report.get("best_policy") or {}
     lines.extend(
         [
@@ -2849,3 +3094,48 @@ def _exit_sensitivity_markdown(report: Mapping[str, Any]) -> str:
         )
     lines.extend(["", "## Answer", "", str(report.get("answer") or "")])
     return "\n".join(lines) + "\n"
+
+
+def _sample_frame_markdown(sample_frame: Mapping[str, Any]) -> list[str]:
+    if not sample_frame:
+        return ["", "## Sample Frame", "", "- Not provided.", ""]
+    lines = [
+        "",
+        "## Sample Frame",
+        "",
+        f"- Classification: {sample_frame.get('lookback_classification')}",
+        f"- Source type: {sample_frame.get('sample_source_type')}",
+        f"- Sample unit: {sample_frame.get('sample_unit')}",
+        f"- Start: {sample_frame.get('start_timestamp')}",
+        f"- End: {sample_frame.get('end_timestamp')}",
+        f"- Calendar days: {sample_frame.get('calendar_days')}",
+        f"- Trading/session days: {sample_frame.get('trading_session_days')}",
+        f"- Sessions represented: {', '.join(sample_frame.get('sessions_represented') or [])}",
+        "",
+        "### Instrument/session bars",
+    ]
+    instruments = sample_frame.get("completed_5m_bars_by_instrument_session") or {}
+    for instrument, frame in instruments.items():
+        lines.append(f"- {instrument}: total={frame.get('completed_5m_bars_total')}")
+        for item in frame.get("completed_5m_bars_by_session") or []:
+            lines.append(f"  - {item.get('session')}: {item.get('completed_5m_bars')} completed 5m bars")
+    limitations = sample_frame.get("missing_windows_or_rotated_data_limitations") or []
+    lines.extend(["", "### Limitations"])
+    if limitations:
+        lines.extend(f"- {item}" for item in limitations)
+    else:
+        lines.append("- No missing windows or rotated-data blockers were detected by this bounded audit.")
+    source_files = sample_frame.get("source_data_files") or []
+    lines.extend(["", "### Source Data Files"])
+    if source_files:
+        for item in source_files[:20]:
+            lines.append(
+                f"- {item.get('instrument')} {item.get('path')}: candles={item.get('candle_count')} "
+                f"{item.get('first_timestamp')} -> {item.get('last_timestamp')}"
+            )
+        if len(source_files) > 20:
+            lines.append(f"- ... {len(source_files) - 20} additional source files omitted from markdown; see JSON.")
+    else:
+        lines.append("- Not provided.")
+    lines.append("")
+    return lines
