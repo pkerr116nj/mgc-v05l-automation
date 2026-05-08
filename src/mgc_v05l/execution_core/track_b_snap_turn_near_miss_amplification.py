@@ -8,6 +8,7 @@ production predicate or threshold changes are proposed.
 from __future__ import annotations
 
 import json
+import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -127,6 +128,30 @@ class TrackBSnapTurnReplayBackfillConfig:
 
 @dataclass(frozen=True)
 class TrackBSnapTurnReplayBackfillResult:
+    report_json: Path
+    report_md: Path
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TrackBSnapTurnLocationVariantResearchConfig:
+    repo_root: Path = Path(".")
+    candidate_strategy_id: str = "MNQ_FIRST_BEAR_SNAP_TURN_V1"
+    candidate_name: str = "MNQ_FIRST_BEAR_SNAP_TURN_LOCATION_VARIANT_RESEARCH_V1"
+    candidate_predicate: str = "bear_snap_location_ok"
+    replay_backfill_config: TrackBSnapTurnReplayBackfillConfig | None = None
+    refresh_replay_backfill: bool = True
+    snapshots_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_replay_scorable_snapshots.json"
+    output_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_location_variant_research_replay.json"
+    output_md: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_location_variant_research_replay.md"
+    max_horizon_bars: int = 6
+    time_box_bars: int = 3
+    minimum_sample_count: int = 20
+    random_baseline_seed: int = 17
+
+
+@dataclass(frozen=True)
+class TrackBSnapTurnLocationVariantResearchResult:
     report_json: Path
     report_md: Path
     report: dict[str, Any]
@@ -320,6 +345,118 @@ def create_track_b_snap_turn_replay_backfill(
     _write_json(output_json, report)
     _write_text(output_md, _replay_markdown(report))
     return TrackBSnapTurnReplayBackfillResult(report_json=output_json, report_md=output_md, report=report)
+
+
+def create_track_b_snap_turn_location_variant_research_replay(
+    *,
+    config: TrackBSnapTurnLocationVariantResearchConfig | None = None,
+    now: datetime | None = None,
+) -> TrackBSnapTurnLocationVariantResearchResult:
+    actual_config = config or TrackBSnapTurnLocationVariantResearchConfig()
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    repo_root = Path(actual_config.repo_root)
+    replay_config = actual_config.replay_backfill_config or TrackBSnapTurnReplayBackfillConfig(repo_root=repo_root)
+    replay_report: Mapping[str, Any] = {}
+    if actual_config.refresh_replay_backfill:
+        replay_report = create_track_b_snap_turn_replay_backfill(config=replay_config, now=actual_now).report
+    snapshots_payload = _load_json(_resolve(repo_root, actual_config.snapshots_json))
+    snapshots = [item for item in snapshots_payload.get("snapshots") or [] if isinstance(item, Mapping)]
+    candles = _load_replay_candles(
+        repo_root=repo_root,
+        paths=replay_config.mnq_candle_payloads,
+        instrument="MNQ",
+        retained_5m_context_root=replay_config.retained_5m_context_root,
+    )
+    candidate_rows = _location_variant_candidate_rows(
+        snapshots=snapshots,
+        strategy_id=actual_config.candidate_strategy_id,
+        predicate=actual_config.candidate_predicate,
+    )
+    sample_results = [
+        _research_sample_result(
+            snapshot=snapshot,
+            candles=candles,
+            max_horizon_bars=actual_config.max_horizon_bars,
+            time_box_bars=actual_config.time_box_bars,
+        )
+        for snapshot in candidate_rows
+    ]
+    production_rows = [
+        item
+        for item in snapshots
+        if item.get("strategy_id") == actual_config.candidate_strategy_id and item.get("hard_signal") is True
+    ]
+    production_results = [
+        _research_sample_result(
+            snapshot=snapshot,
+            candles=candles,
+            max_horizon_bars=actual_config.max_horizon_bars,
+            time_box_bars=actual_config.time_box_bars,
+        )
+        for snapshot in production_rows
+    ]
+    baseline_rows = _baseline_rows(
+        snapshots=snapshots,
+        excluded=candidate_rows,
+        strategy_id=actual_config.candidate_strategy_id,
+        sample_count=len(candidate_rows),
+        seed=actual_config.random_baseline_seed,
+    )
+    baseline_results = [
+        _research_sample_result(
+            snapshot=snapshot,
+            candles=candles,
+            max_horizon_bars=actual_config.max_horizon_bars,
+            time_box_bars=actual_config.time_box_bars,
+        )
+        for snapshot in baseline_rows
+    ]
+    policy_summary = _policy_summary(sample_results)
+    baseline_summary = _policy_summary(baseline_results)
+    production_summary = _policy_summary(production_results)
+    classification = _location_variant_classification(
+        sample_count=len(sample_results),
+        policy_summary=policy_summary,
+        baseline_summary=baseline_summary,
+        minimum_sample_count=actual_config.minimum_sample_count,
+    )
+    report = {
+        "schema_version": "track_b_snap_turn_location_variant_research_replay_v1",
+        "generated_at": actual_now.isoformat(),
+        "candidate_name": actual_config.candidate_name,
+        "candidate_strategy_id": actual_config.candidate_strategy_id,
+        "candidate_predicate": actual_config.candidate_predicate,
+        "candidate_status": "RESEARCH_ONLY",
+        "paper_eligible": False,
+        "live_money_eligible": False,
+        "production_thresholds_changed": False,
+        "production_strategy_changed": False,
+        "broker_commands_invoked": False,
+        "paper_proof_cli_invoked": False,
+        "submit_cancel_place_order_invoked": False,
+        "classification": classification,
+        "sample_count": len(sample_results),
+        "production_signal_sample_count": len(production_results),
+        "baseline_sample_count": len(baseline_results),
+        "policy_summary": policy_summary,
+        "production_strategy_comparison": production_summary,
+        "random_baseline_comparison": baseline_summary,
+        "samples": sample_results,
+        "outlier_sensitivity": _outlier_sensitivity(sample_results),
+        "loss_clustering": _loss_clustering(sample_results, policy="time_boxed_3x5m"),
+        "replay_backfill_source": {
+            "refreshed": actual_config.refresh_replay_backfill,
+            "replay_report_classifications": replay_report.get("classifications") if replay_report else None,
+            "snapshots_json": str(actual_config.snapshots_json),
+        },
+        "expected_answer": _location_variant_answer(classification, policy_summary, baseline_summary),
+    }
+    output_json = _resolve(repo_root, actual_config.output_json)
+    output_md = _resolve(repo_root, actual_config.output_md)
+    _write_json(output_json, report)
+    _write_text(output_md, _location_variant_markdown(report))
+    return TrackBSnapTurnLocationVariantResearchResult(report_json=output_json, report_md=output_md, report=report)
 
 
 def _strategy_report(
@@ -959,6 +1096,8 @@ def _scorable_snapshots(
                 "instrument": meta["instrument"],
                 "strategy_id": strategy_id,
                 "side": meta["side"],
+                "bar_ohlc": row.get("ohlc") or {},
+                "proposed_entry_price": (row.get("ohlc") or {}).get("close"),
                 "session": _session_bucket(row.get("state") if isinstance(row.get("state") or {}, Mapping) else {}),
                 "regime": _regime_bucket(row),
                 "eligibility": eligibility,
@@ -1465,6 +1604,261 @@ def _simplest_methodology_change(strategies: Iterable[Mapping[str, Any]]) -> dic
     }
 
 
+def _location_variant_candidate_rows(
+    *,
+    snapshots: Iterable[Mapping[str, Any]],
+    strategy_id: str,
+    predicate: str,
+) -> list[Mapping[str, Any]]:
+    rows = []
+    for snapshot in snapshots:
+        if snapshot.get("strategy_id") != strategy_id:
+            continue
+        if snapshot.get("hard_signal") is True:
+            continue
+        failed = [str(item) for item in snapshot.get("failed_primitive_predicates") or []]
+        if predicate not in failed:
+            continue
+        if str(snapshot.get("near_miss_bucket") or "") not in {"ONE_PREDICATE_AWAY", "TWO_PREDICATES_AWAY"}:
+            continue
+        if (snapshot.get("eligibility") or {}).get("eligible") is not True:
+            continue
+        rows.append(snapshot)
+    rows.sort(key=lambda item: str(item.get("decision_bar_timestamp") or ""))
+    return rows
+
+
+def _research_sample_result(
+    *,
+    snapshot: Mapping[str, Any],
+    candles: list[dict[str, Any]],
+    max_horizon_bars: int,
+    time_box_bars: int,
+) -> dict[str, Any]:
+    timestamp = _parse_dt(str(snapshot.get("decision_bar_timestamp") or ""))
+    entry = _decimal(snapshot.get("proposed_entry_price"))
+    risk = _risk_from_snapshot(snapshot)
+    future = [item for item in candles if timestamp is not None and item["timestamp"] > timestamp][:max_horizon_bars]
+    mfe_mae = _path_mfe_mae(entry=entry, future=future, side="SHORT")
+    return {
+        "timestamp": snapshot.get("decision_bar_timestamp"),
+        "session": snapshot.get("session"),
+        "regime": snapshot.get("regime"),
+        "proposed_entry_price": _decimal_str(entry),
+        "risk_points": _decimal_str(risk),
+        "failed_primitive_predicates": snapshot.get("failed_primitive_predicates") or [],
+        "mfe_points": _decimal_str(mfe_mae["mfe"]),
+        "mae_points": _decimal_str(mfe_mae["mae"]),
+        "mfe_occurred_before_mae": mfe_mae["mfe_before_mae"],
+        "time_to_mfe_bars": mfe_mae["time_to_mfe_bars"],
+        "time_to_mae_bars": mfe_mae["time_to_mae_bars"],
+        "policies": {
+            "target_1r_stop_1r": _stop_target_policy(entry=entry, risk=risk, future=future, side="SHORT", target_r=Decimal("1.0")),
+            "target_1_5r_stop_1r": _stop_target_policy(entry=entry, risk=risk, future=future, side="SHORT", target_r=Decimal("1.5")),
+            "time_boxed_3x5m": _time_box_policy(entry=entry, risk=risk, future=future, side="SHORT", bars=time_box_bars),
+        },
+    }
+
+
+def _risk_from_snapshot(snapshot: Mapping[str, Any]) -> Decimal:
+    for item in snapshot.get("primitive_predicates") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("predicate") == "bear_snap_range_ok":
+            threshold = _decimal(item.get("threshold"))
+            if threshold > 0:
+                return threshold / Decimal("0.90")
+    ohlc = snapshot.get("bar_ohlc") if isinstance(snapshot.get("bar_ohlc") or {}, Mapping) else {}
+    bar_range = _decimal(ohlc.get("high")) - _decimal(ohlc.get("low"))
+    return bar_range if bar_range > 0 else Decimal("1")
+
+
+def _path_mfe_mae(*, entry: Decimal, future: list[dict[str, Any]], side: str) -> dict[str, Any]:
+    mfe = Decimal("0")
+    mae = Decimal("0")
+    time_to_mfe: int | None = None
+    time_to_mae: int | None = None
+    for index, bar in enumerate(future, start=1):
+        high = _decimal(bar.get("high"))
+        low = _decimal(bar.get("low"))
+        if side == "SHORT":
+            favorable = entry - low
+            adverse = entry - high
+        else:
+            favorable = high - entry
+            adverse = low - entry
+        if favorable > mfe:
+            mfe = favorable
+            time_to_mfe = index
+        if adverse < mae:
+            mae = adverse
+            time_to_mae = index
+    mfe_before_mae = None
+    if time_to_mfe is not None and time_to_mae is not None:
+        mfe_before_mae = time_to_mfe < time_to_mae
+    return {"mfe": mfe, "mae": mae, "time_to_mfe_bars": time_to_mfe, "time_to_mae_bars": time_to_mae, "mfe_before_mae": mfe_before_mae}
+
+
+def _stop_target_policy(
+    *,
+    entry: Decimal,
+    risk: Decimal,
+    future: list[dict[str, Any]],
+    side: str,
+    target_r: Decimal,
+) -> dict[str, Any]:
+    if risk <= 0 or not future:
+        return {"outcome": "NO_FUTURE_BARS", "r": None}
+    target = entry - target_r * risk if side == "SHORT" else entry + target_r * risk
+    stop = entry + risk if side == "SHORT" else entry - risk
+    for index, bar in enumerate(future, start=1):
+        high = _decimal(bar.get("high"))
+        low = _decimal(bar.get("low"))
+        target_hit = low <= target if side == "SHORT" else high >= target
+        stop_hit = high >= stop if side == "SHORT" else low <= stop
+        if target_hit and stop_hit:
+            return {"outcome": "STOP_FIRST_SAME_BAR_CONSERVATIVE", "r": "-1", "bars": index}
+        if stop_hit:
+            return {"outcome": "STOP", "r": "-1", "bars": index}
+        if target_hit:
+            return {"outcome": "TARGET", "r": _decimal_str(target_r), "bars": index}
+    close = _decimal(future[-1].get("close"))
+    r_value = (entry - close) / risk if side == "SHORT" else (close - entry) / risk
+    return {"outcome": "TIMEOUT_MARK_TO_CLOSE", "r": _decimal_str(r_value), "bars": len(future)}
+
+
+def _time_box_policy(*, entry: Decimal, risk: Decimal, future: list[dict[str, Any]], side: str, bars: int) -> dict[str, Any]:
+    if risk <= 0 or not future:
+        return {"outcome": "NO_FUTURE_BARS", "r": None}
+    chosen = future[min(len(future), bars) - 1]
+    close = _decimal(chosen.get("close"))
+    r_value = (entry - close) / risk if side == "SHORT" else (close - entry) / risk
+    return {"outcome": "TIME_BOX_EXIT", "r": _decimal_str(r_value), "bars": min(len(future), bars)}
+
+
+def _policy_summary(samples: list[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "sample_count": len(samples),
+        "target_1r_stop_1r": _single_policy_summary(samples, "target_1r_stop_1r"),
+        "target_1_5r_stop_1r": _single_policy_summary(samples, "target_1_5r_stop_1r"),
+        "time_boxed_3x5m": _single_policy_summary(samples, "time_boxed_3x5m"),
+    }
+
+
+def _single_policy_summary(samples: list[Mapping[str, Any]], policy: str) -> dict[str, Any]:
+    r_values = [_decimal(((sample.get("policies") or {}).get(policy) or {}).get("r")) for sample in samples if ((sample.get("policies") or {}).get(policy) or {}).get("r") is not None]
+    if not r_values:
+        return {"sample_count": 0, "win_rate": None, "average_r": None, "worst_r": None, "max_drawdown_r": None}
+    wins = [value for value in r_values if value > 0]
+    return {
+        "sample_count": len(r_values),
+        "win_rate": _decimal_str(Decimal(len(wins)) / Decimal(len(r_values))),
+        "average_r": _decimal_str(sum(r_values, Decimal("0")) / Decimal(len(r_values))),
+        "worst_r": _decimal_str(min(r_values)),
+        "max_drawdown_r": _decimal_str(_max_drawdown(r_values)),
+    }
+
+
+def _baseline_rows(
+    *,
+    snapshots: Iterable[Mapping[str, Any]],
+    excluded: Iterable[Mapping[str, Any]],
+    strategy_id: str,
+    sample_count: int,
+    seed: int,
+) -> list[Mapping[str, Any]]:
+    excluded_keys = {_snapshot_key(item) for item in excluded}
+    population = [
+        item
+        for item in snapshots
+        if item.get("strategy_id") == strategy_id
+        and (item.get("eligibility") or {}).get("eligible") is True
+        and _snapshot_key(item) not in excluded_keys
+    ]
+    rng = random.Random(seed)
+    if sample_count <= 0:
+        return []
+    if len(population) <= sample_count:
+        return population
+    return rng.sample(population, sample_count)
+
+
+def _location_variant_classification(
+    *,
+    sample_count: int,
+    policy_summary: Mapping[str, Any],
+    baseline_summary: Mapping[str, Any],
+    minimum_sample_count: int,
+) -> str:
+    if sample_count < minimum_sample_count:
+        return "INSUFFICIENT_SAMPLE"
+    candidate_time = policy_summary.get("time_boxed_3x5m") or {}
+    candidate_1r = policy_summary.get("target_1r_stop_1r") or {}
+    baseline_time = baseline_summary.get("time_boxed_3x5m") or {}
+    candidate_avg = _decimal(candidate_time.get("average_r"))
+    candidate_1r_avg = _decimal(candidate_1r.get("average_r"))
+    baseline_avg = _decimal(baseline_time.get("average_r"))
+    if candidate_avg > Decimal("0.05") and candidate_1r_avg > Decimal("0") and candidate_avg > baseline_avg:
+        return "PROMOTE_TO_REPLAY_CANDIDATE"
+    if candidate_avg <= Decimal("-0.10") and candidate_1r_avg <= Decimal("-0.10"):
+        return "REJECT_FALSE_POSITIVE"
+    return "KEEP_RESEARCH_ONLY"
+
+
+def _location_variant_answer(classification: str, policy_summary: Mapping[str, Any], baseline_summary: Mapping[str, Any]) -> str:
+    candidate_time = policy_summary.get("time_boxed_3x5m") or {}
+    baseline_time = baseline_summary.get("time_boxed_3x5m") or {}
+    if classification == "PROMOTE_TO_REPLAY_CANDIDATE":
+        return (
+            "Relaxing/modifying bear_snap_location_ok is credible enough for a bounded replay candidate, "
+            f"with time-box average R {candidate_time.get('average_r')} versus baseline {baseline_time.get('average_r')}."
+        )
+    if classification == "REJECT_FALSE_POSITIVE":
+        return "The near-misses looked attractive in raw MFE/MAE but failed simple policy replay; reject this false-positive lane."
+    if classification == "INSUFFICIENT_SAMPLE":
+        return "The sample is too small for a profitability claim; keep research-only and collect/replay more windows."
+    return "The candidate remains research-only: raw MFE/MAE is interesting, but simple policy replay is not strong enough for promotion."
+
+
+def _outlier_sensitivity(samples: list[Mapping[str, Any]]) -> dict[str, Any]:
+    r_values = [_decimal(((sample.get("policies") or {}).get("time_boxed_3x5m") or {}).get("r")) for sample in samples if ((sample.get("policies") or {}).get("time_boxed_3x5m") or {}).get("r") is not None]
+    if len(r_values) < 3:
+        return {"available": False}
+    sorted_values = sorted(r_values)
+    trimmed = sorted_values[1:-1]
+    return {
+        "available": True,
+        "average_r": _decimal_str(sum(r_values, Decimal("0")) / Decimal(len(r_values))),
+        "trimmed_best_worst_average_r": _decimal_str(sum(trimmed, Decimal("0")) / Decimal(len(trimmed))),
+        "best_r": _decimal_str(max(r_values)),
+        "worst_r": _decimal_str(min(r_values)),
+    }
+
+
+def _loss_clustering(samples: list[Mapping[str, Any]], *, policy: str) -> dict[str, Any]:
+    r_values = [_decimal(((sample.get("policies") or {}).get(policy) or {}).get("r")) for sample in samples if ((sample.get("policies") or {}).get(policy) or {}).get("r") is not None]
+    max_losses = 0
+    current = 0
+    for value in r_values:
+        if value <= 0:
+            current += 1
+            max_losses = max(max_losses, current)
+        else:
+            current = 0
+    return {"policy": policy, "max_consecutive_non_winners": max_losses, "sample_count": len(r_values)}
+
+
+def _max_drawdown(r_values: list[Decimal]) -> Decimal:
+    equity = Decimal("0")
+    peak = Decimal("0")
+    max_dd = Decimal("0")
+    for value in r_values:
+        equity += value
+        peak = max(peak, equity)
+        max_dd = min(max_dd, equity - peak)
+    return max_dd
+
+
 def _candle_index(
     *,
     evaluated_rows: Iterable[Mapping[str, Any]],
@@ -1914,4 +2308,42 @@ def _replay_markdown(report: Mapping[str, Any]) -> str:
         lines.append(f"- Candidate: {method.get('candidate')}")
     if method.get("reason"):
         lines.append(f"- Reason: {method.get('reason')}")
+    return "\n".join(lines) + "\n"
+
+
+def _location_variant_markdown(report: Mapping[str, Any]) -> str:
+    lines = [
+        "# Track B Snap-Turn Location Variant Research Replay",
+        "",
+        f"Generated: {report.get('generated_at')}",
+        "",
+        f"Candidate: {report.get('candidate_name')}",
+        f"Classification: {report.get('classification')}",
+        "",
+        "This is research-only. It does not change production thresholds, submit orders, or promote to PAPER.",
+        "",
+        "## Policy Summary",
+        "",
+    ]
+    policy_summary = report.get("policy_summary") or {}
+    for policy in ("target_1r_stop_1r", "target_1_5r_stop_1r", "time_boxed_3x5m"):
+        summary = policy_summary.get(policy) or {}
+        lines.append(
+            f"- {policy}: n={summary.get('sample_count')}, win_rate={summary.get('win_rate')}, "
+            f"avgR={summary.get('average_r')}, worstR={summary.get('worst_r')}, maxDD={summary.get('max_drawdown_r')}"
+        )
+    lines.extend(["", "## Baseline", ""])
+    baseline = report.get("random_baseline_comparison") or {}
+    for policy in ("target_1r_stop_1r", "target_1_5r_stop_1r", "time_boxed_3x5m"):
+        summary = baseline.get(policy) or {}
+        lines.append(f"- {policy}: avgR={summary.get('average_r')}, win_rate={summary.get('win_rate')}")
+    lines.extend(["", "## Samples", ""])
+    for sample in (report.get("samples") or [])[:25]:
+        time_box = ((sample.get("policies") or {}).get("time_boxed_3x5m") or {})
+        lines.append(
+            f"- {sample.get('timestamp')} {sample.get('session')} {sample.get('regime')}: "
+            f"entry={sample.get('proposed_entry_price')} MFE={sample.get('mfe_points')} MAE={sample.get('mae_points')} "
+            f"MFE_before_MAE={sample.get('mfe_occurred_before_mae')} time_box_R={time_box.get('r')}"
+        )
+    lines.extend(["", "## Answer", "", str(report.get("expected_answer") or "")])
     return "\n".join(lines) + "\n"

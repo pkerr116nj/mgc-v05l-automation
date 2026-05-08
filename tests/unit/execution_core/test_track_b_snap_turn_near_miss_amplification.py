@@ -6,8 +6,10 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_snap_turn_near_miss_amplification import (
     TrackBSnapTurnNearMissAmplificationConfig,
+    TrackBSnapTurnLocationVariantResearchConfig,
     TrackBSnapTurnReplayBackfillConfig,
     create_track_b_snap_turn_near_miss_amplification,
+    create_track_b_snap_turn_location_variant_research_replay,
     create_track_b_snap_turn_replay_backfill,
 )
 
@@ -416,3 +418,76 @@ def test_snap_turn_replay_backfill_reconstructs_dense_scorable_snapshots(tmp_pat
     latest = json.loads((tmp_path / "latest_replay_snapshots.json").read_text(encoding="utf-8"))
     assert latest["snapshot_count"] == 6
     assert latest["numeric_distance_available_count"] > 0
+
+
+def test_location_variant_research_replay_promotes_only_to_replay_candidate(tmp_path: Path) -> None:
+    snapshots = []
+    candles = []
+    for index in range(24):
+        timestamp = f"2026-05-07T14:{index * 5:02d}:00+00:00"
+        entry = 100 - index
+        candles.append(
+            {
+                "candle_timestamp": timestamp,
+                "timestamp": timestamp,
+                "open": str(entry),
+                "high": str(entry + 0.2),
+                "low": str(entry - 2.0),
+                "close": str(entry - 1.0),
+                "volume": "100",
+                "completed": True,
+            }
+        )
+        if index < 21:
+            snapshots.append(
+                {
+                    "decision_bar_timestamp": timestamp,
+                    "instrument": "MNQ",
+                    "strategy_id": "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+                    "side": "SHORT",
+                    "session": "US",
+                    "regime": "DOWNSLOPE",
+                    "eligibility": {"eligible": True},
+                    "feature_envelope_available": True,
+                    "hard_signal": False,
+                    "result": "NO_SIGNAL",
+                    "bar_ohlc": {"open": str(entry), "high": str(entry + 1), "low": str(entry - 1), "close": str(entry)},
+                    "proposed_entry_price": str(entry),
+                    "near_miss_bucket": "ONE_PREDICATE_AWAY",
+                    "failed_primitive_predicates": ["bear_snap_location_ok"],
+                    "primitive_predicates": [
+                        {"predicate": "bear_snap_range_ok", "threshold": "1", "actual": "2", "pass_margin": "1"},
+                        {"predicate": "bear_snap_location_ok", "threshold": "1", "actual": "0", "pass_margin": "-1"},
+                    ],
+                }
+            )
+    payload = _write_json(tmp_path / "mnq_5m.json", {"instrument_family": "MNQ", "candles": candles})
+    snapshots_json = _write_json(
+        tmp_path / "snapshots.json",
+        {"snapshots": snapshots},
+    )
+
+    result = create_track_b_snap_turn_location_variant_research_replay(
+        config=TrackBSnapTurnLocationVariantResearchConfig(
+            repo_root=tmp_path,
+            refresh_replay_backfill=False,
+            replay_backfill_config=TrackBSnapTurnReplayBackfillConfig(
+                repo_root=tmp_path,
+                mgc_candle_payloads=(),
+                mnq_candle_payloads=(payload,),
+            ),
+            snapshots_json=snapshots_json,
+            output_json=tmp_path / "research.json",
+            output_md=tmp_path / "research.md",
+            minimum_sample_count=20,
+        ),
+        now=datetime(2026, 5, 7, 16, 0, tzinfo=UTC),
+    )
+
+    assert result.report["candidate_status"] == "RESEARCH_ONLY"
+    assert result.report["paper_eligible"] is False
+    assert result.report["production_thresholds_changed"] is False
+    assert result.report["sample_count"] == 21
+    assert result.report["classification"] == "PROMOTE_TO_REPLAY_CANDIDATE"
+    assert result.report["policy_summary"]["time_boxed_3x5m"]["average_r"] is not None
+    assert result.report["submit_cancel_place_order_invoked"] is False
