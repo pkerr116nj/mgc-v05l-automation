@@ -25,6 +25,8 @@ class TrackBResearchHarnessWorkbenchConfig:
     output_md: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_research_harness_workbench.md"
     reuse_audit_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_research_workbench_reuse_audit.json"
     reuse_audit_md: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_research_workbench_reuse_audit.md"
+    candidate_run_json: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_research_workbench_candidate_run.json"
+    candidate_run_md: Path = DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_research_workbench_candidate_run.md"
     location_variant_research_json: Path = (
         DEFAULT_DIAGNOSTICS_ROOT / "latest_track_b_snap_turn_location_variant_research_replay.json"
     )
@@ -59,6 +61,43 @@ class ResearchRunPlanRequest:
     regime: str = "ANY"
 
 
+@dataclass(frozen=True)
+class DecisionSurfaceSpec:
+    decision_surface_id: str
+    source_timeframe: str
+    decision_timeframe: str
+    source_data_index_id: str
+    completed_bar_only: bool = True
+
+
+@dataclass(frozen=True)
+class ResearchCandidateSpec:
+    candidate_id: str
+    base_strategy_id: str
+    instrument: str
+    side: str
+    timeframes: tuple[str, ...]
+    sessions: tuple[str, ...]
+    regime_tags: tuple[str, ...]
+    decision_surface_id: str
+    snapshot_builder_id: str
+    rule_evaluator_id: str
+    exit_policy_grid_id: str
+    pnl_risk_scorer_id: str
+    report_writer_id: str
+    status: str
+    status_reasons: tuple[str, ...]
+    paper_eligible: bool = False
+    managed_paper_eligible: bool = False
+
+
+@dataclass(frozen=True)
+class TrackBResearchWorkbenchCandidateRunResult:
+    report_json: Path
+    report_md: Path
+    report: dict[str, Any]
+
+
 SHARED_PIPELINE_ID = "TRACK_B_RESEARCH_WORKBENCH_SHARED_PIPELINE_V1"
 SHARED_SCORER_ID = "track_b_research_pnl_risk_scorer_v1"
 SHARED_REPORT_WRITER_ID = "track_b_research_sample_frame_report_writer_v1"
@@ -77,6 +116,46 @@ CANONICAL_PIPELINE = [
     "gui_api",
     "backlog_promotion_status",
 ]
+
+MNQ_LOCATION_VARIANT_CANDIDATE_ID = "MNQ_FIRST_BEAR_SNAP_TURN_LOCATION_VARIANT_RESEARCH_V1"
+
+DECISION_SURFACE_REGISTRY: dict[str, DecisionSurfaceSpec] = {
+    "completed_5m_from_track1_1m_v1": DecisionSurfaceSpec(
+        decision_surface_id="completed_5m_from_track1_1m_v1",
+        source_timeframe="1m",
+        decision_timeframe="5m",
+        source_data_index_id="track1_1m_history_index_v1",
+    ),
+    "completed_3m_from_track1_1m_v1": DecisionSurfaceSpec(
+        decision_surface_id="completed_3m_from_track1_1m_v1",
+        source_timeframe="1m",
+        decision_timeframe="3m",
+        source_data_index_id="track1_1m_history_index_v1",
+    ),
+}
+
+RESEARCH_CANDIDATE_REGISTRY: dict[str, ResearchCandidateSpec] = {
+    MNQ_LOCATION_VARIANT_CANDIDATE_ID: ResearchCandidateSpec(
+        candidate_id=MNQ_LOCATION_VARIANT_CANDIDATE_ID,
+        base_strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+        instrument="MNQ",
+        side="SHORT",
+        timeframes=("5m",),
+        sessions=("US_OPEN",),
+        regime_tags=("SNAP_TURN", "DOWNSLOPE", "LOCATION_VARIANT"),
+        decision_surface_id="completed_5m_from_track1_1m_v1",
+        snapshot_builder_id="track_b_research_snapshot_builder_v1",
+        rule_evaluator_id="rules.py:mnq_first_bear_snap_turn_location_variant_v1",
+        exit_policy_grid_id="FULL_HISTORY_EXIT_POLICY_GRID",
+        pnl_risk_scorer_id=SHARED_SCORER_ID,
+        report_writer_id=SHARED_REPORT_WRITER_ID,
+        status="NOT_PROMOTED",
+        status_reasons=(
+            "REJECTED_IN_SINGLE_WINDOW_DIAGNOSTIC",
+            "RETEST_REQUIRED_ON_FULL_HISTORY_RESEARCH_ENGINE",
+        ),
+    )
+}
 
 
 def create_track_b_research_harness_workbench(
@@ -262,6 +341,127 @@ def create_track_b_research_workbench_reuse_audit(
     return TrackBResearchWorkbenchReuseAuditResult(report_json=output_json, report_md=output_md, report=report)
 
 
+def track_b_research_candidate_registry() -> dict[str, dict[str, Any]]:
+    return {candidate_id: _candidate_spec_payload(spec) for candidate_id, spec in RESEARCH_CANDIDATE_REGISTRY.items()}
+
+
+def track_b_decision_surface_registry() -> dict[str, dict[str, Any]]:
+    return {
+        surface_id: {
+            "decision_surface_id": spec.decision_surface_id,
+            "source_timeframe": spec.source_timeframe,
+            "decision_timeframe": spec.decision_timeframe,
+            "source_data_index_id": spec.source_data_index_id,
+            "completed_bar_only": spec.completed_bar_only,
+        }
+        for surface_id, spec in DECISION_SURFACE_REGISTRY.items()
+    }
+
+
+def run_track_b_research_workbench_candidate(
+    *,
+    candidate_id: str,
+    config: TrackBResearchHarnessWorkbenchConfig | None = None,
+    now: datetime | None = None,
+    replay_config: Any | None = None,
+    research_config: Any | None = None,
+    exit_sensitivity_config: Any | None = None,
+) -> TrackBResearchWorkbenchCandidateRunResult:
+    actual_config = config or TrackBResearchHarnessWorkbenchConfig()
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    repo_root = Path(actual_config.repo_root)
+    spec = RESEARCH_CANDIDATE_REGISTRY.get(candidate_id)
+    if spec is None:
+        raise ValueError(f"Unknown Track B research candidate: {candidate_id}")
+    surface = DECISION_SURFACE_REGISTRY[spec.decision_surface_id]
+    run_plan = build_research_workbench_run_plan(
+        [
+            ResearchRunPlanRequest(
+                run_id=f"{candidate_id}:research_retest",
+                run_kind="backlog_candidate",
+                candidate_id=candidate_id,
+                timeframe=surface.decision_timeframe,
+                exit_policy_id=spec.exit_policy_grid_id,
+                lookback_id="MAX_TRACK1_1M_HISTORY_THROUGH_PRIOR_FRIDAY",
+                session=spec.sessions[0] if spec.sessions else "ANY",
+                regime=spec.regime_tags[0] if spec.regime_tags else "ANY",
+            )
+        ]
+    )
+    if candidate_id != MNQ_LOCATION_VARIANT_CANDIDATE_ID:
+        raise ValueError(f"No shared workbench runner is registered for candidate: {candidate_id}")
+    location_report, exit_report = _run_mnq_location_variant_shared_pipeline(
+        repo_root=repo_root,
+        now=actual_now,
+        replay_config=replay_config,
+        research_config=research_config,
+        exit_sensitivity_config=exit_sensitivity_config,
+    )
+    report = {
+        "schema_version": "track_b_research_workbench_candidate_run_v1",
+        "generated_at": actual_now.isoformat(),
+        "candidate_spec": _candidate_spec_payload(spec),
+        "decision_surface_spec": {
+            "decision_surface_id": surface.decision_surface_id,
+            "source_timeframe": surface.source_timeframe,
+            "decision_timeframe": surface.decision_timeframe,
+            "source_data_index_id": surface.source_data_index_id,
+            "completed_bar_only": surface.completed_bar_only,
+        },
+        "shared_pipeline_id": SHARED_PIPELINE_ID,
+        "shared_pipeline": CANONICAL_PIPELINE,
+        "shared_pipeline_used": True,
+        "run_plan": run_plan,
+        "stage_contracts": {
+            "snapshot_builder": spec.snapshot_builder_id,
+            "rule_evaluator": spec.rule_evaluator_id,
+            "exit_policy_engine": SHARED_EXIT_POLICY_ENGINE_ID,
+            "pnl_risk_scorer": SHARED_SCORER_ID,
+            "report_writer": SHARED_REPORT_WRITER_ID,
+        },
+        "candidate_status": spec.status,
+        "candidate_status_reasons": list(spec.status_reasons),
+        "research_inventory_action": "KEEP_IN_FUTURE_RESEARCH_HARNESS_BACKLOG",
+        "paper_eligible": spec.paper_eligible,
+        "managed_paper_eligible": spec.managed_paper_eligible,
+        "production_thresholds_changed": False,
+        "paper_promotion_changed": False,
+        "broker_commands_invoked": False,
+        "paper_proof_cli_invoked": False,
+        "submit_cancel_place_order_invoked": False,
+        "legacy_bespoke_entrypoints_deprecated": True,
+        "deprecated_entrypoints": [
+            "create_track_b_snap_turn_location_variant_research_replay",
+            "create_track_b_snap_turn_location_variant_exit_sensitivity",
+        ],
+        "location_variant_research_report": {
+            "classification": location_report.get("classification"),
+            "sample_frame": location_report.get("sample_frame"),
+            "sample_count": location_report.get("sample_count"),
+            "candidate_status": location_report.get("candidate_status"),
+            "candidate_status_reasons": location_report.get("candidate_status_reasons"),
+            "policy_summary": location_report.get("policy_summary"),
+            "production_strategy_comparison": location_report.get("production_strategy_comparison"),
+            "random_baseline_comparison": location_report.get("random_baseline_comparison"),
+        },
+        "exit_sensitivity_report": {
+            "classification": exit_report.get("classification"),
+            "sample_frame": exit_report.get("sample_frame"),
+            "sample_count": exit_report.get("sample_count"),
+            "candidate_status": exit_report.get("candidate_status"),
+            "candidate_status_reasons": exit_report.get("candidate_status_reasons"),
+            "policy_summary": exit_report.get("policy_summary"),
+            "best_policy": exit_report.get("best_policy"),
+        },
+    }
+    output_json = _resolve(repo_root, actual_config.candidate_run_json)
+    output_md = _resolve(repo_root, actual_config.candidate_run_md)
+    _write_json(output_json, report)
+    _write_text(output_md, _candidate_run_markdown(report))
+    return TrackBResearchWorkbenchCandidateRunResult(report_json=output_json, report_md=output_md, report=report)
+
+
 def build_research_workbench_run_plan(requests: list[ResearchRunPlanRequest]) -> list[dict[str, Any]]:
     return [
         {
@@ -288,6 +488,64 @@ def build_research_workbench_run_plan(requests: list[ResearchRunPlanRequest]) ->
         }
         for request in requests
     ]
+
+
+def _run_mnq_location_variant_shared_pipeline(
+    *,
+    repo_root: Path,
+    now: datetime,
+    replay_config: Any | None,
+    research_config: Any | None,
+    exit_sensitivity_config: Any | None,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    from .track_b_snap_turn_near_miss_amplification import (
+        TrackBSnapTurnLocationVariantExitSensitivityConfig,
+        TrackBSnapTurnLocationVariantResearchConfig,
+        TrackBSnapTurnReplayBackfillConfig,
+        create_track_b_snap_turn_location_variant_exit_sensitivity,
+        create_track_b_snap_turn_location_variant_research_replay,
+    )
+
+    actual_replay_config = replay_config or TrackBSnapTurnReplayBackfillConfig(repo_root=repo_root)
+    actual_research_config = research_config or TrackBSnapTurnLocationVariantResearchConfig(
+        repo_root=repo_root,
+        replay_backfill_config=actual_replay_config,
+    )
+    research_result = create_track_b_snap_turn_location_variant_research_replay(
+        config=actual_research_config,
+        now=now,
+    )
+    actual_exit_config = exit_sensitivity_config or TrackBSnapTurnLocationVariantExitSensitivityConfig(
+        repo_root=repo_root,
+        research_replay_config=actual_research_config,
+    )
+    exit_result = create_track_b_snap_turn_location_variant_exit_sensitivity(
+        config=actual_exit_config,
+        now=now,
+    )
+    return research_result.report, exit_result.report
+
+
+def _candidate_spec_payload(spec: ResearchCandidateSpec) -> dict[str, Any]:
+    return {
+        "candidate_id": spec.candidate_id,
+        "base_strategy_id": spec.base_strategy_id,
+        "instrument": spec.instrument,
+        "side": spec.side,
+        "timeframes": list(spec.timeframes),
+        "sessions": list(spec.sessions),
+        "regime_tags": list(spec.regime_tags),
+        "decision_surface_id": spec.decision_surface_id,
+        "snapshot_builder_id": spec.snapshot_builder_id,
+        "rule_evaluator_id": spec.rule_evaluator_id,
+        "exit_policy_grid_id": spec.exit_policy_grid_id,
+        "pnl_risk_scorer_id": spec.pnl_risk_scorer_id,
+        "report_writer_id": spec.report_writer_id,
+        "status": spec.status,
+        "status_reasons": list(spec.status_reasons),
+        "paper_eligible": spec.paper_eligible,
+        "managed_paper_eligible": spec.managed_paper_eligible,
+    }
 
 
 def _location_variant_backlog_item(
@@ -536,6 +794,38 @@ def _markdown(report: Mapping[str, Any]) -> str:
         lines.append("")
     lines.extend(["## Next Steps", ""])
     for item in report.get("next_workbench_steps") or []:
+        lines.append(f"- {item}")
+    return "\n".join(lines) + "\n"
+
+
+def _candidate_run_markdown(report: Mapping[str, Any]) -> str:
+    spec = report.get("candidate_spec") or {}
+    location = report.get("location_variant_research_report") or {}
+    exit_report = report.get("exit_sensitivity_report") or {}
+    lines = [
+        "# Track B Research Workbench Candidate Run",
+        "",
+        f"Generated: {report.get('generated_at')}",
+        "",
+        f"Candidate: {spec.get('candidate_id')}",
+        f"Status: {report.get('candidate_status')}",
+        f"Status reasons: {', '.join(report.get('candidate_status_reasons') or [])}",
+        f"Paper eligible: {report.get('paper_eligible')}",
+        f"Shared pipeline: {report.get('shared_pipeline_id')}",
+        "",
+        "## Stage Contracts",
+        "",
+    ]
+    stages = report.get("stage_contracts") or {}
+    for key in ("snapshot_builder", "rule_evaluator", "exit_policy_engine", "pnl_risk_scorer", "report_writer"):
+        lines.append(f"- {key}: {stages.get(key)}")
+    lines.extend(["", "## Results", ""])
+    lines.append(f"- Location replay classification: {location.get('classification')}")
+    lines.append(f"- Location replay samples: {location.get('sample_count')}")
+    lines.append(f"- Exit sensitivity classification: {exit_report.get('classification')}")
+    lines.append(f"- Exit sensitivity samples: {exit_report.get('sample_count')}")
+    lines.extend(["", "## Deprecated Bespoke Entrypoints", ""])
+    for item in report.get("deprecated_entrypoints") or []:
         lines.append(f"- {item}")
     return "\n".join(lines) + "\n"
 

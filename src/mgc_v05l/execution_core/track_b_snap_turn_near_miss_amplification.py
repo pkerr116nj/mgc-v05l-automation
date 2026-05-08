@@ -388,6 +388,12 @@ def create_track_b_snap_turn_location_variant_research_replay(
     config: TrackBSnapTurnLocationVariantResearchConfig | None = None,
     now: datetime | None = None,
 ) -> TrackBSnapTurnLocationVariantResearchResult:
+    """Compatibility wrapper for the legacy location-variant replay artifact.
+
+    New Track B research candidates should be selected through
+    run_track_b_research_workbench_candidate so they use CandidateSpec,
+    DecisionSurfaceSpec, and the shared workbench scorer/report contract.
+    """
     actual_config = config or TrackBSnapTurnLocationVariantResearchConfig()
     actual_now = now or datetime.now(UTC)
     require_aware_datetime(actual_now, "now")
@@ -470,6 +476,9 @@ def create_track_b_snap_turn_location_variant_research_replay(
     report = {
         "schema_version": "track_b_snap_turn_location_variant_research_replay_v1",
         "generated_at": actual_now.isoformat(),
+        "entrypoint_status": "DEPRECATED_COMPATIBILITY_WRAPPER",
+        "canonical_workbench_entrypoint": "run_track_b_research_workbench_candidate",
+        "do_not_extend_with_new_candidates": True,
         "candidate_name": actual_config.candidate_name,
         "candidate_strategy_id": actual_config.candidate_strategy_id,
         "candidate_predicate": actual_config.candidate_predicate,
@@ -513,6 +522,11 @@ def create_track_b_snap_turn_location_variant_exit_sensitivity(
     config: TrackBSnapTurnLocationVariantExitSensitivityConfig | None = None,
     now: datetime | None = None,
 ) -> TrackBSnapTurnLocationVariantExitSensitivityResult:
+    """Compatibility wrapper for the legacy location-variant exit audit.
+
+    New Track B research candidates should run through the shared workbench
+    candidate path instead of adding more candidate-named replay functions.
+    """
     actual_config = config or TrackBSnapTurnLocationVariantExitSensitivityConfig()
     actual_now = now or datetime.now(UTC)
     require_aware_datetime(actual_now, "now")
@@ -553,6 +567,9 @@ def create_track_b_snap_turn_location_variant_exit_sensitivity(
     report = {
         "schema_version": "track_b_snap_turn_location_variant_exit_sensitivity_v1",
         "generated_at": actual_now.isoformat(),
+        "entrypoint_status": "DEPRECATED_COMPATIBILITY_WRAPPER",
+        "canonical_workbench_entrypoint": "run_track_b_research_workbench_candidate",
+        "do_not_extend_with_new_candidates": True,
         "candidate_name": research_report.get("candidate_name")
         or "MNQ_FIRST_BEAR_SNAP_TURN_LOCATION_VARIANT_RESEARCH_V1",
         "candidate_status": candidate_status["candidate_status"],

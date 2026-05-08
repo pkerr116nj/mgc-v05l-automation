@@ -489,6 +489,9 @@ def test_location_variant_research_replay_promotes_only_to_replay_candidate(tmp_
     )
 
     assert result.report["candidate_status"] == "NOT_PROMOTED"
+    assert result.report["entrypoint_status"] == "DEPRECATED_COMPATIBILITY_WRAPPER"
+    assert result.report["canonical_workbench_entrypoint"] == "run_track_b_research_workbench_candidate"
+    assert result.report["do_not_extend_with_new_candidates"] is True
     assert result.report["candidate_status_reasons"] == [
         "REJECTED_IN_SINGLE_WINDOW_DIAGNOSTIC",
         "RETEST_REQUIRED_ON_FULL_HISTORY_RESEARCH_ENGINE",
@@ -562,6 +565,9 @@ def test_location_variant_exit_sensitivity_keeps_quick_scalp_research_only(tmp_p
     )
 
     assert result.report["candidate_status"] == "NOT_PROMOTED"
+    assert result.report["entrypoint_status"] == "DEPRECATED_COMPATIBILITY_WRAPPER"
+    assert result.report["canonical_workbench_entrypoint"] == "run_track_b_research_workbench_candidate"
+    assert result.report["do_not_extend_with_new_candidates"] is True
     assert result.report["candidate_status_reasons"] == [
         "REJECTED_IN_SINGLE_WINDOW_DIAGNOSTIC",
         "RETEST_REQUIRED_ON_FULL_HISTORY_RESEARCH_ENGINE",
