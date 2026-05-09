@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mgc_v05l.app.phase1_ticker_readiness_matrix import (
@@ -9,6 +10,8 @@ from mgc_v05l.app.phase1_ticker_readiness_matrix import (
     build_phase1_ticker_readiness_matrix,
     write_phase1_ticker_readiness_matrix_artifacts,
 )
+
+NOW = datetime(2026, 5, 9, 14, 0, tzinfo=timezone.utc)
 
 
 def _write_market_data_config(root: Path) -> None:
@@ -59,10 +62,34 @@ def _write_governance(root: Path) -> None:
     )
 
 
+def _write_runtime_artifacts(root: Path, *, symbol: str) -> None:
+    for timeframe in ("1m", "3m", "5m"):
+        for base, filename, row_key in (
+            ("phase1_runtime_market_data", "latest_runtime_candles.json", "bars"),
+            ("phase1_runtime_features", "latest_runtime_features.json", "features"),
+        ):
+            path = root / "outputs" / "track_b_execution_core" / base / symbol / timeframe / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": NOW.isoformat(),
+                        "source_id": "databento_live:test",
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "completed_candles_only": True,
+                        row_key: [{"bar_end": NOW.isoformat(), "close": 100.0}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+
 def _config(root: Path) -> Phase1TickerReadinessMatrixConfig:
     return Phase1TickerReadinessMatrixConfig(
         repo_root=root,
         output_dir=Path("outputs") / "reports" / "phase1_ticker_readiness_matrix",
+        now=NOW,
     )
 
 
@@ -111,6 +138,7 @@ def test_strategy_approval_defaults_false_and_blocks_submit(tmp_path: Path) -> N
     assert rows["GC"]["strategy_approved"] is False
     assert rows["GC"]["can_submit"] is False
     assert rows["GC"]["block_reason"] == "NO_APPROVED_STRATEGY"
+    assert rows["GC"]["runtime_data_block_reason"] == "RUNTIME_CANDLES_MISSING"
     assert rows["NQ"]["block_reason"] == "NO_APPROVED_STRATEGY"
 
 
@@ -138,6 +166,40 @@ def test_live_money_false_and_quantity_cap_constant_for_all_rows(tmp_path: Path)
 
     assert all(row["live_money_eligible"] is False for row in artifacts.rows)
     assert {row["quantity_cap"] for row in artifacts.rows} == {1.0}
+
+
+def test_runtime_data_ready_does_not_create_submit_permission_without_strategy_approval(tmp_path: Path) -> None:
+    _write_market_data_config(tmp_path)
+    _write_governance(tmp_path)
+    _write_runtime_artifacts(tmp_path, symbol="GC")
+
+    artifacts = build_phase1_ticker_readiness_matrix(config=_config(tmp_path))
+    rows = {row["approved_phase1_symbol"]: row for row in artifacts.rows}
+
+    assert rows["GC"]["runtime_candles_ready"] is True
+    assert rows["GC"]["derived_features_ready"] is True
+    assert rows["GC"]["runtime_data_block_reason"] == "READY"
+    assert rows["GC"]["strategy_approved"] is False
+    assert rows["GC"]["can_submit"] is False
+    assert rows["GC"]["block_reason"] == "NO_APPROVED_STRATEGY"
+
+
+def test_strategy_approved_symbol_is_blocked_when_runtime_data_missing(tmp_path: Path) -> None:
+    _write_market_data_config(tmp_path)
+    _write_governance(tmp_path)
+    governance_path = tmp_path / "var" / "per_strategy_paper_status.json"
+    payload = json.loads(governance_path.read_text(encoding="utf-8"))
+    payload["strategies"][0]["strategy_approved"] = True
+    governance_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    artifacts = build_phase1_ticker_readiness_matrix(config=_config(tmp_path))
+    rows = {row["approved_phase1_symbol"]: row for row in artifacts.rows}
+
+    assert rows["GC"]["lane_adapter_present"] is True
+    assert rows["GC"]["strategy_approved"] is True
+    assert rows["GC"]["runtime_candles_ready"] is False
+    assert rows["GC"]["can_submit"] is False
+    assert rows["GC"]["block_reason"] == "RUNTIME_DATA_NOT_READY"
 
 
 def test_writes_matrix_artifacts_without_archive_truth(tmp_path: Path) -> None:

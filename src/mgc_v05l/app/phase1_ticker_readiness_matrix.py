@@ -16,13 +16,19 @@ from mgc_v05l.execution.ibkr_phase1_futures_scope import (
     phase1_execution_target_for_source,
     supported_phase1_source_instruments,
 )
+from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
+    DEFAULT_RUNTIME_CANDLE_ROOT,
+    DEFAULT_RUNTIME_FEATURE_ROOT,
+    Phase1RuntimeDataReadinessConfig,
+    build_phase1_runtime_data_readiness,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "reports" / "phase1_ticker_readiness_matrix"
 DEFAULT_MARKET_DATA_CONFIG_PATH = Path("config") / "market_data_providers.json"
 DEFAULT_GOVERNANCE_STATUS_PATH = Path("var") / "per_strategy_paper_status.json"
-DEFAULT_RUNTIME_CANDLE_DIR = Path("outputs") / "track_b_execution_core" / "track_b_runtime_candle_capture"
-DEFAULT_FEATURE_STATE_DIR = Path("outputs") / "track_b_execution_core" / "track_b_runtime_feature_state"
+DEFAULT_RUNTIME_CANDLE_DIR = DEFAULT_RUNTIME_CANDLE_ROOT
+DEFAULT_FEATURE_STATE_DIR = DEFAULT_RUNTIME_FEATURE_ROOT
 PHASE1_TICKER_ORDER = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB")
 FULL_SIZE_CONTRACTS = {"GC", "NQ", "ES"}
 MICRO_CONTRACTS = {"MGC", "MNQ", "MES"}
@@ -38,6 +44,7 @@ class Phase1TickerReadinessMatrixConfig:
     governance_status_path: Path = DEFAULT_GOVERNANCE_STATUS_PATH
     runtime_candle_dir: Path = DEFAULT_RUNTIME_CANDLE_DIR
     feature_state_dir: Path = DEFAULT_FEATURE_STATE_DIR
+    now: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -55,13 +62,33 @@ def build_phase1_ticker_readiness_matrix(
     governance = _load_json(repo_root / config.governance_status_path, default={})
     governance_rows = list(governance.get("strategies") or [])
     adapters = submit_capable_lane_adapters()
-    rows = [_ticker_row(symbol, repo_root=repo_root, config=config, market_data=market_data, governance_rows=governance_rows, adapters=adapters) for symbol in PHASE1_TICKER_ORDER]
+    runtime_data = build_phase1_runtime_data_readiness(
+        config=Phase1RuntimeDataReadinessConfig(
+            repo_root=repo_root,
+            runtime_candle_root=config.runtime_candle_dir,
+            runtime_feature_root=config.feature_state_dir,
+            now=config.now,
+        )
+    )
+    runtime_data_by_symbol = {str(row.get("symbol") or ""): row for row in runtime_data.rows}
+    rows = [
+        _ticker_row(
+            symbol,
+            market_data=market_data,
+            governance_rows=governance_rows,
+            adapters=adapters,
+            runtime_data_by_symbol=runtime_data_by_symbol,
+        )
+        for symbol in PHASE1_TICKER_ORDER
+    ]
     report = {
         "schema_version": "phase1_ticker_readiness_matrix_v1",
         "generated_at": _utc_now(),
         "repo_root": str(repo_root),
         "archive_artifact_used": False,
+        "research_artifact_used": bool(runtime_data.report.get("research_artifact_used")),
         "runtime_truth_policy": "active runtime/preflight/dashboard must not read cold archive as operational truth",
+        "runtime_data_readiness_schema_version": runtime_data.report.get("schema_version"),
         "approved_phase1_tickers": list(PHASE1_TICKER_ORDER),
         "row_count": len(rows),
         "can_submit_count": sum(1 for row in rows if row["can_submit"]),
@@ -124,11 +151,10 @@ def render_phase1_ticker_readiness_matrix_markdown(report: dict[str, Any]) -> st
 def _ticker_row(
     symbol: str,
     *,
-    repo_root: Path,
-    config: Phase1TickerReadinessMatrixConfig,
     market_data: dict[str, Any],
     governance_rows: list[dict[str, Any]],
     adapters: dict[str, dict[str, Any]],
+    runtime_data_by_symbol: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     target = phase1_execution_target_for_source(symbol)
     source_supported = symbol in supported_phase1_source_instruments()
@@ -136,8 +162,10 @@ def _ticker_row(
     metadata_present = _contract_metadata_present(target)
     qualification_ready = bool(metadata_present and target)
     market_data_ready = _market_data_ready(symbol=symbol, market_data=market_data)
-    runtime_candles_ready = _runtime_candles_ready(symbol=symbol, repo_root=repo_root, config=config)
-    derived_features_ready = _derived_features_ready(symbol=symbol, repo_root=repo_root, config=config)
+    runtime_data = dict(runtime_data_by_symbol.get(symbol) or {})
+    runtime_candles_ready = bool(runtime_data.get("runtime_candles_ready"))
+    derived_features_ready = bool(runtime_data.get("derived_features_ready"))
+    runtime_data_block_reason = _runtime_data_block_reason(runtime_data)
     governance_visible = any(str(row.get("instrument") or "").upper() == symbol for row in governance_rows)
     lane_adapter_present = any(
         str(dict(adapter.get("bridge_execution_target") or {}).get("symbol") or "").upper() == symbol
@@ -152,6 +180,7 @@ def _ticker_row(
         contract_metadata_present=metadata_present,
         lane_adapter_present=lane_adapter_present,
         strategy_approved=strategy_approved,
+        runtime_data_ready=runtime_candles_ready and derived_features_ready,
     )
     return {
         "approved_phase1_symbol": symbol,
@@ -163,6 +192,7 @@ def _ticker_row(
         "market_data_ready": market_data_ready,
         "runtime_candles_ready": runtime_candles_ready,
         "derived_features_ready": derived_features_ready,
+        "runtime_data_block_reason": runtime_data_block_reason,
         "governance_visible": governance_visible,
         "lane_adapter_present": lane_adapter_present,
         "paper_route_capable": bool(lane_adapter_present and metadata_present),
@@ -185,6 +215,7 @@ def _submit_status(
     contract_metadata_present: bool,
     lane_adapter_present: bool,
     strategy_approved: bool,
+    runtime_data_ready: bool,
 ) -> tuple[bool, str]:
     if not contract_metadata_present:
         return False, "CONTRACT_METADATA_MISSING"
@@ -192,6 +223,8 @@ def _submit_status(
         return False, "LANE_ADAPTER_MISSING"
     if not strategy_approved:
         return False, "NO_APPROVED_STRATEGY"
+    if not runtime_data_ready:
+        return False, "RUNTIME_DATA_NOT_READY"
     return True, "READY"
 
 
@@ -208,22 +241,14 @@ def _market_data_ready(*, symbol: str, market_data: dict[str, Any]) -> bool:
     return bool(row.get("request_symbol") and (row.get("schema_by_timeframe") or {}).get("1m"))
 
 
-def _runtime_candles_ready(*, symbol: str, repo_root: Path, config: Phase1TickerReadinessMatrixConfig) -> bool:
-    root = repo_root / config.runtime_candle_dir
-    candidates = (
-        root / f"latest_runtime_{symbol.lower()}_1m_candles.json",
-        root / f"latest_runtime_{symbol}_1m_candles.json",
-    )
-    return any(path.exists() for path in candidates)
-
-
-def _derived_features_ready(*, symbol: str, repo_root: Path, config: Phase1TickerReadinessMatrixConfig) -> bool:
-    root = repo_root / config.feature_state_dir
-    candidates = (
-        root / f"latest_runtime_{symbol.lower()}_features.json",
-        root / f"latest_runtime_{symbol}_features.json",
-    )
-    return any(path.exists() for path in candidates)
+def _runtime_data_block_reason(runtime_data: dict[str, Any]) -> str:
+    if not runtime_data:
+        return "RUNTIME_DATA_NOT_READY"
+    if not runtime_data.get("runtime_candles_ready"):
+        return str(runtime_data.get("runtime_candles_block_reason") or "RUNTIME_CANDLES_NOT_READY")
+    if not runtime_data.get("derived_features_ready"):
+        return str(runtime_data.get("derived_features_block_reason") or "FEATURES_NOT_READY")
+    return "READY"
 
 
 def _load_json(path: Path, *, default: Any) -> Any:
