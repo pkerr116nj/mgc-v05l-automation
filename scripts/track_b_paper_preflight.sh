@@ -116,6 +116,21 @@ def read_json(path: Path) -> tuple[dict[str, Any] | list[Any] | None, str | None
         return None, f"{path}: {exc}"
 
 
+def parse_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 checks: list[dict[str, Any]] = []
 warnings: list[str] = []
 blocking: list[str] = []
@@ -276,6 +291,110 @@ add(
     True,
     "no paper_proof invocation evidence" if not proof_hits else "\n".join(proof_hits[:20]),
     hit_count=len(proof_hits),
+)
+
+governance_freshness_window_seconds = 120.0
+try:
+    from mgc_v05l.execution.ibkr_paper_strategy_governance import (
+        IbkrPaperStrategyGovernanceConfig,
+        run_ibkr_paper_strategy_governance,
+        write_ibkr_paper_strategy_governance_artifacts,
+    )
+
+    governance_config = IbkrPaperStrategyGovernanceConfig(repo_root=REPO_ROOT)
+    governance_freshness_window_seconds = float(governance_config.freshness_window_seconds)
+    if MODE == "monday-live":
+        governance_artifacts = run_ibkr_paper_strategy_governance(config=governance_config)
+        write_ibkr_paper_strategy_governance_artifacts(
+            config=governance_config,
+            artifacts=governance_artifacts,
+        )
+        add(
+            "governance_artifacts_regenerated",
+            True,
+            True,
+            "regenerated var/per_strategy_paper_status.json and var/strategy_probation_dashboard.json from local runtime artifacts",
+            classification=governance_artifacts.classification,
+        )
+except Exception as exc:
+    if MODE == "monday-live":
+        add(
+            "governance_artifacts_regenerated",
+            False,
+            True,
+            f"governance refresh failed before PAPER watch: {exc}",
+        )
+    else:
+        checks.append(
+            {
+                "name": "governance_artifacts_regenerated",
+                "status": "SKIP",
+                "detail": "weekend-static does not regenerate governance artifacts",
+            }
+        )
+
+governance_status_path = REPO_ROOT / "var/per_strategy_paper_status.json"
+governance_dashboard_path = REPO_ROOT / "var/strategy_probation_dashboard.json"
+governance_payload, governance_err = read_json(governance_status_path)
+governance_dashboard, governance_dashboard_err = read_json(governance_dashboard_path)
+governance_blocks = MODE == "monday-live"
+
+def validate_runtime_json_artifact(
+    *,
+    name: str,
+    path: Path,
+    payload: dict[str, Any] | list[Any] | None,
+    err: str | None,
+    row_key: str,
+) -> datetime | None:
+    is_object = isinstance(payload, dict)
+    generated_at = parse_datetime(payload.get("generated_at")) if is_object else None
+    age_seconds = None if generated_at is None else max(0.0, (datetime.now(timezone.utc) - generated_at).total_seconds())
+    rows = payload.get(row_key) if is_object else None
+    row_count = len(rows) if isinstance(rows, list) else 0
+    passed = (
+        err is None
+        and is_object
+        and generated_at is not None
+        and age_seconds is not None
+        and age_seconds <= governance_freshness_window_seconds
+        and row_count > 0
+    )
+    detail = (
+        f"{path} generated_at={generated_at.isoformat() if generated_at else None}; "
+        f"age_seconds={age_seconds}; freshness_window_seconds={governance_freshness_window_seconds}; "
+        f"{row_key}_count={row_count}"
+        if err is None
+        else err
+    )
+    add(name, passed, governance_blocks, detail, path=str(path), age_seconds=age_seconds, row_count=row_count)
+    return generated_at
+
+
+governance_generated_at = validate_runtime_json_artifact(
+    name="governance_status_artifact_fresh",
+    path=governance_status_path,
+    payload=governance_payload,
+    err=governance_err,
+    row_key="strategies",
+)
+dashboard_generated_at = validate_runtime_json_artifact(
+    name="governance_dashboard_artifact_fresh",
+    path=governance_dashboard_path,
+    payload=governance_dashboard,
+    err=governance_dashboard_err,
+    row_key="active_rows",
+)
+timestamp_delta_seconds = (
+    None
+    if governance_generated_at is None or dashboard_generated_at is None
+    else abs((governance_generated_at - dashboard_generated_at).total_seconds())
+)
+add(
+    "governance_artifact_timestamps_match",
+    timestamp_delta_seconds is not None and timestamp_delta_seconds <= 5.0,
+    governance_blocks,
+    f"timestamp_delta_seconds={timestamp_delta_seconds}; tolerance_seconds=5.0",
 )
 
 readiness_path = REPO_ROOT / "outputs/operator_dashboard/paper_readiness_snapshot.json"
@@ -472,7 +591,17 @@ elif warnings:
 else:
     status = "PASS"
 
-weekend_status = status if MODE == "weekend-static" else "PASS" if not blocking else "FAIL"
+governance_artifact_check_names = {
+    "governance_artifacts_regenerated",
+    "governance_status_artifact_fresh",
+    "governance_dashboard_artifact_fresh",
+    "governance_artifact_timestamps_match",
+}
+governance_artifact_failure = any(
+    check.get("name") in governance_artifact_check_names and check.get("status") == "FAIL"
+    for check in checks
+)
+weekend_status = "PASS" if MODE == "weekend-static" and not blocking else status if MODE == "weekend-static" else "PASS" if not blocking else "FAIL"
 monday_status = "NOT_APPLICABLE" if MODE == "weekend-static" else status
 result = {
     "schema_version": "track_b_paper_preflight_v1",
@@ -483,6 +612,11 @@ result = {
     "final_submit_path_baseline_commit": "35064b698c",
     "weekend_static_dry_run": weekend_status,
     "monday_live_preflight": monday_status,
+    "monday_blocked_classification": (
+        "MONDAY_BLOCKED_READINESS_ARTIFACTS"
+        if MODE == "monday-live" and governance_artifact_failure
+        else None
+    ),
     "blocking_reasons": blocking,
     "warnings": warnings,
     "next_action": (
