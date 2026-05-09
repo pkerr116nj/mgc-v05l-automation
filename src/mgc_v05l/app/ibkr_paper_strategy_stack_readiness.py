@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from mgc_v05l.execution.ibkr_phase1_futures_scope import phase1_execution_symbol_for_source
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "reports" / "ibkr_paper_strategy_stack_readiness"
@@ -94,10 +96,7 @@ def _family_for_symbol(symbol: str) -> str:
 
 
 def _proxy_for_symbol(symbol: str) -> str:
-    for config in FAMILY_CONFIGS:
-        if symbol in config.symbols:
-            return config.executable_proxy
-    return ""
+    return phase1_execution_symbol_for_source(symbol) or ""
 
 
 def _quote_mode_for_symbol(symbol: str) -> str:

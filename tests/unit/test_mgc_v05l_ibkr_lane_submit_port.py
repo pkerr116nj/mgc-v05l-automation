@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mgc_v05l.execution.ibkr_lane_submit_port import (
@@ -222,6 +223,7 @@ def _write_governance_status(tmp_path: Path) -> None:
     path.write_text(
         json.dumps(
             {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
                 "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
                 "strategies": [
                     {
@@ -328,7 +330,7 @@ def test_lane_submit_port_can_target_submit_capable_nq_lane(tmp_path: Path) -> N
 
     assert artifacts.classification == "PAPER_LANE_SUBMIT_READY_NO_ACTION"
     assert artifacts.report["selected_lane"]["strategy_id"] == "nq_1x_asia_london_participation__asia_london_long_v5"
-    assert artifacts.report["bridge_adapter"]["bridge_execution_target"]["symbol"] == "MNQ"
+    assert artifacts.report["bridge_adapter"]["bridge_execution_target"]["symbol"] == "NQ"
     assert artifacts.report["selected_inventory_row"]["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
 
 

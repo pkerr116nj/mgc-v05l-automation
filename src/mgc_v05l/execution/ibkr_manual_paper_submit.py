@@ -1338,14 +1338,14 @@ def render_ibkr_manual_paper_submit_markdown(report: dict[str, Any]) -> str:
         "- manual CLI only",
         "- paper only",
         "- one order maximum",
-        "- MGC 202606 only",
+        "- explicitly approved phase-1 futures targets only",
         "- LMT DAY only",
         "- qty = 1 only",
         f"- {action_scope}",
         "- no market orders",
         "- no bracket/OCO",
         "- no strategy linkage",
-        "- no ATP/GC execution",
+        "- no unapproved strategy execution",
         "- no scheduler",
         "- environment lock is PAPER / 127.0.0.1 / 7497 only",
         "- live port 7496 fails closed",
@@ -2113,7 +2113,12 @@ def _collect_truth_and_preview_context(
             _audit_row("account_truth_read", config=config, detail="Account truth captured.", extra={"account_id": selected_account_id}),
             _audit_row("positions_read", config=config, detail="Current positions captured.", extra={"position_count": positions.get("position_count")}),
             _audit_row("open_order_baseline_read", config=config, detail="Open-order baseline captured.", extra={"open_order_count": open_orders_before.get("open_order_count")}),
-            _audit_row("contract_qualified", config=config, detail="MGC 202606 qualified successfully.", extra={"qualified_contract_identifier": contract_report.get("qualified_contract_identifier")}),
+            _audit_row(
+                "contract_qualified",
+                config=config,
+                detail=f"{str(requested_order.get('symbol') or '').strip().upper()} {str(requested_order.get('expiry') or '').strip()} qualified successfully.",
+                extra={"qualified_contract_identifier": contract_report.get("qualified_contract_identifier")},
+            ),
         ]
     )
     if str(config.test_mode or "").strip().upper() == _CLOSE_TEST_MODE:

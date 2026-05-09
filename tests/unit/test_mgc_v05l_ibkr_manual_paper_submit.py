@@ -126,27 +126,47 @@ def test_qty_greater_than_one_fails_closed() -> None:
     assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
 
 
-def test_non_mgc_contract_fails_closed() -> None:
-    artifacts = run_ibkr_manual_paper_submit_test(config=_config(symbol="GC"), stack_provider=_manual_stack)
+def test_unapproved_contract_fails_closed() -> None:
+    artifacts = run_ibkr_manual_paper_submit_test(config=_config(symbol="CL"), stack_provider=_manual_stack)
     assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
 
 
-def test_mnq_phase1_contract_passes_input_guardrail() -> None:
-    guardrails = _submit_input_guardrails(
-        {
-            "symbol": "MNQ",
-            "expiry": "202606",
-            "action": "BUY",
-            "quantity": 1.0,
-            "order_type": "LMT",
-            "limit_price": 29307.75,
-            "time_in_force": "DAY",
-        },
-        test_mode=_FILL_TEST_MODE,
-        require_limit_price=True,
-    )
+def test_approved_phase1_contracts_pass_input_guardrail() -> None:
+    for symbol, limit_price in (("GC", 4639.7), ("NQ", 29307.75), ("ES", 5240.25), ("MNQ", 29307.75)):
+        guardrails = _submit_input_guardrails(
+            {
+                "symbol": symbol,
+                "expiry": "202606",
+                "action": "BUY",
+                "quantity": 1.0,
+                "order_type": "LMT",
+                "limit_price": limit_price,
+                "time_in_force": "DAY",
+            },
+            test_mode=_FILL_TEST_MODE,
+            require_limit_price=True,
+        )
 
-    assert guardrails["whitelisted_contract"]["passed"] is True
+        assert guardrails["whitelisted_contract"]["passed"] is True
+
+
+def test_rates_and_equities_fail_input_guardrail() -> None:
+    for symbol in ("ZN", "ZB", "AAPL"):
+        guardrails = _submit_input_guardrails(
+            {
+                "symbol": symbol,
+                "expiry": "202606",
+                "action": "BUY",
+                "quantity": 1.0,
+                "order_type": "LMT",
+                "limit_price": 100.0,
+                "time_in_force": "DAY",
+            },
+            test_mode=_FILL_TEST_MODE,
+            require_limit_price=True,
+        )
+
+        assert guardrails["whitelisted_contract"]["passed"] is False
 
 
 def test_market_order_fails_closed() -> None:

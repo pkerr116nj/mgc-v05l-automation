@@ -104,7 +104,7 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS: dict[str, dict[str, Any]] = {
         "source_instrument": "GC",
         "bridge_execution_target": dict(phase1_execution_target_for_source("GC") or {}),
         "current_order_destination": "ibkr_paper_bridge_submit_capable",
-        "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+        "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
     }
     for lane_id in _GC_PHASE1_SUBMIT_LANE_IDS
 }
@@ -124,7 +124,7 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
         "source_instrument": "NQ",
         "bridge_execution_target": dict(phase1_execution_target_for_source("NQ") or {}),
         "current_order_destination": "ibkr_paper_bridge_submit_capable",
-        "bridge_proxy_mode": "NQ_SIGNAL_ROUTED_TO_MNQ_PHASE1",
+        "bridge_proxy_mode": "NQ_SIGNAL_DIRECT_PHASE1",
     }
     for lane_id in _NQ_PHASE1_SUBMIT_LANE_IDS
 }
@@ -144,7 +144,7 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
         "source_instrument": "ES",
         "bridge_execution_target": dict(phase1_execution_target_for_source("ES") or {}),
         "current_order_destination": "ibkr_paper_bridge_submit_capable",
-        "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+        "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1",
     }
     for lane_id in _ES_PHASE1_SUBMIT_LANE_IDS
 }
@@ -593,8 +593,6 @@ def _entry_exit_capability(*, current_position_state: str, instrument: str) -> s
     if instrument in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
         if current_position_state == "LONG":
             return "EXIT_ONLY_WHILE_LONG"
-        if instrument in {"GC", "NQ", "ES"}:
-            return "ENTRY_SUBMIT_CAPABLE_PHASE1_PROXY"
         return "ENTRY_SUBMIT_CAPABLE_PHASE1_DIRECT"
     return "UNSUPPORTED_INSTRUMENT"
 
@@ -624,7 +622,7 @@ def _lane_blockers(
         blockers.append("broker_ledger_mismatch")
     if instrument not in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
         blockers.append("unsupported_instrument_scope")
-    if destination not in {"ibkr_paper_bridge_adopted_position", "ibkr_paper_bridge_submit_capable"} and instrument in {"MGC", "MNQ", "MES"}:
+    if destination not in {"ibkr_paper_bridge_adopted_position", "ibkr_paper_bridge_submit_capable"} and instrument in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
         blockers.append("lane_not_yet_submit_ported")
     if lane_id != _ATP_LANE_ID and signal_state in {"ENTRY_BUY", "ENTRY_SELL", "EXIT_LONG"} and destination != "ibkr_paper_bridge_submit_capable":
         blockers.append("strategy_lane_not_yet_submit_ported")

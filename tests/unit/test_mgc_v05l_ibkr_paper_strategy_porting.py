@@ -235,12 +235,63 @@ def test_builds_inventory_and_intent_rows_for_live_paper_lanes(tmp_path: Path) -
     assert mgc["bridge_execution_target"]["symbol"] == "MGC"
     gc_intent = next(row for row in artifacts.intent_rows if row["strategy_id"] == "gc_1x_asia_london_participation__asia_london_long_v5")
     assert gc_intent["bridge_submit_capable"] is True
-    assert gc_intent["bridge_execution_target"]["symbol"] == "MGC"
+    assert gc_intent["bridge_execution_target"]["symbol"] == "GC"
     nq = next(row for row in artifacts.intent_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
     assert nq["bridge_submit_capable"] is True
-    assert nq["bridge_execution_target"]["symbol"] == "MNQ"
+    assert nq["bridge_execution_target"]["symbol"] == "NQ"
     assert nq["action"] == "BUY"
     assert nq["can_route_to_ibkr_now"] is True
+
+
+def test_missing_full_size_lane_adapter_fails_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path)
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    signal_path = tmp_path / "outputs" / "operator_dashboard" / "paper_signal_intent_fill_audit_snapshot.json"
+    signal_payload = json.loads(signal_path.read_text(encoding="utf-8"))
+    signal_payload["rows"].append(
+        {
+            "id": "index_futures_ny_intraday_forced_core_v2__ES_UNKNOWN",
+            "lane_id": "es_1x_unknown_lane__us_midday_long",
+            "instrument": "ES",
+            "family": "index_futures_ny_intraday_forced_core_v2",
+            "current_strategy_status": "READY",
+            "entries_enabled": True,
+            "eligible_now": True,
+            "audit_verdict": "READY",
+            "last_actionable_signal_family": "nyMiddayLong",
+            "last_actionable_signal_timestamp": "2026-04-28T13:00:00-04:00",
+            "last_recent_long_setup": True,
+            "last_recent_short_setup": False,
+            "last_intent_type": None,
+            "last_fill_timestamp": None,
+        }
+    )
+    signal_path.write_text(json.dumps(signal_payload), encoding="utf-8")
+    performance_path = tmp_path / "outputs" / "operator_dashboard" / "paper_strategy_performance_snapshot.json"
+    performance_payload = json.loads(performance_path.read_text(encoding="utf-8"))
+    performance_payload["rows"].append(
+        {
+            "lane_id": "es_1x_unknown_lane__us_midday_long",
+            "instrument": "ES",
+            "strategy_family": "index_futures_ny_intraday_forced_core_v2",
+            "standalone_strategy_id": "index_futures_ny_intraday_forced_core_v2__ES_UNKNOWN",
+            "position_side": "FLAT",
+            "status": "READY",
+        }
+    )
+    performance_path.write_text(json.dumps(performance_payload), encoding="utf-8")
+
+    artifacts = run_ibkr_paper_strategy_porting(config=_config(tmp_path))
+
+    row = next(row for row in artifacts.intent_rows if row["strategy_id"] == "es_1x_unknown_lane__us_midday_long")
+    assert row["bridge_submit_capable"] is False
+    assert "lane_not_yet_submit_ported" in row["route_blockers"]
+    assert "strategy_lane_not_yet_submit_ported" in row["route_blockers"]
+    assert row["can_route_to_ibkr_now"] is False
 
 
 def test_write_porting_artifacts(tmp_path: Path) -> None:

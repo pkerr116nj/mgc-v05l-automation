@@ -7,11 +7,11 @@ from typing import Any
 
 _SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ", "ES", "MES"}
 _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
-    "GC": "MGC",
+    "GC": "GC",
     "MGC": "MGC",
-    "NQ": "MNQ",
+    "NQ": "NQ",
     "MNQ": "MNQ",
-    "ES": "MES",
+    "ES": "ES",
     "MES": "MES",
 }
 _FIXED_GOLD_CONTRACT_MONTH = "202606"
@@ -42,6 +42,20 @@ def phase1_execution_target_for_symbol(
     now: date | datetime | None = None,
 ) -> dict[str, Any]:
     normalized = str(symbol or "").strip().upper()
+    if normalized == "GC":
+        return {
+            "symbol": "GC",
+            "contract_month": contract_month or _FIXED_GOLD_CONTRACT_MONTH,
+            "expiry": None,
+            "con_id": None,
+            "local_symbol": None,
+            "friendly_label": f"GC {contract_month or _FIXED_GOLD_CONTRACT_MONTH}",
+            "exchange": "COMEX",
+            "currency": "USD",
+            "multiplier": "100",
+            "trading_class": "GC",
+            "phase1_proxy_mode": "DIRECT",
+        }
     if normalized == "MGC":
         return {
             "symbol": "MGC",
@@ -54,6 +68,21 @@ def phase1_execution_target_for_symbol(
             "currency": "USD",
             "multiplier": "10",
             "trading_class": "MGC",
+            "phase1_proxy_mode": "DIRECT",
+        }
+    if normalized == "NQ":
+        resolved_month = contract_month or active_index_contract_month(now=now)
+        return {
+            "symbol": "NQ",
+            "contract_month": resolved_month,
+            "expiry": None,
+            "con_id": None,
+            "local_symbol": None,
+            "friendly_label": f"NQ {resolved_month}",
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": "20",
+            "trading_class": "NQ",
             "phase1_proxy_mode": "DIRECT",
         }
     if normalized == "MNQ":
@@ -69,6 +98,21 @@ def phase1_execution_target_for_symbol(
             "currency": "USD",
             "multiplier": "2",
             "trading_class": "MNQ",
+            "phase1_proxy_mode": "DIRECT",
+        }
+    if normalized == "ES":
+        resolved_month = contract_month or active_index_contract_month(now=now)
+        return {
+            "symbol": "ES",
+            "contract_month": resolved_month,
+            "expiry": None,
+            "con_id": None,
+            "local_symbol": None,
+            "friendly_label": f"ES {resolved_month}",
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": "50",
+            "trading_class": "ES",
             "phase1_proxy_mode": "DIRECT",
         }
     if normalized == "MES":

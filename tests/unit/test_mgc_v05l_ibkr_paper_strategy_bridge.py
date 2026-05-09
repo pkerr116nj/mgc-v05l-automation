@@ -140,12 +140,12 @@ def _approved_runtime_metadata(
     *,
     strategy_id: str,
     source_instrument: str = "GC",
-    executable_proxy: str = "MGC",
+    executable_proxy: str = "GC",
     action: str = "BUY",
     intent_type: str = "BUY_TO_OPEN",
     route_destination: str = "ibkr_paper_bridge_submit_capable",
     mode: str = "PAPER",
-    bridge_proxy_mode: str = "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+    bridge_proxy_mode: str = "GC_SIGNAL_DIRECT_PHASE1",
 ) -> dict[str, object]:
     return {
         "caller_type": "supervised_paper_runtime",
@@ -290,12 +290,12 @@ def test_invalid_symbol_fails_before_connect(tmp_path: Path) -> None:
     assert "No approved phase-1 execution target exists" in json.dumps(artifacts.report)
 
 
-def test_ported_gc_lane_passes_static_submit_gate_with_mgc_execution_proxy(tmp_path: Path) -> None:
+def test_ported_gc_lane_passes_static_submit_gate_with_full_size_gc_execution_target(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
         submit=True,
         strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
-        symbol="MGC",
+        symbol="GC",
         manual_frozen_preview_path=tmp_path / "preview.json",
         approval_digest="digest",
         approval_phrase="phrase",
@@ -324,7 +324,7 @@ def test_ported_gc_lane_passes_static_submit_gate_with_mgc_execution_proxy(tmp_p
             "submit_allowed": True,
             "health_classification": "HEALTHY",
             "account_id": "DUM882026",
-            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "exact_contract": {"symbol": "GC", "expiry": "202606", "con_id": 712565978, "local_symbol": "GCM6"},
             "block_reasons": [],
         },
         governance_status=_healthy_lane_governance(),
@@ -335,17 +335,18 @@ def test_ported_gc_lane_passes_static_submit_gate_with_mgc_execution_proxy(tmp_p
     assert next(row for row in checks if row["name"] == "selected_lane_adapter_present")["passed"] is True
 
 
-def test_ported_es_lane_passes_static_submit_gate_with_mes_execution_proxy(tmp_path: Path) -> None:
+def test_ported_es_lane_passes_static_submit_gate_with_full_size_es_execution_target(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
         submit=True,
         strategy_id="es_1x_ny_early_core__us_midday_long",
-        symbol="MES",
+        symbol="ES",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(
             strategy_id="es_1x_ny_early_core__us_midday_long",
             source_instrument="ES",
-            executable_proxy="MES",
+            executable_proxy="ES",
+            bridge_proxy_mode="ES_SIGNAL_DIRECT_PHASE1",
         ),
         manual_frozen_preview_path=None,
         approval_digest=None,
@@ -375,7 +376,7 @@ def test_ported_es_lane_passes_static_submit_gate_with_mes_execution_proxy(tmp_p
             "submit_allowed": True,
             "health_classification": "HEALTHY",
             "account_id": "DUM882026",
-            "exact_contract": {"symbol": "MES", "expiry": "20260619", "con_id": 123, "local_symbol": "MESM6"},
+            "exact_contract": {"symbol": "ES", "expiry": "20260619", "con_id": 123, "local_symbol": "ESM6"},
             "block_reasons": [],
         },
         governance_status={
@@ -401,11 +402,11 @@ def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_wit
         (
             "gc_1x_asia_london_participation__asia_london_long_v5",
             "GC",
-            "MGC",
-            "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
-            "MGC",
-            "20260626",
-            "MGCM6",
+            "GC",
+            "GC_SIGNAL_DIRECT_PHASE1",
+            "GC",
+            "202606",
+            "GCM6",
         ),
         (
             "mgc_1x_asia_london_participation__asia_london_long_v5",
@@ -419,11 +420,11 @@ def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_wit
         (
             "es_1x_ny_early_core__us_midday_long",
             "ES",
-            "MES",
-            "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
-            "MES",
+            "ES",
+            "ES_SIGNAL_DIRECT_PHASE1",
+            "ES",
             "20260619",
-            "MESM6",
+            "ESM6",
         ),
         (
             "mes_1x_ny_early_core__us_midday_long",
@@ -437,11 +438,11 @@ def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_wit
         (
             "nq_1x_asia_london_participation__asia_london_long_v5",
             "NQ",
-            "MNQ",
-            "NQ_SIGNAL_ROUTED_TO_MNQ_PHASE1",
-            "MNQ",
+            "NQ",
+            "NQ_SIGNAL_DIRECT_PHASE1",
+            "NQ",
             "20260619",
-            "MNQM6",
+            "NQM6",
         ),
         (
             "mnq_1x_asia_london_participation__asia_london_long_v5",
@@ -534,8 +535,8 @@ def test_live_style_mes_and_nq_runtime_routes_ignore_stale_global_monitor_contra
         (
             "nq_1x_ny_early_core__us_midday_long",
             "NQ",
-            "MNQ",
-            "NQ_SIGNAL_ROUTED_TO_MNQ_PHASE1",
+            "NQ",
+            "NQ_SIGNAL_DIRECT_PHASE1",
             "BUY",
             "BUY_TO_OPEN",
         ),
@@ -619,7 +620,7 @@ def test_bridge_gate_does_not_fail_just_because_schwab_is_unavailable(tmp_path: 
         tmp_path,
         submit=True,
         strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
-        symbol="MGC",
+        symbol="GC",
         manual_frozen_preview_path=tmp_path / "preview.json",
         approval_digest="digest",
         approval_phrase="phrase",
@@ -649,7 +650,7 @@ def test_bridge_gate_does_not_fail_just_because_schwab_is_unavailable(tmp_path: 
             "submit_allowed": True,
             "health_classification": "HEALTHY",
             "account_id": "DUM882026",
-            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "exact_contract": {"symbol": "GC", "expiry": "202606", "con_id": 712565978, "local_symbol": "GCM6"},
             "block_reasons": [],
         },
         governance_status=_healthy_lane_governance(),
@@ -896,14 +897,15 @@ def test_supervised_runtime_preflight_allows_fresh_flat_state_with_preserved_atp
         tmp_path,
         submit=True,
         strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
-        symbol="MGC",
+        symbol="GC",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(
             strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
             source_instrument="GC",
-            executable_proxy="MGC",
+            executable_proxy="GC",
             action="BUY",
             intent_type="BUY_TO_OPEN",
+            bridge_proxy_mode="GC_SIGNAL_DIRECT_PHASE1",
         ),
         manual_frozen_preview_path=None,
         approval_digest=None,
@@ -1093,6 +1095,7 @@ def test_preflight_blocks_dirty_broker_ledger_state(tmp_path: Path) -> None:
         tmp_path,
         submit=True,
         strategy_id="gc_1x_all_lanes__us_midday_short",
+        symbol="GC",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(
             strategy_id="gc_1x_all_lanes__us_midday_short",
@@ -1219,14 +1222,14 @@ def test_preflight_blocks_wrong_contract_month_for_approved_runtime_lane(tmp_pat
         tmp_path,
         submit=True,
         strategy_id="es_1x_ny_early_core__us_midday_long",
-        symbol="MES",
+        symbol="ES",
         contract_month="202609",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(
             strategy_id="es_1x_ny_early_core__us_midday_long",
             source_instrument="ES",
-            executable_proxy="MES",
-            bridge_proxy_mode="ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+            executable_proxy="ES",
+            bridge_proxy_mode="ES_SIGNAL_DIRECT_PHASE1",
         ),
         manual_frozen_preview_path=None,
         approval_digest=None,
@@ -1283,14 +1286,14 @@ def test_preflight_blocks_live_metadata_for_current_supervised_paper_route(tmp_p
         tmp_path,
         submit=True,
         strategy_id="es_1x_ny_early_core__us_midday_long",
-        symbol="MES",
+        symbol="ES",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(
             strategy_id="es_1x_ny_early_core__us_midday_long",
             source_instrument="ES",
-            executable_proxy="MES",
+            executable_proxy="ES",
             mode="LIVE",
-            bridge_proxy_mode="ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+            bridge_proxy_mode="ES_SIGNAL_DIRECT_PHASE1",
         ),
         manual_frozen_preview_path=None,
         approval_digest=None,
@@ -1320,7 +1323,7 @@ def test_preflight_blocks_live_metadata_for_current_supervised_paper_route(tmp_p
             "submit_allowed": True,
             "health_classification": "HEALTHY",
             "account_id": "DUM882026",
-            "exact_contract": {"symbol": "MES", "expiry": "20260619", "con_id": 123, "local_symbol": "MESM6"},
+            "exact_contract": {"symbol": "ES", "expiry": "20260619", "con_id": 123, "local_symbol": "ESM6"},
             "block_reasons": [],
         },
         governance_status={
@@ -1444,6 +1447,7 @@ def test_supervised_runtime_caller_requires_metadata(tmp_path: Path) -> None:
         tmp_path,
         submit=True,
         strategy_id="gc_1x_all_lanes__us_midday_short",
+        symbol="GC",
         caller_path="probationary_paper_runtime_lane",
         manual_frozen_preview_path=None,
         approval_digest=None,
@@ -1501,6 +1505,7 @@ def test_supervised_runtime_caller_metadata_passes_for_midday_gold_lane(tmp_path
         submit=True,
         strategy_id="gc_1x_all_lanes__us_midday_short",
         action="SELL",
+        symbol="GC",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(
             strategy_id="gc_1x_all_lanes__us_midday_short",
@@ -1563,6 +1568,7 @@ def test_supervised_runtime_caller_metadata_passes_for_gc_asia_early_long_lane(t
         tmp_path,
         submit=True,
         strategy_id="gc_1x_all_lanes__asia_early_long",
+        symbol="GC",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(strategy_id="gc_1x_all_lanes__asia_early_long"),
         manual_frozen_preview_path=None,
@@ -1620,6 +1626,7 @@ def test_supervised_runtime_caller_metadata_passes_for_gc_asia_early_short_lane(
         submit=True,
         strategy_id="gc_1x_all_lanes__asia_early_short",
         action="SELL",
+        symbol="GC",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(
             strategy_id="gc_1x_all_lanes__asia_early_short",
@@ -1821,6 +1828,7 @@ def test_runtime_caller_still_blocks_when_monitor_health_fails(tmp_path: Path) -
         tmp_path,
         submit=True,
         strategy_id="gc_1x_all_lanes__us_midday_short",
+        symbol="GC",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(strategy_id="gc_1x_all_lanes__us_midday_short"),
         manual_frozen_preview_path=None,

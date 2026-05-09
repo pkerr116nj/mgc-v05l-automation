@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--client-id", type=int, default=9211, help="Dedicated paper strategy bridge client id.")
     parser.add_argument("--account-id", default="DUM882026", help="Expected paper account id.")
     parser.add_argument("--strategy-id", default="ATP_COMPANION_V1_ASIA_US", help="Allowed shared strategy identity that generated the paper intent.")
-    parser.add_argument("--symbol", default="MGC", help="Phase-1 executable symbol. Only MGC is allowed.")
+    parser.add_argument("--symbol", default="MGC", help="Phase-1 executable symbol. Approved futures only; unsupported symbols fail closed.")
     parser.add_argument("--contract-month", default="202606", help="Friendly contract month label.")
     parser.add_argument("--action", default="BUY", choices=("BUY", "SELL"), help="Intent action. BUY opens paper long; SELL closes exact long 1.")
     parser.add_argument("--quantity", type=float, default=1.0, help="Only quantity 1 is allowed.")

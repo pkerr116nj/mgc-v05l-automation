@@ -4834,24 +4834,24 @@ def test_current_supervised_route_rejects_legacy_submit_gate_wiring(tmp_path: Pa
             "ES",
             {
                 "current_order_destination": "ibkr_paper_bridge_submit_capable",
-                "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
-                "bridge_execution_target": {"symbol": "MES", "contract_month": "202606"},
+                "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1",
+                "bridge_execution_target": {"symbol": "ES", "contract_month": "202606"},
             },
             OrderIntentType.BUY_TO_OPEN,
             "BUY",
-            "MES",
+            "ES",
         ),
         (
             "gc_1x_all_lanes__us_midday_short",
             "GC",
             {
                 "current_order_destination": "ibkr_paper_bridge_submit_capable",
-                "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
-                "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+                "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+                "bridge_execution_target": {"symbol": "GC", "contract_month": "202606"},
             },
             OrderIntentType.SELL_TO_OPEN,
             "SELL",
-            "MGC",
+            "GC",
         ),
     ],
 )
@@ -4929,7 +4929,7 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
     broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
         lane_id="es_1x_ny_early_core__us_early_long",
         source_symbol="ES",
-        bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1", "bridge_execution_target": {"symbol": "MES", "contract_month": "202606"}},
+        bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1", "bridge_execution_target": {"symbol": "ES", "contract_month": "202606"}},
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
     )
@@ -4958,12 +4958,12 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
     strategy_engine.process_bar(finalized_bar)
 
     assert bridge_calls == [
-        {
-            "strategy_id": "es_1x_ny_early_core__us_early_long",
-            "symbol": "MES",
-            "action": "BUY",
-            "contract_month": "202606",
-        }
+            {
+                "strategy_id": "es_1x_ny_early_core__us_early_long",
+                "symbol": "ES",
+                "action": "BUY",
+                "contract_month": "202606",
+            }
     ]
     assert repositories.fills.list_all() == []
     intent_rows = repositories.order_intents.list_all()
@@ -5208,7 +5208,7 @@ def test_submit_capable_lane_exit_invokes_ibkr_bridge_without_local_fill(tmp_pat
     broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
         lane_id="nq_1x_ny_early_core__us_early_long",
         source_symbol="NQ",
-        bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "NQ_SIGNAL_ROUTED_TO_MNQ_PHASE1", "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"}},
+        bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "NQ_SIGNAL_DIRECT_PHASE1", "bridge_execution_target": {"symbol": "NQ", "contract_month": "202606"}},
         repo_root=Path(__file__).resolve().parents[2],
         bridge_runner=fake_bridge_runner,
     )
@@ -5237,12 +5237,12 @@ def test_submit_capable_lane_exit_invokes_ibkr_bridge_without_local_fill(tmp_pat
     )
 
     assert bridge_calls == [
-        {
-            "strategy_id": "nq_1x_ny_early_core__us_early_long",
-            "symbol": "MNQ",
-            "action": "SELL",
-            "contract_month": "202606",
-        }
+            {
+                "strategy_id": "nq_1x_ny_early_core__us_early_long",
+                "symbol": "NQ",
+                "action": "SELL",
+                "contract_month": "202606",
+            }
     ]
     assert repositories.fills.list_all() == []
     intent_rows = repositories.order_intents.list_all()
@@ -5259,24 +5259,24 @@ def test_submit_capable_lane_exit_invokes_ibkr_bridge_without_local_fill(tmp_pat
             "ES",
             {
                 "current_order_destination": "ibkr_paper_bridge_submit_capable",
-                "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
-                "bridge_execution_target": {"symbol": "MES", "contract_month": "202606"},
+                "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1",
+                "bridge_execution_target": {"symbol": "ES", "contract_month": "202606"},
             },
             OrderIntentType.BUY_TO_OPEN,
             "BUY",
-            "MES",
+            "ES",
         ),
         (
             "gc_1x_all_lanes__us_midday_short",
             "GC",
             {
                 "current_order_destination": "ibkr_paper_bridge_submit_capable",
-                "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
-                "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+                "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+                "bridge_execution_target": {"symbol": "GC", "contract_month": "202606"},
             },
             OrderIntentType.SELL_TO_CLOSE,
             "SELL",
-            "MGC",
+            "GC",
         ),
     ],
 )
@@ -5375,8 +5375,8 @@ def test_midday_runtime_bridge_block_writes_route_proof_traces(tmp_path: Path) -
         source_symbol="GC",
         bridge_adapter={
             "current_order_destination": "ibkr_paper_bridge_submit_capable",
-            "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
-            "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+            "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "GC", "contract_month": "202606"},
         },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
@@ -5435,8 +5435,8 @@ def test_midday_runtime_bridge_success_writes_route_proof_traces(tmp_path: Path)
         source_symbol="ES",
         bridge_adapter={
             "current_order_destination": "ibkr_paper_bridge_submit_capable",
-            "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
-            "bridge_execution_target": {"symbol": "MES", "contract_month": "202606"},
+            "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "ES", "contract_month": "202606"},
         },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
