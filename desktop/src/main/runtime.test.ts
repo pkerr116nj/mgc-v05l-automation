@@ -14,7 +14,8 @@ import {
   startDashboard,
   type DesktopState,
 } from "./runtime";
-import { buildOperatorTriageContract } from "./shared/operatorTriage";
+import { buildOperatorTriageContract, deriveOperatorLaneSemantics } from "./shared/operatorTriage";
+import { sortLivePnlLaneRows } from "./shared/livePnlTableSort";
 
 function makeDesktopState(overrides: Partial<DesktopState> = {}): DesktopState {
   return {
@@ -465,11 +466,13 @@ test("electron renderer readiness cards map corrected fireability fields", () =>
   const appTsx = fs.readFileSync(path.resolve(__dirname, "../../src/renderer/App.tsx"), "utf8");
 
   assert.match(appTsx, /label:\s*"Session Eligible"[\s\S]*session_eligible_lanes_count/);
-  assert.match(appTsx, /label:\s*"Waiting For 3m Bar"[\s\S]*waiting_for_completed_bar_count/);
-  assert.match(appTsx, /label:\s*"Evaluated \/ No Setup"[\s\S]*no_setup_count/);
+  assert.match(appTsx, /label:\s*"Live-Capable"[\s\S]*live_capable_count/);
+  assert.match(appTsx, /label:\s*"Waiting For Bar"[\s\S]*(waiting_for_bar_count|waiting_for_completed_bar_count)/);
+  assert.match(appTsx, /label:\s*"No Setup"[\s\S]*no_setup_count/);
   assert.match(appTsx, /label:\s*"Actionable Now"[\s\S]*actionable_now_count/);
-  assert.match(appTsx, /label:\s*"Blocked Lanes"[\s\S]*blocked_lanes_count/);
-  assert.match(appTsx, /label:\s*"Ready This Bar"[\s\S]*eligible_to_trade_count/);
+  assert.match(appTsx, /label:\s*"True Blocked"[\s\S]*(true_blocked_count|blocked_lanes_count)/);
+  assert.match(appTsx, /label:\s*"Market Data Stale"[\s\S]*market_data_stale_count/);
+  assert.doesNotMatch(appTsx, /label:\s*"Ready This Bar"[\s\S]*eligible_to_trade_count/);
   assert.doesNotMatch(appTsx, /title:\s*"Tradable Now"/);
 });
 
@@ -629,7 +632,15 @@ test("Track B PAPER trading renderer is standalone read-only blotter view", () =
   assert.match(appTsx, /Recent Trades/);
   assert.match(appTsx, /Strategy Performance/);
   assert.match(appTsx, /Instrument Performance/);
+  assert.match(appTsx, /Startup Readiness/);
+  assert.match(appTsx, /Feature context/);
+  assert.match(appTsx, /Live Approved/);
+  assert.match(appTsx, /Decision Bar/);
+  assert.match(appTsx, /Live Confirm 1m/);
+  assert.match(appTsx, /Live Confirm 5m/);
   assert.match(appTsx, /Artifact-derived PAPER lifecycle view/);
+  assert.match(appTsx, /TRACK_B_PAPER_READY_NO_SIGNAL/);
+  assert.match(appTsx, /Track B PAPER evaluating live decision bars; no trade signals observed/);
   assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}runDashboardAction/);
   assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}paper_proof_cli/);
   assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}placeOrder/);
@@ -810,16 +821,126 @@ test("packaged launch trusts a fresh synchronized local snapshot long enough to 
   __testing.resetRuntimeState();
 });
 
+test("packaged launch keeps service-attached state when compacted snapshot only retains startup control plane authority", async () => {
+  __testing.resetRuntimeState();
+  __testing.setPackagedLocalBundleLaunchContextHook(() => true);
+  __testing.setBuildLocalOperatorAuthStateHook(async () => makeDesktopState().localAuth);
+  __testing.setEnsureServiceHostUsableHook(async () => {
+    throw new Error("service bootstrap should not run when authoritative attached snapshot exists");
+  });
+  __testing.setLoadSnapshotBundleHook(async () => ({
+    generated_at: new Date().toISOString(),
+    dashboard_meta: {
+      source: "artifact_snapshot",
+    },
+    global: { mode: "PAPER", mode_label: "PAPER", auth_ready: true, runtime_status: "RUNNING" },
+    operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
+    paper: { readiness: { runtime_running: true, entries_enabled: true }, running: true },
+    startup_control_plane: {
+      overall_state: "READY",
+      convergence: {
+        stable_ready: true,
+        dashboard_attached: true,
+        paper_runtime_ready: true,
+        startup_launch_allowed: true,
+        startup_overall_state: "READY",
+        manager_instance_id: "instance-current",
+        server_pid: 21319,
+      },
+    },
+    supervised_paper_operability: {
+      app_usable_for_supervised_paper: true,
+      dashboard_attached: true,
+      paper_runtime_ready: true,
+      runtime_running: true,
+      state: "USABLE",
+      summary_line: "Application is usable for supervised paper operation.",
+    },
+  }));
+  __testing.setLoadAttachedSnapshotBridgeHook(async () => null);
+  __testing.setLoadLiveDashboardHook(async () => null);
+
+  const state = await getDesktopState();
+
+  assert.equal(state.connection, "snapshot");
+  assert.equal(state.source.mode, "attached_snapshot_bridge");
+  assert.equal(state.source.label, "SERVICE ATTACHED");
+  assert.equal(state.backend.state, "healthy");
+  assert.deepEqual(state.errors, []);
+  __testing.resetRuntimeState();
+});
+
+test("packaged launch still uses valid cached snapshot when workspace operator surface artifact is unavailable", async () => {
+  __testing.resetRuntimeState();
+  __testing.setPackagedLocalBundleLaunchContextHook(() => true);
+  __testing.setBuildLocalOperatorAuthStateHook(async () => makeDesktopState().localAuth);
+  __testing.setEnsureServiceHostUsableHook(async () => {
+    throw new Error("service bootstrap should not run when cached packaged snapshot exists");
+  });
+  __testing.setLoadSnapshotBundleHook(async () => ({
+    generated_at: new Date().toISOString(),
+    dashboard_meta: {
+      source: "desktop_cache",
+      server_instance_id: "instance-current",
+      server_pid: 21319,
+      server_url: "http://127.0.0.1:8790/",
+    },
+    global: { mode: "PAPER", mode_label: "PAPER", auth_ready: true, runtime_status: "RUNNING" },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: new Date().toISOString(),
+        current_broad_trading_session: "US_EARLY",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+    },
+    startup_control_plane: {
+      overall_state: "READY",
+      convergence: {
+        stable_ready: true,
+        dashboard_attached: true,
+        paper_runtime_ready: true,
+        startup_launch_allowed: true,
+        startup_overall_state: "READY",
+        manager_instance_id: "instance-current",
+        server_pid: 21319,
+      },
+    },
+    supervised_paper_operability: {
+      app_usable_for_supervised_paper: true,
+      dashboard_attached: true,
+      paper_runtime_ready: true,
+      runtime_running: true,
+      state: "USABLE",
+      summary_line: "Application is usable for supervised paper operation.",
+    },
+  }));
+  __testing.setLoadAttachedSnapshotBridgeHook(async () => null);
+  __testing.setLoadLiveDashboardHook(async () => null);
+
+  const state = await getDesktopState();
+
+  assert.equal(state.connection, "snapshot");
+  assert.equal(state.source.mode, "attached_snapshot_bridge");
+  assert.equal(state.backend.state, "healthy");
+  assert.deepEqual(state.errors, []);
+  __testing.resetRuntimeState();
+});
+
 test("packaged snapshot authority rejects stale desktop cache when fresher readiness-backed artifacts exist", () => {
+  const freshIso = new Date().toISOString();
+  const staleIso = new Date(Date.now() - (2 * 24 * 60 * 60 * 1000)).toISOString();
   const freshArtifacts = {
-    generated_at: "2026-04-30T07:01:13.562Z",
+    generated_at: freshIso,
     operator_surface: {
-      generated_at: "2026-04-30T07:01:13.562Z",
+      generated_at: freshIso,
     },
     paper: {
       running: true,
       readiness: {
-        generated_at: "2026-04-30T07:01:13.562Z",
+        generated_at: freshIso,
         current_broad_trading_session: "LONDON_EARLY",
         lane_eligibility_rows: [],
         runtime_running: true,
@@ -835,14 +956,14 @@ test("packaged snapshot authority rejects stale desktop cache when fresher readi
     },
   };
   const staleDesktopCache = {
-    generated_at: "2026-04-18T07:01:13.562Z",
+    generated_at: staleIso,
     operator_surface: {
-      generated_at: "2026-04-18T07:01:13.562Z",
+      generated_at: staleIso,
     },
     paper: {
       running: true,
       readiness: {
-        generated_at: "2026-04-18T07:01:13.562Z",
+        generated_at: staleIso,
         current_broad_trading_session: "UNCLASSIFIED",
         lane_eligibility_rows: [],
         runtime_running: true,
@@ -866,16 +987,90 @@ test("packaged snapshot authority rejects stale desktop cache when fresher readi
   assert.equal(selected?.name, "fresh_operator_artifacts");
 });
 
-test("packaged snapshot authority returns no candidate instead of silently promoting stale cache as current paper state", () => {
-  const staleDesktopCache = {
-    generated_at: "2026-04-18T07:01:13.562Z",
+test("packaged snapshot authority rejects empty desktop paper ledger when fresher artifacts publish paper trades", () => {
+  const freshIso = new Date().toISOString();
+  const cacheIso = new Date(Date.now() + 2_000).toISOString();
+  const freshArtifacts = {
+    generated_at: freshIso,
     operator_surface: {
-      generated_at: "2026-04-18T07:01:13.562Z",
+      generated_at: freshIso,
     },
     paper: {
       running: true,
       readiness: {
-        generated_at: "2026-04-18T07:01:13.562Z",
+        generated_at: freshIso,
+        current_broad_trading_session: "LONDON_LATE",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+      strategy_performance: {
+        generated_at: "2026-04-30T09:36:40.441Z",
+        trade_log_count: 453,
+        trade_log: [
+          {
+            trade_id: "paper-trade-1",
+            exit_timestamp: "2026-04-29T18:00:00Z",
+          },
+        ],
+      },
+    },
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+    },
+    dashboard_meta: {
+      source: "artifact_snapshot",
+    },
+  };
+  const emptyDesktopCache = {
+    generated_at: cacheIso,
+    operator_surface: {
+      generated_at: cacheIso,
+    },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: cacheIso,
+        current_broad_trading_session: "LONDON_LATE",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+      strategy_performance: {
+        generated_at: null,
+        trade_log_count: 0,
+        trade_log: [],
+      },
+    },
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+    },
+    dashboard_meta: {
+      source: "desktop_cache",
+    },
+  };
+
+  const selected = __testing.selectPackagedSnapshotCandidate([
+    { name: "desktop_cache", snapshot: emptyDesktopCache },
+    { name: "fresh_operator_artifacts", snapshot: freshArtifacts },
+  ]);
+
+  assert.equal(selected?.name, "fresh_operator_artifacts");
+});
+
+test("packaged snapshot authority returns no candidate instead of silently promoting stale cache as current paper state", () => {
+  const staleIso = new Date(Date.now() - (2 * 24 * 60 * 60 * 1000)).toISOString();
+  const staleDesktopCache = {
+    generated_at: staleIso,
+    operator_surface: {
+      generated_at: staleIso,
+    },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: staleIso,
         current_broad_trading_session: "UNCLASSIFIED",
         lane_eligibility_rows: [],
         runtime_running: true,
@@ -898,16 +1093,204 @@ test("packaged snapshot authority returns no candidate instead of silently promo
   assert.equal(selected, null);
 });
 
-test("attached readiness authority prefers fresher workspace readiness over stale local cache when session truth diverges", () => {
-  const snapshot = {
-    generated_at: "2026-04-30T07:01:13.562Z",
+test("packaged snapshot authority keeps a recent readiness-backed snapshot for degraded fallback after strict freshness expires", () => {
+  const recentIso = new Date(Date.now() - (15 * 60 * 1000)).toISOString();
+  const recentDesktopCache = {
+    generated_at: recentIso,
     operator_surface: {
-      generated_at: "2026-04-30T07:01:13.562Z",
+      generated_at: recentIso,
     },
     paper: {
       running: true,
       readiness: {
-        generated_at: "2026-04-30T07:01:13.562Z",
+        generated_at: recentIso,
+        current_broad_trading_session: "US_PREOPEN_OPENING",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+    },
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+    },
+    dashboard_meta: {
+      source: "desktop_cache",
+    },
+  };
+
+  const selected = __testing.selectPackagedSnapshotCandidate([
+    { name: "desktop_cache", snapshot: recentDesktopCache },
+  ]);
+
+  assert.equal(selected?.name, "desktop_cache");
+});
+
+test("snapshot fallback reports degraded backend instead of backend down when persisted artifacts remain usable", async () => {
+  __testing.resetRuntimeState();
+  __testing.setPackagedLocalBundleLaunchContextHook(() => true);
+  __testing.setAutoBootstrapBlockedHook(() => true);
+  __testing.setLoadLiveDashboardHook(async () => null);
+  __testing.setLoadSnapshotBundleHook(async () => ({
+    generated_at: new Date().toISOString(),
+    dashboard_meta: {
+      source: "desktop_cache",
+    },
+    operator_surface: {
+      generated_at: new Date().toISOString(),
+    },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: new Date().toISOString(),
+        current_broad_trading_session: "US_PREOPEN_OPENING",
+        lane_eligibility_rows: [],
+        runtime_running: true,
+        paper_runtime_ready: true,
+      },
+    },
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+    },
+  }));
+  __testing.setLoadAttachedSnapshotBridgeHook(async () => null);
+
+  const state = await getDesktopState();
+
+  assert.equal(state.connection, "snapshot");
+  assert.equal(state.source.mode, "snapshot_fallback");
+  assert.equal(state.backend.state, "degraded");
+  assert.equal(state.backend.label, "SNAPSHOT ONLY");
+  __testing.resetRuntimeState();
+});
+
+test("lane waiting for bar close remains live-capable without a hard blocker", () => {
+  const semantics = deriveOperatorLaneSemantics({
+    session_eligible: true,
+    route_ready: true,
+    governance_allowed: true,
+    entries_enabled: true,
+    operator_halt: false,
+    risk_state: "OK",
+    market_data_stale: false,
+    data_fresh: true,
+    bar_state: "WAITING_FOR_BAR_CLOSE",
+    bar_state_reason: "Inside bar-close grace window.",
+    effective_readiness_eligibility_reason: "waiting_for_bar_close",
+    latest_fault_or_blocker: "waiting_for_bar_close",
+    can_fire_now: false,
+  });
+
+  assert.equal(semantics.live_capable, true);
+  assert.equal(semantics.actionable_this_bar, false);
+  assert.equal(semantics.true_blocked, false);
+  assert.equal(semantics.latest_hard_blocker, null);
+  assert.equal(semantics.cadence_state, "WAITING_FOR_BAR_CLOSE");
+});
+
+test("market data stale remains a hard blocker", () => {
+  const semantics = deriveOperatorLaneSemantics({
+    session_eligible: true,
+    route_ready: true,
+    governance_allowed: true,
+    entries_enabled: true,
+    operator_halt: false,
+    risk_state: "OK",
+    market_data_stale: true,
+    bar_state: "MARKET_DATA_STALE",
+    latest_fault_or_blocker: "market_data_stale",
+    can_fire_now: false,
+  });
+
+  assert.equal(semantics.live_capable, false);
+  assert.equal(semantics.true_blocked, true);
+  assert.equal(semantics.latest_hard_blocker, "market_data_stale");
+});
+
+test("wrong session outside configured session remains a hard blocker", () => {
+  const semantics = deriveOperatorLaneSemantics({
+    session_eligible: false,
+    route_ready: true,
+    governance_allowed: true,
+    entries_enabled: true,
+    operator_halt: false,
+    risk_state: "OK",
+    market_data_stale: false,
+    effective_readiness_eligibility_reason: "wrong_session",
+    latest_fault_or_blocker: "wrong_session",
+    can_fire_now: false,
+  });
+
+  assert.equal(semantics.live_capable, false);
+  assert.equal(semantics.true_blocked, true);
+  assert.equal(semantics.latest_hard_blocker, "wrong_session");
+});
+
+test("stale raw wrong_session does not override timestamp-valid readiness", () => {
+  const semantics = deriveOperatorLaneSemantics({
+    session_eligible: true,
+    route_ready: true,
+    governance_allowed: true,
+    entries_enabled: true,
+    operator_halt: false,
+    risk_state: "OK",
+    market_data_stale: false,
+    runtime_eligibility_reason: "wrong_session",
+    effective_readiness_eligibility_reason: "waiting_for_bar_close",
+    latest_fault_or_blocker: "waiting_for_bar_close",
+    bar_state: "WAITING_FOR_BAR_CLOSE",
+    can_fire_now: false,
+  });
+
+  assert.equal(semantics.live_capable, true);
+  assert.equal(semantics.true_blocked, false);
+  assert.equal(semantics.latest_hard_blocker, null);
+  assert.equal(semantics.cadence_state, "WAITING_FOR_BAR_CLOSE");
+});
+
+test("live pnl lane sort preserves default order and row data when no sort is active", () => {
+  const rows = [
+    { lane_id: "lane-b", strategy_name: "Beta", actionable_entry_signal_count: 2 },
+    { lane_id: "lane-a", strategy_name: "Alpha", actionable_entry_signal_count: 1 },
+  ];
+
+  const sorted = sortLivePnlLaneRows(rows, null);
+
+  assert.deepEqual(sorted, rows);
+  assert.notEqual(sorted, rows);
+  assert.equal(sorted.length, rows.length);
+});
+
+test("live pnl lane sort keeps missing timestamps last and remains stable for equal values", () => {
+  const rows = [
+    { lane_id: "lane-1", strategy_name: "Alpha", last_actionable_signal_timestamp: "2026-04-30T09:10:00Z" },
+    { lane_id: "lane-2", strategy_name: "Beta", last_actionable_signal_timestamp: null },
+    { lane_id: "lane-3", strategy_name: "Gamma", last_actionable_signal_timestamp: "2026-04-30T09:10:00Z" },
+  ];
+
+  const sortedAsc = sortLivePnlLaneRows(rows, { key: "last_signal", direction: "asc" });
+  const sortedDesc = sortLivePnlLaneRows(rows, { key: "last_signal", direction: "desc" });
+
+  assert.deepEqual(sortedAsc.map((row) => row.lane_id), ["lane-1", "lane-3", "lane-2"]);
+  assert.deepEqual(sortedDesc.map((row) => row.lane_id), ["lane-1", "lane-3", "lane-2"]);
+  assert.equal(rows[0].lane_id, "lane-1");
+  assert.equal(rows[1].lane_id, "lane-2");
+  assert.equal(rows[2].lane_id, "lane-3");
+});
+
+test("attached readiness authority prefers fresher workspace readiness over stale local cache when session truth diverges", () => {
+  const freshIso = new Date().toISOString();
+  const staleIso = new Date(Date.now() - 30_000).toISOString();
+  const snapshot = {
+    generated_at: freshIso,
+    operator_surface: {
+      generated_at: freshIso,
+    },
+    paper: {
+      running: true,
+      readiness: {
+        generated_at: freshIso,
         current_broad_trading_session: "LONDON_EARLY",
         lane_eligibility_rows: [],
         runtime_running: true,
@@ -924,7 +1307,7 @@ test("attached readiness authority prefers fresher workspace readiness over stal
     },
   };
   const staleLocalReadiness = {
-    generated_at: "2026-04-30T06:58:00.000Z",
+    generated_at: staleIso,
     current_broad_trading_session: "UNCLASSIFIED",
     readiness_state: "READY",
     payload: {
@@ -942,7 +1325,7 @@ test("attached readiness authority prefers fresher workspace readiness over stal
     },
   };
   const freshWorkspaceReadiness = {
-    generated_at: "2026-04-30T07:01:13.562Z",
+    generated_at: freshIso,
     current_broad_trading_session: "LONDON_EARLY",
     readiness_state: "READY",
     payload: {
@@ -1089,6 +1472,122 @@ test("packaged launch promotes to live API when the local dashboard endpoint is 
   assert.equal(state.source.canRunLiveActions, true);
   assert.equal(state.backend.apiStatus, "responding");
   assert.equal(state.backend.pid, 98165);
+  __testing.resetRuntimeState();
+});
+
+test("live dashboard authority validation rejects a stale previous-instance payload", () => {
+  const validation = __testing.validateLiveDashboardAuthority(
+    {
+      instance_id: "instance-current",
+      build_stamp: "build-current",
+      pid: 98165,
+    },
+    {
+      dashboard_meta: {
+        server_instance_id: "instance-stale",
+        build_stamp: "build-stale",
+        server_pid: 42732,
+      },
+    },
+  );
+
+  assert.equal(validation.ok, false);
+  assert.match(validation.reason ?? "", /dashboard payload authority mismatch/i);
+});
+
+test("packaged launch rejects stale previous-instance live API payload and stays on the attached snapshot bridge", async () => {
+  __testing.resetRuntimeState();
+  __testing.setPackagedLocalBundleLaunchContextHook(() => true);
+  __testing.setBuildLocalOperatorAuthStateHook(async () => makeDesktopState().localAuth);
+  __testing.setLoadSnapshotBundleHook(async () => ({
+    generated_at: new Date().toISOString(),
+    dashboard_meta: {
+      server_instance_id: "instance-current",
+      server_pid: 98165,
+      server_url: "http://127.0.0.1:8790/",
+    },
+    global: { mode: "PAPER", mode_label: "PAPER", auth_ready: true, runtime_status: "RUNNING" },
+    operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
+    paper: { readiness: { runtime_running: true, entries_enabled: true }, running: true },
+    startup_control_plane: {
+      overall_state: "READY",
+      launch_allowed: true,
+      convergence: {
+        stable_ready: true,
+        dashboard_attached: true,
+        paper_runtime_ready: true,
+      },
+    },
+    supervised_paper_operability: {
+      app_usable_for_supervised_paper: true,
+      state: "USABLE",
+      summary_line: "Paper runtime is operational.",
+    },
+  }));
+  __testing.setLoadAttachedSnapshotBridgeHook(async () => ({
+    transportKind: "readiness_bridge",
+    readiness: {
+      readiness_state: "READY",
+      payload: {
+        reachable: true,
+        ready: true,
+        instance_id: "instance-current",
+        pid: 98165,
+      },
+      listener: {
+        reachable: true,
+      },
+      control_plane: {
+        launch_allowed: true,
+        dashboard_attached: true,
+        paper_runtime_ready: true,
+      },
+      configured_url: "http://127.0.0.1:8790/",
+    },
+    health: { status: "ok", ready: true, pid: 98165, instance_id: "instance-current", build_stamp: "build-current" },
+    backendUrl: "http://127.0.0.1:8790/",
+    detail: "Service is attached through the local readiness bridge and synchronized operator snapshot.",
+  }));
+  __testing.setLoadLiveDashboardHook(async () => ({
+    mode: "live",
+    url: "http://127.0.0.1:8790/",
+    health: { status: "ok", ready: true, pid: 98165, instance_id: "instance-current", build_stamp: "build-current" },
+    dashboard: {
+      generated_at: new Date().toISOString(),
+      dashboard_meta: {
+        source: "service_live_api",
+        server_instance_id: "instance-stale",
+        build_stamp: "build-stale",
+        server_pid: 42732,
+        server_url: "http://127.0.0.1:8790/",
+      },
+      global: { mode: "PAPER", mode_label: "PAPER", auth_ready: true, runtime_status: "RUNNING" },
+      operator_surface: { generated_at: new Date().toISOString(), runtime_readiness: { values: {} } },
+      paper: { readiness: { runtime_running: true, entries_enabled: true }, running: true },
+      startup_control_plane: {
+        overall_state: "READY",
+        launch_allowed: true,
+        convergence: {
+          stable_ready: true,
+          dashboard_attached: true,
+          paper_runtime_ready: true,
+        },
+      },
+      supervised_paper_operability: {
+        app_usable_for_supervised_paper: true,
+        state: "USABLE",
+        summary_line: "Paper runtime is operational.",
+      },
+    },
+  }));
+
+  const state = await getDesktopState();
+
+  assert.equal(state.connection, "snapshot");
+  assert.equal(state.source.mode, "attached_snapshot_bridge");
+  assert.equal(state.source.apiReachable, false);
+  assert.match(state.source.label, /stale payload rejected/i);
+  assert.match(state.backend.detail, /stale payload/i);
   __testing.resetRuntimeState();
 });
 
@@ -1433,6 +1932,245 @@ test("paper mode does not let live broker and operator auth gates block supervis
   assert.equal(contract.operator_triage.hard_gates.find((gate) => gate.key === "operator-authority")?.status, "pass");
 });
 
+test("paper mode prefers Track B PAPER live readiness over legacy stale market data labels", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "attached_snapshot_bridge",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "STALE",
+      market_data_label: "STALE",
+      reconciliation_status: "CLEAN",
+      stale: true,
+    },
+    operatorSurface: { generated_at: new Date().toISOString() },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+    },
+    runtimeValues: {
+      runtime_recovery_state: "RUNNING",
+      paper_trade_allowed: false,
+      paper_trade_block_reason: "paper_market_data_stale_or_unavailable",
+    },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+      paper_trade_allowed: false,
+      paper_trade_block_reason: "paper_market_data_stale_or_unavailable",
+    },
+    trackBPaperTrading: {
+      available: true,
+      review_required_count: 0,
+      startup_readiness_diagnostic: {
+        instruments: {
+          MGC: {
+            instrument: "MGC",
+            context_ready: true,
+            live_execution_approved: true,
+            paper_evaluation_allowed: true,
+          },
+          MNQ: {
+            instrument: "MNQ",
+            context_ready: true,
+            live_execution_approved: true,
+            paper_evaluation_allowed: true,
+          },
+        },
+      },
+      zero_activity_diagnostic: {
+        diagnosis_classification: "NORMAL_NO_SIGNAL",
+        signals_seen: 0,
+        recent_cycles_evaluated: 4,
+        strategies_evaluated: 10,
+        completed_decision_bar_audit: {
+          classification: "EVALUATING_EACH_COMPLETED_BAR",
+        },
+      },
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {},
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: { blocked: false, mismatch_count: 0, detail: "clear" },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {},
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  const marketDataGate = contract.operator_triage.hard_gates.find((gate) => gate.key === "market-data");
+  assert.equal(contract.operator_triage.paper_trade_allowed, true);
+  assert.equal(contract.operator_triage.paper_trade_block_reason, null);
+  assert.equal(contract.operator_triage.track_b_paper_status_code, "TRACK_B_PAPER_READY_NO_SIGNAL");
+  assert.equal(
+    contract.operator_triage.verdict_sentence,
+    "Track B PAPER evaluating live decision bars; no trade signals observed.",
+  );
+  assert.equal(contract.operator_triage.root_cause.code, "TRACK_B_PAPER_READY_NO_SIGNAL");
+  assert.equal(marketDataGate?.status, "pass");
+  assert.equal(marketDataGate?.label, "Track B Live Market Data");
+  assert.ok(!contract.operator_triage.verdict_sentence.includes("paper_market_data_stale_or_unavailable"));
+  assert.equal(
+    contract.operator_triage.track_b_legacy_market_data_note,
+    "Legacy paper market-data status is separate from Track B Databento Live execution readiness.",
+  );
+});
+
+test("paper mode reports Track B live execution blocker when Track B is not approved", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "attached_snapshot_bridge",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "STALE",
+      market_data_label: "STALE",
+      reconciliation_status: "CLEAN",
+      stale: true,
+    },
+    operatorSurface: { generated_at: new Date().toISOString() },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+    },
+    runtimeValues: { runtime_recovery_state: "RUNNING" },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+    },
+    trackBPaperTrading: {
+      available: true,
+      startup_readiness_diagnostic: {
+        instruments: {
+          MGC: {
+            instrument: "MGC",
+            context_ready: true,
+            live_execution_approved: false,
+            paper_evaluation_allowed: false,
+          },
+        },
+      },
+      zero_activity_diagnostic: {
+        diagnosis_classification: "STALE_LIVE_FEED",
+        dominant_blocker: "Execution freshness failing for MGC",
+      },
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {},
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: { blocked: false, mismatch_count: 0, detail: "clear" },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {},
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  assert.equal(contract.operator_triage.track_b_paper_status_code, "TRACK_B_PAPER_BLOCKED_LIVE_EXECUTION");
+  assert.equal(contract.operator_triage.hard_gates.find((gate) => gate.key === "market-data")?.status, "fail");
+  assert.equal(
+    contract.operator_triage.root_cause.detail,
+    "Track B PAPER blocked: live execution freshness failed for MGC.",
+  );
+});
+
+test("paper mode reports Track B feature-context blocker separately from market-data freshness", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "attached_snapshot_bridge",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "LIVE",
+      market_data_label: "LIVE",
+      reconciliation_status: "CLEAN",
+      stale: false,
+    },
+    operatorSurface: { generated_at: new Date().toISOString() },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+    },
+    runtimeValues: { runtime_recovery_state: "RUNNING" },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+    },
+    trackBPaperTrading: {
+      available: true,
+      startup_readiness_diagnostic: {
+        instruments: {
+          MNQ: {
+            instrument: "MNQ",
+            context_ready: false,
+            live_execution_approved: true,
+            paper_evaluation_allowed: false,
+          },
+        },
+      },
+      zero_activity_diagnostic: {
+        diagnosis_classification: "INPUTS_NOT_READY",
+      },
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {},
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: { blocked: false, mismatch_count: 0, detail: "clear" },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {},
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  assert.equal(contract.operator_triage.track_b_paper_status_code, "TRACK_B_PAPER_BLOCKED_FEATURE_CONTEXT");
+  assert.equal(
+    contract.operator_triage.verdict_sentence,
+    "Track B PAPER blocked: feature context not ready for MNQ.",
+  );
+});
+
 test("paper mode keeps live authority blocked while allowing supervised paper authority", () => {
   const contract = buildOperatorTriageContract({
     desktopSourceMode: "attached_snapshot_bridge",
@@ -1511,6 +2249,196 @@ test("paper mode keeps live authority blocked while allowing supervised paper au
   assert.equal(contract.operator_triage.live_trade_authority, "Blocked");
   assert.equal(contract.operator_triage.paper_bridge_allowed, true);
   assert.equal(contract.operator_triage.live_bridge_allowed, false);
+});
+
+test("paper mode trusts authoritative reconciliation payload over stale global reconciliation labels", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "attached_snapshot_bridge",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "LIVE",
+      market_data_label: "LIVE",
+      reconciliation_status: "FAILED",
+      stale: false,
+    },
+    operatorSurface: {
+      generated_at: new Date().toISOString(),
+    },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+    },
+    runtimeValues: {
+      runtime_recovery_state: "RUNNING",
+    },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+      paper_trade_allowed: true,
+      paper_trade_block_reason: null,
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {},
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: {
+      status: "clear",
+      blocked: false,
+      mismatch_count: 0,
+      detail: "Broker reconciliation is clear.",
+    },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {},
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  const reconciliationGate = contract.operator_triage.hard_gates.find((gate) => gate.key === "reconciliation");
+  assert.equal(reconciliationGate?.status, "pass");
+  assert.equal(reconciliationGate?.reason, "Broker reconciliation is clear.");
+  assert.equal(contract.operator_triage.paper_trade_allowed, true);
+  assert.equal(contract.operator_triage.verdict_sentence, "Paper stack healthy. Flat. Paper trade authority enabled.");
+});
+
+test("paper mode trusts authoritative reconciliation snapshot even when live production link transport is unavailable", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "snapshot_fallback",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "STALE",
+      market_data_label: "STALE",
+      reconciliation_status: "SNAPSHOT",
+      stale: true,
+    },
+    operatorSurface: {
+      generated_at: new Date().toISOString(),
+    },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+    },
+    runtimeValues: {
+      runtime_recovery_state: "RUNNING",
+      paper_trade_allowed: false,
+      paper_trade_block_reason: "paper_market_data_stale_or_unavailable",
+    },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+      paper_trade_allowed: false,
+      paper_trade_block_reason: "paper_market_data_stale_or_unavailable",
+    },
+    portfolio: {},
+    productionLinkEnabled: false,
+    productionLink: {},
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: {
+      status: "clear",
+      blocked: false,
+      mismatch_count: 0,
+      detail: "Broker reconciliation is clear.",
+    },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {},
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  const reconciliationGate = contract.operator_triage.hard_gates.find((gate) => gate.key === "reconciliation");
+  assert.equal(reconciliationGate?.status, "pass");
+  assert.equal(reconciliationGate?.reason, "Broker reconciliation is clear.");
+  assert.equal(contract.operator_triage.paper_trade_allowed, false);
+  assert.equal(contract.operator_triage.paper_trade_block_reason, "legacy_paper_market_data_stale_or_unavailable");
+});
+
+test("reconciliation hard gate fails from authoritative mismatch data even if global reconciliation label still says CLEAN", () => {
+  const contract = buildOperatorTriageContract({
+    desktopSourceMode: "attached_snapshot_bridge",
+    desktopRefreshedAt: new Date().toISOString(),
+    dashboardGeneratedAt: new Date().toISOString(),
+    global: {
+      mode: "PAPER",
+      mode_label: "PAPER",
+      live_disabled: true,
+      market_data_status: "LIVE",
+      market_data_label: "LIVE",
+      reconciliation_status: "CLEAN",
+      stale: false,
+    },
+    operatorSurface: {
+      generated_at: new Date().toISOString(),
+    },
+    runtimeReadiness: {
+      runtime_status: "RUNNING",
+      paper_enabled: true,
+      entries_enabled: true,
+      blocking_faults_active: false,
+    },
+    runtimeValues: {
+      runtime_recovery_state: "RUNNING",
+    },
+    paperReadiness: {
+      generated_at: new Date().toISOString(),
+      runtime_running: true,
+      entries_enabled: true,
+    },
+    portfolio: {},
+    productionLinkEnabled: true,
+    productionLink: {},
+    productionHealth: {
+      broker_reachable: { ok: true, detail: "reachable" },
+      auth_healthy: { ok: true, detail: "healthy" },
+      account_selected: { ok: true, detail: "selected" },
+      positions_fresh: { ok: true, detail: "fresh" },
+      quotes_fresh: { ok: true, detail: "fresh" },
+    },
+    productionReconciliation: {
+      status: "blocked",
+      blocked: true,
+      mismatch_count: 2,
+      detail: "Broker reconciliation reported mismatched exposure.",
+    },
+    productionDiagnostics: {},
+    productionBalances: {},
+    localOperatorAuth: {},
+    operatorActiveAlertRows: [],
+    operatorRecentAlertRows: [],
+    sameUnderlyingConflictSummary: {},
+  });
+
+  const reconciliationGate = contract.operator_triage.hard_gates.find((gate) => gate.key === "reconciliation");
+  assert.equal(reconciliationGate?.status, "fail");
+  assert.equal(reconciliationGate?.reason, "Broker reconciliation reported mismatched exposure.");
 });
 
 test("paper mode still hard-blocks on current runtime faults with paper-specific wording", () => {
@@ -1687,7 +2615,9 @@ test("paper mode follows authoritative paper readiness contract instead of recom
       paper_readiness_source: "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload",
       paper_readiness_timestamp: new Date().toISOString(),
       session_eligible_count: 9,
+      live_capable_count: 9,
       waiting_for_bar_count: 9,
+      market_data_stale_count: 0,
       no_setup_count: 11,
       actionable_now_count: 0,
       true_blocked_count: 0,
@@ -1749,7 +2679,9 @@ test("paper mode follows authoritative paper readiness contract instead of recom
   assert.equal(contract.operator_triage.live_trade_authority, "Blocked");
   assert.equal(contract.operator_triage.paper_readiness_source, "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload");
   assert.equal(contract.operator_triage.session_eligible_count, 9);
+  assert.equal(contract.operator_triage.live_capable_count, 9);
   assert.equal(contract.operator_triage.waiting_for_bar_count, 9);
+  assert.equal(contract.operator_triage.market_data_stale_count, 0);
   assert.equal(contract.operator_triage.advisory_fault_count, 9);
   assert.equal(contract.operator_triage.blocking_fault_count, 0);
 });
@@ -1944,6 +2876,16 @@ test("compact startup state strips heavyweight analytics payloads from persisted
         alerts: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }],
       },
     },
+    action_log: [{
+      action: "production-refresh",
+      action_label: "production-refresh",
+      kind: "success",
+      message: "Broker state refreshed.",
+      output: "Using live broker truth.",
+      production_link: {
+        diagnostics: { giant: "X".repeat(20_000) },
+      },
+    }],
     historical_playback: {
       study_catalog: {
         items: [{
@@ -1995,6 +2937,7 @@ test("compact startup state strips heavyweight analytics payloads from persisted
   const rawOperatorStatus = (paper.raw_operator_status ?? {}) as Record<string, unknown>;
   const signalIntentFillAudit = (paper.signal_intent_fill_audit ?? {}) as Record<string, unknown>;
   const events = (paper.events ?? {}) as Record<string, unknown>;
+  const actionLog = Array.isArray(dashboard.action_log) ? dashboard.action_log as Array<Record<string, unknown>> : [];
   const transferMeta = ((dashboard.dashboard_meta ?? {}) as Record<string, unknown>).desktop_transfer as Record<string, unknown>;
 
   assert.equal(state.connection, "snapshot");
@@ -2023,6 +2966,8 @@ test("compact startup state strips heavyweight analytics payloads from persisted
   assert.equal(Array.isArray(events.alerts), true);
   assert.equal((events.alerts as Array<unknown>).length, 5);
   assert.equal(events.alerts_count, 6);
+  assert.equal(actionLog.length, 1);
+  assert.equal("production_link" in (actionLog[0] ?? {}), false);
   assert.equal(transferMeta.compacted_for_startup, true);
   assert.equal(transferMeta.budget_bytes, DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES);
   assert.equal(typeof (transferMeta.detail_artifacts as Record<string, unknown>).full_dashboard_snapshot_path, "string");
@@ -2123,14 +3068,16 @@ test("renderer-bound desktop state stays under budget while preserving operator-
   assert.equal(Array.isArray(alertsState.active_alerts), true);
   assert.equal(Array.isArray(alertsState.recent_events), true);
   const compactTradeLog = strategyPerformance.trade_log as Array<Record<string, unknown>>;
-  assert.equal(compactTradeLog.length, 200);
+  assert.equal(compactTradeLog.length, 500);
   assert.equal(strategyPerformance.trade_log_count, 500);
   assert.deepEqual(tradeLogWindow.requested_range, null);
   assert.equal(tradeLogWindow.total_trade_count, 500);
-  assert.equal(tradeLogWindow.returned_trade_count, 200);
-  assert.equal(tradeLogWindow.latest_trade_count, 200);
+  assert.equal(tradeLogWindow.returned_trade_count, 500);
+  assert.equal(tradeLogWindow.latest_trade_count, 500);
+  assert.equal(tradeLogWindow.compacted_for_startup, false);
   assert.equal(String(compactTradeLog[0]?.exit_timestamp ?? ""), "2026-04-29T15:00:00.000Z");
-  assert.equal(String(compactTradeLog[199]?.exit_timestamp ?? ""), "2026-04-21T08:00:00.000Z");
+  assert.equal(String(compactTradeLog[499]?.exit_timestamp ?? ""), "2026-04-08T20:00:00.000Z");
+  assert.equal("same_underlying_ambiguity_note" in (compactTradeLog[0] ?? {}), false);
   assert.equal((rawOperatorStatus.lanes as Array<unknown>).length, 44);
   assert.equal((signalIntentFillAudit.rows as Array<unknown>).length, 44);
   assert.equal(transferMeta.compacted_for_startup, true);
@@ -2189,6 +3136,8 @@ test("renderer paper trade-log contract unions the visible calendar window with 
     endDate: "2026-04-20",
   });
   assert.equal(tradeLogWindow.total_trade_count, 500);
+  assert.equal(tradeLogWindow.returned_trade_count, 500);
+  assert.equal(tradeLogWindow.compacted_for_startup, false);
   assert.equal(tradeLogWindow.visible_range_complete, true);
   assert.ok(returnedDays.includes("2026-04-16"));
   assert.ok(returnedDays.includes("2026-04-17"));

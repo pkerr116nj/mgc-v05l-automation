@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   appendDesktopLog,
+  compactDesktopStateForRenderer,
   copyText,
   clearLocalOperatorAuthSession,
   authenticateLocalOperator,
@@ -18,6 +19,7 @@ import {
   runProductionLinkAction,
   startDashboard,
   stopDashboard,
+  type DesktopStateRequestOptions,
 } from "./runtime";
 
 let mainWindow: BrowserWindow | null = null;
@@ -530,7 +532,12 @@ async function createWindow(): Promise<void> {
 
 function installIpcHandlers(): void {
   logStartupStage("ipc:install:start");
-  ipcMain.handle("desktop:get-state", (_event, options?: { includeHeavyPayload?: boolean }) => getDesktopState(options));
+  ipcMain.handle("desktop:get-state", async (_event, options?: DesktopStateRequestOptions) =>
+    compactDesktopStateForRenderer(
+      await getDesktopState(options),
+      { paperTradeLogVisibleRange: options?.paperTradeLogVisibleRange ?? null },
+    ),
+  );
   ipcMain.handle("desktop:start-dashboard", () => startDashboard());
   ipcMain.handle("desktop:stop-dashboard", () => stopDashboard());
   ipcMain.handle("desktop:restart-dashboard", () => restartDashboard());

@@ -15,8 +15,9 @@ from zoneinfo import ZoneInfo
 
 from ..market_data import SchwabAuthError, SchwabOAuthClient, SchwabTokenStore, UrllibJsonTransport, load_schwab_auth_config_from_env
 from ..market_data import SchwabQuoteHttpClient, load_schwab_market_data_config
+from ..market_data.schwab_http import SchwabHttpError
 from ..local_operator_auth import local_operator_auth_surface
-from .client import BrokerHttpClient, BrokerHttpError
+from .client import BrokerHttpClient, BrokerHttpError, SchwabBrokerHttpError
 from .config import load_production_link_config
 from .models import (
     BrokerAccountIdentity,
@@ -343,7 +344,15 @@ class SchwabProductionLinkService:
                 self._last_live_fetch_at = now.isoformat()
                 self._write_snapshot(live_snapshot)
                 return live_snapshot
-            except (SchwabAuthError, BrokerHttpError, ProductionLinkActionError, FileNotFoundError, KeyError, ValueError) as exc:
+            except (
+                SchwabAuthError,
+                SchwabHttpError,
+                BrokerHttpError,
+                ProductionLinkActionError,
+                FileNotFoundError,
+                KeyError,
+                ValueError,
+            ) as exc:
                 self._last_error = str(exc)
                 degraded = self._degraded_snapshot(now, detail=str(exc))
                 self._cached_snapshot = degraded

@@ -2657,6 +2657,29 @@ input {
   background: rgba(255, 255, 255, 0.012);
 }
 
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.table-sort-button.is-active {
+  color: var(--text);
+}
+
+.table-sort-indicator {
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
 .data-table tbody tr:hover {
   background: rgba(255, 255, 255, 0.025);
 }

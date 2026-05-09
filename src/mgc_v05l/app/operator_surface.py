@@ -165,6 +165,8 @@ def _build_runtime_readiness(
     no_setup_count = int(lane_status_summary.get("no_setup_count") or 0)
     actionable_now_count = int(lane_status_summary.get("actionable_now_count") or 0)
     blocked_lanes_count = int(lane_status_summary.get("blocked_lanes_count") or 0)
+    live_capable_count = int(lane_status_summary.get("live_capable_count") or 0)
+    market_data_stale_count = int(lane_status_summary.get("market_data_stale_count") or 0)
     stale_runtime_blocked_count = int(lane_status_summary.get("stale_runtime_blocked_count") or 0)
     ready_this_bar_count = int(lane_status_summary.get("eligible_to_trade_count") or 0)
     current_detected_phase_label = str(readiness.get("current_detected_phase_label") or readiness.get("current_detected_session") or "UNKNOWN")
@@ -210,8 +212,8 @@ def _build_runtime_readiness(
             f"auth={'READY' if auth_readiness else 'NOT_READY'} | "
             f"market_data={market_data_readiness} | faults={len(blocking_faults)} | advisory={len(advisory_faults)} | "
             f"runtime_recovery={runtime_recovery_state} | restart_budget={runtime_recovery_attempts}/{runtime_recovery_attempt_budget or '?'} | "
-            f"session_eligible={session_eligible_lanes_count} | waiting_bar={waiting_for_completed_bar_count} | "
-            f"no_setup={no_setup_count} | actionable={actionable_now_count} | blocked={blocked_lanes_count} | "
+            f"live_capable={live_capable_count} | session_eligible={session_eligible_lanes_count} | waiting_bar={waiting_for_completed_bar_count} | "
+            f"no_setup={no_setup_count} | actionable={actionable_now_count} | blocked={blocked_lanes_count} | stale={market_data_stale_count} | "
             f"bootstrap_issues={len(bootstrap_issues)}"
         ),
         "field_sources": {
@@ -264,8 +266,10 @@ def _build_runtime_readiness(
         "route_ready_lanes_count": route_ready_lanes_count,
         "session_eligible_lanes_count": session_eligible_lanes_count,
         "session_eligible_count": int(readiness.get("session_eligible_count") or session_eligible_lanes_count),
+        "live_capable_count": int(readiness.get("live_capable_count") or live_capable_count),
         "waiting_for_completed_bar_count": waiting_for_completed_bar_count,
         "waiting_for_bar_count": int(readiness.get("waiting_for_bar_count") or waiting_for_completed_bar_count),
+        "market_data_stale_count": int(readiness.get("market_data_stale_count") or market_data_stale_count),
         "no_setup_count": no_setup_count,
         "actionable_now_count": actionable_now_count,
         "blocked_lanes_count": blocked_lanes_count,
@@ -896,12 +900,16 @@ def _legacy_readiness_alias(payload: dict[str, Any]) -> dict[str, Any]:
             {"label": "Paper Runtime", "value": "RUNNING" if values.get("paper_enabled") else "STOPPED", "level": "ok" if values.get("paper_enabled") else "warning"},
             {"label": "Entries", "value": "ENABLED" if values.get("entries_enabled") else "HALTED", "level": "ok" if values.get("entries_enabled") else "warning"},
             {"label": "Market Data", "value": values.get("market_data_readiness") or "-", "level": "info"},
-            {"label": "Session Eligible", "value": str(values.get("session_eligible_lanes_count") or 0), "level": "ok" if values.get("session_eligible_lanes_count") else "muted"},
-            {"label": "Waiting For 3m Bar", "value": str(values.get("waiting_for_completed_bar_count") or 0), "level": "warning" if values.get("waiting_for_completed_bar_count") else "muted"},
+            {"label": "Runtime Lanes Loaded", "value": str(values.get("runtime_lanes_loaded_count") or 0), "level": "ok" if values.get("runtime_lanes_loaded_count") else "warning"},
+            {"label": "Route Ready Lanes", "value": str(values.get("route_ready_lanes_count") or 0), "level": "ok" if values.get("route_ready_lanes_count") else "warning"},
+            {"label": "Session Eligible Now", "value": str(values.get("session_eligible_lanes_count") or 0), "level": "ok" if values.get("session_eligible_lanes_count") else "muted"},
+            {"label": "Live-Capable", "value": str(values.get("live_capable_count") or 0), "level": "ok" if values.get("live_capable_count") else "muted"},
+            {"label": "Waiting For Bar", "value": str(values.get("waiting_for_bar_count") or values.get("waiting_for_completed_bar_count") or 0), "level": "warning" if (values.get("waiting_for_bar_count") or values.get("waiting_for_completed_bar_count")) else "muted"},
             {"label": "No Setup", "value": str(values.get("no_setup_count") or 0), "level": "warning" if values.get("no_setup_count") else "muted"},
             {"label": "Actionable Now", "value": str(values.get("actionable_now_count") or 0), "level": "ok" if values.get("actionable_now_count") else "muted"},
-            {"label": "Blocked Lanes", "value": str(values.get("blocked_lanes_count") or 0), "level": "danger" if values.get("blocked_lanes_count") else "ok"},
-            {"label": "Ready This Bar", "value": str(values.get("ready_this_bar_count") or 0), "level": "ok" if values.get("ready_this_bar_count") else "muted"},
+            {"label": "True Blocked", "value": str(values.get("true_blocked_count") or values.get("blocked_lanes_count") or 0), "level": "danger" if (values.get("true_blocked_count") or values.get("blocked_lanes_count")) else "ok"},
+            {"label": "Market Data Stale", "value": str(values.get("market_data_stale_count") or 0), "level": "danger" if values.get("market_data_stale_count") else "ok"},
+            {"label": "Blocking Faults", "value": str(values.get("blocking_faults_count") or 0), "level": "danger" if values.get("blocking_faults_count") else "ok"},
         ],
         "notes": [
             f"Auth readiness: {'READY' if values.get('auth_readiness') else 'NOT_READY'}",

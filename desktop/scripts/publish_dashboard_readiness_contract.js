@@ -201,7 +201,7 @@ async function sampleDashboardState({ configuredUrl, infoFile }) {
         parsed_json: health.parsed_json,
       };
       if (health.ok) {
-        dashboardProbe = await probeJsonEndpoint(dashboardUrl, 4);
+        dashboardProbe = await probeJsonEndpoint(dashboardUrl, 15);
       }
     } catch {
       healthProbe = {

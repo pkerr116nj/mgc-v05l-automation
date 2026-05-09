@@ -163,8 +163,16 @@ export interface DesktopBuildMetadata {
   metadata_path: string | null;
 }
 
+export interface DesktopStateRequestOptions {
+  includeHeavyPayload?: boolean;
+  paperTradeLogVisibleRange?: {
+    startDate: string;
+    endDate: string;
+  } | null;
+}
+
 export interface OperatorDesktopApi {
-  getDesktopState(): Promise<DesktopState>;
+  getDesktopState(options?: DesktopStateRequestOptions): Promise<DesktopState>;
   startDashboard(): Promise<DesktopCommandResult>;
   stopDashboard(): Promise<DesktopCommandResult>;
   restartDashboard(): Promise<DesktopCommandResult>;

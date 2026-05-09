@@ -110,7 +110,9 @@ export interface OperatorTriage {
   paper_readiness_source: string | null;
   paper_readiness_timestamp: string | null;
   session_eligible_count: number;
+  live_capable_count: number;
   waiting_for_bar_count: number;
+  market_data_stale_count: number;
   no_setup_count: number;
   actionable_now_count: number;
   true_blocked_count: number;
@@ -135,6 +137,15 @@ export interface OperatorTriage {
 
 export interface OperatorTriageContract {
   operator_triage: OperatorTriage;
+}
+
+export interface OperatorLaneSemantics {
+  cadence_state: string | null;
+  cadence_reason: string | null;
+  latest_hard_blocker: string | null;
+  live_capable: boolean;
+  actionable_this_bar: boolean;
+  true_blocked: boolean;
 }
 
 export interface OperatorTriageInput {
@@ -182,6 +193,92 @@ function asArray<T>(value: unknown): T[] {
 
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+const CADENCE_STATE_CODES = new Set([
+  "WAITING_FOR_BAR_CLOSE",
+  "BAR_RECEIVED_NOT_PROCESSED_YET",
+  "BAR_PROCESSED_CURRENT",
+  "READY_NO_SETUP",
+  "NO_SETUP_OBSERVED",
+  "NO_NEW_COMPLETED_BAR",
+]);
+
+function normalizedUpperToken(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function isRiskHaltState(value: unknown): boolean {
+  const riskState = normalizedUpperToken(value);
+  return Boolean(riskState) && !["", "OK", "CLEAR", "READY"].includes(riskState);
+}
+
+export function deriveOperatorLaneSemantics(row: JsonRecord | null | undefined): OperatorLaneSemantics {
+  const record = asRecord(row);
+  const latestGatingState = asRecord(record.latest_gating_state);
+  const cadenceState = normalizedUpperToken(record.bar_state || record.fireability_classification || record.current_signal_state) || null;
+  const cadenceReason = String(record.bar_state_reason ?? record.audit_reason ?? record.eligibility_detail ?? "").trim() || null;
+  const firstTrueBlocker = String(record.first_true_blocker ?? "").trim() || null;
+  const effectiveReason = String(
+    record.effective_readiness_eligibility_reason
+      ?? record.eligibility_reason
+      ?? latestGatingState.latest_fault_or_blocker
+      ?? record.latest_fault_or_blocker
+      ?? "",
+  ).trim() || null;
+  const marketDataStale = record.market_data_stale === true;
+  const routeReady = record.route_ready !== false;
+  const governanceAllowed = record.governance_allowed !== false;
+  const entriesEnabled = record.entries_enabled !== false;
+  const operatorHalt = record.operator_halt === true;
+  const riskHalt = isRiskHaltState(record.risk_state ?? latestGatingState.risk_state);
+  const sessionEligible = record.session_eligible === true;
+  const actionableThisBar = record.can_fire_now === true || record.actionable_now === true || record.eligible_now === true;
+  const staleRuntime = record.runtime_stale_effective === true || record.runtime_stale_observed === true || record.data_fresh === false;
+
+  const hardBlockerCandidate =
+    marketDataStale
+      ? "market_data_stale"
+      : operatorHalt
+        ? "operator_halt"
+        : riskHalt
+          ? (String(record.halt_reason ?? "").trim() || "risk_halt")
+          : !routeReady
+            ? "route_not_ready"
+            : !governanceAllowed || !entriesEnabled
+              ? "governance_disabled"
+              : firstTrueBlocker
+                ? firstTrueBlocker
+                : effectiveReason;
+  const normalizedHardBlocker = hardBlockerCandidate ? normalizedUpperToken(hardBlockerCandidate) : "";
+  const latestHardBlocker = normalizedHardBlocker && !CADENCE_STATE_CODES.has(normalizedHardBlocker)
+    ? hardBlockerCandidate
+    : null;
+  const trueBlocked = Boolean(
+    record.true_blocked === true
+    || record.blocked_lane === true
+    || latestHardBlocker
+    || (record.session_eligible === false && normalizedUpperToken(effectiveReason) === "WRONG_SESSION"),
+  );
+  const liveCapable = Boolean(
+    sessionEligible
+    && routeReady
+    && governanceAllowed
+    && entriesEnabled
+    && !operatorHalt
+    && !riskHalt
+    && !marketDataStale
+    && !staleRuntime
+    && !trueBlocked,
+  );
+  return {
+    cadence_state: cadenceState,
+    cadence_reason: cadenceReason,
+    latest_hard_blocker: latestHardBlocker,
+    live_capable: liveCapable,
+    actionable_this_bar: actionableThisBar,
+    true_blocked: trueBlocked,
+  };
 }
 
 function formatValue(value: unknown): string {
@@ -824,6 +921,11 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     ?? paperReadiness.waiting_for_bar_count
     ?? laneStatusSummary.waiting_for_completed_bar_count,
   ) ?? 0;
+  const marketDataStaleCount = numericOrNull(
+    runtimeValues.market_data_stale_count
+    ?? paperReadiness.market_data_stale_count
+    ?? laneStatusSummary.market_data_stale_count,
+  ) ?? 0;
   const noSetupCount = numericOrNull(
     runtimeValues.no_setup_count
     ?? paperReadiness.no_setup_count
@@ -840,6 +942,11 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     ?? paperReadiness.true_blocked_count
     ?? laneStatusSummary.blocked_lanes_count,
   ) ?? 0;
+  const liveCapableCount = numericOrNull(
+    runtimeValues.live_capable_count
+    ?? paperReadiness.live_capable_count
+    ?? laneStatusSummary.live_capable_count,
+  ) ?? Math.max(0, sessionEligibleCount - trueBlockedCount);
   const advisoryFaultCount = numericOrNull(
     runtimeValues.advisory_fault_count
     ?? runtimeValues.advisory_faults_count
@@ -899,11 +1006,42 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
     && brokerQuotesFresh
     && brokerRouteBlockers.length === 0;
   const brokerAuthorityPass = paperMode || liveBrokerAuthorityPass;
+  const reconciliationStatusToken = normalizedUpperToken(
+    productionReconciliation.status
+      ?? productionReconciliation.label
+      ?? productionReconciliation.detail
+      ?? global.reconciliation_status,
+  );
+  const reconciliationStructuredClear =
+    productionReconciliation.blocked !== true
+    && Number(productionReconciliation.mismatch_count ?? 0) === 0;
+  const reconciliationHasAuthoritativeSnapshot =
+    productionReconciliation.blocked !== undefined
+    || productionReconciliation.mismatch_count !== undefined
+    || Boolean(reconciliationStatusToken);
+  const reconciliationAuthorityAvailable =
+    input.productionLinkEnabled || reconciliationHasAuthoritativeSnapshot;
   const reconciliationPass =
-    input.productionLinkEnabled
-    && productionReconciliation.blocked !== true
-    && Number(productionReconciliation.mismatch_count ?? 0) === 0
-    && String(global.reconciliation_status ?? "").trim().toUpperCase() === "CLEAN";
+    reconciliationAuthorityAvailable
+    && reconciliationStructuredClear
+    && (
+      reconciliationHasAuthoritativeSnapshot
+        ? !["BLOCKED", "DIRTY", "FAIL", "FAILED", "MISMATCH", "RECONCILING"].includes(reconciliationStatusToken)
+        : ["CLEAN", "CLEAR"].includes(normalizedUpperToken(global.reconciliation_status))
+    );
+  const reconciliationFailReason = firstNonEmptyString(
+    !reconciliationAuthorityAvailable ? "Production link is disabled." : null,
+    productionReconciliation.blocked === true
+      ? String(productionReconciliation.detail ?? productionReconciliation.status ?? "Reconciliation is blocked.")
+      : null,
+    Number(productionReconciliation.mismatch_count ?? 0) > 0
+      ? `Broker reconciliation reported ${Number(productionReconciliation.mismatch_count ?? 0)} mismatch${Number(productionReconciliation.mismatch_count ?? 0) === 1 ? "" : "es"}.`
+      : null,
+    ["BLOCKED", "DIRTY", "FAIL", "FAILED", "MISMATCH", "RECONCILING"].includes(reconciliationStatusToken)
+      ? String(productionReconciliation.detail ?? productionReconciliation.status ?? global.reconciliation_status ?? "Reconciliation is not clear.")
+      : null,
+    textOrFallback(global.reconciliation_status, "Reconciliation is not clear."),
+  );
   const runtimePosture: RuntimePostureState = paperMode
     ? (
         blockingFaultCount > 0
@@ -1036,7 +1174,7 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
       status: reconciliationPass ? "pass" : "fail",
       reason: reconciliationPass
         ? "Broker reconciliation is clear."
-        : textOrFallback(productionReconciliation.detail ?? global.reconciliation_status, "Reconciliation is not clear."),
+        : (reconciliationFailReason || "Reconciliation is not clear."),
       checked_at: checkedAt,
       source_timestamp: timestampOrNull(productionReconciliation.created_at) ?? timestampOrNull(input.desktopRefreshedAt),
       freshness_seconds: freshnessSeconds(
@@ -1246,7 +1384,9 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
       track_b_paper_status_message: trackBPaperStatus.message,
       track_b_legacy_market_data_note: trackBPaperStatus.ready && !legacyMarketDataPass ? trackBPaperStatus.legacyMarketDataNote : null,
       session_eligible_count: sessionEligibleCount,
+      live_capable_count: liveCapableCount,
       waiting_for_bar_count: waitingForBarCount,
+      market_data_stale_count: marketDataStaleCount,
       no_setup_count: noSetupCount,
       actionable_now_count: actionableNowCount,
       true_blocked_count: trueBlockedCount,

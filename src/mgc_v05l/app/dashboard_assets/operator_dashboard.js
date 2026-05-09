@@ -1157,9 +1157,16 @@ function buildOperatorReadinessCards(payload) {
     { label: "Entries", value: values.entries_enabled ? "ENABLED" : "HALTED" },
     { label: "Auth", value: values.auth_readiness ? "READY" : "NOT_READY" },
     { label: "Market Data", value: values.market_data_readiness || "Unavailable" },
-    { label: "Faults", value: String(values.blocking_faults_count ?? 0) },
-    { label: "Active Lanes", value: String(values.active_lanes_count ?? 0) },
-    { label: "Active Instruments", value: String(values.active_instruments_count ?? 0) },
+    { label: "Runtime Lanes Loaded", value: String(values.runtime_lanes_loaded_count ?? 0) },
+    { label: "Route Ready Lanes", value: String(values.route_ready_lanes_count ?? 0) },
+    { label: "Session Eligible Now", value: String(values.session_eligible_lanes_count ?? 0) },
+    { label: "Live-Capable", value: String(values.live_capable_count ?? 0) },
+    { label: "Waiting For Bar", value: String(values.waiting_for_bar_count ?? values.waiting_for_completed_bar_count ?? 0) },
+    { label: "No Setup", value: String(values.no_setup_count ?? 0) },
+    { label: "Actionable Now", value: String(values.actionable_now_count ?? 0) },
+    { label: "True Blocked", value: String(values.true_blocked_count ?? values.blocked_lanes_count ?? 0) },
+    { label: "Market Data Stale", value: String(values.market_data_stale_count ?? 0) },
+    { label: "Blocking Faults", value: String(values.blocking_faults_count ?? 0) },
   ];
 }
 
@@ -1168,6 +1175,10 @@ function buildOperatorReadinessNotes(payload) {
   const rows = [];
   rows.push(`Auth readiness: ${values.auth_readiness ? "READY" : "NOT_READY"}`);
   rows.push(`Degraded informational feeds: ${(values.degraded_informational_feeds || []).join(", ") || "None"}`);
+  rows.push(`Broad session: ${values.current_broad_trading_session || "-"}`);
+  rows.push(`Phase label: ${values.current_detected_phase_label || "-"}`);
+  rows.push(`Next decision bar: ${values.next_expected_decision_bar_ts || "-"}`);
+  rows.push(`Stale-runtime effective blocks: ${values.stale_runtime_blocked_count ?? 0}`);
   const bootstrap = payload.bootstrap_prerequisites || {};
   const bootstrapItems = Array.isArray(bootstrap.items) ? bootstrap.items : [];
   if (bootstrapItems.length) {

@@ -300,6 +300,39 @@ const DESKTOP_BUILD_METADATA_FILE = ".mgc-build-metadata.json";
 const DASHBOARD_READINESS_FILE = path.join(RUNTIME_ROOT, "operator_dashboard_readiness.json");
 export const DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES = 8_000_000;
 const DESKTOP_RENDERER_TRADE_LOG_LIMIT = 200;
+const PAPER_TRADE_LOG_STARTUP_FIELDS = new Set([
+  "config_source",
+  "entry_price",
+  "entry_session_phase",
+  "entry_timestamp",
+  "exit_price",
+  "exit_reason",
+  "exit_session_phase",
+  "exit_timestamp",
+  "family",
+  "fees",
+  "gross_pnl",
+  "id",
+  "instrument",
+  "lane_id",
+  "paper_strategy_class",
+  "quantity",
+  "realized_pnl",
+  "side",
+  "signal_family",
+  "slippage",
+  "source_family",
+  "standalone_strategy_id",
+  "standalone_strategy_label",
+  "standalone_strategy_root",
+  "status",
+  "strategy_family",
+  "strategy_key",
+  "strategy_name",
+  "trade_id",
+]);
+const DESKTOP_ACTION_LOG_LIMIT = 20;
+const DESKTOP_ACTION_LOG_TEXT_LIMIT = 600;
 const LOCAL_OPERATOR_AUTH_STATE_FILE = path.join(LOCAL_OPERATOR_AUTH_ROOT, "local_operator_auth_state.json");
 const LOCAL_OPERATOR_AUTH_EVENTS_FILE = path.join(LOCAL_OPERATOR_AUTH_ROOT, "local_operator_auth_events.jsonl");
 const LOCAL_SECRET_WRAPPER_FILE = path.join(LOCAL_OPERATOR_AUTH_ROOT, "local_secret_wrapper.json");
@@ -371,6 +404,7 @@ const DESKTOP_STATE_FIXTURE_PATH = String(process.env.MGC_DESKTOP_STATE_FIXTURE_
 const ATTACHED_SNAPSHOT_BRIDGE_MAX_AGE_MS = 60_000;
 const PACKAGED_SYNCHRONIZED_SNAPSHOT_MAX_AGE_MS = 10 * 60_000;
 const PACKAGED_OPERATOR_SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
+const PACKAGED_OPERATOR_SNAPSHOT_DEGRADED_MAX_AGE_MS = 60 * 60_000;
 const SNAPSHOT_AUTHORITY_SKEW_MS = 5_000;
 const SNAPSHOT_FILES = {
   dashboardApi: path.join(OUTPUT_ROOT, "dashboard_api_snapshot.json"),
@@ -389,6 +423,9 @@ const SNAPSHOT_FILES = {
   paperPerformance: path.join(OUTPUT_ROOT, "paper_performance_snapshot.json"),
   paperPosition: path.join(OUTPUT_ROOT, "paper_position_state_snapshot.json"),
   paperReadiness: path.join(OUTPUT_ROOT, "paper_readiness_snapshot.json"),
+  paperSignalIntentFillAudit: path.join(OUTPUT_ROOT, "paper_signal_intent_fill_audit_snapshot.json"),
+  paperStrategyPerformance: path.join(OUTPUT_ROOT, "paper_strategy_performance_snapshot.json"),
+  paperStrategyTradeLog: path.join(OUTPUT_ROOT, "paper_strategy_trade_log_snapshot.json"),
   startupControlPlane: path.join(OUTPUT_ROOT, "startup_control_plane_snapshot.json"),
   treasuryCurve: path.join(OUTPUT_ROOT, "treasury_curve_snapshot.json"),
   actionLog: path.join(OUTPUT_ROOT, "action_log.jsonl"),
@@ -397,8 +434,8 @@ const SNAPSHOT_FILES = {
 const HEALTH_TIMEOUT_MS = 5000;
 const DASHBOARD_TIMEOUT_MS = 120000;
 const DASHBOARD_STARTUP_TIMEOUT_MS = 120000;
-const STARTUP_HEALTH_TIMEOUT_MS = 1000;
-const STARTUP_DASHBOARD_TIMEOUT_MS = 5000;
+const STARTUP_HEALTH_TIMEOUT_MS = 3500;
+const STARTUP_DASHBOARD_TIMEOUT_MS = 15000;
 const SNAPSHOT_PROMOTION_GRACE_MS = 1500;
 const HISTORICAL_PLAYBACK_MANIFEST_CACHE_TTL_MS = 10000;
 const RECONNECT_BACKOFF_MS = [2000, 5000, 10000, 20000, 30000];
@@ -567,10 +604,12 @@ function snapshotAuthorityMetadata(snapshot: JsonRecord | null | undefined): Sna
   const dashboard = asJsonRecord(snapshot);
   const paper = asJsonRecord(dashboard.paper);
   const readiness = asJsonRecord(paper.readiness);
+  const strategyPerformance = asJsonRecord(paper.strategy_performance);
   const operatorSurface = asJsonRecord(dashboard.operator_surface);
   const dashboardMeta = asJsonRecord(dashboard.dashboard_meta);
   const generatedAt = parseIsoDate(dashboard.generated_at);
   const readinessGeneratedAt = parseIsoDate(readiness.generated_at);
+  const paperTradeLogGeneratedAt = parseIsoDate(strategyPerformance.generated_at);
   const operatorSurfaceGeneratedAt = parseIsoDate(operatorSurface.generated_at);
   const freshnessAt = maxDate(readinessGeneratedAt, operatorSurfaceGeneratedAt, generatedAt);
   const broadSession = typeof readiness.current_broad_trading_session === "string" && readiness.current_broad_trading_session.trim()
@@ -581,6 +620,13 @@ function snapshotAuthorityMetadata(snapshot: JsonRecord | null | undefined): Sna
     && broadSession
     && Array.isArray(readiness.lane_eligibility_rows),
   );
+  const tradeLogRows = Array.isArray(strategyPerformance.trade_log)
+    ? strategyPerformance.trade_log.filter((entry): entry is JsonRecord => Boolean(entry) && typeof entry === "object")
+    : [];
+  const publishedTradeLogCount = Number(strategyPerformance.trade_log_count);
+  const paperTradeLogCount = Number.isFinite(publishedTradeLogCount)
+    ? Math.max(publishedTradeLogCount, tradeLogRows.length)
+    : tradeLogRows.length;
   const global = asJsonRecord(dashboard.global);
   const modeLabel = String(global.mode_label ?? global.mode ?? "").trim().toUpperCase();
   const paperRunning = paper.running === true || readiness.paper_runtime_ready === true || readiness.runtime_running === true;
@@ -591,6 +637,8 @@ function snapshotAuthorityMetadata(snapshot: JsonRecord | null | undefined): Sna
     freshnessAt,
     broadSession,
     hasPaperReadiness,
+    paperTradeLogCount,
+    paperTradeLogGeneratedAt,
     modeCompatible: paperRunning || modeLabel === "PAPER",
     sourceTag: typeof dashboardMeta.source === "string" && dashboardMeta.source.trim()
       ? dashboardMeta.source.trim()
@@ -1702,6 +1750,40 @@ function paperTradeLogRowCacheKey(row: JsonRecord, index: number): string {
   ].join("|");
 }
 
+function compactPaperTradeLogRow(row: JsonRecord): JsonRecord {
+  return Object.fromEntries(
+    Object.entries(row).filter(([key]) => PAPER_TRADE_LOG_STARTUP_FIELDS.has(key)),
+  );
+}
+
+function truncateDesktopLogText(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return value == null ? null : String(value);
+  }
+  return value.length > DESKTOP_ACTION_LOG_TEXT_LIMIT
+    ? `${value.slice(0, DESKTOP_ACTION_LOG_TEXT_LIMIT)}...`
+    : value;
+}
+
+function compactDashboardActionLog(actionLog: unknown): JsonRecord[] {
+  const rows = Array.isArray(actionLog)
+    ? actionLog.filter((entry): entry is JsonRecord => Boolean(entry) && typeof entry === "object")
+    : [];
+  return rows.slice(0, DESKTOP_ACTION_LOG_LIMIT).map((row) => ({
+    action: row.action ?? null,
+    action_label: row.action_label ?? null,
+    command: truncateDesktopLogText(row.command),
+    kind: row.kind ?? null,
+    message: truncateDesktopLogText(row.message),
+    ok: row.ok ?? null,
+    output: truncateDesktopLogText(row.output),
+    returncode: row.returncode ?? null,
+    stderr_snippet: truncateDesktopLogText(row.stderr_snippet),
+    stdout_snippet: truncateDesktopLogText(row.stdout_snippet),
+    timestamp: row.timestamp ?? null,
+  }));
+}
+
 function dateKeyRange(dateKeys: string[]): JsonRecord | null {
   const ordered = dateKeys.filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)).sort();
   if (!ordered.length) {
@@ -1715,10 +1797,15 @@ function dateKeyRange(dateKeys: string[]): JsonRecord | null {
 
 function compactPaperStrategyPerformance(
   strategyPerformance: JsonRecord,
-  options: { paperTradeLogVisibleRange?: DesktopPaperTradeLogVisibleRange | null } = {},
+  options: {
+    paperTradeLogVisibleRange?: DesktopPaperTradeLogVisibleRange | null;
+    preserveFullTradeLog?: boolean;
+  } = {},
 ): JsonRecord {
   const tradeLog = Array.isArray(strategyPerformance.trade_log)
-    ? strategyPerformance.trade_log.filter((entry): entry is JsonRecord => Boolean(entry) && typeof entry === "object")
+    ? strategyPerformance.trade_log
+      .filter((entry): entry is JsonRecord => Boolean(entry) && typeof entry === "object")
+      .map(compactPaperTradeLogRow)
     : [];
   const orderedTradeLog = [...tradeLog]
     .sort((left, right) => {
@@ -1726,7 +1813,9 @@ function compactPaperStrategyPerformance(
       const rightTimestamp = paperTradeLogRowTimestamp(right);
       return rightTimestamp.localeCompare(leftTimestamp);
     });
-  const latestTradeLog = orderedTradeLog.slice(0, DESKTOP_RENDERER_TRADE_LOG_LIMIT);
+  const latestTradeLog = options.preserveFullTradeLog
+    ? orderedTradeLog
+    : orderedTradeLog.slice(0, DESKTOP_RENDERER_TRADE_LOG_LIMIT);
   const normalizedVisibleRange = normalizePaperTradeLogVisibleRange(options.paperTradeLogVisibleRange);
   const visibleRangeTradeLog = normalizedVisibleRange
     ? orderedTradeLog.filter((row) => {
@@ -1739,6 +1828,7 @@ function compactPaperStrategyPerformance(
   ).values()].sort((left, right) => paperTradeLogRowTimestamp(right).localeCompare(paperTradeLogRowTimestamp(left)));
   const publishedTradeLogCount = Number(strategyPerformance.trade_log_count);
   const totalTradeLogCount = Number.isFinite(publishedTradeLogCount) ? Math.max(publishedTradeLogCount, tradeLog.length) : tradeLog.length;
+  const tradeLogCompacted = compactTradeLog.length < orderedTradeLog.length;
   return {
     generated_at: strategyPerformance.generated_at ?? null,
     session_date: strategyPerformance.session_date ?? null,
@@ -1772,9 +1862,9 @@ function compactPaperStrategyPerformance(
             return dateKey >= normalizedVisibleRange.startDate && dateKey <= normalizedVisibleRange.endDate;
           })
         : null,
-      compacted_for_startup: true,
+      compacted_for_startup: tradeLogCompacted,
     },
-    compacted_for_startup: true,
+    compacted_for_startup: tradeLogCompacted,
   };
 }
 
@@ -1890,22 +1980,28 @@ function compactDashboardForDesktopTransfer(
 
   const paper = asJsonRecord(dashboard.paper);
   const alertsState = asJsonRecord(paper.alerts_state);
-  const compactPaper = Object.keys(paper).length
-    ? {
-        ...paper,
-        alerts_state: compactPaperAlertsState(alertsState),
-        strategy_performance: compactPaperStrategyPerformance(
-          asJsonRecord(paper.strategy_performance),
-          { paperTradeLogVisibleRange: options.paperTradeLogVisibleRange },
-        ),
-        raw_operator_status: compactPaperRawOperatorStatus(asJsonRecord(paper.raw_operator_status)),
-        signal_intent_fill_audit: compactPaperSignalIntentFillAudit(asJsonRecord(paper.signal_intent_fill_audit)),
-        events: compactPaperEvents(asJsonRecord(paper.events)),
-      }
-    : paper;
+  const buildCompactPaper = (preserveFullTradeLog: boolean): JsonRecord => (
+    Object.keys(paper).length
+      ? {
+          ...paper,
+          alerts_state: compactPaperAlertsState(alertsState),
+          strategy_performance: compactPaperStrategyPerformance(
+            asJsonRecord(paper.strategy_performance),
+            {
+              paperTradeLogVisibleRange: options.paperTradeLogVisibleRange,
+              preserveFullTradeLog,
+            },
+          ),
+          raw_operator_status: compactPaperRawOperatorStatus(asJsonRecord(paper.raw_operator_status)),
+          signal_intent_fill_audit: compactPaperSignalIntentFillAudit(asJsonRecord(paper.signal_intent_fill_audit)),
+          events: compactPaperEvents(asJsonRecord(paper.events)),
+        }
+      : paper
+  );
 
-  return {
+  const buildCompactedDashboard = (preserveFullTradeLog: boolean): JsonRecord => ({
     ...dashboard,
+    action_log: compactDashboardActionLog(dashboard.action_log),
     dashboard_meta: {
       ...asJsonRecord(dashboard.dashboard_meta),
       desktop_transfer: {
@@ -1916,9 +2012,15 @@ function compactDashboardForDesktopTransfer(
     },
     strategy_analysis: compactStrategyAnalysis,
     historical_playback: compactHistoricalPlayback,
-    paper: compactPaper,
+    paper: buildCompactPaper(preserveFullTradeLog),
     desktop_compacted_for_startup: true,
-  };
+  });
+
+  const fullTradeLogDashboard = buildCompactedDashboard(true);
+  if (Buffer.byteLength(JSON.stringify(fullTradeLogDashboard)) <= DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES) {
+    return fullTradeLogDashboard;
+  }
+  return buildCompactedDashboard(false);
 }
 
 export function compactDesktopStateForRenderer(
@@ -2320,6 +2422,15 @@ type LoadLiveDashboardResult =
   | { mode: "health-only"; url: string; health: JsonRecord; error: string }
   | null;
 
+interface LiveDashboardAuthorityValidation {
+  ok: boolean;
+  reason: string | null;
+  healthInstanceId: string | null;
+  dashboardInstanceId: string | null;
+  healthBuildStamp: string | null;
+  dashboardBuildStamp: string | null;
+}
+
 function describeLocalApiTransportError(url: string, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const maybeCause = error instanceof Error ? (error as Error & { cause?: unknown }).cause : undefined;
@@ -2335,6 +2446,94 @@ function describeLocalApiTransportError(url: string, error: unknown): string {
     .map((value) => String(value).trim());
   const detail = fragments.length ? ` [${fragments.join(" / ")}]` : "";
   return `${message}${detail} @ ${url}`;
+}
+
+function liveDashboardAuthorityMismatch(error: string | null | undefined): boolean {
+  const normalized = String(error ?? "").toLowerCase();
+  return normalized.includes("dashboard payload authority mismatch");
+}
+
+function validateLiveDashboardAuthority(
+  health: JsonRecord | null | undefined,
+  dashboard: JsonRecord | null | undefined,
+): LiveDashboardAuthorityValidation {
+  const healthRecord = asJsonRecord(health);
+  const dashboardRecord = asJsonRecord(dashboard);
+  const dashboardMeta = asJsonRecord(dashboardRecord.dashboard_meta);
+  const healthInstanceId = String(healthRecord.instance_id ?? "").trim() || null;
+  const dashboardInstanceId = String(dashboardMeta.server_instance_id ?? "").trim() || null;
+  const healthBuildStamp = String(healthRecord.build_stamp ?? "").trim() || null;
+  const dashboardBuildStamp = String(dashboardMeta.build_stamp ?? "").trim() || null;
+  const healthPid = Number(healthRecord.pid ?? healthRecord.server_pid ?? NaN);
+  const dashboardPid = Number(dashboardMeta.server_pid ?? NaN);
+
+  if (healthInstanceId && dashboardInstanceId && healthInstanceId !== dashboardInstanceId) {
+    return {
+      ok: false,
+      reason: `Dashboard payload authority mismatch: /health instance ${healthInstanceId} does not match /api/dashboard instance ${dashboardInstanceId}.`,
+      healthInstanceId,
+      dashboardInstanceId,
+      healthBuildStamp,
+      dashboardBuildStamp,
+    };
+  }
+  if (healthBuildStamp && dashboardBuildStamp && healthBuildStamp !== dashboardBuildStamp) {
+    return {
+      ok: false,
+      reason: `Dashboard payload authority mismatch: /health build ${healthBuildStamp} does not match /api/dashboard build ${dashboardBuildStamp}.`,
+      healthInstanceId,
+      dashboardInstanceId,
+      healthBuildStamp,
+      dashboardBuildStamp,
+    };
+  }
+  if (
+    !healthInstanceId
+    && !dashboardInstanceId
+    && !healthBuildStamp
+    && !dashboardBuildStamp
+    && Number.isFinite(healthPid)
+    && Number.isFinite(dashboardPid)
+    && healthPid > 0
+    && dashboardPid > 0
+    && healthPid !== dashboardPid
+  ) {
+    return {
+      ok: false,
+      reason: `Dashboard payload authority mismatch: /health pid ${healthPid} does not match /api/dashboard pid ${dashboardPid}.`,
+      healthInstanceId,
+      dashboardInstanceId,
+      healthBuildStamp,
+      dashboardBuildStamp,
+    };
+  }
+  return {
+    ok: true,
+    reason: null,
+    healthInstanceId,
+    dashboardInstanceId,
+    healthBuildStamp,
+    dashboardBuildStamp,
+  };
+}
+
+function normalizeLiveDashboardResult(result: LoadLiveDashboardResult): LoadLiveDashboardResult {
+  if (!result || result.mode !== "live") {
+    return result;
+  }
+  const validation = validateLiveDashboardAuthority(result.health, result.dashboard);
+  if (validation.ok) {
+    return result;
+  }
+  appendDesktopLog(
+    `[electron] live-dashboard-authority-mismatch health_instance=${validation.healthInstanceId ?? "unknown"} dashboard_instance=${validation.dashboardInstanceId ?? "unknown"} health_build=${validation.healthBuildStamp ?? "unknown"} dashboard_build=${validation.dashboardBuildStamp ?? "unknown"}`,
+  );
+  return {
+    mode: "health-only",
+    url: result.url,
+    health: result.health,
+    error: validation.reason ?? "Dashboard payload authority mismatch.",
+  };
 }
 
 async function postLocalJson(url: string, payload: JsonRecord, timeoutMs = DASHBOARD_TIMEOUT_MS): Promise<LocalApiResponse> {
@@ -2510,35 +2709,57 @@ function selectPackagedSnapshotCandidate(
   const freshestReference = freshnessSorted.find(
     ({ meta, candidate }) => candidate.name === "fresh_operator_artifacts" && meta.hasPaperReadiness,
   ) ?? freshnessSorted.find(({ meta }) => meta.hasPaperReadiness);
-  for (const { candidate, meta } of freshnessSorted) {
-    if (!meta.hasPaperReadiness || !meta.modeCompatible || !meta.freshnessAt) {
-      continue;
+  const richestPaperLedgerReference = freshnessSorted.find(
+    ({ meta, candidate }) => candidate.name === "fresh_operator_artifacts" && meta.hasPaperReadiness && meta.paperTradeLogCount > 0,
+  ) ?? freshnessSorted.find(({ meta }) => meta.hasPaperReadiness && meta.paperTradeLogCount > 0);
+  const selectWithinAge = (maxAgeMs: number): SnapshotCandidate | null => {
+    for (const { candidate, meta } of freshnessSorted) {
+      if (!meta.hasPaperReadiness || !meta.modeCompatible || !meta.freshnessAt) {
+        continue;
+      }
+      if (nowMs - meta.freshnessAt.getTime() > maxAgeMs) {
+        continue;
+      }
+      if (
+        richestPaperLedgerReference
+        && meta.paperTradeLogCount === 0
+        && candidate.name !== richestPaperLedgerReference.candidate.name
+        && richestPaperLedgerReference.meta.freshnessAt
+        && (
+          richestPaperLedgerReference.meta.freshnessAt.getTime() >= meta.freshnessAt.getTime()
+          || meta.sourceTag === "desktop_cache"
+        )
+      ) {
+        continue;
+      }
+      if (
+        freshestReference
+        && candidate.name !== freshestReference.candidate.name
+        && freshestReference.meta.freshnessAt
+        && freshestReference.meta.freshnessAt.getTime() - meta.freshnessAt.getTime() > SNAPSHOT_AUTHORITY_SKEW_MS
+      ) {
+        continue;
+      }
+      if (
+        freshestReference
+        && candidate.name !== freshestReference.candidate.name
+        && freshestReference.meta.broadSession
+        && meta.broadSession
+        && freshestReference.meta.broadSession !== meta.broadSession
+        && freshestReference.meta.freshnessAt
+        && freshestReference.meta.freshnessAt.getTime() >= (meta.freshnessAt.getTime() + SNAPSHOT_AUTHORITY_SKEW_MS)
+      ) {
+        continue;
+      }
+      return candidate;
     }
-    if (nowMs - meta.freshnessAt.getTime() > PACKAGED_OPERATOR_SNAPSHOT_MAX_AGE_MS) {
-      continue;
-    }
-    if (
-      freshestReference
-      && candidate.name !== freshestReference.candidate.name
-      && freshestReference.meta.freshnessAt
-      && freshestReference.meta.freshnessAt.getTime() - meta.freshnessAt.getTime() > SNAPSHOT_AUTHORITY_SKEW_MS
-    ) {
-      continue;
-    }
-    if (
-      freshestReference
-      && candidate.name !== freshestReference.candidate.name
-      && freshestReference.meta.broadSession
-      && meta.broadSession
-      && freshestReference.meta.broadSession !== meta.broadSession
-      && freshestReference.meta.freshnessAt
-      && freshestReference.meta.freshnessAt.getTime() >= (meta.freshnessAt.getTime() + SNAPSHOT_AUTHORITY_SKEW_MS)
-    ) {
-      continue;
-    }
-    return candidate;
+    return null;
+  };
+  const authoritativeCandidate = selectWithinAge(PACKAGED_OPERATOR_SNAPSHOT_MAX_AGE_MS);
+  if (authoritativeCandidate) {
+    return authoritativeCandidate;
   }
-  return null;
+  return selectWithinAge(PACKAGED_OPERATOR_SNAPSHOT_DEGRADED_MAX_AGE_MS);
 }
 
 async function loadSnapshotBundle(
@@ -2589,6 +2810,9 @@ async function loadSnapshotBundle(
     paperPerformance,
     paperPosition,
     paperReadiness,
+    paperSignalIntentFillAudit,
+    paperStrategyPerformance,
+    paperStrategyTradeLog,
     startupControlPlane,
     treasuryCurve,
     productionLink,
@@ -2609,25 +2833,53 @@ async function loadSnapshotBundle(
     readJsonFile(SNAPSHOT_FILES.paperPerformance),
     readJsonFile(SNAPSHOT_FILES.paperPosition),
     readJsonFile(SNAPSHOT_FILES.paperReadiness),
+    readJsonFile(SNAPSHOT_FILES.paperSignalIntentFillAudit),
+    readJsonFile(SNAPSHOT_FILES.paperStrategyPerformance),
+    readJsonFile(SNAPSHOT_FILES.paperStrategyTradeLog),
     readJsonFile(SNAPSHOT_FILES.startupControlPlane),
     readJsonFile(SNAPSHOT_FILES.treasuryCurve),
     readJsonFile(SNAPSHOT_FILES.productionLink),
     readActionLog(),
   ]);
 
-  if (!operatorSurface) {
+  const canUsePackagedFallbackCandidates =
+    packagedLocalLaunch
+    && (
+      looksLikeDashboardSnapshot(workspaceDashboardSnapshot)
+      || looksLikeDashboardSnapshot(desktopCacheSnapshot)
+    );
+
+  if (!operatorSurface && !canUsePackagedFallbackCandidates) {
     appendDesktopLog(
       `[electron] loadSnapshotBundle:no-operator-surface repo=${SNAPSHOT_FILES.dashboardApi} cache=${DESKTOP_LOCAL_DASHBOARD_CACHE_FILE}`,
     );
     return null;
   }
 
-  const readinessValues = ((operatorSurface.runtime_readiness as JsonRecord | undefined)?.values ?? {}) as JsonRecord;
+  const operatorSurfaceRecord = asJsonRecord(operatorSurface);
+  const readinessValues = ((operatorSurfaceRecord.runtime_readiness as JsonRecord | undefined)?.values ?? {}) as JsonRecord;
   const entriesEnabled = Boolean((paperReadiness as JsonRecord | null)?.entries_enabled ?? readinessValues.entries_enabled);
   const runtimeRunning = Boolean((paperReadiness as JsonRecord | null)?.runtime_running ?? (readinessValues.runtime_status === "RUNNING"));
   const blockingFaultsCount = Number(readinessValues.blocking_faults_count ?? 0);
+  const paperStrategyPerformanceRecord = (paperStrategyPerformance as JsonRecord | null) ?? {};
+  const paperStrategyTradeLogRows = Array.isArray((paperStrategyTradeLog as JsonRecord | null)?.rows)
+    ? (((paperStrategyTradeLog as JsonRecord | null)?.rows as unknown[]) ?? []).filter((row): row is JsonRecord => Boolean(row) && typeof row === "object")
+    : [];
+  const paperStrategyPerformanceTradeLog = Array.isArray(paperStrategyPerformanceRecord.trade_log)
+    ? (paperStrategyPerformanceRecord.trade_log as unknown[]).filter((row): row is JsonRecord => Boolean(row) && typeof row === "object")
+    : [];
+  const effectivePaperStrategyTradeLog = paperStrategyPerformanceTradeLog.length > 0
+    ? paperStrategyPerformanceTradeLog
+    : paperStrategyTradeLogRows;
+  const effectivePaperStrategyPerformance = {
+    ...paperStrategyPerformanceRecord,
+    trade_log: effectivePaperStrategyTradeLog,
+    trade_log_count: Number.isFinite(Number(paperStrategyPerformanceRecord.trade_log_count))
+      ? Math.max(Number(paperStrategyPerformanceRecord.trade_log_count), effectivePaperStrategyTradeLog.length)
+      : effectivePaperStrategyTradeLog.length,
+  };
 
-  const bundledSnapshot = {
+  const bundledSnapshot = !operatorSurface ? null : {
     generated_at: String((operatorSurface.generated_at as string | undefined) ?? new Date().toISOString()),
     dashboard_meta: {
       build_stamp: null,
@@ -2691,6 +2943,8 @@ async function loadSnapshotBundle(
       position: paperPosition ?? {},
       performance: paperPerformance ?? {},
       readiness: paperReadiness ?? {},
+      signal_intent_fill_audit: paperSignalIntentFillAudit ?? {},
+      strategy_performance: effectivePaperStrategyPerformance,
       lane_activity: paperLaneActivity ?? {},
       approved_models: paperApprovedModels ?? {},
       non_approved_lanes: paperNonApprovedLanes ?? {},
@@ -2769,6 +3023,8 @@ interface SnapshotAuthorityMetadata {
   freshnessAt: Date | null;
   broadSession: string | null;
   hasPaperReadiness: boolean;
+  paperTradeLogCount: number;
+  paperTradeLogGeneratedAt: Date | null;
   modeCompatible: boolean;
   sourceTag: string | null;
 }
@@ -2915,41 +3171,65 @@ function synthesizeAttachedSnapshotBridgeFromSnapshot(snapshot: JsonRecord | nul
   }
   const meta = asJsonRecord(snapshot.dashboard_meta);
   const startupControlPlane = asJsonRecord(snapshot.startup_control_plane);
+  const convergence = asJsonRecord(startupControlPlane.convergence);
   const supervisedPaperOperability = asJsonRecord(snapshot.supervised_paper_operability);
   const backendUrl = typeof meta.server_url === "string" && meta.server_url.trim()
     ? meta.server_url.trim()
     : null;
-  const launchAllowed = startupControlPlane.launch_allowed === true || String(startupControlPlane.overall_state ?? "").toUpperCase() === "READY";
+  const launchAllowed =
+    startupControlPlane.launch_allowed === true
+    || convergence.startup_launch_allowed === true
+    || convergence.stable_ready === true
+    || String(startupControlPlane.overall_state ?? "").toUpperCase() === "READY"
+    || String(convergence.startup_overall_state ?? "").toUpperCase() === "READY";
+  const dashboardAttached =
+    convergence.dashboard_attached === true
+    || supervisedPaperOperability.dashboard_attached === true;
+  const paperRuntimeReady =
+    convergence.paper_runtime_ready === true
+    || supervisedPaperOperability.paper_runtime_ready === true
+    || supervisedPaperOperability.runtime_running === true;
+  const instanceId =
+    String(
+      meta.server_instance_id
+        ?? convergence.manager_instance_id
+        ?? "",
+    ).trim() || null;
+  const serverPid = Number(
+    meta.server_pid
+      ?? convergence.server_pid
+      ?? 0,
+  ) || null;
   const serviceIdentified = Boolean(
     backendUrl
-    || String(meta.server_instance_id ?? "").trim()
-    || Number(meta.server_pid ?? 0) > 0,
+    || instanceId
+    || serverPid,
   );
   const operabilityKnown = supervisedPaperOperability.app_usable_for_supervised_paper === true
     || String(supervisedPaperOperability.state ?? "").toUpperCase() === "USABLE";
-  if (!serviceIdentified || (!launchAllowed && !operabilityKnown)) {
+  if (!serviceIdentified || (!launchAllowed && !operabilityKnown && !dashboardAttached && !paperRuntimeReady)) {
     return null;
   }
   return {
     transportKind: "synthesized_snapshot",
     readiness: {
       generated_at: snapshot.generated_at ?? null,
-      readiness_state: launchAllowed ? "READY" : "USABLE",
+      readiness_state: launchAllowed || dashboardAttached || paperRuntimeReady ? "READY" : "USABLE",
       launch_allowed: launchAllowed,
       configured_url: backendUrl,
       payload: {
         reachable: true,
         ready: true,
         generated_at: snapshot.generated_at ?? null,
-        instance_id: meta.server_instance_id ?? null,
-        pid: meta.server_pid ?? null,
+        instance_id: instanceId,
+        pid: serverPid,
       },
       control_plane: {
         present: true,
-        state: startupControlPlane.overall_state ?? (launchAllowed ? "READY" : null),
+        state: startupControlPlane.overall_state ?? convergence.startup_overall_state ?? (launchAllowed ? "READY" : null),
         launch_allowed: launchAllowed,
-        dashboard_attached: true,
-        paper_runtime_ready: true,
+        dashboard_attached: dashboardAttached,
+        paper_runtime_ready: paperRuntimeReady,
       },
     },
     health: null,
@@ -3468,7 +3748,7 @@ function buildRuntimeStates({
     };
   }
 
-  if (attachedSnapshotBridgeConfirmsLiveApi(attachedSnapshotBridge) && snapshotAvailable) {
+  if (live === null && attachedSnapshotBridgeConfirmsLiveApi(attachedSnapshotBridge) && snapshotAvailable) {
     return {
       connection: "live",
       source: {
@@ -3486,6 +3766,8 @@ function buildRuntimeStates({
           "Live dashboard readiness is confirmed by the current local readiness bridge and synchronized API cache.",
           null,
         ),
+        apiStatus: "responding",
+        healthStatus: "ok",
         startupFailureKind: "none",
         actionHint: null,
         staleListenerDetected: false,
@@ -3497,12 +3779,16 @@ function buildRuntimeStates({
 
   if (live?.mode === "health-only") {
     if (attachedSnapshotBridge && snapshotAvailable) {
+      const stalePayloadRejected = liveDashboardAuthorityMismatch(live.error);
+      const bridgeDetail = stalePayloadRejected
+        ? "Live /health is current, but /api/dashboard returned a stale payload from a previous backend instance. Using the attached snapshot bridge until the current payload catches up."
+        : attachedSnapshotBridge.detail;
       return {
         connection: "snapshot",
         source: {
           mode: "attached_snapshot_bridge",
-          label: "SERVICE ATTACHED / DEGRADED",
-          detail: attachedSnapshotBridge.detail,
+          label: stalePayloadRejected ? "SERVICE ATTACHED / STALE PAYLOAD REJECTED" : "SERVICE ATTACHED / DEGRADED",
+          detail: bridgeDetail,
           canRunLiveActions: false,
           healthReachable: true,
           apiReachable: false,
@@ -3510,8 +3796,8 @@ function buildRuntimeStates({
         backend: {
           ...backendPayload(
             "degraded",
-            "DEGRADED",
-            attachedSnapshotBridge.detail,
+            stalePayloadRejected ? "STALE PAYLOAD REJECTED" : "DEGRADED",
+            bridgeDetail,
             live.error,
           ),
           startupFailureKind: "none",
@@ -3527,16 +3813,20 @@ function buildRuntimeStates({
       connection: snapshotAvailable ? "snapshot" : "unavailable",
       source: {
         mode: snapshotAvailable ? "snapshot_fallback" : "backend_down",
-        label: "API NOT READY",
-        detail: `Live /health is reachable at ${live.url}, but /api/dashboard did not become ready quickly enough for startup attach.`,
+        label: liveDashboardAuthorityMismatch(live.error) ? "STALE PAYLOAD REJECTED" : "API NOT READY",
+        detail: liveDashboardAuthorityMismatch(live.error)
+          ? `Live /health is reachable at ${live.url}, but /api/dashboard is serving a stale payload from a previous backend instance.`
+          : `Live /health is reachable at ${live.url}, but /api/dashboard did not become ready quickly enough for startup attach.`,
         canRunLiveActions: false,
         healthReachable: true,
         apiReachable: false,
       },
       backend: backendPayload(
         "degraded",
-        "API NOT READY",
-        "Backend health is reachable, but the full /api/dashboard payload is not responsive.",
+        liveDashboardAuthorityMismatch(live.error) ? "STALE PAYLOAD REJECTED" : "API NOT READY",
+        liveDashboardAuthorityMismatch(live.error)
+          ? "Backend health is reachable, but /api/dashboard is serving a stale payload from a previous backend instance."
+          : "Backend health is reachable, but the full /api/dashboard payload is not responsive.",
         live.error,
       ),
     };
@@ -3588,8 +3878,8 @@ function buildRuntimeStates({
         apiReachable: false,
       },
       backend: backendPayload(
-        "backend_down",
-        failure.kind !== "none" ? "STARTUP FAILURE" : "BACKEND DOWN",
+        "degraded",
+        failure.kind !== "none" ? "STARTUP FAILURE" : "SNAPSHOT ONLY",
         staleInfoFile
           ? "Stored dashboard info exists, but the backend did not answer health checks."
           : "No live backend answered; the app is running from the latest persisted dashboard artifacts.",
@@ -3709,10 +3999,10 @@ export async function prepareDesktopForLaunch(): Promise<void> {
   }
   const packagedBridge = await loadPackagedAttachedSnapshotBridge({ includeHeavyPayload: false });
   const { urls } = await candidateUrls();
-  const live = await loadLiveDashboard(urls, {
+  const live = normalizeLiveDashboardResult(await loadLiveDashboard(urls, {
     healthTimeoutMs: STARTUP_HEALTH_TIMEOUT_MS,
     dashboardTimeoutMs: STARTUP_DASHBOARD_TIMEOUT_MS,
-  });
+  }));
   if (live?.mode === "live") {
     return;
   }
@@ -3774,6 +4064,7 @@ async function probeDesktopState(
       paperTradeLogVisibleRange: options.paperTradeLogVisibleRange,
     });
   }
+  live = normalizeLiveDashboardResult(live);
   if (live?.mode === "live") {
     snapshot = null;
     attachedSnapshotBridge = null;
@@ -4273,6 +4564,9 @@ export const __testing = {
   },
   selectAttachedReadinessCandidate(candidates: ReadinessCandidate[], snapshot: JsonRecord | null): ReadinessCandidate | null {
     return selectAttachedReadinessCandidate(candidates, snapshot);
+  },
+  validateLiveDashboardAuthority(health: JsonRecord | null | undefined, dashboard: JsonRecord | null | undefined): LiveDashboardAuthorityValidation {
+    return validateLiveDashboardAuthority(health, dashboard);
   },
   shouldContinueWaitingForRecovery(state: DesktopState): boolean {
     return shouldContinueWaitingForRecovery(state);

@@ -1,10 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { DesktopCommandResult, DesktopState } from "./runtime";
+import type { DesktopCommandResult, DesktopState, DesktopStateRequestOptions } from "./runtime";
 
 const preloadPathLabel = typeof __filename === "string" ? __filename : "packaged-preload";
 
 const operatorDesktop = {
-  getDesktopState: (options?: { includeHeavyPayload?: boolean }): Promise<DesktopState> =>
+  getDesktopState: (options?: DesktopStateRequestOptions): Promise<DesktopState> =>
     ipcRenderer.invoke("desktop:get-state", options ?? {}),
   startDashboard: (): Promise<DesktopCommandResult> => ipcRenderer.invoke("desktop:start-dashboard"),
   stopDashboard: (): Promise<DesktopCommandResult> => ipcRenderer.invoke("desktop:stop-dashboard"),

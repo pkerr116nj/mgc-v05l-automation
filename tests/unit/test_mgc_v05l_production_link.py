@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from mgc_v05l.local_operator_auth import local_operator_auth_surface
+from mgc_v05l.market_data.schwab_http import SchwabHttpError
 from mgc_v05l.production_link.client import SchwabBrokerHttpError
 import mgc_v05l.production_link.service as production_link_service
 from mgc_v05l.production_link.models import BrokerAccountIdentity, BrokerOrderEvent, BrokerOrderRecord, BrokerPositionSnapshot
@@ -334,6 +335,34 @@ def test_production_link_snapshot_disabled_by_default(tmp_path: Path, monkeypatc
 
     assert snapshot["status"] == "disabled"
     assert snapshot["enabled"] is False
+
+
+def test_production_link_snapshot_degrades_on_schwab_http_error(tmp_path: Path, monkeypatch) -> None:
+    token_path = tmp_path / ".local" / "schwab" / "tokens.json"
+    _write_token_file(token_path)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "app-key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "app-secret")
+    monkeypatch.setenv("SCHWAB_CALLBACK_URL", "https://localhost/callback")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(token_path))
+    monkeypatch.setenv("MGC_PRODUCTION_LINK_ENABLED", "1")
+
+    service = SchwabProductionLinkService(
+        tmp_path,
+        client_factory=lambda config, oauth_client: FakeSchwabBrokerClient(),
+    )
+
+    def _raise_http_error(now: datetime) -> dict[str, object]:
+        raise SchwabHttpError("unsupported_token_type")
+
+    service._refresh_live_snapshot = _raise_http_error  # type: ignore[method-assign]
+
+    snapshot = service.snapshot(force_refresh=True)
+
+    assert snapshot["status"] == "degraded"
+    assert snapshot["enabled"] is True
+    assert snapshot["detail"] == "unsupported_token_type"
+    assert snapshot["auth"]["ready"] is False
 
 
 def test_manual_live_pilot_surface_reports_scope_and_status(tmp_path: Path, monkeypatch) -> None:
