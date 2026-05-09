@@ -4,7 +4,7 @@ set -uo pipefail
 REPO_ROOT="/Users/patrick/Dev/MGC-v05l-automation"
 OUT_DIR="${REPO_ROOT}/outputs/reports/track_b_paper_preflight"
 OUT_JSON="${OUT_DIR}/latest_track_b_paper_preflight.json"
-REQUIRED_PATCH_COMMITS="d7b126c10d 35064b698c 94695132b1 520bd7313f 57402b55a7"
+REQUIRED_PATCH_COMMITS="d7b126c10d 35064b698c 94695132b1 520bd7313f 57402b55a7 155cea2bfa a47a6f6806 83ed3578c2"
 
 usage() {
   echo "Usage: $0 --mode weekend-static|monday-live" >&2
@@ -328,6 +328,87 @@ except Exception as exc:
         True,
         f"phase-1 ticker readiness matrix check failed: {exc}",
     )
+    matrix_rows = []
+
+try:
+    from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
+        Phase1RuntimeDataReadinessConfig,
+        build_phase1_runtime_data_readiness,
+    )
+
+    runtime_data_artifacts = build_phase1_runtime_data_readiness(
+        config=Phase1RuntimeDataReadinessConfig(repo_root=REPO_ROOT)
+    )
+    runtime_data_rows = list(runtime_data_artifacts.rows)
+    runtime_data_symbols = tuple(str(row.get("symbol") or "") for row in runtime_data_rows)
+    runtime_data_symbol_check = (
+        len(runtime_data_rows) == 10
+        and runtime_data_symbols == expected_phase1_symbols
+        and int(runtime_data_artifacts.report.get("ready_ticker_count", -1)) >= 0
+        and runtime_data_artifacts.report.get("research_artifact_used") is False
+        and runtime_data_artifacts.report.get("archive_artifact_used") is False
+    )
+    add(
+        "phase1_runtime_data_readiness_static",
+        runtime_data_symbol_check,
+        True,
+        (
+            f"row_count={len(runtime_data_rows)}; "
+            f"ready_ticker_count={runtime_data_artifacts.report.get('ready_ticker_count')}; "
+            f"symbols={list(runtime_data_symbols)}; "
+            f"research_artifact_used={runtime_data_artifacts.report.get('research_artifact_used')}; "
+            f"archive_artifact_used={runtime_data_artifacts.report.get('archive_artifact_used')}"
+        ),
+        row_count=len(runtime_data_rows),
+        ready_ticker_count=runtime_data_artifacts.report.get("ready_ticker_count"),
+        symbols=list(runtime_data_symbols),
+    )
+
+    strategy_required_symbols = {
+        str(row.get("approved_phase1_symbol") or "")
+        for row in matrix_rows
+        if bool(row.get("strategy_approved")) or bool(row.get("can_submit"))
+    }
+    runtime_not_ready = [
+        str(row.get("symbol") or "")
+        for row in runtime_data_rows
+        if row.get("runtime_candles_ready") is not True
+    ]
+    runtime_required_not_ready = [
+        symbol for symbol in runtime_not_ready if symbol in strategy_required_symbols
+    ]
+    runtime_nonrequired_not_ready = [
+        symbol for symbol in runtime_not_ready if symbol not in strategy_required_symbols
+    ]
+    runtime_reasons = {
+        str(row.get("symbol") or ""): row.get("runtime_candles_block_reason")
+        for row in runtime_data_rows
+        if row.get("runtime_candles_ready") is not True
+    }
+    runtime_data_required_passed = not runtime_required_not_ready
+    runtime_data_all_passed = runtime_data_required_passed and not runtime_nonrequired_not_ready
+    add(
+        "phase1_runtime_candles_ready_for_strategy_approved_symbols",
+        runtime_data_all_passed,
+        not runtime_data_required_passed,
+        (
+            f"strategy_required_symbols={sorted(strategy_required_symbols)}; "
+            f"required_not_ready={runtime_required_not_ready}; "
+            f"nonrequired_not_ready={runtime_nonrequired_not_ready}; "
+            f"reasons={runtime_reasons}"
+        ),
+        strategy_required_symbols=sorted(strategy_required_symbols),
+        required_not_ready=runtime_required_not_ready,
+        nonrequired_not_ready=runtime_nonrequired_not_ready,
+        reasons=runtime_reasons,
+    )
+except Exception as exc:
+    add(
+        "phase1_runtime_data_readiness_static",
+        False,
+        True,
+        f"phase-1 runtime data readiness check failed: {exc}",
+    )
 
 governance_freshness_window_seconds = 120.0
 try:
@@ -649,6 +730,9 @@ result = {
     "final_execution_scope_baseline_commit": "94695132b1",
     "final_rates_scope_baseline_commit": "520bd7313f",
     "final_ticker_readiness_matrix_baseline_commit": "57402b55a7",
+    "final_runtime_ticker_registry_baseline_commit": "155cea2bfa",
+    "final_runtime_data_readiness_baseline_commit": "a47a6f6806",
+    "final_runtime_data_matrix_integration_baseline_commit": "83ed3578c2",
     "weekend_static_dry_run": weekend_status,
     "monday_live_preflight": monday_status,
     "monday_blocked_classification": (
