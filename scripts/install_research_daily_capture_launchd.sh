@@ -43,7 +43,9 @@ cp "${REPO_ROOT}/config/base.yaml" "${RUNTIME_CONFIG_DIR}/base.yaml"
 cp "${REPO_ROOT}/config/replay.yaml" "${RUNTIME_CONFIG_DIR}/replay.yaml"
 cp "${REPO_ROOT}/config/schwab.local.json" "${RUNTIME_CONFIG_DIR}/schwab.local.json"
 cp "${REPO_ROOT}/config/data_storage_policy.json" "${RUNTIME_POLICY_PATH}"
-cp "${SOURCE_TOKEN_PATH}" "${RUNTIME_TOKEN_PATH}"
+if [[ "$(cd "$(dirname "${SOURCE_TOKEN_PATH}")" && pwd)/$(basename "${SOURCE_TOKEN_PATH}")" != "$(cd "$(dirname "${RUNTIME_TOKEN_PATH}")" && pwd)/$(basename "${RUNTIME_TOKEN_PATH}")" ]]; then
+  cp "${SOURCE_TOKEN_PATH}" "${RUNTIME_TOKEN_PATH}"
+fi
 chmod 600 "${RUNTIME_TOKEN_PATH}"
 
 cat > "${RUNTIME_ENV_PATH}" <<EOF

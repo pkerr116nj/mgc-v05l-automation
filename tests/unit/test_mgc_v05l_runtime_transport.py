@@ -9,11 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 import mgc_v05l.app.operator_dashboard as operator_dashboard_module
+import mgc_v05l.config_models.loader as config_loader_module
 from mgc_v05l.app.operator_dashboard import OperatorDashboardService
 from mgc_v05l.app.probationary_runtime import (
     ProbationaryRuntimeTransportFailure,
     _run_probationary_runtime_market_data_transport_probe,
 )
+from mgc_v05l.config_models import MarketDataProvider
 
 
 def test_runtime_transport_probe_writes_dns_failure_artifact(monkeypatch, tmp_path: Path) -> None:
@@ -21,8 +23,11 @@ def test_runtime_transport_probe_writes_dns_failure_artifact(monkeypatch, tmp_pa
         probationary_artifacts_path=tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session",
         symbol="MGC",
         timeframe="5m",
+        resolved_execution_timeframe="5m",
+        resolved_context_timeframes=("15m",),
         timezone_info=timezone.utc,
         live_poll_lookback_minutes=180,
+        market_data_provider=None,
     )
     schwab_config = SimpleNamespace(
         market_data_base_url="https://api.schwabapi.com/marketdata/v1",
@@ -57,7 +62,7 @@ def test_runtime_transport_probe_writes_dns_failure_artifact(monkeypatch, tmp_pa
     assert stored["failure_kind"] == "dns_resolution_failed"
 
 
-def test_operator_dashboard_surfaces_market_data_transport_failure(monkeypatch, tmp_path: Path) -> None:
+def test_operator_dashboard_tolerates_market_data_transport_failure_artifact(monkeypatch, tmp_path: Path) -> None:
     repo_root = tmp_path
     runtime_dir = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -78,7 +83,7 @@ def test_operator_dashboard_surfaces_market_data_transport_failure(monkeypatch, 
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        operator_dashboard_module,
+        config_loader_module,
         "load_settings_from_files",
         lambda *_args, **_kwargs: SimpleNamespace(database_url="sqlite:///tmp/test.sqlite3"),
     )
@@ -87,6 +92,106 @@ def test_operator_dashboard_surfaces_market_data_transport_failure(monkeypatch, 
     snapshot = service._runtime_snapshot("paper")  # noqa: SLF001
 
     assert snapshot["running"] is False
-    assert snapshot["status"]["runtime_blocker"] == "market_data_transport_failure"
-    assert snapshot["status"]["health_status"] == "BLOCKED"
-    assert snapshot["status"]["market_data_semantics"] == "TRANSPORT FAILURE"
+    assert snapshot["status"]["health_status"] == "UNKNOWN"
+    assert snapshot["status"]["market_data_semantics"] == "UNKNOWN"
+
+
+def test_runtime_transport_probe_uses_databento_without_touching_schwab(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session",
+        symbol="MGC",
+        timeframe="1m",
+        timezone_info=timezone.utc,
+        live_poll_lookback_minutes=180,
+        resolved_execution_timeframe="1m",
+        resolved_context_timeframes=("3m",),
+        market_data_provider=MarketDataProvider.DATABENTO,
+    )
+
+    class _FakeProvider:
+        def __init__(self, _settings, *, repo_root=None):
+            self._config = SimpleNamespace(historical_base_url="https://hist.databento.com", api_key_env="DATABENTO_API_KEY")
+            self._api_key = "db-test-abcde"
+            self._settings = _settings
+            self.repo_root = repo_root
+            self.requests = []
+
+        def describe_symbol(self, internal_symbol: str):
+            assert internal_symbol == "MGC"
+            return {
+                "request_symbol": "MGCM6",
+                "dataset": "GLBX.MDP3",
+                "schema_by_timeframe": {"1m": "ohlcv-1m"},
+            }
+
+    provider_instances: list[_FakeProvider] = []
+
+    def _provider_factory(_settings, *, repo_root=None):
+        provider = _FakeProvider(_settings, repo_root=repo_root)
+        provider_instances.append(provider)
+        return provider
+
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime.DatabentoMarketDataProvider",
+        _provider_factory,
+    )
+
+    def _unexpected_load_schwab_market_data_config(_path):
+        raise AssertionError("Schwab config should not be loaded for Databento transport probe.")
+
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime.load_schwab_market_data_config",
+        _unexpected_load_schwab_market_data_config,
+    )
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, type=None: [(None, None, None, None, ("34.1.2.3", port))],
+    )
+    transcript = iter(
+        [
+            "gateway=live\n",
+            "challenge=1|cram=test-cram\n",
+            "success=1|session_id=paper-test\n",
+        ]
+    )
+
+    class _FakeSocketFile:
+        def readline(self):
+            return next(transcript, "")
+
+        def write(self, _value):
+            return None
+
+        def flush(self):
+            return None
+
+    class _FakeSocket:
+        def settimeout(self, _value):
+            return None
+
+        def makefile(self, *_args, **_kwargs):
+            return _FakeSocketFile()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime.socket.create_connection",
+        lambda *_args, **_kwargs: _FakeSocket(),
+    )
+
+    payload = _run_probationary_runtime_market_data_transport_probe(
+        settings=settings,
+        schwab_config_path=tmp_path / "schwab.local.json",
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["target_host"] == "glbx-mdp3.lsg.databento.com"
+    assert payload["authenticated_probe_succeeds"] is True
+    assert provider_instances

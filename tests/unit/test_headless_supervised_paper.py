@@ -213,3 +213,68 @@ def test_headless_supervised_paper_contract_prefers_live_service_truth_over_stal
     assert contract["backend"]["startup_ready"] is False
     assert contract["backend"]["launch_allowed"] is False
     assert contract["overall_state"] == "USABLE"
+
+
+def test_headless_supervised_paper_contract_keeps_route_usable_when_schwab_is_only_a_degraded_sidecar() -> None:
+    contract = build_headless_supervised_paper_contract(
+        health_payload={
+            "ready": True,
+            "status": "ok",
+            "phase": "stable_attached",
+            "phase_detail": "Dashboard/API and tracked paper runtime remained attached across the manager stability window.",
+        },
+        startup_control_plane={
+            "overall_state": "READY",
+            "launch_allowed": True,
+            "primary_reason_code": "dashboard_ready",
+            "primary_reason": "Dashboard/API is serving the current operator snapshot for this server instance.",
+            "dependencies": [
+                {"key": "dashboard_backend", "label": "Dashboard / Backend", "state": "READY", "reason": "Dashboard attached."},
+                {
+                    "key": "market_data_connectivity",
+                    "label": "Market-Data Connectivity",
+                    "state": "READY",
+                    "reason": "Execution market data is live through the attached paper runtime.",
+                },
+                {
+                    "key": "schwab_connectivity",
+                    "label": "Schwab Connectivity / Auth",
+                    "state": "DEGRADED",
+                    "reason": "Schwab fallback/auth is unavailable, but it is not required for the current IBKR/Databento supervised paper route.",
+                    "reason_code": "schwab_auth_sidecar_unavailable",
+                },
+                {"key": "paper_runtime", "label": "Paper Runtime", "state": "READY", "reason": "Paper runtime is active."},
+                {"key": "reconciliation", "label": "Reconciliation Needed", "state": "READY", "reason": "Reconciliation is clean."},
+            ],
+        },
+        supervised_paper_operability={
+            "app_usable_for_supervised_paper": True,
+            "state": "USABLE",
+            "dashboard_attached": True,
+            "startup_ready": True,
+            "launch_allowed": True,
+            "runtime_running": True,
+            "paper_runtime_phase": "RUNNING",
+            "paper_runtime_ready": True,
+            "entries_enabled": True,
+            "operator_halt": False,
+            "usable_lane_count": 13,
+            "eligible_to_trade_count": 13,
+            "halted_lane_count": 0,
+            "operator_action_required": False,
+            "primary_next_action": "No action needed; already eligible",
+        },
+        dashboard_info={
+            "dashboard_api_url": "http://127.0.0.1:8790/api/dashboard",
+            "health_url": "http://127.0.0.1:8790/health",
+            "pid": 123,
+            "instance_id": "instance-sidecar-degraded",
+        },
+    )
+
+    assert contract["app_usable_for_supervised_paper"] is True
+    assert contract["overall_state"] == "USABLE"
+    assert contract["backend"]["attached"] is True
+    assert contract["paper_runtime"]["usable"] is True
+    assert contract["auth"]["usable"] is False
+    assert contract["auth"]["dependency"]["reason_code"] == "schwab_auth_sidecar_unavailable"

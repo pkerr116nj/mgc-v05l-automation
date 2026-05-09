@@ -34,6 +34,7 @@ DEFAULT_RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_sess
 DEFAULT_PID_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.pid"
 DEFAULT_LOG_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.log"
 DEFAULT_CONFIG_PATHS_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_config_paths.txt"
+CANARY_ENABLE_SENTINEL="${DEFAULT_RUNTIME_DIR}/enable_paper_route_canary.flag"
 CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
 
 ARGS=()
@@ -43,6 +44,7 @@ BACKGROUND=0
 NETWORK_PREFLIGHT_ONLY=0
 INCLUDE_ATPE_CANARY=0
 INCLUDE_GC_MGC_ACCEPTANCE=0
+ENABLE_PAPER_ROUTE_CANARY_FLAG=0
 PID_FILE="${DEFAULT_PID_FILE}"
 LOG_FILE="${DEFAULT_LOG_FILE}"
 CONFIG_PATHS_FILE="${DEFAULT_CONFIG_PATHS_FILE}"
@@ -63,6 +65,10 @@ while (($# > 0)); do
       ;;
     --include-gc-mgc-acceptance)
       INCLUDE_GC_MGC_ACCEPTANCE=1
+      shift
+      ;;
+    --enable-paper-route-canary)
+      ENABLE_PAPER_ROUTE_CANARY_FLAG=1
       shift
       ;;
     --pid-file)
@@ -153,6 +159,17 @@ if [[ ${SCHWAB_CONFIG_SET} -eq 0 && -f "${DEFAULT_SCHWAB_CONFIG}" ]]; then
 fi
 if [[ ${#ARGS[@]} -gt 0 ]]; then
   FINAL_ARGS+=("${ARGS[@]}")
+fi
+
+if [[ ${ENABLE_PAPER_ROUTE_CANARY_FLAG} -eq 1 ]]; then
+  export ENABLE_PAPER_ROUTE_CANARY=true
+fi
+
+ensure_dir "${DEFAULT_RUNTIME_DIR}"
+if [[ ${ENABLE_PAPER_ROUTE_CANARY_FLAG} -eq 1 ]]; then
+  printf 'enabled=true\n' > "${CANARY_ENABLE_SENTINEL}"
+else
+  rm -f "${CANARY_ENABLE_SENTINEL}"
 fi
 
 persist_runtime_config_paths() {

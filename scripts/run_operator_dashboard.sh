@@ -204,9 +204,24 @@ read_health_field() {
 }
 
 read_local_build_stamp() {
-  "${PYTHON_BIN}" - <<'PY'
-from mgc_v05l.app.operator_dashboard import dashboard_build_stamp
-print(dashboard_build_stamp())
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}"
+import hashlib
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+asset_dir = repo_root / "src" / "mgc_v05l" / "app" / "dashboard_assets"
+paths = (
+    repo_root / "src" / "mgc_v05l" / "app" / "operator_dashboard.py",
+    asset_dir / "operator_dashboard.html",
+    asset_dir / "operator_dashboard.css",
+    asset_dir / "operator_dashboard.js",
+)
+digest = hashlib.sha1()
+for path in paths:
+    digest.update(str(path).encode("utf-8"))
+    digest.update(path.read_bytes())
+print(digest.hexdigest()[:12])
 PY
 }
 
@@ -347,6 +362,7 @@ is_recoverable_local_dashboard_listener() {
     return 1
   fi
   [[ "${normalized}" == *"mgc_v05l.app.main"* && "${normalized}" == *"operator-dashboard"* ]] || \
+    [[ "${normalized}" == *"mgc_v05l.app.operator_dashboard_cli"* ]] || \
     [[ "${normalized}" == *"python"* && "${normalized}" == *"operator_dashboard"* ]] || \
     [[ "${normalized}" == *"run_operator_dashboard.sh"* ]] || \
     [[ "${normalized}" == *"desktop/dist/main/main.js"* && "${normalized}" == *"electron"* ]]
@@ -591,8 +607,7 @@ fi
 DASHBOARD_CMD=(
   "${PYTHON_BIN}"
   -m
-  mgc_v05l.app.main
-  operator-dashboard
+  mgc_v05l.app.operator_dashboard_cli
   --host "${HOST}"
   --port "${PORT}"
   --info-file "${INFO_FILE}"
@@ -641,6 +656,24 @@ fi
 
 READINESS_REASON="$(read_json_path "${READINESS_FILE}" reason_code 2>/dev/null || true)"
 READINESS_DETAIL="$(read_json_path "${READINESS_FILE}" reason_detail 2>/dev/null || true)"
+DASHBOARD_URL="$(read_info_field "${INFO_FILE}" url 2>/dev/null || true)"
+if [[ -n "${DASHBOARD_URL}" ]] && dashboard_ready_check "${DASHBOARD_URL}"; then
+  start_dashboard_readiness_heartbeat "steady_state" "${DASHBOARD_PID}" "${DASHBOARD_PID}"
+  BOUND_HOST="$(read_info_field "${INFO_FILE}" host 2>/dev/null || true)"
+  BOUND_PORT="$(read_info_field "${INFO_FILE}" port 2>/dev/null || true)"
+  RUNNING_BUILD="$(read_health_field "${DASHBOARD_URL%/}/health" build_stamp 2>/dev/null || true)"
+  RUNNING_STARTED="$(read_health_field "${DASHBOARD_URL%/}/health" started_at 2>/dev/null || true)"
+  RUNNING_HEALTH_STATUS="$(read_health_field "${DASHBOARD_URL%/}/health" status 2>/dev/null || true)"
+  RUNNING_HEALTH_READY="$(read_health_field "${DASHBOARD_URL%/}/health" ready 2>/dev/null || true)"
+  report_success "${DASHBOARD_URL}" "${BOUND_HOST:-${HOST}}" "${BOUND_PORT:-${PORT}}" "${DASHBOARD_PID}" "${RUNNING_BUILD:-${LOCAL_BUILD_STAMP}}" "${RUNNING_STARTED:-unknown}" 0 "${RUNNING_HEALTH_STATUS:-unknown}" "${RUNNING_HEALTH_READY:-false}"
+  if [[ ${OPEN_BROWSER} -eq 1 ]]; then
+    if ! open_browser "${DASHBOARD_URL}"; then
+      echo "Dashboard is healthy, but browser auto-open failed. Open this URL manually: ${DASHBOARD_URL}" >&2
+    fi
+  fi
+  wait "${DASHBOARD_PID}"
+  exit $?
+fi
 if ! ps -p "${DASHBOARD_PID}" >/dev/null 2>&1; then
   emit_startup_failure \
     "early_process_exit" \
