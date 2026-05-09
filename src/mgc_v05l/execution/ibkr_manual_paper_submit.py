@@ -23,6 +23,7 @@ from ..brokers.ibkr import (
     IbkrSession,
     build_default_ibkr_order_id_policy,
 )
+from .ibkr_phase1_futures_scope import phase1_execution_target_for_symbol
 from .ibkr_execution_provider import IbkrExecutionProvider
 from .ibkr_paper_order_preview import (
     _FORBIDDEN_CALLER_PREFIXES,
@@ -89,6 +90,18 @@ _ORDER_REJECTION_ERROR_CODES = {478, 10268, 201, 202}
 
 class IbkrManualPaperSubmitError(RuntimeError):
     """Base error for the manual paper submit/cancel harness."""
+
+
+def _phase1_target_for_requested_order(requested_order: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(requested_order.get("symbol") or "").strip().upper()
+    expiry = str(requested_order.get("expiry") or "").strip() or None
+    try:
+        target = dict(phase1_execution_target_for_symbol(symbol, contract_month=expiry))
+    except KeyError:
+        return {}
+    target.setdefault("symbol", symbol)
+    target.setdefault("contract_month", expiry or "")
+    return target
 
 
 @dataclass(frozen=True)
@@ -1518,6 +1531,9 @@ def _submit_input_guardrails(
 ) -> dict[str, dict[str, Any]]:
     normalized_mode = str(test_mode or "").strip().upper()
     expected_action = "SELL" if normalized_mode == _CLOSE_TEST_MODE else _EXPECTED_ACTION
+    expected_target = _phase1_target_for_requested_order(requested_order)
+    expected_symbol = str(expected_target.get("symbol") or "").strip().upper()
+    expected_expiry = str(expected_target.get("contract_month") or "").strip()
     action_detail = (
         "Only SELL is allowed in the manual paper close harness."
         if normalized_mode == _CLOSE_TEST_MODE
@@ -1525,8 +1541,14 @@ def _submit_input_guardrails(
     )
     return {
         "whitelisted_contract": {
-            "passed": requested_order.get("symbol") == _EXPECTED_SYMBOL and requested_order.get("expiry") == _EXPECTED_EXPIRY,
-            "detail": "Only MGC 202606 is allowed in the first manual paper submit/cancel harness.",
+            "passed": bool(expected_target)
+            and str(requested_order.get("symbol") or "").strip().upper() == expected_symbol
+            and str(requested_order.get("expiry") or "").strip() == expected_expiry,
+            "detail": (
+                f"Only the approved phase-1 execution target {expected_symbol} {expected_expiry} is allowed in the manual paper submit/cancel harness."
+                if expected_target
+                else "Only explicitly approved phase-1 execution targets are allowed in the manual paper submit/cancel harness."
+            ),
         },
         "supported_action": {
             "passed": requested_order.get("action") == expected_action,
@@ -1743,6 +1765,7 @@ def _build_delayed_quote_pricing_context(
 def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[dict[str, Any]]:
     quote_snapshot = dict(pricing_context.get("quote_snapshot") or {})
     quote_source = str(quote_snapshot.get("source_label") or "").strip().upper()
+    delayed_quote_available = quote_source in {"DELAYED", "DELAYED_FROZEN"}
     quote_age_seconds = pricing_context.get("quote_snapshot", {}).get("quote_age_seconds")
     distance_from_reference_price = pricing_context.get("distance_from_reference_price")
     distance_ticks = pricing_context.get("distance_ticks")
@@ -1750,7 +1773,7 @@ def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[d
     checks = [
         _guardrail_check(
             "delayed_quote_available",
-            passed=quote_source == "DELAYED" and pricing_context.get("reference_price") is not None,
+            passed=delayed_quote_available and pricing_context.get("reference_price") is not None,
             blocking=True,
             detail="The first manual paper submit/cancel test requires a delayed bid or last quote snapshot. If delayed quote data is unavailable, fail closed rather than guessing a price.",
         ),
@@ -2051,21 +2074,24 @@ def _collect_truth_and_preview_context(
     positions = _build_positions_snapshot(client=runtime.client, selected_account_id=selected_account_id)
     open_orders_before = _build_open_orders_snapshot(client=runtime.client, selected_account_id=selected_account_id)
     if open_orders_before.get("open_order_count"):
+        expected_symbol = str(requested_order.get("symbol") or "").strip().upper()
         mgc_rows = [
             row
             for row in list(open_orders_before.get("open_orders") or [])
-            if str(row.get("symbol") or "").strip().upper() == _EXPECTED_SYMBOL
+            if str(row.get("symbol") or "").strip().upper() == expected_symbol
         ]
         if mgc_rows:
             raise IbkrManualPaperSubmitError(
-                "Open-order baseline contains working MGC orders. Cancel them manually in TWS before rerunning the manual paper submit/cancel test."
+                f"Open-order baseline contains working {expected_symbol} orders. Cancel them manually in TWS before rerunning the manual paper submit/cancel test."
             )
         raise IbkrManualPaperSubmitError(
             f"Open-order baseline is not empty for the first manual submit test: {open_orders_before['open_order_count']} existing open orders."
         )
-    contract_report = _qualify_mgc_contract(
+    contract_report = _qualify_futures_contract(
         transport=runtime.transport,
         collector=runtime.collector,
+        symbol=str(requested_order.get('symbol') or '').strip().upper(),
+        expiry=str(requested_order.get('expiry') or '').strip(),
         timeout_seconds=config.timeout_seconds,
         sleep_fn=sleep_fn,
     )

@@ -15,6 +15,7 @@ from mgc_v05l.execution.ibkr_manual_paper_submit import (
     _configure_minimal_futures_limit_order,
     _detect_order_rejection,
     _derive_marketable_limit_price,
+    _delayed_quote_pricing_guardrails,
     _exact_contract_position_quantity,
     _execute_submit_cancel_lifecycle,
     _probe_delayed_quote_context,
@@ -130,6 +131,24 @@ def test_non_mgc_contract_fails_closed() -> None:
     assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
 
 
+def test_mnq_phase1_contract_passes_input_guardrail() -> None:
+    guardrails = _submit_input_guardrails(
+        {
+            "symbol": "MNQ",
+            "expiry": "202606",
+            "action": "BUY",
+            "quantity": 1.0,
+            "order_type": "LMT",
+            "limit_price": 29307.75,
+            "time_in_force": "DAY",
+        },
+        test_mode=_FILL_TEST_MODE,
+        require_limit_price=True,
+    )
+
+    assert guardrails["whitelisted_contract"]["passed"] is True
+
+
 def test_market_order_fails_closed() -> None:
     artifacts = run_ibkr_manual_paper_submit_test(config=_config(order_type="MKT"), stack_provider=_manual_stack)
     assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
@@ -170,6 +189,36 @@ def test_stale_delayed_quote_fails_closed(monkeypatch) -> None:
 
     assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
     assert any(check["name"] == "delayed_quote_fresh" and check["passed"] is False for check in artifacts.report["guardrail_checks"])
+
+
+def test_delayed_frozen_quote_passes_availability_but_still_checks_freshness() -> None:
+    fresh_checks = _delayed_quote_pricing_guardrails(
+        {
+            "quote_snapshot": {
+                "source_label": "DELAYED_FROZEN",
+                "quote_age_seconds": 5.0,
+            },
+            "reference_price": 29307.75,
+            "max_quote_age_seconds": 30.0,
+            "intended_to_fill": False,
+        }
+    )
+    stale_checks = _delayed_quote_pricing_guardrails(
+        {
+            "quote_snapshot": {
+                "source_label": "DELAYED_FROZEN",
+                "quote_age_seconds": 35.0,
+            },
+            "reference_price": 29307.75,
+            "max_quote_age_seconds": 30.0,
+            "intended_to_fill": False,
+        }
+    )
+
+    assert any(check["name"] == "delayed_quote_available" and check["passed"] is True for check in fresh_checks)
+    assert any(check["name"] == "delayed_quote_fresh" and check["passed"] is True for check in fresh_checks)
+    assert any(check["name"] == "delayed_quote_available" and check["passed"] is True for check in stale_checks)
+    assert any(check["name"] == "delayed_quote_fresh" and check["passed"] is False for check in stale_checks)
 
 
 def test_far_away_placeholder_limit_fails_closed(monkeypatch) -> None:
