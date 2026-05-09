@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime, time, timezone
+from decimal import Decimal
 from typing import Callable, Optional
 
 from ..config_models import ExecutionTimeframeRole, StrategySettings
@@ -59,6 +60,162 @@ from .state_machine import (
 )
 from .reconcile import StrategyReconciler
 from .trade_state import build_initial_state, normalize_legacy_single_position_state
+
+
+def _intent_side(intent: OrderIntent) -> str:
+    if intent.intent_type in (OrderIntentType.BUY_TO_OPEN, OrderIntentType.BUY_TO_CLOSE):
+        return "BUY"
+    return "SELL"
+
+
+def _broker_status_is_filled(status: object) -> bool:
+    return str(status or "").strip().upper() in {OrderStatus.FILLED.value, "FILLED"}
+
+
+def _parse_fill_price(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    return Decimal(str(value))
+
+
+def _parse_fill_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _blocked_intent_classification(reason: str, submit_attempt: dict[str, object]) -> str:
+    gate_trace = [dict(row) for row in list(submit_attempt.get("bridge_gate_trace") or []) if isinstance(row, dict)]
+    failed_gate_text = " ".join(
+        [
+            json.dumps(
+                {
+                    "name": row.get("name"),
+                    "detail": row.get("detail"),
+                    "passed": row.get("passed"),
+                },
+                sort_keys=True,
+                default=str,
+            )
+            for row in gate_trace
+            if row.get("passed") is False
+        ]
+    ).lower()
+    text = " ".join(
+        [
+            str(reason or ""),
+            str(submit_attempt.get("bridge_detail") or ""),
+            failed_gate_text,
+        ]
+    ).lower()
+    if "paper_strategy_exposure_gate" in failed_gate_text or "owning strategy" in text or "attributed exposure" in text:
+        return "BRIDGE_EXPOSURE_GATE_BLOCKED"
+    if "paper_strategy_monitor_running" in failed_gate_text or "monitor_not_running" in text or "not running" in text or "health_stopped" in text or "stopped" in text:
+        return "PAPER_MONITOR_NOT_HEALTHY"
+    if (
+        "stale" in failed_gate_text
+        or "broker_refresh" in failed_gate_text
+        or "last_successful_broker_refresh" in failed_gate_text
+        or (not failed_gate_text and ("stale" in text or "broker_refresh" in text or "last_successful_broker_refresh" in text))
+    ):
+        return "ROUTE_HEALTH_STALE"
+    if "bridge_allowed=false" in text or "bridge_allowed" in failed_gate_text:
+        return "BRIDGE_AUTHORITY_BLOCKED"
+    if "account" in failed_gate_text:
+        return "ACCOUNT_MISMATCH"
+    if "contract" in failed_gate_text or "local_symbol" in failed_gate_text or "expiry" in failed_gate_text or "execution target" in failed_gate_text:
+        return "EXECUTION_TARGET_MISMATCH"
+    if "adapter" in failed_gate_text or "allowlist" in failed_gate_text or "not enabled" in text or "unsupported" in text:
+        return "EXECUTION_TARGET_NOT_ENABLED"
+    return "PRE_SUBMIT_GATE_BLOCKED"
+
+
+def _blocked_intent_route_target(submit_attempt: dict[str, object], intent: OrderIntent) -> dict[str, object]:
+    metadata = dict(submit_attempt.get("caller_metadata") or {})
+    return {
+        "source_instrument": metadata.get("source_instrument") or submit_attempt.get("source_symbol") or intent.symbol,
+        "execution_symbol": submit_attempt.get("bridge_symbol") or metadata.get("executable_proxy") or intent.symbol,
+        "contract_month": submit_attempt.get("bridge_contract_month"),
+        "action": submit_attempt.get("bridge_action"),
+        "route_destination": submit_attempt.get("route_destination"),
+        "bridge_proxy_mode": submit_attempt.get("bridge_proxy_mode"),
+        "caller_path": submit_attempt.get("caller_path"),
+    }
+
+
+def _blocked_intent_monitor_snapshot(submit_attempt: dict[str, object], reason: str) -> dict[str, object]:
+    checks = [dict(row) for row in list(submit_attempt.get("bridge_gate_trace") or []) if isinstance(row, dict)]
+    by_name = {str(row.get("name") or row.get("gate") or ""): row for row in checks}
+
+    def _detail(*names: str) -> str | None:
+        for name in names:
+            row = by_name.get(name)
+            if row:
+                return str(row.get("detail") or row.get("message") or "")
+        return None
+
+    text = f"{reason} {json.dumps(checks, sort_keys=True, default=str)}"
+    return {
+        "monitor_running": _gate_passed(by_name.get("paper_strategy_monitor_running"), text, "monitor_running"),
+        "health_classification": _extract_token(text, "health_classification")
+        or _extract_health_from_detail(_detail("paper_strategy_monitor_health")),
+        "bridge_allowed": _extract_bool_token(text, "bridge_allowed"),
+        "broker_refresh_timestamp": _extract_token(text, "last_successful_broker_refresh")
+        or _extract_token(text, "broker_refresh_timestamp"),
+        "broker_refresh_freshness": "STALE" if "stale" in text.lower() else None,
+        "account": _extract_token(text, "account_id") or _extract_token(text, "account"),
+        "contract": {
+            "symbol": submit_attempt.get("bridge_symbol"),
+            "contract_month": submit_attempt.get("bridge_contract_month"),
+            "detail": _detail("paper_strategy_monitor_contract_match", "executable_contract_whitelist"),
+        },
+    }
+
+
+def _gate_passed(row: dict[str, object] | None, text: str, field_name: str) -> bool | None:
+    if row is not None and "passed" in row:
+        return bool(row.get("passed"))
+    return _extract_bool_token(text, field_name)
+
+
+def _extract_bool_token(text: str, key: str) -> bool | None:
+    lowered = text.lower()
+    key_lower = key.lower()
+    for separator in ("=", ":"):
+        token = f"{key_lower}{separator}"
+        if token in lowered:
+            tail = lowered.split(token, 1)[1].strip()
+            if tail.startswith("true"):
+                return True
+            if tail.startswith("false"):
+                return False
+    return None
+
+
+def _extract_token(text: str, key: str) -> str | None:
+    for separator in ("=", ":"):
+        marker = f"{key}{separator}"
+        if marker in text:
+            raw = text.split(marker, 1)[1].strip()
+            token = raw.split()[0].strip(" ,.;'\"{}[]")
+            return token or None
+    return None
+
+
+def _extract_health_from_detail(detail: str | None) -> str | None:
+    if not detail:
+        return None
+    upper = detail.upper()
+    for value in ("HEALTHY", "STOPPED", "STALE", "UNKNOWN", "DEGRADED"):
+        if value in upper:
+            return value
+    return None
 
 
 class StrategyEngine:
@@ -309,12 +466,22 @@ class StrategyEngine:
                             "submit_suppressed": False,
                         }
                     if submit_blocker is not None:
+                        blocked_payload = self._persist_blocked_strategy_intent(
+                            maybe_intent,
+                            occurred_at=execution_bar.end_ts,
+                            reason=submit_blocker,
+                            submit_attempt_id=self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
+                        )
                         self._emit_order_rejection_alert(
                             maybe_intent,
                             execution_bar.end_ts,
                             reason=submit_blocker,
                             submit_attempt_id=self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
                         )
+                        self._latest_live_intent_summary = {
+                            **self._latest_live_intent_summary,
+                            "blocked_strategy_intent": blocked_payload,
+                        }
                     else:
                         pending = self._execution_engine.submit_intent(
                             maybe_intent,
@@ -324,12 +491,6 @@ class StrategyEngine:
                             short_entry_source=short_entry_source,
                         )
                         if pending is not None:
-                            working_state = replace(
-                                working_state,
-                                last_order_intent_id=maybe_intent.order_intent_id,
-                                open_broker_order_id=pending.broker_order_id,
-                                updated_at=execution_bar.end_ts,
-                            )
                             self._latest_live_intent_summary = {
                                 **self._latest_live_intent_summary,
                                 "submit_attempt_id": pending.submit_attempt_id,
@@ -346,41 +507,112 @@ class StrategyEngine:
                                     occurred_at=execution_bar.end_ts,
                                 )
                             )
-                            self._persist_order_intent(
-                                maybe_intent,
-                                pending.broker_order_id,
-                                submitted_at=pending.submitted_at,
-                                acknowledged_at=pending.acknowledged_at,
-                                broker_order_status=pending.broker_order_status,
-                                last_status_checked_at=pending.last_status_checked_at,
-                                retry_count=pending.retry_count,
-                            )
-                            self._persist_state(working_state, transition_label="intent_created")
-                            if maybe_intent.intent_type in (OrderIntentType.SELL_TO_CLOSE, OrderIntentType.BUY_TO_CLOSE):
-                                self._last_exit_decision_summary = {
-                                    **self._last_exit_decision_summary,
-                                    "exit_order_intent_id": maybe_intent.order_intent_id,
-                                    "exit_intent_type": maybe_intent.intent_type.value,
-                                    "exit_fill_pending": True,
-                                    "exit_fill_confirmed": False,
-                                    "pending_broker_order_id": pending.broker_order_id,
-                                    "intent_created_at": maybe_intent.created_at.isoformat(),
-                                    "latest_order_status": pending.broker_order_status,
-                                }
-                            self._emit_order_lifecycle_alert(
-                                "created",
-                                maybe_intent,
-                                execution_bar.end_ts,
-                                pending_broker_order_id=pending.broker_order_id,
-                                submit_attempt_id=pending.submit_attempt_id,
-                            )
-                            self._emit_order_lifecycle_alert(
-                                "submitted",
-                                maybe_intent,
-                                execution_bar.end_ts,
-                                pending_broker_order_id=pending.broker_order_id,
-                                submit_attempt_id=pending.submit_attempt_id,
-                            )
+                            if _broker_status_is_filled(pending.broker_order_status):
+                                try:
+                                    fill_event = self._broker_fill_event_from_pending(pending)
+                                    self._persist_order_intent(
+                                        maybe_intent,
+                                        pending.broker_order_id,
+                                        order_status=OrderStatus.FILLED,
+                                        submitted_at=pending.submitted_at,
+                                        acknowledged_at=pending.acknowledged_at,
+                                        broker_order_status=OrderStatus.FILLED.value,
+                                        last_status_checked_at=pending.last_status_checked_at,
+                                        retry_count=pending.retry_count,
+                                    )
+                                    self.apply_fill(
+                                        fill_event=fill_event,
+                                        signal_bar_id=pending.signal_bar_id,
+                                        long_entry_family=pending.long_entry_family,
+                                        short_entry_family=pending.short_entry_family,
+                                        short_entry_source=pending.short_entry_source,
+                                    )
+                                    self._execution_engine.clear_intent(pending.intent.order_intent_id)
+                                    working_state = self._state
+                                    self._persist_filled_bridge_result(
+                                        pending=pending,
+                                        fill_event=fill_event,
+                                        classification="PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+                                        review_required=False,
+                                    )
+                                    events.append(
+                                        FillReceivedEvent(
+                                            order_intent_id=fill_event.order_intent_id,
+                                            broker_order_id=fill_event.broker_order_id,
+                                            fill_timestamp=fill_event.fill_timestamp,
+                                            fill_price=fill_event.fill_price,
+                                        )
+                                    )
+                                except Exception as exc:
+                                    self._persist_order_intent(
+                                        maybe_intent,
+                                        pending.broker_order_id,
+                                        order_status=OrderStatus.FILLED,
+                                        submitted_at=pending.submitted_at,
+                                        acknowledged_at=pending.acknowledged_at,
+                                        broker_order_status=OrderStatus.FILLED.value,
+                                        last_status_checked_at=pending.last_status_checked_at,
+                                        timeout_classification="REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE",
+                                        timeout_status_updated_at=execution_bar.end_ts,
+                                        retry_count=pending.retry_count,
+                                    )
+                                    working_state = transition_to_fault(
+                                        replace(working_state, entries_enabled=False, updated_at=execution_bar.end_ts),
+                                        execution_bar.end_ts,
+                                        f"REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE: {exc}",
+                                    )
+                                    self._state = working_state
+                                    self._execution_engine.clear_intent(pending.intent.order_intent_id)
+                                    self._persist_state(working_state, transition_label="filled_bridge_persistence_review_required")
+                                    self._persist_filled_bridge_result(
+                                        pending=pending,
+                                        fill_event=None,
+                                        classification="REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE",
+                                        review_required=True,
+                                        error=str(exc),
+                                    )
+                            else:
+                                working_state = replace(
+                                    working_state,
+                                    last_order_intent_id=maybe_intent.order_intent_id,
+                                    open_broker_order_id=pending.broker_order_id,
+                                    updated_at=execution_bar.end_ts,
+                                )
+                                self._persist_order_intent(
+                                    maybe_intent,
+                                    pending.broker_order_id,
+                                    submitted_at=pending.submitted_at,
+                                    acknowledged_at=pending.acknowledged_at,
+                                    broker_order_status=pending.broker_order_status,
+                                    last_status_checked_at=pending.last_status_checked_at,
+                                    retry_count=pending.retry_count,
+                                )
+                                self._persist_state(working_state, transition_label="intent_created")
+                                if maybe_intent.intent_type in (OrderIntentType.SELL_TO_CLOSE, OrderIntentType.BUY_TO_CLOSE):
+                                    self._last_exit_decision_summary = {
+                                        **self._last_exit_decision_summary,
+                                        "exit_order_intent_id": maybe_intent.order_intent_id,
+                                        "exit_intent_type": maybe_intent.intent_type.value,
+                                        "exit_fill_pending": True,
+                                        "exit_fill_confirmed": False,
+                                        "pending_broker_order_id": pending.broker_order_id,
+                                        "intent_created_at": maybe_intent.created_at.isoformat(),
+                                        "latest_order_status": pending.broker_order_status,
+                                    }
+                                self._emit_order_lifecycle_alert(
+                                    "created",
+                                    maybe_intent,
+                                    execution_bar.end_ts,
+                                    pending_broker_order_id=pending.broker_order_id,
+                                    submit_attempt_id=pending.submit_attempt_id,
+                                )
+                                self._emit_order_lifecycle_alert(
+                                    "submitted",
+                                    maybe_intent,
+                                    execution_bar.end_ts,
+                                    pending_broker_order_id=pending.broker_order_id,
+                                    submit_attempt_id=pending.submit_attempt_id,
+                                )
                         else:
                             failure = self._execution_engine.last_submit_failure()
                             self._latest_live_intent_summary = {
@@ -1723,6 +1955,16 @@ class StrategyEngine:
         reason = default_reason
         if failure is not None and failure.order_intent_id == intent.order_intent_id:
             reason = f"{default_reason} Broker stage={failure.failure_stage}: {failure.error}"
+        blocked_payload = self._persist_blocked_strategy_intent(
+            intent,
+            occurred_at=occurred_at,
+            reason=reason,
+            submit_attempt_id=failure.submit_attempt_id if failure is not None else None,
+        )
+        self._latest_live_intent_summary = {
+            **self._latest_live_intent_summary,
+            "blocked_strategy_intent": blocked_payload,
+        }
         self._emit_order_rejection_alert(
             intent,
             occurred_at,
@@ -1743,6 +1985,148 @@ class StrategyEngine:
             execution_engine=self._execution_engine,
         )
         return next_state
+
+    def _broker_fill_event_from_pending(self, pending) -> FillEvent:
+        status_payload = self._execution_engine.broker.get_order_status(pending.broker_order_id) or {}
+        fill_timestamp = _parse_fill_timestamp(status_payload.get("fill_timestamp")) or pending.acknowledged_at or pending.submitted_at
+        fill_price = _parse_fill_price(status_payload.get("fill_price"))
+        return FillEvent(
+            order_intent_id=pending.intent.order_intent_id,
+            intent_type=pending.intent.intent_type,
+            order_status=OrderStatus.FILLED,
+            fill_timestamp=fill_timestamp,
+            fill_price=fill_price,
+            broker_order_id=pending.broker_order_id,
+            quantity=pending.intent.quantity,
+        )
+
+    def _persist_filled_bridge_result(
+        self,
+        *,
+        pending,
+        fill_event: FillEvent | None,
+        classification: str,
+        review_required: bool,
+        error: str | None = None,
+    ) -> dict[str, object]:
+        submit_attempt = self._execution_engine.last_submit_attempt() or {}
+        status_payload = self._execution_engine.broker.get_order_status(pending.broker_order_id) or {}
+        payload: dict[str, object] = {
+            "schema_version": "strategy_managed_filled_bridge_result_v1",
+            "artifact_type": "filled_bridge_result",
+            "classification": classification,
+            "review_required": bool(review_required),
+            "strategy_id": self._runtime_identity.get("standalone_strategy_id") or self._runtime_identity.get("strategy_id"),
+            "lane_id": self._runtime_identity.get("lane_id"),
+            "strategy_family": self._runtime_identity.get("strategy_family"),
+            "instrument": self._runtime_identity.get("instrument") or pending.intent.symbol,
+            "symbol": pending.intent.symbol,
+            "side": _intent_side(pending.intent),
+            "action": _intent_side(pending.intent),
+            "quantity": pending.intent.quantity,
+            "order_intent_id": pending.intent.order_intent_id,
+            "intent_type": pending.intent.intent_type.value,
+            "decision_bar_timestamp": pending.intent.created_at.isoformat(),
+            "bar_id": pending.intent.bar_id,
+            "broker_order_id": pending.broker_order_id,
+            "perm_id": status_payload.get("perm_id") or submit_attempt.get("perm_id"),
+            "client_id": status_payload.get("client_id") or submit_attempt.get("client_id"),
+            "exec_id": status_payload.get("execution_id") or submit_attempt.get("execution_id"),
+            "local_symbol": status_payload.get("local_symbol") or submit_attempt.get("local_symbol"),
+            "con_id": status_payload.get("con_id") or submit_attempt.get("con_id"),
+            "contract": status_payload.get("contract") or dict(submit_attempt.get("bridge_order_metadata") or {}).get("contract"),
+            "fill_price": str(fill_event.fill_price) if fill_event is not None and fill_event.fill_price is not None else status_payload.get("fill_price") or submit_attempt.get("fill_price"),
+            "fill_timestamp": fill_event.fill_timestamp.isoformat() if fill_event is not None else status_payload.get("fill_timestamp") or submit_attempt.get("fill_timestamp"),
+            "bridge_classification": submit_attempt.get("bridge_classification"),
+            "bridge_order_status": submit_attempt.get("bridge_order_status"),
+            "route_destination": submit_attempt.get("route_destination"),
+            "intended_lifecycle_mode": "STRATEGY_MANAGED",
+            "lifecycle_state": self._state.strategy_status.value,
+            "position_side": self._state.position_side.value,
+            "internal_position_qty": self._state.internal_position_qty,
+            "broker_position_qty": self._state.broker_position_qty,
+            "paper_proof_invoked": False,
+            "live_money_readiness": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if error:
+            payload["error"] = error
+        if self._structured_logger is not None:
+            if hasattr(self._structured_logger, "log_filled_bridge_result"):
+                self._structured_logger.log_filled_bridge_result(payload)
+            if hasattr(self._structured_logger, "write_filled_bridge_result_state"):
+                self._structured_logger.write_filled_bridge_result_state(payload)
+        self._latest_live_intent_summary = {
+            **self._latest_live_intent_summary,
+            "filled_bridge_result": payload,
+            "review_required": bool(review_required),
+        }
+        return payload
+
+    def _persist_blocked_strategy_intent(
+        self,
+        intent: OrderIntent,
+        *,
+        occurred_at: datetime,
+        reason: str,
+        submit_attempt_id: str | None,
+    ) -> dict[str, object]:
+        submit_attempt = self._execution_engine.last_submit_attempt() or {}
+        classification = _blocked_intent_classification(reason, submit_attempt)
+        monitor_snapshot = _blocked_intent_monitor_snapshot(submit_attempt, reason)
+        route_target = _blocked_intent_route_target(submit_attempt, intent)
+        payload: dict[str, object] = {
+            "schema_version": "strategy_managed_blocked_intent_v1",
+            "artifact_type": "blocked_strategy_intent",
+            "strategy_id": self._runtime_identity.get("standalone_strategy_id") or self._runtime_identity.get("strategy_id"),
+            "lane_id": self._runtime_identity.get("lane_id"),
+            "strategy_family": self._runtime_identity.get("strategy_family"),
+            "instrument": self._runtime_identity.get("instrument") or intent.symbol,
+            "symbol": intent.symbol,
+            "side": _intent_side(intent),
+            "order_intent_id": intent.order_intent_id,
+            "intent_type": intent.intent_type.value,
+            "signal_id": intent.signal_id,
+            "signal_timestamp": intent.created_at.isoformat(),
+            "decision_bar_timestamp": occurred_at.isoformat(),
+            "bar_id": intent.bar_id,
+            "source_artifact": "runtime_completed_decision_bar",
+            "source_artifact_bar_id": intent.bar_id,
+            "route_target": route_target,
+            "intended_lifecycle_mode": "STRATEGY_MANAGED",
+            "submit_allowed": False,
+            "submit_attempt_id": submit_attempt_id,
+            "submit_attempted": bool(submit_attempt),
+            "blocker_classification": classification,
+            "exact_blocker_reason": reason,
+            "monitor_running": monitor_snapshot.get("monitor_running"),
+            "health_classification": monitor_snapshot.get("health_classification"),
+            "bridge_allowed": monitor_snapshot.get("bridge_allowed"),
+            "broker_refresh_timestamp": monitor_snapshot.get("broker_refresh_timestamp"),
+            "broker_refresh_freshness": monitor_snapshot.get("broker_refresh_freshness"),
+            "account": monitor_snapshot.get("account"),
+            "contract": monitor_snapshot.get("contract"),
+            "bridge_classification": submit_attempt.get("bridge_classification"),
+            "bridge_detail": submit_attempt.get("bridge_detail"),
+            "bridge_gate_trace": list(submit_attempt.get("bridge_gate_trace") or []),
+            "paper_proof_invoked": False,
+            "live_money_readiness": False,
+            "created_at": occurred_at.isoformat(),
+        }
+        self._persist_order_intent(
+            intent,
+            broker_order_id=None,
+            order_status=OrderStatus.REJECTED,
+            broker_order_status="PRE_SUBMIT_BLOCKED",
+            last_status_checked_at=occurred_at,
+            timeout_classification=classification,
+            timeout_status_updated_at=occurred_at,
+            retry_count=0,
+        )
+        if self._structured_logger is not None:
+            self._structured_logger.log_blocked_strategy_intent(payload)
+            self._structured_logger.write_blocked_strategy_intent_state(payload)
+        return payload
 
     def _runtime_alert_dedup_key(self, *parts: object) -> str:
         identity = {
@@ -1844,7 +2228,7 @@ class StrategyEngine:
     def _persist_order_intent(
         self,
         intent: OrderIntent,
-        broker_order_id: str,
+        broker_order_id: str | None,
         order_status: OrderStatus = OrderStatus.ACKNOWLEDGED,
         *,
         submitted_at: datetime | None = None,
@@ -1852,6 +2236,7 @@ class StrategyEngine:
         broker_order_status: str | None = None,
         last_status_checked_at: datetime | None = None,
         timeout_classification: str | None = None,
+        timeout_status_updated_at: datetime | None = None,
         retry_count: int | None = None,
     ) -> None:
         if self._repositories is None:
@@ -1865,6 +2250,7 @@ class StrategyEngine:
             broker_order_status=broker_order_status,
             last_status_checked_at=last_status_checked_at,
             timeout_classification=timeout_classification,
+            timeout_status_updated_at=timeout_status_updated_at,
             retry_count=retry_count,
         )
 

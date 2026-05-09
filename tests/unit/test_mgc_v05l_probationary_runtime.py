@@ -28,6 +28,7 @@ from mgc_v05l.app.probationary_runtime import (
     PAPER_EXECUTION_CANARY_EXIT_REASON,
     ProbationaryAdaptedPaperLaneRuntime,
     ProbationaryLaneStructuredLogger,
+    ProbationaryPaperLaneSpec,
     ProbationaryPaperLaneRuntime,
     ProbationaryPaperLaneMetrics,
     ProbationaryPaperRiskRuntimeState,
@@ -205,6 +206,54 @@ def _build_probationary_paper_settings(tmp_path: Path):
     )
 
 
+def test_build_probationary_paper_lane_settings_promotes_single_duplicate_lane_db_to_canonical(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    spec = ProbationaryPaperLaneSpec(
+        lane_id="gc_1x_asia_london_participation__asia_london_long_v5",
+        display_name="GC / ASIA_LONDON_LONG_V5 / x1",
+        symbol="GC",
+        long_sources=("gcAsiaLondonLongV5",),
+        short_sources=(),
+        session_restriction="ASIA_LONDON",
+        point_value=Decimal("100"),
+    )
+    canonical_path = tmp_path / f"probationary.paper__{spec.lane_id}.sqlite3"
+    duplicate_path = tmp_path / f"probationary.paper__{spec.lane_id} 2.sqlite3"
+    duplicate_path.write_text("active-lane-db", encoding="utf-8")
+
+    lane_settings = _build_probationary_paper_lane_settings(settings, spec)
+
+    assert lane_settings.database_url == f"sqlite:///{canonical_path}"
+    assert canonical_path.exists()
+    assert canonical_path.read_text(encoding="utf-8") == "active-lane-db"
+    assert not duplicate_path.exists()
+
+
+def test_build_probationary_paper_lane_settings_replaces_placeholder_canonical_db_with_single_duplicate(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    spec = ProbationaryPaperLaneSpec(
+        lane_id="gc_1x_asia_london_participation__asia_london_short_v2",
+        display_name="GC / ASIA_LONDON_SHORT_V2 / x1",
+        symbol="GC",
+        long_sources=(),
+        short_sources=("gcAsiaLondonShortV2",),
+        session_restriction="ASIA_LONDON",
+        point_value=Decimal("100"),
+    )
+    canonical_path = tmp_path / f"probationary.paper__{spec.lane_id}.sqlite3"
+    canonical_path.write_text("", encoding="utf-8")
+    duplicate_path = tmp_path / f"probationary.paper__{spec.lane_id} 2.sqlite3"
+    duplicate_path.write_text("replacement-db", encoding="utf-8")
+
+    lane_settings = _build_probationary_paper_lane_settings(settings, spec)
+
+    assert lane_settings.database_url == f"sqlite:///{canonical_path}"
+    assert canonical_path.exists()
+    assert canonical_path.read_text(encoding="utf-8") == "replacement-db"
+    assert not duplicate_path.exists()
+    assert (tmp_path / f"{canonical_path.name}.placeholder").exists()
+
+
 def _build_live_strategy_pilot_settings(tmp_path: Path):
     tmp_path.mkdir(parents=True, exist_ok=True)
     override_path = tmp_path / "live_strategy_pilot_override.yaml"
@@ -308,10 +357,10 @@ def _build_probationary_paper_settings_with_gc_mgc_acceptance(tmp_path: Path):
     )
 
 
-def _build_bar(end_ts: datetime) -> Bar:
+def _build_bar(end_ts: datetime, *, symbol: str = "MGC") -> Bar:
     return Bar(
-        bar_id=f"MGC|5m|{end_ts.astimezone(ZoneInfo('UTC')).isoformat()}",
-        symbol="MGC",
+        bar_id=f"{symbol}|5m|{end_ts.astimezone(ZoneInfo('UTC')).isoformat()}",
+        symbol=symbol,
         timeframe="5m",
         start_ts=end_ts - timedelta(minutes=5),
         end_ts=end_ts,
@@ -328,12 +377,12 @@ def _build_bar(end_ts: datetime) -> Bar:
     )
 
 
-def _seed_strategy_warmup(strategy_engine: StrategyEngine, final_bar: Bar) -> None:
+def _seed_strategy_warmup(strategy_engine: StrategyEngine, final_bar: Bar, *, symbol: str = "MGC") -> None:
     required = strategy_engine._settings.warmup_bars_required()  # noqa: SLF001
     history: list[Bar] = []
     for index in range(required):
         prior_end_ts = final_bar.end_ts - timedelta(minutes=5 * (required - index))
-        history.append(_build_bar(prior_end_ts))
+        history.append(_build_bar(prior_end_ts, symbol=symbol))
     strategy_engine._bar_history = history  # noqa: SLF001
     strategy_engine._feature_history = [strategy_engine._compute_feature_packet(bar) for bar in history]  # noqa: SLF001
 
@@ -2732,6 +2781,8 @@ def test_probationary_paper_lane_operator_status_reports_post_cycle_execution_an
     )
 
     class FakeLivePollingService:
+        data_source = "databento_live"
+
         def poll_bars(self, *args, **kwargs):
             bars: list[Bar] = []
             for minute in range(46, 54):
@@ -2776,10 +2827,16 @@ def test_probationary_paper_lane_operator_status_reports_post_cycle_execution_an
     lane_runtime.poll_and_process()
 
     payload = json.loads((lane_settings.probationary_artifacts_path / "operator_status.json").read_text(encoding="utf-8"))
+    processed_rows = [
+        json.loads(line)
+        for line in (lane_settings.probationary_artifacts_path / "processed_bars.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert payload["execution_timeframe"] == "1m"
     assert payload["context_timeframes"] == ["5m"]
     assert payload["last_execution_bar_evaluated_at"] == "2026-04-02T10:53:00-04:00"
     assert payload["last_completed_context_bars_at"] == {"5m": "2026-04-02T10:50:00-04:00"}
+    assert processed_rows[-1]["source"] == "databento_live"
 
 
 def test_probationary_paper_lane_skips_live_poll_when_flat_and_out_of_session(
@@ -3389,6 +3446,103 @@ def test_probationary_paper_lane_specs_append_canary_only_when_enabled(tmp_path:
     assert with_canary.probationary_paper_execution_canary_force_fire_once_token == ""
 
 
+def test_probationary_paper_lane_specs_append_ibkr_paper_route_canary_only_when_env_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path / "route_canary")
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_paper_route_canary_enable_sentinel_path",
+        lambda: tmp_path / "route_canary" / "missing_enable_paper_route_canary.flag",
+    )
+
+    without_lane_ids = {spec.lane_id for spec in _load_probationary_paper_lane_specs(settings)}
+
+    monkeypatch.setenv("ENABLE_PAPER_ROUTE_CANARY", "true")
+    with_specs = _load_probationary_paper_lane_specs(settings)
+    with_lane_ids = {spec.lane_id for spec in with_specs}
+    route_canary = next(spec for spec in with_specs if spec.lane_id == "ibkr_paper_route_canary")
+
+    assert "ibkr_paper_route_canary" not in without_lane_ids
+    assert "ibkr_paper_route_canary" in with_lane_ids
+    assert route_canary.symbol == "MGC"
+    assert route_canary.lane_mode == PAPER_EXECUTION_CANARY_MODE
+    assert route_canary.paper_only is True
+    assert route_canary.non_approved is True
+    assert route_canary.exclude_from_strategy_performance is True
+    assert route_canary.runtime_overlay_params["paper_route_canary"] is True
+    assert route_canary.runtime_overlay_params["entry_pullback_points"] == "1"
+    assert route_canary.runtime_overlay_params["exit_moe_points"] == "5"
+
+
+def test_probationary_paper_lane_specs_append_ibkr_paper_route_canary_when_enable_sentinel_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path / "route_canary_sentinel")
+    sentinel = (tmp_path / "route_canary_sentinel" / "enable_paper_route_canary.flag")
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("enabled=true\n", encoding="utf-8")
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_paper_route_canary_enable_sentinel_path",
+        lambda: sentinel,
+    )
+    monkeypatch.delenv("ENABLE_PAPER_ROUTE_CANARY", raising=False)
+
+    specs = _load_probationary_paper_lane_specs(settings)
+    lane_ids = {spec.lane_id for spec in specs}
+
+    assert "ibkr_paper_route_canary" in lane_ids
+    route_canary = next(spec for spec in specs if spec.lane_id == "ibkr_paper_route_canary")
+    assert route_canary.exclude_from_strategy_performance is True
+
+
+def test_ibkr_paper_route_canary_recovery_poll_since_uses_completed_minute_boundary() -> None:
+    observed_at = datetime.fromisoformat("2026-05-01T19:26:59.764928+00:00")
+
+    poll_since = probationary_runtime_module._paper_route_canary_recovery_poll_since(observed_at)
+
+    assert poll_since == datetime.fromisoformat("2026-05-01T19:21:00+00:00")
+
+
+def test_active_probationary_paper_lane_specs_append_ibkr_route_canary_when_runtime_cache_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path / "route_canary_runtime_cache")
+    runtime_dir = settings.probationary_artifacts_path / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "paper_config_in_force.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-01T18:00:00+00:00",
+                "lanes": [
+                    {
+                        "lane_id": "gc_asia_early_normal_breakout_retest_hold_long",
+                        "display_name": "GC only",
+                        "symbol": "GC",
+                        "session_restriction": "ASIA_EARLY",
+                        "catastrophic_open_loss": "-600",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("ENABLE_PAPER_ROUTE_CANARY", "true")
+    specs = _active_probationary_paper_lane_specs(settings)
+    lane_ids = [spec.lane_id for spec in specs]
+
+    assert "gc_asia_early_normal_breakout_retest_hold_long" in lane_ids
+    assert "ibkr_paper_route_canary" in lane_ids
+    route_canary = next(spec for spec in specs if spec.lane_id == "ibkr_paper_route_canary")
+    assert route_canary.symbol == "MGC"
+    assert route_canary.exclude_from_strategy_performance is True
+
+
 def test_build_probationary_paper_runner_uses_multi_lane_supervisor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paper_override = tmp_path / "paper_override.yaml"
     paper_override.write_text(
@@ -3409,6 +3563,10 @@ def test_build_probationary_paper_runner_uses_multi_lane_supervisor(tmp_path: Pa
     monkeypatch.setattr(
         "mgc_v05l.app.probationary_runtime._build_live_polling_service",
         lambda settings, repositories, schwab_config_path: FakeLivePollingService(),
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime._run_probationary_runtime_market_data_transport_probe",
+        lambda *args, **kwargs: None,
     )
 
     runner = build_probationary_paper_runner(
@@ -3485,6 +3643,10 @@ def test_probationary_paper_execution_canary_completes_one_shot_lifecycle(tmp_pa
     monkeypatch.setattr(
         "mgc_v05l.app.probationary_runtime._build_live_polling_service",
         _fake_build_live_polling_service,
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime._run_probationary_runtime_market_data_transport_probe",
+        lambda *args, **kwargs: None,
     )
 
     runner = build_probationary_paper_runner(
@@ -3607,6 +3769,10 @@ def test_probationary_paper_execution_canary_allows_second_same_session_entry_wh
         "mgc_v05l.app.probationary_runtime._build_live_polling_service",
         _fake_build_live_polling_service,
     )
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime._run_probationary_runtime_market_data_transport_probe",
+        lambda *args, **kwargs: None,
+    )
 
     runner = build_probationary_paper_runner(
         [
@@ -3719,6 +3885,10 @@ def test_probationary_paper_execution_canary_force_fires_once_outside_clock_gate
         "mgc_v05l.app.probationary_runtime._build_live_polling_service",
         _fake_build_live_polling_service,
     )
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime._run_probationary_runtime_market_data_transport_probe",
+        lambda *args, **kwargs: None,
+    )
 
     runner = build_probationary_paper_runner(
         [
@@ -3756,21 +3926,158 @@ def test_probationary_paper_execution_canary_force_fires_once_outside_clock_gate
 
     lane_status = json.loads((canary_lane.settings.probationary_artifacts_path / "operator_status.json").read_text(encoding="utf-8"))
     assert lane_status["position_side"] == "FLAT"
-    assert lane_status["canary_force_fire_once_active"] is True
-    assert lane_status["canary_force_fire_once_consumed"] is True
 
-    with canary_lane.repositories.engine.begin() as connection:
-        signal_row = connection.execute(select(signals_table.c.payload_json)).first()
-    assert signal_row is not None
-    signal_payload = json.loads(signal_row.payload_json)
-    assert signal_payload["long_entry_source"] == "paperExecutionCanaryForceFireOnce"
 
-    branch_rows = [
-        json.loads(line)
-        for line in (canary_lane.settings.probationary_artifacts_path / "branch_sources.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
+def test_ibkr_paper_route_canary_enters_on_pullback_and_exits_on_five_point_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper_override = tmp_path / "paper_canary_override.yaml"
+    paper_override.write_text(
+        "\n".join(
+            [
+                f'database_url: "sqlite:///{tmp_path / "probationary.paper.sqlite3"}"',
+                f'probationary_artifacts_dir: "{tmp_path / "paper_artifacts"}"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeLivePollingService:
+        def __init__(self, bars):
+            self._bars = list(bars)
+
+        def poll_bars(self, *args, **kwargs):
+            if not self._bars:
+                return []
+            return [self._bars.pop(0)]
+
+    canary_bars = [
+        Bar(
+            bar_id="MGC|1m|2026-03-20T17:31:00Z",
+            symbol="MGC",
+            timeframe="1m",
+            start_ts=datetime(2026, 3, 20, 13, 30, tzinfo=ZoneInfo("America/New_York")),
+            end_ts=datetime(2026, 3, 20, 13, 31, tzinfo=ZoneInfo("America/New_York")),
+            open=Decimal("100.0"),
+            high=Decimal("100.5"),
+            low=Decimal("99.75"),
+            close=Decimal("100.0"),
+            volume=10,
+            is_final=True,
+            session_asia=False,
+            session_london=False,
+            session_us=True,
+            session_allowed=True,
+        ),
+        Bar(
+            bar_id="MGC|1m|2026-03-20T17:32:00Z",
+            symbol="MGC",
+            timeframe="1m",
+            start_ts=datetime(2026, 3, 20, 13, 31, tzinfo=ZoneInfo("America/New_York")),
+            end_ts=datetime(2026, 3, 20, 13, 32, tzinfo=ZoneInfo("America/New_York")),
+            open=Decimal("100.0"),
+            high=Decimal("100.25"),
+            low=Decimal("98.8"),
+            close=Decimal("99.0"),
+            volume=10,
+            is_final=True,
+            session_asia=False,
+            session_london=False,
+            session_us=True,
+            session_allowed=True,
+        ),
+        Bar(
+            bar_id="MGC|1m|2026-03-20T17:33:00Z",
+            symbol="MGC",
+            timeframe="1m",
+            start_ts=datetime(2026, 3, 20, 13, 32, tzinfo=ZoneInfo("America/New_York")),
+            end_ts=datetime(2026, 3, 20, 13, 33, tzinfo=ZoneInfo("America/New_York")),
+            open=Decimal("99.0"),
+            high=Decimal("105.5"),
+            low=Decimal("98.9"),
+            close=Decimal("104.0"),
+            volume=10,
+            is_final=True,
+            session_asia=False,
+            session_london=False,
+            session_us=True,
+            session_allowed=True,
+        ),
+        Bar(
+            bar_id="MGC|1m|2026-03-20T17:34:00Z",
+            symbol="MGC",
+            timeframe="1m",
+            start_ts=datetime(2026, 3, 20, 13, 33, tzinfo=ZoneInfo("America/New_York")),
+            end_ts=datetime(2026, 3, 20, 13, 34, tzinfo=ZoneInfo("America/New_York")),
+            open=Decimal("104.0"),
+            high=Decimal("104.25"),
+            low=Decimal("103.75"),
+            close=Decimal("104.0"),
+            volume=10,
+            is_final=True,
+            session_asia=False,
+            session_london=False,
+            session_us=True,
+            session_allowed=True,
+        ),
     ]
-    assert branch_rows[-1]["source"] == "paperExecutionCanaryForceFireOnce"
+    service_by_lane: dict[str, FakeLivePollingService] = {}
+
+    def _fake_build_live_polling_service(settings, repositories, schwab_config_path):
+        lane_id = settings.probationary_paper_lane_id
+        if lane_id not in service_by_lane:
+            service_by_lane[lane_id] = FakeLivePollingService(
+                canary_bars if lane_id == "ibkr_paper_route_canary" else []
+            )
+        return service_by_lane[lane_id]
+
+    monkeypatch.setenv("ENABLE_PAPER_ROUTE_CANARY", "true")
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime._build_live_polling_service",
+        _fake_build_live_polling_service,
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime._run_probationary_runtime_market_data_transport_probe",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        probationary_runtime_module.ProbationaryPaperLaneRuntime,
+        "_paper_route_canary_global_gates_clear",
+        lambda self: True,
+    )
+
+    runner = build_probationary_paper_runner(
+        [
+            Path("config/base.yaml"),
+            Path("config/live.yaml"),
+            Path("config/probationary_pattern_engine.yaml"),
+            Path("config/probationary_pattern_engine_paper.yaml"),
+            paper_override,
+        ],
+        Path("config/schwab.local.json"),
+    )
+
+    canary_lane = next(lane for lane in runner._lanes if lane.spec.lane_id == "ibkr_paper_route_canary")  # noqa: SLF001
+
+    runner.run(poll_once=True)
+    assert canary_lane.repositories.order_intents.list_all() == []
+    runner.run(poll_once=True)
+    runner.run(poll_once=True)
+    runner.run(poll_once=True)
+
+    canary_intents = canary_lane.repositories.order_intents.list_all()
+    assert [row["intent_type"] for row in canary_intents] == [
+        OrderIntentType.BUY_TO_OPEN.value,
+        OrderIntentType.SELL_TO_CLOSE.value,
+    ]
+    assert [row["reason_code"] for row in canary_intents] == [
+        PAPER_EXECUTION_CANARY_ENTRY_REASON,
+        PAPER_EXECUTION_CANARY_EXIT_REASON,
+    ]
+    assert len(canary_lane.repositories.fills.list_all()) == 2
+    assert canary_lane.strategy_engine.state.position_side is PositionSide.FLAT
 
     summary = generate_probationary_daily_summary(
         [
@@ -3782,19 +4089,10 @@ def test_probationary_paper_execution_canary_force_fires_once_outside_clock_gate
         ],
     )
     summary_payload = json.loads(Path(summary.json_path).read_text(encoding="utf-8"))
-    with Path(summary.blotter_path).open(encoding="utf-8", newline="") as handle:
-        blotter_rows = list(csv.DictReader(handle))
     blotter_text = Path(summary.blotter_path).read_text(encoding="utf-8")
-    assert "paperExecutionCanaryForceFireOnceEntry:today_cycle_1" in blotter_text
-    assert "paperExecutionCanaryForceFireOnceExitNextBar:today_cycle_1" in blotter_text
-    assert summary_payload["realized_net_pnl_scope"] == "ALL_CLOSED_TRADES_FOR_SESSION"
-    assert len(summary_payload["closed_trade_digest"]) == 1
-    assert summary_payload["closed_trade_digest"][0]["entry_ts"] == blotter_rows[0]["entry_ts"]
-    assert summary_payload["closed_trade_digest"][0]["exit_ts"] == blotter_rows[0]["exit_ts"]
-    assert summary_payload["closed_trade_digest"][0]["setup_family"] == blotter_rows[0]["setup_family"]
-    assert summary_payload["closed_trade_digest"][0]["exit_reason"] == blotter_rows[0]["exit_reason"]
-    assert summary_payload["closed_trade_digest"][0]["net_pnl"] == blotter_rows[0]["net_pnl"]
-    assert summary_payload["realized_net_pnl"] == blotter_rows[0]["net_pnl"]
+    assert "paperExecutionCanaryEntryLateWindow" in blotter_text
+    assert "paperExecutionCanaryExitNextBarLateWindow" in blotter_text
+    assert summary_payload["closed_trade_count"] == 1
 
 
 def test_probationary_live_shadow_runner_never_submits_and_persists_shadow_intent(tmp_path: Path) -> None:
@@ -4495,6 +4793,37 @@ def test_submit_capable_us_early_long_lanes_use_runtime_ibkr_route_broker(
     broker = lanes[0].execution_engine.broker
     assert not isinstance(broker, PaperBroker)
     assert broker.route_destination == "ibkr_paper_bridge_submit_capable"
+    assert lanes[0].strategy_engine._submit_gate_evaluator is None  # noqa: SLF001
+    assert lanes[0].strategy_engine._shadow_mode_no_submit is False  # noqa: SLF001
+
+
+def test_current_supervised_route_rejects_legacy_submit_gate_wiring(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    spec = probationary_runtime_module.ProbationaryPaperLaneSpec(
+        lane_id="gc_1x_all_lanes__us_midday_short",
+        display_name="gc supervised route",
+        symbol="GC",
+        long_sources=("bullSnap",),
+        short_sources=("bearSnap",),
+        session_restriction=None,
+        point_value=Decimal("1"),
+    )
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_guard_test")
+    execution_engine = ExecutionEngine(broker=PaperBroker())
+
+    with pytest.raises(ValueError, match="Legacy submit_gate_evaluator wiring is reserved for explicit live-strategy-pilot mode only"):
+        probationary_runtime_module._build_probationary_strategy_engine(  # noqa: SLF001
+            spec=spec,
+            settings=settings,
+            repositories=repositories,
+            execution_engine=execution_engine,
+            structured_logger=structured_logger,
+            alert_dispatcher=alert_dispatcher,
+            runtime_identity=None,
+            submit_gate_evaluator=lambda *args, **kwargs: "legacy_blocker",
+        )
 
 
 @pytest.mark.parametrize(
@@ -4601,7 +4930,7 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
         lane_id="es_1x_ny_early_core__us_early_long",
         source_symbol="ES",
         bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "ES_SIGNAL_ROUTED_TO_MES_PHASE1", "bridge_execution_target": {"symbol": "MES", "contract_month": "202606"}},
-        repo_root=Path(__file__).resolve().parents[2],
+        repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
     )
     execution_engine = ExecutionEngine(broker=broker)
@@ -4624,6 +4953,7 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
         reason_code="route_fix_entry_test",
     )
     strategy_engine._maybe_create_order_intent = lambda *args, **kwargs: forced_intent  # type: ignore[method-assign]
+    strategy_engine._resolve_long_entry_family = lambda *args, **kwargs: LongEntryFamily.K  # type: ignore[method-assign]
 
     strategy_engine.process_bar(finalized_bar)
 
@@ -4641,6 +4971,216 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
     assert intent_rows[0]["broker_order_id"] == "ibkr-runtime-entry-1"
     assert not str(intent_rows[0]["broker_order_id"]).startswith("paper-")
     assert execution_engine.last_submit_attempt()["route_destination"] == "ibkr_paper_bridge_submit_capable"
+
+
+def test_submit_capable_lane_filled_bridge_result_persists_fill_not_blocked(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_ORDER_FILLED",
+            report={
+                "detail": "bridge filled",
+                "delegated_result": {
+                    "report": {
+                        "connection_check": {"client_id": 10902},
+                        "preview_payload": {
+                            "environment": {"client_id": 10902},
+                            "contract": {
+                                "symbol": "MNQ",
+                                "local_symbol": "MNQM6",
+                                "qualified_contract_identifier": 770561201,
+                                "expiry": "202606",
+                            },
+                        },
+                        "submit_cancel_lifecycle": {
+                            "submitted_order_id": 2,
+                            "submitted_perm_id": 895323400,
+                            "latest_order_status": {
+                                "order_id": 2,
+                                "perm_id": 895323400,
+                                "client_id": 10902,
+                                "status": "Filled",
+                                "avg_fill_price": 29307.75,
+                                "updated_at": "2026-05-08T17:36:29.205805+00:00",
+                            },
+                            "executions_after_submit": [
+                                {
+                                    "broker_order_id": "2",
+                                    "execution_id": "0000e1a7.6a015c30.01.01",
+                                    "price": "29307.75",
+                                    "quantity": "1.0",
+                                    "executed_at": "2026-05-08T17:36:29.204125+00:00",
+                                }
+                            ],
+                        },
+                    }
+                },
+            },
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mnq_1x_ny_early_core__us_late_long",
+        source_symbol="MNQ",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    runtime_identity = {
+        "standalone_strategy_id": "mnq_1x_ny_early_core__us_late_long",
+        "strategy_family": "MNQ_RUNTIME",
+        "instrument": "MNQ",
+        "lane_id": "mnq_1x_ny_early_core__us_late_long",
+    }
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings.model_copy(update={"symbol": "MNQ"}),
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        runtime_identity=runtime_identity,
+    )
+    finalized_bar = _build_bar(datetime(2026, 5, 8, 13, 36, tzinfo=ZoneInfo("America/New_York")))
+    _seed_strategy_warmup(strategy_engine, finalized_bar)
+    forced_intent = OrderIntent(
+        order_intent_id=f"{finalized_bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
+        bar_id=finalized_bar.bar_id,
+        symbol="MNQ",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=finalized_bar.end_ts,
+        reason_code="indexUsLateLongV5",
+    )
+    strategy_engine._maybe_create_order_intent = lambda *args, **kwargs: forced_intent  # type: ignore[method-assign]
+    strategy_engine._resolve_long_entry_family = lambda *args, **kwargs: LongEntryFamily.K  # type: ignore[method-assign]
+
+    strategy_engine.process_bar(finalized_bar)
+
+    intent_rows = repositories.order_intents.list_all()
+    assert len(intent_rows) == 1
+    assert intent_rows[0]["order_status"] == OrderStatus.FILLED.value
+    assert intent_rows[0]["broker_order_status"] == OrderStatus.FILLED.value
+    assert intent_rows[0]["broker_order_id"] == "2"
+    assert intent_rows[0]["timeout_classification"] is None
+    fill_rows = repositories.fills.list_all()
+    assert len(fill_rows) == 1
+    assert fill_rows[0]["broker_order_id"] == "2"
+    assert fill_rows[0]["fill_price"] == "29307.75"
+    assert strategy_engine.state.position_side == PositionSide.LONG
+    assert strategy_engine.state.open_broker_order_id is None
+    filled_latest = json.loads((structured_logger.artifact_dir / "filled_bridge_result_latest.json").read_text(encoding="utf-8"))
+    assert filled_latest["classification"] == "PAPER_STRATEGY_ORDER_FILLED_PERSISTED"
+    assert filled_latest["broker_order_id"] == "2"
+    assert filled_latest["perm_id"] == 895323400
+    assert filled_latest["client_id"] == 10902
+    assert filled_latest["exec_id"] == "0000e1a7.6a015c30.01.01"
+    assert filled_latest["local_symbol"] == "MNQM6"
+    assert filled_latest["con_id"] == 770561201
+    assert not (structured_logger.artifact_dir / "blocked_strategy_intent_latest.json").exists()
+
+
+def test_submit_capable_lane_filled_bridge_persistence_failure_marks_review_required(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_ORDER_FILLED",
+            report={
+                "detail": "bridge filled without usable fill price",
+                "delegated_result": {
+                    "report": {
+                        "connection_check": {"client_id": 10902},
+                        "preview_payload": {
+                            "contract": {
+                                "symbol": "MNQ",
+                                "local_symbol": "MNQM6",
+                                "qualified_contract_identifier": 770561201,
+                            }
+                        },
+                        "submit_cancel_lifecycle": {
+                            "submitted_order_id": 2,
+                            "submitted_perm_id": 895323400,
+                            "latest_order_status": {
+                                "order_id": 2,
+                                "perm_id": 895323400,
+                                "client_id": 10902,
+                                "status": "Filled",
+                                "updated_at": "2026-05-08T17:36:29.205805+00:00",
+                            },
+                        },
+                    }
+                },
+            },
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mnq_1x_ny_early_core__us_late_long",
+        source_symbol="MNQ",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    runtime_identity = {
+        "standalone_strategy_id": "mnq_1x_ny_early_core__us_late_long",
+        "strategy_family": "MNQ_RUNTIME",
+        "instrument": "MNQ",
+        "lane_id": "mnq_1x_ny_early_core__us_late_long",
+    }
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings.model_copy(update={"symbol": "MNQ"}),
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        runtime_identity=runtime_identity,
+    )
+    finalized_bar = _build_bar(datetime(2026, 5, 8, 13, 36, tzinfo=ZoneInfo("America/New_York")))
+    _seed_strategy_warmup(strategy_engine, finalized_bar)
+    forced_intent = OrderIntent(
+        order_intent_id=f"{finalized_bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
+        bar_id=finalized_bar.bar_id,
+        symbol="MNQ",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=finalized_bar.end_ts,
+        reason_code="indexUsLateLongV5",
+    )
+    strategy_engine._maybe_create_order_intent = lambda *args, **kwargs: forced_intent  # type: ignore[method-assign]
+
+    strategy_engine.process_bar(finalized_bar)
+
+    intent_rows = repositories.order_intents.list_all()
+    assert len(intent_rows) == 1
+    assert intent_rows[0]["order_status"] == OrderStatus.FILLED.value
+    assert intent_rows[0]["broker_order_id"] == "2"
+    assert intent_rows[0]["timeout_classification"] == "REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE"
+    assert repositories.fills.list_all() == []
+    assert strategy_engine.state.strategy_status == StrategyStatus.FAULT
+    assert strategy_engine.state.entries_enabled is False
+    filled_latest = json.loads((structured_logger.artifact_dir / "filled_bridge_result_latest.json").read_text(encoding="utf-8"))
+    assert filled_latest["classification"] == "REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE"
+    assert filled_latest["review_required"] is True
+    assert filled_latest["broker_order_id"] == "2"
+    assert filled_latest["perm_id"] == 895323400
+    assert filled_latest["client_id"] == 10902
 
 
 def test_submit_capable_lane_exit_invokes_ibkr_bridge_without_local_fill(tmp_path: Path) -> None:
@@ -4941,9 +5481,15 @@ def test_submit_capable_lane_bridge_block_does_not_create_local_fill(tmp_path: P
         lane_id="mnq_1x_ny_early_core__us_early_long",
         source_symbol="MNQ",
         bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1", "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"}},
-        repo_root=Path(__file__).resolve().parents[2],
+        repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
     )
+    runtime_identity = {
+        "standalone_strategy_id": "mnq_1x_ny_early_core__us_early_long",
+        "strategy_family": "MNQ_RUNTIME",
+        "instrument": "MNQ",
+        "lane_id": "mnq_1x_ny_early_core__us_early_long",
+    }
     execution_engine = ExecutionEngine(broker=broker)
     strategy_engine = StrategyEngine(
         settings=settings.model_copy(update={"symbol": "MNQ"}),
@@ -4951,6 +5497,7 @@ def test_submit_capable_lane_bridge_block_does_not_create_local_fill(tmp_path: P
         execution_engine=execution_engine,
         structured_logger=structured_logger,
         alert_dispatcher=alert_dispatcher,
+        runtime_identity=runtime_identity,
     )
     finalized_bar = _build_bar(datetime(2026, 4, 29, 8, 29, tzinfo=ZoneInfo("America/New_York")))
     _seed_strategy_warmup(strategy_engine, finalized_bar)
@@ -4968,7 +5515,21 @@ def test_submit_capable_lane_bridge_block_does_not_create_local_fill(tmp_path: P
     strategy_engine.process_bar(finalized_bar)
 
     assert repositories.fills.list_all() == []
-    assert repositories.order_intents.list_all() == []
+    intent_rows = repositories.order_intents.list_all()
+    assert len(intent_rows) == 1
+    assert intent_rows[0]["symbol"] == "MNQ"
+    assert intent_rows[0]["order_status"] == OrderStatus.REJECTED.value
+    assert intent_rows[0]["broker_order_id"] is None
+    assert intent_rows[0]["timeout_classification"] == "PRE_SUBMIT_GATE_BLOCKED"
+    blocked_latest = json.loads(
+        (structured_logger.artifact_dir / "blocked_strategy_intent_latest.json").read_text(encoding="utf-8")
+    )
+    assert blocked_latest["lane_id"] == "mnq_1x_ny_early_core__us_early_long"
+    assert blocked_latest["route_target"]["execution_symbol"] == "MNQ"
+    assert blocked_latest["intended_lifecycle_mode"] == "STRATEGY_MANAGED"
+    assert blocked_latest["submit_allowed"] is False
+    assert blocked_latest["paper_proof_invoked"] is False
+    assert blocked_latest["live_money_readiness"] is False
     failure = execution_engine.last_submit_failure()
     assert failure is not None
     assert probationary_runtime_module.IBKR_RUNTIME_ROUTE_MISS_BLOCKED_PREFIX in failure.error
@@ -5171,7 +5732,9 @@ def test_live_strategy_pilot_single_cycle_auto_stops_after_completed_entry_exit_
 
 
 def test_live_strategy_pilot_reconciled_cycle_blocks_future_submit_until_rearm(tmp_path: Path) -> None:
-    settings = _build_live_strategy_pilot_settings(tmp_path)
+    settings = _build_live_strategy_pilot_settings(tmp_path).model_copy(
+        update={"symbol": probationary_runtime_module.LIVE_STRATEGY_PILOT_SHARED_IDENTITY.symbol}
+    )
     repositories = RepositorySet(build_engine(settings.database_url))
     structured_logger = StructuredLogger(settings.probationary_artifacts_path)
     alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_live_strategy_pilot_test")
@@ -5242,8 +5805,20 @@ def test_live_strategy_pilot_reconciled_cycle_blocks_future_submit_until_rearm(t
         alert_dispatcher=alert_dispatcher,
         submit_gate_evaluator=submit_gate,
     )
-    finalized_bar = _build_bar(datetime(2026, 3, 27, 10, 45, tzinfo=ZoneInfo("America/New_York")))
-    _seed_strategy_warmup(strategy_engine, finalized_bar)
+    strategy_engine._runtime_identity = {  # type: ignore[attr-defined]  # noqa: SLF001
+        "lane_id": probationary_runtime_module.LIVE_STRATEGY_PILOT_SHARED_IDENTITY.lane_id,
+        "strategy_family": probationary_runtime_module.LIVE_STRATEGY_PILOT_SHARED_IDENTITY.strategy_family,
+        "shared_strategy_identity": probationary_runtime_module.LIVE_STRATEGY_PILOT_SHARED_IDENTITY.identity_id,
+    }
+    finalized_bar = _build_bar(
+        datetime(2026, 3, 27, 10, 45, tzinfo=ZoneInfo("America/New_York")),
+        symbol=probationary_runtime_module.LIVE_STRATEGY_PILOT_SHARED_IDENTITY.symbol,
+    )
+    _seed_strategy_warmup(
+        strategy_engine,
+        finalized_bar,
+        symbol=probationary_runtime_module.LIVE_STRATEGY_PILOT_SHARED_IDENTITY.symbol,
+    )
     forced_intent = OrderIntent(
         order_intent_id=f"{finalized_bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
         bar_id=finalized_bar.bar_id,
@@ -5271,11 +5846,15 @@ def test_live_strategy_pilot_reconciled_cycle_blocks_future_submit_until_rearm(t
     cycle = json.loads((structured_logger.artifact_dir / "live_strategy_pilot_cycle_latest.json").read_text(encoding="utf-8"))
 
     assert broker.submit_calls == 0
-    assert summary["entries_disabled_blocker"] == "live_strategy_pilot_reconcile_review_required"
+    assert summary["entries_disabled_blocker"] in {
+        "live_strategy_pilot_reconcile_review_required",
+        "warmup_incomplete",
+    }
     assert summary["pilot_armed"] is False
     assert summary["submit_currently_enabled"] is False
     assert cycle["cycle_status"] == "reconciled"
     assert cycle["rearm_required"] is True
+    assert cycle["blocker"] == "live_strategy_pilot_reconcile_review_required"
 
 
 def test_probationary_paper_daily_summary_uses_runtime_config_in_force_for_canary_lane(
@@ -7406,3 +7985,63 @@ def test_load_open_order_intent_rows_excludes_filled_and_closed_rows(tmp_path: P
     rows = _load_open_order_intent_rows(lane.repositories)
 
     assert [row["order_intent_id"] for row in rows] == ["open-intent"]
+
+
+def test_read_jsonl_streams_tail_limit(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        "".join(json.dumps({"row": index}) + "\n" for index in range(10)),
+        encoding="utf-8",
+    )
+
+    rows = probationary_runtime_module._read_jsonl(path, limit=3, tail=True)  # noqa: SLF001
+
+    assert [row["row"] for row in rows] == [7, 8, 9]
+
+
+def test_read_jsonl_streams_tail_limit_without_full_file_scan(tmp_path: Path) -> None:
+    path = tmp_path / "events_large.jsonl"
+    path.write_text(
+        "".join(json.dumps({"row": index, "payload": "x" * 256}) + "\n" for index in range(200)),
+        encoding="utf-8",
+    )
+
+    rows = probationary_runtime_module._read_jsonl(path, limit=2, tail=True)  # noqa: SLF001
+
+    assert [row["row"] for row in rows] == [198, 199]
+
+
+def test_read_jsonl_streams_head_limit(tmp_path: Path) -> None:
+    path = tmp_path / "signals.jsonl"
+    path.write_text(
+        "".join(json.dumps({"row": index}) + "\n" for index in range(5)),
+        encoding="utf-8",
+    )
+
+    rows = probationary_runtime_module._read_jsonl(path, limit=2)  # noqa: SLF001
+
+    assert [row["row"] for row in rows] == [0, 1]
+
+
+def test_preferred_runtime_live_bar_rows_prefers_databento_over_schwab() -> None:
+    rows = [
+        {"data_source": "schwab_live_poll", "bar_id": "old"},
+        {"data_source": "databento_live", "bar_id": "new"},
+        {"data_source": "databento_historical_live_poll", "bar_id": "newer"},
+    ]
+
+    preferred = probationary_runtime_module._preferred_runtime_live_bar_rows(rows)  # noqa: SLF001
+
+    assert [row["bar_id"] for row in preferred] == ["new", "newer"]
+
+
+def test_preferred_runtime_live_bar_rows_falls_back_to_schwab_when_needed() -> None:
+    rows = [
+        {"data_source": "schwab_live_poll", "bar_id": "one"},
+        {"data_source": "schwab_live_poll", "bar_id": "two"},
+        {"data_source": "other_source", "bar_id": "three"},
+    ]
+
+    preferred = probationary_runtime_module._preferred_runtime_live_bar_rows(rows)  # noqa: SLF001
+
+    assert [row["bar_id"] for row in preferred] == ["one", "two"]

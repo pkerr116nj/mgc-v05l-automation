@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time as time_module
 import csv
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal
@@ -21,12 +21,13 @@ from typing import Any, Iterable, Sequence
 from urllib.parse import urlencode, urlparse
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, case, select
 
 from ..config_models import (
     AddDirectionPolicy,
     EnvironmentMode,
     ExecutionTimeframeRole,
+    MarketDataProvider,
     ParticipationPolicy,
     RuntimeMode,
     StrategySettings,
@@ -49,6 +50,7 @@ from ..execution.ibkr_paper_strategy_bridge import (
     IbkrPaperStrategyBridgeConfig,
     IbkrPaperStrategyBridgeArtifacts,
     run_ibkr_paper_strategy_bridge,
+    write_ibkr_paper_strategy_bridge_artifacts,
 )
 from ..execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
 from ..execution.live_strategy_broker import LiveStrategyPilotBroker
@@ -61,6 +63,8 @@ from ..execution.reconciliation import (
 )
 from ..market_data import (
     CanonicalMarketDataMaintenanceService,
+    DatabentoMarketDataProvider,
+    HistoricalBarsRequest,
     HistoricalPollingLiveClient,
     LivePollingService,
     SchwabHistoricalHttpClient,
@@ -68,6 +72,12 @@ from ..market_data import (
     SchwabLivePollRequest,
     SchwabMarketDataAdapter,
     load_schwab_market_data_config,
+)
+from ..market_data.live_feed import (
+    DatabentoRawLivePollingClient,
+    databento_live_auth_response,
+    databento_live_effective_end,
+    databento_live_gateway_host,
 )
 from ..monitoring.alerts import AlertDispatcher
 from ..monitoring.health import derive_health_status
@@ -133,12 +143,23 @@ from .index_futures_forced_session_runtime import (
     IndexFuturesForcedSessionStrategyEngine,
 )
 from .shared_strategy_identities import ATP_COMPANION_V1_ASIA_US, ATP_COMPANION_V1_GC_ASIA_US, get_shared_strategy_identity
-from .session_phase_labels import label_session_phase
+from .session_phase_labels import (
+    label_session_phase,
+    phase_coarse_session_group as shared_phase_coarse_session_group,
+    session_restriction_matches_phase as shared_session_restriction_matches_phase,
+    session_restriction_matches_timestamp,
+)
 from .strategy_runtime_registry import (
     StandaloneStrategyRuntimeInstance,
     StrategyRuntimeRegistry,
     build_standalone_strategy_definitions,
 )
+
+
+_RUNTIME_SIGNAL_RESTORE_LIMIT = 512
+_RUNTIME_EVENT_RESTORE_LIMIT = 512
+_RUNTIME_TRADE_RESTORE_LIMIT = 128
+_RUNTIME_PROCESSED_BAR_RESTORE_LIMIT = 720
 
 
 @dataclass(frozen=True)
@@ -273,6 +294,32 @@ def _runtime_cadence_payload(settings: StrategySettings, strategy_engine: Strate
     }
 
 
+def _market_data_recovery_snapshot_for_runtime(
+    *,
+    live_polling_service: Any,
+    internal_symbol: str,
+    internal_timeframe: str,
+    lane_id: str | None = None,
+    latest_feature_bar_timestamp: str | None = None,
+    latest_processed_bar_timestamp: str | None = None,
+    latest_processed_signal_timestamp: str | None = None,
+) -> dict[str, Any]:
+    snapshot_hook = getattr(live_polling_service, "market_data_recovery_snapshot", None)
+    if not callable(snapshot_hook):
+        return {}
+    return dict(
+        snapshot_hook(
+            internal_symbol=internal_symbol,
+            internal_timeframe=internal_timeframe,
+            latest_feature_bar_timestamp=latest_feature_bar_timestamp,
+            latest_processed_bar_timestamp=latest_processed_bar_timestamp,
+            latest_processed_signal_timestamp=latest_processed_signal_timestamp,
+            lane_id=lane_id,
+        )
+        or {}
+    )
+
+
 APPROVED_LONG_SOURCE_FIELDS = {
     "usLatePauseResumeLongTurn": "enable_us_late_pause_resume_longs",
     "asiaEarlyNormalBreakoutRetestHoldTurn": "enable_asia_early_normal_breakout_retest_hold_longs",
@@ -354,6 +401,29 @@ PAPER_EXECUTION_CANARY_EXIT_REASON = "paperExecutionCanaryExitNextBarLateWindow"
 PAPER_EXECUTION_CANARY_FORCE_SIGNAL_SOURCE = "paperExecutionCanaryForceFireOnce"
 PAPER_EXECUTION_CANARY_FORCE_ENTRY_REASON = "paperExecutionCanaryForceFireOnceEntry"
 PAPER_EXECUTION_CANARY_FORCE_EXIT_REASON = "paperExecutionCanaryForceFireOnceExitNextBar"
+PAPER_ROUTE_CANARY_ENABLE_ENV = "ENABLE_PAPER_ROUTE_CANARY"
+PAPER_ROUTE_CANARY_SYMBOL_ENV = "PAPER_ROUTE_CANARY_SYMBOL"
+PAPER_ROUTE_CANARY_LANE_ID = "ibkr_paper_route_canary"
+PAPER_ROUTE_CANARY_LABEL = "PAPER_ROUTE_CANARY"
+PAPER_ROUTE_CANARY_SYMBOL = "MGC"
+PAPER_ROUTE_CANARY_EXPERIMENTAL_STATUS = "paper_route_canary"
+
+def _paper_route_canary_enable_sentinel_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "enable_paper_route_canary.flag"
+    )
+
+
+def _paper_route_canary_recovery_poll_since(observed_at: datetime) -> datetime:
+    observed_utc = observed_at.astimezone(timezone.utc)
+    return observed_utc.replace(second=0, microsecond=0) - timedelta(minutes=5)
+
+
 ATPE_CANARY_RUNTIME_KIND = "atpe_canary_observer"
 ATP_COMPANION_BENCHMARK_RUNTIME_KIND = "atp_companion_benchmark_paper"
 ATP_COMPANION_LIVE_ENTRY_PILOT_RUNTIME_KIND = "atp_companion_live_entry_pilot"
@@ -627,6 +697,7 @@ class ProbationaryPaperLaneSpec:
     experimental_status: str | None = None
     paper_only: bool = False
     non_approved: bool = False
+    exclude_from_strategy_performance: bool = False
     observer_variant_id: str | None = None
     observer_side: str | None = None
     identity_components: tuple[str, ...] = ()
@@ -745,8 +816,11 @@ class ProbationaryLaneStructuredLogger:
 
     def log_restore_validation_event(self, payload: dict[str, Any]) -> Path:
         enriched = self._enrich(payload)
-        self._root_logger.log_restore_validation_event(enriched)
-        return self._lane_logger.log_restore_validation_event(enriched)
+        try:
+            self._root_logger.log_restore_validation_event(enriched)
+            return self._lane_logger.log_restore_validation_event(enriched)
+        except (OSError, TimeoutError):
+            return self._lane_logger.artifact_dir / "restore_validation_events.jsonl"
 
     def log_exit_parity_event(self, payload: dict[str, Any]) -> Path:
         enriched = self._enrich(payload)
@@ -763,13 +837,41 @@ class ProbationaryLaneStructuredLogger:
         self._root_logger.log_operator_control(enriched)
         return self._lane_logger.log_operator_control(enriched)
 
+    def log_market_data_recovery_event(self, payload: dict[str, Any]) -> Path:
+        enriched = self._enrich(payload)
+        self._root_logger.log_market_data_recovery_event(enriched)
+        return self._lane_logger.log_market_data_recovery_event(enriched)
+
+    def log_blocked_strategy_intent(self, payload: dict[str, Any]) -> Path:
+        enriched = self._enrich(payload)
+        self._root_logger.log_blocked_strategy_intent(enriched)
+        return self._lane_logger.log_blocked_strategy_intent(enriched)
+
+    def write_blocked_strategy_intent_state(self, payload: dict[str, Any]) -> Path:
+        enriched = self._enrich(payload)
+        self._root_logger.write_blocked_strategy_intent_state(enriched)
+        return self._lane_logger.write_blocked_strategy_intent_state(enriched)
+
+    def log_filled_bridge_result(self, payload: dict[str, Any]) -> Path:
+        enriched = self._enrich(payload)
+        self._root_logger.log_filled_bridge_result(enriched)
+        return self._lane_logger.log_filled_bridge_result(enriched)
+
+    def write_filled_bridge_result_state(self, payload: dict[str, Any]) -> Path:
+        enriched = self._enrich(payload)
+        self._root_logger.write_filled_bridge_result_state(enriched)
+        return self._lane_logger.write_filled_bridge_result_state(enriched)
+
     def write_operator_status(self, payload: dict[str, Any]) -> Path:
         return self._lane_logger.write_operator_status(self._enrich(payload))
 
     def write_restore_validation_state(self, payload: dict[str, Any]) -> Path:
         enriched = self._enrich(payload)
-        self._root_logger.write_restore_validation_state(enriched)
-        return self._lane_logger.write_restore_validation_state(enriched)
+        try:
+            self._root_logger.write_restore_validation_state(enriched)
+            return self._lane_logger.write_restore_validation_state(enriched)
+        except (OSError, TimeoutError):
+            return self._lane_logger.artifact_dir / "restore_validation_latest.json"
 
     def write_exit_parity_state(self, payload: dict[str, Any]) -> Path:
         enriched = self._enrich(payload)
@@ -3378,6 +3480,34 @@ class ProbationaryPaperLaneRuntime:
         )
         self._order_timeout_watchdog = _initial_order_timeout_watchdog_status(self.settings)
         self._startup_restore_validation: dict[str, Any] = {}
+        self._canary_reference_session_date: date | None = None
+        self._canary_reference_close: Decimal | None = None
+        self._force_fire_canary_entry_attempted_token: str | None = None
+        self._force_fire_canary_exit_attempted_token: str | None = None
+        set_logger = getattr(self.live_polling_service, "set_recovery_event_logger", None)
+        if callable(set_logger):
+            set_logger(self.structured_logger.log_market_data_recovery_event)
+
+    def config_row_extras(self) -> dict[str, Any]:
+        return {
+            "experimental_status": self.spec.experimental_status,
+            "paper_only": self.spec.paper_only,
+            "non_approved": self.spec.non_approved,
+            "exclude_from_strategy_performance": self.spec.exclude_from_strategy_performance,
+            "runtime_overlay_params": dict(self.spec.runtime_overlay_params or {}),
+        }
+
+    def _write_startup_phase_marker(self, phase: str, **extras: Any) -> None:
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "lane_id": self.spec.lane_id,
+            "display_name": self.spec.display_name,
+            "phase": phase,
+            **extras,
+        }
+        path = self.structured_logger.artifact_dir / "startup_phase.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
     def _write_exit_parity_summary(self, observed_at: datetime) -> Path:
         payload = _build_exit_parity_summary(
@@ -3406,18 +3536,23 @@ class ProbationaryPaperLaneRuntime:
 
     def restore_startup(self) -> str | None:
         restore_started_at = datetime.now(timezone.utc)
+        self._write_startup_phase_marker("restore_start")
         pre_restore_state = _restore_validation_state_snapshot(
             repositories=self.repositories,
             strategy_engine=self.strategy_engine,
             execution_engine=self.execution_engine,
         )
+        self._write_startup_phase_marker("pre_restore_state_snapshot_complete")
         pre_restore_counts = _restore_validation_record_counts(self.repositories)
+        self._write_startup_phase_marker("pre_restore_counts_complete")
         restore_adjustments: list[str] = []
+        self._write_startup_phase_marker("restore_runtime_state_started")
         _restore_paper_runtime_state(
             repositories=self.repositories,
             strategy_engine=self.strategy_engine,
             execution_engine=self.execution_engine,
         )
+        self._write_startup_phase_marker("restore_runtime_state_complete")
         if (
             self.spec.lane_mode == PAPER_EXECUTION_CANARY_MODE
             and self.strategy_engine.state.operator_halt
@@ -3429,6 +3564,7 @@ class ProbationaryPaperLaneRuntime:
         ):
             self.strategy_engine.set_operator_halt(datetime.now(timezone.utc), False)
             restore_adjustments.append("clear_stale_operator_halt_flat_canary")
+        self._write_startup_phase_marker("startup_reconciliation_started")
         reconciliation = _reconcile_paper_runtime(
             repositories=self.repositories,
             strategy_engine=self.strategy_engine,
@@ -3436,7 +3572,13 @@ class ProbationaryPaperLaneRuntime:
             trigger="startup",
             apply_repairs=True,
         )
+        self._write_startup_phase_marker(
+            "startup_reconciliation_complete",
+            reconciliation_clean=bool(reconciliation.get("clean")),
+            reconciliation_classification=str(reconciliation.get("classification") or ""),
+        )
         self._last_reconciliation_payload = dict(reconciliation)
+        self._write_startup_phase_marker("record_restore_validation_started")
         self._startup_restore_validation = _record_restore_validation(
             repositories=self.repositories,
             strategy_engine=self.strategy_engine,
@@ -3453,10 +3595,12 @@ class ProbationaryPaperLaneRuntime:
             before_state_summary=pre_restore_state,
             before_counts=pre_restore_counts,
         )
+        self._write_startup_phase_marker("record_restore_validation_complete")
         self._write_exit_parity_summary(datetime.now(timezone.utc))
         self._write_live_timing_summary(datetime.now(timezone.utc))
         self.started = True
         if reconciliation["clean"] or reconciliation.get("classification") == "safe_repair":
+            self._write_startup_phase_marker("restore_ready")
             return None
         self.alert_dispatcher.emit(
             severity="BLOCKING",
@@ -3469,12 +3613,36 @@ class ProbationaryPaperLaneRuntime:
             recommended_action="Inspect broker/internal state before restarting this lane.",
             active=True,
         )
+        self._write_startup_phase_marker("restore_failed", stop_reason="paper_startup_reconciliation_failed")
         return "paper_startup_reconciliation_failed"
 
     def supervisor_status_extras(self) -> dict[str, Any]:
+        latest_processed_bar_timestamp = (
+            self.repositories.processed_bars.latest_end_ts().isoformat()
+            if self.repositories.processed_bars.latest_end_ts() is not None
+            else None
+        )
+        latest_live_intent = self.strategy_engine.latest_live_intent_summary()
+        latest_blocked_intent = dict(latest_live_intent.get("blocked_strategy_intent") or {})
         return {
             **_runtime_cadence_payload(self.settings, self.strategy_engine),
             "startup_restore_validation": dict(self._startup_restore_validation or {}),
+            "experimental_status": self.spec.experimental_status,
+            "paper_only": self.spec.paper_only,
+            "non_approved": self.spec.non_approved,
+            "exclude_from_strategy_performance": self.spec.exclude_from_strategy_performance,
+            "runtime_overlay_params": dict(self.spec.runtime_overlay_params or {}),
+            "latest_live_strategy_intent": latest_live_intent,
+            "latest_blocked_strategy_intent": latest_blocked_intent,
+            "latest_blocked_strategy_intent_reason": latest_blocked_intent.get("exact_blocker_reason"),
+            "latest_blocked_strategy_intent_classification": latest_blocked_intent.get("blocker_classification"),
+            "market_data_recovery": _market_data_recovery_snapshot_for_runtime(
+                live_polling_service=self.live_polling_service,
+                internal_symbol=self.settings.symbol,
+                internal_timeframe=self.settings.resolved_execution_timeframe,
+                lane_id=self.spec.lane_id,
+                latest_processed_bar_timestamp=latest_processed_bar_timestamp,
+            ),
         }
 
     def _should_skip_live_poll(self, observed_at: datetime) -> bool:
@@ -3496,10 +3664,20 @@ class ProbationaryPaperLaneRuntime:
         latest_processed_end_ts = self.repositories.processed_bars.latest_end_ts()
         bars: list[Bar] = []
         if not self._should_skip_live_poll(observed_at):
+            poll_since = latest_processed_end_ts
+            if (
+                self._paper_route_canary_overlay_active()
+                and (
+                    poll_since is None
+                    or poll_since < observed_at.astimezone(timezone.utc) - timedelta(minutes=15)
+                )
+            ):
+                # Start on a completed-minute boundary so we do not skip the latest closed bar.
+                poll_since = _paper_route_canary_recovery_poll_since(observed_at)
             bars = self.live_polling_service.poll_bars(
                 SchwabLivePollRequest(
                     internal_symbol=self.settings.symbol,
-                    since=latest_processed_end_ts,
+                    since=poll_since,
                 ),
                 internal_timeframe=self.settings.resolved_execution_timeframe,
                 default_is_final=True,
@@ -3611,12 +3789,14 @@ class ProbationaryPaperLaneRuntime:
                 signal_source=PAPER_EXECUTION_CANARY_FORCE_SIGNAL_SOURCE,
                 reason_code=self._force_fire_canary_entry_reason_code(),
             )
+            self._force_fire_canary_entry_attempted_token = self._force_fire_canary_token()
             return
         if self._should_submit_force_fire_canary_exit(bar):
             self.strategy_engine.submit_operator_flatten_intent(
                 bar.end_ts,
                 reason_code=self._force_fire_canary_exit_reason_code(),
             )
+            self._force_fire_canary_exit_attempted_token = self._force_fire_canary_token()
             return
         if self._force_fire_canary_enabled():
             return
@@ -3643,6 +3823,8 @@ class ProbationaryPaperLaneRuntime:
             return False
         if not state.entries_enabled or state.operator_halt or state.fault_code is not None:
             return False
+        if self._paper_route_canary_overlay_active():
+            return self._paper_route_canary_entry_ready(bar=bar, session_date=session_date)
         local_time = bar.end_ts.astimezone(self.settings.timezone_info).time()
         return _time_in_closed_open_window(
             local_time,
@@ -3662,6 +3844,8 @@ class ProbationaryPaperLaneRuntime:
             return False
         if state.entry_timestamp is None:
             return False
+        if self._paper_route_canary_overlay_active():
+            return self._paper_route_canary_exit_ready(bar)
         local_time = bar.end_ts.astimezone(self.settings.timezone_info).time()
         if self.spec.canary_exit_not_before_et:
             exit_not_before = _parse_time_or_none(self.spec.canary_exit_not_before_et)
@@ -3673,6 +3857,8 @@ class ProbationaryPaperLaneRuntime:
 
     def _should_submit_force_fire_canary_entry(self) -> bool:
         if not self._force_fire_canary_enabled():
+            return False
+        if self._force_fire_canary_entry_attempted_token == self._force_fire_canary_token():
             return False
         if self._force_fire_canary_entry_count() > 0:
             return False
@@ -3688,6 +3874,8 @@ class ProbationaryPaperLaneRuntime:
     def _should_submit_force_fire_canary_exit(self, bar: Bar) -> bool:
         if not self._force_fire_canary_enabled():
             return False
+        if self._force_fire_canary_exit_attempted_token == self._force_fire_canary_token():
+            return False
         if self._force_fire_canary_entry_count() <= self._force_fire_canary_exit_count():
             return False
         state = self.strategy_engine.state
@@ -3697,7 +3885,10 @@ class ProbationaryPaperLaneRuntime:
             return False
         if state.entry_timestamp is None:
             return False
-        required_end = state.entry_timestamp + timedelta(minutes=timeframe_minutes(self.settings.resolved_execution_timeframe))
+        hold_minutes = self._paper_route_canary_decimal_param("exit_hold_minutes") or Decimal(
+            str(timeframe_minutes(self.settings.resolved_execution_timeframe))
+        )
+        required_end = state.entry_timestamp + timedelta(minutes=float(hold_minutes))
         return bar.end_ts >= required_end
 
     def _force_fire_canary_enabled(self) -> bool:
@@ -3752,6 +3943,66 @@ class ProbationaryPaperLaneRuntime:
             session_date=session_date,
             timezone_info=self.settings.timezone_info,
             reason_code=PAPER_EXECUTION_CANARY_EXIT_REASON,
+        )
+
+    def _paper_route_canary_overlay_active(self) -> bool:
+        return bool((self.spec.runtime_overlay_params or {}).get("paper_route_canary"))
+
+    def _paper_route_canary_decimal_param(self, key: str) -> Decimal | None:
+        raw_value = (self.spec.runtime_overlay_params or {}).get(key)
+        if raw_value in (None, ""):
+            return None
+        try:
+            return Decimal(str(raw_value))
+        except Exception:
+            return None
+
+    def _paper_route_canary_entry_ready(self, *, bar: Bar, session_date: date) -> bool:
+        if self._canary_reference_session_date != session_date:
+            self._canary_reference_session_date = session_date
+            self._canary_reference_close = None
+        pullback_points = self._paper_route_canary_decimal_param("entry_pullback_points") or Decimal("1")
+        if self._canary_reference_close is None:
+            self._canary_reference_close = Decimal(str(bar.close))
+            return False
+        self._canary_reference_close = max(self._canary_reference_close, Decimal(str(bar.close)))
+        if Decimal(str(bar.low)) > self._canary_reference_close - pullback_points:
+            return False
+        return self._paper_route_canary_global_gates_clear()
+
+    def _paper_route_canary_exit_ready(self, bar: Bar) -> bool:
+        move_points = self._paper_route_canary_decimal_param("exit_moe_points") or Decimal("5")
+        entry_price = self.strategy_engine.state.entry_price
+        if entry_price is None:
+            return False
+        hold_minutes = self._paper_route_canary_decimal_param("exit_hold_minutes") or Decimal("0")
+        entry_timestamp = self.strategy_engine.state.entry_timestamp
+        if entry_timestamp is not None and hold_minutes > 0:
+            required_end = entry_timestamp + timedelta(minutes=float(hold_minutes))
+            if bar.end_ts < required_end:
+                return False
+        entry_price_decimal = Decimal(str(entry_price))
+        bar_high = Decimal(str(bar.high))
+        bar_low = Decimal(str(bar.low))
+        return bool(
+            bar_high >= entry_price_decimal + move_points
+            or bar_low <= entry_price_decimal - move_points
+        )
+
+    def _paper_route_canary_global_gates_clear(self) -> bool:
+        repo_root = Path(__file__).resolve().parents[3]
+        monitor_status = _read_json(repo_root / "var" / "paper_strategy_monitor_runtime_status.json")
+        bridge_adapter = lane_submit_bridge_adapter(lane_id=self.spec.lane_id) or {}
+        return bool(
+            str(monitor_status.get("health_classification") or "").upper() == "HEALTHY"
+            and bool(monitor_status.get("submit_allowed")) is True
+            and str(monitor_status.get("classification") or "").strip() == "PAPER_STRATEGY_MONITOR_ACTIVE"
+            and str(monitor_status.get("account_id") or "").strip() == "DUM882026"
+            and float(monitor_status.get("broker_position_quantity") or 0.0) == 0.0
+            and str(monitor_status.get("broker_ledger_match") or "").strip().upper() == "MATCH"
+            and int(monitor_status.get("open_order_count") or 0) == 0
+            and bool(bridge_adapter)
+            and str(bridge_adapter.get("current_order_destination") or "").strip() == "ibkr_paper_bridge_submit_capable"
         )
 
 
@@ -3869,8 +4120,16 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
         self._services_by_instrument = dict(live_polling_services_by_instrument)
         self._bars_1m: dict[str, list[ResearchBar]] = {self._instrument: []}
         self._latest_polled_end_ts: dict[str, datetime | None] = {self._instrument: None}
-        self._signal_rows: list[dict[str, Any]] = _read_jsonl(self._lane_file("signals.jsonl"))
-        self._event_rows: list[dict[str, Any]] = _read_jsonl(self._lane_file("events.jsonl"))
+        self._signal_rows: list[dict[str, Any]] = _read_jsonl(
+            self._lane_file("signals.jsonl"),
+            limit=_RUNTIME_SIGNAL_RESTORE_LIMIT,
+            tail=True,
+        )
+        self._event_rows: list[dict[str, Any]] = _read_jsonl(
+            self._lane_file("events.jsonl"),
+            limit=_RUNTIME_EVENT_RESTORE_LIMIT,
+            tail=True,
+        )
         self._seen_decision_ids = {
             str(row.get("decision_id") or "").strip()
             for row in self._signal_rows
@@ -3907,7 +4166,8 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
 
         instrument = self._instrument
         latest_end = self._latest_polled_end_ts.get(instrument)
-        bars = self._services_by_instrument[instrument].poll_bars(
+        polling_service = self._services_by_instrument[instrument]
+        bars = polling_service.poll_bars(
             SchwabLivePollRequest(
                 internal_symbol=instrument,
                 since=latest_end,
@@ -3920,7 +4180,10 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
         for bar in bars:
             self.repositories.bars.save(bar)
             self.repositories.processed_bars.mark_processed(bar)
-            research_bar = _research_bar_from_domain_bar(bar)
+            research_bar = _research_bar_from_domain_bar(
+                bar,
+                source=getattr(polling_service, "data_source", "runtime_live_poll"),
+            )
             existing = self._bars_1m.setdefault(instrument, [])
             if not any(item.end_ts == research_bar.end_ts for item in existing):
                 existing.append(research_bar)
@@ -4054,7 +4317,11 @@ class ProbationaryAtpeCanaryLaneRuntime(ProbationaryPaperLaneRuntime):
 
     def _restore_bars_from_artifacts(self) -> None:
         restored: list[ResearchBar] = []
-        for row in _read_jsonl(self._lane_file("processed_bars.jsonl")):
+        for row in _read_jsonl(
+            self._lane_file("processed_bars.jsonl"),
+            limit=_RUNTIME_PROCESSED_BAR_RESTORE_LIMIT,
+            tail=True,
+        ):
             if str(row.get("symbol") or "").upper() != self._instrument:
                 continue
             start_ts = row.get("start_ts")
@@ -4754,8 +5021,16 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
         self._benchmark_root = Path(self.settings.probationary_artifacts_path).parent.parent
         self._bars_1m: dict[str, list[ResearchBar]] = {self._instrument: []}
         self._latest_polled_end_ts: dict[str, datetime | None] = {self._instrument: None}
-        self._signal_rows: list[dict[str, Any]] = _read_jsonl(self._lane_file("signals.jsonl"))
-        self._event_rows: list[dict[str, Any]] = _read_jsonl(self._lane_file("events.jsonl"))
+        self._signal_rows: list[dict[str, Any]] = _read_jsonl(
+            self._lane_file("signals.jsonl"),
+            limit=_RUNTIME_SIGNAL_RESTORE_LIMIT,
+            tail=True,
+        )
+        self._event_rows: list[dict[str, Any]] = _read_jsonl(
+            self._lane_file("events.jsonl"),
+            limit=_RUNTIME_EVENT_RESTORE_LIMIT,
+            tail=True,
+        )
         self._emitted_signal_keys: set[str] = set()
         self._duplicate_bar_suppression_count = 0
         self._latest_feature_rows: list[Any] = []
@@ -4796,7 +5071,10 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
         )
         for bar in bars:
             self.repositories.bars.save(bar)
-            research_bar = _research_bar_from_domain_bar(bar)
+            research_bar = _research_bar_from_domain_bar(
+                bar,
+                source=getattr(self.live_polling_service, "data_source", "runtime_live_poll"),
+            )
             existing = self._bars_1m.setdefault(instrument, [])
             if any(item.end_ts == research_bar.end_ts for item in existing):
                 self._duplicate_bar_suppression_count += 1
@@ -4965,7 +5243,11 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
 
     def _restore_bars_from_artifacts(self) -> None:
         restored: list[ResearchBar] = []
-        for row in _read_jsonl(self._lane_file("processed_bars.jsonl")):
+        for row in _read_jsonl(
+            self._lane_file("processed_bars.jsonl"),
+            limit=_RUNTIME_PROCESSED_BAR_RESTORE_LIMIT,
+            tail=True,
+        ):
             if str(row.get("symbol") or "").upper() != self._instrument:
                 continue
             start_ts = row.get("start_ts")
@@ -5015,7 +5297,11 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
             latest_atp_timing_state=latest_atp_timing_state_summary(latest_timing_state),
             order_intents=self.repositories.order_intents.list_all(),
             fills=self.repositories.fills.list_all(),
-            trade_rows=_read_jsonl(self._lane_file("trades.jsonl")),
+            trade_rows=_read_jsonl(
+                self._lane_file("trades.jsonl"),
+                limit=_RUNTIME_TRADE_RESTORE_LIMIT,
+                tail=True,
+            ),
             artifact_context="ATP_COMPANION_PAPER_RUNTIME_STATE",
         )
         payload = {
@@ -5617,7 +5903,11 @@ class ProbationaryAtpCompanionBenchmarkLaneRuntime(ProbationaryPaperLaneRuntime)
         latest_atp_state = latest_atp_state_summary(latest_feature)
         latest_atp_entry_state = latest_atp_entry_state_summary(latest_entry_state)
         latest_atp_timing_state = latest_atp_timing_state_summary(latest_timing_state)
-        trade_rows = _read_jsonl(self._lane_file("trades.jsonl"))
+        trade_rows = _read_jsonl(
+            self._lane_file("trades.jsonl"),
+            limit=_RUNTIME_TRADE_RESTORE_LIMIT,
+            tail=True,
+        )
         lifecycle_contract = _atp_paper_runtime_lifecycle_contract(
             latest_atp_entry_state=latest_atp_entry_state,
             latest_atp_timing_state=latest_atp_timing_state,
@@ -5735,6 +6025,9 @@ class ProbationaryShadowRunner:
         self._structured_logger = structured_logger
         self._alert_dispatcher = alert_dispatcher
         self._broker_truth_service = broker_truth_service
+        set_logger = getattr(self._live_polling_service, "set_recovery_event_logger", None)
+        if callable(set_logger):
+            set_logger(self._structured_logger.log_market_data_recovery_event)
 
     def run(self, poll_once: bool = False, max_cycles: int | None = None) -> ProbationaryShadowSummary:
         cycles = 0
@@ -5788,6 +6081,16 @@ class ProbationaryShadowRunner:
                     "shadow_mode_no_submit": True,
                     "broker_truth_summary": live_shadow_summary.get("broker_truth_summary"),
                     "live_shadow_summary": live_shadow_summary,
+                    "market_data_recovery": _market_data_recovery_snapshot_for_runtime(
+                        live_polling_service=self._live_polling_service,
+                        internal_symbol=self._settings.symbol,
+                        internal_timeframe=self._settings.resolved_execution_timeframe,
+                        latest_processed_bar_timestamp=(
+                            self._repositories.processed_bars.latest_end_ts().isoformat()
+                            if self._repositories.processed_bars.latest_end_ts() is not None
+                            else None
+                        ),
+                    ),
                 }
             )
             self._structured_logger.log_live_shadow_event(live_shadow_summary)
@@ -5932,6 +6235,9 @@ class ProbationaryPaperRunner:
         self._order_timeout_watchdog = _initial_order_timeout_watchdog_status(self._settings)
         self._startup_restore_validation: dict[str, Any] = {}
         self._runtime_started_at = datetime.now(timezone.utc)
+        set_logger = getattr(self._live_polling_service, "set_recovery_event_logger", None)
+        if callable(set_logger):
+            set_logger(self._structured_logger.log_market_data_recovery_event)
 
     def run(self, poll_once: bool = False, max_cycles: int | None = None) -> ProbationaryPaperSummary:
         stop_reason: str | None = None
@@ -6022,6 +6328,16 @@ class ProbationaryPaperRunner:
                         ),
                         "runtime_started_at": self._runtime_started_at.isoformat(),
                         "latest_operator_control": control_result,
+                        "market_data_recovery": _market_data_recovery_snapshot_for_runtime(
+                            live_polling_service=self._live_polling_service,
+                            internal_symbol=self._settings.symbol,
+                            internal_timeframe=self._settings.resolved_execution_timeframe,
+                            latest_processed_bar_timestamp=(
+                                self._repositories.processed_bars.latest_end_ts().isoformat()
+                                if self._repositories.processed_bars.latest_end_ts() is not None
+                                else None
+                            ),
+                        ),
                     }
                 )
                 self._structured_logger.write_live_timing_state(
@@ -6530,6 +6846,9 @@ class ProbationaryLiveStrategyPilotRunner:
         self._order_timeout_watchdog = _initial_order_timeout_watchdog_status(self._settings)
         self._startup_restore_validation: dict[str, Any] = {}
         self._latest_broker_truth_snapshot: dict[str, Any] = {}
+        set_logger = getattr(self._live_polling_service, "set_recovery_event_logger", None)
+        if callable(set_logger):
+            set_logger(self._structured_logger.log_market_data_recovery_event)
 
     def run(self, poll_once: bool = False, max_cycles: int | None = None) -> ProbationaryLiveStrategyPilotSummary:
         stop_reason = self._restore_and_reconcile_startup()
@@ -6648,6 +6967,16 @@ class ProbationaryLiveStrategyPilotRunner:
                     ),
                     "live_strategy_pilot_enabled": self._settings.live_strategy_pilot_enabled,
                     "live_strategy_pilot_submit_enabled": self._settings.live_strategy_pilot_submit_enabled,
+                    "market_data_recovery": _market_data_recovery_snapshot_for_runtime(
+                        live_polling_service=self._live_polling_service,
+                        internal_symbol=self._settings.symbol,
+                        internal_timeframe=self._settings.resolved_execution_timeframe,
+                        latest_processed_bar_timestamp=(
+                            self._repositories.processed_bars.latest_end_ts().isoformat()
+                            if self._repositories.processed_bars.latest_end_ts() is not None
+                            else None
+                        ),
+                    ),
                     "live_strategy_pilot_summary": _build_live_strategy_pilot_summary(
                         settings=self._settings,
                         repositories=self._repositories,
@@ -6902,6 +7231,7 @@ def build_probationary_live_strategy_pilot_runner(
         alert_dispatcher=alert_dispatcher,
         runtime_identity=runtime_identity,
         submit_gate_evaluator=_submit_gate,
+        allow_legacy_submit_gate=True,
     )
     return ProbationaryLiveStrategyPilotRunner(
         settings=lane_settings,
@@ -6996,10 +7326,15 @@ def _active_probationary_paper_lane_specs(settings: StrategySettings) -> tuple[P
             if row.get("lane_id")
         }
         merged_rows: list[dict[str, Any]] = []
+        runtime_lane_ids: set[str] = set()
         for row in runtime_lanes:
             lane_id = str(row.get("lane_id") or "")
+            runtime_lane_ids.add(lane_id)
             configured = configured_by_lane_id.get(lane_id, {})
             merged_rows.append({**dict(row), **configured})
+        route_canary = configured_by_lane_id.get(PAPER_ROUTE_CANARY_LANE_ID)
+        if route_canary and PAPER_ROUTE_CANARY_LANE_ID not in runtime_lane_ids:
+            merged_rows.append(dict(route_canary))
         return _coerce_probationary_paper_lane_specs(merged_rows)
     return _load_probationary_paper_lane_specs(settings)
 
@@ -7011,6 +7346,9 @@ def _configured_probationary_paper_lane_rows(settings: StrategySettings) -> list
     canary_spec = settings.probationary_paper_execution_canary_spec
     if canary_spec:
         raw_specs.append(canary_spec)
+    route_canary_spec = _paper_route_canary_spec()
+    if route_canary_spec:
+        raw_specs.append(route_canary_spec)
     if settings.probationary_atpe_canary_enabled:
         raw_specs.extend(_atpe_probationary_paper_lane_rows(settings))
     if settings.probationary_gc_mgc_acceptance_enabled:
@@ -7117,6 +7455,7 @@ def _coerce_probationary_paper_lane_specs(
                 ),
                 paper_only=bool(raw_spec.get("paper_only", False)),
                 non_approved=bool(raw_spec.get("non_approved", False)),
+                exclude_from_strategy_performance=bool(raw_spec.get("exclude_from_strategy_performance", False)),
                 observer_variant_id=(
                     str(raw_spec["observer_variant_id"]) if raw_spec.get("observer_variant_id") else None
                 ),
@@ -7252,6 +7591,56 @@ def _approved_quant_probationary_paper_lane_row(
         "strategy_identity_root": spec.lane_name,
         "runtime_kind": "approved_quant_strategy_engine",
         "live_poll_lookback_minutes": APPROVED_QUANT_RUNTIME_LOOKBACK_MINUTES,
+    }
+
+
+def _paper_route_canary_enabled() -> bool:
+    if str(os.environ.get(PAPER_ROUTE_CANARY_ENABLE_ENV) or "").strip().lower() == "true":
+        return True
+    return _paper_route_canary_enable_sentinel_path().exists()
+
+
+def _paper_route_canary_spec() -> dict[str, Any] | None:
+    if not _paper_route_canary_enabled():
+        return None
+    symbol = str(os.environ.get(PAPER_ROUTE_CANARY_SYMBOL_ENV) or PAPER_ROUTE_CANARY_SYMBOL).strip().upper()
+    if symbol not in {"MGC", "MNQ"}:
+        symbol = PAPER_ROUTE_CANARY_SYMBOL
+    point_value = "2" if symbol == "MNQ" else "10"
+    return {
+        "lane_id": PAPER_ROUTE_CANARY_LANE_ID,
+        "display_name": PAPER_ROUTE_CANARY_LABEL,
+        "symbol": symbol,
+        "long_sources": [],
+        "short_sources": [],
+        "session_restriction": "ALL",
+        "allowed_sessions": ["ALL"],
+        "point_value": point_value,
+        "trade_size": 1,
+        "catastrophic_open_loss": "-250",
+        "lane_mode": PAPER_EXECUTION_CANARY_MODE,
+        "strategy_family": PAPER_ROUTE_CANARY_LABEL,
+        "runtime_kind": "strategy_engine",
+        "execution_timeframe": "1m",
+        "structural_signal_timeframe": "1m",
+        "artifact_timeframe": "1m",
+        "context_timeframes": ["1m"],
+        "canary_entry_not_before_et": "13:30:00",
+        "canary_entry_window_end_et": "16:00:00",
+        "canary_max_entries_per_session": 1,
+        "canary_one_shot_per_session": True,
+        "paper_only": True,
+        "non_approved": True,
+        "exclude_from_strategy_performance": True,
+        "experimental_status": PAPER_ROUTE_CANARY_EXPERIMENTAL_STATUS,
+        "runtime_overlay_params": {
+            "paper_route_canary": True,
+            "route_canary_label": PAPER_ROUTE_CANARY_LABEL,
+            "entry_reference_mode": "highest_close_since_enablement",
+            "entry_pullback_points": "1",
+            "exit_moe_points": "5",
+            "exit_hold_minutes": "10",
+        },
     }
 
 
@@ -7500,7 +7889,12 @@ def _build_probationary_strategy_engine(
     alert_dispatcher: AlertDispatcher,
     runtime_identity: dict[str, Any] | None,
     submit_gate_evaluator: Any | None = None,
+    allow_legacy_submit_gate: bool = False,
 ) -> StrategyEngine:
+    if submit_gate_evaluator is not None and not allow_legacy_submit_gate:
+        raise ValueError(
+            "Legacy submit_gate_evaluator wiring is reserved for explicit live-strategy-pilot mode only."
+        )
     if spec.runtime_kind == "approved_quant_strategy_engine":
         quant_spec = next(
             candidate
@@ -7570,6 +7964,9 @@ def _build_probationary_paper_lane_settings(
     settings: StrategySettings,
     spec: ProbationaryPaperLaneSpec,
 ) -> StrategySettings:
+    lane_database_url = _normalize_probationary_lane_database_url(
+        spec.database_url or _derive_probationary_lane_database_url(settings.database_url, spec.lane_id)
+    )
     updates: dict[str, Any] = {
         "symbol": spec.symbol,
         "trade_size": spec.trade_size,
@@ -7578,7 +7975,7 @@ def _build_probationary_paper_lane_settings(
         "max_position_quantity": spec.max_position_quantity,
         "max_adds_after_entry": spec.max_adds_after_entry,
         "add_direction_policy": spec.add_direction_policy,
-        "database_url": spec.database_url or _derive_probationary_lane_database_url(settings.database_url, spec.lane_id),
+        "database_url": lane_database_url,
         "probationary_artifacts_dir": spec.artifacts_dir or str(settings.probationary_artifacts_path / "lanes" / spec.lane_id),
         "probationary_paper_lane_id": spec.lane_id,
         "probationary_paper_lane_display_name": spec.display_name,
@@ -7647,6 +8044,34 @@ def _derive_probationary_lane_database_url(database_url: str, lane_id: str) -> s
     suffix = path.suffix or ".sqlite3"
     derived_path = path.with_name(f"{path.stem}__{lane_id}{suffix}")
     return f"sqlite:///{derived_path}"
+
+
+def _normalize_probationary_lane_database_url(database_url: str) -> str:
+    if not database_url.startswith("sqlite:///"):
+        return database_url
+    raw_path = database_url.removeprefix("sqlite:///")
+    path = Path(raw_path)
+    if path.name == ":memory:":
+        return database_url
+    _promote_probationary_duplicate_lane_database(path)
+    return f"sqlite:///{path}"
+
+
+def _promote_probationary_duplicate_lane_database(path: Path) -> None:
+    canonical_path = path.expanduser()
+    duplicate_candidates = sorted(canonical_path.parent.glob(f"{canonical_path.stem} *{canonical_path.suffix}"))
+    if len(duplicate_candidates) != 1:
+        return
+    duplicate_path = duplicate_candidates[0]
+    if duplicate_path == canonical_path or not duplicate_path.exists():
+        return
+    canonical_exists = canonical_path.exists()
+    if canonical_exists and canonical_path.stat().st_size > 4096:
+        return
+    if canonical_exists and canonical_path.stat().st_size <= 4096:
+        placeholder_backup = canonical_path.with_name(f"{canonical_path.name}.placeholder")
+        canonical_path.replace(placeholder_backup)
+    duplicate_path.replace(canonical_path)
 
 
 def _write_probationary_paper_config_in_force(
@@ -7823,45 +8248,11 @@ def _latest_completed_probationary_bar_end(now: datetime, timeframe: str) -> dat
 
 
 def _session_restriction_matches_phase(current_phase: str, restriction: str | None) -> bool:
-    normalized = str(restriction or "").upper()
-    if not normalized:
-        return True
-    if "/" in normalized:
-        allowed = {part.strip() for part in normalized.split("/") if part.strip()}
-        coarse = _phase_coarse_session_group(current_phase)
-        return coarse in allowed or current_phase in allowed
-    if normalized == "ASIA_EARLY":
-        return current_phase == "ASIA_EARLY"
-    if normalized in {"US_EARLY", "NY_EARLY"}:
-        return current_phase == "US_EARLY"
-    if normalized == "US_LATE":
-        return current_phase == "US_LATE"
-    if normalized == "US_EARLY_OBSERVATION":
-        return current_phase in {"US_PREOPEN_OPENING", "US_CASH_OPEN_IMPULSE", "US_OPEN_LATE"}
-    return current_phase == normalized
+    return shared_session_restriction_matches_phase(current_phase, restriction)
 
 
 def _session_restriction_matches_now(now: datetime, restriction: str | None) -> bool:
-    normalized = str(restriction or "").upper()
-    if not normalized:
-        return True
-    current_phase = label_session_phase(now)
-    if "/" in normalized:
-        allowed = {part.strip() for part in normalized.split("/") if part.strip()}
-        coarse = _phase_coarse_session_group(current_phase)
-        return coarse in allowed or current_phase in allowed
-    local_time = now.timetz().replace(tzinfo=None)
-    if _gold_session_restriction_matches_time(local_time, normalized):
-        return True
-    if normalized == "US_EARLY_OBSERVATION":
-        return current_phase in {"US_PREOPEN_OPENING", "US_CASH_OPEN_IMPULSE", "US_OPEN_LATE"}
-    if normalized == "ASIA_EARLY":
-        return current_phase == "ASIA_EARLY"
-    if normalized in {"US_EARLY", "NY_EARLY"}:
-        return current_phase == "US_EARLY"
-    if normalized == "US_LATE":
-        return current_phase == "US_LATE"
-    return current_phase == normalized
+    return session_restriction_matches_timestamp(now, restriction)
 
 
 def _gold_session_restriction_matches_time(local_time: dt_time, restriction: str) -> bool:
@@ -7897,14 +8288,7 @@ def _gc_mgc_asia_retest_hold_london_open_extension_matches(*, symbol: str, long_
 
 
 def _phase_coarse_session_group(current_phase: str) -> str:
-    normalized = str(current_phase or "").upper()
-    if normalized.startswith("ASIA_"):
-        return "ASIA"
-    if normalized.startswith("LONDON_"):
-        return "LONDON"
-    if normalized.startswith("US_"):
-        return "US"
-    return "UNKNOWN"
+    return shared_phase_coarse_session_group(current_phase)
 
 
 def _probationary_lane_eligibility_snapshot(
@@ -8081,9 +8465,17 @@ def _load_latest_probationary_live_mark(engine, symbol: str) -> Decimal | None:
     with engine.begin() as connection:
         row = connection.execute(
             select(bars_table.c.close)
-            .where(bars_table.c.data_source == "schwab_live_poll")
             .where(bars_table.c.symbol == symbol)
-            .order_by(bars_table.c.end_ts.desc())
+            .order_by(
+                bars_table.c.end_ts.desc(),
+                case(
+                    (bars_table.c.data_source == "databento_live", 0),
+                    (bars_table.c.data_source.like("databento%"), 1),
+                    (bars_table.c.data_source == "schwab_live_poll", 2),
+                    else_=3,
+                ),
+                bars_table.c.created_at.desc(),
+            )
             .limit(1)
         ).first()
     return Decimal(str(row.close)) if row is not None and row.close is not None else None
@@ -10104,6 +10496,7 @@ class _IbkrPaperBridgeRuntimeBroker:
         self._position = PaperPosition()
         self._open_order_ids: list[str] = []
         self._order_status: dict[str, OrderStatus] = {}
+        self._order_metadata: dict[str, dict[str, Any]] = {}
         self._last_fill_timestamp: datetime | None = None
         self._last_submit_context: dict[str, Any] = {
             "lane_id": self._lane_id,
@@ -10157,6 +10550,11 @@ class _IbkrPaperBridgeRuntimeBroker:
             artifacts = self._bridge_runner(config=bridge_config)
             report = dict(artifacts.report or {})
             self._last_bridge_report = report
+            if bridge_config.output_dir is not None:
+                write_ibkr_paper_strategy_bridge_artifacts(
+                    output_dir=Path(bridge_config.output_dir),
+                    artifacts=artifacts,
+                )
             self._last_submit_context = {
                 **self._last_submit_context,
                 "bridge_classification": artifacts.classification,
@@ -10169,12 +10567,14 @@ class _IbkrPaperBridgeRuntimeBroker:
             broker_order_id = _extract_bridge_broker_order_id(report)
             if not broker_order_id:
                 raise RuntimeError("IBKR paper bridge returned a successful classification without a broker_order_id.")
+            order_metadata = _extract_bridge_order_metadata(report, broker_order_id=broker_order_id)
             status = (
                 OrderStatus.FILLED
                 if artifacts.classification == "PAPER_STRATEGY_ORDER_FILLED"
                 else OrderStatus.ACKNOWLEDGED
             )
             self._order_status[broker_order_id] = status
+            self._order_metadata[broker_order_id] = order_metadata
             if status is OrderStatus.ACKNOWLEDGED:
                 self._open_order_ids = [broker_order_id]
             else:
@@ -10187,6 +10587,14 @@ class _IbkrPaperBridgeRuntimeBroker:
                 **self._last_submit_context,
                 "broker_order_id": broker_order_id,
                 "bridge_order_status": status.value,
+                "perm_id": order_metadata.get("perm_id"),
+                "client_id": order_metadata.get("client_id"),
+                "execution_id": order_metadata.get("execution_id"),
+                "local_symbol": order_metadata.get("local_symbol"),
+                "con_id": order_metadata.get("con_id"),
+                "fill_price": order_metadata.get("fill_price"),
+                "fill_timestamp": order_metadata.get("fill_timestamp"),
+                "bridge_order_metadata": dict(order_metadata),
             }
             return broker_order_id
         except Exception as exc:
@@ -10231,12 +10639,23 @@ class _IbkrPaperBridgeRuntimeBroker:
         if status is OrderStatus.FILLED:
             fill_timestamp = self._last_fill_timestamp.isoformat() if self._last_fill_timestamp is not None else None
             fill_price = str(self._position.average_price) if self._position.average_price is not None else None
+        metadata = dict(self._order_metadata.get(normalized) or {})
+        if fill_timestamp is None:
+            fill_timestamp = str(metadata.get("fill_timestamp") or "").strip() or None
+        if fill_price is None:
+            fill_price = str(metadata.get("fill_price") or "").strip() or None
         return {
             "broker_order_id": normalized,
             "status": status.value,
             "fill_timestamp": fill_timestamp,
             "fill_price": fill_price,
             "route_destination": self.route_destination,
+            "perm_id": metadata.get("perm_id"),
+            "client_id": metadata.get("client_id"),
+            "execution_id": metadata.get("execution_id"),
+            "local_symbol": metadata.get("local_symbol"),
+            "con_id": metadata.get("con_id"),
+            "contract": metadata.get("contract"),
         }
 
     def get_open_orders(self) -> list[dict[str, Any]]:
@@ -10270,6 +10689,7 @@ class _IbkrPaperBridgeRuntimeBroker:
             "average_price": str(self._position.average_price) if self._position.average_price is not None else None,
             "open_order_ids": list(self._open_order_ids),
             "order_status": {key: status.value for key, status in self._order_status.items()},
+            "order_metadata": {key: dict(value) for key, value in self._order_metadata.items()},
             "last_fill_timestamp": self._last_fill_timestamp.isoformat() if self._last_fill_timestamp is not None else None,
             "route_destination": self.route_destination,
             "last_submit_context": dict(self._last_submit_context),
@@ -10434,6 +10854,9 @@ def _extract_bridge_broker_order_id(report: dict[str, Any]) -> str | None:
         _nested_get(report, "delegated_result", "report", "lifecycle", "broker_order_id"),
         _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "order_id"),
         _nested_get(report, "delegated_result", "report", "lifecycle", "order_id"),
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "submitted_order_id"),
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "latest_order_status", "order_id"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "latest_order_status", "order_id"),
     ]
     for candidate in candidates:
         text = str(candidate or "").strip()
@@ -10448,7 +10871,15 @@ def _extract_bridge_fill_price(report: dict[str, Any]) -> Decimal | None:
         _nested_get(report, "delegated_result", "report", "lifecycle", "average_fill_price"),
         _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "fill_price"),
         _nested_get(report, "delegated_result", "report", "lifecycle", "fill_price"),
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "latest_order_status", "avg_fill_price"),
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "latest_order_status", "last_fill_price"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "latest_order_status", "avg_fill_price"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "latest_order_status", "last_fill_price"),
     ]
+    executions = list(_nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "executions_after_submit") or [])
+    for execution in executions:
+        if isinstance(execution, dict):
+            candidates.append(execution.get("price"))
     for candidate in candidates:
         if candidate in (None, ""):
             continue
@@ -10465,11 +10896,61 @@ def _extract_bridge_fill_timestamp(report: dict[str, Any]) -> datetime | None:
         _nested_get(report, "delegated_result", "report", "lifecycle", "fill_timestamp"),
         _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "filled_at"),
         _nested_get(report, "delegated_result", "report", "lifecycle", "filled_at"),
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "latest_order_status", "updated_at"),
+        _nested_get(report, "delegated_result", "report", "lifecycle", "latest_order_status", "updated_at"),
     ]
+    executions = list(_nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "executions_after_submit") or [])
+    for execution in executions:
+        if isinstance(execution, dict):
+            candidates.append(execution.get("executed_at"))
     for candidate in candidates:
         parsed = _parse_iso_datetime_or_none(candidate)
         if parsed is not None:
             return parsed
+    return None
+
+
+def _extract_bridge_order_metadata(report: dict[str, Any], *, broker_order_id: str | None) -> dict[str, Any]:
+    executions = [
+        dict(row)
+        for row in list(_nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "executions_after_submit") or [])
+        if isinstance(row, dict)
+    ]
+    first_execution = executions[0] if executions else {}
+    contract = dict(
+        _nested_get(report, "delegated_result", "report", "preview_payload", "contract")
+        or _nested_get(report, "exact_contract")
+        or {}
+    )
+    fill_timestamp = _extract_bridge_fill_timestamp(report)
+    fill_price = _extract_bridge_fill_price(report)
+    metadata = {
+        "broker_order_id": broker_order_id,
+        "perm_id": _first_present(
+            _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "submitted_perm_id"),
+            _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "latest_order_status", "perm_id"),
+            _nested_get(report, "delegated_result", "report", "lifecycle", "perm_id"),
+        ),
+        "client_id": _first_present(
+            _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "latest_order_status", "client_id"),
+            _nested_get(report, "delegated_result", "report", "connection_check", "client_id"),
+            _nested_get(report, "delegated_result", "report", "preview_payload", "environment", "client_id"),
+        ),
+        "execution_id": _first_present(first_execution.get("execution_id"), first_execution.get("exec_id")),
+        "local_symbol": _first_present(contract.get("local_symbol"), contract.get("localSymbol")),
+        "con_id": _first_present(contract.get("qualified_contract_identifier"), contract.get("con_id"), contract.get("conId")),
+        "contract": contract,
+        "fill_price": str(fill_price) if fill_price is not None else None,
+        "fill_timestamp": fill_timestamp.isoformat() if fill_timestamp is not None else None,
+        "executions": executions,
+    }
+    return {key: value for key, value in metadata.items() if value not in (None, "", [])}
+
+
+def _first_present(*candidates: Any) -> Any:
+    for candidate in candidates:
+        if candidate not in (None, ""):
+            return candidate
     return None
 
 
@@ -13693,6 +14174,23 @@ def _build_live_polling_service(
     repositories: RepositorySet,
     schwab_config_path: str | Path | None,
 ) -> LivePollingService:
+    if settings.market_data_provider is MarketDataProvider.DATABENTO:
+        provider = DatabentoMarketDataProvider(
+            settings,
+            repo_root=Path(__file__).resolve().parents[3],
+        )
+        symbol_description = provider.describe_symbol(settings.symbol)
+        return LivePollingService(
+            adapter=None,
+            client=DatabentoRawLivePollingClient(provider=provider, lookback_minutes=settings.live_poll_lookback_minutes),
+            repositories=repositories,
+            canonical_maintenance=CanonicalMarketDataMaintenanceService(database_url=settings.database_url),
+            data_source="databento_live",
+            provider="databento",
+            provenance_tag="databento_raw_live_poll",
+            dataset=str(symbol_description.get("dataset") or "GLBX.MDP3"),
+            schema_name=str((symbol_description.get("schema_by_timeframe") or {}).get("1m") or "ohlcv-1m"),
+        )
     schwab_config = load_schwab_market_data_config(schwab_config_path)
     adapter = SchwabMarketDataAdapter(settings, schwab_config)
     oauth_client = SchwabOAuthClient(
@@ -13819,6 +14317,48 @@ def _probationary_runtime_transport_diagnostic_payload(
     }
 
 
+def _probationary_runtime_databento_transport_diagnostic_payload(
+    settings: StrategySettings,
+    provider: DatabentoMarketDataProvider,
+) -> dict[str, Any]:
+    symbol_description = provider.describe_symbol(settings.symbol)
+    dataset = str(symbol_description.get("dataset") or "GLBX.MDP3")
+    host = databento_live_gateway_host(dataset)
+    port = 13000
+    symbol_description = provider.describe_symbol(settings.symbol)
+    now = datetime.now(settings.timezone_info)
+    start_dt = now - timedelta(
+        minutes=max(settings.live_poll_lookback_minutes, timeframe_minutes(settings.resolved_execution_timeframe))
+    )
+    timeframe = settings.resolved_execution_timeframe
+    request_payload = {
+        "internal_symbol": settings.symbol,
+        "timeframe": timeframe,
+        "start": start_dt.astimezone(timezone.utc).isoformat(),
+        "provider_request_symbol": symbol_description.get("request_symbol"),
+        "provider_dataset": symbol_description.get("dataset"),
+        "provider_schema": (symbol_description.get("schema_by_timeframe") or {}).get(timeframe),
+        "stype_in": symbol_description.get("stype_in"),
+    }
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "blocker_label": "market_data_transport_failure",
+        "cwd": os.getcwd(),
+        "target_host": host,
+        "market_data_base_url": f"tcp://{host}:{port}",
+        "probe_symbol_internal": settings.symbol,
+        "probe_timeframe": timeframe,
+        "context_timeframes": list(settings.resolved_context_timeframes),
+        "request_query": request_payload,
+        "proxy_env": _probationary_runtime_transport_env(),
+        "python_executable": sys.executable,
+        "venv_prefix": sys.prefix,
+        "hostname": host,
+        "port": port,
+        "pid": os.getpid(),
+    }
+
+
 def run_probationary_market_data_transport_probe(
     config_paths: Sequence[str | Path],
     schwab_config_path: str | Path | None,
@@ -13838,6 +14378,96 @@ def _run_probationary_runtime_market_data_transport_probe(
     adapter: SchwabMarketDataAdapter | None = None,
     oauth_client: SchwabOAuthClient | None = None,
 ) -> dict[str, Any]:
+    if settings.market_data_provider is MarketDataProvider.DATABENTO:
+        provider = DatabentoMarketDataProvider(
+            settings,
+            repo_root=Path(__file__).resolve().parents[3],
+        )
+        diagnostic = _probationary_runtime_databento_transport_diagnostic_payload(settings, provider)
+        print(f"Probationary paper runtime network preflight: {json.dumps(diagnostic, sort_keys=True)}", flush=True)
+        failure_base = {
+            **diagnostic,
+            "runtime_ready": False,
+            "status": "failed",
+            "next_fix": (
+            "Host cannot reach the Databento live market-data gateway from the paper runtime context. "
+            "Verify Databento credentials and host DNS/proxy settings, then rerun the shared market-data transport probe."
+        ),
+        }
+        try:
+            resolved = socket.getaddrinfo(str(diagnostic["target_host"]), int(diagnostic["port"]), type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            failure_payload = {
+                **failure_base,
+                "failure_kind": "dns_resolution_failed",
+                "dns_resolution_succeeds": False,
+                "authenticated_probe_attempted": False,
+                "authenticated_probe_succeeds": False,
+                "exception_text": str(exc),
+                "message": f"DNS resolution failed for {diagnostic['target_host']}.",
+            }
+            failure_path = _write_probationary_runtime_transport_failure(settings, failure_payload)
+            failure_payload["artifact_path"] = str(failure_path)
+            raise ProbationaryRuntimeTransportFailure(failure_payload) from exc
+
+        resolved_addresses = sorted({entry[4][0] for entry in resolved if entry[4]})
+        try:
+            api_key = str(getattr(provider, "_api_key", "")).strip()  # noqa: SLF001
+            if not api_key:
+                raise RuntimeError("Databento live access requires DATABENTO_API_KEY to be set.")
+            with socket.create_connection((str(diagnostic["target_host"]), int(diagnostic["port"])), timeout=10.0) as sock:
+                sock.settimeout(10.0)
+                reader = sock.makefile("r", encoding="utf-8", newline="\n")
+                writer = sock.makefile("w", encoding="utf-8", newline="\n")
+                greeting = reader.readline().strip()
+                challenge = reader.readline().strip()
+                challenge_fields = {}
+                for part in challenge.split("|"):
+                    if "=" not in part:
+                        continue
+                    key, value = part.split("=", 1)
+                    challenge_fields[key.strip()] = value.strip()
+                cram = challenge_fields.get("cram")
+                if not greeting or not cram:
+                    raise RuntimeError(f"Databento live gateway handshake failed: {greeting!r} / {challenge!r}")
+                writer.write(
+                    "auth="
+                    + databento_live_auth_response(cram=cram, api_key=api_key)
+                    + f"|dataset={diagnostic['request_query']['provider_dataset']}|encoding=json|pretty_px=1|pretty_ts=1|heartbeat_interval_s=5\n"
+                )
+                writer.flush()
+                auth_response = reader.readline().strip()
+                if "success=1" not in auth_response:
+                    raise RuntimeError(f"Databento live gateway auth failed: {auth_response}")
+        except Exception as exc:
+            failure_payload = {
+                **failure_base,
+                "failure_kind": "authenticated_databento_live_probe_failed",
+                "dns_resolution_succeeds": True,
+                "resolved_addresses": resolved_addresses,
+                "authenticated_probe_attempted": True,
+                "authenticated_probe_succeeds": False,
+                "exception_text": str(exc),
+                "message": f"Authenticated Databento live gateway probe failed for {diagnostic['target_host']}.",
+            }
+            failure_path = _write_probationary_runtime_transport_failure(settings, failure_payload)
+            failure_payload["artifact_path"] = str(failure_path)
+            raise ProbationaryRuntimeTransportFailure(failure_payload) from exc
+
+        success_payload = {
+            **diagnostic,
+            "status": "ok",
+            "runtime_ready": True,
+            "dns_resolution_succeeds": True,
+            "resolved_addresses": resolved_addresses,
+            "authenticated_probe_attempted": True,
+            "authenticated_probe_succeeds": True,
+        }
+        _clear_probationary_runtime_transport_failure(settings)
+        artifact_path = _write_probationary_runtime_transport_probe(settings, success_payload)
+        success_payload["artifact_path"] = str(artifact_path)
+        return success_payload
+
     resolved_schwab_config = schwab_config or load_schwab_market_data_config(schwab_config_path)
     resolved_adapter = adapter or SchwabMarketDataAdapter(settings, resolved_schwab_config)
     diagnostic = _probationary_runtime_transport_diagnostic_payload(settings, resolved_schwab_config, resolved_adapter)
@@ -13928,22 +14558,75 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+def _read_jsonl(path: Path, *, limit: int | None = None, tail: bool = False) -> list[dict[str, Any]]:
     if not path.exists():
         return []
+    if limit is not None and limit <= 0:
+        return []
+    if tail and limit is not None:
+        return _read_jsonl_tail(path, limit=limit)
     records: list[dict[str, Any]] = []
+    buffered_records: deque[dict[str, Any]] | None = deque(maxlen=limit) if tail and limit is not None else None
     invalid_lines: list[int] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    row = json.loads(stripped)
+                except json.JSONDecodeError:
+                    invalid_lines.append(line_number)
+                    continue
+                if buffered_records is not None:
+                    buffered_records.append(row)
+                else:
+                    records.append(row)
+                    if limit is not None and len(records) >= limit:
+                        break
+    except OSError:
+        return []
+    if buffered_records is not None:
+        records = list(buffered_records)
+    if invalid_lines:
+        print(
+            f"Skipping malformed JSONL rows in {path}: {invalid_lines}",
+            file=sys.stderr,
+        )
+    return records
+
+
+def _read_jsonl_tail(path: Path, *, limit: int) -> list[dict[str, Any]]:
+    invalid_lines: list[int] = []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            chunk_size = 8192
+            buffer = b""
+            line_chunks: list[bytes] = []
+            while position > 0 and len(line_chunks) < limit + 1:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                handle.seek(position)
+                buffer = handle.read(read_size) + buffer
+                line_chunks = buffer.splitlines()
+            tail_chunks = line_chunks[-limit:]
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(tail_chunks, start=1):
         stripped = line.strip()
         if not stripped:
             continue
         try:
-            records.append(json.loads(stripped))
-        except json.JSONDecodeError:
+            records.append(json.loads(stripped.decode("utf-8")))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             invalid_lines.append(line_number)
     if invalid_lines:
         print(
-            f"Skipping malformed JSONL rows in {path}: {invalid_lines}",
+            f"Skipping malformed JSONL tail rows in {path}: {invalid_lines}",
             file=sys.stderr,
         )
     return records
@@ -13997,7 +14680,12 @@ def _default_atpe_runtime_snapshot_rows(root: Path, *, instruments: Sequence[str
     return rows
 
 
-def _research_bar_from_domain_bar(bar: Bar) -> ResearchBar:
+def _research_bar_from_domain_bar(
+    bar: Bar,
+    *,
+    source: str = "runtime_live_poll",
+    provenance: str = "probationary_paper_runtime",
+) -> ResearchBar:
     phase = label_session_phase(bar.end_ts)
     return ResearchBar(
         instrument=str(bar.symbol).upper(),
@@ -14011,8 +14699,8 @@ def _research_bar_from_domain_bar(bar: Bar) -> ResearchBar:
         volume=int(bar.volume),
         session_label=phase,
         session_segment=_phase_coarse_session_group(phase),
-        source="schwab_live_poll",
-        provenance="probationary_paper_runtime",
+        source=source,
+        provenance=provenance,
     )
 
 
@@ -14920,7 +15608,7 @@ def _count_bars_for_session_date(engine, session_date: date, settings: StrategyS
         session_date=session_date,
         timezone_info=settings.timezone_info,
     )
-    return sum(1 for row in rows if row.get("data_source") == "schwab_live_poll")
+    return len(_preferred_runtime_live_bar_rows(rows))
 
 
 def _load_bars_for_session_date(engine, session_date: date, settings: StrategySettings) -> list[Bar]:
@@ -14931,6 +15619,7 @@ def _load_bars_for_session_date(engine, session_date: date, settings: StrategySe
         session_date=session_date,
         timezone_info=settings.timezone_info,
     )
+    preferred_rows = _preferred_runtime_live_bar_rows(rows)
     return [
         Bar(
             bar_id=row["bar_id"],
@@ -14949,9 +15638,22 @@ def _load_bars_for_session_date(engine, session_date: date, settings: StrategySe
             session_us=bool(row["session_us"]),
             session_allowed=bool(row["session_allowed"]),
         )
-        for row in rows
-        if row.get("data_source") == "schwab_live_poll"
+        for row in preferred_rows
     ]
+
+
+def _preferred_runtime_live_bar_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    databento_rows = [
+        row for row in rows if str(row.get("data_source") or "").strip().lower().startswith("databento")
+    ]
+    if databento_rows:
+        return databento_rows
+    schwab_rows = [
+        row for row in rows if str(row.get("data_source") or "").strip().lower() == "schwab_live_poll"
+    ]
+    if schwab_rows:
+        return schwab_rows
+    return list(rows)
 
 
 def _load_open_order_intent_rows(repositories: RepositorySet) -> list[dict[str, Any]]:

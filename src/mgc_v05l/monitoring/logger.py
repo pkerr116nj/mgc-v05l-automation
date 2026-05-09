@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -13,6 +14,11 @@ from typing import Any
 def get_logger(name: str) -> logging.Logger:
     """Return a standard logger pending structured logging configuration."""
     return logging.getLogger(name)
+
+
+def _runtime_event_logging_enabled() -> bool:
+    raw = str(os.environ.get("MGC_ENABLE_RUNTIME_EVENT_LOGS") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 class StructuredLogger:
@@ -28,52 +34,99 @@ class StructuredLogger:
         return self._artifact_dir
 
     def log_branch_source(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "branch_sources.jsonl"
         return self._append_jsonl("branch_sources.jsonl", payload)
 
     def log_rule_block(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "rule_blocks.jsonl"
         return self._append_jsonl("rule_blocks.jsonl", payload)
 
     def log_alert(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "alerts.jsonl"
         return self._append_jsonl("alerts.jsonl", payload)
 
     def write_alert_state(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "alerts_state.json"
         return self._write_json("alerts_state.json", payload)
 
     def log_reconciliation_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "reconciliation_events.jsonl"
         return self._append_jsonl("reconciliation_events.jsonl", payload)
 
     def log_execution_watchdog_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "execution_watchdog_events.jsonl"
         return self._append_jsonl("execution_watchdog_events.jsonl", payload)
 
     def log_restore_validation_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_validation_event_logging_enabled():
+            return self._artifact_dir / "restore_validation_events.jsonl"
         return self._append_jsonl("restore_validation_events.jsonl", payload)
 
     def log_paper_soak_validation_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "paper_soak_validation_events.jsonl"
         return self._append_jsonl("paper_soak_validation_events.jsonl", payload)
 
     def log_paper_soak_extended_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "paper_soak_extended_events.jsonl"
         return self._append_jsonl("paper_soak_extended_events.jsonl", payload)
 
     def log_paper_soak_unattended_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "paper_soak_unattended_events.jsonl"
         return self._append_jsonl("paper_soak_unattended_events.jsonl", payload)
 
     def log_exit_parity_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "exit_parity_events.jsonl"
         return self._append_jsonl("exit_parity_events.jsonl", payload)
 
     def log_live_timing_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "live_timing_events.jsonl"
         return self._append_jsonl("live_timing_events.jsonl", payload)
 
     def log_live_shadow_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "live_shadow_events.jsonl"
         return self._append_jsonl("live_shadow_events.jsonl", payload)
 
     def log_live_strategy_pilot_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "live_strategy_pilot_events.jsonl"
         return self._append_jsonl("live_strategy_pilot_events.jsonl", payload)
 
     def log_live_strategy_pilot_cycle_event(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "live_strategy_pilot_cycle_events.jsonl"
         return self._append_jsonl("live_strategy_pilot_cycle_events.jsonl", payload)
 
     def log_operator_control(self, payload: dict[str, Any]) -> Path:
+        if not _runtime_event_logging_enabled():
+            return self._artifact_dir / "operator_controls.jsonl"
         return self._append_jsonl("operator_controls.jsonl", payload)
+
+    def log_market_data_recovery_event(self, payload: dict[str, Any]) -> Path:
+        return self._append_jsonl("market_data_recovery_events.jsonl", payload)
+
+    def log_blocked_strategy_intent(self, payload: dict[str, Any]) -> Path:
+        return self._append_jsonl("blocked_strategy_intents.jsonl", payload)
+
+    def write_blocked_strategy_intent_state(self, payload: dict[str, Any]) -> Path:
+        return self._write_json("blocked_strategy_intent_latest.json", payload)
+
+    def log_filled_bridge_result(self, payload: dict[str, Any]) -> Path:
+        return self._append_jsonl("filled_bridge_results.jsonl", payload)
+
+    def write_filled_bridge_result_state(self, payload: dict[str, Any]) -> Path:
+        return self._write_json("filled_bridge_result_latest.json", payload)
 
     def write_operator_status(self, payload: dict[str, Any]) -> Path:
         return self._write_json("operator_status.json", payload)
@@ -128,9 +181,15 @@ class StructuredLogger:
     def _write_json(self, file_name_or_path: str | Path, payload: dict[str, Any]) -> Path:
         path = file_name_or_path if isinstance(file_name_or_path, Path) else self._artifact_dir / file_name_or_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, sort_keys=True, indent=2, default=_json_default)
-            handle.write("\n")
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, sort_keys=True, indent=2, default=_json_default)
+                handle.write("\n")
+            tmp_path.replace(path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
         return path
 
 
@@ -142,3 +201,8 @@ def _json_default(value: Any) -> Any:
     if hasattr(value, "value"):
         return value.value
     return str(value)
+
+
+def _runtime_validation_event_logging_enabled() -> bool:
+    raw = str(os.environ.get("MGC_ENABLE_RUNTIME_VALIDATION_EVENT_LOGS") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
