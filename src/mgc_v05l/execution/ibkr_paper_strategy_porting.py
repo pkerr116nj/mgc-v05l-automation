@@ -196,6 +196,10 @@ def lane_submit_bridge_adapter(*, lane_id: str) -> dict[str, Any] | None:
     return dict(adapter) if isinstance(adapter, dict) else None
 
 
+def submit_capable_lane_adapters() -> dict[str, dict[str, Any]]:
+    return {lane_id: dict(adapter) for lane_id, adapter in _SUBMIT_CAPABLE_LANE_ADAPTERS.items()}
+
+
 def run_ibkr_paper_strategy_porting(*, config: IbkrPaperStrategyPortingConfig) -> IbkrPaperStrategyPortingArtifacts:
     audit_events: list[dict[str, Any]] = []
     dashboard_snapshot = _load_json(config.repo_root / config.dashboard_snapshot_path)
