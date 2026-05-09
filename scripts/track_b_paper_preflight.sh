@@ -4,7 +4,7 @@ set -uo pipefail
 REPO_ROOT="/Users/patrick/Dev/MGC-v05l-automation"
 OUT_DIR="${REPO_ROOT}/outputs/reports/track_b_paper_preflight"
 OUT_JSON="${OUT_DIR}/latest_track_b_paper_preflight.json"
-REQUIRED_PATCH_COMMITS="d7b126c10d 35064b698c 94695132b1"
+REQUIRED_PATCH_COMMITS="d7b126c10d 35064b698c 94695132b1 520bd7313f 57402b55a7"
 
 usage() {
   echo "Usage: $0 --mode weekend-static|monday-live" >&2
@@ -292,6 +292,42 @@ add(
     "no paper_proof invocation evidence" if not proof_hits else "\n".join(proof_hits[:20]),
     hit_count=len(proof_hits),
 )
+
+expected_phase1_symbols = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB")
+try:
+    from mgc_v05l.app.phase1_ticker_readiness_matrix import (
+        Phase1TickerReadinessMatrixConfig,
+        build_phase1_ticker_readiness_matrix,
+    )
+
+    matrix_artifacts = build_phase1_ticker_readiness_matrix(
+        config=Phase1TickerReadinessMatrixConfig(repo_root=REPO_ROOT)
+    )
+    matrix_rows = list(matrix_artifacts.rows)
+    matrix_symbols = tuple(str(row.get("approved_phase1_symbol") or "") for row in matrix_rows)
+    matrix_live_money_false = all(row.get("live_money_eligible") is False for row in matrix_rows)
+    add(
+        "phase1_ticker_readiness_matrix_static",
+        len(matrix_rows) == 10
+        and int(matrix_artifacts.report.get("can_submit_count", -1)) == 0
+        and matrix_symbols == expected_phase1_symbols
+        and matrix_live_money_false,
+        True,
+        (
+            f"row_count={len(matrix_rows)}; can_submit_count={matrix_artifacts.report.get('can_submit_count')}; "
+            f"symbols={list(matrix_symbols)}; live_money_eligible_false={matrix_live_money_false}"
+        ),
+        row_count=len(matrix_rows),
+        can_submit_count=matrix_artifacts.report.get("can_submit_count"),
+        symbols=list(matrix_symbols),
+    )
+except Exception as exc:
+    add(
+        "phase1_ticker_readiness_matrix_static",
+        False,
+        True,
+        f"phase-1 ticker readiness matrix check failed: {exc}",
+    )
 
 governance_freshness_window_seconds = 120.0
 try:
@@ -611,6 +647,8 @@ result = {
     "required_patch_commits": list(REQUIRED_PATCH_COMMITS),
     "final_submit_path_baseline_commit": "35064b698c",
     "final_execution_scope_baseline_commit": "94695132b1",
+    "final_rates_scope_baseline_commit": "520bd7313f",
+    "final_ticker_readiness_matrix_baseline_commit": "57402b55a7",
     "weekend_static_dry_run": weekend_status,
     "monday_live_preflight": monday_status,
     "monday_blocked_classification": (
