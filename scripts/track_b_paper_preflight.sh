@@ -4,7 +4,7 @@ set -uo pipefail
 REPO_ROOT="/Users/patrick/Dev/MGC-v05l-automation"
 OUT_DIR="${REPO_ROOT}/outputs/reports/track_b_paper_preflight"
 OUT_JSON="${OUT_DIR}/latest_track_b_paper_preflight.json"
-PATCH_COMMIT="d7b126c10d"
+REQUIRED_PATCH_COMMITS="d7b126c10d 35064b698c"
 
 usage() {
   echo "Usage: $0 --mode weekend-static|monday-live" >&2
@@ -48,7 +48,7 @@ cd "${REPO_ROOT}" || exit 2
 PREFLIGHT_MODE="${MODE}" \
 PREFLIGHT_REPO_ROOT="${REPO_ROOT}" \
 PREFLIGHT_OUT_JSON="${OUT_JSON}" \
-PREFLIGHT_PATCH_COMMIT="${PATCH_COMMIT}" \
+PREFLIGHT_REQUIRED_PATCH_COMMITS="${REQUIRED_PATCH_COMMITS}" \
 ./.venv/bin/python - <<'PY'
 from __future__ import annotations
 
@@ -63,7 +63,11 @@ from typing import Any
 MODE = os.environ["PREFLIGHT_MODE"]
 REPO_ROOT = Path(os.environ["PREFLIGHT_REPO_ROOT"])
 OUT_JSON = Path(os.environ["PREFLIGHT_OUT_JSON"])
-PATCH_COMMIT = os.environ["PREFLIGHT_PATCH_COMMIT"]
+REQUIRED_PATCH_COMMITS = tuple(
+    commit.strip()
+    for commit in os.environ["PREFLIGHT_REQUIRED_PATCH_COMMITS"].split()
+    if commit.strip()
+)
 OLD_ROOT_PATTERNS = (
     "/Users/patrick/Documents/MGC-v05l-automation",
     "Mobile Documents",
@@ -138,13 +142,14 @@ add(
     branch_name or branch["stderr"],
 )
 
-commit = run(["git", "merge-base", "--is-ancestor", PATCH_COMMIT, "HEAD"])
-add(
-    "filled_bridge_patch_commit_present",
-    commit["returncode"] == 0,
-    True,
-    f"{PATCH_COMMIT} is ancestor of HEAD" if commit["returncode"] == 0 else commit["stderr"],
-)
+for required_commit in REQUIRED_PATCH_COMMITS:
+    commit = run(["git", "merge-base", "--is-ancestor", required_commit, "HEAD"])
+    add(
+        f"required_patch_commit_present_{required_commit}",
+        commit["returncode"] == 0,
+        True,
+        f"{required_commit} is ancestor of HEAD" if commit["returncode"] == 0 else commit["stderr"],
+    )
 
 ps = run(["ps", "-ef"])
 old_process_hits: list[str] = []
@@ -474,7 +479,8 @@ result = {
     "generated_at": now_iso(),
     "mode": MODE,
     "repo_root": str(REPO_ROOT),
-    "patch_commit": PATCH_COMMIT,
+    "required_patch_commits": list(REQUIRED_PATCH_COMMITS),
+    "final_submit_path_baseline_commit": "35064b698c",
     "weekend_static_dry_run": weekend_status,
     "monday_live_preflight": monday_status,
     "blocking_reasons": blocking,
