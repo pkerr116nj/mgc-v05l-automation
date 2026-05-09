@@ -48,7 +48,9 @@ def test_active_runtime_files_are_preserved_not_delete_candidates(tmp_path: Path
         '{"symbol":"GC"}',
     )
 
-    report = build_weekly_data_maintenance_report(config=WeeklyMaintenanceConfig(repo_root=tmp_path))
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(repo_root=tmp_path, include_full_paths=True)
+    )
     rows = {row["path"]: row for row in report["classifications"]}
 
     assert rows["var/runtime_market_data/MNQ/1m/latest_runtime_candles.json"]["classification"] == "HOT_DECISION_RUNTIME_DATA"
@@ -60,7 +62,9 @@ def test_broker_review_evidence_is_archive_or_preserve_not_delete(tmp_path: Path
     _write(tmp_path / "outputs" / "reports" / "manual_reconciliation_close" / "latest_review_required.json")
     _write(tmp_path / "outputs" / "reports" / "ibkr_bridge" / "broker_order_evidence.json")
 
-    report = build_weekly_data_maintenance_report(config=WeeklyMaintenanceConfig(repo_root=tmp_path))
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(repo_root=tmp_path, include_full_paths=True)
+    )
     rows = {row["path"]: row for row in report["classifications"]}
 
     assert rows["outputs/reports/manual_reconciliation_close/latest_review_required.json"]["classification"] == "COLD_ARCHIVE_CANDIDATE"
@@ -73,7 +77,9 @@ def test_disposable_build_metadata_is_delete_candidate_dry_run_only(tmp_path: Pa
     _write(tmp_path / ".pytest_cache" / "v" / "cache" / "nodeids", "[]")
     _write(tmp_path / "src" / "mgc_v05l" / "app" / "__pycache__" / "x.pyc", "bytecode")
 
-    report = build_weekly_data_maintenance_report(config=WeeklyMaintenanceConfig(repo_root=tmp_path))
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(repo_root=tmp_path, include_full_paths=True)
+    )
 
     disposable = [
         row for row in report["classifications"] if row["classification"] == "DISPOSABLE_BUILD"
@@ -91,7 +97,9 @@ def test_research_offline_paths_are_deferred(tmp_path: Path) -> None:
     _write(tmp_path / "src" / "mgc_v05l" / "research" / "offline.py", "")
     _write(tmp_path / "examples" / "track_b_shadow_listener" / "inbox" / "signal.json", "{}")
 
-    report = build_weekly_data_maintenance_report(config=WeeklyMaintenanceConfig(repo_root=tmp_path))
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(repo_root=tmp_path, include_full_paths=True)
+    )
 
     assert report["deferred_research_count"] == 6
     assert {
@@ -126,6 +134,67 @@ def test_report_schema_and_written_artifacts(tmp_path: Path) -> None:
     assert payload["policy"]["delete_files"] is False
     assert payload["policy"]["move_files"] is False
     assert written["markdown"].name == "weekly_data_maintenance_2026-05-08.md"
+    assert "classifications" not in payload
+    assert "summary_by_retention_tier" in payload
+    assert "detail_lists" in payload
+
+
+def test_summary_counts_equal_total_classified_candidates(tmp_path: Path) -> None:
+    _write(tmp_path / "var" / "runtime_market_data" / "MNQ" / "1m" / "latest.json")
+    _write(tmp_path / "outputs" / "reports" / "ibkr_bridge" / "broker_order_evidence.json")
+    _write(tmp_path / "docs" / "atp_note.md")
+    _write(tmp_path / ".pytest_cache" / "v" / "cache" / "nodeids")
+
+    report = build_weekly_data_maintenance_report(config=WeeklyMaintenanceConfig(repo_root=tmp_path))
+
+    total = report["total_classified_count"]
+    assert sum(report["summary_by_retention_tier"].values()) == total
+    assert sum(report["summary_by_top_level_directory"].values()) == total
+    assert sum(report["summary_by_age_bucket"].values()) == total
+    assert sum(report["summary_by_reason"].values()) == total
+
+
+def test_detail_lists_are_capped_and_hide_full_paths_by_default(tmp_path: Path) -> None:
+    for index in range(5):
+        _write(tmp_path / ".pytest_cache" / f"cache_{index}" / "nodeids")
+        _write(tmp_path / "outputs" / "reports" / "ibkr_bridge" / f"broker_order_{index}.json")
+
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(repo_root=tmp_path, detail_limit=2)
+    )
+
+    assert "classifications" not in report
+    assert len(report["detail_lists"]["top_delete_candidates"]) == 1
+    assert len(report["detail_lists"]["top_archive_candidates"]) == 2
+    assert all("path" not in row for rows in report["detail_lists"].values() for row in rows)
+    assert all("path_hint" in row for rows in report["detail_lists"].values() for row in rows)
+
+
+def test_include_full_paths_adds_full_classifications_and_detail_paths(tmp_path: Path) -> None:
+    _write(tmp_path / "outputs" / "reports" / "ibkr_bridge" / "broker_order.json")
+
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(repo_root=tmp_path, include_full_paths=True)
+    )
+
+    assert "classifications" in report
+    assert report["classifications"][0]["path"] == "outputs/reports/ibkr_bridge/broker_order.json"
+    assert report["detail_lists"]["top_archive_candidates"][0]["path"] == "outputs/reports/ibkr_bridge/broker_order.json"
+
+
+def test_category_filter_limits_reported_categories(tmp_path: Path) -> None:
+    _write(tmp_path / "var" / "runtime_market_data" / "MNQ" / "1m" / "latest.json")
+    _write(tmp_path / "docs" / "atp_note.md")
+    _write(tmp_path / ".pytest_cache" / "v" / "cache" / "nodeids")
+
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(repo_root=tmp_path, category_filter=("DISPOSABLE_BUILD",))
+    )
+
+    assert report["total_classified_before_filter"] == 3
+    assert report["total_classified_count"] == 1
+    assert report["summary_by_retention_tier"] == {"DISPOSABLE_BUILD": 1}
+    assert report["delete_candidates_count"] == 1
 
 
 def test_cli_dry_run_writes_report_and_apply_returns_two(tmp_path: Path) -> None:

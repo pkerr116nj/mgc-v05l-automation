@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 
@@ -65,6 +65,9 @@ class WeeklyMaintenanceConfig:
     archive_staging_root: Path = DEFAULT_ARCHIVE_STAGING_ROOT
     hot_root: Path = DEFAULT_HOT_ROOT
     warm_root: Path = DEFAULT_WARM_ROOT
+    detail_limit: int = 50
+    include_full_paths: bool = False
+    category_filter: tuple[str, ...] = ()
 
 
 def build_weekly_data_maintenance_report(*, config: WeeklyMaintenanceConfig) -> dict[str, Any]:
@@ -86,7 +89,8 @@ def build_weekly_data_maintenance_report(*, config: WeeklyMaintenanceConfig) -> 
     active_processes = _detect_active_runtime_processes()
     stale_root_hits = _detect_old_root_hits(repo_root=repo_root)
     inspected_paths = _collect_candidate_paths(repo_root=repo_root, hot_roots=hot_roots, warm_root=warm_root)
-    classifications = [_classify_path(path=path, repo_root=repo_root, hot_roots=hot_roots, warm_root=warm_root) for path in inspected_paths]
+    all_classifications = [_classify_path(path=path, repo_root=repo_root, hot_roots=hot_roots, warm_root=warm_root, week_start=week_start, week_end=week_end) for path in inspected_paths]
+    classifications = _filter_classifications(all_classifications, config.category_filter)
 
     delete_candidates = [row for row in classifications if row["classification"] == "DISPOSABLE_BUILD"]
     archive_candidates = [row for row in classifications if row["classification"] == "COLD_ARCHIVE_CANDIDATE"]
@@ -117,6 +121,11 @@ def build_weekly_data_maintenance_report(*, config: WeeklyMaintenanceConfig) -> 
         "archive_candidates_count": len(archive_candidates),
         "preserve_candidates_count": len(preserve_candidates),
         "deferred_research_count": len(deferred_research),
+        "total_classified_count": len(classifications),
+        "total_classified_before_filter": len(all_classifications),
+        "category_filter": list(config.category_filter),
+        "detail_limit": max(0, int(config.detail_limit)),
+        "include_full_paths": config.include_full_paths,
         "runtime_active": runtime_active,
         "active_runtime_processes": active_processes,
         "review_required": review_required,
@@ -129,10 +138,20 @@ def build_weekly_data_maintenance_report(*, config: WeeklyMaintenanceConfig) -> 
             "broker_mutation": False,
             "cold_archive_runtime_truth": False,
         },
-        "classifications": classifications,
         "summary_by_classification": _summary_by_classification(classifications),
+        "summary_by_retention_tier": _summary_by_key(classifications, "retention_tier"),
+        "summary_by_top_level_directory": _summary_by_key(classifications, "top_level_directory"),
+        "summary_by_age_bucket": _summary_by_key(classifications, "age_bucket"),
+        "summary_by_reason": _summary_by_key(classifications, "reason_key"),
+        "detail_lists": _detail_lists(
+            classifications,
+            detail_limit=max(0, int(config.detail_limit)),
+            include_full_paths=config.include_full_paths,
+        ),
     }
-    _assert_safety_invariants(report)
+    if config.include_full_paths:
+        report["classifications"] = classifications
+    _assert_safety_invariants(classifications)
     return report
 
 
@@ -178,50 +197,77 @@ def _collect_candidate_paths(*, repo_root: Path, hot_roots: Sequence[Path], warm
     return _collapse_disposable_children(sorted(dict.fromkeys(paths)), repo_root=repo_root)
 
 
-def _classify_path(*, path: Path, repo_root: Path, hot_roots: Sequence[Path], warm_root: Path) -> dict[str, Any]:
+def _classify_path(*, path: Path, repo_root: Path, hot_roots: Sequence[Path], warm_root: Path, week_start: date, week_end: date) -> dict[str, Any]:
     relative = _relative(path, repo_root)
     classification = "UNKNOWN_REVIEW"
+    retention_tier = "PRESERVE"
+    reason_key = "unknown_preserve"
     reason = "No policy bucket matched."
     action = "review"
 
     if any(_is_relative_to(path, root) for root in hot_roots):
         classification = "HOT_DECISION_RUNTIME_DATA"
+        retention_tier = "HOT"
+        reason_key = "active_runtime_state"
         reason = "Active runtime/HOT data root; never delete in dry-run maintenance."
         action = "preserve"
     elif _is_deferred_research_path(relative):
         classification = "DEFERRED_RESEARCH_OFFLINE"
+        retention_tier = "DEFERRED_RESEARCH"
+        reason_key = "deferred_research"
         reason = "Research/offline path; classify only until archive server policy exists."
         action = "defer"
     elif _is_disposable_path(path, repo_root=repo_root):
         classification = "DISPOSABLE_BUILD"
+        retention_tier = "DISPOSABLE_BUILD"
+        reason_key = "disposable_build_metadata"
         reason = "Rebuildable cache/build metadata."
         action = "delete_candidate_dry_run_only"
     elif _is_relative_to(path, warm_root):
         lower = str(relative).lower()
         if any(term in lower for term in BROKER_EVIDENCE_TERMS) or "preflight" in lower or "cleanup" in lower:
             classification = "COLD_ARCHIVE_CANDIDATE"
+            retention_tier = "COLD_ARCHIVE_CANDIDATE"
+            reason_key = "broker_or_review_evidence" if any(term in lower for term in BROKER_EVIDENCE_TERMS) else "archive_candidate"
             reason = "WARM evidence/state that should be staged later, not moved in v1."
             action = "archive_candidate_dry_run_only"
         else:
             classification = "WARM_EVIDENCE_STATE"
+            retention_tier = "WARM"
+            reason_key = "current_week_data" if _mtime_date_in_week(path, week_start=week_start, week_end=week_end) else "unknown_preserve"
             reason = "WARM report/dashboard/operator state; preserve under rolling retention."
             action = "preserve"
 
     if _is_broker_or_review_evidence(relative) and classification == "DISPOSABLE_BUILD":
         classification = "WARM_EVIDENCE_STATE"
+        retention_tier = "WARM"
+        reason_key = "broker_or_review_evidence"
         reason = "Broker/review evidence may never be a delete candidate."
         action = "preserve"
 
+    stat_info = _safe_stat(path)
+    size_bytes = stat_info.st_size if stat_info is not None and path.is_file() else 0
+    mtime = (
+        datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
+        if stat_info is not None
+        else None
+    )
     return {
         "path": str(relative),
         "classification": classification,
+        "retention_tier": retention_tier,
+        "top_level_directory": _top_level_directory(relative),
+        "age_bucket": _age_bucket(mtime),
+        "reason_key": reason_key,
         "reason": reason,
         "recommended_action": action,
+        "size_bytes": size_bytes,
+        "mtime": mtime.isoformat() if mtime is not None else None,
     }
 
 
-def _assert_safety_invariants(report: dict[str, Any]) -> None:
-    for row in report.get("classifications", []):
+def _assert_safety_invariants(rows: Sequence[dict[str, Any]]) -> None:
+    for row in rows:
         path = str(row.get("path") or "").lower()
         if row.get("classification") == "DISPOSABLE_BUILD" and any(term in path for term in BROKER_EVIDENCE_TERMS):
             raise AssertionError(f"broker/review evidence classified as disposable: {row}")
@@ -232,11 +278,94 @@ def _assert_safety_invariants(report: dict[str, Any]) -> None:
 
 
 def _summary_by_classification(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
+    return _summary_by_key(rows, "classification")
+
+
+def _summary_by_key(rows: Sequence[dict[str, Any]], key: str) -> dict[str, int]:
     summary: dict[str, int] = {}
     for row in rows:
-        key = str(row.get("classification") or "UNKNOWN_REVIEW")
-        summary[key] = summary.get(key, 0) + 1
+        value = str(row.get(key) or "UNKNOWN")
+        summary[value] = summary.get(value, 0) + 1
     return dict(sorted(summary.items()))
+
+
+def _filter_classifications(rows: Sequence[dict[str, Any]], category_filter: Sequence[str]) -> list[dict[str, Any]]:
+    filters = {item.strip().upper() for item in category_filter if item.strip()}
+    if not filters:
+        return list(rows)
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        values = {
+            str(row.get("classification") or "").upper(),
+            str(row.get("retention_tier") or "").upper(),
+            str(row.get("reason_key") or "").upper(),
+            str(row.get("top_level_directory") or "").upper(),
+        }
+        if values & filters:
+            filtered.append(row)
+    return filtered
+
+
+def _detail_lists(
+    rows: Sequence[dict[str, Any]],
+    *,
+    detail_limit: int,
+    include_full_paths: bool,
+) -> dict[str, list[dict[str, Any]]]:
+    preserve_rows = [
+        row for row in rows if row.get("classification") in {"HOT_DECISION_RUNTIME_DATA", "WARM_EVIDENCE_STATE", "UNKNOWN_REVIEW"}
+    ]
+    stale_warm = [
+        row
+        for row in rows
+        if row.get("classification") == "WARM_EVIDENCE_STATE" and row.get("age_bucket") in {"31-90d", ">90d"}
+    ]
+    return {
+        "top_delete_candidates": _cap_details(
+            [row for row in rows if row.get("classification") == "DISPOSABLE_BUILD"],
+            detail_limit=detail_limit,
+            include_full_paths=include_full_paths,
+        ),
+        "top_archive_candidates": _cap_details(
+            [row for row in rows if row.get("classification") == "COLD_ARCHIVE_CANDIDATE"],
+            detail_limit=detail_limit,
+            include_full_paths=include_full_paths,
+        ),
+        "largest_preserve_candidates": _cap_details(
+            sorted(preserve_rows, key=lambda row: int(row.get("size_bytes") or 0), reverse=True),
+            detail_limit=detail_limit,
+            include_full_paths=include_full_paths,
+        ),
+        "stale_warm_candidates": _cap_details(
+            sorted(stale_warm, key=lambda row: str(row.get("mtime") or "")),
+            detail_limit=detail_limit,
+            include_full_paths=include_full_paths,
+        ),
+    }
+
+
+def _cap_details(
+    rows: Sequence[dict[str, Any]],
+    *,
+    detail_limit: int,
+    include_full_paths: bool,
+) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for row in rows[:detail_limit]:
+        detail = {
+            "path_hint": Path(str(row.get("path") or "")).name,
+            "top_level_directory": row.get("top_level_directory"),
+            "classification": row.get("classification"),
+            "retention_tier": row.get("retention_tier"),
+            "reason_key": row.get("reason_key"),
+            "age_bucket": row.get("age_bucket"),
+            "size_bytes": row.get("size_bytes"),
+            "recommended_action": row.get("recommended_action"),
+        }
+        if include_full_paths:
+            detail["path"] = row.get("path")
+        details.append(detail)
+    return details
 
 
 def _detect_active_runtime_processes() -> list[str]:
@@ -251,6 +380,43 @@ def _detect_active_runtime_processes() -> list[str]:
         if any(pattern in line for pattern in RUNTIME_PROCESS_PATTERNS):
             hits.append(line)
     return hits
+
+
+def _safe_stat(path: Path):
+    try:
+        return path.stat()
+    except OSError:
+        return None
+
+
+def _mtime_date_in_week(path: Path, *, week_start: date, week_end: date) -> bool:
+    stat_info = _safe_stat(path)
+    if stat_info is None:
+        return False
+    mtime_date = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc).date()
+    return week_start <= mtime_date <= week_end
+
+
+def _age_bucket(mtime: datetime | None) -> str:
+    if mtime is None:
+        return "unknown"
+    age_days = max(0, int((datetime.now(timezone.utc) - mtime).total_seconds() // 86400))
+    if age_days <= 1:
+        return "0-1d"
+    if age_days <= 7:
+        return "2-7d"
+    if age_days <= 30:
+        return "8-30d"
+    if age_days <= 90:
+        return "31-90d"
+    return ">90d"
+
+
+def _top_level_directory(relative: Path) -> str:
+    if not relative.parts:
+        return "other"
+    top = relative.parts[0]
+    return top if top in {"var", "outputs", "docs", "src", "tests", "examples"} else "other"
 
 
 def _detect_old_root_hits(*, repo_root: Path) -> list[str]:
@@ -347,6 +513,12 @@ def _parse_symbols(value: str) -> tuple[str, ...]:
     return symbols or PHASE1_RUNTIME_TICKER_ORDER
 
 
+def _parse_category_filter(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 def _parse_date(value: str | None) -> date | None:
     return None if value is None else date.fromisoformat(value)
 
@@ -381,6 +553,12 @@ def _render_markdown(report: dict[str, Any]) -> str:
     ]
     for key, count in report.get("summary_by_classification", {}).items():
         lines.append(f"- {key}: `{count}`")
+    lines.extend(["", "## Summary By Retention Tier", ""])
+    for key, count in report.get("summary_by_retention_tier", {}).items():
+        lines.append(f"- {key}: `{count}`")
+    lines.extend(["", "## Summary By Reason", ""])
+    for key, count in report.get("summary_by_reason", {}).items():
+        lines.append(f"- {key}: `{count}`")
     lines.append("")
     return "\n".join(lines)
 
@@ -396,6 +574,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hot-root", default=str(DEFAULT_HOT_ROOT))
     parser.add_argument("--warm-root", default=str(DEFAULT_WARM_ROOT))
     parser.add_argument("--json-output")
+    parser.add_argument("--detail-limit", type=int, default=50)
+    parser.add_argument("--include-full-paths", action="store_true")
+    parser.add_argument("--category-filter")
     return parser
 
 
@@ -410,6 +591,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         archive_staging_root=Path(args.archive_staging_root),
         hot_root=Path(args.hot_root),
         warm_root=Path(args.warm_root),
+        detail_limit=max(0, int(args.detail_limit)),
+        include_full_paths=bool(args.include_full_paths),
+        category_filter=_parse_category_filter(args.category_filter),
     )
     report = build_weekly_data_maintenance_report(config=config)
     if report.get("final_verdict") == "APPLY_MODE_NOT_IMPLEMENTED":
