@@ -1,0 +1,498 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+REPO_ROOT="/Users/patrick/Dev/MGC-v05l-automation"
+OUT_DIR="${REPO_ROOT}/outputs/reports/track_b_paper_preflight"
+OUT_JSON="${OUT_DIR}/latest_track_b_paper_preflight.json"
+PATCH_COMMIT="d7b126c10d"
+
+usage() {
+  echo "Usage: $0 --mode weekend-static|monday-live" >&2
+}
+
+MODE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      MODE="${2:-}"
+      shift 2
+      ;;
+    --mode=*)
+      MODE="${1#--mode=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "${MODE}" != "weekend-static" && "${MODE}" != "monday-live" ]]; then
+  usage
+  exit 2
+fi
+
+if [[ ! -d "${REPO_ROOT}" ]]; then
+  echo "Repo root missing: ${REPO_ROOT}" >&2
+  exit 2
+fi
+
+mkdir -p "${OUT_DIR}"
+cd "${REPO_ROOT}" || exit 2
+
+PREFLIGHT_MODE="${MODE}" \
+PREFLIGHT_REPO_ROOT="${REPO_ROOT}" \
+PREFLIGHT_OUT_JSON="${OUT_JSON}" \
+PREFLIGHT_PATCH_COMMIT="${PATCH_COMMIT}" \
+./.venv/bin/python - <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+MODE = os.environ["PREFLIGHT_MODE"]
+REPO_ROOT = Path(os.environ["PREFLIGHT_REPO_ROOT"])
+OUT_JSON = Path(os.environ["PREFLIGHT_OUT_JSON"])
+PATCH_COMMIT = os.environ["PREFLIGHT_PATCH_COMMIT"]
+OLD_ROOT_PATTERNS = (
+    "/Users/patrick/Documents/MGC-v05l-automation",
+    "Mobile Documents",
+    "iCloud",
+)
+TRADING_PROCESS_PATTERNS = (
+    "probationary-paper-soak",
+    "paper_strategy_monitor",
+    "run_probationary_paper_soak",
+    "run_supervised_paper",
+    "headless_supervised_paper",
+)
+MUTATING_TERMS = ("placeOrder", "paper_proof")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def run(cmd: list[str], timeout: int = 30) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        return {
+            "cmd": cmd,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout.strip(),
+            "stderr": completed.stderr.strip(),
+        }
+    except Exception as exc:  # pragma: no cover - defensive for operator script
+        return {"cmd": cmd, "returncode": 999, "stdout": "", "stderr": str(exc)}
+
+
+def read_json(path: Path) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
+    try:
+        return json.loads(path.read_text()), None
+    except FileNotFoundError:
+        return None, f"missing: {path}"
+    except Exception as exc:
+        return None, f"{path}: {exc}"
+
+
+checks: list[dict[str, Any]] = []
+warnings: list[str] = []
+blocking: list[str] = []
+
+
+def add(name: str, passed: bool, fail_blocks: bool, detail: str, **extra: Any) -> None:
+    status = "PASS" if passed else ("FAIL" if fail_blocks else "WARN")
+    item = {"name": name, "status": status, "detail": detail}
+    item.update(extra)
+    checks.append(item)
+    if not passed:
+        if fail_blocks:
+            blocking.append(f"{name}: {detail}")
+        else:
+            warnings.append(f"{name}: {detail}")
+
+
+branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+branch_name = branch["stdout"]
+add(
+    "branch_is_track_b_paper_execution_core",
+    branch["returncode"] == 0 and branch_name == "track-b-paper-execution-core",
+    True,
+    branch_name or branch["stderr"],
+)
+
+commit = run(["git", "merge-base", "--is-ancestor", PATCH_COMMIT, "HEAD"])
+add(
+    "filled_bridge_patch_commit_present",
+    commit["returncode"] == 0,
+    True,
+    f"{PATCH_COMMIT} is ancestor of HEAD" if commit["returncode"] == 0 else commit["stderr"],
+)
+
+ps = run(["ps", "-ef"])
+old_process_hits: list[str] = []
+if ps["returncode"] == 0:
+    for line in ps["stdout"].splitlines():
+        if any(old in line for old in OLD_ROOT_PATTERNS) and any(
+            marker in line for marker in TRADING_PROCESS_PATTERNS
+        ):
+            old_process_hits.append(line)
+add(
+    "no_old_root_trading_processes",
+    not old_process_hits,
+    True,
+    "no submit-capable old-root process found" if not old_process_hits else "\n".join(old_process_hits),
+    hits=old_process_hits,
+)
+
+scan_paths = [
+    "config",
+    "scripts",
+    "src",
+    "launchd",
+    str(Path.home() / "Library" / "LaunchAgents"),
+]
+rg = run(
+    [
+        "rg",
+        "-n",
+        "/Users/patrick/Documents/MGC-v05l-automation|Mobile Documents|iCloud",
+        *scan_paths,
+    ],
+    timeout=45,
+)
+submit_capable_old_root_hits: list[str] = []
+if rg["returncode"] in (0, 1):
+    for line in rg["stdout"].splitlines():
+        lowered = line.lower()
+        if any(term.lower() in lowered for term in ("paper", "submit", "strategy_monitor", "probationary")):
+            submit_capable_old_root_hits.append(line)
+add(
+    "no_submit_capable_old_root_config_or_launchd",
+    not submit_capable_old_root_hits,
+    True,
+    "no submit-capable old-root config/launchd references found"
+    if not submit_capable_old_root_hits
+    else "\n".join(submit_capable_old_root_hits[:20]),
+    hit_count=len(submit_capable_old_root_hits),
+)
+
+runtime_config_hits: list[str] = []
+runtime_files = [
+    REPO_ROOT / "outputs/probationary_pattern_engine/paper_session/operator_status.json",
+    REPO_ROOT / "outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid",
+]
+operator_status, operator_err = read_json(runtime_files[0])
+if isinstance(operator_status, dict):
+    runtime_config_hits.append(str(REPO_ROOT))
+    source_pid = operator_status.get("source_runtime_pid")
+    if source_pid:
+        proc = run(["ps", "-p", str(source_pid), "-o", "command="])
+        if proc["returncode"] == 0:
+            runtime_config_hits.append(proc["stdout"])
+configs_point_dev = all(
+    not any(old in hit for old in OLD_ROOT_PATTERNS) and str(REPO_ROOT) in hit
+    for hit in runtime_config_hits
+) and bool(runtime_config_hits)
+add(
+    "runtime_package_configs_point_to_dev_root",
+    configs_point_dev,
+    True,
+    "runtime/package references point to Dev root"
+    if configs_point_dev
+    else (operator_err or "runtime Dev-root evidence missing/stale"),
+    evidence=runtime_config_hits,
+)
+
+compile_cmd = [
+    "./.venv/bin/python",
+    "-m",
+    "compileall",
+    "src/mgc_v05l/app/probationary_runtime.py",
+    "src/mgc_v05l/strategy/strategy_engine.py",
+    "src/mgc_v05l/monitoring/logger.py",
+]
+compile_result = run(compile_cmd, timeout=60)
+add(
+    "compileall_patched_modules",
+    compile_result["returncode"] == 0,
+    True,
+    compile_result["stdout"] or compile_result["stderr"],
+)
+
+pytest_cmd = [
+    "./.venv/bin/python",
+    "-m",
+    "pytest",
+    "tests/unit/test_mgc_v05l_probationary_runtime.py",
+    "-k",
+    "filled_bridge or bridge_block_does_not_create_local_fill or submit_capable_lane_entry_invokes_ibkr_bridge",
+]
+pytest_result = run(pytest_cmd, timeout=120)
+add(
+    "filled_result_invariant_tests",
+    pytest_result["returncode"] == 0,
+    True,
+    pytest_result["stdout"].splitlines()[-1] if pytest_result["stdout"] else pytest_result["stderr"],
+)
+
+proof_scan = run(
+    [
+        "rg",
+        "-n",
+        '"paper_proof_invoked"\\s*:\\s*true|paper_proof_invoked=true|paper_proof.*placeOrder',
+        "outputs/probationary_pattern_engine",
+        "outputs/operator_dashboard",
+        "outputs/reports",
+    ],
+    timeout=45,
+)
+proof_hits = proof_scan["stdout"].splitlines() if proof_scan["returncode"] == 0 else []
+add(
+    "paper_proof_not_invoked",
+    not proof_hits,
+    True,
+    "no paper_proof invocation evidence" if not proof_hits else "\n".join(proof_hits[:20]),
+    hit_count=len(proof_hits),
+)
+
+readiness_path = REPO_ROOT / "outputs/operator_dashboard/paper_readiness_snapshot.json"
+readiness, readiness_err = read_json(readiness_path)
+paper_trade_allowed = None
+market_data_stale_count = None
+if isinstance(readiness, dict):
+    paper_trade_allowed = readiness.get("paper_trade_allowed")
+    market_data_stale_count = readiness.get("market_data_stale_count")
+stale_is_blocking = MODE == "monday-live"
+add(
+    "paper_trade_allowed_true",
+    paper_trade_allowed is True,
+    stale_is_blocking,
+    f"paper_trade_allowed={paper_trade_allowed}" if readiness_err is None else readiness_err,
+)
+add(
+    "market_data_not_stale",
+    market_data_stale_count == 0,
+    stale_is_blocking,
+    f"market_data_stale_count={market_data_stale_count}" if readiness_err is None else readiness_err,
+)
+
+monitor_path = REPO_ROOT / "outputs/reports/paper_strategy_monitor/paper_strategy_monitor_runtime_status.json"
+monitor, monitor_err = read_json(monitor_path)
+monitor_required = MODE == "monday-live"
+if MODE == "monday-live" and isinstance(monitor, dict):
+    add(
+        "monitor_healthy",
+        monitor.get("health_classification") == "HEALTHY",
+        monitor_required,
+        f"health_classification={monitor.get('health_classification')}",
+    )
+    add(
+        "monitor_not_stale",
+        monitor.get("stale") is False,
+        monitor_required,
+        f"stale={monitor.get('stale')}",
+    )
+    add(
+        "monitor_submit_allowed",
+        monitor.get("submit_allowed") is True,
+        monitor_required,
+        f"submit_allowed={monitor.get('submit_allowed')}",
+    )
+    add(
+        "bridge_allowed",
+        monitor.get("bridge_allowed") is True,
+        monitor_required,
+        f"bridge_allowed={monitor.get('bridge_allowed')}",
+    )
+elif MODE == "monday-live":
+    add("monitor_status_available", False, monitor_required, monitor_err or "monitor missing")
+
+strategies_required = MODE == "monday-live"
+if isinstance(operator_status, dict):
+    lanes = operator_status.get("lanes") or {}
+    if isinstance(lanes, list):
+        lane_rows = lanes
+    elif isinstance(lanes, dict):
+        lane_rows = list(lanes.values())
+    else:
+        lane_rows = []
+    active_lane_ids = operator_status.get("active_lane_ids") or []
+    status = operator_status.get("strategy_status")
+    entries_enabled = operator_status.get("entries_enabled")
+    position_side = operator_status.get("position_side")
+    lanes_ready_flat = True
+    for lane in lane_rows:
+        lane_id = str(lane.get("lane_id") or lane.get("strategy_id") or "")
+        if "mnq_" not in lane_id.lower():
+            continue
+        lane_status = lane.get("strategy_status") or lane.get("status")
+        lane_side = lane.get("position_side")
+        if lane_status not in ("READY", "RUNNING", "RUNNING_MULTI_LANE") or lane_side != "FLAT":
+            lanes_ready_flat = False
+    add(
+        "strategies_evaluating",
+        bool(active_lane_ids) and status in ("RUNNING_MULTI_LANE", "RUNNING", "READY"),
+        strategies_required,
+        f"status={status}, active_lane_count={len(active_lane_ids)}",
+    )
+    add(
+        "mnq_lanes_ready_flat",
+        lanes_ready_flat and position_side == "FLAT",
+        strategies_required,
+        f"aggregate_position_side={position_side}, entries_enabled={entries_enabled}",
+    )
+else:
+    add("operator_status_available", False, strategies_required, operator_err or "operator status missing")
+
+ibkr_cmd = [
+    "./.venv/bin/python",
+    "-m",
+    "mgc_v05l.app.ibkr_read_only_verify",
+    "--mode",
+    "PAPER",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "7497",
+    "--client-id",
+    "9071",
+    "--account-id",
+    "DUM882026",
+    "--read-only",
+    "--timeout-seconds",
+    "8",
+    "--skip-market-data-probe",
+    "--skip-duplicate-client-id-probe",
+    "--overwrite",
+]
+ibkr = run(ibkr_cmd, timeout=20)
+broker_required = MODE == "monday-live"
+broker_available = ibkr["returncode"] == 0
+add(
+    "ibkr_read_only_available",
+    broker_available,
+    broker_required,
+    "read-only broker verification succeeded" if broker_available else ibkr["stderr"] or ibkr["stdout"],
+)
+
+positions_path = REPO_ROOT / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
+positions, positions_err = read_json(positions_path)
+flat_symbols: dict[str, Any] = {}
+if broker_available and isinstance(positions, dict):
+    rows = positions.get("positions") or positions.get("rows") or []
+elif broker_available and isinstance(positions, list):
+    rows = positions
+else:
+    rows = []
+for symbol in ("MNQ", "MGC"):
+    qtys = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_symbol = str(row.get("symbol") or row.get("contract_symbol") or "")
+        local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "")
+        if row_symbol == symbol or local_symbol.startswith(symbol):
+            try:
+                qtys.append(float(row.get("quantity") or row.get("position") or 0))
+            except Exception:
+                qtys.append(row.get("quantity"))
+    flat_symbols[symbol] = qtys
+    add(
+        f"broker_{symbol.lower()}_flat_if_connected",
+        (not broker_available and MODE == "weekend-static") or all(q == 0 for q in qtys),
+        broker_required,
+        f"{symbol} quantities={qtys}" if broker_available else "broker read-only unavailable in weekend mode",
+    )
+
+open_orders_path = REPO_ROOT / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json"
+open_orders, open_orders_err = read_json(open_orders_path)
+open_rows = []
+if broker_available and isinstance(open_orders, dict):
+    open_rows = open_orders.get("open_orders") or open_orders.get("orders") or open_orders.get("rows") or []
+elif broker_available and isinstance(open_orders, list):
+    open_rows = open_orders
+symbol_open_orders = []
+for row in open_rows:
+    if not isinstance(row, dict):
+        continue
+    symbol_text = " ".join(str(row.get(k, "")) for k in ("symbol", "local_symbol", "localSymbol", "contract"))
+    if "MNQ" in symbol_text or "MGC" in symbol_text:
+        symbol_open_orders.append(row)
+add(
+    "broker_mnq_mgc_open_orders_zero_if_connected",
+    (not broker_available and MODE == "weekend-static") or not symbol_open_orders,
+    broker_required,
+    f"MNQ/MGC open_orders={len(symbol_open_orders)}" if broker_available else "broker read-only unavailable in weekend mode",
+)
+
+current_review_required = False
+review_sources = []
+for path in (
+    REPO_ROOT / "outputs/probationary_pattern_engine/paper_session/operator_status.json",
+    REPO_ROOT / "outputs/operator_dashboard/paper_readiness_snapshot.json",
+):
+    payload, err = read_json(path)
+    if isinstance(payload, dict) and payload.get("review_required") is True:
+        current_review_required = True
+        review_sources.append(str(path))
+add(
+    "no_current_review_required",
+    not current_review_required,
+    MODE == "monday-live",
+    "no current review_required flag found" if not current_review_required else ", ".join(review_sources),
+)
+
+if blocking:
+    status = "FAIL"
+elif warnings:
+    status = "WARN"
+else:
+    status = "PASS"
+
+weekend_status = status if MODE == "weekend-static" else "PASS" if not blocking else "FAIL"
+monday_status = "NOT_APPLICABLE" if MODE == "weekend-static" else status
+result = {
+    "schema_version": "track_b_paper_preflight_v1",
+    "generated_at": now_iso(),
+    "mode": MODE,
+    "repo_root": str(REPO_ROOT),
+    "patch_commit": PATCH_COMMIT,
+    "weekend_static_dry_run": weekend_status,
+    "monday_live_preflight": monday_status,
+    "blocking_reasons": blocking,
+    "warnings": warnings,
+    "next_action": (
+        "Run monday-live preflight before PAPER watch"
+        if MODE == "weekend-static" and status == "PASS"
+        else "Review warnings, then run monday-live preflight before PAPER watch"
+        if MODE == "weekend-static" and status == "WARN"
+        else "Start PAPER watch"
+        if status == "PASS"
+        else "Resolve blocking reasons before PAPER watch"
+    ),
+    "checks": checks,
+}
+OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
+OUT_JSON.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+print(json.dumps(result, indent=2, sort_keys=True))
+
+raise SystemExit(0 if status in ("PASS", "WARN") else 1)
+PY
