@@ -15,7 +15,7 @@ import os
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
@@ -340,6 +340,12 @@ def _write_success(
     credential_status: str,
     credential_source: str | None,
 ) -> TrackBDatabentoLiveFeedResult:
+    candles = _merge_with_existing_recent_live_candles(
+        config=config,
+        output_root=report_json.parent.parent,
+        candles=candles,
+        generated_at=completed_at,
+    )
     latest_1m = _parse_time(str(candles[-1]["candle_timestamp"])) if candles else None
     latest_completed_5m = _latest_completed_5m_timestamp(candles)
     latency_anchor = latest_ts_recv or latest_ts_event or latest_1m
@@ -566,6 +572,13 @@ def _write_hot_live_artifacts(
     if not candles:
         return
     generated_at = generated_at.astimezone(UTC)
+    output_root = Path(config.output_root)
+    candles = _merge_with_existing_recent_live_candles(
+        config=config,
+        output_root=output_root,
+        candles=candles,
+        generated_at=generated_at,
+    )
     latest_1m = _parse_time(str(candles[-1]["candle_timestamp"]))
     latest_completed_5m = _latest_completed_5m_timestamp(candles)
     latest_1m_age = max(0.0, (generated_at - latest_1m).total_seconds())
@@ -596,7 +609,6 @@ def _write_hot_live_artifacts(
     event.update(freshness_fields)
     latency_anchor = latest_ts_recv or latest_ts_event or latest_1m
     latency_ms = max(0.0, (generated_at - latency_anchor).total_seconds() * 1000.0)
-    output_root = Path(config.output_root)
     completed_payload = _completed_5m_candles(candles, instrument_family=config.instrument_family)
     _write_json(_latest_live_1m_path(output_root, config.instrument_family), event)
     _write_json(_latest_live_completed_5m_path(output_root, config.instrument_family), completed_payload)
@@ -770,6 +782,43 @@ def _write_provider_error(
             },
         )
     return TrackBDatabentoLiveFeedResult(verdict=verdict, report_json=report_json, report=report, live_1m_candles_json=None, live_1m_candles_event=None)
+
+
+def _merge_with_existing_recent_live_candles(
+    *,
+    config: TrackBDatabentoLiveFeedConfig,
+    output_root: Path,
+    candles: Sequence[Mapping[str, Any]],
+    generated_at: datetime,
+) -> list[dict[str, Any]]:
+    existing_payload = _read_json_optional(_latest_live_1m_path(output_root, config.instrument_family))
+    existing_candles = [] if existing_payload is None else _payload_candles(existing_payload)
+    cutoff = generated_at.astimezone(UTC) - timedelta(minutes=max(int(config.max_bars) * 2, 30))
+    recent_existing = [
+        dict(item)
+        for item in existing_candles
+        if _candle_timestamp_or_none(item) is not None and _candle_timestamp_or_none(item) >= cutoff
+    ]
+    merged, _duplicates = _dedupe_and_sort([*recent_existing, *[dict(item) for item in candles]])
+    return merged[-max(int(config.max_bars), 1) :]
+
+
+def _payload_candles(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    for key in ("candles", "candle_history", "runtime_candles", "bars", "ohlcv"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [dict(item) for item in raw if isinstance(item, Mapping)]
+    return []
+
+
+def _candle_timestamp_or_none(candle: Mapping[str, Any]) -> datetime | None:
+    value = candle.get("candle_timestamp") or candle.get("timestamp") or candle.get("end_ts")
+    if value in {None, ""}:
+        return None
+    try:
+        return _parse_time(str(value))
+    except ValueError:
+        return None
 
 
 def _base_report(
@@ -1094,3 +1143,10 @@ def _decimal_text(value: Decimal) -> str:
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(to_jsonable(dict(payload)), indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _read_json_optional(path: Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None

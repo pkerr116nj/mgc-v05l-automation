@@ -5,8 +5,8 @@
       "schwab_market_data"
     ],
     "live_market_data": [
-      "schwab_market_data",
-      "databento"
+      "databento",
+      "schwab_market_data"
     ],
     "execution_truth": [
       "schwab_execution"
@@ -28,8 +28,8 @@
     },
     "live_market_data": {
       "1m": [
-        "schwab_live_poll",
         "databento_live",
+        "schwab_live_poll",
         "historical_1m_canonical",
         "schwab_history"
       ]

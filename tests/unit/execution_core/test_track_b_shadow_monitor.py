@@ -813,9 +813,197 @@ def test_backfill_seeded_context_allows_evaluation_without_forty_live_minutes(tm
     assert instrument_report["feature_context_source"] == "MIXED_BACKFILL_SEEDED_CONTEXT"
     assert instrument_report["live_execution_approved"] is True
     assert instrument_report["paper_evaluation_allowed"] is True
+    assert instrument_report["required_bar_count"] == 40
+    assert instrument_report["seeded_bar_count"] == 40
+    assert instrument_report["live_confirmed_bar_count"] == 5
+    assert instrument_report["completed_candles_only"] is True
+    assert instrument_report["research_artifact_used"] is False
+    assert instrument_report["live_feed_ready"] is True
+    assert instrument_report["paper_trade_allowed"] is True
     assert instrument_report["live_feed_warmup_1m_count"] == 5
     diagnostic = json.loads((cfg.diagnostic_output_root / "latest_track_b_startup_readiness_diagnostic.json").read_text())
     assert diagnostic["instruments"]["MGC"]["classification"] == "READY_WITH_BACKFILL_SEEDED_CONTEXT"
+    assert diagnostic["instruments"]["MGC"]["required_bar_count"] == 40
+    assert diagnostic["instruments"]["MGC"]["seeded_bar_count"] == 40
+    assert diagnostic["instruments"]["MGC"]["live_confirmed_bar_count"] == 5
+    assert diagnostic["instruments"]["MGC"]["completed_candles_only"] is True
+    assert diagnostic["instruments"]["MGC"]["research_artifact_used"] is False
+    assert diagnostic["instruments"]["MGC"]["feature_context_ready"] is True
+    assert diagnostic["instruments"]["MGC"]["live_feed_ready"] is True
+    assert diagnostic["instruments"]["MGC"]["paper_trade_allowed"] is True
+
+
+def test_backfill_seeded_context_blocks_without_fresh_live_confirmation(tmp_path: Path) -> None:
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        live_feed_min_bars=40,
+        max_bars=50,
+        manage_live_feed=False,
+    )
+    write_recovery_context_artifact(
+        cfg,
+        cfg.instruments[0],
+        one_minute_candles(20, 40, source_tag="DATABENTO_HTTP_BACKFILL"),
+    )
+    live_candles = one_minute_candles(55, 5, source_tag="DATABENTO_LIVE_ARTIFACT")
+    write_json(
+        cfg.live_runtime_feed_output_root / "latest_live_mgc_1m_candles.json",
+        {
+            **runtime_payload_for_now(),
+            "candles": live_candles,
+            "candle_history": live_candles,
+            "candle_source_mode": "DATABENTO_LIVE_RUNTIME_FEED",
+            "completed_1m_fresh": False,
+            "completed_5m_fresh": False,
+            "bars_available": len(live_candles),
+        },
+    )
+    write_json(cfg.live_runtime_feed_output_root / "latest_live_mgc_completed_5m_candles.json", completed_5m_payload_for_now(1))
+    stale_status = {
+        "generated_at": now().isoformat(),
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "databento_continuous_symbol": "MGC.v.0",
+        "dataset": "GLBX.MDP3",
+        "live_feed_connected": True,
+        "subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+        "fresh_for_execution": False,
+        "latest_1m_age_seconds": 901,
+        "latest_completed_5m_age_seconds": 901,
+        "bars_available": len(live_candles),
+    }
+    write_json(cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_heartbeat.json", stale_status)
+    write_json(cfg.live_runtime_feed_output_root / "latest_databento_live_runtime_feed_report.json", stale_status)
+    fake = FakeStages(tmp_path)
+    stages = TrackBShadowMonitorStages(
+        runtime_candle_capture=_run_runtime_candle_capture,
+        asian_drift_watch_chain=fake.asian,
+        snap_turn_envelopes=fake.snap,
+        session_strategy_envelopes=fake.session,
+        multi_strategy_runtime_cycle=fake.multi,
+        operator_status=fake.operator,
+        sleep=fake.sleep,
+        pid_is_alive=lambda _pid: False,
+    )
+
+    result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-seeded-live-stale", now_func=now)
+
+    assert fake.calls["multi"] == 0
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["feature_context_ready"] is True
+    assert instrument_report["live_feed_ready"] is False
+    assert instrument_report["paper_trade_allowed"] is False
+    assert instrument_report["paper_evaluation_allowed"] is False
+    assert instrument_report["seeded_bar_count"] == 40
+    assert instrument_report["live_confirmed_bar_count"] == 5
+
+
+def test_fewer_than_forty_seed_bars_blocks_feature_context(tmp_path: Path) -> None:
+    cfg = config(
+        tmp_path,
+        live_runtime_feed_output_root=tmp_path / "live",
+        live_feed_min_bars=40,
+        max_bars=50,
+        manage_live_feed=False,
+    )
+    write_recovery_context_artifact(
+        cfg,
+        cfg.instruments[0],
+        one_minute_candles(20, 34, source_tag="DATABENTO_HTTP_BACKFILL"),
+    )
+    write_live_feed_artifacts(cfg, cfg.instruments[0], one_minute_candles(55, 5, source_tag="DATABENTO_LIVE_ARTIFACT"))
+
+    def failed_backfill(*_args: object, **_kwargs: object) -> TrackBRuntimeCandleCaptureResult:
+        report_path = tmp_path / "runtime" / "failed-backfill-report.json"
+        report = {"data_written": False, "primary_blocker": "bounded backfill unavailable"}
+        write_json(report_path, report)
+        return TrackBRuntimeCandleCaptureResult(
+            verdict=TrackBRuntimeCandleCaptureVerdict.FETCH_FAILED,
+            report_json=report_path,
+            report=report,
+            runtime_candles_json=None,
+            runtime_candles_event=None,
+        )
+
+    original = shadow_monitor_module._run_http_backfill_runtime_candle_capture
+    shadow_monitor_module._run_http_backfill_runtime_candle_capture = failed_backfill  # type: ignore[method-assign]
+    try:
+        fake = FakeStages(tmp_path)
+        stages = TrackBShadowMonitorStages(
+            runtime_candle_capture=_run_runtime_candle_capture,
+            asian_drift_watch_chain=fake.asian,
+            snap_turn_envelopes=fake.snap,
+            session_strategy_envelopes=fake.session,
+            multi_strategy_runtime_cycle=fake.multi,
+            operator_status=fake.operator,
+            sleep=fake.sleep,
+            pid_is_alive=lambda _pid: False,
+        )
+        result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-short-seed", now_func=now)
+    finally:
+        shadow_monitor_module._run_http_backfill_runtime_candle_capture = original  # type: ignore[method-assign]
+
+    assert fake.calls["multi"] == 0
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["feature_context_ready"] is False
+    assert instrument_report["live_feed_ready"] is True
+    assert instrument_report["paper_trade_allowed"] is False
+
+
+def test_research_only_startup_context_is_rejected(tmp_path: Path) -> None:
+    cfg = config(
+        tmp_path,
+        runtime_candle_capture_output_root=tmp_path / "outputs" / "track_b_research" / "snapshots",
+        live_runtime_feed_output_root=tmp_path / "live",
+        live_feed_min_bars=40,
+        max_bars=50,
+        manage_live_feed=False,
+    )
+    write_recovery_context_artifact(
+        cfg,
+        cfg.instruments[0],
+        one_minute_candles(20, 40, source_tag="TRACK_B_RESEARCH_SNAPSHOT"),
+    )
+    write_live_feed_artifacts(cfg, cfg.instruments[0], one_minute_candles(55, 5, source_tag="DATABENTO_LIVE_ARTIFACT"))
+
+    def failed_backfill(*_args: object, **_kwargs: object) -> TrackBRuntimeCandleCaptureResult:
+        report_path = tmp_path / "runtime" / "failed-backfill-report.json"
+        report = {"data_written": False, "primary_blocker": "bounded backfill unavailable"}
+        write_json(report_path, report)
+        return TrackBRuntimeCandleCaptureResult(
+            verdict=TrackBRuntimeCandleCaptureVerdict.FETCH_FAILED,
+            report_json=report_path,
+            report=report,
+            runtime_candles_json=None,
+            runtime_candles_event=None,
+        )
+
+    original = shadow_monitor_module._run_http_backfill_runtime_candle_capture
+    shadow_monitor_module._run_http_backfill_runtime_candle_capture = failed_backfill  # type: ignore[method-assign]
+    try:
+        fake = FakeStages(tmp_path)
+        stages = TrackBShadowMonitorStages(
+            runtime_candle_capture=_run_runtime_candle_capture,
+            asian_drift_watch_chain=fake.asian,
+            snap_turn_envelopes=fake.snap,
+            session_strategy_envelopes=fake.session,
+            multi_strategy_runtime_cycle=fake.multi,
+            operator_status=fake.operator,
+            sleep=fake.sleep,
+            pid_is_alive=lambda _pid: False,
+        )
+        result = run_track_b_shadow_monitor(config=cfg, stages=stages, monitor_id="monitor-research-seed", now_func=now)
+    finally:
+        shadow_monitor_module._run_http_backfill_runtime_candle_capture = original  # type: ignore[method-assign]
+
+    assert fake.calls["multi"] == 0
+    instrument_report = result.report["instrument_reports"][0]
+    assert instrument_report["research_artifact_used"] is True
+    assert instrument_report["feature_context_ready"] is False
+    assert instrument_report["paper_trade_allowed"] is False
+    diagnostic = json.loads((cfg.diagnostic_output_root / "latest_track_b_startup_readiness_diagnostic.json").read_text())
+    assert diagnostic["instruments"]["MGC"]["classification"] == "RESEARCH_ONLY_CONTEXT_REJECTED"
 
 
 def test_repairable_startup_context_gap_is_backfilled_and_allows_evaluation(

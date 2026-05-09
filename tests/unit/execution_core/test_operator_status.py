@@ -200,13 +200,30 @@ def shadow_monitor_report(tmp_path: Path, **overrides: object) -> Path:
         "monitor_id": "monitor-001",
         "cycle_id": "cycle-001",
         "mode": "SHADOW",
+        "runtime_decision_source": "DATABENTO_LIVE_ARTIFACT",
+        "paper_trading_enabled": False,
+        "paper_on_signal": False,
+        "paper_trades_attempted_count": 0,
         "completed_at": aware_now().isoformat(),
         "monitor_verdict": "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL",
+        "pid": 12345,
         "instrument_families": ["GC", "MGC", "ES", "MES", "NQ", "MNQ"],
         "instrument_reports": [
             {
                 "instrument_family": "MGC",
                 "instrument_verdict": "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL",
+                "runtime_chain_wired": True,
+                "runtime_decision_source": "DATABENTO_LIVE_ARTIFACT",
+                "live_feed_pid": 12346,
+                "live_feed_connected": True,
+                "live_feed_status": "LIVE_FEED_READY",
+                "live_feed_subscription_status": "SUBSCRIBED_RECORDS_RECEIVED",
+                "live_feed_heartbeat_age_seconds": 1.25,
+                "live_feed_strategy_ready": True,
+                "live_feed_warmup_1m_count": 40,
+                "live_feed_warmup_completed_5m_count": 8,
+                "live_feed_required_1m_count": 40,
+                "live_feed_required_completed_5m_count": 8,
                 "enabled_strategies": ["ASIAN_DRIFT_V1"],
                 "evaluated_strategy_count": 1,
                 "candidate_signals": [],
@@ -243,6 +260,8 @@ def shadow_monitor_heartbeat(tmp_path: Path, **overrides: object) -> Path:
         "generated_at": aware_now().isoformat(),
         "monitor_id": "monitor-001",
         "cycle_id": "cycle-001",
+        "mode": "SHADOW",
+        "pid": 12345,
         "monitor_running": True,
         "heartbeat_json_path": "latest_track_b_shadow_monitor_heartbeat.json",
         "submit_allowed": False,
@@ -783,6 +802,15 @@ def test_shadow_monitor_report_is_summarized(tmp_path: Path) -> None:
     assert result.verdict == OperatorStatusVerdict.OK_FOR_SHADOW_REVIEW
     assert result.report["latest_shadow_monitor_verdict"] == "TRACK_B_SHADOW_MONITOR_OK_NO_SIGNAL"
     assert result.report["latest_shadow_monitor_cycle_id"] == "cycle-001"
+    assert result.report["shadow_monitor_mode"] == "SHADOW"
+    assert result.report["shadow_monitor_pid"] == 12345
+    assert result.report["shadow_monitor_runtime_decision_source"] == "DATABENTO_LIVE_ARTIFACT"
+    assert result.report["shadow_monitor_live_feed_pid"] == 12346
+    assert result.report["shadow_monitor_live_feed_connected"] is True
+    assert result.report["shadow_monitor_live_feed_strategy_ready"] is True
+    assert result.report["shadow_monitor_live_feed_warmup_1m_count"] == 40
+    assert result.report["shadow_monitor_live_feed_warmup_completed_5m_count"] == 8
+    assert result.report["shadow_monitor_paper_trades_attempted_count"] == 0
     assert result.report["shadow_monitor_running"] is True
     assert result.report["shadow_monitor_heartbeat_path"] == "latest_track_b_shadow_monitor_heartbeat.json"
     assert result.report["shadow_monitor_instrument_families"] == ["GC", "MGC", "ES", "MES", "NQ", "MNQ"]

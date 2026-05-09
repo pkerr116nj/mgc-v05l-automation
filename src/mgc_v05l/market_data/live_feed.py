@@ -1,14 +1,25 @@
-"""Live ingestion scaffolding for Schwab market data."""
+"""Live ingestion scaffolding for completed-bar market data."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from collections.abc import Iterable
-from typing import Optional
+import hashlib
+import json
+import os
+import socket
+import threading
+import time
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from collections.abc import Iterable, Sequence
+from typing import Any, Callable, Optional
 
 from ..domain.models import Bar
+from .bar_models import build_bar_id
 from ..persistence.repositories import RepositorySet
+from .databento_provider import DatabentoHttpError, DatabentoMarketDataProvider
 from .canonical_maintenance import CanonicalMarketDataMaintenanceService
+from .provider_models import HistoricalBarsRequest
 from .schwab_adapter import SchwabMarketDataAdapter
 from .schwab_models import (
     SchwabHistoricalClient,
@@ -18,6 +29,24 @@ from .schwab_models import (
     SchwabLiveStreamClient,
 )
 from .timeframes import timeframe_minutes
+
+_DATABENTO_LIVE_POLL_SAFETY_DELAY_SECONDS = 10
+_DATABENTO_LIVE_GATEWAY_PORT = 13000
+_DATABENTO_LIVE_SESSION_WAIT_SECONDS = 8.0
+_MARKET_DATA_STALE_GRACE_SECONDS = 10.0
+_MARKET_DATA_RECOVERY_COOLDOWN_SECONDS = 45.0
+_MARKET_DATA_RECOVERY_WINDOW_SECONDS = 300.0
+_MARKET_DATA_RECOVERY_MAX_ATTEMPTS_PER_WINDOW = 3
+
+
+def databento_live_effective_end(
+    now: datetime,
+    internal_timeframe: str,
+    *,
+    safety_delay_seconds: int = _DATABENTO_LIVE_POLL_SAFETY_DELAY_SECONDS,
+) -> datetime:
+    delayed_now = now - timedelta(seconds=max(safety_delay_seconds, 0))
+    return _latest_completed_bar_end(delayed_now, internal_timeframe)
 
 
 class HistoricalPollingLiveClient:
@@ -41,9 +70,10 @@ class HistoricalPollingLiveClient:
     ) -> list[dict]:
         now = datetime.now(self._adapter._settings.timezone_info)  # noqa: SLF001 - adapter already owns runtime tz
         timeframe_duration = timedelta(minutes=timeframe_minutes(external_timeframe))
-        start_dt = request.since - timeframe_duration if request.since is not None else (
-            now - timedelta(minutes=self._lookback_minutes)
-        )
+        recovery_floor = now - timedelta(minutes=self._lookback_minutes)
+        start_dt = recovery_floor
+        if request.since is not None:
+            start_dt = max(request.since - timeframe_duration, recovery_floor)
         payload = self._historical_client.fetch_price_history(
             external_symbol,
             SchwabHistoricalRequest(
@@ -64,20 +94,477 @@ class HistoricalPollingLiveClient:
         return list(records)
 
 
+class DatabentoHistoricalPollingClient:
+    """Uses recent Databento 1m bars as the completed-bar live polling source."""
+
+    def __init__(
+        self,
+        *,
+        provider: DatabentoMarketDataProvider,
+        timezone_info,
+        lookback_minutes: int = 180,
+    ) -> None:
+        self._provider = provider
+        self._timezone_info = timezone_info
+        self._lookback_minutes = lookback_minutes
+
+    def poll_live_bars(
+        self,
+        _external_symbol: str | None,
+        external_timeframe: str,
+        request: SchwabLivePollRequest,
+    ) -> list[Bar]:
+        now = datetime.now(self._timezone_info)
+        timeframe_duration = timedelta(minutes=timeframe_minutes(external_timeframe))
+        effective_end = databento_live_effective_end(now, external_timeframe)
+        recovery_floor = effective_end - timedelta(minutes=self._lookback_minutes)
+        start_dt = recovery_floor
+        if request.since is not None:
+            start_dt = max(request.since - timeframe_duration, recovery_floor)
+        if start_dt >= effective_end:
+            start_dt = effective_end - timeframe_duration
+        start_utc = start_dt.astimezone(UTC)
+        end_utc = effective_end.astimezone(UTC)
+        try:
+            result = self._provider.fetch_historical_bars(
+                HistoricalBarsRequest(
+                    internal_symbol=request.internal_symbol,
+                    timeframe=external_timeframe,
+                    start=start_utc,
+                    end=end_utc,
+                )
+            )
+            return list(result.bars)
+        except DatabentoHttpError as exc:
+            retry_bounds = _databento_retry_bounds_from_error(
+                exc,
+                start=start_utc,
+                end=end_utc,
+                timeframe_duration=timeframe_duration,
+                recovery_floor=recovery_floor.astimezone(UTC),
+            )
+            if retry_bounds is None:
+                raise
+            retry_start, retry_end = retry_bounds
+            result = self._provider.fetch_historical_bars(
+                HistoricalBarsRequest(
+                    internal_symbol=request.internal_symbol,
+                    timeframe=external_timeframe,
+                    start=retry_start,
+                    end=retry_end,
+                )
+            )
+            return list(result.bars)
+
+
+def databento_live_gateway_host(dataset: str) -> str:
+    normalized = str(dataset or "").strip().lower().replace(".", "-")
+    if not normalized:
+        raise ValueError("Databento live gateway host requires a dataset.")
+    return f"{normalized}.lsg.databento.com"
+
+
+def databento_live_auth_response(*, cram: str, api_key: str) -> str:
+    material = f"{cram}|{api_key}".encode("utf-8")
+    digest = hashlib.sha256(material).hexdigest()
+    bucket_id = str(api_key)[-5:]
+    return f"{digest}-{bucket_id}"
+
+
+def databento_live_format_timestamp(value: datetime) -> str:
+    utc_value = value.astimezone(UTC)
+    return utc_value.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _parse_control_message(line: str) -> dict[str, str]:
+    payload: dict[str, str] = {}
+    for part in str(line).strip().split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        payload[key.strip()] = value.strip()
+    return payload
+
+
+def _parse_databento_timestamp(raw_value: Any) -> datetime:
+    if isinstance(raw_value, (int, float)):
+        return datetime.fromtimestamp(float(raw_value) / 1_000_000_000, tz=UTC)
+    value = str(raw_value or "").strip()
+    if not value:
+        raise ValueError("Databento live timestamp is empty.")
+    normalized = value.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _parse_optional_datetime(raw_value: Any) -> datetime | None:
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _databento_retry_bounds_from_error(
+    error: Exception,
+    *,
+    start: datetime,
+    end: datetime,
+    timeframe_duration: timedelta,
+    recovery_floor: datetime,
+) -> tuple[datetime, datetime] | None:
+    detail = _parse_databento_error_detail(error)
+    if not detail:
+        return None
+    case = str(detail.get("case") or "").strip().lower()
+    payload = detail.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    available_end = _parse_optional_datetime(payload.get("available_end"))
+    if available_end is None:
+        return None
+    if case not in {"data_end_after_available_end", "data_start_after_available_end"}:
+        return None
+    retry_end = min(end.astimezone(UTC), available_end.astimezone(UTC))
+    retry_floor = max(recovery_floor.astimezone(UTC), retry_end - timeframe_duration)
+    retry_start = start.astimezone(UTC)
+    if retry_start >= retry_end:
+        retry_start = retry_floor
+    else:
+        retry_start = max(retry_start, recovery_floor.astimezone(UTC))
+    if retry_start >= retry_end:
+        return None
+    return retry_start, retry_end
+
+
+def _parse_databento_error_detail(error: Exception) -> dict[str, Any] | None:
+    message = str(error or "")
+    brace_index = message.find("{")
+    if brace_index < 0:
+        return None
+    try:
+        payload = json.loads(message[brace_index:])
+    except json.JSONDecodeError:
+        return None
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        return detail
+    return None
+
+
+def _parse_databento_price(raw_value: Any) -> Decimal:
+    if isinstance(raw_value, int):
+        return Decimal(raw_value) / Decimal("1000000000")
+    if isinstance(raw_value, float):
+        return Decimal(str(raw_value))
+    return Decimal(str(raw_value))
+
+
+class _DatabentoRawLiveSession:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        dataset: str,
+        request_symbol: str,
+        stype_in: str,
+        schema_name: str,
+        internal_symbol: str,
+        internal_timeframe: str,
+        lookback_minutes: int,
+    ) -> None:
+        self._api_key = api_key
+        self._dataset = dataset
+        self._request_symbol = request_symbol
+        self._stype_in = stype_in
+        self._schema_name = schema_name
+        self._internal_symbol = internal_symbol
+        self._internal_timeframe = internal_timeframe
+        self._lookback_minutes = lookback_minutes
+        self._bars: dict[datetime, Bar] = {}
+        self._condition = threading.Condition()
+        self._last_error: str | None = None
+        self._last_stream_end: datetime | None = None
+        self._started = False
+        self._thread: threading.Thread | None = None
+        self._active_socket: socket.socket | None = None
+
+    def ensure_started(self) -> None:
+        with self._condition:
+            if self._started:
+                return
+            self._started = True
+            self._thread = threading.Thread(
+                target=self._run_forever,
+                name=f"databento-live-{self._internal_symbol}-{self._internal_timeframe}",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def snapshot_bars(self, *, since: datetime | None) -> list[Bar]:
+        self.ensure_started()
+        deadline = time.monotonic() + _DATABENTO_LIVE_SESSION_WAIT_SECONDS
+        with self._condition:
+            while not self._bars and self._last_error is None and time.monotonic() < deadline:
+                self._condition.wait(timeout=0.5)
+            if self._last_error is not None and not self._bars:
+                raise RuntimeError(self._last_error)
+            rows = sorted(self._bars.values(), key=lambda row: row.end_ts)
+        if since is None:
+            return rows
+        return [row for row in rows if row.end_ts > since]
+
+    def _run_forever(self) -> None:
+        while True:
+            try:
+                self._run_session()
+            except Exception as exc:  # pragma: no cover - exercised through runtime integration
+                with self._condition:
+                    self._last_error = f"Databento live session failed for {self._request_symbol}: {exc}"
+                    self._condition.notify_all()
+                time.sleep(1.0)
+
+    def _run_session(self) -> None:
+        host = databento_live_gateway_host(self._dataset)
+        with socket.create_connection((host, _DATABENTO_LIVE_GATEWAY_PORT), timeout=10.0) as sock:
+            with self._condition:
+                self._active_socket = sock
+            sock.settimeout(10.0)
+            reader = sock.makefile("r", encoding="utf-8", newline="\n")
+            writer = sock.makefile("w", encoding="utf-8", newline="\n")
+            greeting = reader.readline().strip()
+            challenge = reader.readline().strip()
+            challenge_fields = _parse_control_message(challenge)
+            cram = challenge_fields.get("cram")
+            if not greeting or not cram:
+                raise RuntimeError(f"Databento live gateway handshake failed: {greeting!r} / {challenge!r}")
+            auth_line = (
+                f"auth={databento_live_auth_response(cram=cram, api_key=self._api_key)}"
+                f"|dataset={self._dataset}|encoding=json|pretty_px=1|pretty_ts=1|heartbeat_interval_s=5"
+            )
+            writer.write(auth_line + "\n")
+            writer.flush()
+            auth_response = _parse_control_message(reader.readline())
+            if auth_response.get("success") != "1":
+                raise RuntimeError(f"Databento live authentication failed: {auth_response}")
+
+            timeframe_duration = timedelta(minutes=timeframe_minutes(self._internal_timeframe))
+            replay_start = (
+                self._last_stream_end - timeframe_duration
+                if self._last_stream_end is not None
+                else datetime.now(UTC) - timedelta(minutes=self._lookback_minutes)
+            )
+            subscribe_line = (
+                f"schema={self._schema_name}|stype_in={self._stype_in}|symbols={self._request_symbol}"
+                f"|start={databento_live_format_timestamp(replay_start)}"
+            )
+            writer.write(subscribe_line + "\n")
+            writer.write("start_session=0\n")
+            writer.flush()
+
+            with self._condition:
+                self._last_error = None
+                self._condition.notify_all()
+
+            while True:
+                raw_line = reader.readline()
+                if not raw_line:
+                    raise RuntimeError("Databento live gateway closed the socket.")
+                line = raw_line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                record = json.loads(line)
+                bar = self._bar_from_live_record(record)
+                if bar is None:
+                    continue
+                with self._condition:
+                    self._bars[bar.end_ts] = bar
+                    if len(self._bars) > 2048:
+                        oldest_end_ts = min(self._bars)
+                        del self._bars[oldest_end_ts]
+                    self._last_stream_end = bar.end_ts
+                    self._condition.notify_all()
+        with self._condition:
+            self._active_socket = None
+
+    def request_reconnect(self, *, reason: str) -> None:
+        del reason
+        with self._condition:
+            active_socket = self._active_socket
+        if active_socket is None:
+            return
+        try:
+            active_socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            active_socket.close()
+        except OSError:
+            pass
+
+    def _bar_from_live_record(self, record: dict[str, Any]) -> Bar | None:
+        required_fields = {"open", "high", "low", "close", "volume"}
+        if not required_fields.issubset(record):
+            return None
+        header = record.get("hd") if isinstance(record.get("hd"), dict) else {}
+        ts_event = record.get("ts_event") or header.get("ts_event")
+        if not ts_event:
+            return None
+        start_ts = _parse_databento_timestamp(ts_event)
+        duration = timedelta(minutes=timeframe_minutes(self._internal_timeframe))
+        end_ts = start_ts + duration
+        return Bar(
+            bar_id=build_bar_id(self._internal_symbol, self._internal_timeframe, end_ts),
+            symbol=self._internal_symbol,
+            timeframe=self._internal_timeframe,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            open=_parse_databento_price(record["open"]),
+            high=_parse_databento_price(record["high"]),
+            low=_parse_databento_price(record["low"]),
+            close=_parse_databento_price(record["close"]),
+            volume=int(record["volume"]),
+            is_final=True,
+            session_asia=False,
+            session_london=False,
+            session_us=True,
+            session_allowed=True,
+        )
+
+
+class DatabentoRawLivePollingClient:
+    _sessions: dict[tuple[str, str, str, str], _DatabentoRawLiveSession] = {}
+    _sessions_lock = threading.Lock()
+
+    def __init__(
+        self,
+        *,
+        provider: DatabentoMarketDataProvider,
+        lookback_minutes: int = 180,
+    ) -> None:
+        self._provider = provider
+        self._lookback_minutes = lookback_minutes
+
+    def poll_live_bars(
+        self,
+        _external_symbol: str | None,
+        external_timeframe: str,
+        request: SchwabLivePollRequest,
+    ) -> list[Bar]:
+        symbol_description = self._provider.describe_symbol(request.internal_symbol)
+        dataset = str(symbol_description.get("dataset") or "GLBX.MDP3")
+        request_symbol = str(symbol_description.get("request_symbol") or request.internal_symbol)
+        stype_in = str(symbol_description.get("stype_in") or "continuous")
+        schema_name = str((symbol_description.get("schema_by_timeframe") or {}).get(external_timeframe) or "ohlcv-1m")
+        api_key = str(getattr(self._provider, "_api_key", "") or os.environ.get(getattr(self._provider._config, "api_key_env", "DATABENTO_API_KEY"), "")).strip()  # noqa: SLF001
+        if not api_key:
+            raise RuntimeError("Databento live polling requires DATABENTO_API_KEY to be set.")
+        session_key = (dataset, request_symbol, stype_in, schema_name)
+        with self._sessions_lock:
+            session = self._sessions.get(session_key)
+            if session is None:
+                session = _DatabentoRawLiveSession(
+                    api_key=api_key,
+                    dataset=dataset,
+                    request_symbol=request_symbol,
+                    stype_in=stype_in,
+                    schema_name=schema_name,
+                    internal_symbol=request.internal_symbol,
+                    internal_timeframe=external_timeframe,
+                    lookback_minutes=self._lookback_minutes,
+                )
+                self._sessions[session_key] = session
+        return session.snapshot_bars(since=request.since)
+
+    def recover_live_bars(
+        self,
+        *,
+        internal_symbol: str,
+        internal_timeframe: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        matched = 0
+        with self._sessions_lock:
+            sessions = list(self._sessions.values())
+        for session in sessions:
+            if (
+                getattr(session, "_internal_symbol", None) == internal_symbol
+                and getattr(session, "_internal_timeframe", None) == internal_timeframe
+            ):
+                matched += 1
+                session.request_reconnect(reason=reason)
+        return {
+            "action": "provider_resubscribe",
+            "matched_session_count": matched,
+            "ok": matched > 0,
+            "detail": (
+                f"Requested Databento reconnect for {matched} live session(s)."
+                if matched > 0
+                else "No active Databento live session matched the stale symbol/timeframe."
+            ),
+        }
+
+
 class LivePollingService:
     """Polls live bar data and normalizes it into the shared internal bar model."""
 
     def __init__(
         self,
-        adapter: SchwabMarketDataAdapter,
+        adapter: SchwabMarketDataAdapter | None,
         client: Optional[SchwabLivePollingClient] = None,
         repositories: Optional[RepositorySet] = None,
         canonical_maintenance: CanonicalMarketDataMaintenanceService | None = None,
+        data_source: str = "schwab_live_poll",
+        provider: str = "schwab_market_data",
+        provenance_tag: str = "schwab_market_data_live_poll",
+        dataset: str | None = "schwab_pricehistory_live_poll",
+        schema_name: str | None = "ohlcv-1m",
     ) -> None:
         self._adapter = adapter
         self._client = client
         self._repositories = repositories
         self._canonical_maintenance = canonical_maintenance
+        self._data_source = data_source
+        self._provider = provider
+        self._provenance_tag = provenance_tag
+        self._dataset = dataset
+        self._schema_name = schema_name
+        self._market_data_recovery: dict[tuple[str, str], dict[str, Any]] = {}
+        self._market_data_recovery_event_logger: Callable[[dict[str, Any]], Any] | None = None
+
+    @property
+    def data_source(self) -> str:
+        return self._data_source
+
+    def set_recovery_event_logger(self, callback: Callable[[dict[str, Any]], Any] | None) -> None:
+        self._market_data_recovery_event_logger = callback
+
+    def market_data_recovery_snapshot(
+        self,
+        *,
+        internal_symbol: str,
+        internal_timeframe: str,
+        latest_feature_bar_timestamp: str | None = None,
+        latest_processed_bar_timestamp: str | None = None,
+        latest_processed_signal_timestamp: str | None = None,
+        lane_id: str | None = None,
+    ) -> dict[str, Any]:
+        key = self._market_data_recovery_key(internal_symbol, internal_timeframe)
+        payload = deepcopy(self._market_data_recovery.get(key) or self._initial_market_data_recovery_state(internal_symbol, internal_timeframe))
+        payload["latest_feature_bar_timestamp"] = latest_feature_bar_timestamp
+        payload["latest_processed_bar_timestamp"] = latest_processed_bar_timestamp
+        payload["latest_processed_signal_timestamp"] = latest_processed_signal_timestamp
+        payload["affected_symbols"] = [str(internal_symbol).upper()]
+        payload["affected_lanes"] = [str(lane_id)] if str(lane_id or "").strip() else []
+        return payload
 
     def poll_bars(
         self,
@@ -91,17 +578,71 @@ class LivePollingService:
                 "Fill in the SchwabLivePollingClient once docs are confirmed."
             )
 
-        external_symbol = self._adapter.map_historical_symbol(request.internal_symbol)
-        raw_records = self._client.poll_live_bars(external_symbol, internal_timeframe, request)
-        bars = self._adapter.normalize_live_records(
+        raw_records = self._poll_provider_once(request=request, internal_timeframe=internal_timeframe)
+        bars = self._normalize_records(
             raw_records,
-            request.internal_symbol,
-            internal_timeframe,
+            internal_symbol=request.internal_symbol,
+            internal_timeframe=internal_timeframe,
             default_is_final=default_is_final,
         )
         bars = self._filter_completed_bars(bars, request=request, internal_timeframe=internal_timeframe)
         self._persist_bars(bars)
+        self._record_latest_observed_bar(
+            internal_symbol=request.internal_symbol,
+            internal_timeframe=internal_timeframe,
+            bars=bars,
+            after_recovery=False,
+        )
+        recovery_state = self._evaluate_market_data_recovery_state(
+            request=request,
+            internal_timeframe=internal_timeframe,
+            latest_bars=bars,
+        )
+        if bool(recovery_state.get("stale")) and self._should_attempt_market_data_recovery(recovery_state):
+            recovery_state, recovered_bars = self._attempt_market_data_recovery(
+                request=request,
+                internal_timeframe=internal_timeframe,
+                default_is_final=default_is_final,
+                prior_state=recovery_state,
+            )
+            bars = self._merge_bar_rows(bars, recovered_bars)
+        self._store_market_data_recovery_state(
+            internal_symbol=request.internal_symbol,
+            internal_timeframe=internal_timeframe,
+            payload=recovery_state,
+        )
         return bars
+
+    def _poll_provider_once(
+        self,
+        *,
+        request: SchwabLivePollRequest,
+        internal_timeframe: str,
+    ) -> Sequence[Bar] | Sequence[dict[str, Any]]:
+        external_symbol = self._adapter.map_historical_symbol(request.internal_symbol) if self._adapter is not None else None
+        return self._client.poll_live_bars(external_symbol, internal_timeframe, request)
+
+    def _normalize_records(
+        self,
+        raw_records: Sequence[Bar] | Sequence[dict[str, Any]],
+        *,
+        internal_symbol: str,
+        internal_timeframe: str,
+        default_is_final: bool,
+    ) -> list[Bar]:
+        if not raw_records:
+            return []
+        first_record = raw_records[0]
+        if isinstance(first_record, Bar):
+            return list(raw_records)  # type: ignore[arg-type]
+        if self._adapter is None:
+            raise ValueError("LivePollingService requires an adapter when the client emits raw provider records.")
+        return self._adapter.normalize_live_records(
+            raw_records,  # type: ignore[arg-type]
+            internal_symbol,
+            internal_timeframe,
+            default_is_final=default_is_final,
+        )
 
     def _filter_completed_bars(
         self,
@@ -121,17 +662,261 @@ class LivePollingService:
         if self._repositories is None:
             return
         for bar in bars:
-            self._repositories.bars.save(bar, data_source="schwab_live_poll")
+            self._repositories.bars.save(bar, data_source=self._data_source)
         if self._canonical_maintenance is not None:
             self._canonical_maintenance.persist_completed_1m_bars(
                 bars=bars,
-                raw_data_source="schwab_live_poll",
-                provider="schwab_market_data",
-                provenance_tag="schwab_market_data_live_poll",
-                dataset="schwab_pricehistory_live_poll",
-                schema_name="ohlcv-1m",
+                raw_data_source=self._data_source,
+                provider=self._provider,
+                provenance_tag=self._provenance_tag,
+                dataset=self._dataset,
+                schema_name=self._schema_name,
                 provider_metadata={"ingest_mode": "completed_live_poll"},
             )
+
+    def _market_data_recovery_key(self, internal_symbol: str, internal_timeframe: str) -> tuple[str, str]:
+        return (str(internal_symbol).upper(), str(internal_timeframe).lower())
+
+    def _initial_market_data_recovery_state(self, internal_symbol: str, internal_timeframe: str) -> dict[str, Any]:
+        return {
+            "market_data_recovery_state": "IDLE",
+            "last_recovery_attempt_at": None,
+            "recovery_attempt_count": 0,
+            "recovery_action": None,
+            "recovery_result": None,
+            "recovery_root_cause": None,
+            "affected_symbols": [str(internal_symbol).upper()],
+            "affected_lanes": [],
+            "latest_observed_raw_bar_timestamp": None,
+            "latest_observed_bar_after_recovery": None,
+            "latest_feature_bar_timestamp": None,
+            "latest_processed_bar_timestamp": None,
+            "latest_processed_signal_timestamp": None,
+            "current_wall_clock_timestamp": None,
+            "market_data_lag_seconds": None,
+            "source_used_for_freshness": self._data_source,
+            "data_provider": self._provider,
+            "stale_scope": "ONE_SYMBOL_GROUP",
+            "recovered": False,
+            "stale": False,
+            "cooldown_until": None,
+            "attempt_history": [],
+            "last_recovery_detail": None,
+        }
+
+    def _record_latest_observed_bar(
+        self,
+        *,
+        internal_symbol: str,
+        internal_timeframe: str,
+        bars: Sequence[Bar],
+        after_recovery: bool,
+    ) -> None:
+        if not bars:
+            return
+        key = self._market_data_recovery_key(internal_symbol, internal_timeframe)
+        payload = deepcopy(self._market_data_recovery.get(key) or self._initial_market_data_recovery_state(internal_symbol, internal_timeframe))
+        latest_bar = max(bars, key=lambda row: row.end_ts)
+        payload["latest_observed_raw_bar_timestamp"] = latest_bar.end_ts.isoformat()
+        if after_recovery:
+            payload["latest_observed_bar_after_recovery"] = latest_bar.end_ts.isoformat()
+        self._market_data_recovery[key] = payload
+
+    def _evaluate_market_data_recovery_state(
+        self,
+        *,
+        request: SchwabLivePollRequest,
+        internal_timeframe: str,
+        latest_bars: Sequence[Bar],
+    ) -> dict[str, Any]:
+        key = self._market_data_recovery_key(request.internal_symbol, internal_timeframe)
+        payload = deepcopy(self._market_data_recovery.get(key) or self._initial_market_data_recovery_state(request.internal_symbol, internal_timeframe))
+        now = datetime.now(UTC)
+        latest_observed_ts = None
+        if latest_bars:
+            latest_observed_ts = max(row.end_ts for row in latest_bars).astimezone(UTC)
+        else:
+            existing = payload.get("latest_observed_raw_bar_timestamp")
+            latest_observed_ts = _parse_optional_datetime(existing) if existing else None
+        expected_completed_end = _latest_completed_bar_end(now, internal_timeframe).astimezone(UTC)
+        grace_deadline = expected_completed_end + timedelta(seconds=_MARKET_DATA_STALE_GRACE_SECONDS)
+        market_data_lag_seconds = None
+        if latest_observed_ts is not None:
+            market_data_lag_seconds = max(
+                (expected_completed_end - latest_observed_ts).total_seconds(),
+                0.0,
+            )
+        else:
+            market_data_lag_seconds = max((now - expected_completed_end).total_seconds(), 0.0)
+        if now <= grace_deadline:
+            root_cause = "NORMAL_PUBLICATION_DELAY_WITHIN_GRACE"
+            stale = False
+            state = "GRACE"
+            recovered = False
+        elif latest_observed_ts is None or latest_observed_ts < expected_completed_end:
+            stale = True
+            recovered = False
+            if self._data_source.startswith("databento"):
+                root_cause = "SUBSCRIPTION_DROPPED"
+            else:
+                root_cause = "DATA_PROVIDER_LAG"
+            state = "STALE_DETECTED"
+        else:
+            stale = False
+            recovered = bool(payload.get("recovered"))
+            root_cause = None
+            state = "RECOVERED" if recovered else "HEALTHY"
+        payload.update(
+            {
+                "market_data_recovery_state": state,
+                "recovery_root_cause": root_cause,
+                "current_wall_clock_timestamp": now.isoformat(),
+                "market_data_lag_seconds": market_data_lag_seconds,
+                "source_used_for_freshness": self._data_source,
+                "data_provider": self._provider,
+                "stale": stale,
+                "recovered": recovered,
+            }
+        )
+        return payload
+
+    def _should_attempt_market_data_recovery(self, payload: dict[str, Any]) -> bool:
+        if not bool(payload.get("stale")):
+            return False
+        now = _parse_optional_datetime(payload.get("current_wall_clock_timestamp")) or datetime.now(UTC)
+        cooldown_until = _parse_optional_datetime(payload.get("cooldown_until"))
+        if cooldown_until is not None and now < cooldown_until.astimezone(UTC):
+            payload["market_data_recovery_state"] = "COOLDOWN_ACTIVE"
+            payload["recovery_result"] = "RATE_LIMITED"
+            return False
+        attempt_history = [
+            _parse_optional_datetime(value)
+            for value in list(payload.get("attempt_history") or [])
+            if _parse_optional_datetime(value) is not None
+        ]
+        window_floor = now - timedelta(seconds=_MARKET_DATA_RECOVERY_WINDOW_SECONDS)
+        recent_attempts = [value for value in attempt_history if value is not None and value.astimezone(UTC) >= window_floor]
+        payload["attempt_history"] = [value.isoformat() for value in recent_attempts]
+        if len(recent_attempts) >= _MARKET_DATA_RECOVERY_MAX_ATTEMPTS_PER_WINDOW:
+            payload["market_data_recovery_state"] = "COOLDOWN_ACTIVE"
+            payload["recovery_result"] = "RATE_LIMITED"
+            payload["cooldown_until"] = (now + timedelta(seconds=_MARKET_DATA_RECOVERY_COOLDOWN_SECONDS)).isoformat()
+            return False
+        return True
+
+    def _attempt_market_data_recovery(
+        self,
+        *,
+        request: SchwabLivePollRequest,
+        internal_timeframe: str,
+        default_is_final: bool,
+        prior_state: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[Bar]]:
+        now = datetime.now(UTC)
+        payload = deepcopy(prior_state)
+        attempt_history = list(payload.get("attempt_history") or [])
+        attempt_history.append(now.isoformat())
+        payload["attempt_history"] = attempt_history
+        payload["recovery_attempt_count"] = len(attempt_history)
+        payload["last_recovery_attempt_at"] = now.isoformat()
+        payload["market_data_recovery_state"] = "RECOVERY_IN_PROGRESS"
+        recovery_result: dict[str, Any] = {
+            "action": "provider_resubscribe_unsupported",
+            "ok": False,
+            "detail": "The active market-data client does not support scoped recovery.",
+        }
+        recover_hook = getattr(self._client, "recover_live_bars", None)
+        if callable(recover_hook):
+            recovery_result = dict(
+                recover_hook(
+                    internal_symbol=request.internal_symbol,
+                    internal_timeframe=internal_timeframe,
+                    reason=str(payload.get("recovery_root_cause") or "market_data_stale"),
+                )
+                or {}
+            )
+        payload["recovery_action"] = recovery_result.get("action")
+        payload["last_recovery_detail"] = recovery_result.get("detail")
+        recovered_bars: list[Bar] = []
+        if bool(recovery_result.get("ok")):
+            raw_records = self._poll_provider_once(request=request, internal_timeframe=internal_timeframe)
+            recovered_bars = self._normalize_records(
+                raw_records,
+                internal_symbol=request.internal_symbol,
+                internal_timeframe=internal_timeframe,
+                default_is_final=default_is_final,
+            )
+            recovered_bars = self._filter_completed_bars(
+                recovered_bars,
+                request=request,
+                internal_timeframe=internal_timeframe,
+            )
+            self._persist_bars(recovered_bars)
+            self._record_latest_observed_bar(
+                internal_symbol=request.internal_symbol,
+                internal_timeframe=internal_timeframe,
+                bars=recovered_bars,
+                after_recovery=True,
+            )
+        post_state = self._evaluate_market_data_recovery_state(
+            request=request,
+            internal_timeframe=internal_timeframe,
+            latest_bars=recovered_bars,
+        )
+        post_state["attempt_history"] = list(payload.get("attempt_history") or [])
+        post_state["recovery_attempt_count"] = payload["recovery_attempt_count"]
+        post_state["last_recovery_attempt_at"] = payload["last_recovery_attempt_at"]
+        post_state["recovery_action"] = payload["recovery_action"]
+        post_state["last_recovery_detail"] = payload["last_recovery_detail"]
+        if bool(post_state.get("stale")):
+            post_state["market_data_recovery_state"] = "FAILED"
+            post_state["recovery_result"] = "NO_FRESH_BAR_AFTER_RECOVERY"
+            post_state["recovered"] = False
+            post_state["cooldown_until"] = (now + timedelta(seconds=_MARKET_DATA_RECOVERY_COOLDOWN_SECONDS)).isoformat()
+        else:
+            post_state["market_data_recovery_state"] = "RECOVERED"
+            post_state["recovery_result"] = "FRESH_BAR_OBSERVED"
+            post_state["recovered"] = True
+            post_state["cooldown_until"] = None
+        self._emit_market_data_recovery_event(request=request, internal_timeframe=internal_timeframe, payload=post_state)
+        return post_state, recovered_bars
+
+    def _store_market_data_recovery_state(
+        self,
+        *,
+        internal_symbol: str,
+        internal_timeframe: str,
+        payload: dict[str, Any],
+    ) -> None:
+        key = self._market_data_recovery_key(internal_symbol, internal_timeframe)
+        self._market_data_recovery[key] = deepcopy(payload)
+
+    def _emit_market_data_recovery_event(
+        self,
+        *,
+        request: SchwabLivePollRequest,
+        internal_timeframe: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if self._market_data_recovery_event_logger is None:
+            return
+        event = {
+            "event_type": "market_data_recovery_attempt",
+            "symbol": str(request.internal_symbol).upper(),
+            "timeframe": str(internal_timeframe),
+            **deepcopy(payload),
+        }
+        try:
+            self._market_data_recovery_event_logger(event)
+        except Exception:
+            return
+
+    @staticmethod
+    def _merge_bar_rows(existing: Sequence[Bar], recovered: Sequence[Bar]) -> list[Bar]:
+        merged: dict[tuple[str, datetime], Bar] = {}
+        for row in [*existing, *recovered]:
+            merged[(row.symbol, row.end_ts)] = row
+        return sorted(merged.values(), key=lambda row: row.end_ts)
 
 
 class LiveStreamService:

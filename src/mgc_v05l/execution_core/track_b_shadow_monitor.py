@@ -854,9 +854,12 @@ def _run_instrument_cycle(
             now=started_at,
             live_feed_processes=live_feed_processes if live_feed_processes is not None else {},
         )
-        if not live_feed_readiness.strategy_ready and not (
-            config.startup_backfill_context_enabled and live_feed_readiness.live_execution_approved
-        ):
+        startup_seed_diagnostic_allowed = (
+            config.startup_backfill_context_enabled
+            and live_feed_readiness.live_feed_connected is True
+            and live_feed_readiness.event_path is not None
+        )
+        if not live_feed_readiness.strategy_ready and not startup_seed_diagnostic_allowed:
             _write_live_readiness_startup_diagnostic(
                 config=config,
                 instrument=instrument,
@@ -902,6 +905,24 @@ def _run_instrument_cycle(
                 live_feed=live_feed_readiness,
                 primary_blocker=str(runtime.report.get("primary_blocker") or "Runtime candle capture did not write data."),
                 required_next_action=str(runtime.report.get("required_next_action") or "Repair runtime candle provider before evaluation."),
+            ),
+            None,
+        )
+    if live_feed_readiness is not None and live_feed_readiness.live_execution_approved is not True:
+        return (
+            _instrument_report_from_stages(
+                instrument=instrument,
+                verdict=live_feed_readiness.verdict or TrackBShadowMonitorVerdict.LIVE_FEED_STALE,
+                runtime=runtime,
+                live_feed=live_feed_readiness,
+                primary_blocker=live_feed_readiness.blocker or str(
+                    runtime.report.get("primary_blocker")
+                    or "Databento Live feed is not approved for execution yet."
+                ),
+                required_next_action=(
+                    "Keep the managed Databento Live feed running until live_execution_approved=true; "
+                    "seeded context alone must not allow PAPER evaluation."
+                ),
             ),
             None,
         )
@@ -1711,6 +1732,16 @@ def _run_live_runtime_artifact_capture(
             "latest_decision_bar_source": startup_readiness.get("latest_decision_bar_source"),
             "live_execution_approved": startup_readiness.get("live_execution_approved"),
             "paper_evaluation_allowed": startup_readiness.get("paper_evaluation_allowed"),
+            "required_bar_count": startup_readiness.get("required_bar_count"),
+            "seeded_bar_count": startup_readiness.get("seeded_bar_count"),
+            "live_confirmed_bar_count": startup_readiness.get("live_confirmed_bar_count"),
+            "latest_seed_bar_timestamp": startup_readiness.get("latest_seed_bar_timestamp"),
+            "latest_live_bar_timestamp": startup_readiness.get("latest_live_bar_timestamp"),
+            "source_paths": startup_readiness.get("source_paths") or [],
+            "completed_candles_only": startup_readiness.get("completed_candles_only"),
+            "research_artifact_used": startup_readiness.get("research_artifact_used"),
+            "live_feed_ready": startup_readiness.get("live_feed_ready"),
+            "paper_trade_allowed": startup_readiness.get("paper_trade_allowed"),
         }
     )
     _annotate_live_runtime_result(result, live_report_json=live_report_json, live_event_json=live_event_json, live_report=live_report)
@@ -1737,6 +1768,22 @@ def _startup_context_payload(
     backfill_gap_filled = False
     backfill_source = None
     backfill_report_path = None
+    research_artifact_used = False
+    source_paths: list[dict[str, Any]] = [
+        {
+            "path": str(live_event_json),
+            "category": "LIVE_RUNTIME",
+            "used_for": "LIVE_CONFIRMATION_AND_DECISION_BAR",
+        }
+    ]
+    if live_report_json.exists():
+        source_paths.append(
+            {
+                "path": str(live_report_json),
+                "category": "LIVE_RUNTIME_REPORT",
+                "used_for": "LIVE_CONFIRMATION",
+            }
+        )
     gap_repair_attempted = False
     gap_repair_source = None
     gap_repair_request_params: dict[str, Any] | None = None
@@ -1746,15 +1793,32 @@ def _startup_context_payload(
     recovery_event_path = _latest_runtime_1m_path(Path(config.runtime_candle_capture_output_root), instrument)
     recovery_payload = _read_json_optional(recovery_event_path)
     if backfill_gap_detected and recovery_payload:
-        recovery_candles = _tag_context_candles(
-            _payload_candles(recovery_payload),
-            _context_source_tag(recovery_payload, default="RECOVERY_CONTEXT"),
-        )
-        merged = _merge_context_candles(recovery_candles, merged)
-        backfill_gap_filled = len(merged) >= required_1m and _completed_5m_count_from_1m(merged) >= required_5m
-        if backfill_gap_filled:
-            backfill_source = "RECOVERY_CONTEXT"
-            backfill_report_path = str(recovery_event_path)
+        if _is_research_only_context_source(recovery_event_path, recovery_payload):
+            research_artifact_used = True
+            source_paths.append(
+                {
+                    "path": str(recovery_event_path),
+                    "category": "RESEARCH_ONLY_UNSAFE",
+                    "used_for": "REJECTED_STARTUP_CONTEXT",
+                }
+            )
+        else:
+            recovery_candles = _tag_context_candles(
+                _payload_candles(recovery_payload),
+                _context_source_tag(recovery_payload, default="RECOVERY_CONTEXT"),
+            )
+            merged = _merge_context_candles(recovery_candles, merged)
+            backfill_gap_filled = len(merged) >= required_1m and _completed_5m_count_from_1m(merged) >= required_5m
+            if backfill_gap_filled:
+                backfill_source = "RECOVERY_CONTEXT"
+                backfill_report_path = str(recovery_event_path)
+                source_paths.append(
+                    {
+                        "path": str(recovery_event_path),
+                        "category": "SAFE_STARTUP_CONTEXT",
+                        "used_for": "FEATURE_CONTEXT_SEED",
+                    }
+                )
     merged = _merge_context_candles(merged)
     initial_gap_details = _classify_context_gaps(merged, required_1m=required_1m, required_5m=required_5m)
     blocking_initial_gaps = _blocking_context_gaps(initial_gap_details)
@@ -1792,14 +1856,31 @@ def _startup_context_payload(
                 backfill.verdict.value if isinstance(backfill.verdict, TrackBRuntimeCandleCaptureVerdict) else backfill.verdict,
             )
         if backfill.report.get("data_written") is True and backfill.runtime_candles_event:
-            http_candles = _tag_context_candles(
-                _payload_candles(backfill.runtime_candles_event),
-                "DATABENTO_HTTP_BACKFILL",
-            )
-            merged = _merge_context_candles(http_candles, live_candles)
-            backfill_source = "DATABENTO_HTTP_BACKFILL"
-            gap_repair_source = "DATABENTO_HTTP_BACKFILL" if gap_repair_attempted else None
-            backfill_gap_filled = len(merged) >= required_1m and _completed_5m_count_from_1m(merged) >= required_5m
+            if _is_research_only_context_source(backfill.report_json, backfill.runtime_candles_event):
+                research_artifact_used = True
+                source_paths.append(
+                    {
+                        "path": str(backfill.report_json),
+                        "category": "RESEARCH_ONLY_UNSAFE",
+                        "used_for": "REJECTED_STARTUP_CONTEXT",
+                    }
+                )
+            else:
+                http_candles = _tag_context_candles(
+                    _payload_candles(backfill.runtime_candles_event),
+                    "DATABENTO_HTTP_BACKFILL",
+                )
+                merged = _merge_context_candles(http_candles, live_candles)
+                backfill_source = "DATABENTO_HTTP_BACKFILL"
+                gap_repair_source = "DATABENTO_HTTP_BACKFILL" if gap_repair_attempted else None
+                backfill_gap_filled = len(merged) >= required_1m and _completed_5m_count_from_1m(merged) >= required_5m
+                source_paths.append(
+                    {
+                        "path": str(backfill.report_json),
+                        "category": "SAFE_STARTUP_CONTEXT",
+                        "used_for": "FEATURE_CONTEXT_SEED",
+                    }
+                )
     merged = _merge_context_candles(merged)
     merged = merged[-max(int(config.max_bars), required_1m):]
     gap_details = _classify_context_gaps(
@@ -1847,6 +1928,8 @@ def _startup_context_payload(
     primary_gap = blocking_gaps[0] if blocking_gaps else (gap_details[0] if gap_details else None)
     latest_decision_bar_source = merged[-1].get("source_tag") if merged else None
     context_ready = len(validation_candles) >= required_1m and completed_5m_count >= required_5m and context_gap_count == 0
+    if research_artifact_used:
+        context_ready = False
     live_completed_1m_fresh = _first_bool(
         live_payload.get("completed_1m_fresh"),
         live_report_payload.get("completed_1m_fresh"),
@@ -1887,7 +1970,11 @@ def _startup_context_payload(
         and live_completed_5m_fresh is True
     )
     paper_evaluation_allowed = context_ready and live_execution_approved
-    if not context_ready:
+    if research_artifact_used:
+        classification = "RESEARCH_ONLY_CONTEXT_REJECTED"
+        context_source = "RESEARCH_ONLY_UNSAFE"
+        paper_evaluation_allowed = False
+    elif not context_ready:
         classification = "FEATURE_CONTEXT_NOT_READY"
         context_source = backfill_source
     elif latest_decision_bar_source != "DATABENTO_LIVE_ARTIFACT":
@@ -1911,7 +1998,20 @@ def _startup_context_payload(
         context_source = backfill_source
     diagnostic = {
         "instrument_family": instrument.instrument_family,
+        "instrument": instrument.instrument_family,
+        "timeframe": "1m",
         "strategy_ids": list(instrument.enabled_strategies),
+        "required_bar_count": required_1m,
+        "seeded_bar_count": len(validation_candles) if context_ready else len(merged),
+        "live_confirmed_bar_count": len(live_candles),
+        "latest_seed_bar_timestamp": _latest_context_timestamp(validation_candles if context_ready else merged),
+        "latest_live_bar_timestamp": _latest_context_timestamp(live_candles),
+        "source_paths": source_paths,
+        "completed_candles_only": True,
+        "research_artifact_used": research_artifact_used,
+        "feature_context_ready": context_ready,
+        "live_feed_ready": live_execution_approved,
+        "paper_trade_allowed": paper_evaluation_allowed,
         "required_1m_context_bars": required_1m,
         "available_1m_context_bars": len(merged),
         "usable_1m_context_bars": len(validation_candles),
@@ -1983,6 +2083,16 @@ def _startup_context_payload(
             "candle_history": validation_candles if context_ready else merged,
             "bars_available": len(validation_candles) if context_ready else len(merged),
             "feature_context_ready": context_ready,
+            "live_feed_ready": live_execution_approved,
+            "paper_trade_allowed": paper_evaluation_allowed,
+            "required_bar_count": required_1m,
+            "seeded_bar_count": len(validation_candles) if context_ready else len(merged),
+            "live_confirmed_bar_count": len(live_candles),
+            "latest_seed_bar_timestamp": _latest_context_timestamp(validation_candles if context_ready else merged),
+            "latest_live_bar_timestamp": _latest_context_timestamp(live_candles),
+            "source_paths": source_paths,
+            "completed_candles_only": True,
+            "research_artifact_used": research_artifact_used,
             "feature_context_source": context_source,
             "startup_readiness_classification": classification,
             "latest_decision_bar_source": latest_decision_bar_source,
@@ -2008,6 +2118,30 @@ def _payload_candles(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         if isinstance(raw, list):
             return [dict(item) for item in raw if isinstance(item, Mapping)]
     return []
+
+
+def _latest_context_timestamp(candles: Sequence[Mapping[str, Any]]) -> str | None:
+    for candle in reversed(list(candles)):
+        ts = _first_text(candle.get("candle_timestamp"), candle.get("timestamp"), candle.get("end_ts"))
+        if ts:
+            return ts
+    return None
+
+
+def _is_research_only_context_source(path: Path, payload: Mapping[str, Any] | None = None) -> bool:
+    normalized = str(path).replace("\\", "/")
+    if "/outputs/track_b_research/" in normalized or normalized.startswith("outputs/track_b_research/"):
+        return True
+    if payload is None:
+        return False
+    mode = str(payload.get("candle_source_mode") or payload.get("source_category") or "").upper()
+    if "RESEARCH" in mode:
+        return True
+    for candle in _payload_candles(payload):
+        source_tag = str(candle.get("source_tag") or candle.get("source_category") or "").upper()
+        if "RESEARCH" in source_tag:
+            return True
+    return False
 
 
 def _tag_context_candles(candles: Sequence[Mapping[str, Any]], source_tag: str) -> list[dict[str, Any]]:
@@ -2268,7 +2402,39 @@ def _write_live_readiness_startup_diagnostic(
         classification = "READY_WITH_LIVE_ONLY_CONTEXT"
     payload = {
         "instrument_family": instrument.instrument_family,
+        "instrument": instrument.instrument_family,
+        "timeframe": "1m",
         "strategy_ids": list(instrument.enabled_strategies),
+        "required_bar_count": readiness.required_1m_count,
+        "seeded_bar_count": readiness.warmup_1m_count,
+        "live_confirmed_bar_count": readiness.live_confirmation_1m_count,
+        "latest_seed_bar_timestamp": None,
+        "latest_live_bar_timestamp": None,
+        "source_paths": [
+            item
+            for item in (
+                None
+                if readiness.event_path is None
+                else {
+                    "path": str(readiness.event_path),
+                    "category": "LIVE_RUNTIME",
+                    "used_for": "LIVE_CONFIRMATION_AND_FEATURE_CONTEXT",
+                },
+                None
+                if readiness.report_path is None
+                else {
+                    "path": str(readiness.report_path),
+                    "category": "LIVE_RUNTIME_REPORT",
+                    "used_for": "LIVE_CONFIRMATION",
+                },
+            )
+            if item is not None
+        ],
+        "completed_candles_only": True,
+        "research_artifact_used": False,
+        "feature_context_ready": readiness.feature_context_ready,
+        "live_feed_ready": readiness.live_execution_approved,
+        "paper_trade_allowed": False,
         "required_1m_context_bars": readiness.required_1m_count,
         "available_1m_context_bars": readiness.warmup_1m_count,
         "required_5m_context_bars": readiness.required_completed_5m_count,
@@ -2334,6 +2500,8 @@ def _write_startup_readiness_diagnostic(
         classification = "BACKFILL_REQUIRED_IN_PROGRESS"
     elif any(item == "FEATURE_CONTEXT_NOT_READY" for item in classifications):
         classification = "FEATURE_CONTEXT_NOT_READY"
+    elif any(item == "RESEARCH_ONLY_CONTEXT_REJECTED" for item in classifications):
+        classification = "RESEARCH_ONLY_CONTEXT_REJECTED"
     else:
         classification = "DIAGNOSTIC_INCONCLUSIVE"
     report = {
@@ -3193,6 +3361,16 @@ def _instrument_report_from_stages(
             "live_feed_required_completed_5m_count": base.get("live_feed_required_completed_5m_count"),
             "feature_context_ready": runtime_report.get("feature_context_ready", base.get("feature_context_ready")),
             "feature_context_source": runtime_report.get("feature_context_source") or base.get("feature_context_source"),
+            "required_bar_count": runtime_report.get("required_bar_count"),
+            "seeded_bar_count": runtime_report.get("seeded_bar_count"),
+            "live_confirmed_bar_count": runtime_report.get("live_confirmed_bar_count"),
+            "latest_seed_bar_timestamp": runtime_report.get("latest_seed_bar_timestamp"),
+            "latest_live_bar_timestamp": runtime_report.get("latest_live_bar_timestamp"),
+            "source_paths": runtime_report.get("source_paths") or [],
+            "completed_candles_only": runtime_report.get("completed_candles_only"),
+            "research_artifact_used": runtime_report.get("research_artifact_used", False),
+            "live_feed_ready": runtime_report.get("live_feed_ready", base.get("live_execution_approved")),
+            "paper_trade_allowed": runtime_report.get("paper_trade_allowed", False),
             "paper_evaluation_allowed": bool(
                 runtime_report.get("feature_context_ready", base.get("feature_context_ready")) is True
                 and base.get("live_execution_approved") is True

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -159,6 +160,42 @@ def test_live_runtime_feed_writes_instrument_specific_mnq_hot_artifacts(monkeypa
     assert client.subscribe_kwargs["symbols"] == ["MNQ.v.0"]
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_live_runtime_feed_merges_recent_same_instrument_bars_across_restarts(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    restart_records = [
+        {
+            **record,
+            "ts_event": (datetime(2026, 5, 5, 12, 0, tzinfo=UTC) + timedelta(minutes=index)).isoformat(),
+            "ts_recv": (datetime(2026, 5, 5, 12, 0, 1, tzinfo=UTC) + timedelta(minutes=index)).isoformat(),
+        }
+        for index, record in enumerate(live_records()[:5])
+    ]
+    first_records = restart_records[:4]
+    first_result = run_track_b_databento_live_runtime_feed(
+        config=config(tmp_path, max_records=4, max_bars=9, min_bars=1),
+        live_client_factory=lambda _key: FakeLiveClient(first_records),
+        now_func=lambda: datetime(2026, 5, 5, 12, 4, 30, tzinfo=UTC),
+        run_id="live-restart-first",
+    )
+    assert first_result.report["bars_available"] == 4
+    assert json.loads((tmp_path / "live" / "latest_live_mgc_completed_5m_candles.json").read_text())["bars_available"] == 0
+
+    second_result = run_track_b_databento_live_runtime_feed(
+        config=config(tmp_path, max_records=1, max_bars=9, min_bars=1),
+        live_client_factory=lambda _key: FakeLiveClient([restart_records[4]]),
+        now_func=lambda: datetime(2026, 5, 5, 12, 5, 30, tzinfo=UTC),
+        run_id="live-restart-second",
+    )
+
+    assert second_result.report["bars_available"] == 5
+    latest = json.loads((tmp_path / "live" / "latest_live_mgc_1m_candles.json").read_text())
+    completed = json.loads((tmp_path / "live" / "latest_live_mgc_completed_5m_candles.json").read_text())
+    assert latest["bars_available"] == 5
+    assert latest["first_candle_timestamp"] == "2026-05-05T12:00:00+00:00"
+    assert latest["last_candle_timestamp"] == "2026-05-05T12:04:00+00:00"
+    assert completed["bars_available"] == 1
 
 
 def test_live_runtime_feed_provider_error_never_logs_secret(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
