@@ -4,7 +4,7 @@ set -uo pipefail
 REPO_ROOT="/Users/patrick/Dev/MGC-v05l-automation"
 OUT_DIR="${REPO_ROOT}/outputs/reports/track_b_paper_preflight"
 OUT_JSON="${OUT_DIR}/latest_track_b_paper_preflight.json"
-REQUIRED_PATCH_COMMITS="d7b126c10d 35064b698c"
+REQUIRED_PATCH_COMMITS="d7b126c10d 35064b698c 94695132b1"
 
 usage() {
   echo "Usage: $0 --mode weekend-static|monday-live" >&2
@@ -610,6 +610,7 @@ result = {
     "repo_root": str(REPO_ROOT),
     "required_patch_commits": list(REQUIRED_PATCH_COMMITS),
     "final_submit_path_baseline_commit": "35064b698c",
+    "final_execution_scope_baseline_commit": "94695132b1",
     "weekend_static_dry_run": weekend_status,
     "monday_live_preflight": monday_status,
     "monday_blocked_classification": (
