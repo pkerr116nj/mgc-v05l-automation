@@ -14,6 +14,7 @@ from ..app.shared_strategy_identities import shared_strategy_identities
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from .ibkr_paper_strategy_porting import (
     IbkrPaperStrategyPortingConfig,
+    lane_submit_bridge_adapter,
     run_ibkr_paper_strategy_porting,
 )
 
@@ -24,9 +25,14 @@ _DEFAULT_VAR_PERFORMANCE_PATH = Path("var") / "per_strategy_paper_performance.cs
 _DEFAULT_PERFORMANCE_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "paper_strategy_performance_snapshot.json"
 _DEFAULT_SIGNAL_AUDIT_PATH = Path("outputs") / "operator_dashboard" / "paper_signal_intent_fill_audit_snapshot.json"
 _DEFAULT_DASHBOARD_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "dashboard_api_snapshot.json"
+_DEFAULT_PAPER_READINESS_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "paper_readiness_snapshot.json"
+_DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "startup_control_plane_snapshot.json"
+_DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "supervised_paper_operability_snapshot.json"
+_DEFAULT_TEMP_PAPER_INTEGRITY_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "paper_temporary_paper_runtime_integrity_snapshot.json"
 _DEFAULT_LEDGER_PATH = Path("var") / "paper_strategy_position_ledger.json"
 _DEFAULT_PORTING_OUTPUT_DIR = Path("outputs") / "reports" / "ibkr_strategy_porting"
 _DEFAULT_PAPER_SESSION_LANES_DIR = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "lanes"
+_DEFAULT_PAPER_CONFIG_IN_FORCE_PATH = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_config_in_force.json"
 _PERFORMANCE_CSV = "per_strategy_paper_performance.csv"
 _STATUS_JSON = "per_strategy_paper_status.json"
 _PROBATION_DASHBOARD_JSON = "strategy_probation_dashboard.json"
@@ -39,6 +45,12 @@ _LOCAL_ONLY_AUDIT_CSV = "local_only_lane_audit.csv"
 _TRADE_SEPARATION_REPORT_MD = "ibkr_vs_internal_paper_trade_separation_report.md"
 
 _SUPPORTED_EXECUTABLE_INSTRUMENTS = {"MGC", "GC", "MNQ", "NQ", "MES", "ES"}
+_BACKEND_SOURCE_MONITOR_BLOCK_REASONS = {
+    "backend_down",
+    "source_snapshot_fallback",
+    "paper_runtime_stale",
+    "temp_paper_blocked",
+}
 _EXPLICIT_INTERNAL_ONLY_DIAGNOSTIC_LANE_IDS: set[str] = set()
 _STATUS_PRECEDENCE = {
     "DISABLED": 6,
@@ -113,6 +125,7 @@ def run_ibkr_paper_strategy_governance(
     intent_by_lane = {str(row.get("strategy_id") or ""): dict(row) for row in intent_rows}
     ledger_positions = list(ledger.get("positions") or [])
     trade_stats_by_lane = _trade_stats_by_lane(trade_log)
+    paper_config_in_force = _load_json(config.repo_root / _DEFAULT_PAPER_CONFIG_IN_FORCE_PATH)
     shared_identity_map = {
         identity.lane_id: identity.identity_id
         for identity in shared_strategy_identities()
@@ -181,6 +194,36 @@ def run_ibkr_paper_strategy_governance(
         )
         strategy_rows.append(row)
         seen_lane_ids.add(synthetic_lane_id)
+
+    for configured_row in list(paper_config_in_force.get("lanes") or []):
+        lane_id = str(configured_row.get("lane_id") or "").strip()
+        if not lane_id or lane_id in seen_lane_ids:
+            continue
+        if not bool(configured_row.get("paper_only")):
+            continue
+        if not bool(configured_row.get("non_approved")):
+            continue
+        if not bool(configured_row.get("exclude_from_strategy_performance")):
+            continue
+        bridge_adapter = lane_submit_bridge_adapter(lane_id=lane_id)
+        if not bridge_adapter:
+            continue
+        row = _build_governance_row(
+            config=config,
+            now=now,
+            inventory_row=_synthetic_configured_inventory_row(configured_row=configured_row, bridge_adapter=bridge_adapter),
+            performance_row=performance_by_lane.get(lane_id, {}),
+            signal_row=signal_by_lane.get(lane_id, {}),
+            intent_row=intent_by_lane.get(lane_id, {}),
+            tracked_details=tracked_details,
+            ledger_positions=ledger_positions,
+            monitor_status=monitor_status,
+            trade_stats=trade_stats_by_lane.get(lane_id, {}),
+            shared_strategy_id=shared_identity_map.get(lane_id),
+            global_monitor_owner="",
+        )
+        strategy_rows.append(row)
+        seen_lane_ids.add(lane_id)
 
     strategy_rows.sort(key=lambda row: (str(row.get("instrument") or ""), str(row.get("strategy_id") or "")))
     pause_rows.sort(key=lambda row: (str(row.get("instrument") or ""), str(row.get("strategy_id") or "")))
@@ -295,26 +338,63 @@ def load_paper_strategy_governance_status(*, repo_root: Path, strategy_id: str |
             "block_reasons": ["paper_strategy_governance_status_invalid"],
             "detail": "Paper strategy governance status could not be decoded.",
         }
-
-    rows = list(payload.get("strategies") or [])
     requested = str(strategy_id or "").strip()
+    payload = _refresh_governance_payload_if_needed(repo_root=repo_root, payload=payload, strategy_id=requested)
+    return _select_governance_strategy(payload=payload, strategy_id=requested)
+
+
+def _select_governance_strategy(*, payload: dict[str, Any], strategy_id: str) -> dict[str, Any]:
+    rows = list(payload.get("strategies") or [])
     selected = None
-    if requested:
+    if strategy_id:
         for row in rows:
             identifiers = {
                 str(row.get("strategy_id") or "").strip(),
                 str(row.get("bridge_strategy_id") or "").strip(),
                 str(row.get("standalone_strategy_id") or "").strip(),
             }
-            if requested in identifiers:
+            if strategy_id in identifiers:
                 selected = dict(row)
                 break
+    payload = dict(payload)
     payload["selected_strategy"] = selected
     payload["submit_allowed"] = bool(selected.get("submit_allowed")) if isinstance(selected, dict) else False
     payload["block_reasons"] = list(selected.get("submit_block_reasons") or []) if isinstance(selected, dict) else ["paper_strategy_governance_strategy_missing"]
-    if requested and selected is None:
-        payload["detail"] = f"Paper strategy governance has no row for strategy identity {requested}."
+    if strategy_id and selected is None:
+        payload["detail"] = f"Paper strategy governance has no row for strategy identity {strategy_id}."
+    elif isinstance(selected, dict) and not bool(selected.get("submit_allowed")):
+        payload["detail"] = _selected_governance_block_detail(selected)
+        payload["backend_source_readiness"] = selected.get("backend_source_readiness")
     return payload
+
+
+def _refresh_governance_payload_if_needed(
+    *,
+    repo_root: Path,
+    payload: dict[str, Any],
+    strategy_id: str,
+) -> dict[str, Any]:
+    generated_at = _parse_datetime(payload.get("generated_at"))
+    freshness_window_seconds = float(IbkrPaperStrategyGovernanceConfig(repo_root=repo_root).freshness_window_seconds)
+    payload_stale = (
+        generated_at is None
+        or max(0.0, (datetime.now(timezone.utc) - generated_at).total_seconds()) > freshness_window_seconds
+    )
+    strategy_missing = bool(strategy_id) and _select_governance_strategy(payload=payload, strategy_id=strategy_id).get("selected_strategy") is None
+    readiness_newer = _backend_readiness_artifacts_newer_than(repo_root=repo_root, generated_at=generated_at)
+    if not payload_stale and not strategy_missing and not readiness_newer:
+        return payload
+    try:
+        refreshed = run_ibkr_paper_strategy_governance(
+            config=IbkrPaperStrategyGovernanceConfig(repo_root=repo_root),
+        )
+        write_ibkr_paper_strategy_governance_artifacts(
+            config=IbkrPaperStrategyGovernanceConfig(repo_root=repo_root),
+            artifacts=refreshed,
+        )
+        return dict(refreshed.status_payload)
+    except Exception:
+        return payload
 
 
 def render_ibkr_paper_strategy_governance_markdown(report: dict[str, Any]) -> str:
@@ -454,6 +534,7 @@ def _build_governance_row(
         paper_session_lanes_dir=config.paper_session_lanes_dir,
         lane_id=lane_id,
     )
+    backend_source_readiness = _backend_source_live_readiness(config=config)
 
     pause_reasons: list[str] = []
     submit_block_reasons: list[str] = []
@@ -476,6 +557,8 @@ def _build_governance_row(
         open_order_ambiguity_count += 1
     for reason in list(monitor_status.get("block_reasons") or []):
         normalized = str(reason or "").strip()
+        if normalized in _BACKEND_SOURCE_MONITOR_BLOCK_REASONS:
+            continue
         if normalized and normalized not in submit_block_reasons:
             submit_block_reasons.append(normalized)
     if daily_order_count is not None and int(daily_order_count) >= int(config.daily_order_limit):
@@ -484,7 +567,7 @@ def _build_governance_row(
         submit_block_reasons.append("weekly_order_limit_reached")
     if max_drawdown is not None and abs(float(max_drawdown)) >= float(config.drawdown_limit):
         submit_block_reasons.append("drawdown_limit_reached")
-    if not bool(_dashboard_live_ready(monitor_status)):
+    if not bool(backend_source_readiness.get("live_ready")):
         submit_block_reasons.append("backend_or_source_not_live_ready")
 
     strategy_status = _strategy_governance_status(
@@ -588,6 +671,8 @@ def _build_governance_row(
         "submit_block_reasons": list(dict.fromkeys(submit_block_reasons)),
         "submit_allowed": submit_allowed,
         "bridge_invocation_allowed": submit_allowed and bool(inventory_row.get("bridge_adapter_ready")),
+        "backend_source_readiness": backend_source_readiness,
+        "backend_source_readiness_detail": backend_source_readiness.get("detail"),
         "monitor_health": monitor_status.get("health_classification"),
         "monitor_stale": monitor_status.get("stale"),
         "monitor_open_orders": monitor_status.get("open_order_count"),
@@ -645,6 +730,199 @@ def _dashboard_live_ready(monitor_status: dict[str, Any]) -> bool:
     )
 
 
+def _selected_governance_block_detail(selected: dict[str, Any]) -> str:
+    reasons = [str(reason or "").strip() for reason in list(selected.get("submit_block_reasons") or []) if str(reason or "").strip()]
+    detail = f"Paper strategy governance blocked submit: {', '.join(reasons) or 'unknown_reason'}"
+    readiness_detail = str(selected.get("backend_source_readiness_detail") or "").strip()
+    if "backend_or_source_not_live_ready" in reasons and readiness_detail:
+        detail = f"{detail}; {readiness_detail}"
+    return detail
+
+
+def _backend_source_live_readiness(*, config: IbkrPaperStrategyGovernanceConfig) -> dict[str, Any]:
+    freshness_window = float(config.freshness_window_seconds)
+    readiness = _load_json(config.repo_root / _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH)
+    startup = _load_json(config.repo_root / _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH)
+    supervised = _load_json(config.repo_root / _DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH)
+    temp_integrity = _load_json(config.repo_root / _DEFAULT_TEMP_PAPER_INTEGRITY_SNAPSHOT_PATH)
+    artifacts = {
+        "paper_readiness": _artifact_status(
+            config.repo_root / _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH,
+            readiness,
+            freshness_window_seconds=freshness_window,
+        ),
+        "startup_control_plane": _artifact_status(
+            config.repo_root / _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH,
+            startup,
+            freshness_window_seconds=freshness_window,
+        ),
+        "supervised_paper_operability": _artifact_status(
+            config.repo_root / _DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH,
+            supervised,
+            freshness_window_seconds=freshness_window,
+        ),
+        "temporary_paper_runtime_integrity": _artifact_status(
+            config.repo_root / _DEFAULT_TEMP_PAPER_INTEGRITY_SNAPSHOT_PATH,
+            temp_integrity,
+            freshness_window_seconds=freshness_window,
+            required=False,
+        ),
+    }
+    required_artifacts = [
+        artifacts["paper_readiness"],
+        artifacts["startup_control_plane"],
+        artifacts["supervised_paper_operability"],
+    ]
+    block_reasons: list[str] = []
+    missing_required = [row["label"] for row in required_artifacts if not row["present"]]
+    stale_required = [row["label"] for row in required_artifacts if row["present"] and not row["fresh"]]
+    if missing_required:
+        block_reasons.append("backend_readiness_artifact_missing")
+    if stale_required:
+        block_reasons.append("backend_readiness_artifact_stale")
+    temp_status = artifacts["temporary_paper_runtime_integrity"]
+    if temp_status["present"] and not temp_status["fresh"]:
+        block_reasons.append("backend_readiness_artifact_stale")
+
+    paper_runtime_ready = bool(readiness.get("paper_runtime_ready"))
+    runtime_running = bool(readiness.get("runtime_running"))
+    paper_trade_allowed = bool(readiness.get("paper_trade_allowed"))
+    market_data_stale_count = int(readiness.get("market_data_stale_count") or 0)
+    bar_authority_unavailable_count = int(readiness.get("bar_authority_unavailable_count") or 0)
+    blocking_fault_count = int(readiness.get("blocking_fault_count") or 0)
+    startup_ready = str(startup.get("overall_state") or "").strip().upper() == "READY"
+    supervised_usable = bool(supervised.get("app_usable_for_supervised_paper"))
+    temp_paper_blocked = bool(temp_integrity.get("temp_paper_blocked"))
+
+    if readiness and not runtime_running:
+        block_reasons.append("paper_runtime_not_running")
+    if readiness and not paper_runtime_ready:
+        block_reasons.append("paper_runtime_not_ready")
+    if readiness and not paper_trade_allowed:
+        block_reasons.append("paper_trade_not_allowed")
+    if market_data_stale_count > 0:
+        block_reasons.append("source_market_data_stale")
+    if bar_authority_unavailable_count > 0:
+        block_reasons.append("bar_authority_unavailable")
+    if blocking_fault_count > 0:
+        block_reasons.append("blocking_faults_present")
+    if startup and not startup_ready:
+        block_reasons.append("startup_control_plane_not_ready")
+    if supervised and not supervised_usable:
+        block_reasons.append("supervised_paper_not_usable")
+    if temp_paper_blocked:
+        block_reasons.append("temp_paper_blocked")
+
+    block_reasons = list(dict.fromkeys(block_reasons))
+    live_ready = not block_reasons
+    detail = _backend_source_readiness_detail(
+        live_ready=live_ready,
+        block_reasons=block_reasons,
+        artifacts=artifacts,
+        freshness_window_seconds=freshness_window,
+        readiness=readiness,
+        startup=startup,
+        supervised=supervised,
+        temp_integrity=temp_integrity,
+    )
+    return {
+        "live_ready": live_ready,
+        "block_reasons": block_reasons,
+        "detail": detail,
+        "freshness_window_seconds": freshness_window,
+        "artifacts": artifacts,
+        "paper_runtime_ready": paper_runtime_ready,
+        "runtime_running": runtime_running,
+        "paper_trade_allowed": paper_trade_allowed,
+        "market_data_stale_count": market_data_stale_count,
+        "bar_authority_unavailable_count": bar_authority_unavailable_count,
+        "blocking_fault_count": blocking_fault_count,
+        "startup_control_plane_ready": startup_ready,
+        "supervised_paper_usable": supervised_usable,
+        "temp_paper_blocked": temp_paper_blocked,
+        "source": "operator_dashboard_readiness_artifacts",
+    }
+
+
+def _backend_readiness_artifacts_newer_than(*, repo_root: Path, generated_at: datetime | None) -> bool:
+    if generated_at is None:
+        return False
+    for relative_path in (
+        _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH,
+        _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH,
+        _DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH,
+        _DEFAULT_TEMP_PAPER_INTEGRITY_SNAPSHOT_PATH,
+    ):
+        artifact_payload = _load_json(repo_root / relative_path)
+        artifact_generated_at = _parse_datetime(artifact_payload.get("generated_at"))
+        if artifact_generated_at is not None and artifact_generated_at > generated_at:
+            return True
+    return False
+
+
+def _artifact_status(path: Path, payload: dict[str, Any], *, freshness_window_seconds: float, required: bool = True) -> dict[str, Any]:
+    generated_at = _parse_datetime(payload.get("generated_at"))
+    age_seconds = None if generated_at is None else max(0.0, (datetime.now(timezone.utc) - generated_at).total_seconds())
+    present = bool(payload)
+    fresh = bool(present and generated_at is not None and age_seconds is not None and age_seconds <= freshness_window_seconds)
+    return {
+        "label": path.stem,
+        "path": str(path),
+        "required": required,
+        "present": present,
+        "generated_at": generated_at.isoformat() if generated_at is not None else None,
+        "age_seconds": age_seconds,
+        "fresh": fresh,
+    }
+
+
+def _backend_source_readiness_detail(
+    *,
+    live_ready: bool,
+    block_reasons: list[str],
+    artifacts: dict[str, dict[str, Any]],
+    freshness_window_seconds: float,
+    readiness: dict[str, Any],
+    startup: dict[str, Any],
+    supervised: dict[str, Any],
+    temp_integrity: dict[str, Any],
+) -> str:
+    readiness_status = artifacts["paper_readiness"]
+    startup_status = artifacts["startup_control_plane"]
+    supervised_status = artifacts["supervised_paper_operability"]
+    temp_status = artifacts["temporary_paper_runtime_integrity"]
+    return (
+        f"backend/source readiness {'ready' if live_ready else 'not live-ready'} "
+        f"from operator_dashboard_readiness_artifacts; "
+        f"block_reasons={block_reasons}; "
+        f"freshness_window_seconds={freshness_window_seconds}; "
+        f"paper_readiness_generated_at={readiness_status.get('generated_at')} "
+        f"paper_readiness_age_seconds={_round_age(readiness_status.get('age_seconds'))} "
+        f"paper_readiness_fresh={readiness_status.get('fresh')}; "
+        f"runtime_running={bool(readiness.get('runtime_running'))} "
+        f"paper_runtime_ready={bool(readiness.get('paper_runtime_ready'))} "
+        f"paper_trade_allowed={bool(readiness.get('paper_trade_allowed'))} "
+        f"market_data_stale_count={int(readiness.get('market_data_stale_count') or 0)} "
+        f"bar_authority_unavailable_count={int(readiness.get('bar_authority_unavailable_count') or 0)} "
+        f"blocking_fault_count={int(readiness.get('blocking_fault_count') or 0)}; "
+        f"startup_generated_at={startup_status.get('generated_at')} "
+        f"startup_age_seconds={_round_age(startup_status.get('age_seconds'))} "
+        f"startup_ready={str(startup.get('overall_state') or '').strip().upper() == 'READY'}; "
+        f"supervised_generated_at={supervised_status.get('generated_at')} "
+        f"supervised_age_seconds={_round_age(supervised_status.get('age_seconds'))} "
+        f"supervised_usable={bool(supervised.get('app_usable_for_supervised_paper'))}; "
+        f"temp_integrity_present={temp_status.get('present')} "
+        f"temp_integrity_fresh={temp_status.get('fresh')} "
+        f"temp_paper_blocked={bool(temp_integrity.get('temp_paper_blocked'))}"
+    )
+
+
+def _round_age(value: Any) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), 3)
+
+
 def _matching_ledger_position(
     *,
     ledger_positions: list[dict[str, Any]],
@@ -691,6 +969,37 @@ def _synthetic_inventory_row(*, lane_id: str, bridge_strategy_id: str, ledger_po
         "last_fill_timestamp": None,
         "audit_verdict": "ADOPTED_BROKER_POSITION",
         "monitor_submit_allowed": True,
+    }
+
+
+def _synthetic_configured_inventory_row(
+    *,
+    configured_row: dict[str, Any],
+    bridge_adapter: dict[str, Any],
+) -> dict[str, Any]:
+    lane_id = str(configured_row.get("lane_id") or "").strip()
+    instrument = str(configured_row.get("symbol") or "").strip().upper()
+    return {
+        "strategy_id": lane_id,
+        "standalone_strategy_id": lane_id,
+        "instrument": instrument,
+        "strategy_family": str(configured_row.get("strategy_family") or configured_row.get("display_name") or lane_id),
+        "current_app_runtime_status": "ACTIVE_RUNTIME_READY",
+        "current_position_state": "FLAT",
+        "current_quantity": 0.0,
+        "current_signal_state": "NO_ACTION",
+        "entry_exit_capability": "ENTRY_AND_EXIT_WHEN_FLAT",
+        "current_order_destination": str(bridge_adapter.get("current_order_destination") or ""),
+        "can_emit_standardized_order_intent_now": True,
+        "blockers_to_ibkr_paper_routing": [],
+        "entries_enabled": True,
+        "eligible_now": False,
+        "last_signal_family": None,
+        "last_signal_timestamp": None,
+        "last_fill_timestamp": None,
+        "audit_verdict": "CONFIGURED_CANARY_ROUTE_READY",
+        "monitor_submit_allowed": True,
+        "bridge_adapter_ready": True,
     }
 
 

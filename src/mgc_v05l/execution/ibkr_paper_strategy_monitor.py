@@ -50,12 +50,19 @@ _DEFAULT_EXECUTOR_REPORT_PATH = (
 )
 _DEFAULT_EXECUTOR_LOOP_STATUS_PATH = Path("var") / "paper_strategy_executor_loop_status.json"
 _DEFAULT_MONITOR_SERVICE_PID_PATH = Path("var") / "paper_strategy_monitor_service.pid"
+_DEFAULT_OPERATOR_DASHBOARD_DIR = Path("outputs") / "operator_dashboard"
+_DEFAULT_PAPER_READINESS_SNAPSHOT_PATH = _DEFAULT_OPERATOR_DASHBOARD_DIR / "paper_readiness_snapshot.json"
+_DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH = _DEFAULT_OPERATOR_DASHBOARD_DIR / "startup_control_plane_snapshot.json"
+_DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH = _DEFAULT_OPERATOR_DASHBOARD_DIR / "supervised_paper_operability_snapshot.json"
+_DEFAULT_TEMP_PAPER_INTEGRITY_SNAPSHOT_PATH = _DEFAULT_OPERATOR_DASHBOARD_DIR / "paper_temporary_paper_runtime_integrity_snapshot.json"
 _RUNTIME_STATUS_FILENAME = "paper_strategy_monitor_runtime_status.json"
 _DAEMON_REPORT_FILENAME = "paper_strategy_monitor_daemon_report.json"
 _RUNTIME_AUDIT_FILENAME = "paper_strategy_monitor_runtime_audit.jsonl"
 _SERVICE_STATUS_REPORT_FILENAME = "paper_monitor_service_status_report.json"
 _SERVICE_RELIABILITY_REPORT_FILENAME = "paper_monitor_service_reliability_report.md"
 _SERVICE_AUDIT_FILENAME = "paper_monitor_service_audit.jsonl"
+DEFAULT_PAPER_STRATEGY_MONITOR_STARTUP_GRACE_SECONDS = 30.0
+_LOCAL_BACKEND_GATE_FRESHNESS_WINDOW_SECONDS = 120.0
 
 
 class IbkrPaperStrategyMonitorError(RuntimeError):
@@ -155,9 +162,9 @@ def run_ibkr_paper_strategy_monitor(
             extra={"backend_gate": backend_gate},
         )
     except IbkrPaperStrategyMonitorError as exc:
-        dashboard_payload = {}
         dashboard_error = str(exc)
-        backend_gate = {
+        dashboard_payload = {}
+        backend_gate = _load_local_backend_gate(config.repo_root, dashboard_error=dashboard_error) or {
             "backend_healthy": False,
             "live_source_ready": False,
             "startup_control_plane_ready": False,
@@ -170,13 +177,20 @@ def run_ibkr_paper_strategy_monitor(
             "state": "UNAVAILABLE",
             "summary_line": dashboard_error,
             "source_mode": "UNAVAILABLE",
+            "dashboard_error": dashboard_error,
+            "dashboard_timeout_degraded": True,
+            "authoritative_source": "UNAVAILABLE",
         }
         _record_audit(
             audit_events,
-            "backend_gate_unavailable",
-            "Live operator backend payload could not be loaded; submit gate remains blocked.",
+            "backend_gate_unavailable" if backend_gate.get("authoritative_source") == "UNAVAILABLE" else "backend_gate_local_fallback",
+            (
+                "Live operator backend payload could not be loaded; submit gate remains blocked."
+                if backend_gate.get("authoritative_source") == "UNAVAILABLE"
+                else "Live operator backend payload timed out; direct local operator artifacts were used for monitor safety gating."
+            ),
             config=config,
-            extra={"error": dashboard_error},
+            extra={"error": dashboard_error, "backend_gate": backend_gate},
         )
 
     reconciliation = reconciliation_runner(
@@ -636,6 +650,24 @@ def build_paper_strategy_monitor_service_status(*, repo_root: Path) -> dict[str,
     }
 
 
+def paper_strategy_monitor_startup_validation_ready(report: dict[str, Any]) -> bool:
+    return (
+        bool(report.get("service_process_running"))
+        and bool(report.get("monitor_running"))
+        and str(report.get("ibkr_connection_state") or "").upper() == "CONNECTED"
+        and bool(report.get("last_successful_broker_refresh"))
+    )
+
+
+def paper_strategy_monitor_startup_validation_permanent_failure(report: dict[str, Any]) -> bool:
+    return (
+        bool(report.get("service_process_running"))
+        and bool(report.get("monitor_running"))
+        and str(report.get("ibkr_connection_state") or "").upper() == "DISCONNECTED"
+        and not bool(report.get("last_successful_broker_refresh"))
+    )
+
+
 def write_paper_strategy_monitor_service_status_artifacts(*, repo_root: Path, report: dict[str, Any]) -> None:
     output_dir = repo_root / _DEFAULT_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -953,7 +985,10 @@ def _build_backend_gate(payload: dict[str, Any]) -> dict[str, Any]:
     temp_integrity = dict(paper.get("temporary_paper_runtime_integrity") or {})
     readiness = dict(paper.get("readiness") or {})
     return {
-        "backend_healthy": not bool(dashboard_meta.get("degraded")) and bool(supervised.get("dashboard_attached")),
+        # Snapshot fallback is display/source authority only. The supervised PAPER
+        # bridge must not treat a non-attached dashboard presentation state as a
+        # broker-route blocker when the broker/ledger/open-order truth is clean.
+        "backend_healthy": not bool(dashboard_meta.get("degraded")),
         "live_source_ready": bool(supervised.get("dashboard_attached")) and str(startup.get("overall_state") or "").upper() == "READY",
         "startup_control_plane_ready": str(startup.get("overall_state") or "").upper() == "READY",
         "paper_runtime_stale": bool(paper_status.get("stale")),
@@ -965,7 +1000,88 @@ def _build_backend_gate(payload: dict[str, Any]) -> dict[str, Any]:
         "state": supervised.get("state"),
         "summary_line": supervised.get("summary_line"),
         "source_mode": "LIVE_API" if bool(supervised.get("dashboard_attached")) else "SNAPSHOT_FALLBACK",
+        "dashboard_error": None,
+        "dashboard_timeout_degraded": False,
+        "authoritative_source": "LIVE_DASHBOARD_API",
     }
+
+
+def _load_local_backend_gate(repo_root: Path, *, dashboard_error: str) -> dict[str, Any] | None:
+    readiness = _load_json(repo_root / _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH)
+    startup = _load_json(repo_root / _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH)
+    supervised = _load_json(repo_root / _DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH)
+    temp_integrity = _load_json(repo_root / _DEFAULT_TEMP_PAPER_INTEGRITY_SNAPSHOT_PATH)
+    if not readiness and not startup and not supervised and not temp_integrity:
+        return None
+
+    freshness_values = [
+        _artifact_is_fresh(readiness),
+        _artifact_is_fresh(startup),
+        _artifact_is_fresh(supervised),
+        _artifact_is_fresh(temp_integrity),
+    ]
+    present_freshness = [value for value in freshness_values if value is not None]
+    artifacts_fresh = bool(present_freshness) and all(present_freshness)
+
+    paper_runtime_ready = bool(readiness.get("paper_runtime_ready"))
+    runtime_running = bool(readiness.get("runtime_running"))
+    paper_trade_allowed = bool(readiness.get("paper_trade_allowed"))
+    market_data_stale_count = int(readiness.get("market_data_stale_count") or 0)
+    bar_authority_unavailable_count = int(readiness.get("bar_authority_unavailable_count") or 0)
+    blocking_fault_count = int(readiness.get("blocking_fault_count") or 0)
+    temp_paper_blocked = bool(temp_integrity.get("temp_paper_blocked"))
+    temp_paper_mismatch_status = temp_integrity.get("mismatch_status")
+    startup_ready = str(startup.get("overall_state") or "").upper() == "READY"
+    usable_for_supervised_paper = bool(supervised.get("app_usable_for_supervised_paper"))
+    launch_allowed = bool(supervised.get("launch_allowed", startup.get("launch_allowed")))
+    live_source_ready = (
+        artifacts_fresh
+        and runtime_running
+        and paper_runtime_ready
+        and paper_trade_allowed
+        and market_data_stale_count == 0
+        and bar_authority_unavailable_count == 0
+        and blocking_fault_count == 0
+        and not temp_paper_blocked
+    )
+    paper_runtime_stale = not live_source_ready
+    summary_line = str(supervised.get("summary_line") or startup.get("summary_line") or readiness.get("runtime_status_detail") or "").strip()
+    if not summary_line:
+        summary_line = "Direct local operator artifacts were used because the dashboard API timed out."
+    direct_runtime_authority_ready = bool(live_source_ready)
+    return {
+        "backend_healthy": direct_runtime_authority_ready,
+        "live_source_ready": live_source_ready,
+        "startup_control_plane_ready": startup_ready or direct_runtime_authority_ready,
+        "paper_runtime_stale": paper_runtime_stale,
+        "market_data_semantics": "STALE" if market_data_stale_count > 0 else "LIVE_READY",
+        "temp_paper_blocked": temp_paper_blocked,
+        "temp_paper_mismatch_status": temp_paper_mismatch_status,
+        "session_classification": readiness.get("current_detected_session"),
+        "launch_allowed": launch_allowed or direct_runtime_authority_ready,
+        "state": "USABLE" if direct_runtime_authority_ready else (supervised.get("state") or "DEGRADED"),
+        "summary_line": summary_line,
+        "source_mode": "LOCAL_OPERATOR_ARTIFACTS",
+        "dashboard_error": dashboard_error,
+        "dashboard_timeout_degraded": True,
+        "authoritative_source": "LOCAL_OPERATOR_ARTIFACTS",
+        "artifacts_fresh": artifacts_fresh,
+        "paper_runtime_ready": paper_runtime_ready,
+        "paper_trade_allowed": paper_trade_allowed,
+        "market_data_stale_count": market_data_stale_count,
+        "bar_authority_unavailable_count": bar_authority_unavailable_count,
+        "blocking_fault_count": blocking_fault_count,
+    }
+
+
+def _artifact_is_fresh(payload: dict[str, Any]) -> bool | None:
+    if not payload:
+        return None
+    generated_at = _parse_datetime(payload.get("generated_at"))
+    if generated_at is None:
+        return False
+    age_seconds = max(0.0, (datetime.now(timezone.utc) - generated_at).total_seconds())
+    return age_seconds <= _LOCAL_BACKEND_GATE_FRESHNESS_WINDOW_SECONDS
 
 
 def _determine_strategy_ownership(
@@ -1291,8 +1407,6 @@ def _build_monitor_status(
     block_reasons: list[str] = []
     if not backend_gate.get("backend_healthy"):
         block_reasons.append("backend_down")
-    if not backend_gate.get("live_source_ready"):
-        block_reasons.append("source_snapshot_fallback")
     if backend_gate.get("paper_runtime_stale"):
         block_reasons.append("paper_runtime_stale")
     if backend_gate.get("temp_paper_blocked"):
@@ -1305,14 +1419,17 @@ def _build_monitor_status(
         block_reasons.append("working_open_order_present")
 
     classification = "PAPER_STRATEGY_MONITOR_ACTIVE"
-    if dashboard_error is not None:
-        classification = "PAPER_STRATEGY_MONITOR_BLOCKED"
-    elif mismatch:
+    if mismatch:
         classification = "PAPER_STRATEGY_LEDGER_BROKER_MISMATCH"
     elif orphan:
         classification = "PAPER_STRATEGY_ORPHAN_POSITION"
     elif newly_adopted:
         classification = "PAPER_STRATEGY_POSITION_ADOPTED"
+
+    detail = str(ownership.get("detail") or "").strip()
+    if dashboard_error is not None:
+        warning = f"Dashboard telemetry degraded: {dashboard_error}"
+        detail = f"{detail} {warning}".strip() if detail else warning
 
     return {
         "classification": classification,
@@ -1337,8 +1454,9 @@ def _build_monitor_status(
         "persistent_strategy_position_ledger": True,
         "continuous_unrealized_pnl_tracking_active": False,
         "continuous_realized_pnl_tracking_active": False,
-        "detail": ownership.get("detail") if dashboard_error is None else dashboard_error,
+        "detail": detail or dashboard_error or ownership.get("detail"),
         "monitoring_scope": "snapshot_reconciliation_only",
+        "dashboard_error": dashboard_error,
     }
 
 

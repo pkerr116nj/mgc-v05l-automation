@@ -102,6 +102,68 @@ def _write_dashboard(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    _write_backend_source_readiness(tmp_path)
+
+
+def _write_backend_source_readiness(
+    tmp_path: Path,
+    *,
+    generated_at: str = "2999-01-01T00:00:00+00:00",
+    runtime_running: bool = True,
+    paper_runtime_ready: bool = True,
+    paper_trade_allowed: bool = True,
+    market_data_stale_count: int = 0,
+    bar_authority_unavailable_count: int = 0,
+    blocking_fault_count: int = 0,
+    startup_state: str = "READY",
+    launch_allowed: bool = True,
+    supervised_usable: bool = True,
+    temp_paper_blocked: bool = False,
+) -> None:
+    output_dir = tmp_path / "outputs" / "operator_dashboard"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "paper_readiness_snapshot.json").write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at,
+                "runtime_running": runtime_running,
+                "paper_runtime_ready": paper_runtime_ready,
+                "paper_trade_allowed": paper_trade_allowed,
+                "market_data_stale_count": market_data_stale_count,
+                "bar_authority_unavailable_count": bar_authority_unavailable_count,
+                "blocking_fault_count": blocking_fault_count,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "startup_control_plane_snapshot.json").write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at,
+                "overall_state": startup_state,
+                "launch_allowed": launch_allowed,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "supervised_paper_operability_snapshot.json").write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at,
+                "app_usable_for_supervised_paper": supervised_usable,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "paper_temporary_paper_runtime_integrity_snapshot.json").write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at,
+                "temp_paper_blocked": temp_paper_blocked,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _write_signal_audit(tmp_path: Path) -> None:
@@ -213,6 +275,29 @@ def _write_strategy_performance(tmp_path: Path) -> None:
     )
 
 
+def _write_paper_config_in_force_with_canary(tmp_path: Path) -> None:
+    path = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_config_in_force.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "lanes": [
+                    {
+                        "lane_id": "ibkr_paper_route_canary",
+                        "display_name": "PAPER_ROUTE_CANARY",
+                        "symbol": "MNQ",
+                        "paper_only": True,
+                        "non_approved": True,
+                        "exclude_from_strategy_performance": True,
+                        "experimental_status": "paper_route_canary",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_governance_builds_strategy_rows_and_status_payload(tmp_path: Path) -> None:
     _write_monitor(tmp_path)
     _write_ledger(tmp_path)
@@ -233,6 +318,7 @@ def test_governance_builds_strategy_rows_and_status_payload(tmp_path: Path) -> N
     nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
     assert nq["strategy_status"] == "PROMISING"
     assert nq["submit_allowed"] is True
+    assert nq["backend_source_readiness"]["live_ready"] is True
     assert nq["current_routing_mode"] == "IBKR_ROUTED"
 
 
@@ -264,3 +350,224 @@ def test_load_status_blocks_when_file_missing(tmp_path: Path) -> None:
 
     assert payload["submit_allowed"] is False
     assert "paper_strategy_governance_status_missing" in payload["block_reasons"]
+
+
+def test_load_status_refreshes_stale_payload_before_bridge_consumes_it(tmp_path: Path, monkeypatch) -> None:
+    stale_payload = {
+        "generated_at": "2026-04-29T12:28:50.338596+00:00",
+        "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+        "strategies": [],
+    }
+    path = tmp_path / "var" / "per_strategy_paper_status.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stale_payload), encoding="utf-8")
+
+    refreshed_payload = {
+        "generated_at": "2999-01-01T00:00:00+00:00",
+        "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+        "submit_allowed": True,
+        "block_reasons": [],
+        "strategies": [
+            {
+                "strategy_id": "nq_1x_ny_early_core__us_midday_long",
+                "bridge_strategy_id": "nq_1x_ny_early_core__us_midday_long",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            }
+        ],
+    }
+
+    def _fake_run(*, config: IbkrPaperStrategyGovernanceConfig):
+        class _Artifacts:
+            status_payload = refreshed_payload
+            performance_rows = []
+            probation_dashboard = {}
+            pause_rows = []
+            audit_events = []
+            classification = "PAPER_STRATEGY_GOVERNANCE_READY"
+            report = {}
+
+        return _Artifacts()
+
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_paper_strategy_governance.run_ibkr_paper_strategy_governance",
+        _fake_run,
+    )
+
+    payload = load_paper_strategy_governance_status(
+        repo_root=tmp_path,
+        strategy_id="nq_1x_ny_early_core__us_midday_long",
+    )
+
+    assert payload["classification"] == "PAPER_STRATEGY_GOVERNANCE_READY"
+    assert payload["selected_strategy"]["strategy_id"] == "nq_1x_ny_early_core__us_midday_long"
+    assert payload["submit_allowed"] is True
+
+
+def test_load_status_refreshes_when_backend_readiness_artifact_is_newer(tmp_path: Path, monkeypatch) -> None:
+    cached_payload = {
+        "generated_at": "2999-01-01T00:00:00+00:00",
+        "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+        "strategies": [
+            {
+                "strategy_id": "mnq_1x_ny_early_core__us_early_long",
+                "bridge_strategy_id": "index_futures_ny_intraday_forced_core_v2__MNQ",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": False,
+                "submit_block_reasons": ["backend_or_source_not_live_ready"],
+                "backend_source_readiness_detail": "old source stale detail",
+            }
+        ],
+    }
+    path = tmp_path / "var" / "per_strategy_paper_status.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cached_payload), encoding="utf-8")
+    _write_backend_source_readiness(tmp_path, generated_at="2999-01-01T00:01:00+00:00")
+
+    refreshed_payload = {
+        "generated_at": "2999-01-01T00:01:30+00:00",
+        "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+        "submit_allowed": True,
+        "block_reasons": [],
+        "strategies": [
+            {
+                "strategy_id": "mnq_1x_ny_early_core__us_early_long",
+                "bridge_strategy_id": "index_futures_ny_intraday_forced_core_v2__MNQ",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            }
+        ],
+    }
+    calls = {"count": 0}
+
+    def _fake_run(*, config: IbkrPaperStrategyGovernanceConfig):
+        calls["count"] += 1
+
+        class _Artifacts:
+            status_payload = refreshed_payload
+            performance_rows = []
+            probation_dashboard = {}
+            pause_rows = []
+            audit_events = []
+            classification = "PAPER_STRATEGY_GOVERNANCE_READY"
+            report = {}
+
+        return _Artifacts()
+
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_paper_strategy_governance.run_ibkr_paper_strategy_governance",
+        _fake_run,
+    )
+
+    payload = load_paper_strategy_governance_status(
+        repo_root=tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_early_long",
+    )
+
+    assert calls["count"] == 1
+    assert payload["classification"] == "PAPER_STRATEGY_GOVERNANCE_READY"
+    assert payload["submit_allowed"] is True
+
+
+def test_governance_uses_operator_readiness_not_monitor_backend_reason_when_fresh(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+        block_reasons=["paper_runtime_stale"],
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["source"] == "operator_dashboard_readiness_artifacts"
+    assert nq["backend_source_readiness"]["live_ready"] is True
+    assert "paper_runtime_stale" not in nq["submit_block_reasons"]
+    assert "backend_or_source_not_live_ready" not in nq["submit_block_reasons"]
+    assert nq["submit_allowed"] is True
+
+
+def test_governance_blocks_healthy_monitor_when_source_readiness_is_not_live(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        paper_trade_allowed=False,
+        market_data_stale_count=3,
+    )
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["monitor_health"] == "HEALTHY"
+    assert nq["monitor_stale"] is False
+    assert nq["backend_source_readiness"]["live_ready"] is False
+    assert nq["backend_source_readiness"]["paper_trade_allowed"] is False
+    assert nq["backend_source_readiness"]["market_data_stale_count"] == 3
+    assert "paper_trade_not_allowed" in nq["backend_source_readiness"]["block_reasons"]
+    assert "source_market_data_stale" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
+    assert "market_data_stale_count=3" in nq["backend_source_readiness_detail"]
+    assert "freshness_window_seconds=120.0" in nq["backend_source_readiness_detail"]
+    assert nq["submit_allowed"] is False
+
+
+def test_load_status_exposes_freshness_threshold_and_age_for_stale_source(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path, generated_at="2026-04-29T12:28:50.338596+00:00")
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+    config = _config(tmp_path)
+    artifacts = run_ibkr_paper_strategy_governance(config=config)
+    write_ibkr_paper_strategy_governance_artifacts(config=config, artifacts=artifacts)
+
+    payload = load_paper_strategy_governance_status(
+        repo_root=tmp_path,
+        strategy_id="index_futures_ny_intraday_forced_core_v2__NQ",
+    )
+
+    assert payload["submit_allowed"] is False
+    assert payload["block_reasons"] == ["backend_or_source_not_live_ready"]
+    assert "backend_readiness_artifact_stale" in payload["backend_source_readiness"]["block_reasons"]
+    assert "freshness_window_seconds=120.0" in payload["detail"]
+    assert "paper_readiness_age_seconds=" in payload["detail"]
+
+
+def test_governance_includes_configured_paper_route_canary_without_performance_row(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+    _write_paper_config_in_force_with_canary(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    canary = next(row for row in artifacts.performance_rows if row["strategy_id"] == "ibkr_paper_route_canary")
+    assert canary["instrument"] == "MNQ"
+    assert canary["submit_allowed"] is True
+    assert canary["ibkr_bridge_submit_capable"] is True
+    assert canary["current_routing_mode"] == "IBKR_ROUTED"

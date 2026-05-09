@@ -145,6 +145,7 @@ def _approved_runtime_metadata(
     intent_type: str = "BUY_TO_OPEN",
     route_destination: str = "ibkr_paper_bridge_submit_capable",
     mode: str = "PAPER",
+    bridge_proxy_mode: str = "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
 ) -> dict[str, object]:
     return {
         "caller_type": "supervised_paper_runtime",
@@ -158,7 +159,7 @@ def _approved_runtime_metadata(
         "port": 7497,
         "account_id": "DUM882026",
         "route_destination": route_destination,
-        "bridge_proxy_mode": "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+        "bridge_proxy_mode": bridge_proxy_mode,
         "intent_action": action,
         "intent_type": intent_type,
     }
@@ -283,10 +284,10 @@ def test_scheduler_style_runtime_with_valid_metadata_still_fails_closed() -> Non
 
 
 def test_invalid_symbol_fails_before_connect(tmp_path: Path) -> None:
-    artifacts = run_ibkr_paper_strategy_bridge(config=_config(tmp_path, symbol="GC"))
+    artifacts = run_ibkr_paper_strategy_bridge(config=_config(tmp_path, symbol="CL"))
 
     assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
-    assert "Phase 1 executable contract is MGC only" in json.dumps(artifacts.report)
+    assert "No approved phase-1 execution target exists" in json.dumps(artifacts.report)
 
 
 def test_ported_gc_lane_passes_static_submit_gate_with_mgc_execution_proxy(tmp_path: Path) -> None:
@@ -332,6 +333,281 @@ def test_ported_gc_lane_passes_static_submit_gate_with_mgc_execution_proxy(tmp_p
 
     assert next(row for row in checks if row["name"] == "strategy_allowlist")["passed"] is True
     assert next(row for row in checks if row["name"] == "selected_lane_adapter_present")["passed"] is True
+
+
+def test_ported_es_lane_passes_static_submit_gate_with_mes_execution_proxy(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="es_1x_ny_early_core__us_midday_long",
+        symbol="MES",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="es_1x_ny_early_core__us_midday_long",
+            source_instrument="ES",
+            executable_proxy="MES",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-30T12:26:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MES", "expiry": "20260619", "con_id": 123, "local_symbol": "MESM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "es_1x_ny_early_core__us_midday_long",
+                "bridge_strategy_id": "es_1x_ny_early_core__us_midday_long",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert all(row["passed"] for row in checks)
+
+
+def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_with_stale_monitor_exact_contract(tmp_path: Path) -> None:
+    cases = [
+        (
+            "gc_1x_asia_london_participation__asia_london_long_v5",
+            "GC",
+            "MGC",
+            "GC_SIGNAL_ROUTED_TO_MGC_PHASE1",
+            "MGC",
+            "20260626",
+            "MGCM6",
+        ),
+        (
+            "mgc_1x_asia_london_participation__asia_london_long_v5",
+            "MGC",
+            "MGC",
+            "MGC_SIGNAL_DIRECT_PHASE1",
+            "MGC",
+            "20260626",
+            "MGCM6",
+        ),
+        (
+            "es_1x_ny_early_core__us_midday_long",
+            "ES",
+            "MES",
+            "ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+            "MES",
+            "20260619",
+            "MESM6",
+        ),
+        (
+            "mes_1x_ny_early_core__us_midday_long",
+            "MES",
+            "MES",
+            "MES_SIGNAL_DIRECT_PHASE1",
+            "MES",
+            "20260619",
+            "MESM6",
+        ),
+        (
+            "nq_1x_asia_london_participation__asia_london_long_v5",
+            "NQ",
+            "MNQ",
+            "NQ_SIGNAL_ROUTED_TO_MNQ_PHASE1",
+            "MNQ",
+            "20260619",
+            "MNQM6",
+        ),
+        (
+            "mnq_1x_asia_london_participation__asia_london_long_v5",
+            "MNQ",
+            "MNQ",
+            "MNQ_SIGNAL_DIRECT_PHASE1",
+            "MNQ",
+            "20260619",
+            "MNQM6",
+        ),
+    ]
+    for strategy_id, source_instrument, executable_proxy, proxy_mode, exact_symbol, exact_expiry, exact_local_symbol in cases:
+        config = _config(
+            tmp_path,
+            submit=True,
+            strategy_id=strategy_id,
+            symbol=executable_proxy,
+            caller_path="probationary_paper_runtime_lane",
+            caller_metadata=_approved_runtime_metadata(
+                strategy_id=strategy_id,
+                source_instrument=source_instrument,
+                executable_proxy=executable_proxy,
+                bridge_proxy_mode=proxy_mode,
+            ),
+            manual_frozen_preview_path=None,
+            approval_digest=None,
+            approval_phrase=None,
+        )
+        intent = IbkrPaperStrategyOrderIntent(
+            strategy_id=config.strategy_id,
+            symbol=config.symbol,
+            contract_month=config.contract_month,
+            action=config.action,
+            quantity=config.quantity,
+            order_type=config.order_type,
+            limit_price_model=config.limit_price_model,
+            time_in_force=config.time_in_force,
+            reason=config.reason,
+            timestamp="2026-05-01T12:30:00+00:00",
+            risk_tags=config.risk_tags,
+            paper_only=config.paper_only,
+        )
+        checks = _build_static_preflight_checks(
+            config=config,
+            intent=intent,
+            environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+            caller_gate={"passed": True, "detail": "approved runtime caller"},
+            monitor_status={
+                "monitor_running": True,
+                "submit_allowed": True,
+                "health_classification": "HEALTHY",
+                "account_id": "DUM882026",
+                # Deliberately stale global snapshot; current supervised PAPER route
+                # must use the lane-authoritative execution target instead.
+                "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+                "block_reasons": [],
+            },
+            governance_status={
+                "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+                "submit_allowed": True,
+                "block_reasons": [],
+                "selected_strategy": {
+                    "strategy_id": strategy_id,
+                    "bridge_strategy_id": strategy_id,
+                    "strategy_status": "PROBATION_ACTIVE",
+                    "submit_allowed": True,
+                    "submit_block_reasons": [],
+                },
+            },
+            exposure_status=_healthy_exposure(),
+        )
+        assert next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")["passed"] is True
+        assert next(row for row in checks if row["name"] == "executable_contract_whitelist")["passed"] is True
+        assert next(row for row in checks if row["name"] == "contract_month_lock")["passed"] is True
+        assert next(row for row in checks if row["name"] == "paper_strategy_monitor_contract_match")["passed"] is True
+        assert all(row["passed"] for row in checks), strategy_id
+        assert all("MGC only" not in str(row["detail"]) for row in checks), strategy_id
+
+
+def test_live_style_mes_and_nq_runtime_routes_ignore_stale_global_monitor_contract_snapshot(tmp_path: Path) -> None:
+    cases = [
+        (
+            "mes_1x_ny_early_core__us_midday_short_breakdown",
+            "MES",
+            "MES",
+            "MES_SIGNAL_DIRECT_PHASE1",
+            "SELL",
+            "SELL_TO_OPEN",
+        ),
+        (
+            "nq_1x_ny_early_core__us_midday_long",
+            "NQ",
+            "MNQ",
+            "NQ_SIGNAL_ROUTED_TO_MNQ_PHASE1",
+            "BUY",
+            "BUY_TO_OPEN",
+        ),
+    ]
+    for strategy_id, source_instrument, executable_proxy, proxy_mode, action, intent_type in cases:
+        config = _config(
+            tmp_path,
+            submit=True,
+            strategy_id=strategy_id,
+            symbol=executable_proxy,
+            action=action,
+            caller_path="probationary_paper_runtime_lane",
+            caller_metadata=_approved_runtime_metadata(
+                strategy_id=strategy_id,
+                source_instrument=source_instrument,
+                executable_proxy=executable_proxy,
+                action=action,
+                intent_type=intent_type,
+                bridge_proxy_mode=proxy_mode,
+            ),
+            manual_frozen_preview_path=None,
+            approval_digest=None,
+            approval_phrase=None,
+        )
+        intent = IbkrPaperStrategyOrderIntent(
+            strategy_id=config.strategy_id,
+            symbol=config.symbol,
+            contract_month=config.contract_month,
+            action=config.action,
+            quantity=config.quantity,
+            order_type=config.order_type,
+            limit_price_model=config.limit_price_model,
+            time_in_force=config.time_in_force,
+            reason=config.reason,
+            timestamp="2026-05-01T16:23:00+00:00",
+            risk_tags=config.risk_tags,
+            paper_only=config.paper_only,
+        )
+        checks = _build_static_preflight_checks(
+            config=config,
+            intent=intent,
+            environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+            caller_gate={"passed": True, "detail": "approved runtime caller"},
+            monitor_status={
+                "monitor_running": True,
+                "submit_allowed": True,
+                "health_classification": "HEALTHY",
+                "account_id": "DUM882026",
+                "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+                "block_reasons": [],
+                "detail": "Preserved ATP ownership on the reconciled flat paper position using prior adopted evidence from the opened broker lot.",
+                "broker_position_quantity": 0.0,
+                "ledger_position_quantity": 0.0,
+                "open_order_count": 0,
+            },
+            governance_status={
+                "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+                "submit_allowed": True,
+                "block_reasons": [],
+                "selected_strategy": {
+                    "strategy_id": strategy_id,
+                    "bridge_strategy_id": strategy_id,
+                    "strategy_status": "PROBATION_ACTIVE",
+                    "submit_allowed": True,
+                    "submit_block_reasons": [],
+                },
+            },
+            exposure_status=_healthy_exposure(),
+        )
+
+        assert next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")["passed"] is True
+        assert next(row for row in checks if row["name"] == "paper_strategy_monitor_contract_match")["passed"] is True
 
 
 def test_bridge_gate_does_not_fail_just_because_schwab_is_unavailable(tmp_path: Path, monkeypatch) -> None:
@@ -581,6 +857,489 @@ def test_preflight_ignores_stale_service_overlay_for_flat_paper_submit_gate(tmp_
     monitor_gate = next(row for row in checks if row["name"] == "paper_strategy_submit_gate")
     assert monitor_status["submit_allowed"] is True
     assert monitor_gate["passed"] is True
+
+
+def test_supervised_runtime_preflight_allows_fresh_flat_state_with_preserved_atp_ownership(tmp_path: Path) -> None:
+    _write_runtime_files(
+        tmp_path,
+        monitor_status={
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+            "detail": "Preserved ATP ownership on the reconciled flat paper position using prior adopted evidence from the opened broker lot.",
+            "broker_position_quantity": 0.0,
+            "ledger_position_quantity": 0.0,
+            "open_order_count": 0,
+            "last_successful_broker_refresh": "2999-01-01T00:00:00+00:00",
+            "freshness_window_seconds": 60.0,
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "bridge_strategy_id": "asia_london_participation_core_v1__GC",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+            "strategies": [],
+        },
+    )
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+        symbol="MGC",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            source_instrument="GC",
+            executable_proxy="MGC",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-01T02:20:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    monitor_status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status=monitor_status,
+        governance_status=_healthy_lane_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert monitor_status["submit_allowed"] is True
+    assert next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")["passed"] is True
+    assert next(row for row in checks if row["name"] == "paper_strategy_submit_gate")["passed"] is True
+
+
+def test_supervised_runtime_preflight_allows_clean_flat_state_even_if_monitor_submit_bool_is_false_for_preserved_atp_detail(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="ibkr_paper_route_canary",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="ibkr_paper_route_canary",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-01T18:59:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+            "monitor_running": True,
+            "submit_allowed": False,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+            "detail": "Preserved ATP ownership on the reconciled flat paper position using prior adopted evidence from the opened broker lot.",
+            "broker_position_quantity": 0.0,
+            "ledger_position_quantity": 0.0,
+            "broker_ledger_match": "MATCH",
+            "open_order_count": 0,
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "ibkr_paper_route_canary",
+                "bridge_strategy_id": "ibkr_paper_route_canary",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    gate = next(row for row in checks if row["name"] == "paper_strategy_submit_gate")
+    assert gate["passed"] is True
+    assert "informational only" in gate["detail"]
+
+
+def test_supervised_runtime_preflight_allows_preserved_atp_detail_with_live_monitor_field_names(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="ibkr_paper_route_canary",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="ibkr_paper_route_canary",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-01T19:47:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",
+            "monitor_running": True,
+            "submit_allowed": False,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+            "detail": "Preserved ATP ownership on the reconciled flat paper position using prior adopted evidence from the opened broker lot.",
+            "current_broker_mgc_position": 0.0,
+            "strategy_ledger_mgc_position": 0.0,
+            "broker_ledger_match": "MATCH",
+            "open_mgc_orders": 0,
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "ibkr_paper_route_canary",
+                "bridge_strategy_id": "ibkr_paper_route_canary",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    gate = next(row for row in checks if row["name"] == "paper_strategy_submit_gate")
+    assert gate["passed"] is True
+    assert "informational only" in gate["detail"]
+
+
+def test_preflight_blocks_dirty_broker_ledger_state(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="gc_1x_all_lanes__us_midday_short",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="gc_1x_all_lanes__us_midday_short",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-29T15:05:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": False,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": ["ledger_broker_mismatch"],
+            "detail": "Broker and paper ledger disagree.",
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "gc_1x_all_lanes__us_midday_short",
+                "bridge_strategy_id": "gc_1x_all_lanes__us_midday_short",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    failure = next(row for row in checks if row["name"] == "paper_strategy_submit_gate")
+    assert failure["passed"] is False
+    assert "disagree" in failure["detail"]
+
+
+def test_preflight_blocks_unsupported_execution_contract_for_approved_runtime_lane(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="es_1x_ny_early_core__us_midday_long",
+        symbol="M2K",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="es_1x_ny_early_core__us_midday_long",
+            source_instrument="ES",
+            executable_proxy="M2K",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-30T12:26:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "M2K", "expiry": "20260619", "con_id": 123, "local_symbol": "M2KM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "es_1x_ny_early_core__us_midday_long",
+                "bridge_strategy_id": "es_1x_ny_early_core__us_midday_long",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    failure = next(row for row in checks if row["name"] == "executable_contract_whitelist")
+    assert failure["passed"] is False
+    assert "approved phase-1 execution target" in failure["detail"]
+
+
+def test_preflight_blocks_wrong_contract_month_for_approved_runtime_lane(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="es_1x_ny_early_core__us_midday_long",
+        symbol="MES",
+        contract_month="202609",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="es_1x_ny_early_core__us_midday_long",
+            source_instrument="ES",
+            executable_proxy="MES",
+            bridge_proxy_mode="ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-01T12:31:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "es_1x_ny_early_core__us_midday_long",
+                "bridge_strategy_id": "es_1x_ny_early_core__us_midday_long",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    failure = next(row for row in checks if row["name"] == "contract_month_lock")
+    assert failure["passed"] is False
+
+
+def test_preflight_blocks_live_metadata_for_current_supervised_paper_route(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="es_1x_ny_early_core__us_midday_long",
+        symbol="MES",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="es_1x_ny_early_core__us_midday_long",
+            source_instrument="ES",
+            executable_proxy="MES",
+            mode="LIVE",
+            bridge_proxy_mode="ES_SIGNAL_ROUTED_TO_MES_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-01T12:32:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MES", "expiry": "20260619", "con_id": 123, "local_symbol": "MESM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "es_1x_ny_early_core__us_midday_long",
+                "bridge_strategy_id": "es_1x_ny_early_core__us_midday_long",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    failure = next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")
+    assert failure["passed"] is False
 
 
 def test_preflight_blocks_when_monitor_contract_mismatches(tmp_path: Path) -> None:
@@ -914,6 +1673,147 @@ def test_supervised_runtime_caller_metadata_passes_for_gc_asia_early_short_lane(
     )
 
     assert next(row for row in checks if row["name"] == "approved_runtime_caller_metadata")["passed"] is True
+
+
+def test_mnq_short_entry_lane_reaches_guarded_submit_boundary_when_fresh(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="mnq_1x_ny_early_core__us_early_short_reclaim_fail",
+        symbol="MNQ",
+        contract_month="202606",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_early_short_reclaim_fail",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-08T14:28:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "mnq_1x_ny_early_core__us_early_short_reclaim_fail",
+                "bridge_strategy_id": "mnq_1x_ny_early_core__us_early_short_reclaim_fail",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert all(row["passed"] for row in checks), checks
+    assert next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")["passed"] is True
+    assert next(row for row in checks if row["name"] == "paper_strategy_exposure_gate")["passed"] is True
+
+
+def test_submit_preflight_blocks_deprecated_documents_repo_root(tmp_path: Path) -> None:
+    deprecated_root = Path("/Users/patrick/Documents/MGC-v05l-automation")
+    config = _config(
+        tmp_path,
+        repo_root=deprecated_root,
+        submit=True,
+        strategy_id="mnq_1x_ny_early_core__us_early_short_reclaim_fail",
+        symbol="MNQ",
+        contract_month="202606",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_early_short_reclaim_fail",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-08T14:28:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "block_reasons": [],
+        },
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "submit_allowed": True,
+            "block_reasons": [],
+            "selected_strategy": {
+                "strategy_id": "mnq_1x_ny_early_core__us_early_short_reclaim_fail",
+                "bridge_strategy_id": "mnq_1x_ny_early_core__us_early_short_reclaim_fail",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": True,
+                "submit_block_reasons": [],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    root_gate = next(row for row in checks if row["name"] == "deprecated_submit_root_block")
+    assert root_gate["passed"] is False
+    assert "deprecated" in root_gate["detail"]
+    assert "Documents/MGC-v05l-automation" in root_gate["detail"]
 
 
 def test_runtime_caller_still_blocks_when_monitor_health_fails(tmp_path: Path) -> None:

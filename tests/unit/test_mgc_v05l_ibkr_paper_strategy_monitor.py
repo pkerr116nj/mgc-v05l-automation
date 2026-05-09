@@ -5,11 +5,15 @@ import os
 from pathlib import Path
 
 from mgc_v05l.execution.ibkr_paper_strategy_monitor import (
+    DEFAULT_PAPER_STRATEGY_MONITOR_STARTUP_GRACE_SECONDS,
+    IbkrPaperStrategyMonitorError,
     IbkrPaperStrategyMonitorDaemonConfig,
     IbkrPaperStrategyMonitorConfig,
     build_paper_strategy_monitor_service_status,
     load_paper_strategy_monitor_status,
     mark_paper_strategy_monitor_service_stopped,
+    paper_strategy_monitor_startup_validation_permanent_failure,
+    paper_strategy_monitor_startup_validation_ready,
     run_ibkr_paper_strategy_monitor_daemon,
     run_ibkr_paper_strategy_monitor,
     write_paper_strategy_monitor_service_status_artifacts,
@@ -198,6 +202,72 @@ def _write_prior_adopted_position_evidence(tmp_path: Path, *, perm_id: int = 490
     )
 
 
+def _write_local_operator_artifacts(
+    tmp_path: Path,
+    *,
+    readiness_generated_at: str = "2999-01-01T00:00:00+00:00",
+    startup_generated_at: str = "2999-01-01T00:00:00+00:00",
+    supervised_generated_at: str = "2999-01-01T00:00:00+00:00",
+    integrity_generated_at: str = "2999-01-01T00:00:00+00:00",
+    paper_runtime_ready: bool = True,
+    paper_trade_allowed: bool = True,
+    market_data_stale_count: int = 0,
+    bar_authority_unavailable_count: int = 0,
+    blocking_fault_count: int = 0,
+    temp_paper_blocked: bool = False,
+) -> None:
+    output_dir = tmp_path / "outputs" / "operator_dashboard"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "paper_readiness_snapshot.json").write_text(
+        json.dumps(
+            {
+                "generated_at": readiness_generated_at,
+                "paper_runtime_ready": paper_runtime_ready,
+                "paper_trade_allowed": paper_trade_allowed,
+                "market_data_stale_count": market_data_stale_count,
+                "bar_authority_unavailable_count": bar_authority_unavailable_count,
+                "blocking_fault_count": blocking_fault_count,
+                "runtime_running": True,
+                "current_detected_session": "US_MIDDAY",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "startup_control_plane_snapshot.json").write_text(
+        json.dumps(
+            {
+                "generated_at": startup_generated_at,
+                "overall_state": "READY",
+                "launch_allowed": True,
+                "summary_line": "Startup dependencies are aligned.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "supervised_paper_operability_snapshot.json").write_text(
+        json.dumps(
+            {
+                "generated_at": supervised_generated_at,
+                "app_usable_for_supervised_paper": True,
+                "launch_allowed": True,
+                "state": "USABLE",
+                "summary_line": "Application is usable for supervised paper operation.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "paper_temporary_paper_runtime_integrity_snapshot.json").write_text(
+        json.dumps(
+            {
+                "generated_at": integrity_generated_at,
+                "temp_paper_blocked": temp_paper_blocked,
+                "mismatch_status": "CLEAR",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_adopts_current_broker_position_and_blocks_submit_when_runtime_is_stale(tmp_path: Path) -> None:
     _write_ownership_evidence(tmp_path)
 
@@ -327,6 +397,69 @@ def test_flat_after_adopted_position_preserves_strategy_ownership(tmp_path: Path
     assert "ledger_broker_mismatch" not in artifacts.status["block_reasons"]
     assert artifacts.ledger["positions"][0]["strategy_id"] == "ATP_COMPANION_V1_ASIA_US"
     assert artifacts.ledger["positions"][0]["state"] == "FLAT"
+
+
+def test_snapshot_fallback_display_state_does_not_block_clean_flat_submit_authority(tmp_path: Path) -> None:
+    _write_prior_adopted_position_evidence(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_monitor(
+        config=_config(tmp_path),
+        reconciliation_runner=lambda **_: _Artifacts(_reconciliation_report(quantity=0.0)),
+        dashboard_fetcher=lambda _: _dashboard_payload(stale=False, attached=False),
+    )
+
+    assert artifacts.status["submit_allowed"] is True
+    assert "source_snapshot_fallback" not in artifacts.status["block_reasons"]
+    assert "backend_down" not in artifacts.status["block_reasons"]
+    assert artifacts.status["detail"] == "Preserved ATP ownership on the reconciled flat paper position using prior adopted evidence from the opened broker lot."
+
+
+def test_dashboard_timeout_uses_fresh_local_operator_artifacts_for_clean_flat_submit_authority(tmp_path: Path) -> None:
+    _write_prior_adopted_position_evidence(tmp_path)
+    _write_local_operator_artifacts(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_monitor(
+        config=_config(tmp_path),
+        reconciliation_runner=lambda **_: _Artifacts(_reconciliation_report(quantity=0.0)),
+        dashboard_fetcher=lambda _: (_ for _ in ()).throw(
+            IbkrPaperStrategyMonitorError("Live dashboard payload could not be loaded from http://127.0.0.1:8790/api/dashboard: timed out")
+        ),
+    )
+
+    assert artifacts.status["submit_allowed"] is True
+    assert "backend_down" not in artifacts.status["block_reasons"]
+    assert "paper_runtime_stale" not in artifacts.status["block_reasons"]
+    assert artifacts.status["backend_gate"]["authoritative_source"] == "LOCAL_OPERATOR_ARTIFACTS"
+    assert artifacts.status["backend_gate"]["dashboard_timeout_degraded"] is True
+    assert artifacts.status["backend_gate"]["paper_trade_allowed"] is True
+    assert "Dashboard telemetry degraded:" in artifacts.status["detail"]
+
+
+def test_dashboard_timeout_still_fails_closed_when_local_readiness_is_stale(tmp_path: Path) -> None:
+    _write_prior_adopted_position_evidence(tmp_path)
+    _write_local_operator_artifacts(
+        tmp_path,
+        readiness_generated_at="2000-01-01T00:00:00+00:00",
+        startup_generated_at="2000-01-01T00:00:00+00:00",
+        supervised_generated_at="2000-01-01T00:00:00+00:00",
+        integrity_generated_at="2000-01-01T00:00:00+00:00",
+        paper_trade_allowed=False,
+        market_data_stale_count=1,
+    )
+
+    artifacts = run_ibkr_paper_strategy_monitor(
+        config=_config(tmp_path),
+        reconciliation_runner=lambda **_: _Artifacts(_reconciliation_report(quantity=0.0)),
+        dashboard_fetcher=lambda _: (_ for _ in ()).throw(
+            IbkrPaperStrategyMonitorError("Live dashboard payload could not be loaded from http://127.0.0.1:8790/api/dashboard: timed out")
+        ),
+    )
+
+    assert artifacts.status["submit_allowed"] is False
+    assert "backend_down" in artifacts.status["block_reasons"]
+    assert "paper_runtime_stale" in artifacts.status["block_reasons"]
+    assert artifacts.status["backend_gate"]["authoritative_source"] == "LOCAL_OPERATOR_ARTIFACTS"
+    assert artifacts.status["backend_gate"]["backend_healthy"] is False
 
 
 def test_write_artifacts_and_load_status(tmp_path: Path) -> None:
@@ -545,6 +678,34 @@ def test_service_status_reports_ready_when_runtime_is_live(tmp_path: Path) -> No
     assert report["bridge_blocked"] is False
     assert report["current_broker_mgc_position"] == 0.0
     assert report["strategy_ledger_mgc_position"] == 0.0
+
+
+def test_startup_validation_accepts_running_connected_monitor() -> None:
+    report = {
+        "service_process_running": True,
+        "monitor_running": True,
+        "ibkr_connection_state": "CONNECTED",
+        "last_successful_broker_refresh": "2026-05-01T15:59:29.592604+00:00",
+    }
+
+    assert paper_strategy_monitor_startup_validation_ready(report) is True
+    assert paper_strategy_monitor_startup_validation_permanent_failure(report) is False
+
+
+def test_startup_validation_flags_permanent_disconnect_without_refresh() -> None:
+    report = {
+        "service_process_running": True,
+        "monitor_running": True,
+        "ibkr_connection_state": "DISCONNECTED",
+        "last_successful_broker_refresh": None,
+    }
+
+    assert paper_strategy_monitor_startup_validation_ready(report) is False
+    assert paper_strategy_monitor_startup_validation_permanent_failure(report) is True
+
+
+def test_startup_grace_default_is_long_enough_for_first_broker_refresh() -> None:
+    assert DEFAULT_PAPER_STRATEGY_MONITOR_STARTUP_GRACE_SECONDS == 30.0
 
 
 def test_mark_service_stopped_blocks_and_writes_report(tmp_path: Path) -> None:

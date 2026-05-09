@@ -25,11 +25,15 @@ from .ibkr_manual_paper_submit import (
     artifact_stem_for_test_mode,
     frozen_preview_path_for_config,
     _probe_delayed_quote_context,
-    _qualify_mgc_contract,
+    _qualify_futures_contract,
     _refresh_open_orders_snapshot,
     _refresh_positions_snapshot,
     run_ibkr_manual_paper_submit_test,
     write_ibkr_manual_paper_submit_artifacts,
+)
+from .ibkr_phase1_futures_scope import (
+    phase1_execution_target_for_source,
+    phase1_execution_target_for_symbol,
 )
 from .ibkr_paper_order_preview import (
     _FORBIDDEN_CALLER_PREFIXES,
@@ -99,6 +103,12 @@ _APPROVED_RUNTIME_STRATEGY_ENGINE_MODULE_PREFIXES = (
 _BRIDGE_ADDITIONAL_FORBIDDEN_CALLER_PREFIXES = (
     "mgc_v05l.live",
     "mgc_v05l.execution.live_strategy_broker",
+)
+_DEPRECATED_SUBMIT_ROOT_FRAGMENTS = (
+    "/Users/patrick/Documents/MGC-v05l-automation",
+    "/Users/patrick/Documents/",
+    "/Mobile Documents/",
+    "/iCloud",
 )
 
 
@@ -195,6 +205,180 @@ class _Runtime:
     transport: IbkrManualPaperSubmitTransport
 
 
+def _bridge_phase1_target(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> dict[str, Any]:
+    metadata = dict(config.caller_metadata or {})
+    lane_adapter = lane_submit_bridge_adapter(lane_id=intent.strategy_id)
+    target = dict(lane_adapter.get("bridge_execution_target") or {}) if lane_adapter is not None else {}
+    approved = bool(target)
+    if not target:
+        try:
+            executable_proxy = str(
+                metadata.get("executable_proxy")
+                or config.symbol
+                or intent.symbol
+                or ""
+            ).strip().upper()
+            target = dict(
+                phase1_execution_target_for_symbol(
+                    executable_proxy,
+                    contract_month=str(config.contract_month or intent.contract_month or "").strip() or None,
+                )
+            )
+            approved = True
+        except KeyError:
+            try:
+                target = dict(
+                    phase1_execution_target_for_source(
+                        str(
+                            metadata.get("source_instrument")
+                            or (lane_adapter or {}).get("source_instrument")
+                            or config.symbol
+                            or intent.symbol
+                            or ""
+                        ).strip().upper()
+                    )
+                    or {}
+                )
+                approved = bool(target)
+            except KeyError:
+                target = {}
+    symbol = str(target.get("symbol") or config.symbol or intent.symbol or "").strip().upper()
+    contract_month = str(target.get("contract_month") or config.contract_month or intent.contract_month or "").strip()
+    caller_path = str(config.caller_path or "").strip()
+    route_destination = str(
+        metadata.get("route_destination")
+        or (lane_adapter or {}).get("current_order_destination")
+        or ""
+    ).strip()
+    source_symbol = str(
+        metadata.get("source_instrument")
+        or (lane_adapter or {}).get("source_instrument")
+        or intent.symbol
+        or config.symbol
+        or ""
+    ).strip().upper()
+    supervised_runtime_route = (
+        caller_path in _APPROVED_RUNTIME_CALLER_PATHS
+        and route_destination == "ibkr_paper_bridge_submit_capable"
+        and _runtime_caller_metadata_is_authorized(
+            caller_metadata=metadata,
+            expected_strategy_id=config.strategy_id,
+            expected_lane_id=config.strategy_id,
+            expected_executable_proxy=symbol or None,
+            expected_action=config.action,
+        )
+    )
+    return {
+        **target,
+        "approved": approved,
+        "symbol": symbol,
+        "contract_month": contract_month,
+        "source_symbol": source_symbol,
+        "route_destination": route_destination,
+        "lane_adapter_present": lane_adapter is not None,
+        "lane_adapter": dict(lane_adapter or {}),
+        "supervised_runtime_route": supervised_runtime_route,
+        "friendly_label": str(target.get("friendly_label") or f"{symbol} {contract_month}".strip()).strip(),
+    }
+
+
+def _phase1_target_detail_label(target: dict[str, Any]) -> str:
+    symbol = str(target.get("symbol") or "").strip().upper()
+    contract_month = str(target.get("contract_month") or "").strip()
+    if symbol and contract_month:
+        return f"{symbol} {contract_month}"
+    if symbol:
+        return symbol
+    return "the approved phase-1 execution target"
+
+
+def _phase1_target_is_configured(target: dict[str, Any]) -> bool:
+    return bool(target.get("approved")) and bool(str(target.get("symbol") or "").strip())
+
+
+def _deprecated_submit_root_detail(repo_root: Path) -> str | None:
+    try:
+        normalized = str(Path(repo_root).expanduser().resolve())
+    except OSError:
+        normalized = str(Path(repo_root).expanduser())
+    for fragment in _DEPRECATED_SUBMIT_ROOT_FRAGMENTS:
+        if fragment in normalized:
+            return (
+                "Submit-capable PAPER bridge calls must not originate from deprecated "
+                f"or cloud-synced repo roots; resolved repo_root={normalized}."
+            )
+    return None
+
+
+def _exact_contract_matches_phase1_target(
+    *,
+    contract: dict[str, Any],
+    target: dict[str, Any],
+) -> bool:
+    if str(contract.get("broker_symbol") or "").strip().upper() != str(target.get("symbol") or "").strip().upper():
+        return False
+    expected_expiry = str(target.get("expiry") or "").strip()
+    expected_contract_month = str(target.get("contract_month") or "").strip()
+    actual_expiry = str(contract.get("expiry") or "").strip()
+    if expected_expiry and actual_expiry != expected_expiry:
+        return False
+    if not expected_expiry and expected_contract_month and actual_expiry and not actual_expiry.startswith(expected_contract_month):
+        return False
+    expected_con_id = target.get("con_id")
+    actual_con_id = contract.get("con_id")
+    if expected_con_id is not None and actual_con_id is not None and int(actual_con_id) != int(expected_con_id):
+        return False
+    expected_local_symbol = str(target.get("local_symbol") or "").strip().upper()
+    actual_local_symbol = str(contract.get("local_symbol") or "").strip().upper()
+    if expected_local_symbol and actual_local_symbol and actual_local_symbol != expected_local_symbol:
+        return False
+    expected_exchange = str(target.get("exchange") or "").strip().upper()
+    actual_exchange = str(contract.get("exchange") or "").strip().upper()
+    if expected_exchange and actual_exchange and actual_exchange != expected_exchange:
+        return False
+    expected_currency = str(target.get("currency") or "").strip().upper()
+    actual_currency = str(contract.get("currency") or "").strip().upper()
+    if expected_currency and actual_currency and actual_currency != expected_currency:
+        return False
+    expected_multiplier = str(target.get("multiplier") or "").strip()
+    actual_multiplier = str(contract.get("multiplier") or "").strip()
+    if expected_multiplier and actual_multiplier and actual_multiplier != expected_multiplier:
+        return False
+    return True
+
+
+def _monitor_exact_contract_matches_target(
+    *,
+    monitor_exact_contract: dict[str, Any],
+    target: dict[str, Any],
+) -> bool:
+    symbol = str(target.get("symbol") or "").strip().upper()
+    if not symbol:
+        return False
+    if str(monitor_exact_contract.get("symbol") or "").strip().upper() != symbol:
+        return False
+    expected_expiry = str(target.get("expiry") or "").strip()
+    expected_contract_month = str(target.get("contract_month") or "").strip()
+    actual_expiry = str(monitor_exact_contract.get("expiry") or "").strip()
+    if expected_expiry and actual_expiry != expected_expiry:
+        return False
+    if not expected_expiry and expected_contract_month and actual_expiry and not actual_expiry.startswith(expected_contract_month):
+        return False
+    expected_con_id = target.get("con_id")
+    actual_con_id = monitor_exact_contract.get("con_id")
+    if expected_con_id is not None and actual_con_id not in (None, "") and int(actual_con_id) != int(expected_con_id):
+        return False
+    expected_local_symbol = str(target.get("local_symbol") or "").strip().upper()
+    actual_local_symbol = str(monitor_exact_contract.get("local_symbol") or "").strip().upper()
+    if expected_local_symbol and actual_local_symbol and actual_local_symbol != expected_local_symbol:
+        return False
+    return True
+
+
 def strategy_order_intent_schema() -> dict[str, Any]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -261,6 +445,7 @@ def run_ibkr_paper_strategy_bridge(
         strategy_id=config.strategy_id,
         bridge_strategy_id=str(governance_row.get("bridge_strategy_id") or "").strip() or None,
         action=config.action,
+        intent_type=str((config.caller_metadata or {}).get("intent_type") or "").strip().upper() or None,
         quantity=config.quantity,
         executable_symbol=config.symbol,
     )
@@ -362,9 +547,17 @@ def run_ibkr_paper_strategy_bridge(
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
         )
-        qualified_contract_report = _qualify_mgc_contract(
+        expected_target = _bridge_phase1_target(config=config, intent=intent)
+        qualified_contract_report = _qualify_futures_contract(
             transport=runtime.transport,
             collector=runtime.collector,
+            symbol=str(expected_target.get("symbol") or intent.symbol or "").strip().upper(),
+            expiry=str(
+                expected_target.get("expiry")
+                or expected_target.get("contract_month")
+                or intent.contract_month
+                or ""
+            ).strip(),
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
         )
@@ -416,6 +609,7 @@ def run_ibkr_paper_strategy_bridge(
                 open_orders=open_orders,
                 quote_context=quote_context,
                 paper_strategy_monitor_status=monitor_status,
+                paper_strategy_exposure_status=exposure_status,
                 exact_contract_report=exact_contract_report,
                 qualified_contract_report=qualified_contract_report,
                 current_position_quantity=current_position_quantity,
@@ -565,7 +759,7 @@ def render_ibkr_paper_strategy_bridge_markdown(report: dict[str, Any]) -> str:
         f"- executable symbol: `{intent.get('symbol')}`",
         f"- action / qty / type / tif: `{intent.get('action')} / {intent.get('quantity')} / {intent.get('order_type')} / {intent.get('time_in_force')}`",
         f"- limit price model: `{intent.get('limit_price_model')}`",
-        f"- exact qualified contract: `MGC {exact_contract.get('expiry')} / conId={exact_contract.get('con_id')} / localSymbol={exact_contract.get('local_symbol')}`",
+        f"- exact qualified contract: `{exact_contract.get('broker_symbol') or exact_contract.get('internal_symbol')} {exact_contract.get('expiry')}` / `conId={exact_contract.get('con_id')}` / `localSymbol={exact_contract.get('local_symbol')}`",
         f"- current exact position quantity: `{current_position_quantity}`",
         f"- current open-order count: `{report.get('open_orders', {}).get('open_order_count')}`",
         f"- paper strategy monitor classification: `{monitor_status.get('classification')}`",
@@ -724,7 +918,7 @@ def _runtime_caller_metadata_check(
         caller_metadata=metadata,
         expected_strategy_id=config.strategy_id,
         expected_lane_id=config.strategy_id,
-        expected_executable_proxy=config.symbol,
+        expected_executable_proxy=str(_bridge_phase1_target(config=config, intent=intent).get("symbol") or config.symbol).strip().upper(),
         expected_action=config.action,
     )
     return _check(
@@ -737,6 +931,21 @@ def _runtime_caller_metadata_check(
             else "Approved supervised paper runtime caller metadata is missing or does not match the required PAPER / 127.0.0.1 / 7497 / DUM882026 route context."
         ),
     )
+
+
+def _authorized_supervised_runtime_route_check(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> dict[str, Any]:
+    metadata_check = _runtime_caller_metadata_check(config=config, intent=intent)
+    caller_path = str(config.caller_path or "").strip()
+    route_authorized = caller_path in _APPROVED_RUNTIME_CALLER_PATHS and bool(metadata_check.get("passed"))
+    return {
+        "passed": route_authorized,
+        "detail": str(metadata_check.get("detail") or ""),
+        "metadata_check": metadata_check,
+    }
 
 
 def _build_runtime(
@@ -805,12 +1014,19 @@ def _build_preflight_checks(
     qualified_contract_report: dict[str, Any],
     audit_events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    expected_target = _bridge_phase1_target(config=config, intent=intent)
+    expected_label = _phase1_target_detail_label(expected_target)
     checks = [
         _check("account_match", selected_account_id == config.account_id == _EXPECTED_ACCOUNT_ID, True, "Paper bridge account must match DUM882026 exactly."),
         _check("daily_order_cap", _submitted_order_count(audit_events) < int(config.daily_order_cap), True, f"Daily bridge order cap is {config.daily_order_cap}."),
         _check("no_working_orders", int(open_orders.get("open_order_count") or 0) == 0, True, "No working broker order is allowed before a strategy bridge intent can submit."),
         _check("delayed_quote_freshness", _quote_is_fresh(quote_context), True, "A fresh delayed quote is required before strategy bridge submit is allowed."),
-        _check("exact_qualified_contract", _qualified_contract_is_exact(qualified_contract_report), True, "Submitted contract must match exact qualified MGC 20260626 details."),
+        _check(
+            "exact_qualified_contract",
+            _qualified_contract_is_exact(qualified_contract_report, expected_target=expected_target),
+            True,
+            f"Submitted contract must match the approved phase-1 execution target {expected_label}.",
+        ),
         _check("strategy_allowed_state", True, True, "The bridge remains manual-only and the shadow ledger stays separate from broker execution."),
     ]
     if intent.action == "BUY":
@@ -855,21 +1071,16 @@ def _build_static_preflight_checks(
     monitor_health = str(monitor_status.get("health_classification") or monitor_status.get("monitor_health") or "").strip().upper()
     monitor_account_matches = str(monitor_status.get("account_id") or "").strip() == config.account_id
     governance_row = dict(governance_status.get("selected_strategy") or {})
-    lane_adapter = lane_submit_bridge_adapter(lane_id=intent.strategy_id)
-    monitor_contract_matches = (
-        str(monitor_exact_contract.get("symbol") or "").strip().upper() == config.symbol
-        and str(monitor_exact_contract.get("expiry") or "").strip() == _EXPECTED_EXACT_EXPIRY
-        and int(monitor_exact_contract.get("con_id") or 0) == _EXPECTED_CON_ID
-        and str(monitor_exact_contract.get("local_symbol") or "").strip().upper() == _EXPECTED_LOCAL_SYMBOL
+    expected_target = _bridge_phase1_target(config=config, intent=intent)
+    expected_label = _phase1_target_detail_label(expected_target)
+    lane_adapter = dict(expected_target.get("lane_adapter") or {})
+    runtime_route = _authorized_supervised_runtime_route_check(config=config, intent=intent)
+    monitor_contract_matches = _monitor_exact_contract_matches_target(
+        monitor_exact_contract=monitor_exact_contract,
+        target=expected_target,
     )
-    monitor_detail = str(
-        monitor_status.get("detail")
-        or (
-            "Paper strategy monitor allows submit."
-            if monitor_status.get("submit_allowed")
-            else f"Paper strategy monitor blocked submit: {', '.join(list(monitor_status.get('block_reasons') or [])) or 'unknown_reason'}"
-        )
-    )
+    monitor_contract_gate_required = (not config.submit) or not bool(runtime_route.get("passed"))
+    monitor_detail = _paper_strategy_monitor_submit_gate_detail(monitor_status)
     governance_detail = str(
         governance_status.get("detail")
         or (
@@ -887,17 +1098,42 @@ def _build_static_preflight_checks(
         )
     )
     caller_path = str(config.caller_path or "").strip()
+    deprecated_root_detail = _deprecated_submit_root_detail(Path(config.repo_root))
     return [
         _check("approved_paper_caller_path", caller_gate["passed"], True, caller_gate["detail"]),
-        _runtime_caller_metadata_check(config=config, intent=intent),
+        dict(runtime_route.get("metadata_check") or _runtime_caller_metadata_check(config=config, intent=intent)),
+        _check(
+            "deprecated_submit_root_block",
+            (not config.submit) or deprecated_root_detail is None,
+            True,
+            deprecated_root_detail or "Submit-capable PAPER bridge repo_root is not a deprecated Documents/iCloud path.",
+        ),
         _check("paper_environment_lock", environment_lock["passed"], True, str(environment_lock.get("port_policy") or environment_lock.get("detail") or "Environment lock failed.")),
         _check("paper_only_intent", bool(intent.paper_only), True, "Intent must remain explicitly paper-only."),
-        _check("strategy_allowlist", intent.strategy_id in _SUPPORTED_STRATEGY_IDS or lane_adapter is not None, True, "Only the ATP Companion baseline and explicitly ported paper strategy lane identities are allowed in the paper bridge."),
-        _check("executable_contract_whitelist", intent.symbol == _EXPECTED_SYMBOL, True, "Phase 1 executable contract is MGC only, even when the source strategy lane is GC."),
-        _check("contract_month_lock", intent.contract_month == _EXPECTED_CONTRACT_MONTH, True, "Only MGC 202606 is allowed in the paper bridge."),
+        _check("strategy_allowlist", intent.strategy_id in _SUPPORTED_STRATEGY_IDS or bool(lane_adapter), True, "Only the ATP Companion baseline and explicitly ported paper strategy lane identities are allowed in the paper bridge."),
+        _check(
+            "executable_contract_whitelist",
+            _phase1_target_is_configured(expected_target) and intent.symbol == str(expected_target.get("symbol") or "").strip().upper(),
+            True,
+            (
+                f"Executable contract must match the approved phase-1 execution target {expected_label}."
+                if _phase1_target_is_configured(expected_target)
+                else "No approved phase-1 execution target exists for this supervised paper route."
+            ),
+        ),
+        _check(
+            "contract_month_lock",
+            _phase1_target_is_configured(expected_target) and intent.contract_month == str(expected_target.get("contract_month") or "").strip(),
+            True,
+            (
+                f"Executable contract month must match the approved phase-1 execution target {expected_label}."
+                if _phase1_target_is_configured(expected_target)
+                else "No approved phase-1 execution target exists for this supervised paper route."
+            ),
+        ),
         _check(
             "selected_lane_adapter_present",
-            (lane_adapter is not None) if intent.strategy_id not in {"ATP_COMPANION_V1_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"} else True,
+            bool(lane_adapter) if intent.strategy_id not in {"ATP_COMPANION_V1_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"} else True,
             True,
             "Non-ATP paper strategy lanes require an explicit bridge adapter before submit-capable routing is allowed.",
         ),
@@ -932,9 +1168,13 @@ def _build_static_preflight_checks(
         ),
         _check(
             "paper_strategy_monitor_contract_match",
-            (not config.submit) or monitor_contract_matches,
+            (not config.submit) or ((not monitor_contract_gate_required) or monitor_contract_matches),
             True,
-            "Submit-capable paper strategy orders require the live monitor exact contract to match MGC 20260626 / conId 712565978 / localSymbol MGCM6.",
+            (
+                f"Submit-capable paper strategy orders require the live monitor exact contract to match the approved phase-1 execution target {expected_label}."
+                if monitor_contract_gate_required
+                else f"Approved supervised PAPER route resolved executable target {expected_label}; stale global monitor exact-contract snapshots do not veto current route preflight."
+            ),
         ),
         _check(
             "manual_harness_bundle_present_for_submit",
@@ -952,7 +1192,7 @@ def _build_static_preflight_checks(
         ),
         _check(
             "paper_strategy_submit_gate",
-            (not config.submit) or bool(monitor_status.get("submit_allowed")),
+            (not config.submit) or _paper_strategy_monitor_submit_gate_passed(monitor_status),
             True,
             monitor_detail,
         ),
@@ -990,17 +1230,85 @@ def _build_static_preflight_checks(
     ]
 
 
+def _paper_strategy_monitor_submit_gate_passed(monitor_status: dict[str, Any]) -> bool:
+    if bool(monitor_status.get("submit_allowed")):
+        return True
+    detail = str(monitor_status.get("detail") or "").strip()
+    block_reasons = [str(reason or "").strip() for reason in list(monitor_status.get("block_reasons") or []) if str(reason or "").strip()]
+    health = str(monitor_status.get("health_classification") or monitor_status.get("monitor_health") or "").strip().upper()
+    broker_quantity = float(
+        monitor_status.get("broker_position_quantity")
+        if monitor_status.get("broker_position_quantity") is not None
+        else monitor_status.get("current_broker_mgc_position")
+        if monitor_status.get("current_broker_mgc_position") is not None
+        else 0.0
+    )
+    open_order_count = int(
+        monitor_status.get("open_order_count")
+        if monitor_status.get("open_order_count") is not None
+        else monitor_status.get("open_mgc_orders")
+        if monitor_status.get("open_mgc_orders") is not None
+        else 0
+    )
+    broker_ledger_match = str(monitor_status.get("broker_ledger_match") or "").strip().upper()
+    preserved_flat_ownership_detail = (
+        "Preserved ATP ownership on the reconciled flat paper position" in detail
+    )
+    return (
+        preserved_flat_ownership_detail
+        and not block_reasons
+        and bool(monitor_status.get("monitor_running"))
+        and health == "HEALTHY"
+        and broker_quantity == 0.0
+        and open_order_count == 0
+        and broker_ledger_match in {"", "MATCH"}
+    )
+
+
+def _paper_strategy_monitor_submit_gate_detail(monitor_status: dict[str, Any]) -> str:
+    detail = str(monitor_status.get("detail") or "").strip()
+    if _paper_strategy_monitor_submit_gate_passed(monitor_status):
+        if "Preserved ATP ownership on the reconciled flat paper position" in detail:
+            return (
+                "Paper strategy monitor allows submit; preserved ATP ownership detail on a "
+                "reconciled flat paper position is informational only."
+            )
+        return detail or "Paper strategy monitor allows submit."
+    return detail or (
+        f"Paper strategy monitor blocked submit: {', '.join(list(monitor_status.get('block_reasons') or [])) or 'unknown_reason'}"
+    )
+
+
 def _delegate_to_manual_harness(
     *,
     config: IbkrPaperStrategyBridgeConfig,
     intent: IbkrPaperStrategyOrderIntent,
 ) -> dict[str, Any]:
-    if config.manual_frozen_preview_path is None or config.approval_digest is None or config.approval_phrase is None:
-        raise IbkrPaperStrategyBridgeError(
-            "Bridge submit delegation requires a previously generated manual-harness frozen preview plus the exact approval digest and approval phrase."
+    manual_frozen_preview_path = config.manual_frozen_preview_path
+    approval_digest = config.approval_digest
+    approval_phrase = config.approval_phrase
+    runtime_route = _authorized_supervised_runtime_route_check(config=config, intent=intent)
+    supervised_runtime_route = bool(runtime_route.get("passed"))
+    if manual_frozen_preview_path is None or approval_digest is None or approval_phrase is None:
+        if not supervised_runtime_route:
+            raise IbkrPaperStrategyBridgeError(
+                "Bridge submit delegation requires a previously generated manual-harness frozen preview plus the exact approval digest and approval phrase."
+            )
+        prepared = _prepare_manual_submit_bundle(
+            config=config,
+            intent=intent,
+            stack_provider=(lambda: []),
         )
+        manual_frozen_preview_path = Path(str(prepared.get("frozen_preview_path") or ""))
+        approval_digest = str(prepared.get("preview_digest") or "")
+        approval_phrase = str(prepared.get("expected_approval_phrase") or "")
+        if not manual_frozen_preview_path.exists() or not approval_digest or not approval_phrase:
+            raise IbkrPaperStrategyBridgeError(
+                "Approved supervised PAPER runtime route could not prepare a valid internal frozen preview bundle."
+            )
     test_mode = "PAPER_FILL_TEST" if intent.action == "BUY" else "PAPER_CLOSE_TEST"
     delegated_output_dir = (Path(config.output_dir) / "delegated_manual_harness") if config.output_dir is not None else None
+    expected_target = _bridge_phase1_target(config=config, intent=intent)
     manual_config = IbkrManualPaperSubmitConfig(
         repo_root=config.repo_root,
         mode=config.mode,
@@ -1008,8 +1316,8 @@ def _delegate_to_manual_harness(
         port=config.port,
         client_id=_manual_harness_client_id(config.client_id),
         account_id=config.account_id,
-        symbol=_EXPECTED_SYMBOL,
-        expiry=_EXPECTED_CONTRACT_MONTH,
+        symbol=str(expected_target.get("symbol") or intent.symbol or "").strip().upper(),
+        expiry=str(expected_target.get("contract_month") or intent.contract_month or "").strip(),
         action=intent.action,
         quantity=float(intent.quantity),
         order_type=_EXPECTED_ORDER_TYPE,
@@ -1023,17 +1331,44 @@ def _delegate_to_manual_harness(
         manual_confirmation_timeout_seconds=90.0,
         caller_path="manual_cli",
         submit=True,
-        approval_digest=config.approval_digest,
-        approval_phrase=config.approval_phrase,
+        approval_digest=approval_digest,
+        approval_phrase=approval_phrase,
         output_dir=delegated_output_dir,
-        frozen_preview_path=Path(config.manual_frozen_preview_path),
+        frozen_preview_path=Path(manual_frozen_preview_path),
         diagnostic_dry_run=False,
     )
-    delegated = run_ibkr_manual_paper_submit_test(config=manual_config)
+    manual_confirmation_fn = _supervised_runtime_manual_confirmation if supervised_runtime_route else None
+    delegated = run_ibkr_manual_paper_submit_test(
+        config=manual_config,
+        stack_provider=(lambda: []) if supervised_runtime_route else inspect.stack,
+        manual_confirmation_fn=manual_confirmation_fn,
+    )
     return {
         "classification": delegated.classification,
         "detail": delegated.report.get("lifecycle", {}).get("detail"),
         "report": delegated.report,
+    }
+
+
+def _supervised_runtime_manual_confirmation(
+    *,
+    timeout_seconds: float,
+    order_id: int,
+    preview_digest: str,
+) -> dict[str, Any]:
+    del timeout_seconds
+    return {
+        "state": "SUBMIT_SENT_AWAITING_TWS_MANUAL_CONFIRMATION",
+        "operator_outcome": "approved",
+        "response_text": None,
+        "detail": (
+            "Approved supervised PAPER runtime route skipped the legacy manual-harness TTY prompt; "
+            "broker truth still verifies the submitted paper order before success."
+        ),
+        "timed_out": False,
+        "order_id": int(order_id),
+        "preview_digest": str(preview_digest),
+        "source": "approved_supervised_paper_runtime_route",
     }
 
 
@@ -1163,9 +1498,11 @@ def _prepare_manual_submit_bundle(
     *,
     config: IbkrPaperStrategyBridgeConfig,
     intent: IbkrPaperStrategyOrderIntent,
+    stack_provider: Callable[[], list[Any]] = inspect.stack,
 ) -> dict[str, Any]:
     test_mode = _intent_test_mode(intent)
     delegated_output_dir = (Path(config.output_dir) / "prepared_manual_harness") if config.output_dir is not None else None
+    expected_target = _bridge_phase1_target(config=config, intent=intent)
     manual_config = IbkrManualPaperSubmitConfig(
         repo_root=config.repo_root,
         mode=config.mode,
@@ -1173,8 +1510,8 @@ def _prepare_manual_submit_bundle(
         port=config.port,
         client_id=_manual_harness_client_id(config.client_id),
         account_id=config.account_id,
-        symbol=_EXPECTED_SYMBOL,
-        expiry=_EXPECTED_CONTRACT_MONTH,
+        symbol=str(expected_target.get("symbol") or intent.symbol or "").strip().upper(),
+        expiry=str(expected_target.get("contract_month") or intent.contract_month or "").strip(),
         action=intent.action,
         quantity=float(intent.quantity),
         order_type=_EXPECTED_ORDER_TYPE,
@@ -1192,7 +1529,7 @@ def _prepare_manual_submit_bundle(
         frozen_preview_path=None,
         diagnostic_dry_run=False,
     )
-    artifacts = run_ibkr_manual_paper_submit_test(config=manual_config)
+    artifacts = run_ibkr_manual_paper_submit_test(config=manual_config, stack_provider=stack_provider)
     if delegated_output_dir is not None:
         write_ibkr_manual_paper_submit_artifacts(output_dir=delegated_output_dir, artifacts=artifacts)
     frozen_preview_path = frozen_preview_path_for_config(manual_config)
@@ -1256,18 +1593,17 @@ def _quote_is_fresh(quote_context: dict[str, Any]) -> bool:
     return age_seconds <= 30.0 and str(quote_context.get("quote_source_label") or "").strip().upper() in {
         "DELAYED",
         "DELAYED_FROZEN",
+        "FROZEN",
         "LIVE",
     }
 
 
-def _qualified_contract_is_exact(qualified_contract_report: dict[str, Any]) -> bool:
+def _qualified_contract_is_exact(
+    qualified_contract_report: dict[str, Any],
+    expected_target: dict[str, Any],
+) -> bool:
     contract = dict(qualified_contract_report.get("qualified_contract") or {})
-    return (
-        str(contract.get("broker_symbol") or "").strip().upper() == _EXPECTED_SYMBOL
-        and str(contract.get("expiry") or "").strip() == _EXPECTED_EXACT_EXPIRY
-        and int(contract.get("con_id") or 0) == _EXPECTED_CON_ID
-        and str(contract.get("local_symbol") or "").strip().upper() == _EXPECTED_LOCAL_SYMBOL
-    )
+    return _exact_contract_matches_phase1_target(contract=contract, target=expected_target)
 
 
 def _check(name: str, passed: bool, blocking: bool, detail: str) -> dict[str, Any]:
@@ -1307,6 +1643,7 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _position_like_config(config: IbkrPaperStrategyBridgeConfig) -> Any:
+    expected_target = _bridge_phase1_target(config=config, intent=_build_intent(config))
     return type(
         "PaperStrategyBridgePositionConfig",
         (),
@@ -1318,15 +1655,15 @@ def _position_like_config(config: IbkrPaperStrategyBridgeConfig) -> Any:
             "client_id": config.client_id,
             "read_only": True,
             "account_id": config.account_id,
-            "symbol": _EXPECTED_SYMBOL,
-            "contract_month": _EXPECTED_CONTRACT_MONTH,
-            "exact_expiry": _EXPECTED_EXACT_EXPIRY,
-            "con_id": _EXPECTED_CON_ID,
-            "local_symbol": _EXPECTED_LOCAL_SYMBOL,
+            "symbol": str(expected_target.get("symbol") or config.symbol or "").strip().upper(),
+            "contract_month": str(expected_target.get("contract_month") or config.contract_month or "").strip(),
+            "exact_expiry": str(expected_target.get("expiry") or "").strip(),
+            "con_id": expected_target.get("con_id"),
+            "local_symbol": str(expected_target.get("local_symbol") or "").strip().upper(),
             "security_type": "FUT",
-            "exchange": _EXPECTED_EXCHANGE,
-            "currency": _EXPECTED_CURRENCY,
-            "multiplier": _EXPECTED_MULTIPLIER,
+            "exchange": str(expected_target.get("exchange") or _EXPECTED_EXCHANGE).strip().upper(),
+            "currency": str(expected_target.get("currency") or _EXPECTED_CURRENCY).strip().upper(),
+            "multiplier": str(expected_target.get("multiplier") or _EXPECTED_MULTIPLIER).strip(),
             "timeout_seconds": config.timeout_seconds,
         },
     )()

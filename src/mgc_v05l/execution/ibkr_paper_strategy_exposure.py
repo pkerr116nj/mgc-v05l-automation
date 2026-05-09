@@ -18,11 +18,14 @@ _DEFAULT_REPORT_MD = "paper_exposure_attribution_report.md"
 _DEFAULT_LEDGER_JSON = "paper_strategy_exposure_ledger.json"
 _DEFAULT_AGGREGATE_JSON = "paper_aggregate_exposure_state.json"
 _DEFAULT_AUDIT_JSONL = "paper_exposure_gate_audit.jsonl"
+_DEFAULT_BROKER_POSITIONS_SNAPSHOT = Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+_DEFAULT_INDEX_EXPOSURE_SNAPSHOT = Path("outputs") / "reports" / "ibkr_mnq_nq_scope_support" / "paper_index_exposure_state.json"
 _SUPPORTED_ENTRY_ACTIONS = {"BUY"}
 _SUPPORTED_EXIT_ACTIONS = {"SELL", "EXIT"}
 _DEFAULT_MAX_TOTAL_MGC_CONTRACTS = 20.0
 _DEFAULT_MAX_TOTAL_GC_EQUIVALENT = 2.0
 _DEFAULT_MAX_PER_STRATEGY_MGC_CONTRACTS = 1.0
+_DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,7 @@ class IbkrPaperStrategyExposureConfig:
     bridge_strategy_id: str | None = None
     executable_symbol: str = "MGC"
     action: str | None = None
+    intent_type: str | None = None
     quantity: float = 1.0
     allow_stacking: bool = True
     max_total_mgc_contracts: float | None = _DEFAULT_MAX_TOTAL_MGC_CONTRACTS
@@ -41,6 +45,9 @@ class IbkrPaperStrategyExposureConfig:
     max_per_strategy_mgc_contracts: float = _DEFAULT_MAX_PER_STRATEGY_MGC_CONTRACTS
     allow_long_and_short_netting: bool = False
     allow_direct_strategy_flip: bool = False
+    broker_positions_snapshot_path: Path = _DEFAULT_BROKER_POSITIONS_SNAPSHOT
+    index_exposure_snapshot_path: Path = _DEFAULT_INDEX_EXPOSURE_SNAPSHOT
+    broker_truth_max_age_seconds: float = _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,14 @@ class IbkrPaperStrategyExposureArtifacts:
     strategy_exposure_ledger: dict[str, Any]
     aggregate_exposure_state: dict[str, Any]
     audit_events: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _IntentSemantics:
+    operation: str
+    direction: str | None
+    broker_action: str
+    explicit_intent_type: bool
 
 
 def run_ibkr_paper_strategy_exposure(
@@ -91,6 +106,7 @@ def run_ibkr_paper_strategy_exposure(
             "max_per_strategy_mgc_contracts": float(config.max_per_strategy_mgc_contracts),
             "allow_long_and_short_netting": bool(config.allow_long_and_short_netting),
             "allow_direct_strategy_flip": bool(config.allow_direct_strategy_flip),
+            "broker_truth_max_age_seconds": float(config.broker_truth_max_age_seconds),
         },
         "selected_strategy_gate": selected_strategy_gate,
         "monitor_status": {
@@ -147,6 +163,7 @@ def evaluate_paper_strategy_exposure_gate(
     repo_root: Path,
     strategy_id: str,
     action: str,
+    intent_type: str | None = None,
     quantity: float,
     bridge_strategy_id: str | None = None,
     executable_symbol: str = "MGC",
@@ -156,6 +173,9 @@ def evaluate_paper_strategy_exposure_gate(
     max_per_strategy_mgc_contracts: float = _DEFAULT_MAX_PER_STRATEGY_MGC_CONTRACTS,
     allow_long_and_short_netting: bool = False,
     allow_direct_strategy_flip: bool = False,
+    broker_positions_snapshot_path: Path = _DEFAULT_BROKER_POSITIONS_SNAPSHOT,
+    index_exposure_snapshot_path: Path = _DEFAULT_INDEX_EXPOSURE_SNAPSHOT,
+    broker_truth_max_age_seconds: float = _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS,
 ) -> dict[str, Any]:
     artifacts = run_ibkr_paper_strategy_exposure(
         config=IbkrPaperStrategyExposureConfig(
@@ -164,6 +184,7 @@ def evaluate_paper_strategy_exposure_gate(
             bridge_strategy_id=bridge_strategy_id,
             executable_symbol=executable_symbol,
             action=action,
+            intent_type=intent_type,
             quantity=quantity,
             allow_stacking=allow_stacking,
             max_total_mgc_contracts=_DEFAULT_MAX_TOTAL_MGC_CONTRACTS if max_total_mgc_contracts is None else max_total_mgc_contracts,
@@ -171,6 +192,9 @@ def evaluate_paper_strategy_exposure_gate(
             max_per_strategy_mgc_contracts=max_per_strategy_mgc_contracts,
             allow_long_and_short_netting=allow_long_and_short_netting,
             allow_direct_strategy_flip=allow_direct_strategy_flip,
+            broker_positions_snapshot_path=broker_positions_snapshot_path,
+            index_exposure_snapshot_path=index_exposure_snapshot_path,
+            broker_truth_max_age_seconds=broker_truth_max_age_seconds,
         )
     )
     return dict(artifacts.report.get("selected_strategy_gate") or {})
@@ -283,7 +307,11 @@ def _build_aggregate_exposure_state(
     strategy_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     executable_symbol = str(config.executable_symbol or "MGC").strip().upper()
-    broker_net = float(monitor_status.get("broker_position_quantity") or 0.0)
+    broker_net, broker_truth = _broker_net_position_for_symbol(
+        config=config,
+        monitor_status=monitor_status,
+        executable_symbol=executable_symbol,
+    )
     attributed_rows = [
         dict(row)
         for row in strategy_rows
@@ -298,7 +326,9 @@ def _build_aggregate_exposure_state(
     unmatched_orphan_quantity = float(sum(float(row.get("quantity") or 0.0) for row in orphan_rows))
     ledger_only_rows: list[dict[str, Any]] = []
     discrepancy_classification = "CLEAN"
-    if orphan_rows or abs(unmatched_orphan_quantity) > 0.0:
+    if broker_truth.get("truth_available") is False:
+        discrepancy_classification = "BROKER_TRUTH_STALE_OR_MISSING"
+    elif orphan_rows or abs(unmatched_orphan_quantity) > 0.0:
         discrepancy_classification = "ORPHAN_BROKER_POSITION"
     elif broker_net == 0.0 and abs(strategy_sum) > 0.0:
         discrepancy_classification = "LEDGER_ONLY_POSITION"
@@ -306,7 +336,9 @@ def _build_aggregate_exposure_state(
     elif abs(difference) > 1e-9:
         discrepancy_classification = "LEDGER_BROKER_MISMATCH"
     classification = "PAPER_EXPOSURE_ATTRIBUTION_READY"
-    if discrepancy_classification == "ORPHAN_BROKER_POSITION":
+    if discrepancy_classification == "BROKER_TRUTH_STALE_OR_MISSING":
+        classification = "PAPER_EXPOSURE_BLOCKED_BROKER_TRUTH_STALE"
+    elif discrepancy_classification == "ORPHAN_BROKER_POSITION":
         classification = "PAPER_EXPOSURE_BLOCKED_ORPHAN_POSITION"
     elif discrepancy_classification in {"LEDGER_ONLY_POSITION", "LEDGER_BROKER_MISMATCH"}:
         classification = "PAPER_EXPOSURE_BLOCKED_LEDGER_BROKER_MISMATCH"
@@ -329,6 +361,7 @@ def _build_aggregate_exposure_state(
         "broker_net_position": broker_net,
         "strategy_attributed_position_sum": strategy_sum,
         "broker_minus_strategy_difference": difference,
+        "broker_truth": broker_truth,
         "unmatched_orphan_quantity": unmatched_orphan_quantity,
         "orphan_positions": orphan_rows,
         "ledger_only_positions": ledger_only_rows,
@@ -354,6 +387,7 @@ def _evaluate_strategy_gate(
     requested_strategy = str(config.strategy_id or "").strip()
     requested_bridge_strategy = str(config.bridge_strategy_id or "").strip()
     action = str(config.action or "OBSERVE").strip().upper()
+    semantics = _normalize_intent_semantics(action=action, intent_type=config.intent_type)
     quantity = float(config.quantity or 0.0)
     identifiers = {requested_strategy, requested_bridge_strategy}
     identifiers.discard("")
@@ -372,19 +406,23 @@ def _evaluate_strategy_gate(
 
     block_reasons: list[str] = []
     aggregate_discrepancy = str(aggregate_state.get("discrepancy_classification") or "CLEAN")
-    if aggregate_discrepancy == "ORPHAN_BROKER_POSITION":
+    if aggregate_discrepancy == "BROKER_TRUTH_STALE_OR_MISSING":
+        block_reasons.append("broker_position_truth_stale_or_missing")
+    elif aggregate_discrepancy == "ORPHAN_BROKER_POSITION":
         block_reasons.append("orphan_broker_position")
     elif aggregate_discrepancy == "LEDGER_ONLY_POSITION":
         block_reasons.append("ledger_only_position")
     elif aggregate_discrepancy == "LEDGER_BROKER_MISMATCH":
         block_reasons.append("ledger_broker_mismatch")
+    if semantics.explicit_intent_type and semantics.broker_action != action:
+        block_reasons.append("intent_type_action_mismatch")
 
     classification = str(aggregate_state.get("classification") or "PAPER_EXPOSURE_ATTRIBUTION_READY")
     detail = "Exposure attribution is visible and no explicit exposure conflict is present."
     submit_allowed = not block_reasons
     stacking_observed = False
 
-    if action in _SUPPORTED_ENTRY_ACTIONS:
+    if semantics.operation == "OPEN":
         if strategy_state in {"LONG", "SHORT"}:
             block_reasons.append("duplicate_strategy_entry_while_position_open")
         if float(config.max_per_strategy_mgc_contracts) > 0.0 and owned_quantity + quantity > float(config.max_per_strategy_mgc_contracts):
@@ -410,12 +448,22 @@ def _evaluate_strategy_gate(
             detail = "Another strategy already owns executable-contract exposure, but this strategy remains flat and stacking is allowed."
         else:
             classification = "PAPER_EXPOSURE_ATTRIBUTION_READY"
-    elif action in _SUPPORTED_EXIT_ACTIONS:
-        if strategy_state != "LONG":
+            detail = (
+                "The strategy may open long exposure from flat."
+                if semantics.direction == "LONG"
+                else "The strategy may open short exposure from flat."
+            )
+    elif semantics.operation == "CLOSE":
+        if semantics.direction == "LONG" and strategy_state != "LONG":
+            block_reasons.append("non_owning_strategy_exit_forbidden")
+        if semantics.direction == "SHORT" and strategy_state != "SHORT":
             block_reasons.append("non_owning_strategy_exit_forbidden")
         if quantity <= 0.0 or quantity > owned_quantity:
             block_reasons.append("exit_quantity_exceeds_owned_strategy_position")
-        if float(aggregate_state.get("broker_net_position") or 0.0) < quantity:
+        broker_net_position = float(aggregate_state.get("broker_net_position") or 0.0)
+        if semantics.direction == "LONG" and broker_net_position < quantity:
+            block_reasons.append("broker_position_does_not_support_requested_exit")
+        if semantics.direction == "SHORT" and broker_net_position > -quantity:
             block_reasons.append("broker_position_does_not_support_requested_exit")
         if block_reasons:
             submit_allowed = False
@@ -424,12 +472,21 @@ def _evaluate_strategy_gate(
         else:
             classification = "PAPER_EXPOSURE_EXIT_ALLOWED"
             detail = "The owning strategy may reduce its attributed exposure."
+    elif action != "OBSERVE":
+        block_reasons.append("unsupported_or_ambiguous_intent_semantics")
+        submit_allowed = False
+        classification = "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
+        detail = "The requested broker action does not declare supported open/close intent semantics."
 
     return {
         "classification": classification,
         "strategy_id": requested_strategy or None,
         "bridge_strategy_id": requested_bridge_strategy or None,
         "action": action,
+        "intent_type": str(config.intent_type or "").strip().upper() or None,
+        "intent_operation": semantics.operation,
+        "intent_direction": semantics.direction,
+        "broker_action": semantics.broker_action,
         "quantity": quantity,
         "strategy_state": strategy_state,
         "owned_strategy_quantity": owned_quantity,
@@ -442,7 +499,183 @@ def _evaluate_strategy_gate(
         "max_per_strategy_mgc_contracts": float(config.max_per_strategy_mgc_contracts),
         "aggregate_broker_position": aggregate_state.get("broker_net_position"),
         "aggregate_strategy_position_sum": aggregate_state.get("strategy_attributed_position_sum"),
+        "blocker_classification": (
+            "BROKER_LEDGER_POSITION_MISMATCH"
+            if any(reason in block_reasons for reason in {"ledger_broker_mismatch", "orphan_broker_position"})
+            else ("BROKER_TRUTH_STALE_OR_MISSING" if "broker_position_truth_stale_or_missing" in block_reasons else None)
+        ),
+        "review_required": any(
+            reason in block_reasons
+            for reason in {"ledger_broker_mismatch", "orphan_broker_position", "broker_position_truth_stale_or_missing"}
+        ),
     }
+
+
+def _broker_net_position_for_symbol(
+    *,
+    config: IbkrPaperStrategyExposureConfig,
+    monitor_status: dict[str, Any],
+    executable_symbol: str,
+) -> tuple[float, dict[str, Any]]:
+    if executable_symbol == "MGC":
+        return (
+            float(monitor_status.get("broker_position_quantity") or 0.0),
+            {
+                "truth_available": True,
+                "source": "paper_strategy_monitor_runtime_status",
+                "symbol": executable_symbol,
+                "generated_at": monitor_status.get("last_successful_broker_refresh"),
+                "max_age_seconds": float(config.broker_truth_max_age_seconds),
+            },
+        )
+
+    positions_path = config.repo_root / config.broker_positions_snapshot_path
+    positions_payload = _load_json(positions_path)
+    positions_fresh = _snapshot_freshness(
+        payload=positions_payload,
+        path=positions_path,
+        max_age_seconds=float(config.broker_truth_max_age_seconds),
+    )
+    if positions_fresh["fresh"]:
+        return (
+            _net_position_from_rows(list(positions_payload.get("positions") or []), executable_symbol),
+            {
+                **positions_fresh,
+                "truth_available": True,
+                "source": "ibkr_read_only_positions_snapshot",
+                "symbol": executable_symbol,
+            },
+        )
+
+    index_path = config.repo_root / config.index_exposure_snapshot_path
+    index_payload = _load_json(index_path)
+    index_fresh = _snapshot_freshness(
+        payload=index_payload,
+        path=index_path,
+        max_age_seconds=float(config.broker_truth_max_age_seconds),
+    )
+    if executable_symbol == "MNQ" and index_fresh["fresh"]:
+        return (
+            float(index_payload.get("broker_net_mnq") or 0.0),
+            {
+                **index_fresh,
+                "truth_available": True,
+                "source": "mnq_nq_scope_support_index_exposure",
+                "symbol": executable_symbol,
+            },
+        )
+
+    return (
+        0.0,
+        {
+            "truth_available": False,
+            "source": "missing_or_stale_non_mgc_broker_truth",
+            "symbol": executable_symbol,
+            "positions_snapshot": positions_fresh,
+            "index_exposure_snapshot": index_fresh,
+            "max_age_seconds": float(config.broker_truth_max_age_seconds),
+        },
+    )
+
+
+def _snapshot_freshness(*, payload: dict[str, Any], path: Path, max_age_seconds: float) -> dict[str, Any]:
+    generated_at = str(payload.get("generated_at") or "").strip()
+    if not payload or not generated_at:
+        return {
+            "fresh": False,
+            "path": str(path),
+            "generated_at": generated_at or None,
+            "age_seconds": None,
+            "max_age_seconds": float(max_age_seconds),
+            "reason": "missing_snapshot_or_timestamp",
+        }
+    try:
+        generated_dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return {
+            "fresh": False,
+            "path": str(path),
+            "generated_at": generated_at,
+            "age_seconds": None,
+            "max_age_seconds": float(max_age_seconds),
+            "reason": "invalid_snapshot_timestamp",
+        }
+    if generated_dt.tzinfo is None:
+        generated_dt = generated_dt.replace(tzinfo=timezone.utc)
+    age_seconds = max(0.0, (datetime.now(timezone.utc) - generated_dt.astimezone(timezone.utc)).total_seconds())
+    return {
+        "fresh": age_seconds <= float(max_age_seconds),
+        "path": str(path),
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "max_age_seconds": float(max_age_seconds),
+        "reason": "fresh" if age_seconds <= float(max_age_seconds) else "stale_snapshot",
+    }
+
+
+def _net_position_from_rows(rows: list[dict[str, Any]], symbol: str) -> float:
+    target = str(symbol or "").strip().upper()
+    total = 0.0
+    for row in rows:
+        row_symbol = str(row.get("symbol") or "").strip().upper()
+        local_symbol = str(row.get("local_symbol") or "").strip().upper()
+        if row_symbol != target and not local_symbol.startswith(target):
+            continue
+        total += float(row.get("quantity") or 0.0)
+    return round(total, 8)
+
+
+def _normalize_intent_semantics(*, action: str, intent_type: str | None) -> _IntentSemantics:
+    normalized_action = str(action or "").strip().upper()
+    normalized_intent_type = str(intent_type or "").strip().upper()
+    if normalized_intent_type == "BUY_TO_OPEN":
+        return _IntentSemantics(
+            operation="OPEN",
+            direction="LONG",
+            broker_action="BUY",
+            explicit_intent_type=True,
+        )
+    if normalized_intent_type == "SELL_TO_OPEN":
+        return _IntentSemantics(
+            operation="OPEN",
+            direction="SHORT",
+            broker_action="SELL",
+            explicit_intent_type=True,
+        )
+    if normalized_intent_type == "SELL_TO_CLOSE":
+        return _IntentSemantics(
+            operation="CLOSE",
+            direction="LONG",
+            broker_action="SELL",
+            explicit_intent_type=True,
+        )
+    if normalized_intent_type == "BUY_TO_CLOSE":
+        return _IntentSemantics(
+            operation="CLOSE",
+            direction="SHORT",
+            broker_action="BUY",
+            explicit_intent_type=True,
+        )
+    if normalized_action in _SUPPORTED_ENTRY_ACTIONS:
+        return _IntentSemantics(
+            operation="OPEN",
+            direction="LONG",
+            broker_action=normalized_action,
+            explicit_intent_type=False,
+        )
+    if normalized_action in _SUPPORTED_EXIT_ACTIONS:
+        return _IntentSemantics(
+            operation="CLOSE",
+            direction="LONG",
+            broker_action=normalized_action,
+            explicit_intent_type=False,
+        )
+    return _IntentSemantics(
+        operation="UNKNOWN",
+        direction=None,
+        broker_action=normalized_action,
+        explicit_intent_type=False,
+    )
 
 
 def _normalize_strategy_state(*, quantity: float, side: str, raw_state: str) -> str:

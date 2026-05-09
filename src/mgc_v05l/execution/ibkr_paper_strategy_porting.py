@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,7 @@ _GC_PHASE1_SUBMIT_LANE_IDS = (
 _MGC_PHASE1_SUBMIT_LANE_IDS = (
     "mgc_1x_asia_london_participation__asia_london_long_v5",
     "mgc_1x_asia_london_participation__asia_london_short_v2",
+    "ibkr_paper_route_canary",
 )
 _NQ_PHASE1_SUBMIT_LANE_IDS = (
     "nq_1x_asia_london_participation__asia_london_long_v5",
@@ -180,6 +182,16 @@ class IbkrPaperStrategyPortingArtifacts:
 
 
 def lane_submit_bridge_adapter(*, lane_id: str) -> dict[str, Any] | None:
+    if str(lane_id or "").strip() == "ibkr_paper_route_canary":
+        canary_symbol = str(os.environ.get("PAPER_ROUTE_CANARY_SYMBOL") or "MGC").strip().upper()
+        if canary_symbol == "MNQ":
+            return {
+                "lane_id": "ibkr_paper_route_canary",
+                "source_instrument": "MNQ",
+                "bridge_execution_target": dict(phase1_execution_target_for_source("MNQ") or {}),
+                "current_order_destination": "ibkr_paper_bridge_submit_capable",
+                "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            }
     adapter = _SUBMIT_CAPABLE_LANE_ADAPTERS.get(str(lane_id or "").strip())
     return dict(adapter) if isinstance(adapter, dict) else None
 
