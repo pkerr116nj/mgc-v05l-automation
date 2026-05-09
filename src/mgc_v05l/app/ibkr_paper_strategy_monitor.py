@@ -9,8 +9,11 @@ import threading
 from pathlib import Path
 
 from ..execution.ibkr_paper_strategy_monitor import (
+    DEFAULT_PAPER_STRATEGY_MONITOR_STARTUP_GRACE_SECONDS,
     IbkrPaperStrategyMonitorDaemonConfig,
     IbkrPaperStrategyMonitorConfig,
+    paper_strategy_monitor_startup_validation_permanent_failure,
+    paper_strategy_monitor_startup_validation_ready,
     render_ibkr_paper_strategy_monitor_markdown,
     render_ibkr_paper_strategy_monitor_daemon_markdown,
     run_ibkr_paper_strategy_monitor_daemon,
@@ -48,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval-seconds", type=float, default=10.0, help="Polling interval for daemon mode.")
     parser.add_argument("--max-cycles", type=int, default=3, help="Number of polling cycles to run in daemon mode.")
     parser.add_argument("--freshness-window-seconds", type=float, default=45.0, help="How fresh runtime monitor output must remain for bridge submit gating.")
+    parser.add_argument(
+        "--startup-grace-seconds",
+        type=float,
+        default=DEFAULT_PAPER_STRATEGY_MONITOR_STARTUP_GRACE_SECONDS,
+        help="Bounded startup validation grace window used by wrappers before declaring daemon startup failed.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Allow writing into a non-empty output directory.")
     return parser
 

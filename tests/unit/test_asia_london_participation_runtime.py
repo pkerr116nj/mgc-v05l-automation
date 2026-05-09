@@ -32,6 +32,7 @@ def _bar(symbol: str, end_ts: datetime, *, open_px: str, high_px: str, low_px: s
 
 
 def test_asia_london_live_observation_writes_predicate_and_near_miss_artifacts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MGC_ASIA_LONDON_INSTRUMENTATION_ENABLED", "1")
     monkeypatch.setenv("MGC_ASIA_LONDON_INSTRUMENTATION_DIR", str(tmp_path))
     definition = asia_runtime.ASIA_LONDON_RUNTIME_BY_SOURCE[asia_runtime.GC_ASIA_LONDON_LONG_V5_SOURCE]
     start = datetime(2026, 4, 29, 18, 5, tzinfo=ZoneInfo("America/New_York"))
@@ -68,3 +69,32 @@ def test_asia_london_live_observation_writes_predicate_and_near_miss_artifacts(t
     assert near_miss_rows[-1]["candidate_score_bucket"] == "A+"
     score_rows = list(csv.DictReader((tmp_path / "asia_london_score_bucket_live_observation.csv").open(encoding="utf-8")))
     assert score_rows[-1]["research_score_candidate"] == "True"
+
+
+def test_asia_london_live_observation_ignores_instrumentation_write_timeouts(monkeypatch) -> None:
+    monkeypatch.setenv("MGC_ASIA_LONDON_INSTRUMENTATION_ENABLED", "1")
+    row = {
+        "timestamp": "2026-04-30T15:54:08.920238+00:00",
+        "lane_id": "gc_1x_asia_london_participation_long",
+        "instrument": "GC",
+        "session_label": asia_runtime.ENTRY_SEGMENT,
+        "strict_gate_pass": False,
+        "strict_gate_fail_reason": "timeout_probe",
+        "predicates_passed": 1,
+        "predicate_count": 3,
+        "near_miss_score": 0.333333,
+        "candidate_score_bucket": "rejected",
+        "current_strict_candidate": False,
+        "research_score_candidate": False,
+        "entry_reason": "no_entry",
+        "floor_reason": None,
+        "predicate_results": {"in_entry_segment": True, "setup_bars_ready": False},
+    }
+
+    def _raise_timeout(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise TimeoutError("disk write stalled")
+
+    monkeypatch.setattr(asia_runtime, "_append_jsonl_record", _raise_timeout)
+    monkeypatch.setattr(asia_runtime, "_append_csv_record", _raise_timeout)
+
+    asia_runtime._record_asia_london_live_observation(row)  # noqa: SLF001

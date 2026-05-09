@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from sqlalchemy.exc import OperationalError
 
 from mgc_v05l.app.probationary_runtime import _sync_runtime_health_alerts
@@ -21,8 +22,63 @@ from mgc_v05l.monitoring.alerts import AlertDispatcher
 from mgc_v05l.monitoring.logger import StructuredLogger
 from mgc_v05l.persistence import build_engine
 from mgc_v05l.persistence.repositories import RepositorySet
-from mgc_v05l.strategy.strategy_engine import StrategyEngine
+from mgc_v05l.strategy.strategy_engine import StrategyEngine, _blocked_intent_classification
 from mgc_v05l.strategy.trade_state import build_initial_state
+
+
+@pytest.fixture(autouse=True)
+def _enable_runtime_event_logs(monkeypatch) -> None:
+    monkeypatch.setenv("MGC_ENABLE_RUNTIME_EVENT_LOGS", "1")
+
+
+class _BlockingBroker:
+    def __init__(self, *, error: str, context: dict[str, object]) -> None:
+        self.error = error
+        self.context = dict(context)
+        self.submit_calls = 0
+        self._connected = False
+
+    def connect(self) -> None:
+        self._connected = True
+
+    def disconnect(self) -> None:
+        self._connected = False
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def submit_order(self, order_intent: OrderIntent) -> str:
+        self.submit_calls += 1
+        self.context = {
+            **self.context,
+            "order_intent_id": order_intent.order_intent_id,
+            "intent_type": order_intent.intent_type.value,
+        }
+        raise RuntimeError(self.error)
+
+    def cancel_order(self, broker_order_id: str) -> None:
+        raise AssertionError(f"cancel_order must not be called in this test: {broker_order_id}")
+
+    def get_order_status(self, broker_order_id: str):
+        raise AssertionError(f"get_order_status must not be called after blocked submit: {broker_order_id}")
+
+    def get_open_orders(self):
+        return []
+
+    def get_position(self):
+        return {"quantity": 0}
+
+    def get_account_health(self):
+        return {"status": "BLOCKED"}
+
+    def snapshot_state(self):
+        return {"connected": self._connected, "position_quantity": 0}
+
+    def fill_order(self, order_intent: OrderIntent, fill_price: Decimal, fill_timestamp: datetime) -> FillEvent:
+        raise AssertionError("blocked real strategy signal must not synthesize a local fill")
+
+    def last_submit_context(self) -> dict[str, object]:
+        return dict(self.context)
 
 
 def _build_settings(tmp_path: Path):
@@ -45,9 +101,42 @@ def _build_runtime(tmp_path: Path):
         "lane_id": "lane-1",
     }
     repositories = RepositorySet(build_engine(settings.database_url), runtime_identity=runtime_identity)
-    logger = StructuredLogger(settings.probationary_artifacts_path)
+    logger = StructuredLogger(tmp_path / "artifacts")
     dispatcher = AlertDispatcher(logger, repositories.alerts, source_subsystem="test_runtime")
     execution_engine = ExecutionEngine(PaperBroker())
+    state = replace(
+        build_initial_state(datetime.now(timezone.utc)),
+        strategy_status=StrategyStatus.READY,
+        entries_enabled=True,
+        exits_enabled=True,
+        operator_halt=False,
+        reconcile_required=False,
+        fault_code=None,
+    )
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        initial_state=state,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=logger,
+        alert_dispatcher=dispatcher,
+        runtime_identity=runtime_identity,
+    )
+    return settings, repositories, logger, dispatcher, strategy_engine, execution_engine
+
+
+def _build_runtime_with_broker(tmp_path: Path, broker: _BlockingBroker):
+    settings = _build_settings(tmp_path).model_copy(update={"symbol": "MNQ"})
+    runtime_identity = {
+        "standalone_strategy_id": "mnq_1x_ny_early_core__us_early_long",
+        "strategy_family": "MNQ_RUNTIME",
+        "instrument": "MNQ",
+        "lane_id": "mnq_1x_ny_early_core__us_early_long",
+    }
+    repositories = RepositorySet(build_engine(settings.database_url), runtime_identity=runtime_identity)
+    logger = StructuredLogger(tmp_path / "artifacts")
+    dispatcher = AlertDispatcher(logger, repositories.alerts, source_subsystem="mnq_runtime")
+    execution_engine = ExecutionEngine(broker)
     state = replace(
         build_initial_state(datetime.now(timezone.utc)),
         strategy_status=StrategyStatus.READY,
@@ -87,6 +176,10 @@ def _bar(ts: datetime, *, bar_id: str) -> Bar:
         session_us=True,
         session_allowed=True,
     )
+
+
+def _mnq_bar(ts: datetime, *, bar_id: str) -> Bar:
+    return replace(_bar(ts, bar_id=bar_id), symbol="MNQ")
 
 
 def _read_alert_rows(logger: StructuredLogger) -> list[dict]:
@@ -168,6 +261,109 @@ def test_strategy_engine_emits_order_rejection_alert(tmp_path: Path) -> None:
     assert rejection_rows
     assert rejection_rows[-1]["category"] == "order_rejection"
     assert "rejected before broker submission" in rejection_rows[-1]["message"]
+
+
+def test_blocked_mnq_strategy_signal_persists_rejected_intent_and_artifact(tmp_path: Path) -> None:
+    broker = _BlockingBroker(
+        error=(
+            "BLOCKED_NOT_SENT_TO_BROKER: monitor_running=false "
+            "health_classification=STOPPED bridge_allowed=false "
+            "last_successful_broker_refresh=2026-05-02T01:31:52Z"
+        ),
+        context={
+            "route_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "source_symbol": "MNQ",
+            "bridge_symbol": "MNQ",
+            "bridge_contract_month": "202606",
+            "bridge_action": "BUY",
+            "caller_path": "probationary_paper_runtime_lane",
+            "caller_metadata": {
+                "source_instrument": "MNQ",
+                "executable_proxy": "MNQ",
+                "account_id": "DUM882026",
+            },
+            "bridge_classification": "PAPER_STRATEGY_INTENT_BLOCKED",
+            "bridge_detail": "bridge_allowed=false monitor_running=false health_classification=STOPPED",
+            "bridge_gate_trace": [
+                {
+                    "name": "paper_strategy_monitor_running",
+                    "passed": False,
+                    "detail": "Submit-capable paper strategy orders require the paper strategy monitor service to be actively running.",
+                },
+                {
+                    "name": "paper_strategy_monitor_health",
+                    "passed": False,
+                    "detail": "Submit-capable paper strategy orders require a HEALTHY paper strategy monitor, not STOPPED.",
+                },
+            ],
+        },
+    )
+    _, repositories, logger, _, strategy_engine, execution_engine = _build_runtime_with_broker(tmp_path, broker)
+    bar = _mnq_bar(datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc), bar_id="mnq-bar-1")
+
+    result = strategy_engine.submit_runtime_entry_intent(
+        bar,
+        side="LONG",
+        signal_source="mnq_us_early_long",
+        reason_code="mnq_route_block_test",
+    )
+
+    assert result is None
+    assert broker.submit_calls == 1
+    assert repositories.fills.list_all() == []
+    intent_rows = repositories.order_intents.list_all()
+    assert len(intent_rows) == 1
+    assert intent_rows[0]["symbol"] == "MNQ"
+    assert intent_rows[0]["order_status"] == OrderStatus.REJECTED.value
+    assert intent_rows[0]["broker_order_id"] is None
+    assert intent_rows[0]["timeout_classification"] == "PAPER_MONITOR_NOT_HEALTHY"
+    assert execution_engine.last_submit_failure() is not None
+
+    latest = json.loads((logger.artifact_dir / "blocked_strategy_intent_latest.json").read_text(encoding="utf-8"))
+    assert latest["intended_lifecycle_mode"] == "STRATEGY_MANAGED"
+    assert latest["submit_allowed"] is False
+    assert latest["monitor_running"] is False
+    assert latest["health_classification"] == "STOPPED"
+    assert latest["bridge_allowed"] is False
+    assert latest["broker_refresh_timestamp"] == "2026-05-02T01:31:52Z"
+    assert latest["route_target"]["execution_symbol"] == "MNQ"
+    assert latest["paper_proof_invoked"] is False
+    assert latest["live_money_readiness"] is False
+    assert "placeOrder" not in json.dumps(latest)
+    rows = [
+        json.loads(line)
+        for line in (logger.artifact_dir / "blocked_strategy_intents.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[-1]["order_intent_id"] == intent_rows[0]["order_intent_id"]
+
+
+def test_blocked_intent_classification_uses_failed_bridge_gate_not_passed_notes() -> None:
+    classification = _blocked_intent_classification(
+        (
+            "Execution engine rejected the intent before broker submission. "
+            "Approved supervised PAPER route resolved executable target MNQ 202606; "
+            "stale global monitor exact-contract snapshots do not veto current route preflight. "
+            "The requested exit does not align with the owning strategy's attributed exposure."
+        ),
+        {
+            "bridge_gate_trace": [
+                {
+                    "name": "paper_strategy_monitor_contract_match",
+                    "passed": True,
+                    "detail": "Stale global monitor exact-contract snapshots do not veto current route preflight.",
+                },
+                {
+                    "name": "paper_strategy_exposure_gate",
+                    "passed": False,
+                    "detail": "The requested exit does not align with the owning strategy's attributed exposure.",
+                },
+            ]
+        },
+    )
+
+    assert classification == "BRIDGE_EXPOSURE_GATE_BLOCKED"
 
 
 def test_alert_dispatcher_deduplicates_and_resolves_stateful_alerts(tmp_path: Path) -> None:

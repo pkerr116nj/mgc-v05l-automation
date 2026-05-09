@@ -512,6 +512,13 @@ def _asia_london_instrumentation_root() -> Path:
     return (Path.cwd() / "outputs" / "reports" / ASIA_LONDON_INSTRUMENTATION_DIRNAME).resolve()
 
 
+def _asia_london_instrumentation_enabled() -> bool:
+    raw_enabled = str(os.environ.get("MGC_ASIA_LONDON_INSTRUMENTATION_ENABLED") or "").strip().lower()
+    if raw_enabled in {"1", "true", "yes", "on"}:
+        return True
+    return bool(str(os.environ.get("MGC_ASIA_LONDON_INSTRUMENTATION_DIR") or "").strip())
+
+
 def _append_jsonl_record(path: Path, row: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -529,6 +536,14 @@ def _append_csv_record(path: Path, *, fieldnames: list[str], row: dict[str, Any]
             writer.writeheader()
         writer.writerow({name: row.get(name) for name in fieldnames})
     return path
+
+
+def _write_observation_artifact_best_effort(writer: Any, *args: Any, **kwargs: Any) -> None:
+    try:
+        writer(*args, **kwargs)
+    except (OSError, TimeoutError):
+        # Instrumentation must never block or abort live paper runtime restore/startup.
+        return
 
 
 def _score_bucket_for_ratio(score_ratio: float, *, strict_gate_pass: bool) -> str:
@@ -684,12 +699,15 @@ def _build_asia_london_live_observation(
 
 
 def _record_asia_london_live_observation(row: dict[str, Any]) -> None:
+    if not _asia_london_instrumentation_enabled():
+        return
     root = _asia_london_instrumentation_root()
-    _append_jsonl_record(root / ASIA_LONDON_LIVE_PREDICATE_TRACE, row)
+    _write_observation_artifact_best_effort(_append_jsonl_record, root / ASIA_LONDON_LIVE_PREDICATE_TRACE, row)
     failed_predicates = [
         name for name, passed in dict(row.get("predicate_results") or {}).items() if not bool(passed)
     ]
-    _append_csv_record(
+    _write_observation_artifact_best_effort(
+        _append_csv_record,
         root / ASIA_LONDON_LIVE_NEAR_MISS_TRACE,
         fieldnames=[
             "timestamp",
@@ -726,7 +744,8 @@ def _record_asia_london_live_observation(row: dict[str, Any]) -> None:
             "failed_predicates": "|".join(failed_predicates),
         },
     )
-    _append_csv_record(
+    _write_observation_artifact_best_effort(
+        _append_csv_record,
         root / ASIA_LONDON_SCORE_BUCKET_TRACE,
         fieldnames=[
             "timestamp",

@@ -1,4 +1,4 @@
-"""Research-only session phase labels for replay diagnostics and exports."""
+"""Research-only session phase labels and session matching helpers."""
 
 from __future__ import annotations
 
@@ -7,6 +7,24 @@ from zoneinfo import ZoneInfo
 
 
 NEW_YORK = ZoneInfo("America/New_York")
+
+_SESSION_WINDOWS: dict[str, tuple[time, time]] = {
+    "SESSION_OPEN": (time(18, 0), time(19, 0)),
+    "ASIA_EARLY": (time(19, 0), time(20, 30)),
+    "ASIA_LATE": (time(20, 30), time(23, 0)),
+    "ASIA": (time(18, 0), time(23, 0)),
+    "LONDON_OPEN": (time(3, 0), time(5, 30)),
+    "LONDON_EARLY": (time(3, 0), time(5, 30)),
+    "LONDON_LATE": (time(5, 30), time(8, 20)),
+    "LONDON": (time(3, 0), time(8, 20)),
+    "US_EARLY": (time(8, 20), time(11, 0)),
+    "NY_EARLY": (time(8, 20), time(11, 0)),
+    "US_MIDDAY": (time(11, 0), time(13, 30)),
+    "NY_LATE": (time(11, 0), time(13, 30)),
+    "US_LATE": (time(13, 30), time(16, 0)),
+    "US": (time(8, 20), time(16, 0)),
+    "NY": (time(8, 20), time(16, 0)),
+}
 
 
 def label_session_phase(timestamp: datetime) -> str:
@@ -35,3 +53,52 @@ def label_session_phase(timestamp: datetime) -> str:
     if time(13, 30) <= local_time < time(16, 0):
         return "US_LATE"
     return "UNCLASSIFIED"
+
+
+def phase_coarse_session_group(phase: str) -> str:
+    """Collapse a fine-grained phase label into a broad session group."""
+    normalized = str(phase or "").upper()
+    if normalized in {"ASIA", "LONDON", "US", "NY"}:
+        return "US" if normalized == "NY" else normalized
+    if normalized.startswith("ASIA_") or normalized == "SESSION_OPEN":
+        return "ASIA"
+    if normalized.startswith("LONDON_"):
+        return "LONDON"
+    if normalized.startswith("US_"):
+        return "US"
+    return "UNKNOWN"
+
+
+def session_restriction_matches_phase(current_phase: str, restriction: str | None) -> bool:
+    """Return whether a restriction matches a fine-grained phase label."""
+    normalized = str(restriction or "").upper().strip()
+    if not normalized or normalized in {"ALL", "ANY"}:
+        return True
+    if "/" in normalized:
+        allowed = {part.strip() for part in normalized.split("/") if part.strip()}
+        coarse = phase_coarse_session_group(current_phase)
+        return coarse in allowed or str(current_phase or "").upper() in allowed
+    if normalized == "US_EARLY_OBSERVATION":
+        return str(current_phase or "").upper() in {"US_PREOPEN_OPENING", "US_CASH_OPEN_IMPULSE", "US_OPEN_LATE"}
+    if normalized in {"ASIA", "LONDON", "US", "NY"}:
+        return phase_coarse_session_group(current_phase) == ("US" if normalized == "NY" else normalized)
+    return str(current_phase or "").upper() == normalized
+
+
+def session_restriction_matches_timestamp(timestamp: datetime, restriction: str | None) -> bool:
+    """Return whether a restriction matches a timestamp in New York trading time."""
+    normalized = str(restriction or "").upper().strip()
+    if not normalized or normalized in {"ALL", "ANY"}:
+        return True
+    local_dt = timestamp.astimezone(NEW_YORK) if timestamp.tzinfo is not None else timestamp.replace(tzinfo=NEW_YORK)
+    local_time = local_dt.timetz().replace(tzinfo=None)
+    current_phase = label_session_phase(local_dt)
+    if "/" in normalized:
+        return any(session_restriction_matches_timestamp(local_dt, part.strip()) for part in normalized.split("/") if part.strip())
+    if normalized == "US_EARLY_OBSERVATION":
+        return current_phase in {"US_PREOPEN_OPENING", "US_CASH_OPEN_IMPULSE", "US_OPEN_LATE"}
+    window = _SESSION_WINDOWS.get(normalized)
+    if window is not None:
+        start, end = window
+        return start <= local_time < end
+    return session_restriction_matches_phase(current_phase, normalized)
