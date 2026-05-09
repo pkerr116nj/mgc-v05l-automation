@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-_SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ", "ES", "MES"}
+_SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ", "ES", "MES", "ZT", "ZF", "ZN", "ZB"}
 _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
     "GC": "GC",
     "MGC": "MGC",
@@ -13,8 +13,18 @@ _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
     "MNQ": "MNQ",
     "ES": "ES",
     "MES": "MES",
+    "ZT": "ZT",
+    "ZF": "ZF",
+    "ZN": "ZN",
+    "ZB": "ZB",
 }
 _FIXED_GOLD_CONTRACT_MONTH = "202606"
+_RATES_TARGETS = {
+    "ZT": {"multiplier": "2000", "friendly_name": "2-Year Treasury Note"},
+    "ZF": {"multiplier": "1000", "friendly_name": "5-Year Treasury Note"},
+    "ZN": {"multiplier": "1000", "friendly_name": "10-Year Treasury Note"},
+    "ZB": {"multiplier": "1000", "friendly_name": "30-Year Treasury Bond"},
+}
 
 
 def active_index_contract_month(now: date | datetime | None = None) -> str:
@@ -129,6 +139,23 @@ def phase1_execution_target_for_symbol(
             "multiplier": "5",
             "trading_class": "MES",
             "phase1_proxy_mode": "DIRECT",
+        }
+    if normalized in _RATES_TARGETS:
+        resolved_month = contract_month or active_index_contract_month(now=now)
+        metadata = _RATES_TARGETS[normalized]
+        return {
+            "symbol": normalized,
+            "contract_month": resolved_month,
+            "expiry": None,
+            "con_id": None,
+            "local_symbol": None,
+            "friendly_label": f"{normalized} {resolved_month}",
+            "exchange": "CBOT",
+            "currency": "USD",
+            "multiplier": metadata["multiplier"],
+            "trading_class": normalized,
+            "phase1_proxy_mode": "DIRECT",
+            "contract_family": str(metadata["friendly_name"]),
         }
     raise KeyError(f"Unsupported phase-1 execution symbol: {symbol}")
 

@@ -294,6 +294,58 @@ def test_missing_full_size_lane_adapter_fails_closed(tmp_path: Path) -> None:
     assert row["can_route_to_ibkr_now"] is False
 
 
+def test_rates_scope_does_not_imply_strategy_or_lane_approval(tmp_path: Path) -> None:
+    _write_monitor(tmp_path)
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    signal_path = tmp_path / "outputs" / "operator_dashboard" / "paper_signal_intent_fill_audit_snapshot.json"
+    signal_payload = json.loads(signal_path.read_text(encoding="utf-8"))
+    signal_payload["rows"].append(
+        {
+            "id": "rates_research_only__ZN",
+            "lane_id": "zn_1x_rates_research_only__us_midday_long",
+            "instrument": "ZN",
+            "family": "rates_research_only",
+            "current_strategy_status": "READY",
+            "entries_enabled": True,
+            "eligible_now": True,
+            "audit_verdict": "READY",
+            "last_actionable_signal_family": "ratesResearchOnly",
+            "last_actionable_signal_timestamp": "2026-04-28T13:00:00-04:00",
+            "last_recent_long_setup": True,
+            "last_recent_short_setup": False,
+            "last_intent_type": None,
+            "last_fill_timestamp": None,
+        }
+    )
+    signal_path.write_text(json.dumps(signal_payload), encoding="utf-8")
+    performance_path = tmp_path / "outputs" / "operator_dashboard" / "paper_strategy_performance_snapshot.json"
+    performance_payload = json.loads(performance_path.read_text(encoding="utf-8"))
+    performance_payload["rows"].append(
+        {
+            "lane_id": "zn_1x_rates_research_only__us_midday_long",
+            "instrument": "ZN",
+            "strategy_family": "rates_research_only",
+            "standalone_strategy_id": "rates_research_only__ZN",
+            "position_side": "FLAT",
+            "status": "READY",
+        }
+    )
+    performance_path.write_text(json.dumps(performance_payload), encoding="utf-8")
+
+    artifacts = run_ibkr_paper_strategy_porting(config=_config(tmp_path))
+
+    row = next(row for row in artifacts.intent_rows if row["strategy_id"] == "zn_1x_rates_research_only__us_midday_long")
+    assert row["bridge_submit_capable"] is False
+    assert row["bridge_execution_target"] == {}
+    assert "lane_not_yet_submit_ported" in row["route_blockers"]
+    assert "strategy_lane_not_yet_submit_ported" in row["route_blockers"]
+    assert row["can_route_to_ibkr_now"] is False
+
+
 def test_write_porting_artifacts(tmp_path: Path) -> None:
     _write_monitor(tmp_path)
     _write_ledger(tmp_path)

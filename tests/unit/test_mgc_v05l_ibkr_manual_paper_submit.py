@@ -132,7 +132,16 @@ def test_unapproved_contract_fails_closed() -> None:
 
 
 def test_approved_phase1_contracts_pass_input_guardrail() -> None:
-    for symbol, limit_price in (("GC", 4639.7), ("NQ", 29307.75), ("ES", 5240.25), ("MNQ", 29307.75)):
+    for symbol, limit_price in (
+        ("GC", 4639.7),
+        ("NQ", 29307.75),
+        ("ES", 5240.25),
+        ("MNQ", 29307.75),
+        ("ZT", 102.5),
+        ("ZF", 109.25),
+        ("ZN", 111.5),
+        ("ZB", 124.75),
+    ):
         guardrails = _submit_input_guardrails(
             {
                 "symbol": symbol,
@@ -150,8 +159,8 @@ def test_approved_phase1_contracts_pass_input_guardrail() -> None:
         assert guardrails["whitelisted_contract"]["passed"] is True
 
 
-def test_rates_and_equities_fail_input_guardrail() -> None:
-    for symbol in ("ZN", "ZB", "AAPL"):
+def test_unsupported_rates_and_equities_fail_input_guardrail() -> None:
+    for symbol in ("UB", "ZQ", "AAPL"):
         guardrails = _submit_input_guardrails(
             {
                 "symbol": symbol,
