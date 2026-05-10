@@ -77,12 +77,13 @@ def _write_runtime_artifacts(
     symbol: str,
     historical_seed_ready: bool = False,
     realtime_feed_confirmed: bool = True,
+    include_features: bool = True,
 ) -> None:
     for timeframe in ("1m", "3m", "5m"):
-        for base, filename, row_key in (
-            ("phase1_runtime_market_data", "latest_runtime_candles.json", "bars"),
-            ("phase1_runtime_features", "latest_runtime_features.json", "features"),
-        ):
+        artifact_specs = [("phase1_runtime_market_data", "latest_runtime_candles.json", "bars")]
+        if include_features:
+            artifact_specs.append(("phase1_runtime_features", "latest_runtime_features.json", "features"))
+        for base, filename, row_key in artifact_specs:
             path = root / "outputs" / "track_b_execution_core" / base / symbol / timeframe / filename
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
@@ -267,6 +268,28 @@ def test_gc_candidate_can_become_paper_watch_ready_only_after_mocked_live_route_
     assert rows["GC"]["paper_watch_ready"] is True
     assert rows["GC"]["can_submit"] is True
     assert rows["GC"]["block_reason"] == "READY"
+    assert rows["GC"]["live_money_eligible"] is False
+    assert all(rows[symbol]["paper_candidate_visible"] is False for symbol in PHASE1_TICKER_ORDER if symbol != "GC")
+    assert all(rows[symbol]["can_submit"] is False for symbol in PHASE1_TICKER_ORDER if symbol != "GC")
+
+
+def test_gc_candidate_uses_in_engine_feature_contract_when_generic_features_missing(tmp_path: Path) -> None:
+    _write_market_data_config(tmp_path)
+    _write_governance(tmp_path, approve_gc=True)
+    _write_runtime_artifacts(tmp_path, symbol="GC", include_features=False)
+
+    artifacts = build_phase1_ticker_readiness_matrix(config=_repo_config_with_tmp_artifacts(tmp_path))
+    rows = {row["approved_phase1_symbol"]: row for row in artifacts.rows}
+
+    assert rows["GC"]["runtime_candles_ready"] is True
+    assert rows["GC"]["derived_features_ready"] is False
+    assert rows["GC"]["external_feature_artifacts_required"] is False
+    assert rows["GC"]["external_feature_artifacts_ready"] is True
+    assert rows["GC"]["runtime_data_ready_for_candidate"] is True
+    assert rows["GC"]["paper_candidate_feature_contract_status"] == "IN_ENGINE_BAR_DERIVED_CONTEXT"
+    assert rows["GC"]["paper_candidate_required_runtime_feature_artifacts"] == []
+    assert rows["GC"]["paper_watch_ready"] is True
+    assert rows["GC"]["can_submit"] is True
     assert rows["GC"]["live_money_eligible"] is False
     assert all(rows[symbol]["paper_candidate_visible"] is False for symbol in PHASE1_TICKER_ORDER if symbol != "GC")
     assert all(rows[symbol]["can_submit"] is False for symbol in PHASE1_TICKER_ORDER if symbol != "GC")

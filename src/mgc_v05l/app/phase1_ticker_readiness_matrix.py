@@ -202,12 +202,16 @@ def _ticker_row(
     candidate_visible = bool(gc_candidate_surface) and symbol == "GC"
     paper_candidate_approved = bool(gc_candidate_surface.get("paper_candidate_approved")) if candidate_visible else False
     candidate_eval_ready = bool(gc_candidate_surface.get("candidate_evaluation_ready")) if candidate_visible else False
+    external_feature_artifacts_required = (
+        bool(gc_candidate_surface.get("external_feature_artifacts_required", True)) if candidate_visible else True
+    )
+    external_feature_artifacts_ready = bool(derived_features_ready or not external_feature_artifacts_required)
+    runtime_data_ready_for_candidate = bool(runtime_candles_ready and external_feature_artifacts_ready)
     paper_watch_ready = bool(
         candidate_visible
         and paper_candidate_approved
         and candidate_eval_ready
-        and runtime_candles_ready
-        and derived_features_ready
+        and runtime_data_ready_for_candidate
         and realtime_feed_confirmed
         and guarded_route_authorized
     )
@@ -215,7 +219,7 @@ def _ticker_row(
         contract_metadata_present=metadata_present,
         lane_adapter_present=lane_adapter_present,
         strategy_approved=strategy_approved,
-        runtime_data_ready=runtime_candles_ready and derived_features_ready,
+        runtime_data_ready=runtime_data_ready_for_candidate if candidate_visible else runtime_candles_ready and derived_features_ready,
         guarded_route_authorized=guarded_route_authorized,
     )
     return {
@@ -230,6 +234,9 @@ def _ticker_row(
         "realtime_feed_confirmed": realtime_feed_confirmed,
         "runtime_candles_ready": runtime_candles_ready,
         "derived_features_ready": derived_features_ready,
+        "external_feature_artifacts_required": external_feature_artifacts_required,
+        "external_feature_artifacts_ready": external_feature_artifacts_ready,
+        "runtime_data_ready_for_candidate": runtime_data_ready_for_candidate,
         "runtime_data_block_reason": runtime_data_block_reason,
         "governance_visible": governance_visible,
         "lane_adapter_present": lane_adapter_present,
@@ -240,6 +247,10 @@ def _ticker_row(
         "paper_candidate_approved": paper_candidate_approved,
         "paper_candidate_evaluation_ready": candidate_eval_ready,
         "paper_candidate_block_reason": gc_candidate_surface.get("block_reason") if candidate_visible else None,
+        "paper_candidate_feature_contract_status": gc_candidate_surface.get("feature_contract_status") if candidate_visible else None,
+        "paper_candidate_required_runtime_feature_artifacts": (
+            gc_candidate_surface.get("required_runtime_feature_artifacts") if candidate_visible else []
+        ),
         "paper_watch_ready": paper_watch_ready,
         "paper_watch_block_reason": "READY" if paper_watch_ready else _paper_watch_block_reason(
             symbol=symbol,
@@ -248,6 +259,7 @@ def _ticker_row(
             candidate_eval_ready=candidate_eval_ready,
             runtime_candles_ready=runtime_candles_ready,
             derived_features_ready=derived_features_ready,
+            external_feature_artifacts_required=external_feature_artifacts_required,
             realtime_feed_confirmed=realtime_feed_confirmed,
             guarded_route_authorized=guarded_route_authorized,
         ),
@@ -295,6 +307,7 @@ def _paper_watch_block_reason(
     candidate_eval_ready: bool,
     runtime_candles_ready: bool,
     derived_features_ready: bool,
+    external_feature_artifacts_required: bool,
     realtime_feed_confirmed: bool,
     guarded_route_authorized: bool,
 ) -> str:
@@ -310,7 +323,7 @@ def _paper_watch_block_reason(
         return "REALTIME_FEED_NOT_CONFIRMED"
     if not runtime_candles_ready:
         return "RUNTIME_CANDLES_NOT_READY"
-    if not derived_features_ready:
+    if external_feature_artifacts_required and not derived_features_ready:
         return "DERIVED_FEATURES_NOT_READY"
     if not guarded_route_authorized:
         return "GUARDED_ROUTE_NOT_AUTHORIZED"
@@ -358,6 +371,10 @@ def _gc_candidate_surface(
         "block_reason": evaluation.get("block_reason") or evaluation.get("paper_watch_block_reason"),
         "paper_candidate_approved": bool(artifacts.report.get("paper_candidate_approved")),
         "paper_watch_ready": bool(evaluation.get("paper_watch_ready")),
+        "external_feature_artifacts_required": bool(evaluation.get("external_feature_artifacts_required", True)),
+        "external_feature_artifacts_ready": bool(evaluation.get("external_feature_artifacts_ready")),
+        "required_runtime_feature_artifacts": list(evaluation.get("required_runtime_feature_artifacts") or []),
+        "feature_contract_status": evaluation.get("feature_contract_status"),
     }
 
 

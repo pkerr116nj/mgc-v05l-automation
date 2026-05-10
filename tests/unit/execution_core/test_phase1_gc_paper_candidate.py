@@ -150,6 +150,10 @@ def test_inventory_recommends_one_gc_asia_london_candidate() -> None:
     assert selected.family == "asia_london_participation_core_v1"
     assert selected.structural_timeframe == "3m"
     assert selected.execution_timeframe == "1m"
+    assert selected.required_features == ("completed_ohlcv_1m", "in_engine_asia_london_segment_context")
+    assert selected.external_feature_artifacts_required is False
+    assert selected.required_runtime_feature_artifacts == ()
+    assert selected.feature_contract_status == "IN_ENGINE_BAR_DERIVED_CONTEXT"
 
 
 def test_gc_candidate_evaluates_historical_seed_without_paper_watch_readiness(tmp_path: Path) -> None:
@@ -212,6 +216,51 @@ def test_mocked_live_gates_can_make_gc_candidate_paper_watch_ready_without_submi
     assert artifacts.evaluation["can_submit"] is False
     assert artifacts.evaluation["submit_attempted"] is False
     assert artifacts.evaluation["live_money_eligible"] is False
+
+
+def test_gc_candidate_does_not_require_generic_external_feature_artifacts(tmp_path: Path) -> None:
+    for timeframe in ("1m", "3m", "5m"):
+        _write_seed_artifact(
+            tmp_path,
+            timeframe=timeframe,
+            bars=_bars(timeframe=timeframe),
+            realtime_feed_confirmed=True,
+            source_id="databento_live:test",
+        )
+
+    artifacts = build_phase1_gc_paper_candidate(
+        config=_config(tmp_path, guarded_route_authorized=True)
+    )
+
+    assert artifacts.evaluation["candidate_evaluation_ready"] is True
+    assert artifacts.evaluation["runtime_candles_ready"] is True
+    assert artifacts.evaluation["derived_features_ready"] is False
+    assert artifacts.evaluation["external_feature_artifacts_required"] is False
+    assert artifacts.evaluation["external_feature_artifacts_ready"] is True
+    assert artifacts.evaluation["feature_contract_status"] == "IN_ENGINE_BAR_DERIVED_CONTEXT"
+    assert artifacts.evaluation["paper_watch_ready"] is True
+    assert artifacts.evaluation["can_submit"] is False
+    assert artifacts.evaluation["submit_attempted"] is False
+    assert artifacts.evaluation["live_money_eligible"] is False
+
+
+def test_genuinely_required_external_features_still_fail_closed() -> None:
+    readiness = {
+        "realtime_feed_confirmed": True,
+        "runtime_candles_ready": True,
+        "derived_features_ready": False,
+        "derived_features_block_reason": "FEATURES_NOT_IMPLEMENTED",
+    }
+
+    assert gc_candidate._external_feature_artifacts_ready(  # noqa: SLF001
+        gc_readiness=readiness,
+        external_feature_artifacts_required=True,
+    ) is False
+    assert gc_candidate._paper_watch_block_reason(  # noqa: SLF001
+        gc_readiness=readiness,
+        guarded_route_authorized=True,
+        external_feature_artifacts_required=True,
+    ) == "FEATURES_NOT_IMPLEMENTED"
 
 
 def test_non_gc_tickers_are_not_strategy_promoted(tmp_path: Path) -> None:

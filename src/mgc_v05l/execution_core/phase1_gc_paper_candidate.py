@@ -66,6 +66,9 @@ class GcCandidateLane:
     execution_timeframe: str
     required_features: tuple[str, ...]
     input_artifacts: tuple[str, ...]
+    external_feature_artifacts_required: bool
+    required_runtime_feature_artifacts: tuple[str, ...]
+    feature_contract_status: str
 
 
 @dataclass(frozen=True)
@@ -160,8 +163,11 @@ def inventory_gc_paper_candidate_lanes() -> list[GcCandidateLane]:
             side="LONG",
             structural_timeframe="3m",
             execution_timeframe="1m",
-            required_features=("ohlcv_1m", "derived_3m_context"),
+            required_features=("completed_ohlcv_1m", "in_engine_asia_london_segment_context"),
             input_artifacts=("phase1_runtime_market_data/GC/1m/latest_runtime_candles.json",),
+            external_feature_artifacts_required=False,
+            required_runtime_feature_artifacts=(),
+            feature_contract_status="IN_ENGINE_BAR_DERIVED_CONTEXT",
         ),
         GcCandidateLane(
             strategy_id="gc_1x_asia_london_participation__asia_london_short_v2",
@@ -173,8 +179,11 @@ def inventory_gc_paper_candidate_lanes() -> list[GcCandidateLane]:
             side="SHORT",
             structural_timeframe="3m",
             execution_timeframe="1m",
-            required_features=("ohlcv_1m", "derived_3m_context"),
+            required_features=("completed_ohlcv_1m", "in_engine_asia_london_segment_context"),
             input_artifacts=("phase1_runtime_market_data/GC/1m/latest_runtime_candles.json",),
+            external_feature_artifacts_required=False,
+            required_runtime_feature_artifacts=(),
+            feature_contract_status="IN_ENGINE_BAR_DERIVED_CONTEXT",
         ),
         *[
             GcCandidateLane(
@@ -187,8 +196,11 @@ def inventory_gc_paper_candidate_lanes() -> list[GcCandidateLane]:
                 side=side,
                 structural_timeframe="3m",
                 execution_timeframe="1m",
-                required_features=("ohlcv_1m", "derived_3m_context"),
+                required_features=("completed_ohlcv_1m", "in_engine_forced_session_context"),
                 input_artifacts=("phase1_runtime_market_data/GC/1m/latest_runtime_candles.json",),
+                external_feature_artifacts_required=False,
+                required_runtime_feature_artifacts=(),
+                feature_contract_status="IN_ENGINE_BAR_DERIVED_CONTEXT",
             )
             for suffix, source, side in (
                 ("asia_early_long", ASIA_EARLY_LONG_SOURCE, "LONG"),
@@ -227,9 +239,13 @@ def _evaluate_selected_candidate(
             if isinstance(event, OrderIntentCreatedEvent):
                 order_intents += 1
         signal_events += 1 if getattr(engine, "_last_signal_packet", None) is not None else 0  # noqa: SLF001
+    external_features_ready = _external_feature_artifacts_ready(
+        gc_readiness=gc_readiness,
+        external_feature_artifacts_required=selected.external_feature_artifacts_required,
+    )
     paper_watch_ready = bool(
         gc_readiness.get("runtime_candles_ready")
-        and gc_readiness.get("derived_features_ready")
+        and external_features_ready
         and gc_readiness.get("realtime_feed_confirmed")
         and config.guarded_route_authorized
     )
@@ -250,6 +266,10 @@ def _evaluate_selected_candidate(
         "realtime_feed_confirmed": bool(gc_readiness.get("realtime_feed_confirmed")),
         "runtime_candles_ready": bool(gc_readiness.get("runtime_candles_ready")),
         "derived_features_ready": bool(gc_readiness.get("derived_features_ready")),
+        "external_feature_artifacts_required": bool(selected.external_feature_artifacts_required),
+        "external_feature_artifacts_ready": external_features_ready,
+        "required_runtime_feature_artifacts": list(selected.required_runtime_feature_artifacts),
+        "feature_contract_status": selected.feature_contract_status,
         "paper_candidate_approved": is_phase1_gc_guarded_paper_eligible_strategy(
             strategy_id=selected.strategy_id,
             instrument="GC",
@@ -259,6 +279,7 @@ def _evaluate_selected_candidate(
         "paper_watch_block_reason": "READY" if paper_watch_ready else _paper_watch_block_reason(
             gc_readiness=gc_readiness,
             guarded_route_authorized=config.guarded_route_authorized,
+            external_feature_artifacts_required=selected.external_feature_artifacts_required,
         ),
         "can_submit": False,
         "submit_attempted": False,
@@ -384,6 +405,9 @@ def _inventory_row(lane: GcCandidateLane) -> dict[str, Any]:
         "required_input_timeframe": lane.execution_timeframe,
         "required_context_timeframe": lane.structural_timeframe,
         "required_features": list(lane.required_features),
+        "external_feature_artifacts_required": bool(lane.external_feature_artifacts_required),
+        "required_runtime_feature_artifacts": list(lane.required_runtime_feature_artifacts),
+        "feature_contract_status": lane.feature_contract_status,
         "rule_runner_status": "EXISTING_RUNTIME_ENGINE",
         "bridge_adapter_present": adapter is not None,
         "can_consume_runtime_seed": True,
@@ -409,12 +433,27 @@ def _blocked_evaluation(reason: str, **extra: Any) -> dict[str, Any]:
     }
 
 
-def _paper_watch_block_reason(*, gc_readiness: dict[str, Any], guarded_route_authorized: bool) -> str:
+def _external_feature_artifacts_ready(
+    *,
+    gc_readiness: dict[str, Any],
+    external_feature_artifacts_required: bool,
+) -> bool:
+    if not external_feature_artifacts_required:
+        return True
+    return bool(gc_readiness.get("derived_features_ready"))
+
+
+def _paper_watch_block_reason(
+    *,
+    gc_readiness: dict[str, Any],
+    guarded_route_authorized: bool,
+    external_feature_artifacts_required: bool,
+) -> str:
     if not bool(gc_readiness.get("realtime_feed_confirmed")):
         return "REALTIME_FEED_NOT_CONFIRMED"
     if not bool(gc_readiness.get("runtime_candles_ready")):
         return str(gc_readiness.get("runtime_candles_block_reason") or "RUNTIME_CANDLES_NOT_READY")
-    if not bool(gc_readiness.get("derived_features_ready")):
+    if external_feature_artifacts_required and not bool(gc_readiness.get("derived_features_ready")):
         return str(gc_readiness.get("derived_features_block_reason") or "FEATURES_NOT_READY")
     if not guarded_route_authorized:
         return "GUARDED_ROUTE_NOT_AUTHORIZED"
