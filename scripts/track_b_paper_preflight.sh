@@ -595,6 +595,9 @@ monitor_path = REPO_ROOT / "outputs/reports/paper_strategy_monitor/paper_strateg
 monitor, monitor_err = read_json(monitor_path)
 monitor_required = MODE == "monday-live"
 if MODE == "monday-live" and isinstance(monitor, dict):
+    bridge_allowed_value = monitor.get("bridge_allowed")
+    if bridge_allowed_value is None:
+        bridge_allowed_value = monitor.get("submit_allowed")
     add(
         "monitor_healthy",
         monitor.get("health_classification") == "HEALTHY",
@@ -615,9 +618,9 @@ if MODE == "monday-live" and isinstance(monitor, dict):
     )
     add(
         "bridge_allowed",
-        monitor.get("bridge_allowed") is True,
+        bridge_allowed_value is True,
         monitor_required,
-        f"bridge_allowed={monitor.get('bridge_allowed')}",
+        f"bridge_allowed={bridge_allowed_value}",
     )
 elif MODE == "monday-live":
     add("monitor_status_available", False, monitor_required, monitor_err or "monitor missing")

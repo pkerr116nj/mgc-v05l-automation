@@ -20,6 +20,7 @@ from mgc_v05l.execution.ibkr_paper_strategy_monitor import (
     write_ibkr_paper_strategy_monitor_daemon_artifacts,
     write_ibkr_paper_strategy_monitor_artifacts,
 )
+import mgc_v05l.execution.ibkr_paper_strategy_monitor as monitor_module
 
 
 def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyMonitorConfig:
@@ -328,6 +329,51 @@ def test_restores_lost_strategy_attribution_from_prior_adopted_evidence(tmp_path
     assert artifacts.ledger["positions"][0]["average_entry_price"] == 4586.7
     assert artifacts.ledger["positions"][0]["previously_adopted"] is True
     assert any(event["event_type"] == "paper_orphan_reconciliation_adoption" for event in artifacts.audit_events)
+
+
+def test_prior_adopted_position_evidence_uses_bounded_audit_tail(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(monitor_module, "_PRIOR_ADOPTED_EVIDENCE_TAIL_BYTES", 8192)
+    _write_ownership_evidence(tmp_path)
+    output_dir = tmp_path / "outputs" / "reports" / "paper_strategy_monitor"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prior_row = {
+        "event_type": "strategy_ownership_resolved",
+        "ownership": {
+            "classification": "adopted",
+            "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+            "perm_id": 490708968,
+            "execution_id": "0000e1a7.69f1fa35.01.01",
+            "client_id": 10221,
+            "source_intent_id": "intent-1",
+            "quantity": 1.0,
+            "side": "LONG",
+            "average_entry_price": 4586.7,
+            "sources": [],
+        },
+    }
+    audit_path = output_dir / "paper_strategy_monitor_audit.jsonl"
+    audit_path.write_text(
+        json.dumps({"event_type": "old_noise"}) + "\n"
+        + ("x" * 16_384)
+        + "\n"
+        + json.dumps(prior_row)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = _reconciliation_report(perm_id=None)
+    report["diagnosis"]["latest_matching_perm_id"] = None
+    report["execution_truth"] = {"recent_matching_execution_rows": [], "matching_execution_rows": []}
+
+    artifacts = run_ibkr_paper_strategy_monitor(
+        config=_config(tmp_path),
+        reconciliation_runner=lambda **_: _Artifacts(report),
+        dashboard_fetcher=lambda _: _dashboard_payload(stale=False),
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_POSITION_ADOPTED"
+    assert artifacts.ledger["positions"][0]["perm_id"] == 490708968
+    assert artifacts.ledger["positions"][0]["previously_adopted"] is True
 
 
 def test_ledger_broker_mismatch_is_classified(tmp_path: Path) -> None:

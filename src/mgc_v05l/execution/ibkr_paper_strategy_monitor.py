@@ -63,6 +63,8 @@ _SERVICE_RELIABILITY_REPORT_FILENAME = "paper_monitor_service_reliability_report
 _SERVICE_AUDIT_FILENAME = "paper_monitor_service_audit.jsonl"
 DEFAULT_PAPER_STRATEGY_MONITOR_STARTUP_GRACE_SECONDS = 30.0
 _LOCAL_BACKEND_GATE_FRESHNESS_WINDOW_SECONDS = 120.0
+_PRIOR_ADOPTED_EVIDENCE_TAIL_BYTES = 10 * 1024 * 1024
+_PRIOR_ADOPTED_EVIDENCE_TAIL_LINES = 5_000
 
 
 class IbkrPaperStrategyMonitorError(RuntimeError):
@@ -1465,7 +1467,11 @@ def _load_prior_adopted_position_evidence(config: IbkrPaperStrategyMonitorConfig
     audit_path = config.repo_root / config.output_dir / "paper_strategy_monitor_audit.jsonl"
     if audit_path.exists():
         try:
-            for line in audit_path.read_text(encoding="utf-8").splitlines():
+            for line in _iter_recent_jsonl_lines(
+                audit_path,
+                max_bytes=_PRIOR_ADOPTED_EVIDENCE_TAIL_BYTES,
+                max_lines=_PRIOR_ADOPTED_EVIDENCE_TAIL_LINES,
+            ):
                 if not line.strip():
                     continue
                 row = json.loads(line)
@@ -1484,6 +1490,13 @@ def _load_prior_adopted_position_evidence(config: IbkrPaperStrategyMonitorConfig
                             "perm_id": ownership.get("perm_id"),
                             "execution_id": ownership.get("execution_id"),
                             "client_id": ownership.get("client_id"),
+                            "con_id": ownership.get("con_id"),
+                            "local_symbol": ownership.get("local_symbol"),
+                            "quantity": ownership.get("quantity"),
+                            "side": ownership.get("side"),
+                            "average_entry_price": ownership.get("average_entry_price"),
+                            "order_id": ownership.get("order_id"),
+                            "entry_timestamp": ownership.get("entry_timestamp"),
                             "source_intent_id": ownership.get("source_intent_id"),
                             "ownership_detail": ownership.get("detail"),
                             "sources": [str(audit_path.resolve()), *list(ownership.get("sources") or [])],
@@ -1522,6 +1535,18 @@ def _load_prior_adopted_position_evidence(config: IbkrPaperStrategyMonitorConfig
             )
             break
     return evidence
+
+
+def _iter_recent_jsonl_lines(path: Path, *, max_bytes: int, max_lines: int) -> list[str]:
+    if max_bytes <= 0 or max_lines <= 0:
+        return []
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > max_bytes:
+            handle.seek(max(0, size - max_bytes))
+            handle.readline()
+        data = handle.read(max_bytes)
+    return data.decode("utf-8", errors="replace").splitlines()[-max_lines:]
 
 
 def _build_runtime_status(
@@ -1592,6 +1617,12 @@ def _build_runtime_status(
         if "paper_strategy_monitor_not_running" not in block_reasons:
             block_reasons.append("paper_strategy_monitor_not_running")
 
+    submit_allowed = (
+        bool(monitor_running)
+        and not stale
+        and classification == "PAPER_STRATEGY_MONITOR_ACTIVE"
+        and health_classification == "HEALTHY"
+    )
     return {
         "classification": classification,
         "generated_at": generated_at,
@@ -1619,7 +1650,9 @@ def _build_runtime_status(
         "stale": stale,
         "age_seconds": age_seconds,
         "pnl_source": latest_cycle_pnl.get("pnl_source"),
-        "submit_allowed": bool(monitor_running) and not stale and classification == "PAPER_STRATEGY_MONITOR_ACTIVE" and health_classification == "HEALTHY",
+        "submit_allowed": submit_allowed,
+        "bridge_allowed": submit_allowed,
+        "bridge_blocked": not submit_allowed,
         "block_reasons": block_reasons,
         "continuous_monitor_active": bool(monitor_running),
         "continuous_unrealized_pnl_tracking_active": bool(monitor_running),
