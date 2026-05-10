@@ -12,9 +12,10 @@ import os
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
+from zoneinfo import ZoneInfo
 
 from mgc_v05l.app.databento_research_minute_backfill import DEFAULT_OUTPUT_ROOT, REPO_ROOT, SOURCE
 from mgc_v05l.research.trend_participation.storage import build_layout, write_storage_manifest
@@ -22,6 +23,16 @@ from mgc_v05l.research.trend_participation.storage import build_layout, write_st
 AUDIT_SOURCE = "DATABENTO_HISTORICAL_RESEARCH_BACKFILL_QUALITY_AUDIT"
 TIMEFRAME = "1m"
 DEFAULT_SYMBOL = "MGC"
+SESSION_TIMEZONE = ZoneInfo("America/New_York")
+SESSION_REPLAY_MIN_ACTIVE_RATIO = 0.75
+SESSION_REPLAY_MAX_GAP_MINUTES = 15
+SESSION_REPLAY_MAX_SUSPICIOUS_GAPS = 5
+SESSION_EXPECTED_MINUTES = {
+    "ASIA": 540,
+    "LONDON": 320,
+    "US": 460,
+    "OFF_SESSION": 120,
+}
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,7 @@ def audit_research_minute_backfill(*, config: ResearchBackfillAuditConfig) -> Re
     yearly: dict[str, dict[str, Any]] = {}
     gap_counts: dict[str, int] = defaultdict(int)
     gap_samples: list[dict[str, Any]] = []
+    session_bucket_map: dict[tuple[str, str, str], dict[str, Any]] = {}
     total_rows = 0
     earliest_actual: str | None = None
     latest_actual: str | None = None
@@ -118,6 +130,7 @@ def audit_research_minute_backfill(*, config: ResearchBackfillAuditConfig) -> Re
                 suspicious_gap_count += partition_suspicious
                 for key, value in partition_gap_counts.items():
                     gap_counts[key] += int(value)
+                _merge_session_buckets(session_bucket_map, parquet_summary["session_buckets"])
                 earliest_actual = _min_iso(earliest_actual, first_bar)
                 latest_actual = _max_iso(latest_actual, last_bar)
         elif status == "FAILED":
@@ -162,6 +175,7 @@ def audit_research_minute_backfill(*, config: ResearchBackfillAuditConfig) -> Re
         )
 
     no_2020_partitions = not any("/year=2020/" in f"/{path.as_posix()}/" for path in metadata_paths + parquet_paths)
+    session_coverage = _build_session_coverage(session_bucket_map)
     schema_consistent = len(schema_fingerprints) <= 1 and bool(schema_fingerprints)
     artifact_flags_ok = not artifact_flag_failures
     metadata_consistent = not metadata_mismatches
@@ -210,6 +224,8 @@ def audit_research_minute_backfill(*, config: ResearchBackfillAuditConfig) -> Re
         "gap_classification_counts": dict(sorted(gap_counts.items())),
         "suspicious_gap_count": suspicious_gap_count,
         "gap_samples": gap_samples[: config.max_gap_samples],
+        "session_coverage": session_coverage,
+        "session_coverage_summary": _session_coverage_summary(session_coverage),
         "yearly_coverage": [yearly[key] for key in sorted(yearly)],
         "monthly_coverage": month_rows,
         "failed_partitions": failed_partitions,
@@ -250,14 +266,24 @@ def _audit_parquet_partition(*, parquet_path: Path, symbol: str, max_gap_samples
             flag_failures.append(f"row {idx}: runtime_artifact={row.get('runtime_artifact')}")
     gap_counts: dict[str, int] = defaultdict(int)
     gap_samples: list[dict[str, Any]] = []
+    session_buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
     suspicious_count = 0
     previous: datetime | None = None
     for current in bar_ends:
+        _add_session_bar(session_buckets, symbol=symbol, bar_end=current)
         if previous is not None:
             delta_minutes = int((current - previous).total_seconds() // 60)
             if delta_minutes > 1:
                 classification = _classify_gap(previous, current)
                 gap_counts[classification] += 1
+                _add_session_gap(
+                    session_buckets,
+                    symbol=symbol,
+                    previous=previous,
+                    current=current,
+                    classification=classification,
+                    delta_minutes=delta_minutes,
+                )
                 if classification in {"SUSPICIOUS_INTRA_SESSION_GAP", "PROVIDER_OR_DATA_HOLE"}:
                     suspicious_count += 1
                 if len(gap_samples) < max_gap_samples:
@@ -279,6 +305,7 @@ def _audit_parquet_partition(*, parquet_path: Path, symbol: str, max_gap_samples
         "gap_classification_counts": dict(sorted(gap_counts.items())),
         "suspicious_gap_count": suspicious_count,
         "gap_samples": gap_samples,
+        "session_buckets": session_buckets,
         "artifact_flag_failures": flag_failures,
     }
 
@@ -294,6 +321,179 @@ def _classify_gap(previous: datetime, current: datetime) -> str:
     if delta_minutes <= 8 * 60 and _same_trading_date(previous, current):
         return "PROVIDER_OR_DATA_HOLE"
     return "CONTRACT_OR_SESSION_BOUNDARY_GAP"
+
+
+def _add_session_bar(bucket_map: dict[tuple[str, str, str], dict[str, Any]], *, symbol: str, bar_end: datetime) -> None:
+    key = _session_key(symbol=symbol, bar_end=bar_end)
+    bucket = bucket_map.setdefault(
+        key,
+        {
+            "symbol": key[0],
+            "date": key[1],
+            "session": key[2],
+            "bar_minutes": set(),
+            "first_bar": None,
+            "last_bar": None,
+            "largest_intra_session_gap_minutes": 0,
+            "suspicious_gap_count": 0,
+        },
+    )
+    bucket["bar_minutes"].add(bar_end.isoformat())
+    bucket["first_bar"] = _min_iso(bucket["first_bar"], bar_end.isoformat())
+    bucket["last_bar"] = _max_iso(bucket["last_bar"], bar_end.isoformat())
+
+
+def _add_session_gap(
+    bucket_map: dict[tuple[str, str, str], dict[str, Any]],
+    *,
+    symbol: str,
+    previous: datetime,
+    current: datetime,
+    classification: str,
+    delta_minutes: int,
+) -> None:
+    previous_key = _session_key(symbol=symbol, bar_end=previous)
+    current_key = _session_key(symbol=symbol, bar_end=current)
+    if previous_key != current_key:
+        return
+    bucket = bucket_map.setdefault(
+        previous_key,
+        {
+            "symbol": previous_key[0],
+            "date": previous_key[1],
+            "session": previous_key[2],
+            "bar_minutes": set(),
+            "first_bar": None,
+            "last_bar": None,
+            "largest_intra_session_gap_minutes": 0,
+            "suspicious_gap_count": 0,
+        },
+    )
+    bucket["largest_intra_session_gap_minutes"] = max(int(bucket["largest_intra_session_gap_minutes"]), delta_minutes)
+    if classification in {"SUSPICIOUS_INTRA_SESSION_GAP", "PROVIDER_OR_DATA_HOLE"}:
+        bucket["suspicious_gap_count"] += 1
+
+
+def _merge_session_buckets(target: dict[tuple[str, str, str], dict[str, Any]], source: dict[tuple[str, str, str], dict[str, Any]]) -> None:
+    for key, source_bucket in source.items():
+        bucket = target.setdefault(
+            key,
+            {
+                "symbol": source_bucket["symbol"],
+                "date": source_bucket["date"],
+                "session": source_bucket["session"],
+                "bar_minutes": set(),
+                "first_bar": None,
+                "last_bar": None,
+                "largest_intra_session_gap_minutes": 0,
+                "suspicious_gap_count": 0,
+            },
+        )
+        bucket["bar_minutes"].update(source_bucket["bar_minutes"])
+        bucket["first_bar"] = _min_iso(bucket["first_bar"], source_bucket["first_bar"])
+        bucket["last_bar"] = _max_iso(bucket["last_bar"], source_bucket["last_bar"])
+        bucket["largest_intra_session_gap_minutes"] = max(
+            int(bucket["largest_intra_session_gap_minutes"]),
+            int(source_bucket["largest_intra_session_gap_minutes"]),
+        )
+        bucket["suspicious_gap_count"] += int(source_bucket["suspicious_gap_count"])
+
+
+def _build_session_coverage(bucket_map: dict[tuple[str, str, str], dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key in sorted(bucket_map):
+        bucket = bucket_map[key]
+        total_bars = len(bucket["bar_minutes"])
+        session = str(bucket["session"])
+        expected_minutes = SESSION_EXPECTED_MINUTES.get(session, 0)
+        active_minutes = total_bars
+        active_ratio = None if not expected_minutes else round(active_minutes / expected_minutes, 4)
+        largest_gap = int(bucket["largest_intra_session_gap_minutes"])
+        suspicious = int(bucket["suspicious_gap_count"])
+        eligible, reason = _session_replay_eligibility(
+            session=session,
+            active_minutes=active_minutes,
+            expected_minutes=expected_minutes,
+            largest_gap=largest_gap,
+            suspicious_gap_count=suspicious,
+        )
+        rows.append(
+            {
+                "symbol": bucket["symbol"],
+                "date": bucket["date"],
+                "session": session,
+                "total_bars": total_bars,
+                "active_minutes": active_minutes,
+                "expected_minutes": expected_minutes,
+                "active_ratio": active_ratio,
+                "largest_intra_session_gap_minutes": largest_gap,
+                "suspicious_gap_count": suspicious,
+                "first_bar": bucket["first_bar"],
+                "last_bar": bucket["last_bar"],
+                "eligible_for_replay": eligible,
+                "exclusion_reason": reason,
+            }
+        )
+    return rows
+
+
+def _session_replay_eligibility(
+    *,
+    session: str,
+    active_minutes: int,
+    expected_minutes: int,
+    largest_gap: int,
+    suspicious_gap_count: int,
+) -> tuple[bool, str | None]:
+    if session == "OFF_SESSION":
+        return False, "OFF_SESSION_NOT_REPLAY_SESSION"
+    if active_minutes <= 0:
+        return False, "NO_BARS"
+    if expected_minutes and active_minutes < int(expected_minutes * SESSION_REPLAY_MIN_ACTIVE_RATIO):
+        return False, "ACTIVE_MINUTES_BELOW_75_PERCENT"
+    if largest_gap > SESSION_REPLAY_MAX_GAP_MINUTES:
+        return False, "LARGEST_GAP_EXCEEDS_15_MINUTES"
+    if suspicious_gap_count > SESSION_REPLAY_MAX_SUSPICIOUS_GAPS:
+        return False, "SUSPICIOUS_GAP_COUNT_EXCEEDS_5"
+    return True, None
+
+
+def _session_coverage_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_session: dict[str, dict[str, int]] = defaultdict(lambda: {"row_count": 0, "eligible_count": 0, "ineligible_count": 0})
+    reasons: dict[str, int] = defaultdict(int)
+    for row in rows:
+        session = str(row.get("session"))
+        by_session[session]["row_count"] += 1
+        if row.get("eligible_for_replay"):
+            by_session[session]["eligible_count"] += 1
+        else:
+            by_session[session]["ineligible_count"] += 1
+            reasons[str(row.get("exclusion_reason"))] += 1
+    return {
+        "row_count": len(rows),
+        "eligible_count": sum(1 for row in rows if row.get("eligible_for_replay")),
+        "ineligible_count": sum(1 for row in rows if not row.get("eligible_for_replay")),
+        "by_session": {key: by_session[key] for key in sorted(by_session)},
+        "exclusion_reasons": dict(sorted(reasons.items())),
+    }
+
+
+def _session_key(*, symbol: str, bar_end: datetime) -> tuple[str, str, str]:
+    local = bar_end.astimezone(SESSION_TIMEZONE)
+    session = _session_label(local)
+    trading_date = local.date() + timedelta(days=1) if session == "ASIA" and local.time() >= time(18, 0) else local.date()
+    return symbol, trading_date.isoformat(), session
+
+
+def _session_label(local: datetime) -> str:
+    value = local.time()
+    if value >= time(18, 0) or value < time(3, 0):
+        return "ASIA"
+    if time(3, 0) <= value < time(8, 20):
+        return "LONDON"
+    if time(8, 20) <= value < time(16, 0):
+        return "US"
+    return "OFF_SESSION"
 
 
 def _crosses_weekend(previous: datetime, current: datetime) -> bool:
@@ -372,10 +572,27 @@ def _render_markdown(report: dict[str, Any]) -> str:
             "| year | rows | complete | empty | failed | suspicious gaps | first bar | last bar |",
             "|---|---:|---:|---:|---:|---:|---|---|",
         ]
-    )
+        )
     for row in list(report.get("yearly_coverage") or []):
         lines.append(
             f"| {row.get('year')} | {row.get('row_count')} | {row.get('complete_partitions')} | {row.get('empty_partitions')} | {row.get('failed_partitions')} | {row.get('suspicious_gap_count')} | {row.get('first_bar')} | {row.get('last_bar')} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Session Coverage",
+            "",
+            f"- session_rows: `{(report.get('session_coverage_summary') or {}).get('row_count')}`",
+            f"- eligible_rows: `{(report.get('session_coverage_summary') or {}).get('eligible_count')}`",
+            f"- ineligible_rows: `{(report.get('session_coverage_summary') or {}).get('ineligible_count')}`",
+            "",
+            "| symbol | date | session | bars | active minutes | largest gap | suspicious gaps | eligible | exclusion reason | first bar | last bar |",
+            "|---|---|---|---:|---:|---:|---:|---|---|---|---|",
+        ]
+    )
+    for row in list(report.get("session_coverage") or [])[:500]:
+        lines.append(
+            f"| {row.get('symbol')} | {row.get('date')} | {row.get('session')} | {row.get('total_bars')} | {row.get('active_minutes')} | {row.get('largest_intra_session_gap_minutes')} | {row.get('suspicious_gap_count')} | {row.get('eligible_for_replay')} | {row.get('exclusion_reason')} | {row.get('first_bar')} | {row.get('last_bar')} |"
         )
     return "\n".join(lines) + "\n"
 

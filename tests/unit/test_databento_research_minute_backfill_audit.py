@@ -125,9 +125,42 @@ def test_audit_accepts_consistent_research_partitions_and_empty_months(tmp_path:
     assert result.report["can_submit"] is False
     assert result.report["live_money_eligible"] is False
     assert result.report["suspicious_gap_count"] == 1
+    assert result.report["session_coverage"]
+    assert result.report["session_coverage_summary"]["row_count"] == len(result.report["session_coverage"])
     assert result.report_paths[0].exists()
     assert result.report_paths[1].exists()
     assert result.report_paths[2].exists()
+
+
+def test_session_coverage_reports_replay_eligibility_fields(tmp_path: Path) -> None:
+    bars = [datetime(2019, 12, 2, 14, minute, tzinfo=timezone.utc) for minute in range(60)]
+    _write_parquet(tmp_path, year=2019, month=12, bar_ends=bars)
+    _write_metadata(tmp_path, year=2019, month=12, row_count=len(bars))
+
+    result = audit_research_minute_backfill(config=_config(tmp_path))
+
+    row = next(item for item in result.report["session_coverage"] if item["session"] == "US")
+    assert set(row) >= {
+        "symbol",
+        "date",
+        "session",
+        "total_bars",
+        "active_minutes",
+        "largest_intra_session_gap_minutes",
+        "suspicious_gap_count",
+        "first_bar",
+        "last_bar",
+        "eligible_for_replay",
+        "exclusion_reason",
+    }
+    assert row["symbol"] == "MGC"
+    assert row["date"] == "2019-12-02"
+    assert row["total_bars"] == 60
+    assert row["active_minutes"] == 60
+    assert row["largest_intra_session_gap_minutes"] == 0
+    assert row["suspicious_gap_count"] == 0
+    assert row["eligible_for_replay"] is False
+    assert row["exclusion_reason"] == "ACTIVE_MINUTES_BELOW_75_PERCENT"
 
 
 def test_audit_flags_2020_partitions_and_runtime_artifact_metadata(tmp_path: Path) -> None:
