@@ -690,6 +690,7 @@ add(
     "read-only broker verification succeeded" if broker_available else ibkr["stderr"] or ibkr["stdout"],
 )
 
+phase1_broker_symbols = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB")
 positions_path = REPO_ROOT / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
 positions, positions_err = read_json(positions_path)
 flat_symbols: dict[str, Any] = {}
@@ -699,7 +700,7 @@ elif broker_available and isinstance(positions, list):
     rows = positions
 else:
     rows = []
-for symbol in ("GC", "MNQ", "MGC"):
+for symbol in phase1_broker_symbols:
     qtys = []
     for row in rows:
         if not isinstance(row, dict):
@@ -727,17 +728,34 @@ if broker_available and isinstance(open_orders, dict):
 elif broker_available and isinstance(open_orders, list):
     open_rows = open_orders
 symbol_open_orders = []
+open_orders_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in phase1_broker_symbols}
 for row in open_rows:
     if not isinstance(row, dict):
         continue
-    symbol_text = " ".join(str(row.get(k, "")) for k in ("symbol", "local_symbol", "localSymbol", "contract"))
-    if "GC" in symbol_text or "MNQ" in symbol_text or "MGC" in symbol_text:
+    row_symbol = str(row.get("symbol") or row.get("contract_symbol") or "").upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
+    matched_symbols = [
+        symbol
+        for symbol in phase1_broker_symbols
+        if row_symbol == symbol or local_symbol.startswith(symbol)
+    ]
+    if matched_symbols:
         symbol_open_orders.append(row)
+        for symbol in matched_symbols:
+            open_orders_by_symbol[symbol].append(row)
+for symbol in phase1_broker_symbols:
+    count = len(open_orders_by_symbol.get(symbol) or [])
+    add(
+        f"broker_{symbol.lower()}_open_orders_zero_if_connected",
+        (not broker_available and MODE == "weekend-static") or count == 0,
+        broker_required,
+        f"{symbol} open_orders={count}" if broker_available else "broker read-only unavailable in weekend mode",
+    )
 add(
-    "broker_gc_mnq_mgc_open_orders_zero_if_connected",
+    "broker_phase1_open_orders_zero_if_connected",
     (not broker_available and MODE == "weekend-static") or not symbol_open_orders,
     broker_required,
-    f"GC/MNQ/MGC open_orders={len(symbol_open_orders)}" if broker_available else "broker read-only unavailable in weekend mode",
+    f"Phase-1 open_orders={len(symbol_open_orders)}" if broker_available else "broker read-only unavailable in weekend mode",
 )
 
 current_review_required = False
