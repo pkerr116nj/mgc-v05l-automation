@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +11,7 @@ from mgc_v05l.execution_core.phase1_databento_historical_seed import (
 )
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 
-NOW = datetime(2026, 5, 10, 16, 0, tzinfo=UTC)
+NOW = datetime(2026, 5, 10, 16, 0, tzinfo=timezone.utc)
 
 
 class FakeHistoricalClient:

@@ -12,7 +12,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
@@ -203,8 +203,8 @@ class UrllibDatabentoQuoteTransport:
             "dataset": dataset,
             "symbols": symbol,
             "schema": schema,
-            "start": start.astimezone(UTC).isoformat(),
-            "end": end.astimezone(UTC).isoformat(),
+            "start": start.astimezone(timezone.utc).isoformat(),
+            "end": end.astimezone(timezone.utc).isoformat(),
             "stype_in": stype_in,
             "encoding": "json",
             "compression": "none",
@@ -269,8 +269,8 @@ class NativeDatabentoQuoteTransport:
                 dataset=dataset,
                 symbols=[symbol],
                 schema=schema,
-                start=start.astimezone(UTC).isoformat(),
-                end=end.astimezone(UTC).isoformat(),
+                start=start.astimezone(timezone.utc).isoformat(),
+                end=end.astimezone(timezone.utc).isoformat(),
                 stype_in=stype_in,
             )
         except Exception as exc:  # noqa: BLE001 - provider errors must be reported cleanly.
@@ -383,7 +383,7 @@ class UrllibDatabentoSymbolResolver:
         self.timeout_seconds = float(timeout_seconds)
 
     def resolve(self, *, request: DatabentoSymbolResolutionRequest) -> DatabentoSymbolResolution:
-        resolution_date = request.resolution_date or datetime.now(UTC).date()
+        resolution_date = request.resolution_date or datetime.now(timezone.utc).date()
         resolution_start = request.resolution_start or resolution_date
         resolution_end = request.resolution_end or (resolution_date + timedelta(days=1))
         form = {
@@ -440,7 +440,7 @@ class DatabentoQuoteProvider:
     def get_quote(self, contract_key: str) -> QuoteSnapshot:
         if str(contract_key or "").strip() != self.config.contract_key:
             raise DatabentoQuoteProviderError("contract_key must match explicit Databento quote provider mapping")
-        now = self._now or datetime.now(UTC)
+        now = self._now or datetime.now(timezone.utc)
         quote_end = _optional_datetime(self.config.quote_end_timestamp) or now
         quote_lookback = max(int(self.config.lookback_seconds), 1)
         requested_start = quote_end - timedelta(seconds=quote_lookback)
@@ -730,7 +730,7 @@ class DatabentoQuoteProvider:
                 warnings=("Manual Databento provider symbol override was used for market data only.",),
             )
         requested = str(self.config.databento_continuous_symbol or "").strip()
-        resolution_date = _optional_date(self.config.resolution_date) or (self._now or datetime.now(UTC)).astimezone(UTC).date()
+        resolution_date = _optional_date(self.config.resolution_date) or (self._now or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
         resolution_start = _optional_date(self.config.resolution_start)
         resolution_end = _optional_date(self.config.resolution_end)
         primary_resolution, prior_session_fallback_used = self._resolve_primary_symbol(
@@ -1151,8 +1151,8 @@ def _record_request_details(
         "schema": schema,
         "symbol": symbol,
         "stype_in": stype_in,
-        "start": start.astimezone(UTC).isoformat(),
-        "end": end.astimezone(UTC).isoformat(),
+        "start": start.astimezone(timezone.utc).isoformat(),
+        "end": end.astimezone(timezone.utc).isoformat(),
         "encoding": "json",
         "compression": "none",
         "limit": int(limit),
@@ -1261,21 +1261,21 @@ def _native_error_code_message(value: Any) -> tuple[str | None, str | None]:
 
 def _record_timestamp(record: Mapping[str, Any] | None) -> datetime:
     if not record:
-        return datetime.fromtimestamp(0, tz=UTC)
+        return datetime.fromtimestamp(0, tz=timezone.utc)
     raw = record.get("ts_event") or (record.get("hd") if isinstance(record.get("hd"), Mapping) else {}).get("ts_event")
     if raw is None:
-        return datetime.fromtimestamp(0, tz=UTC)
+        return datetime.fromtimestamp(0, tz=timezone.utc)
     if isinstance(raw, (int, float)):
-        return datetime.fromtimestamp(float(raw) / 1_000_000_000, tz=UTC)
+        return datetime.fromtimestamp(float(raw) / 1_000_000_000, tz=timezone.utc)
     normalized = str(raw).replace("Z", "+00:00")
     parsed = datetime.fromisoformat(normalized)
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _resolution_from_payload(*, request: DatabentoSymbolResolutionRequest, payload: Mapping[str, Any]) -> DatabentoSymbolResolution:
-    resolution_date = request.resolution_date or datetime.now(UTC).date()
+    resolution_date = request.resolution_date or datetime.now(timezone.utc).date()
     resolution_start = request.resolution_start or resolution_date
     resolution_end = request.resolution_end or (resolution_date + timedelta(days=1))
     mappings = payload.get("result") or payload.get("mappings") or payload.get("symbols") or {}
@@ -1388,7 +1388,7 @@ def _mapping_date(value: Any) -> date | None:
 
 
 def _date_to_datetime(value: date | None) -> datetime | None:
-    return datetime(value.year, value.month, value.day, tzinfo=UTC) if value is not None else None
+    return datetime(value.year, value.month, value.day, tzinfo=timezone.utc) if value is not None else None
 
 
 def _quote_temporal_scope(*, config: DatabentoQuoteProviderConfig, available_end_fallback_used: bool) -> str:
@@ -1406,7 +1406,7 @@ def _no_records_reason(*, config: DatabentoQuoteProviderConfig, provider_availab
 
 
 def _clamped_available_end(provider_available_end: datetime, buffer_seconds: int) -> datetime:
-    buffered = provider_available_end.astimezone(UTC) - timedelta(seconds=max(int(buffer_seconds), 0))
+    buffered = provider_available_end.astimezone(timezone.utc) - timedelta(seconds=max(int(buffer_seconds), 0))
     return buffered.replace(second=0, microsecond=0)
 
 
@@ -1470,8 +1470,8 @@ def _provider_timestamp(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _optional_datetime(value: Any) -> datetime | None:
@@ -1485,8 +1485,8 @@ def _optional_datetime(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _basic_auth_header(api_key: str) -> str:

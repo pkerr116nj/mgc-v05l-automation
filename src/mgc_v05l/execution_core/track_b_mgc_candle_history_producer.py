@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
@@ -88,7 +88,7 @@ def produce_track_b_mgc_candle_history_input(
     history_provider_mode: str = "DATABENTO_HISTORICAL_BOUNDED_WITH_REALTIME_CURRENT",
     now: datetime | None = None,
 ) -> TrackBMgcCandleHistoryProducerResult:
-    actual_now = now or datetime.now(UTC)
+    actual_now = now or datetime.now(timezone.utc)
     require_aware_datetime(actual_now, "now")
     actual_producer_id = producer_id or f"track_b_mgc_candle_history_producer_{uuid.uuid4().hex}"
     report_json = Path(output_root) / actual_producer_id / "track_b_mgc_candle_history_producer_report.json"
@@ -270,8 +270,8 @@ def fetch_databento_ohlcv_1m_records(
             dataset=dataset,
             symbol=symbol,
             schema=schema,
-            start=start.astimezone(UTC),
-            end=end.astimezone(UTC),
+            start=start.astimezone(timezone.utc),
+            end=end.astimezone(timezone.utc),
             stype_in=stype_in,
             limit=max_candles,
         )
@@ -296,7 +296,7 @@ def write_provider_error_report(
     now: datetime | None = None,
 ) -> TrackBMgcCandleHistoryProducerResult:
     del expected_account_id, strategy_id, lane_id
-    actual_now = now or datetime.now(UTC)
+    actual_now = now or datetime.now(timezone.utc)
     require_aware_datetime(actual_now, "now")
     actual_producer_id = producer_id or f"track_b_mgc_candle_history_producer_{uuid.uuid4().hex}"
     report_json = Path(output_root) / actual_producer_id / "track_b_mgc_candle_history_producer_report.json"

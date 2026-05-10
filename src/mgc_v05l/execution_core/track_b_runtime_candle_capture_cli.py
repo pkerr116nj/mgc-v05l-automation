@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -81,7 +81,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.fetch_databento_history:
         quote_payload = _read_quote_payload(args.current_quote_report_json)
-        requested_window_end = _parse_time(args.history_end) if args.history_end else datetime.now(UTC)
+        requested_window_end = _parse_time(args.history_end) if args.history_end else datetime.now(timezone.utc)
         requested_window_start = (
             _parse_time(args.history_start)
             if args.history_start
@@ -198,7 +198,7 @@ def _fetch_records(
         )
         return records, None, requested_window_end, None, "DATABENTO_HISTORICAL_RECENT"
     except DatabentoAvailableEndError as exc:
-        provider_available_end = None if exc.provider_available_end is None else exc.provider_available_end.astimezone(UTC)
+        provider_available_end = None if exc.provider_available_end is None else exc.provider_available_end.astimezone(timezone.utc)
         if provider_available_end is None or provider_available_end <= requested_window_start:
             raise
         history_end_used = _safe_ohlcv_1m_available_end(provider_available_end)
@@ -233,8 +233,8 @@ def _transport_for_args(args: argparse.Namespace):
 def _safe_ohlcv_1m_available_end(provider_available_end: datetime) -> datetime:
     """Use a minute-boundary end timestamp for historical OHLCV-1m retries."""
 
-    safe = provider_available_end.astimezone(UTC).replace(second=0, microsecond=0)
-    if safe >= provider_available_end.astimezone(UTC):
+    safe = provider_available_end.astimezone(timezone.utc).replace(second=0, microsecond=0)
+    if safe >= provider_available_end.astimezone(timezone.utc):
         safe = safe - timedelta(minutes=1)
     return safe
 
@@ -380,8 +380,8 @@ def _repo_root() -> Path:
 def _parse_time(value: str) -> datetime:
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _print_result(result: TrackBRuntimeCandleCaptureResult) -> None:

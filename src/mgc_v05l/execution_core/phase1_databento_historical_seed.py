@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
@@ -315,7 +315,7 @@ def _aggregate_bars(one_minute: list[dict[str, Any]], *, minutes: int) -> list[d
             continue
         epoch_minutes = int(end.timestamp() // 60)
         bucket_epoch_minutes = ((epoch_minutes + minutes - 1) // minutes) * minutes
-        bucket_end = datetime.fromtimestamp(bucket_epoch_minutes * 60, tz=UTC)
+        bucket_end = datetime.fromtimestamp(bucket_epoch_minutes * 60, tz=timezone.utc)
         grouped.setdefault(bucket_end, []).append(bar)
     aggregates: list[dict[str, Any]] = []
     for bucket_end in sorted(grouped):
@@ -426,16 +426,16 @@ def _parse_datetime(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _coerce_now(value: datetime | None) -> datetime:
     if value is None:
-        return datetime.now(UTC)
+        return datetime.now(timezone.utc)
     if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def build_parser() -> argparse.ArgumentParser:

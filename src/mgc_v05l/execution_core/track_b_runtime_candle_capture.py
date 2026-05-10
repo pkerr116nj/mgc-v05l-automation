@@ -12,7 +12,7 @@ import json
 import shutil
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
@@ -117,7 +117,7 @@ def capture_track_b_runtime_mgc_1m_candles(
     retention_runs: int = 5,
     now: datetime | None = None,
 ) -> TrackBRuntimeCandleCaptureResult:
-    actual_now = now or datetime.now(UTC)
+    actual_now = now or datetime.now(timezone.utc)
     require_aware_datetime(actual_now, "now")
     actual_capture_id = capture_id or f"track_b_runtime_candle_capture_{uuid.uuid4().hex}"
     actual_source_id = source_id or _optional_text(runtime_candle_payload.get("source_id")) or "track_b_runtime_candle_capture"
@@ -417,7 +417,7 @@ def write_runtime_candle_capture_provider_error(
     capture_id: str | None = None,
     now: datetime | None = None,
 ) -> TrackBRuntimeCandleCaptureResult:
-    actual_now = now or datetime.now(UTC)
+    actual_now = now or datetime.now(timezone.utc)
     require_aware_datetime(actual_now, "now")
     actual_capture_id = capture_id or f"track_b_runtime_candle_capture_{uuid.uuid4().hex}"
     report_json = Path(output_root) / actual_capture_id / "track_b_runtime_candle_capture_report.json"
@@ -704,10 +704,10 @@ def _write_report(
         "dataset": dataset,
         "timeframe": timeframe,
         "candle_source_mode": candle_source_mode,
-        "requested_window_start": None if requested_window_start is None else requested_window_start.astimezone(UTC).isoformat(),
-        "requested_window_end": None if requested_window_end is None else requested_window_end.astimezone(UTC).isoformat(),
-        "provider_available_end": None if provider_available_end is None else provider_available_end.astimezone(UTC).isoformat(),
-        "history_end_used": None if history_end_used is None else history_end_used.astimezone(UTC).isoformat(),
+        "requested_window_start": None if requested_window_start is None else requested_window_start.astimezone(timezone.utc).isoformat(),
+        "requested_window_end": None if requested_window_end is None else requested_window_end.astimezone(timezone.utc).isoformat(),
+        "provider_available_end": None if provider_available_end is None else provider_available_end.astimezone(timezone.utc).isoformat(),
+        "history_end_used": None if history_end_used is None else history_end_used.astimezone(timezone.utc).isoformat(),
         "available_end_lag_seconds": available_end_lag_seconds,
         "provider_transport": provider_transport,
         "provider_request_symbol": provider_request_symbol,
@@ -800,10 +800,10 @@ def _runtime_freshness(
     provider_lag = None
     completed_5m_lag_vs_provider = None
     if provider_available_end is not None:
-        provider_lag = (now - provider_available_end.astimezone(UTC)).total_seconds()
+        provider_lag = (now - provider_available_end.astimezone(timezone.utc)).total_seconds()
         if latest_completed_5m_timestamp is not None:
             completed_5m_lag_vs_provider = (
-                provider_available_end.astimezone(UTC) - latest_completed_5m_timestamp
+                provider_available_end.astimezone(timezone.utc) - latest_completed_5m_timestamp
             ).total_seconds()
     return {
         "latest_1m_timestamp": None if latest_1m_timestamp is None else latest_1m_timestamp.isoformat(),
@@ -884,8 +884,8 @@ def _prune_old_runs(*, output_root: Path, keep: int, current_run_dir: Path) -> i
 def _parse_timestamp(value: str) -> datetime:
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _decimal(value: object, field_name: str) -> Decimal:

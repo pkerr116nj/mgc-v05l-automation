@@ -7,7 +7,7 @@ import json
 import math
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import mkdtemp
@@ -197,7 +197,7 @@ class DatabentoHistoricalHttpClient:
             "dataset": dataset,
             "symbols": request_symbol,
             "schema": schema_name,
-            "start": start.astimezone(UTC).isoformat(),
+            "start": start.astimezone(timezone.utc).isoformat(),
             "stype_in": stype_in,
             "stype_out": stype_out,
             "encoding": encoding,
@@ -207,7 +207,7 @@ class DatabentoHistoricalHttpClient:
             "map_symbols": map_symbols,
         }
         if end is not None:
-            form["end"] = end.astimezone(UTC).isoformat()
+            form["end"] = end.astimezone(timezone.utc).isoformat()
         if limit is not None:
             form["limit"] = int(limit)
         lines = self.transport.request_lines(
@@ -244,7 +244,7 @@ class DatabentoHistoricalHttpClient:
             "dataset": dataset,
             "symbols": request_symbol,
             "schema": schema_name,
-            "start": start.astimezone(UTC).isoformat(),
+            "start": start.astimezone(timezone.utc).isoformat(),
             "stype_in": stype_in,
             "stype_out": stype_out,
             "encoding": encoding,
@@ -254,7 +254,7 @@ class DatabentoHistoricalHttpClient:
             "map_symbols": map_symbols,
         }
         if end is not None:
-            form["end"] = end.astimezone(UTC).isoformat()
+            form["end"] = end.astimezone(timezone.utc).isoformat()
         if limit is not None:
             form["limit"] = int(limit)
         if hasattr(self.transport, "download_to_file"):
@@ -290,11 +290,11 @@ class DatabentoHistoricalHttpClient:
             "dataset": dataset,
             "symbols": request_symbol,
             "schema": schema_name,
-            "start": start.astimezone(UTC).isoformat(),
+            "start": start.astimezone(timezone.utc).isoformat(),
             "stype_in": stype_in,
         }
         if end is not None:
-            query["end"] = end.astimezone(UTC).isoformat()
+            query["end"] = end.astimezone(timezone.utc).isoformat()
         text = self._request_text(
             method="GET",
             url=f"{self.base_url.rstrip('/')}/metadata.get_billable_size",
@@ -339,7 +339,7 @@ class DatabentoHistoricalHttpClient:
             "dataset": dataset,
             "symbols": request_symbol,
             "schema": schema_name,
-            "start": start.astimezone(UTC).isoformat(),
+            "start": start.astimezone(timezone.utc).isoformat(),
             "stype_in": stype_in,
             "stype_out": stype_out,
             "encoding": encoding,
@@ -349,7 +349,7 @@ class DatabentoHistoricalHttpClient:
             "map_symbols": map_symbols,
         }
         if end is not None:
-            form["end"] = end.astimezone(UTC).isoformat()
+            form["end"] = end.astimezone(timezone.utc).isoformat()
         if split_duration:
             form["split_duration"] = split_duration
         if limit is not None:
@@ -525,7 +525,7 @@ class DatabentoMarketDataProvider(MarketDataProvider):
             map_symbols=self._config.map_symbols,
             limit=request.limit,
         )
-        ingest_time = datetime.now(UTC)
+        ingest_time = datetime.now(timezone.utc)
         bars: list[Bar] = []
         raw_symbols_by_bar_id: dict[str, str | None] = {}
         provider_metadata_by_bar_id: dict[str, dict[str, Any]] = {}
@@ -707,7 +707,7 @@ class DatabentoMarketDataProvider(MarketDataProvider):
             data_source=self._config.canonical_data_source_by_timeframe.get(interval, f"databento_{interval}_canonical"),
             internal_symbol=request.internal_symbol,
             timeframe=interval,
-            ingest_time=datetime.now(UTC),
+            ingest_time=datetime.now(timezone.utc),
             staged_path=str(staging_root),
             staged_artifact_paths=tuple(str(path) for path in staged_paths),
             dataset=symbol_config.dataset,
