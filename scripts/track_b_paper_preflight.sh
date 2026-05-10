@@ -699,7 +699,7 @@ elif broker_available and isinstance(positions, list):
     rows = positions
 else:
     rows = []
-for symbol in ("MNQ", "MGC"):
+for symbol in ("GC", "MNQ", "MGC"):
     qtys = []
     for row in rows:
         if not isinstance(row, dict):
@@ -731,13 +731,13 @@ for row in open_rows:
     if not isinstance(row, dict):
         continue
     symbol_text = " ".join(str(row.get(k, "")) for k in ("symbol", "local_symbol", "localSymbol", "contract"))
-    if "MNQ" in symbol_text or "MGC" in symbol_text:
+    if "GC" in symbol_text or "MNQ" in symbol_text or "MGC" in symbol_text:
         symbol_open_orders.append(row)
 add(
-    "broker_mnq_mgc_open_orders_zero_if_connected",
+    "broker_gc_mnq_mgc_open_orders_zero_if_connected",
     (not broker_available and MODE == "weekend-static") or not symbol_open_orders,
     broker_required,
-    f"MNQ/MGC open_orders={len(symbol_open_orders)}" if broker_available else "broker read-only unavailable in weekend mode",
+    f"GC/MNQ/MGC open_orders={len(symbol_open_orders)}" if broker_available else "broker read-only unavailable in weekend mode",
 )
 
 current_review_required = False
