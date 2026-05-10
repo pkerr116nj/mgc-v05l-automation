@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -68,17 +69,12 @@ class WeeklyMaintenanceConfig:
     detail_limit: int = 50
     include_full_paths: bool = False
     category_filter: tuple[str, ...] = ()
+    confirm_disposable_build_cleanup: bool = False
 
 
 def build_weekly_data_maintenance_report(*, config: WeeklyMaintenanceConfig) -> dict[str, Any]:
-    if config.mode != "dry-run":
-        return {
-            "schema_version": "weekly_data_maintenance_v1",
-            "mode": config.mode,
-            "final_verdict": "APPLY_MODE_NOT_IMPLEMENTED",
-            "review_required": True,
-            "error": "APPLY_MODE_NOT_IMPLEMENTED",
-        }
+    if config.mode not in {"dry-run", "apply"}:
+        return _apply_not_implemented_report(config=config)
 
     repo_root = Path(config.repo_root)
     week_end = config.week_ending or date.today()
@@ -151,7 +147,15 @@ def build_weekly_data_maintenance_report(*, config: WeeklyMaintenanceConfig) -> 
     }
     if config.include_full_paths:
         report["classifications"] = classifications
-    _assert_safety_invariants(classifications)
+    if config.mode == "apply":
+        _apply_disposable_build_cleanup(
+            report=report,
+            classifications=classifications,
+            repo_root=repo_root,
+            config=config,
+        )
+    else:
+        _assert_safety_invariants(classifications)
     return report
 
 
@@ -164,6 +168,128 @@ def write_weekly_data_maintenance_report(*, config: WeeklyMaintenanceConfig, rep
     latest_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     weekly_md.write_text(_render_markdown(report), encoding="utf-8")
     return {"json": latest_json, "markdown": weekly_md}
+
+
+def _apply_not_implemented_report(*, config: WeeklyMaintenanceConfig) -> dict[str, Any]:
+    return {
+        "schema_version": "weekly_data_maintenance_v1",
+        "mode": config.mode,
+        "final_verdict": "APPLY_MODE_NOT_IMPLEMENTED",
+        "review_required": True,
+        "error": "APPLY_MODE_NOT_IMPLEMENTED",
+    }
+
+
+def _apply_disposable_build_cleanup(
+    *,
+    report: dict[str, Any],
+    classifications: Sequence[dict[str, Any]],
+    repo_root: Path,
+    config: WeeklyMaintenanceConfig,
+) -> None:
+    report["policy"]["dry_run_only"] = False
+    report["apply_mode"] = {
+        "allowed_scope": "DISPOSABLE_BUILD_ONLY",
+        "confirmation_present": config.confirm_disposable_build_cleanup,
+        "deleted_count": 0,
+        "deleted_paths": [],
+        "skipped_count": 0,
+        "skipped_paths": [],
+    }
+    category_filter = tuple(item.strip().upper() for item in config.category_filter if item.strip())
+    blockers: list[str] = []
+    if category_filter != ("DISPOSABLE_BUILD",):
+        blockers.append("CATEGORY_FILTER_MUST_EQUAL_DISPOSABLE_BUILD")
+    if not config.confirm_disposable_build_cleanup:
+        blockers.append("CONFIRM_DISPOSABLE_BUILD_CLEANUP_REQUIRED")
+
+    delete_candidates = [row for row in classifications if row.get("classification") == "DISPOSABLE_BUILD"]
+    skipped_paths: list[dict[str, str]] = []
+    for row in delete_candidates:
+        safety_error = _disposable_apply_safety_error(row=row, repo_root=repo_root)
+        if safety_error:
+            skipped_paths.append({"path": str(row.get("path") or ""), "reason": safety_error})
+    if skipped_paths:
+        blockers.append("UNSAFE_DELETE_CANDIDATES_PRESENT")
+
+    if blockers:
+        report["final_verdict"] = "APPLY_DISPOSABLE_BUILD_BLOCKED"
+        report["review_required"] = True
+        report["blocking_reasons"] = blockers
+        report["apply_mode"]["skipped_count"] = len(delete_candidates)
+        report["apply_mode"]["skipped_paths"] = skipped_paths or [
+            {"path": str(row.get("path") or ""), "reason": "APPLY_PRECONDITION_BLOCKED"}
+            for row in delete_candidates
+        ]
+        return
+
+    deleted_paths: list[str] = []
+    deletion_failures: list[dict[str, str]] = []
+    for row in delete_candidates:
+        relative = Path(str(row.get("path") or ""))
+        target = repo_root / relative
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+            else:
+                deletion_failures.append({"path": str(relative), "reason": "PATH_MISSING_AT_DELETE_TIME"})
+                continue
+        except Exception as exc:  # pragma: no cover - platform/filesystem defensive path
+            deletion_failures.append({"path": str(relative), "reason": f"DELETE_FAILED: {exc}"})
+            continue
+        deleted_paths.append(str(relative))
+
+    report["apply_mode"]["deleted_count"] = len(deleted_paths)
+    report["apply_mode"]["deleted_paths"] = deleted_paths
+    report["apply_mode"]["skipped_count"] = len(deletion_failures)
+    report["apply_mode"]["skipped_paths"] = deletion_failures
+    if deletion_failures:
+        report["final_verdict"] = "APPLY_DISPOSABLE_BUILD_BLOCKED"
+        report["review_required"] = True
+        report["blocking_reasons"] = ["DELETE_FAILURES_PRESENT"]
+        return
+
+    report["final_verdict"] = "APPLY_DISPOSABLE_BUILD_COMPLETE"
+    report["review_required"] = False
+    report["policy"]["delete_files"] = True
+
+
+def _disposable_apply_safety_error(*, row: dict[str, Any], repo_root: Path) -> str | None:
+    relative = Path(str(row.get("path") or ""))
+    path_text = str(relative).lower()
+    parts = tuple(part.lower() for part in relative.parts)
+    suffix = relative.suffix.lower()
+    if row.get("classification") != "DISPOSABLE_BUILD":
+        return "NOT_DISPOSABLE_BUILD_CLASSIFICATION"
+    if row.get("retention_tier") != "DISPOSABLE_BUILD":
+        return "NOT_DISPOSABLE_BUILD_TIER"
+    if row.get("reason_key") != "disposable_build_metadata":
+        return "NOT_DISPOSABLE_BUILD_REASON"
+    if relative.is_absolute() or ".." in relative.parts:
+        return "UNSAFE_PATH_SHAPE"
+    if not (repo_root / relative).exists():
+        return "PATH_MISSING"
+    if parts and parts[0] in {"var", "outputs", "docs", "examples"}:
+        return "PROTECTED_TOP_LEVEL_PATH"
+    if "research" in parts:
+        return "RESEARCH_PATH_PROTECTED"
+    if suffix in {".py", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".md", ".csv", ".sqlite", ".sqlite3", ".db"}:
+        return "SOURCE_CONFIG_REPORT_OR_DATA_FILE_PROTECTED"
+    if any(term in path_text for term in BROKER_EVIDENCE_TERMS):
+        return "BROKER_OR_REVIEW_EVIDENCE_PROTECTED"
+    target = repo_root / relative
+    if target.is_dir() and (
+        target.name == "__pycache__"
+        or target.name == ".pytest_cache"
+        or target.name.endswith(".egg-info")
+        or any(part == ".pytest_cache" for part in parts)
+    ):
+        return None
+    if target.is_file() and (suffix == ".pyc" or "__pycache__" in parts or ".pytest_cache" in parts):
+        return None
+    return "NOT_RECOGNIZED_DISPOSABLE_BUILD_METADATA"
 
 
 def _runtime_roots(*, config: WeeklyMaintenanceConfig) -> tuple[Path, ...]:
@@ -577,6 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--detail-limit", type=int, default=50)
     parser.add_argument("--include-full-paths", action="store_true")
     parser.add_argument("--category-filter")
+    parser.add_argument("--confirm-disposable-build-cleanup", action="store_true")
     return parser
 
 
@@ -594,6 +721,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         detail_limit=max(0, int(args.detail_limit)),
         include_full_paths=bool(args.include_full_paths),
         category_filter=_parse_category_filter(args.category_filter),
+        confirm_disposable_build_cleanup=bool(args.confirm_disposable_build_cleanup),
     )
     report = build_weekly_data_maintenance_report(config=config)
     if report.get("final_verdict") == "APPLY_MODE_NOT_IMPLEMENTED":
@@ -603,7 +731,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.json_output:
         Path(args.json_output).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({"final_verdict": report["final_verdict"], "json": str(written["json"]), "markdown": str(written["markdown"])}, sort_keys=True))
-    return 0
+    return 1 if report.get("final_verdict") == "APPLY_DISPOSABLE_BUILD_BLOCKED" else 0
 
 
 if __name__ == "__main__":

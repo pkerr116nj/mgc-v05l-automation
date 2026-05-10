@@ -4,6 +4,7 @@ import json
 from datetime import date
 from pathlib import Path
 
+import mgc_v05l.app.weekly_data_maintenance as wdm
 from mgc_v05l.app.weekly_data_maintenance import (
     PHASE1_RUNTIME_TICKER_ORDER,
     WeeklyMaintenanceConfig,
@@ -23,8 +24,9 @@ def test_apply_mode_rejected_before_outputs(tmp_path: Path) -> None:
         config=WeeklyMaintenanceConfig(repo_root=tmp_path, mode="apply")
     )
 
-    assert report["final_verdict"] == "APPLY_MODE_NOT_IMPLEMENTED"
+    assert report["final_verdict"] == "APPLY_DISPOSABLE_BUILD_BLOCKED"
     assert report["review_required"] is True
+    assert "CONFIRM_DISPOSABLE_BUILD_CLEANUP_REQUIRED" in report["blocking_reasons"]
 
 
 def test_default_symbols_are_phase1_ten(tmp_path: Path) -> None:
@@ -197,7 +199,180 @@ def test_category_filter_limits_reported_categories(tmp_path: Path) -> None:
     assert report["delete_candidates_count"] == 1
 
 
-def test_cli_dry_run_writes_report_and_apply_returns_two(tmp_path: Path) -> None:
+def test_apply_with_non_disposable_category_is_rejected(tmp_path: Path) -> None:
+    _write(tmp_path / ".pytest_cache" / "v" / "cache" / "nodeids")
+
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(
+            repo_root=tmp_path,
+            mode="apply",
+            category_filter=("WARM",),
+            confirm_disposable_build_cleanup=True,
+        )
+    )
+
+    assert report["final_verdict"] == "APPLY_DISPOSABLE_BUILD_BLOCKED"
+    assert "CATEGORY_FILTER_MUST_EQUAL_DISPOSABLE_BUILD" in report["blocking_reasons"]
+    assert (tmp_path / ".pytest_cache").exists()
+
+
+def test_apply_refuses_protected_paths_even_if_misclassified(tmp_path: Path, monkeypatch) -> None:
+    for path in (
+        tmp_path / "outputs" / "reports" / "cache.pyc",
+        tmp_path / "docs" / "cache.pyc",
+        tmp_path / "examples" / "cache.pyc",
+        tmp_path / "src" / "mgc_v05l" / "research" / "cache.pyc",
+    ):
+        _write(path, "bytecode")
+
+    original = wdm._classify_path
+
+    def misclassify(*, path, repo_root, hot_roots, warm_root, week_start, week_end):
+        row = original(
+            path=path,
+            repo_root=repo_root,
+            hot_roots=hot_roots,
+            warm_root=warm_root,
+            week_start=week_start,
+            week_end=week_end,
+        )
+        row.update(
+            {
+                "classification": "DISPOSABLE_BUILD",
+                "retention_tier": "DISPOSABLE_BUILD",
+                "reason_key": "disposable_build_metadata",
+            }
+        )
+        return row
+
+    monkeypatch.setattr(wdm, "_classify_path", misclassify)
+
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(
+            repo_root=tmp_path,
+            mode="apply",
+            category_filter=("DISPOSABLE_BUILD",),
+            confirm_disposable_build_cleanup=True,
+            include_full_paths=True,
+        )
+    )
+
+    assert report["final_verdict"] == "APPLY_DISPOSABLE_BUILD_BLOCKED"
+    assert report["review_required"] is True
+    assert report["apply_mode"]["deleted_count"] == 0
+    assert all(path.exists() for path in tmp_path.rglob("cache.pyc"))
+
+
+def test_apply_refuses_source_json_and_evidence_like_files_even_if_misclassified(tmp_path: Path, monkeypatch) -> None:
+    for path in (
+        tmp_path / "src" / "mgc_v05l" / "app" / "tool.py",
+        tmp_path / "src" / "mgc_v05l" / "app" / "config.json",
+        tmp_path / "src" / "mgc_v05l" / "app" / "ibkr_broker_cache.tmp",
+    ):
+        _write(path, "unsafe")
+
+    original = wdm._classify_path
+
+    def misclassify(*, path, repo_root, hot_roots, warm_root, week_start, week_end):
+        row = original(
+            path=path,
+            repo_root=repo_root,
+            hot_roots=hot_roots,
+            warm_root=warm_root,
+            week_start=week_start,
+            week_end=week_end,
+        )
+        row.update(
+            {
+                "classification": "DISPOSABLE_BUILD",
+                "retention_tier": "DISPOSABLE_BUILD",
+                "reason_key": "disposable_build_metadata",
+            }
+        )
+        return row
+
+    monkeypatch.setattr(wdm, "_classify_path", misclassify)
+
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(
+            repo_root=tmp_path,
+            mode="apply",
+            category_filter=("DISPOSABLE_BUILD",),
+            confirm_disposable_build_cleanup=True,
+        )
+    )
+
+    assert report["final_verdict"] == "APPLY_DISPOSABLE_BUILD_BLOCKED"
+    assert report["apply_mode"]["deleted_count"] == 0
+    assert all(path.exists() for path in (tmp_path / "src" / "mgc_v05l" / "app").iterdir())
+
+
+def test_apply_deletes_only_disposable_build_fixture_paths(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "mgc_v05l_automation.egg-info" / "PKG-INFO", "metadata")
+    _write(tmp_path / ".pytest_cache" / "v" / "cache" / "nodeids", "[]")
+    _write(tmp_path / "src" / "mgc_v05l" / "app" / "__pycache__" / "x.pyc", "bytecode")
+
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(
+            repo_root=tmp_path,
+            mode="apply",
+            category_filter=("DISPOSABLE_BUILD",),
+            confirm_disposable_build_cleanup=True,
+            include_full_paths=True,
+        )
+    )
+
+    assert report["final_verdict"] == "APPLY_DISPOSABLE_BUILD_COMPLETE"
+    assert report["review_required"] is False
+    assert report["apply_mode"]["deleted_count"] == 3
+    assert not (tmp_path / "src" / "mgc_v05l_automation.egg-info").exists()
+    assert not (tmp_path / ".pytest_cache").exists()
+    assert not (tmp_path / "src" / "mgc_v05l" / "app" / "__pycache__").exists()
+
+
+def test_apply_is_atomic_when_one_unsafe_candidate_is_present(tmp_path: Path, monkeypatch) -> None:
+    _write(tmp_path / ".pytest_cache" / "v" / "cache" / "nodeids")
+    _write(tmp_path / "outputs" / "reports" / "unsafe_cache.pyc")
+
+    original = wdm._classify_path
+
+    def misclassify(*, path, repo_root, hot_roots, warm_root, week_start, week_end):
+        row = original(
+            path=path,
+            repo_root=repo_root,
+            hot_roots=hot_roots,
+            warm_root=warm_root,
+            week_start=week_start,
+            week_end=week_end,
+        )
+        if str(row["path"]).endswith("unsafe_cache.pyc"):
+            row.update(
+                {
+                    "classification": "DISPOSABLE_BUILD",
+                    "retention_tier": "DISPOSABLE_BUILD",
+                    "reason_key": "disposable_build_metadata",
+                }
+            )
+        return row
+
+    monkeypatch.setattr(wdm, "_classify_path", misclassify)
+
+    report = build_weekly_data_maintenance_report(
+        config=WeeklyMaintenanceConfig(
+            repo_root=tmp_path,
+            mode="apply",
+            category_filter=("DISPOSABLE_BUILD",),
+            confirm_disposable_build_cleanup=True,
+        )
+    )
+
+    assert report["final_verdict"] == "APPLY_DISPOSABLE_BUILD_BLOCKED"
+    assert report["apply_mode"]["deleted_count"] == 0
+    assert (tmp_path / ".pytest_cache").exists()
+    assert (tmp_path / "outputs" / "reports" / "unsafe_cache.pyc").exists()
+
+
+def test_cli_dry_run_writes_report_and_apply_without_confirmation_returns_one(tmp_path: Path) -> None:
     output_root = tmp_path / "reports"
     assert (
         main(
@@ -215,4 +390,4 @@ def test_cli_dry_run_writes_report_and_apply_returns_two(tmp_path: Path) -> None
         == 0
     )
     assert (output_root / "latest_weekly_data_maintenance_report.json").exists()
-    assert main(["--mode", "apply", "--repo-root", str(tmp_path), "--output-root", str(output_root)]) == 2
+    assert main(["--mode", "apply", "--repo-root", str(tmp_path), "--output-root", str(output_root)]) == 1
