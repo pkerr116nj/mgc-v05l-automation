@@ -15,13 +15,27 @@ NOW = datetime(2026, 5, 10, 16, 0, tzinfo=timezone.utc)
 
 
 class FakeHistoricalClient:
-    def __init__(self, records: list[dict[str, Any]] | None = None, *, raise_error: bool = False) -> None:
+    def __init__(
+        self,
+        records: list[dict[str, Any]] | None = None,
+        *,
+        raise_error: bool = False,
+        fail_once_with_available_end: datetime | None = None,
+    ) -> None:
         self.records = records or _records()
         self.raise_error = raise_error
+        self.fail_once_with_available_end = fail_once_with_available_end
         self.requests: list[dict[str, Any]] = []
 
     def get_range_json_lines(self, **kwargs: Any) -> list[dict[str, Any]]:
         self.requests.append(dict(kwargs))
+        if self.fail_once_with_available_end is not None:
+            available_end = self.fail_once_with_available_end
+            self.fail_once_with_available_end = None
+            raise RuntimeError(
+                "Databento HTTP error 422: "
+                f"{{\"detail\":{{\"case\":\"data_end_after_available_end\",\"message\":\"The dataset GLBX.MDP3 has data available up to '{available_end.isoformat()}'.\"}}}}"
+            )
         if self.raise_error:
             raise RuntimeError("historical server unavailable")
         return list(self.records)
@@ -104,6 +118,27 @@ def test_seed_artifacts_include_runtime_provenance_and_do_not_enable_submit(tmp_
     assert payload["archive_artifact_used"] is False
     assert payload["can_submit"] is False
     assert payload["live_money_eligible"] is False
+
+
+def test_available_end_retry_keeps_seed_bounded_to_30_days(tmp_path: Path) -> None:
+    available_end = NOW - timedelta(minutes=2)
+    client = FakeHistoricalClient(fail_once_with_available_end=available_end)
+
+    result = build_phase1_databento_historical_seed(
+        config=_config(tmp_path, symbols=("GC",)),
+        client=client,
+    )
+
+    assert len(client.requests) == 2
+    retry = client.requests[1]
+    assert retry["end"] == available_end
+    assert retry["start"] == available_end - timedelta(days=30)
+    row = result.report["rows"][0]
+    assert row["available_end_retry_used"] is True
+    assert row["provider_available_end"] == available_end.isoformat()
+    assert row["historical_seed_ready"] is True
+    assert row["can_submit"] is False
+    assert row["live_money_eligible"] is False
 
 
 def test_missing_credentials_fail_closed_without_client(tmp_path: Path, monkeypatch) -> None:

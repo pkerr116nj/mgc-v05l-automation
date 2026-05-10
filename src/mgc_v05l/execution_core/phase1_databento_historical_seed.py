@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -111,20 +112,12 @@ def build_phase1_databento_historical_seed(
     rows: list[dict[str, Any]] = []
     for symbol in symbols:
         try:
-            records = seed_client.get_range_json_lines(
-                dataset=config.dataset,
-                request_symbol=_continuous_symbol(symbol),
-                schema_name=config.schema_name,
+            records, actual_start, actual_end, provider_available_end, available_end_retry_used = _fetch_seed_records(
+                client=seed_client,
+                config=config,
+                symbol=symbol,
                 start=start,
                 end=end,
-                stype_in=config.stype_in,
-                stype_out=config.stype_out,
-                encoding="json",
-                compression="none",
-                pretty_px=True,
-                pretty_ts=True,
-                map_symbols=True,
-                limit=config.limit,
             )
         except Exception as exc:  # noqa: BLE001 - provider failures become explicit fail-closed rows.
             rows.append(
@@ -145,8 +138,8 @@ def build_phase1_databento_historical_seed(
             config=config,
             symbol=symbol,
             now=now,
-            start=start,
-            end=end,
+            start=actual_start,
+            end=actual_end,
             one_minute=one_minute,
         )
         symbol_artifacts: list[str] = []
@@ -166,6 +159,10 @@ def build_phase1_databento_historical_seed(
                 "timeframes_written": list(timeframe_payloads.keys()) if one_minute else [],
                 "bar_counts": {timeframe: payload["bar_count"] for timeframe, payload in timeframe_payloads.items()},
                 "last_completed_bar_ts": _last_bar_ts(one_minute),
+                "provider_available_end": None if provider_available_end is None else provider_available_end.isoformat(),
+                "available_end_retry_used": available_end_retry_used,
+                "actual_start_ts": actual_start.isoformat(),
+                "actual_end_ts": actual_end.isoformat(),
                 "artifacts": symbol_artifacts,
                 "can_submit": False,
                 "live_money_eligible": False,
@@ -202,6 +199,52 @@ def build_phase1_databento_historical_seed(
     if write_artifacts:
         _write_report(config=config, report=report)
     return Phase1HistoricalSeedResult(report=report, artifacts_written=artifacts_written)
+
+
+def _fetch_seed_records(
+    *,
+    client: HistoricalSeedClient,
+    config: Phase1HistoricalSeedConfig,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+) -> tuple[list[dict[str, Any]], datetime, datetime, datetime | None, bool]:
+    try:
+        records = _fetch_range(client=client, config=config, symbol=symbol, start=start, end=end)
+        return records, start, end, None, False
+    except Exception as exc:
+        provider_available_end = _provider_available_end_from_error(exc)
+        if provider_available_end is None or provider_available_end <= start:
+            raise
+        retry_end = provider_available_end.replace(second=0, microsecond=0)
+        retry_start = retry_end - timedelta(days=max(int(config.lookback_days), 1))
+        records = _fetch_range(client=client, config=config, symbol=symbol, start=retry_start, end=retry_end)
+        return records, retry_start, retry_end, retry_end, True
+
+
+def _fetch_range(
+    *,
+    client: HistoricalSeedClient,
+    config: Phase1HistoricalSeedConfig,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    return client.get_range_json_lines(
+        dataset=config.dataset,
+        request_symbol=_continuous_symbol(symbol),
+        schema_name=config.schema_name,
+        start=start,
+        end=end,
+        stype_in=config.stype_in,
+        stype_out=config.stype_out,
+        encoding="json",
+        compression="none",
+        pretty_px=True,
+        pretty_ts=True,
+        map_symbols=True,
+        limit=config.limit,
+    )
 
 
 def _timeframe_payloads(
@@ -347,6 +390,13 @@ def _record_timestamp(record: dict[str, Any]) -> datetime | None:
     if isinstance(nested, dict):
         return _parse_datetime(nested.get("ts_event") or nested.get("ts_recv"))
     return None
+
+
+def _provider_available_end_from_error(exc: Exception) -> datetime | None:
+    match = re.search(r"available up to '([^']+)'", str(exc))
+    if not match:
+        return None
+    return _parse_datetime(match.group(1))
 
 
 def _base_report(
