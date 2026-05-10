@@ -63,6 +63,22 @@ class RecordingRunner:
         )
 
 
+@dataclass
+class SequentialRunner:
+    candles_by_symbol: dict[str, list[list[dict[str, Any]]]]
+
+    def __post_init__(self) -> None:
+        self.call_counts: dict[str, int] = {}
+
+    def __call__(self, config: TrackBDatabentoLiveFeedConfig) -> TrackBDatabentoLiveFeedResult:
+        symbol = config.instrument_family
+        count = self.call_counts.get(symbol, 0)
+        self.call_counts[symbol] = count + 1
+        sequence = self.candles_by_symbol.get(symbol, [])
+        candles = sequence[min(count, len(sequence) - 1)] if sequence else []
+        return RecordingRunner({symbol: candles})(config)
+
+
 def _config(root: Path, **overrides: object) -> Phase1DatabentoLiveRuntimeCandlesConfig:
     values = {
         "repo_root": root,
@@ -92,6 +108,58 @@ def _live_candles(count: int = 10, *, end: datetime = NOW - timedelta(minutes=1)
             }
         )
     return rows
+
+
+def _write_existing_phase1_payloads(root: Path, symbol: str, *, generated_at: datetime = NOW) -> None:
+    for timeframe, count in (("1m", 10), ("3m", 3), ("5m", 2)):
+        path = (
+            root
+            / "outputs"
+            / "track_b_execution_core"
+            / "phase1_runtime_market_data"
+            / symbol
+            / timeframe
+            / "latest_runtime_candles.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        bars = [
+            {
+                "bar_start": (generated_at - timedelta(minutes=index + 1)).isoformat(),
+                "bar_end": (generated_at - timedelta(minutes=index)).isoformat(),
+                "open": 1,
+                "high": 1,
+                "low": 1,
+                "close": 1,
+                "volume": 1,
+                "completed": True,
+            }
+            for index in range(count, 0, -1)
+        ]
+        path.write_text(
+            json.dumps(
+                {
+                    "source": "DATABENTO_REALTIME_PHASE1",
+                    "source_id": f"DATABENTO_REALTIME_PHASE1_{symbol.lower()}",
+                    "generated_at": generated_at.isoformat(),
+                    "symbol": symbol,
+                    "instrument": symbol,
+                    "root": symbol,
+                    "timeframe": timeframe,
+                    "bar_count": count,
+                    "first_bar_ts": bars[0]["bar_end"],
+                    "last_completed_bar_ts": bars[-1]["bar_end"],
+                    "historical_seed_ready": False,
+                    "realtime_feed_confirmed": True,
+                    "research_artifact_used": False,
+                    "archive_artifact_used": False,
+                    "completed_candles_only": True,
+                    "can_submit": False,
+                    "live_money_eligible": False,
+                    "bars": bars,
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 def test_phase1_live_writer_writes_1m_3m_5m_artifacts_and_readiness_passes(tmp_path: Path) -> None:
@@ -135,6 +203,67 @@ def test_phase1_live_writer_writes_1m_3m_5m_artifacts_and_readiness_passes(tmp_p
     gc = next(row for row in readiness.rows if row["symbol"] == "GC")
     assert gc["realtime_feed_confirmed"] is True
     assert gc["runtime_candles_ready"] is True
+
+
+def test_symbol_accumulation_retries_until_live_bars_are_complete(tmp_path: Path) -> None:
+    runner = SequentialRunner({"GC": [_live_candles(1), _live_candles(10)]})
+
+    result = build_phase1_databento_live_runtime_candles(
+        config=_config(tmp_path, symbols=("GC",), max_accumulation_attempts=3),
+        live_runner=runner,
+    )
+
+    assert runner.call_counts["GC"] == 2
+    assert result.report["realtime_feed_confirmed_count"] == 1
+    assert result.report["rows"][0]["realtime_feed_confirmed"] is True
+    assert result.report["rows"][0]["attempt_count"] == 2
+
+
+def test_partial_refresh_does_not_overwrite_existing_fresh_confirmed_phase1_artifacts(tmp_path: Path) -> None:
+    _write_existing_phase1_payloads(tmp_path, "GC")
+    original = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+        / "GC"
+        / "1m"
+        / "latest_runtime_candles.json"
+    ).read_text(encoding="utf-8")
+    runner = RecordingRunner({"GC": _live_candles(1)})
+
+    result = build_phase1_databento_live_runtime_candles(
+        config=_config(tmp_path, symbols=("GC",), max_accumulation_attempts=2),
+        live_runner=runner,
+    )
+
+    assert result.report["rows"][0]["realtime_feed_confirmed"] is True
+    assert result.report["rows"][0]["block_reason"] == "PRESERVED_EXISTING_CONFIRMED_RUNTIME_CANDLES"
+    assert result.artifacts_written == []
+    assert (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+        / "GC"
+        / "1m"
+        / "latest_runtime_candles.json"
+    ).read_text(encoding="utf-8") == original
+
+
+def test_gc_can_confirm_even_when_other_phase1_symbols_are_thin(tmp_path: Path) -> None:
+    runner = RecordingRunner({"GC": _live_candles(10), "NQ": _live_candles(1)})
+
+    result = build_phase1_databento_live_runtime_candles(
+        config=_config(tmp_path, symbols=("GC", "NQ"), max_accumulation_attempts=2),
+        live_runner=runner,
+    )
+
+    rows = {row["symbol"]: row for row in result.report["rows"]}
+    assert rows["GC"]["realtime_feed_confirmed"] is True
+    assert rows["NQ"]["realtime_feed_confirmed"] is False
+    assert result.report["realtime_feed_confirmed_count"] == 1
+    assert result.report["final_classification"] == "PHASE1_REALTIME_MARKET_DATA_PARTIAL_OR_BLOCKED"
 
 
 def test_realtime_confirmation_requires_fresh_complete_live_bars(tmp_path: Path) -> None:

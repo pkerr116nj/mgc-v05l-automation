@@ -56,6 +56,8 @@ class Phase1DatabentoLiveRuntimeCandlesConfig:
     min_bars: int = 8
     max_records: int = 90
     max_seconds_per_symbol: float = 75.0
+    max_accumulation_attempts: int = 8
+    max_accumulation_seconds_per_symbol: float = 600.0
     max_workers: int = 10
     max_latest_1m_age_seconds: int = 90
     max_completed_5m_age_seconds: int = 360
@@ -83,27 +85,21 @@ def build_phase1_databento_live_runtime_candles(
     rows_by_symbol: dict[str, dict[str, Any]] = {}
     artifacts_written: list[Path] = []
 
-    def produce_symbol(symbol: str) -> tuple[str, TrackBDatabentoLiveFeedResult | None, str | None]:
-        try:
-            return symbol, runner(_live_config_for_symbol(config=config, symbol=symbol)), None
-        except Exception as exc:  # noqa: BLE001 - provider/runtime errors become fail-closed rows.
-            return symbol, None, str(exc)
+    def produce_symbol(symbol: str) -> tuple[str, dict[str, Any], list[Path]]:
+        return _produce_symbol_with_accumulation(
+            config=config,
+            symbol=symbol,
+            now=now,
+            runner=runner,
+            write_artifacts=write_artifacts,
+        )
 
     max_workers = max(max(len(symbols), 1), int(config.max_workers))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(produce_symbol, symbol): symbol for symbol in symbols}
         for future in concurrent.futures.as_completed(futures):
-            symbol, live_result, error = future.result()
-            if error is not None or live_result is None:
-                rows_by_symbol[symbol] = _blocked_row(symbol=symbol, reason="DATABENTO_LIVE_PRODUCER_ERROR", detail=error or "")
-                continue
-            rows_by_symbol[symbol], written = _row_and_artifacts_for_live_result(
-                config=config,
-                symbol=symbol,
-                now=now,
-                live_result=live_result,
-                write_artifacts=write_artifacts,
-            )
+            symbol, row, written = future.result()
+            rows_by_symbol[symbol] = row
             artifacts_written.extend(written)
 
     rows = [rows_by_symbol[symbol] for symbol in symbols if symbol in rows_by_symbol]
@@ -119,6 +115,12 @@ def build_phase1_databento_live_runtime_candles(
         "symbols": list(symbols),
         "phase1_symbol_count": len(symbols),
         "realtime_feed_confirmed_count": confirmed_count,
+        "realtime_feed_confirmed_symbols": [
+            row["symbol"] for row in rows if row.get("realtime_feed_confirmed") is True
+        ],
+        "realtime_feed_blocked_symbols": [
+            row["symbol"] for row in rows if row.get("realtime_feed_confirmed") is not True
+        ],
         "historical_seed_ready": False,
         "research_artifact_used": False,
         "archive_artifact_used": False,
@@ -138,6 +140,85 @@ def _default_live_runner(config: TrackBDatabentoLiveFeedConfig) -> TrackBDataben
     return run_track_b_databento_live_runtime_feed(config=config)
 
 
+def _produce_symbol_with_accumulation(
+    *,
+    config: Phase1DatabentoLiveRuntimeCandlesConfig,
+    symbol: str,
+    now: datetime,
+    runner: LiveRunner,
+    write_artifacts: bool,
+) -> tuple[str, dict[str, Any], list[Path]]:
+    attempts = _accumulation_attempts(config)
+    last_row: dict[str, Any] | None = None
+    last_result: TrackBDatabentoLiveFeedResult | None = None
+    errors: list[str] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            live_result = runner(_live_config_for_symbol(config=config, symbol=symbol))
+        except Exception as exc:  # noqa: BLE001 - provider/runtime errors become fail-closed rows.
+            errors.append(str(exc))
+            last_row = _blocked_row(
+                symbol=symbol,
+                reason="DATABENTO_LIVE_PRODUCER_ERROR",
+                detail=str(exc),
+                attempt_count=attempt,
+            )
+            continue
+        row, _written = _row_and_artifacts_for_live_result(
+            config=config,
+            symbol=symbol,
+            now=now,
+            live_result=live_result,
+            write_artifacts=False,
+            attempt_count=attempt,
+        )
+        last_row = row
+        last_result = live_result
+        if row.get("realtime_feed_confirmed") is True:
+            final_row, written = _row_and_artifacts_for_live_result(
+                config=config,
+                symbol=symbol,
+                now=now,
+                live_result=live_result,
+                write_artifacts=write_artifacts,
+                attempt_count=attempt,
+            )
+            return symbol, final_row, written
+
+    preserved_row = _preserved_existing_confirmed_row(config=config, symbol=symbol, now=now)
+    if preserved_row is not None:
+        preserved_row["attempt_count"] = attempts
+        preserved_row["latest_attempt_block_reason"] = None if last_row is None else last_row.get("block_reason")
+        preserved_row["latest_attempt_detail"] = None if last_row is None else last_row.get("detail")
+        return symbol, preserved_row, []
+
+    if last_result is not None:
+        final_row, written = _row_and_artifacts_for_live_result(
+            config=config,
+            symbol=symbol,
+            now=now,
+            live_result=last_result,
+            write_artifacts=write_artifacts,
+            attempt_count=attempts,
+        )
+        return symbol, final_row, written
+    return symbol, _blocked_row(
+        symbol=symbol,
+        reason="DATABENTO_LIVE_PRODUCER_ERROR",
+        detail="; ".join(errors[-3:]),
+        attempt_count=attempts,
+    ), []
+
+
+def _accumulation_attempts(config: Phase1DatabentoLiveRuntimeCandlesConfig) -> int:
+    max_attempts = max(int(config.max_accumulation_attempts), 1)
+    per_attempt_seconds = max(float(config.max_seconds_per_symbol), 0.001)
+    by_window = int(float(config.max_accumulation_seconds_per_symbol) // per_attempt_seconds)
+    if by_window * per_attempt_seconds < float(config.max_accumulation_seconds_per_symbol):
+        by_window += 1
+    return max(1, min(max_attempts, by_window))
+
+
 def _row_and_artifacts_for_live_result(
     *,
     config: Phase1DatabentoLiveRuntimeCandlesConfig,
@@ -145,6 +226,7 @@ def _row_and_artifacts_for_live_result(
     now: datetime,
     live_result: TrackBDatabentoLiveFeedResult,
     write_artifacts: bool,
+    attempt_count: int = 1,
 ) -> tuple[dict[str, Any], list[Path]]:
     live_event = live_result.live_1m_candles_event or _fallback_legacy_live_event(config=config, symbol=symbol)
     live_connected = live_result.report.get("live_feed_connected") is True or live_event is not None
@@ -155,6 +237,7 @@ def _row_and_artifacts_for_live_result(
                 reason=str(live_result.report.get("primary_blocker") or "DATABENTO_LIVE_NOT_CONNECTED"),
                 detail=str(live_result.report.get("live_runtime_feed_verdict") or ""),
                 live_report_path=str(live_result.report_json),
+                attempt_count=attempt_count,
             ),
             [],
         )
@@ -201,11 +284,70 @@ def _row_and_artifacts_for_live_result(
             "incomplete_timeframes": incomplete,
             "not_confirmed_timeframes": not_confirmed,
             "live_report_path": str(live_result.report_json),
+            "attempt_count": attempt_count,
             "can_submit": False,
             "live_money_eligible": False,
         },
         written,
     )
+
+
+def _preserved_existing_confirmed_row(
+    *,
+    config: Phase1DatabentoLiveRuntimeCandlesConfig,
+    symbol: str,
+    now: datetime,
+) -> dict[str, Any] | None:
+    payloads: dict[str, dict[str, Any]] = {}
+    for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
+        path = _runtime_candle_path(config=config, symbol=symbol, timeframe=timeframe)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not _phase1_payload_confirmed_fresh(payload=payload, symbol=symbol, timeframe=timeframe, now=now):
+            return None
+        payloads[timeframe] = payload
+    return {
+        "symbol": symbol,
+        "requested_symbol": _continuous_symbol(symbol),
+        "live_feed_connected": True,
+        "runtime_candles_written": [],
+        "bar_counts": {timeframe: payload.get("bar_count") for timeframe, payload in payloads.items()},
+        "latest_completed_bar_ts": {
+            timeframe: payload.get("last_completed_bar_ts") for timeframe, payload in payloads.items()
+        },
+        "realtime_feed_confirmed": True,
+        "block_reason": "PRESERVED_EXISTING_CONFIRMED_RUNTIME_CANDLES",
+        "incomplete_timeframes": [],
+        "not_confirmed_timeframes": [],
+        "preserved_existing_confirmed_artifacts": True,
+        "can_submit": False,
+        "live_money_eligible": False,
+    }
+
+
+def _phase1_payload_confirmed_fresh(
+    *,
+    payload: Mapping[str, Any],
+    symbol: str,
+    timeframe: str,
+    now: datetime,
+) -> bool:
+    if str(payload.get("symbol") or "").strip().upper() != symbol:
+        return False
+    if str(payload.get("timeframe") or "").strip() != timeframe:
+        return False
+    if payload.get("realtime_feed_confirmed") is not True:
+        return False
+    if payload.get("historical_seed_ready") is True:
+        return False
+    if payload.get("research_artifact_used") is True or payload.get("archive_artifact_used") is True:
+        return False
+    generated_at = _parse_datetime(payload.get("generated_at"))
+    if generated_at is None:
+        return False
+    return max(0.0, (now - generated_at).total_seconds()) <= FRESHNESS_SECONDS_BY_TIMEFRAME[timeframe]
 
 
 def _live_config_for_symbol(
@@ -371,7 +513,14 @@ def _min_bars_for_timeframe(*, config: Phase1DatabentoLiveRuntimeCandlesConfig, 
     return 1
 
 
-def _blocked_row(*, symbol: str, reason: str, detail: str = "", live_report_path: str | None = None) -> dict[str, Any]:
+def _blocked_row(
+    *,
+    symbol: str,
+    reason: str,
+    detail: str = "",
+    live_report_path: str | None = None,
+    attempt_count: int = 1,
+) -> dict[str, Any]:
     return {
         "symbol": symbol,
         "requested_symbol": _continuous_symbol(symbol),
@@ -381,6 +530,7 @@ def _blocked_row(*, symbol: str, reason: str, detail: str = "", live_report_path
         "block_reason": reason,
         "detail": detail,
         "live_report_path": live_report_path,
+        "attempt_count": attempt_count,
         "can_submit": False,
         "live_money_eligible": False,
     }
@@ -446,6 +596,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-bars", type=int, default=8)
     parser.add_argument("--max-records", type=int, default=90)
     parser.add_argument("--max-seconds-per-symbol", type=float, default=75.0)
+    parser.add_argument("--max-accumulation-attempts", type=int, default=8)
+    parser.add_argument("--max-accumulation-seconds-per-symbol", type=float, default=600.0)
     parser.add_argument("--max-workers", type=int, default=10)
     parser.add_argument("--no-write", action="store_true")
     return parser
@@ -468,6 +620,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_bars=args.min_bars,
             max_records=args.max_records,
             max_seconds_per_symbol=args.max_seconds_per_symbol,
+            max_accumulation_attempts=args.max_accumulation_attempts,
+            max_accumulation_seconds_per_symbol=args.max_accumulation_seconds_per_symbol,
             max_workers=args.max_workers,
         ),
         write_artifacts=not args.no_write,
