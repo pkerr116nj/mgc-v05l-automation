@@ -188,9 +188,9 @@ def audit_research_minute_backfill(*, config: ResearchBackfillAuditConfig) -> Re
         and no_2020_partitions
     )
     final_classification = (
-        "MGC_2010_TO_2020_RESEARCH_DATA_QUALITY_ACCEPTABLE"
+        f"{symbol}_2010_TO_2020_RESEARCH_DATA_QUALITY_ACCEPTABLE"
         if acceptable
-        else "MGC_2010_TO_2020_RESEARCH_DATA_QUALITY_REVIEW_REQUIRED"
+        else f"{symbol}_2010_TO_2020_RESEARCH_DATA_QUALITY_REVIEW_REQUIRED"
     )
 
     report = {

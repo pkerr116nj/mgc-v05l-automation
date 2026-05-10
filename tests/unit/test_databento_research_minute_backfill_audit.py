@@ -163,6 +163,21 @@ def test_session_coverage_reports_replay_eligibility_fields(tmp_path: Path) -> N
     assert row["exclusion_reason"] == "ACTIVE_MINUTES_BELOW_75_PERCENT"
 
 
+def test_audit_classification_and_session_rows_are_symbol_specific(tmp_path: Path) -> None:
+    bars = [
+        datetime(2019, 12, 2, 14, 0, tzinfo=timezone.utc),
+        datetime(2019, 12, 2, 14, 1, tzinfo=timezone.utc),
+    ]
+    _write_parquet(tmp_path, year=2019, month=12, bar_ends=bars, symbol="MNQ")
+    _write_metadata(tmp_path, year=2019, month=12, row_count=len(bars), symbol="MNQ")
+
+    result = audit_research_minute_backfill(config=_config(tmp_path, symbol="MNQ"))
+
+    assert result.report["symbol"] == "MNQ"
+    assert result.report["final_classification"] == "MNQ_2010_TO_2020_RESEARCH_DATA_QUALITY_ACCEPTABLE"
+    assert {row["symbol"] for row in result.report["session_coverage"]} == {"MNQ"}
+
+
 def test_audit_flags_2020_partitions_and_runtime_artifact_metadata(tmp_path: Path) -> None:
     _write_parquet(tmp_path, year=2020, month=1, bar_ends=[datetime(2020, 1, 2, 0, 0, tzinfo=timezone.utc)])
     _write_metadata(tmp_path, year=2020, month=1, row_count=1, runtime_artifact=True)
