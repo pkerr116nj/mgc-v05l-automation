@@ -792,7 +792,13 @@ governance_artifact_failure = any(
     check.get("name") in governance_artifact_check_names and check.get("status") == "FAIL"
     for check in checks
 )
-weekend_status = "PASS" if MODE == "weekend-static" and not blocking else status if MODE == "weekend-static" else "PASS" if not blocking else "FAIL"
+weekend_status = (
+    "PASS"
+    if MODE == "weekend-static" and not blocking
+    else status
+    if MODE == "weekend-static"
+    else "NOT_APPLICABLE"
+)
 monday_status = "NOT_APPLICABLE" if MODE == "weekend-static" else status
 result = {
     "schema_version": "track_b_paper_preflight_v1",
