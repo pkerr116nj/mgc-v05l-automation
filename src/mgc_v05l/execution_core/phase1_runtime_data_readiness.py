@@ -103,9 +103,13 @@ def _ticker_readiness(*, symbol: str, config: Phase1RuntimeDataReadinessConfig, 
     }
     candle_ready = all(check["ready"] for check in candle_checks.values())
     feature_ready = all(check["ready"] for check in feature_checks.values())
+    historical_seed_ready = all(bool(check.get("historical_seed_ready")) for check in candle_checks.values())
+    realtime_feed_confirmed = all(bool(check.get("realtime_feed_confirmed", check.get("ready"))) for check in candle_checks.values())
     return {
         "symbol": symbol,
         "timeframes": list(PHASE1_RUNTIME_TIMEFRAMES),
+        "historical_seed_ready": historical_seed_ready,
+        "realtime_feed_confirmed": realtime_feed_confirmed,
         "runtime_candles_ready": candle_ready,
         "runtime_candles_block_reason": "READY" if candle_ready else _first_reason(candle_checks),
         "derived_features_ready": feature_ready,
@@ -136,6 +140,10 @@ def _artifact_check(
     generated_at = _parse_datetime(payload.get("generated_at"))
     source_id = str(payload.get("source_id") or "").strip()
     completed_only = payload.get("completed_candles_only")
+    historical_seed_ready = bool(payload.get("historical_seed_ready"))
+    realtime_feed_confirmed = bool(payload.get("realtime_feed_confirmed", True))
+    research_artifact_used = bool(payload.get("research_artifact_used"))
+    archive_artifact_used = bool(payload.get("archive_artifact_used"))
     payload_symbol = str(payload.get("symbol") or "").strip().upper()
     payload_timeframe = str(payload.get("timeframe") or "").strip()
     bars = payload.get("bars") or payload.get("candles") or payload.get("features") or []
@@ -152,6 +160,19 @@ def _artifact_check(
         return _not_ready(path=path, reason="COMPLETED_CANDLE_SEMANTICS_MISSING", kind=kind)
     if bar_count <= 0:
         return _not_ready(path=path, reason="RUNTIME_BARS_MISSING", kind=kind)
+    if research_artifact_used:
+        return _not_ready(path=path, reason="RESEARCH_ARTIFACT_USED", kind=kind)
+    if archive_artifact_used:
+        return _not_ready(path=path, reason="ARCHIVE_ARTIFACT_USED", kind=kind)
+    if kind == "candles" and historical_seed_ready and not realtime_feed_confirmed:
+        return _not_ready(
+            path=path,
+            reason="REALTIME_FEED_NOT_CONFIRMED",
+            kind=kind,
+            bar_count=bar_count,
+            historical_seed_ready=True,
+            realtime_feed_confirmed=False,
+        )
     age_seconds = max(0.0, (now - generated_at).total_seconds())
     freshness_seconds = FRESHNESS_SECONDS_BY_TIMEFRAME[timeframe]
     if age_seconds > freshness_seconds:
@@ -167,6 +188,8 @@ def _artifact_check(
         "freshness_seconds": freshness_seconds,
         "bar_count": bar_count,
         "completed_candles_only": completed_only,
+        "historical_seed_ready": historical_seed_ready,
+        "realtime_feed_confirmed": realtime_feed_confirmed,
     }
 
 
@@ -178,6 +201,8 @@ def _not_ready(
     detail: str = "",
     age_seconds: float | None = None,
     bar_count: int = 0,
+    historical_seed_ready: bool = False,
+    realtime_feed_confirmed: bool = False,
 ) -> dict[str, Any]:
     if kind == "features" and reason == "FEATURES_MISSING":
         reason = "FEATURES_NOT_IMPLEMENTED"
@@ -188,6 +213,8 @@ def _not_ready(
         "detail": detail,
         "age_seconds": age_seconds,
         "bar_count": bar_count,
+        "historical_seed_ready": historical_seed_ready,
+        "realtime_feed_confirmed": realtime_feed_confirmed,
     }
 
 

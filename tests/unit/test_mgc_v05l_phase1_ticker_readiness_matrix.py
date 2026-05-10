@@ -62,7 +62,13 @@ def _write_governance(root: Path) -> None:
     )
 
 
-def _write_runtime_artifacts(root: Path, *, symbol: str) -> None:
+def _write_runtime_artifacts(
+    root: Path,
+    *,
+    symbol: str,
+    historical_seed_ready: bool = False,
+    realtime_feed_confirmed: bool = True,
+) -> None:
     for timeframe in ("1m", "3m", "5m"):
         for base, filename, row_key in (
             ("phase1_runtime_market_data", "latest_runtime_candles.json", "bars"),
@@ -78,6 +84,8 @@ def _write_runtime_artifacts(root: Path, *, symbol: str) -> None:
                         "symbol": symbol,
                         "timeframe": timeframe,
                         "completed_candles_only": True,
+                        "historical_seed_ready": historical_seed_ready,
+                        "realtime_feed_confirmed": realtime_feed_confirmed,
                         row_key: [{"bar_end": NOW.isoformat(), "close": 100.0}],
                     }
                 ),
@@ -180,6 +188,22 @@ def test_runtime_data_ready_does_not_create_submit_permission_without_strategy_a
     assert rows["GC"]["derived_features_ready"] is True
     assert rows["GC"]["runtime_data_block_reason"] == "READY"
     assert rows["GC"]["strategy_approved"] is False
+    assert rows["GC"]["can_submit"] is False
+    assert rows["GC"]["block_reason"] == "NO_APPROVED_STRATEGY"
+
+
+def test_historical_seed_does_not_create_live_runtime_or_submit_readiness(tmp_path: Path) -> None:
+    _write_market_data_config(tmp_path)
+    _write_governance(tmp_path)
+    _write_runtime_artifacts(tmp_path, symbol="GC", historical_seed_ready=True, realtime_feed_confirmed=False)
+
+    artifacts = build_phase1_ticker_readiness_matrix(config=_config(tmp_path))
+    rows = {row["approved_phase1_symbol"]: row for row in artifacts.rows}
+
+    assert rows["GC"]["historical_seed_ready"] is True
+    assert rows["GC"]["realtime_feed_confirmed"] is False
+    assert rows["GC"]["runtime_candles_ready"] is False
+    assert rows["GC"]["runtime_data_block_reason"] == "REALTIME_FEED_NOT_CONFIRMED"
     assert rows["GC"]["can_submit"] is False
     assert rows["GC"]["block_reason"] == "NO_APPROVED_STRATEGY"
 

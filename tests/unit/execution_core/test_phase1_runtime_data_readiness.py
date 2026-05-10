@@ -31,6 +31,8 @@ def _write_artifact(
     completed_candles_only: bool | None = True,
     payload_symbol: str | None = None,
     payload_timeframe: str | None = None,
+    historical_seed_ready: bool = False,
+    realtime_feed_confirmed: bool = True,
 ) -> Path:
     base = "phase1_runtime_market_data" if kind == "candles" else "phase1_runtime_features"
     filename = "latest_runtime_candles.json" if kind == "candles" else "latest_runtime_features.json"
@@ -42,6 +44,8 @@ def _write_artifact(
         "symbol": payload_symbol or symbol,
         "timeframe": payload_timeframe or timeframe,
         "completed_candles_only": completed_candles_only,
+        "historical_seed_ready": historical_seed_ready,
+        "realtime_feed_confirmed": realtime_feed_confirmed,
         "bars" if kind == "candles" else "features": [{"bar_end": NOW.isoformat(), "close": 100.0}],
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -75,6 +79,27 @@ def test_stale_fixture_candles_fail_closed(tmp_path: Path) -> None:
 
     assert gc["runtime_candles_ready"] is False
     assert gc["candle_checks"]["1m"]["reason"] == "RUNTIME_CANDLES_STALE"
+
+
+def test_historical_seed_is_visible_but_does_not_confirm_realtime_readiness(tmp_path: Path) -> None:
+    for timeframe in ("1m", "3m", "5m"):
+        _write_artifact(
+            tmp_path,
+            symbol="GC",
+            timeframe=timeframe,
+            historical_seed_ready=True,
+            realtime_feed_confirmed=False,
+        )
+
+    artifacts = build_phase1_runtime_data_readiness(config=_config(tmp_path))
+    gc = next(row for row in artifacts.rows if row["symbol"] == "GC")
+
+    assert gc["historical_seed_ready"] is True
+    assert gc["realtime_feed_confirmed"] is False
+    assert gc["runtime_candles_ready"] is False
+    assert gc["runtime_candles_block_reason"] == "REALTIME_FEED_NOT_CONFIRMED"
+    assert all(check["historical_seed_ready"] is True for check in gc["candle_checks"].values())
+    assert all(check["realtime_feed_confirmed"] is False for check in gc["candle_checks"].values())
 
 
 def test_wrong_symbol_and_timeframe_fail_closed(tmp_path: Path) -> None:

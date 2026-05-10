@@ -163,6 +163,8 @@ def _ticker_row(
     qualification_ready = bool(metadata_present and target)
     market_data_ready = _market_data_ready(symbol=symbol, market_data=market_data)
     runtime_data = dict(runtime_data_by_symbol.get(symbol) or {})
+    historical_seed_ready = bool(runtime_data.get("historical_seed_ready"))
+    realtime_feed_confirmed = bool(runtime_data.get("realtime_feed_confirmed"))
     runtime_candles_ready = bool(runtime_data.get("runtime_candles_ready"))
     derived_features_ready = bool(runtime_data.get("derived_features_ready"))
     runtime_data_block_reason = _runtime_data_block_reason(runtime_data)
@@ -190,6 +192,8 @@ def _ticker_row(
         "contract_metadata_present": bool(metadata_present),
         "contract_qualification_ready": qualification_ready,
         "market_data_ready": market_data_ready,
+        "historical_seed_ready": historical_seed_ready,
+        "realtime_feed_confirmed": realtime_feed_confirmed,
         "runtime_candles_ready": runtime_candles_ready,
         "derived_features_ready": derived_features_ready,
         "runtime_data_block_reason": runtime_data_block_reason,
