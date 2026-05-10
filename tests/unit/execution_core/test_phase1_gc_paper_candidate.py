@@ -20,19 +20,25 @@ def _runtime_candle_root(root: Path) -> Path:
     return root / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data"
 
 
+def _runtime_feature_root(root: Path) -> Path:
+    return root / "outputs" / "track_b_execution_core" / "phase1_runtime_features"
+
+
 def _write_seed_artifact(
     root: Path,
     *,
     symbol: str = "GC",
     timeframe: str = "1m",
     bars: list[dict[str, object]] | None = None,
+    realtime_feed_confirmed: bool = False,
+    source_id: str = "DATABENTO_HISTORICAL_SEED",
 ) -> Path:
     path = _runtime_candle_root(root) / symbol / timeframe / "latest_runtime_candles.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = bars if bars is not None else _bars(timeframe=timeframe)
     payload = {
         "source": "DATABENTO_HISTORICAL_SEED",
-        "source_id": "databento_historical_seed:test",
+        "source_id": source_id,
         "generated_at": NOW.isoformat(),
         "symbol": symbol,
         "instrument": symbol,
@@ -42,8 +48,8 @@ def _write_seed_artifact(
         "end_ts": rows[-1]["bar_end"],
         "bar_count": len(rows),
         "last_completed_bar_ts": rows[-1]["bar_end"],
-        "historical_seed_ready": True,
-        "realtime_feed_confirmed": False,
+        "historical_seed_ready": not realtime_feed_confirmed,
+        "realtime_feed_confirmed": realtime_feed_confirmed,
         "research_artifact_used": False,
         "archive_artifact_used": False,
         "completed_candles_only": True,
@@ -56,9 +62,38 @@ def _write_seed_artifact(
     return path
 
 
+def _write_feature_artifact(root: Path, *, timeframe: str = "1m") -> Path:
+    path = _runtime_feature_root(root) / "GC" / timeframe / "latest_runtime_features.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "source_id": "databento_live:test",
+        "generated_at": NOW.isoformat(),
+        "symbol": "GC",
+        "timeframe": timeframe,
+        "completed_candles_only": True,
+        "historical_seed_ready": False,
+        "realtime_feed_confirmed": True,
+        "features": [{"bar_end": NOW.isoformat(), "close_to_close_pressure": 0.1}],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 def _write_gc_seed_bundle(root: Path) -> None:
     for timeframe in ("1m", "3m", "5m"):
         _write_seed_artifact(root, timeframe=timeframe, bars=_bars(timeframe=timeframe))
+
+
+def _write_gc_live_bundle(root: Path) -> None:
+    for timeframe in ("1m", "3m", "5m"):
+        _write_seed_artifact(
+            root,
+            timeframe=timeframe,
+            bars=_bars(timeframe=timeframe),
+            realtime_feed_confirmed=True,
+            source_id="databento_live:test",
+        )
+        _write_feature_artifact(root, timeframe=timeframe)
 
 
 def _bars(*, timeframe: str, count: int = 12) -> list[dict[str, object]]:
@@ -89,9 +124,11 @@ def _config(tmp_path: Path, **overrides: object) -> Phase1GcCandidateConfig:
     values = {
         "repo_root": gc_candidate.REPO_ROOT,
         "runtime_candle_root": _runtime_candle_root(tmp_path),
+        "runtime_feature_root": _runtime_feature_root(tmp_path),
         "output_dir": tmp_path / "reports",
         "write_report": False,
         "max_bars": 30,
+        "now": NOW,
     }
     values.update(overrides)
     return Phase1GcCandidateConfig(**values)
@@ -152,9 +189,29 @@ def test_missing_seed_blocks_gc_candidate_evaluation(tmp_path: Path) -> None:
     artifacts = build_phase1_gc_paper_candidate(config=_config(tmp_path))
 
     assert artifacts.evaluation["candidate_evaluation_ready"] is False
-    assert artifacts.evaluation["block_reason"] == "HISTORICAL_SEED_MISSING"
+    assert artifacts.evaluation["block_reason"] == "RUNTIME_CANDLES_MISSING"
     assert artifacts.evaluation["can_submit"] is False
     assert artifacts.evaluation["submit_attempted"] is False
+
+
+def test_mocked_live_gates_can_make_gc_candidate_paper_watch_ready_without_submit(tmp_path: Path) -> None:
+    _write_gc_live_bundle(tmp_path)
+
+    artifacts = build_phase1_gc_paper_candidate(
+        config=_config(tmp_path, guarded_route_authorized=True)
+    )
+
+    assert artifacts.evaluation["candidate_evaluation_ready"] is True
+    assert artifacts.evaluation["historical_seed_ready"] is False
+    assert artifacts.evaluation["realtime_feed_confirmed"] is True
+    assert artifacts.evaluation["runtime_candles_ready"] is True
+    assert artifacts.evaluation["derived_features_ready"] is True
+    assert artifacts.evaluation["paper_candidate_approved"] is True
+    assert artifacts.evaluation["guarded_route_authorized"] is True
+    assert artifacts.evaluation["paper_watch_ready"] is True
+    assert artifacts.evaluation["can_submit"] is False
+    assert artifacts.evaluation["submit_attempted"] is False
+    assert artifacts.evaluation["live_money_eligible"] is False
 
 
 def test_non_gc_tickers_are_not_strategy_promoted(tmp_path: Path) -> None:

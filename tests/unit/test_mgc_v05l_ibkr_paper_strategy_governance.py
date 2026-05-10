@@ -322,6 +322,45 @@ def test_governance_builds_strategy_rows_and_status_payload(tmp_path: Path) -> N
     assert nq["current_routing_mode"] == "IBKR_ROUTED"
 
 
+def test_gc_phase1_candidate_is_marked_paper_approved_without_live_money(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_position_quantity=0.0, ledger_position_quantity=0.0)
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_strategy_performance(tmp_path)
+    audit_path = tmp_path / "outputs" / "operator_dashboard" / "paper_signal_intent_fill_audit_snapshot.json"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "id": "asia_london_participation_core_v1__GC",
+                        "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                        "instrument": "GC",
+                        "family": "asia_london_participation_core_v1",
+                        "current_strategy_status": "READY",
+                        "entries_enabled": True,
+                        "eligible_now": False,
+                        "audit_verdict": "READY",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+    gc = next(row for row in artifacts.performance_rows if row["strategy_id"] == "gc_1x_asia_london_participation__asia_london_long_v5")
+
+    assert gc["strategy_approved"] is True
+    assert gc["paper_strategy_approved"] is True
+    assert gc["approved_phase1_strategy"] is True
+    assert gc["paper_candidate_scope"] == "GC_ONLY"
+    assert gc["live_money_eligible"] is False
+    assert gc["ibkr_bridge_submit_capable"] is True
+    assert gc["submit_allowed"] is True
+
+
 def test_write_artifacts_and_load_by_bridge_strategy_id(tmp_path: Path) -> None:
     _write_monitor(tmp_path)
     _write_ledger(tmp_path)

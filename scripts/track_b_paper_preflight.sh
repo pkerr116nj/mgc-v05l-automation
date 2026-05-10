@@ -331,6 +331,62 @@ except Exception as exc:
     matrix_rows = []
 
 try:
+    from mgc_v05l.execution_core.phase1_gc_paper_candidate import (
+        CHOSEN_GC_STRATEGY_ID,
+        Phase1GcCandidateConfig,
+        build_phase1_gc_paper_candidate,
+    )
+
+    gc_candidate_artifacts = build_phase1_gc_paper_candidate(
+        config=Phase1GcCandidateConfig(
+            repo_root=REPO_ROOT,
+            write_report=False,
+            max_bars=240,
+            guarded_route_authorized=False,
+        )
+    )
+    gc_candidate_report = dict(gc_candidate_artifacts.report)
+    gc_candidate_eval = dict(gc_candidate_artifacts.evaluation)
+    gc_candidate_realtime_condition = (
+        gc_candidate_report.get("realtime_feed_confirmed") is not True
+        if MODE == "weekend-static"
+        else True
+    )
+    gc_candidate_passed = (
+        gc_candidate_report.get("chosen_strategy") == CHOSEN_GC_STRATEGY_ID
+        and gc_candidate_eval.get("candidate_evaluation_ready") is True
+        and gc_candidate_report.get("paper_candidate_approved") is True
+        and gc_candidate_report.get("paper_watch_ready") is False
+        and gc_candidate_report.get("can_submit") is False
+        and gc_candidate_report.get("live_money_eligible") is False
+        and gc_candidate_realtime_condition
+    )
+    add(
+        "gc_phase1_paper_candidate_visible_no_submit",
+        gc_candidate_passed,
+        True,
+        (
+            f"strategy={gc_candidate_report.get('chosen_strategy')}; "
+            f"candidate_evaluation_ready={gc_candidate_eval.get('candidate_evaluation_ready')}; "
+            f"paper_candidate_approved={gc_candidate_report.get('paper_candidate_approved')}; "
+            f"paper_watch_ready={gc_candidate_report.get('paper_watch_ready')}; "
+            f"can_submit={gc_candidate_report.get('can_submit')}; "
+            f"live_money_eligible={gc_candidate_report.get('live_money_eligible')}; "
+            f"realtime_feed_confirmed={gc_candidate_report.get('realtime_feed_confirmed')}"
+        ),
+        strategy_id=gc_candidate_report.get("chosen_strategy"),
+        paper_watch_ready=gc_candidate_report.get("paper_watch_ready"),
+        can_submit=gc_candidate_report.get("can_submit"),
+    )
+except Exception as exc:
+    add(
+        "gc_phase1_paper_candidate_visible_no_submit",
+        False,
+        True,
+        f"GC Phase-1 paper candidate visibility check failed: {exc}",
+    )
+
+try:
     from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
         Phase1RuntimeDataReadinessConfig,
         build_phase1_runtime_data_readiness,

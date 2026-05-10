@@ -17,6 +17,9 @@ from .ibkr_paper_strategy_porting import (
     lane_submit_bridge_adapter,
     run_ibkr_paper_strategy_porting,
 )
+from ..execution_core.phase1_gc_paper_candidate_registry import (
+    is_phase1_gc_guarded_paper_eligible_strategy,
+)
 
 _DEFAULT_OUTPUT_DIR = Path("outputs") / "reports" / "ibkr_strategy_governance"
 _DEFAULT_VAR_STATUS_PATH = Path("var") / "per_strategy_paper_status.json"
@@ -582,6 +585,10 @@ def _build_governance_row(
     )
     if strategy_status in {"PAUSED", "DISABLED"}:
         submit_block_reasons = list(dict.fromkeys(submit_block_reasons + [strategy_status.lower()]))
+    approved_phase1_strategy = is_phase1_gc_guarded_paper_eligible_strategy(
+        strategy_id=lane_id,
+        instrument=instrument,
+    )
     submit_allowed = not submit_block_reasons and strategy_status not in {"PAUSED", "DISABLED"}
     routing_mode, local_trading_allowed = _routing_mode_and_local_policy(
         strategy_status=strategy_status,
@@ -664,6 +671,11 @@ def _build_governance_row(
         "recent_trade_route_kind": recent_trade_route_kind,
         "recent_trade_origin_label": runtime_activity.get("recent_trade_origin_label"),
         "local_trading_allowed": local_trading_allowed,
+        "strategy_approved": approved_phase1_strategy,
+        "paper_strategy_approved": approved_phase1_strategy,
+        "approved_phase1_strategy": approved_phase1_strategy,
+        "paper_candidate_scope": "GC_ONLY" if approved_phase1_strategy else None,
+        "live_money_eligible": False,
         "intent_action": intent_row.get("action"),
         "intent_reason": intent_row.get("reason"),
         "route_blockers": inventory_blockers,

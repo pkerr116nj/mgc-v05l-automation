@@ -32,8 +32,14 @@ from mgc_v05l.domain.events import OrderIntentCreatedEvent
 from mgc_v05l.domain.models import Bar
 from mgc_v05l.execution.execution_engine import ExecutionEngine
 from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
+from mgc_v05l.execution_core.phase1_gc_paper_candidate_registry import (
+    CHOSEN_GC_STRATEGY_ID,
+    PHASE1_GC_GUARDED_PAPER_ELIGIBLE_STRATEGY_IDS,
+    is_phase1_gc_guarded_paper_eligible_strategy,
+)
 from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
     DEFAULT_RUNTIME_CANDLE_ROOT,
+    DEFAULT_RUNTIME_FEATURE_ROOT,
     Phase1RuntimeDataReadinessConfig,
     build_phase1_runtime_data_readiness,
 )
@@ -45,7 +51,6 @@ DEFAULT_CONFIG_PATHS = (
     Path("config") / "live.yaml",
     Path("config") / "probationary_pattern_engine.yaml",
 )
-CHOSEN_GC_STRATEGY_ID = "gc_1x_asia_london_participation__asia_london_long_v5"
 
 
 @dataclass(frozen=True)
@@ -68,10 +73,13 @@ class Phase1GcCandidateConfig:
     repo_root: Path = REPO_ROOT
     output_dir: Path = DEFAULT_OUTPUT_DIR
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT
+    runtime_feature_root: Path = DEFAULT_RUNTIME_FEATURE_ROOT
     config_paths: tuple[Path, ...] = DEFAULT_CONFIG_PATHS
     strategy_id: str = CHOSEN_GC_STRATEGY_ID
     max_bars: int = 1440
     write_report: bool = True
+    guarded_route_authorized: bool = False
+    now: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +100,8 @@ def build_phase1_gc_paper_candidate(
         config=Phase1RuntimeDataReadinessConfig(
             repo_root=repo_root,
             runtime_candle_root=config.runtime_candle_root,
+            runtime_feature_root=config.runtime_feature_root,
+            now=config.now,
         )
     )
     gc_readiness = next(row for row in readiness.rows if row["symbol"] == "GC")
@@ -115,11 +125,19 @@ def build_phase1_gc_paper_candidate(
         ),
         "inventory_rows": inventory_rows,
         "evaluation": evaluation,
+        "approved_strategy_ids": sorted(PHASE1_GC_GUARDED_PAPER_ELIGIBLE_STRATEGY_IDS),
+        "paper_candidate_approved": is_phase1_gc_guarded_paper_eligible_strategy(
+            strategy_id=str(evaluation.get("strategy_id") or config.strategy_id),
+            instrument="GC",
+        ),
+        "guarded_route_authorized": bool(config.guarded_route_authorized),
         "non_gc_strategy_promoted": False,
         "realtime_feed_confirmed": bool(gc_readiness.get("realtime_feed_confirmed")),
         "historical_seed_ready": bool(gc_readiness.get("historical_seed_ready")),
         "runtime_candles_ready": bool(gc_readiness.get("runtime_candles_ready")),
-        "paper_watch_ready": False,
+        "derived_features_ready": bool(gc_readiness.get("derived_features_ready")),
+        "paper_watch_ready": bool(evaluation.get("paper_watch_ready")),
+        "paper_watch_block_reason": evaluation.get("paper_watch_block_reason"),
         "can_submit": False,
         "live_money_eligible": False,
         "research_artifact_used": False,
@@ -194,8 +212,8 @@ def _evaluate_selected_candidate(
     adapter = lane_submit_bridge_adapter(lane_id=selected.strategy_id)
     if adapter is None:
         return _blocked_evaluation("LANE_ADAPTER_MISSING", strategy_id=selected.strategy_id, family=selected.family)
-    if not bool(gc_readiness.get("historical_seed_ready")):
-        return _blocked_evaluation("HISTORICAL_SEED_MISSING", strategy_id=selected.strategy_id, family=selected.family)
+    if not bool(gc_readiness.get("historical_seed_ready") or gc_readiness.get("runtime_candles_ready")):
+        return _blocked_evaluation("RUNTIME_CANDLES_MISSING", strategy_id=selected.strategy_id, family=selected.family)
     candle_path = _runtime_candle_path(config=config, symbol="GC", timeframe="1m")
     bars, candle_error = _load_runtime_bars(candle_path, max_bars=config.max_bars)
     if candle_error:
@@ -209,6 +227,12 @@ def _evaluate_selected_candidate(
             if isinstance(event, OrderIntentCreatedEvent):
                 order_intents += 1
         signal_events += 1 if getattr(engine, "_last_signal_packet", None) is not None else 0  # noqa: SLF001
+    paper_watch_ready = bool(
+        gc_readiness.get("runtime_candles_ready")
+        and gc_readiness.get("derived_features_ready")
+        and gc_readiness.get("realtime_feed_confirmed")
+        and config.guarded_route_authorized
+    )
     return {
         "strategy_id": selected.strategy_id,
         "family": selected.family,
@@ -225,8 +249,17 @@ def _evaluate_selected_candidate(
         "historical_seed_ready": bool(gc_readiness.get("historical_seed_ready")),
         "realtime_feed_confirmed": bool(gc_readiness.get("realtime_feed_confirmed")),
         "runtime_candles_ready": bool(gc_readiness.get("runtime_candles_ready")),
-        "paper_watch_ready": False,
-        "paper_watch_block_reason": "REALTIME_FEED_NOT_CONFIRMED",
+        "derived_features_ready": bool(gc_readiness.get("derived_features_ready")),
+        "paper_candidate_approved": is_phase1_gc_guarded_paper_eligible_strategy(
+            strategy_id=selected.strategy_id,
+            instrument="GC",
+        ),
+        "guarded_route_authorized": bool(config.guarded_route_authorized),
+        "paper_watch_ready": paper_watch_ready,
+        "paper_watch_block_reason": "READY" if paper_watch_ready else _paper_watch_block_reason(
+            gc_readiness=gc_readiness,
+            guarded_route_authorized=config.guarded_route_authorized,
+        ),
         "can_submit": False,
         "submit_attempted": False,
         "live_money_eligible": False,
@@ -287,8 +320,14 @@ def _load_runtime_bars(path: Path, *, max_bars: int) -> tuple[list[Bar], str | N
         return [], "RUNTIME_CANDLES_INVALID"
     if bool(payload.get("research_artifact_used")) or bool(payload.get("archive_artifact_used")):
         return [], "RUNTIME_CANDLES_UNSAFE_PROVENANCE"
-    if payload.get("source") != "DATABENTO_HISTORICAL_SEED":
-        return [], "RUNTIME_CANDLES_SOURCE_NOT_SEED"
+    if not str(payload.get("source_id") or payload.get("source") or "").strip():
+        return [], "RUNTIME_CANDLES_SOURCE_MISSING"
+    if str(payload.get("symbol") or "").strip().upper() not in {"", "GC"}:
+        return [], "RUNTIME_CANDLES_SYMBOL_MISMATCH"
+    if str(payload.get("timeframe") or "").strip() not in {"", "1m"}:
+        return [], "RUNTIME_CANDLES_TIMEFRAME_MISMATCH"
+    if payload.get("completed_candles_only") is not True:
+        return [], "RUNTIME_CANDLES_NOT_COMPLETED_ONLY"
     raw_bars = list(payload.get("bars") or [])
     bars = [_bar_from_payload(row, symbol="GC", timeframe="1m") for row in raw_bars[-max(int(max_bars), 1) :]]
     bars = [bar for bar in bars if bar is not None]
@@ -360,6 +399,7 @@ def _blocked_evaluation(reason: str, **extra: Any) -> dict[str, Any]:
         "candidate_evaluation_ready": False,
         "block_reason": reason,
         "paper_watch_ready": False,
+        "paper_watch_block_reason": reason,
         "can_submit": False,
         "submit_attempted": False,
         "live_money_eligible": False,
@@ -367,6 +407,18 @@ def _blocked_evaluation(reason: str, **extra: Any) -> dict[str, Any]:
         "paper_proof_invoked": False,
         "non_gc_strategy_promoted": False,
     }
+
+
+def _paper_watch_block_reason(*, gc_readiness: dict[str, Any], guarded_route_authorized: bool) -> str:
+    if not bool(gc_readiness.get("realtime_feed_confirmed")):
+        return "REALTIME_FEED_NOT_CONFIRMED"
+    if not bool(gc_readiness.get("runtime_candles_ready")):
+        return str(gc_readiness.get("runtime_candles_block_reason") or "RUNTIME_CANDLES_NOT_READY")
+    if not bool(gc_readiness.get("derived_features_ready")):
+        return str(gc_readiness.get("derived_features_block_reason") or "FEATURES_NOT_READY")
+    if not guarded_route_authorized:
+        return "GUARDED_ROUTE_NOT_AUTHORIZED"
+    return "NOT_READY"
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -414,6 +466,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             strategy_id=str(args.strategy_id),
             max_bars=int(args.max_bars),
             write_report=not bool(args.no_write),
+            guarded_route_authorized=False,
         )
     )
     print(

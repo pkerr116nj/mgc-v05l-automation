@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mgc_v05l.app.phase1_ticker_readiness_matrix import (
     PHASE1_TICKER_ORDER,
     Phase1TickerReadinessMatrixConfig,
+    REPO_ROOT,
     build_phase1_ticker_readiness_matrix,
     write_phase1_ticker_readiness_matrix_artifacts,
 )
@@ -36,19 +37,27 @@ def _write_market_data_config(root: Path) -> None:
     )
 
 
-def _write_governance(root: Path) -> None:
+def _write_governance(root: Path, *, approve_gc: bool = False) -> None:
     path = root / "var" / "per_strategy_paper_status.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    gc_row = {
+        "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+        "instrument": "GC",
+        "submit_allowed": True,
+        "strategy_status": "WATCHLIST",
+    }
+    if approve_gc:
+        gc_row |= {
+            "strategy_approved": True,
+            "paper_strategy_approved": True,
+            "approved_phase1_strategy": True,
+            "strategy_status": "PROBATION_ACTIVE",
+        }
     path.write_text(
         json.dumps(
             {
                 "strategies": [
-                    {
-                        "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
-                        "instrument": "GC",
-                        "submit_allowed": True,
-                        "strategy_status": "WATCHLIST",
-                    },
+                    gc_row,
                     {
                         "strategy_id": "nq_1x_asia_london_participation__asia_london_long_v5",
                         "instrument": "NQ",
@@ -83,12 +92,26 @@ def _write_runtime_artifacts(
                         "source_id": "databento_live:test",
                         "symbol": symbol,
                         "timeframe": timeframe,
-                        "completed_candles_only": True,
-                        "historical_seed_ready": historical_seed_ready,
-                        "realtime_feed_confirmed": realtime_feed_confirmed,
-                        row_key: [{"bar_end": NOW.isoformat(), "close": 100.0}],
-                    }
-                ),
+                            "completed_candles_only": True,
+                            "historical_seed_ready": historical_seed_ready,
+                            "realtime_feed_confirmed": realtime_feed_confirmed,
+                            row_key: [
+                                {
+                                    "bar_start": (NOW.replace(second=0, microsecond=0) - {
+                                        "1m": timedelta(minutes=1),
+                                        "3m": timedelta(minutes=3),
+                                        "5m": timedelta(minutes=5),
+                                    }[timeframe]).isoformat(),
+                                    "bar_end": NOW.isoformat(),
+                                    "open": 100.0,
+                                    "high": 101.0,
+                                    "low": 99.5,
+                                    "close": 100.5,
+                                    "volume": 100,
+                                }
+                            ],
+                        }
+                    ),
                 encoding="utf-8",
             )
 
@@ -97,6 +120,18 @@ def _config(root: Path) -> Phase1TickerReadinessMatrixConfig:
     return Phase1TickerReadinessMatrixConfig(
         repo_root=root,
         output_dir=Path("outputs") / "reports" / "phase1_ticker_readiness_matrix",
+        now=NOW,
+    )
+
+
+def _repo_config_with_tmp_artifacts(root: Path) -> Phase1TickerReadinessMatrixConfig:
+    return Phase1TickerReadinessMatrixConfig(
+        repo_root=REPO_ROOT,
+        market_data_config_path=root / "config" / "market_data_providers.json",
+        governance_status_path=root / "var" / "per_strategy_paper_status.json",
+        runtime_candle_dir=root / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data",
+        feature_state_dir=root / "outputs" / "track_b_execution_core" / "phase1_runtime_features",
+        output_dir=root / "outputs" / "reports" / "phase1_ticker_readiness_matrix",
         now=NOW,
     )
 
@@ -206,6 +241,35 @@ def test_historical_seed_does_not_create_live_runtime_or_submit_readiness(tmp_pa
     assert rows["GC"]["runtime_data_block_reason"] == "REALTIME_FEED_NOT_CONFIRMED"
     assert rows["GC"]["can_submit"] is False
     assert rows["GC"]["block_reason"] == "NO_APPROVED_STRATEGY"
+    assert rows["GC"]["paper_candidate_visible"] is True
+    assert rows["GC"]["paper_candidate_approved"] is True
+    assert rows["GC"]["paper_watch_ready"] is False
+    assert rows["GC"]["paper_watch_block_reason"] in {
+        "REALTIME_FEED_NOT_CONFIRMED",
+        "GC_PAPER_CANDIDATE_NOT_EVALUATION_READY",
+    }
+
+
+def test_gc_candidate_can_become_paper_watch_ready_only_after_mocked_live_route_gates(tmp_path: Path) -> None:
+    _write_market_data_config(tmp_path)
+    _write_governance(tmp_path, approve_gc=True)
+    _write_runtime_artifacts(tmp_path, symbol="GC")
+
+    artifacts = build_phase1_ticker_readiness_matrix(config=_repo_config_with_tmp_artifacts(tmp_path))
+    rows = {row["approved_phase1_symbol"]: row for row in artifacts.rows}
+
+    assert rows["GC"]["paper_candidate_visible"] is True
+    assert rows["GC"]["paper_candidate_strategy_id"] == "gc_1x_asia_london_participation__asia_london_long_v5"
+    assert rows["GC"]["paper_candidate_approved"] is True
+    assert rows["GC"]["paper_candidate_evaluation_ready"] is True
+    assert rows["GC"]["strategy_approved"] is True
+    assert rows["GC"]["guarded_route_authorized"] is True
+    assert rows["GC"]["paper_watch_ready"] is True
+    assert rows["GC"]["can_submit"] is True
+    assert rows["GC"]["block_reason"] == "READY"
+    assert rows["GC"]["live_money_eligible"] is False
+    assert all(rows[symbol]["paper_candidate_visible"] is False for symbol in PHASE1_TICKER_ORDER if symbol != "GC")
+    assert all(rows[symbol]["can_submit"] is False for symbol in PHASE1_TICKER_ORDER if symbol != "GC")
 
 
 def test_strategy_approved_symbol_is_blocked_when_runtime_data_missing(tmp_path: Path) -> None:
