@@ -27,6 +27,7 @@ DEFAULT_CONFIGS=(
   "${REPO_ROOT}/config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us_production_track.yaml"
   "${REPO_ROOT}/config/probationary_pattern_engine_paper_atp_companion_v1_gc_asia_us_production_track_5m.yaml"
   "${REPO_ROOT}/config/probationary_pattern_engine_paper_atp_companion_shared_runtime.yaml"
+  "${REPO_ROOT}/config/probationary_pattern_engine_paper_track_b_restored.yaml"
 )
 ATPE_CANARY_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_atpe_canary.yaml"
 GC_MGC_ACCEPTANCE_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_gc_mgc_acceptance.yaml"
