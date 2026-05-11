@@ -3620,6 +3620,7 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const strategyRows = asArray<JsonRecord>(trading.strategy_performance);
   const instrumentRows = asArray<JsonRecord>(trading.instrument_performance);
   const zeroActivityDiagnostic = asRecord(trading.zero_activity_diagnostic);
+  const phase1GcReadiness = asRecord(trading.phase1_gc_readiness);
   const noSignalAttribution = Object.keys(asRecord(trading.no_signal_attribution_rollup)).length
     ? asRecord(trading.no_signal_attribution_rollup)
     : asRecord(zeroActivityDiagnostic.no_signal_attribution_rollup);
@@ -3642,6 +3643,7 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const featureContextBlockedRows = startupReadinessRows.filter((row) => row.context_ready === false);
   const liveExecutionBlockedRows = startupReadinessRows.filter((row) => row.live_execution_approved === false);
   const zeroActivityClassification = String(zeroActivityDiagnostic.diagnosis_classification ?? "").toUpperCase();
+  const phase1GcReadyForWatch = phase1GcReadiness.ready_for_guarded_paper_watch === true && phase1GcReadiness.live_money_eligible !== true;
   const completedDecisionAudit = asRecord(zeroActivityDiagnostic.completed_decision_bar_audit);
   const completedDecisionAuditClassification = String(completedDecisionAudit.classification ?? "").toUpperCase();
   const trackBPaperStatus =
@@ -3651,6 +3653,12 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
           message: "Track B PAPER review is required before interpreting autonomous trading status as clean.",
           tone: "danger" as Tone,
         }
+      : phase1GcReadyForWatch
+        ? {
+            code: "GC_PHASE1_READY_FOR_GUARDED_PAPER_WATCH",
+            message: "GC Phase-1 candidate is ready for guarded PAPER watch after current monday-live preflight. Legacy lifecycle diagnostics remain read-only context.",
+            tone: "good" as Tone,
+          }
       : zeroActivityClassification === "STALE_DIAGNOSTIC"
         ? {
             code: "TRACK_B_PAPER_DIAGNOSTIC_STALE",
@@ -3745,6 +3753,36 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
             {missingArtifacts.map((path) => (
               <div key={path}>Missing compact summary artifact: {path}</div>
             ))}
+          </div>
+        ) : null}
+        {phase1GcReadiness.available === true ? (
+          <div className={`status-banner ${phase1GcReadyForWatch ? "good" : statusTone(phase1GcReadiness.classification)}`}>
+            <div className="status-banner-main">
+              <div className="status-banner-title">{formatValue(phase1GcReadiness.classification)}</div>
+              <div className="status-banner-body">
+                {phase1GcReadyForWatch
+                  ? "Current GC Phase-1 preflight has no blocking reasons; submit authority remains guarded by strategy signal, route, broker, and PAPER gates."
+                  : formatValue(phase1GcReadiness.blocker ?? phase1GcReadiness.detail)}
+              </div>
+              {zeroActivityClassification === "STALE_DIAGNOSTIC" ? (
+                <div className="status-banner-body secondary">
+                  Legacy zero-activity/lifecycle diagnostic is stale and is not authoritative for current GC Phase-1 preflight readiness.
+                </div>
+              ) : null}
+              <div className="status-banner-body secondary">Source: {formatValue(phase1GcReadiness.path)}</div>
+            </div>
+          </div>
+        ) : null}
+        {phase1GcReadiness.available === true ? (
+          <div className="metric-grid compact">
+            <MetricCard label="GC Strategy" value={formatValue(phase1GcReadiness.strategy_id)} />
+            <MetricCard label="Candidate Ready" value={formatValue(phase1GcReadiness.candidate_evaluation_ready)} tone={phase1GcReadiness.candidate_evaluation_ready === true ? "good" : "warn"} />
+            <MetricCard label="Candidate Approved" value={formatValue(phase1GcReadiness.paper_candidate_approved)} tone={phase1GcReadiness.paper_candidate_approved === true ? "good" : "warn"} />
+            <MetricCard label="Realtime Feed" value={formatValue(phase1GcReadiness.realtime_feed_confirmed)} tone={phase1GcReadiness.realtime_feed_confirmed === true ? "good" : "warn"} />
+            <MetricCard label="Preflight" value={formatValue(phase1GcReadiness.preflight_status)} tone={statusTone(phase1GcReadiness.preflight_status)} />
+            <MetricCard label="Can Submit" value={formatValue(phase1GcReadiness.can_submit)} tone={phase1GcReadiness.can_submit === true ? "warn" : "good"} />
+            <MetricCard label="Live Money" value={formatValue(phase1GcReadiness.live_money_eligible)} tone={phase1GcReadiness.live_money_eligible === true ? "danger" : "good"} />
+            <MetricCard label="Preflight Age" value={formatValue(phase1GcReadiness.age_seconds)} tone={phase1GcReadiness.stale === true ? "warn" : "good"} />
           </div>
         ) : null}
         <div className="metric-grid compact">

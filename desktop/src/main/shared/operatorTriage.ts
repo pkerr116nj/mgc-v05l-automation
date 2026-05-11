@@ -392,6 +392,7 @@ interface TrackBPaperReadinessSummary {
 function summarizeTrackBPaperReadiness(payload: JsonRecord): TrackBPaperReadinessSummary {
   const startup = asRecord(payload.startup_readiness_diagnostic);
   const zeroActivity = asRecord(payload.zero_activity_diagnostic);
+  const phase1Gc = asRecord(payload.phase1_gc_readiness);
   const completedAudit = asRecord(zeroActivity.completed_decision_bar_audit);
   const instruments = Object.values(asRecord(startup.instruments)).map((row) => asRecord(row));
   const configured = instruments.length > 0;
@@ -400,6 +401,7 @@ function summarizeTrackBPaperReadiness(payload: JsonRecord): TrackBPaperReadines
   const featureBlockedRows = instruments.filter((row) => row.context_ready === false || row.feature_context_ready === false);
   const reviewRequired = payload.critical === true || Number(payload.review_required_count ?? 0) > 0;
   const diagnosticStale = zeroActivity.stale === true || String(zeroActivity.diagnosis_classification ?? "") === "STALE_DIAGNOSTIC";
+  const phase1GcReadyForWatch = phase1Gc.ready_for_guarded_paper_watch === true && phase1Gc.live_money_eligible !== true;
   const auditClassification = String(completedAudit.classification ?? "").trim().toUpperCase();
   const latestMonitorVerdict = String(zeroActivity.latest_monitor_verdict ?? "").trim().toUpperCase();
   const signalsSeen = Number(zeroActivity.signals_seen ?? 0) || 0;
@@ -413,17 +415,20 @@ function summarizeTrackBPaperReadiness(payload: JsonRecord): TrackBPaperReadines
     || recentEvaluated > 0
     || Number(zeroActivity.strategies_evaluated ?? 0) > 0
   );
-  const ready = paperAllowedRows.length > 0 && !diagnosticStale && !reviewRequired;
+  const ready = (paperAllowedRows.length > 0 && !diagnosticStale && !reviewRequired) || (phase1GcReadyForWatch && !reviewRequired);
   const blockedLiveExecution = configured && liveBlockedRows.length > 0 && paperAllowedRows.length === 0;
   const blockedFeatureContext = configured && featureBlockedRows.length > 0 && paperAllowedRows.length === 0;
   let code: string | null = null;
   let message: string | null = null;
-  if (!configured && payload.available !== true) {
+  if (!configured && payload.available !== true && !phase1GcReadyForWatch) {
     code = null;
     message = null;
   } else if (reviewRequired) {
     code = "TRACK_B_PAPER_REVIEW_REQUIRED";
     message = "Track B PAPER review is required before interpreting autonomous trading status as clean.";
+  } else if (phase1GcReadyForWatch) {
+    code = "GC_PHASE1_READY_FOR_GUARDED_PAPER_WATCH";
+    message = "GC Phase-1 candidate is ready for guarded PAPER watch after current monday-live preflight; legacy lifecycle diagnostics remain read-only context.";
   } else if (diagnosticStale) {
     code = "TRACK_B_PAPER_DIAGNOSTIC_STALE";
     message = "Track B PAPER diagnostic is stale; refresh or inspect the latest monitor artifact.";
@@ -1105,6 +1110,7 @@ export function buildOperatorTriageContract(input: OperatorTriageInput): Operato
           "global.market_data_status",
           "global.market_data_label",
           "operator_surface.runtime_readiness.market_data_readiness",
+          "track_b_paper_trading.phase1_gc_readiness",
           "track_b_paper_trading.startup_readiness_diagnostic",
           "track_b_paper_trading.zero_activity_diagnostic",
           "global.last_update_timestamp",

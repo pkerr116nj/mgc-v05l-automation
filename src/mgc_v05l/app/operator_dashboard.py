@@ -85,6 +85,7 @@ OPERATOR_ACTION_LOG_COMPRESS_ROTATED_ENV = "MGC_OPERATOR_ACTION_LOG_COMPRESS_ROT
 OPERATOR_ARCHIVE_ROOT_ENV = "MGC_OPERATOR_ARCHIVE_ROOT"
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_FRESHNESS_SECONDS = 30.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_MAX_STALE_SECONDS = 300.0
+DEFAULT_TRACK_B_PREFLIGHT_FRESHNESS_SECONDS = 900.0
 DEFAULT_RUNTIME_DERIVED_PAYLOAD_RUNTIME_UPDATE_GRACE_SECONDS = 60.0
 DEFAULT_COMPLETED_BAR_CLOSE_GRACE_SECONDS = 10.0
 DEFAULT_AUTH_GATE_READY_REFRESH_SECONDS = 300
@@ -1840,6 +1841,7 @@ class OperatorDashboardService:
     def _track_b_paper_trading_results_payload(self) -> dict[str, Any]:
         ledger_root = self._repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
         diagnostic_root = self._repo_root / "outputs" / "track_b_execution_core" / "diagnostics"
+        reports_root = self._repo_root / "outputs" / "reports"
         trade_summary_path = ledger_root / "latest_track_b_paper_trade_summary.json"
         live_position_status_path = ledger_root / "latest_track_b_live_position_status.json"
         pnl_summary_path = ledger_root / "latest_track_b_pnl_summary.json"
@@ -1848,6 +1850,7 @@ class OperatorDashboardService:
         live_feed_freshness_diagnostic_path = diagnostic_root / "latest_track_b_live_feed_freshness_diagnostic.json"
         startup_readiness_diagnostic_path = diagnostic_root / "latest_track_b_startup_readiness_diagnostic.json"
         monitor_liveness_diagnostic_path = diagnostic_root / "latest_track_b_monitor_liveness_diagnostic.json"
+        track_b_preflight_path = reports_root / "track_b_paper_preflight" / "latest_track_b_paper_preflight.json"
         trade_summary = _load_json_file(trade_summary_path)
         live_position_status = _load_json_file(live_position_status_path)
         pnl_summary = _load_json_file(pnl_summary_path)
@@ -1856,6 +1859,7 @@ class OperatorDashboardService:
         live_feed_freshness_diagnostic = _load_json_file(live_feed_freshness_diagnostic_path)
         startup_readiness_diagnostic = _load_json_file(startup_readiness_diagnostic_path)
         monitor_liveness_diagnostic = _load_json_file(monitor_liveness_diagnostic_path)
+        track_b_preflight = _load_json_file(track_b_preflight_path)
         trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
         live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
         pnl_summary = pnl_summary if isinstance(pnl_summary, dict) else {}
@@ -1870,6 +1874,7 @@ class OperatorDashboardService:
         monitor_liveness_diagnostic = (
             monitor_liveness_diagnostic if isinstance(monitor_liveness_diagnostic, dict) else {}
         )
+        track_b_preflight = track_b_preflight if isinstance(track_b_preflight, dict) else {}
         missing = [
             str(path)
             for path, payload in (
@@ -1936,7 +1941,12 @@ class OperatorDashboardService:
                 "trade_summary": _track_b_paper_artifact_status(trade_summary_path),
                 "live_position_status": _track_b_paper_artifact_status(live_position_status_path),
                 "pnl_summary": _track_b_paper_artifact_status(pnl_summary_path),
+                "track_b_paper_preflight": _track_b_paper_artifact_status(track_b_preflight_path),
             },
+            "phase1_gc_readiness": _compact_track_b_phase1_gc_preflight_readiness(
+                track_b_preflight,
+                track_b_preflight_path,
+            ),
             "paper_trades_attempted_count": trade_summary.get("paper_trades_attempted_count", 0),
             "completed_trade_count": trade_summary.get("completed_trade_count", trade_summary.get("closed_trade_count", 0)),
             "managed_strategy_trade_count": trade_summary.get("managed_strategy_trade_count", 0),
@@ -17006,6 +17016,149 @@ def _track_b_paper_artifact_status(path: Path) -> dict[str, Any]:
         "exists": exists,
         "age_seconds": age_seconds,
         "stale": bool(age_seconds is not None and age_seconds > 3600),
+    }
+
+
+def _parse_dashboard_iso_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _dashboard_payload_age_seconds(generated_at: Any) -> float | None:
+    parsed = _parse_dashboard_iso_timestamp(generated_at)
+    if parsed is None:
+        return None
+    return max((datetime.now(timezone.utc) - parsed).total_seconds(), 0.0)
+
+
+def _track_b_named_check(payload: dict[str, Any], name: str) -> dict[str, Any]:
+    checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
+    for row in checks:
+        if isinstance(row, dict) and row.get("name") == name:
+            return row
+    return {}
+
+
+def _check_passed(payload: dict[str, Any], name: str) -> bool:
+    return str(_track_b_named_check(payload, name).get("status") or "").upper() == "PASS"
+
+
+def _detail_flag(detail: Any, flag: str) -> bool | None:
+    if not isinstance(detail, str):
+        return None
+    match = re.search(rf"\b{re.escape(flag)}=(True|False|true|false)\b", detail)
+    if not match:
+        return None
+    return match.group(1).lower() == "true"
+
+
+def _compact_track_b_phase1_gc_preflight_readiness(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "path": str(path),
+            "source": "track_b_paper_preflight",
+            "classification": "PHASE1_GC_PREFLIGHT_NOT_PROVIDED",
+            "ready_for_guarded_paper_watch": False,
+            "legacy_lifecycle_diagnostic_authoritative": True,
+            "live_money_eligible": False,
+        }
+
+    generated_at = payload.get("generated_at")
+    age_seconds = _dashboard_payload_age_seconds(generated_at)
+    stale = bool(age_seconds is None or age_seconds > DEFAULT_TRACK_B_PREFLIGHT_FRESHNESS_SECONDS)
+    blocking_reasons = payload.get("blocking_reasons") if isinstance(payload.get("blocking_reasons"), list) else []
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    gc_check = _track_b_named_check(payload, "gc_phase1_paper_candidate_visible_no_submit")
+    gc_detail = gc_check.get("detail")
+    candidate_evaluation_ready = _detail_flag(gc_detail, "candidate_evaluation_ready")
+    paper_candidate_approved = _detail_flag(gc_detail, "paper_candidate_approved")
+    realtime_feed_confirmed = _detail_flag(gc_detail, "realtime_feed_confirmed")
+    live_money_eligible = bool(_detail_flag(gc_detail, "live_money_eligible") is True)
+    can_submit = bool(gc_check.get("can_submit") is True or _detail_flag(gc_detail, "can_submit") is True)
+    mode = str(payload.get("mode") or "")
+    preflight_status = str(payload.get("monday_live_preflight") or payload.get("weekend_static_dry_run") or "")
+    preflight_allows_watch = (
+        mode == "monday-live"
+        and preflight_status.upper() in {"PASS", "WARN"}
+        and not blocking_reasons
+        and not stale
+    )
+    safety_checks_pass = all(
+        _check_passed(payload, check_name)
+        for check_name in (
+            "paper_trade_allowed_true",
+            "market_data_not_stale",
+            "monitor_healthy",
+            "monitor_not_stale",
+            "monitor_submit_allowed",
+            "bridge_allowed",
+            "broker_gc_flat_if_connected",
+            "broker_gc_open_orders_zero_if_connected",
+            "no_current_review_required",
+        )
+    )
+    gc_candidate_visible = str(gc_check.get("status") or "").upper() == "PASS"
+    ready_for_guarded_paper_watch = bool(
+        preflight_allows_watch
+        and gc_candidate_visible
+        and candidate_evaluation_ready is True
+        and paper_candidate_approved is True
+        and realtime_feed_confirmed is True
+        and safety_checks_pass
+        and not live_money_eligible
+    )
+    if ready_for_guarded_paper_watch:
+        classification = "GC_PHASE1_READY_FOR_GUARDED_PAPER_WATCH"
+        blocker = None
+    elif stale:
+        classification = "GC_PHASE1_PREFLIGHT_STALE"
+        blocker = "TRACK_B_PAPER_PREFLIGHT_STALE_OR_MISSING_GENERATED_AT"
+    elif blocking_reasons:
+        classification = "GC_PHASE1_PREFLIGHT_BLOCKED"
+        blocker = str(blocking_reasons[0])
+    elif not gc_candidate_visible:
+        classification = "GC_PHASE1_CANDIDATE_NOT_VISIBLE"
+        blocker = gc_check.get("detail") or "GC candidate preflight check did not pass."
+    elif live_money_eligible:
+        classification = "GC_PHASE1_LIVE_MONEY_UNSAFE"
+        blocker = "live_money_eligible=true"
+    else:
+        classification = "GC_PHASE1_PREFLIGHT_NOT_READY"
+        blocker = "One or more GC Phase-1 safety checks are not passing."
+    return {
+        "available": True,
+        "path": str(path),
+        "source": "track_b_paper_preflight",
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "freshness_threshold_seconds": DEFAULT_TRACK_B_PREFLIGHT_FRESHNESS_SECONDS,
+        "stale": stale,
+        "mode": mode,
+        "preflight_status": preflight_status,
+        "classification": classification,
+        "ready_for_guarded_paper_watch": ready_for_guarded_paper_watch,
+        "legacy_lifecycle_diagnostic_authoritative": not ready_for_guarded_paper_watch,
+        "strategy_id": gc_check.get("strategy_id"),
+        "candidate_evaluation_ready": candidate_evaluation_ready,
+        "paper_candidate_approved": paper_candidate_approved,
+        "paper_watch_ready": bool(gc_check.get("paper_watch_ready") is True or _detail_flag(gc_detail, "paper_watch_ready") is True),
+        "can_submit": can_submit,
+        "live_money_eligible": live_money_eligible,
+        "realtime_feed_confirmed": realtime_feed_confirmed,
+        "safety_checks_pass": safety_checks_pass,
+        "blocking_reasons": blocking_reasons,
+        "warnings": warnings,
+        "blocker": blocker,
+        "detail": gc_detail,
     }
 
 
