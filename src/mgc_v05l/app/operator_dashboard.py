@@ -1851,6 +1851,11 @@ class OperatorDashboardService:
         startup_readiness_diagnostic_path = diagnostic_root / "latest_track_b_startup_readiness_diagnostic.json"
         monitor_liveness_diagnostic_path = diagnostic_root / "latest_track_b_monitor_liveness_diagnostic.json"
         track_b_preflight_path = reports_root / "track_b_paper_preflight" / "latest_track_b_paper_preflight.json"
+        operator_readiness_refresh_status_path = (
+            reports_root
+            / "track_b_operator_readiness_refresher"
+            / "latest_track_b_operator_readiness_refresher_status.json"
+        )
         broker_truth_refresh_status_path = reports_root / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json"
         trade_summary = _load_json_file(trade_summary_path)
         live_position_status = _load_json_file(live_position_status_path)
@@ -1861,6 +1866,7 @@ class OperatorDashboardService:
         startup_readiness_diagnostic = _load_json_file(startup_readiness_diagnostic_path)
         monitor_liveness_diagnostic = _load_json_file(monitor_liveness_diagnostic_path)
         track_b_preflight = _load_json_file(track_b_preflight_path)
+        operator_readiness_refresh_status = _load_json_file(operator_readiness_refresh_status_path)
         broker_truth_refresh_status = _load_json_file(broker_truth_refresh_status_path)
         trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
         live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
@@ -1877,6 +1883,9 @@ class OperatorDashboardService:
             monitor_liveness_diagnostic if isinstance(monitor_liveness_diagnostic, dict) else {}
         )
         track_b_preflight = track_b_preflight if isinstance(track_b_preflight, dict) else {}
+        operator_readiness_refresh_status = (
+            operator_readiness_refresh_status if isinstance(operator_readiness_refresh_status, dict) else {}
+        )
         broker_truth_refresh_status = broker_truth_refresh_status if isinstance(broker_truth_refresh_status, dict) else {}
         missing = [
             str(path)
@@ -1945,7 +1954,14 @@ class OperatorDashboardService:
                 "live_position_status": _track_b_paper_artifact_status(live_position_status_path),
                 "pnl_summary": _track_b_paper_artifact_status(pnl_summary_path),
                 "track_b_paper_preflight": _track_b_paper_artifact_status(track_b_preflight_path),
+                "operator_readiness_refresh_status": _track_b_paper_artifact_status(
+                    operator_readiness_refresh_status_path
+                ),
             },
+            "operator_readiness_refresh_status": _compact_track_b_operator_readiness_refresh_status(
+                operator_readiness_refresh_status,
+                operator_readiness_refresh_status_path,
+            ),
             "phase1_gc_readiness": _compact_track_b_phase1_gc_preflight_readiness(
                 track_b_preflight,
                 track_b_preflight_path,
@@ -17166,6 +17182,41 @@ def _compact_track_b_phase1_gc_preflight_readiness(payload: dict[str, Any], path
         "warnings": warnings,
         "blocker": blocker,
         "detail": gc_detail,
+    }
+
+
+def _compact_track_b_operator_readiness_refresh_status(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "path": str(path),
+            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_STATUS_MISSING",
+            "fresh": False,
+            "last_success": False,
+            "submit_authority": False,
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+        }
+    generated_at = payload.get("generated_at")
+    age_seconds = _dashboard_payload_age_seconds(generated_at)
+    freshness_threshold_seconds = max(float(payload.get("refresh_seconds") or 60.0) * 2.5, 180.0)
+    fresh = bool(age_seconds is not None and age_seconds <= freshness_threshold_seconds)
+    return {
+        "available": True,
+        "path": str(path),
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "freshness_threshold_seconds": freshness_threshold_seconds,
+        "fresh": fresh,
+        "classification": str(payload.get("classification") or "TRACK_B_OPERATOR_READINESS_REFRESH_UNKNOWN"),
+        "last_success": bool(payload.get("last_success") is True),
+        "last_success_at": payload.get("last_success_at"),
+        "preflight_mode": payload.get("preflight_mode"),
+        "refresh_seconds": payload.get("refresh_seconds"),
+        "refreshed_artifacts": payload.get("refreshed_artifacts") if isinstance(payload.get("refreshed_artifacts"), dict) else {},
+        "submit_authority": bool(payload.get("submit_authority") is True),
+        "paper_proof_invoked": bool(payload.get("paper_proof_invoked") is True),
+        "live_money_eligible": bool(payload.get("live_money_eligible") is True),
     }
 
 

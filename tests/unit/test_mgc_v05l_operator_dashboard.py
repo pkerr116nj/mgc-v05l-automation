@@ -3190,10 +3190,12 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
     monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
     broker_truth_dir = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    readiness_refresh_dir = tmp_path / "outputs" / "reports" / "track_b_operator_readiness_refresher"
     ledger_dir.mkdir(parents=True)
     operator_status_dir.mkdir(parents=True)
     monitor_dir.mkdir(parents=True)
     broker_truth_dir.mkdir(parents=True)
+    readiness_refresh_dir.mkdir(parents=True)
     (operator_status_dir / "latest_operator_status_summary.json").write_text(
         json.dumps({"schema_version": "track_b_operator_status_v1", "live_money_readiness": False}),
         encoding="utf-8",
@@ -3336,6 +3338,25 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
         ),
         encoding="utf-8",
     )
+    (readiness_refresh_dir / "latest_track_b_operator_readiness_refresher_status.json").write_text(
+        json.dumps(
+            {
+                "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_READY",
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "last_success": True,
+                "last_success_at": "2999-01-01T00:00:00+00:00",
+                "refresh_seconds": 60,
+                "preflight_mode": "monday-live",
+                "refreshed_artifacts": {
+                    "track_b_paper_preflight": "outputs/reports/track_b_paper_preflight/latest_track_b_paper_preflight.json"
+                },
+                "submit_authority": False,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
 
@@ -3360,6 +3381,12 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     assert payload["broker_truth_refresh_status"]["account"] == "DUM882026"
     assert payload["broker_truth_refresh_status"]["submit_authority"] is False
     assert payload["broker_truth_refresh_status"]["live_money_eligible"] is False
+    assert payload["operator_readiness_refresh_status"]["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
+    assert payload["operator_readiness_refresh_status"]["fresh"] is True
+    assert payload["operator_readiness_refresh_status"]["last_success"] is True
+    assert payload["operator_readiness_refresh_status"]["submit_authority"] is False
+    assert payload["operator_readiness_refresh_status"]["paper_proof_invoked"] is False
+    assert payload["operator_readiness_refresh_status"]["live_money_eligible"] is False
     assert payload["recent_trades"][0]["strategy_id"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     assert payload["strategy_performance"][0]["strategy"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     assert payload["instrument_performance"][0]["instrument"] == "MNQ-202606"

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common_env.sh"
+
+PID_FILE="${REPO_ROOT}/var/track_b_operator_readiness_refresh_service.pid"
+STATUS_PATH="${REPO_ROOT}/outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json"
+
+pid_is_running() {
+  local pid="$1"
+  [[ -n "${pid}" ]] || return 1
+  if kill -0 "${pid}" 2>/dev/null; then
+    return 0
+  fi
+  ps -p "${pid}" >/dev/null 2>&1
+}
+
+status_is_fresh() {
+  [[ -f "${STATUS_PATH}" ]] || return 1
+  "${PYTHON_BIN}" - "${STATUS_PATH}" <<'PY'
+import datetime as dt
+import json
+import sys
+
+try:
+    payload = json.load(open(sys.argv[1], encoding="utf-8"))
+    raw = payload.get("generated_at")
+    ts = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+    age = (dt.datetime.now(dt.timezone.utc) - ts.astimezone(dt.timezone.utc)).total_seconds()
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if age <= 180 else 1)
+PY
+}
+
+"${PYTHON_BIN}" -m mgc_v05l.app.track_b_operator_readiness_refresher --status
+if [[ -f "${PID_FILE}" ]]; then
+  service_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+else
+  service_pid=""
+fi
+
+if pid_is_running "${service_pid}" || status_is_fresh; then
+  echo "running=true pid=${service_pid}"
+else
+  echo "running=false"
+fi
