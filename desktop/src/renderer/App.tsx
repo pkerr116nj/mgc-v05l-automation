@@ -5453,6 +5453,9 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
   const temporaryPaperRuntimeIntegrity = asRecord(paper.temporary_paper_runtime_integrity);
   const dashboardTruthSource = dashboardTruthSourceLabel(desktopState?.source.mode);
   const dashboardGeneratedAt = dashboardRoot.generated_at ?? desktopState?.refreshedAt ?? null;
+  const trackBPaperTradingRoot = asRecord(dashboard?.track_b_paper_trading);
+  const phase1GcReadiness = asRecord(trackBPaperTradingRoot.phase1_gc_readiness);
+  const phase1GcReadyForWatch = phase1GcReadiness.ready_for_guarded_paper_watch === true && phase1GcReadiness.live_money_eligible !== true;
   const sameUnderlyingConflicts = asRecord(dashboard?.same_underlying_conflicts);
   const sameUnderlyingConflictRows = asArray<JsonRecord>(sameUnderlyingConflicts.rows);
   const sameUnderlyingConflictSummary = asRecord(sameUnderlyingConflicts.summary);
@@ -6330,6 +6333,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
         supervisedPaperOperability,
         paperReadiness,
         temporaryPaperRuntimeIntegrity,
+        phase1GcReadiness,
         authReadyForPaperStartup,
       }),
     [
@@ -6340,6 +6344,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
       desktopState?.source,
       desktopState?.startup,
       paperReadiness,
+      phase1GcReadiness,
       startupControlPlane,
       supervisedPaperOperability,
       temporaryPaperRuntimeIntegrity,
@@ -11791,7 +11796,7 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     runtimeReadiness,
     runtimeValues,
     paperReadiness,
-    trackBPaperTrading: asRecord(dashboard?.track_b_paper_trading),
+    trackBPaperTrading: trackBPaperTradingRoot,
     portfolio,
     laneRows,
     currentPositions,
@@ -12816,7 +12821,11 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
           <div className="topbar-status">
             <Badge label={desktopState?.backend.healthStatus === "ok" ? "Backend Live" : desktopState?.backend.label ?? "Unknown"} tone={statusTone(desktopState?.backend.healthStatus === "ok" ? "ready" : desktopState?.backend.label)} />
             <Badge label={authReadyForPaperStartup ? "Auth Ready" : "Auth Blocked"} tone={authReadyForPaperStartup ? "good" : "warn"} />
-            <Badge label={tempPaperMismatchActive ? "Temp Paper Blocked" : "Temp Paper Clear"} tone={tempPaperMismatchActive ? "warn" : "good"} />
+            <Badge label={phase1GcReadyForWatch ? "GC Phase-1 Ready" : "GC Phase-1 Pending"} tone={phase1GcReadyForWatch ? "good" : "warn"} />
+            <Badge
+              label={tempPaperMismatchActive ? "Temp Paper Legacy Blocked" : "Temp Paper Clear"}
+              tone={tempPaperMismatchActive ? "warn" : "good"}
+            />
             <div className="time-card">
               <div className="time-label">Session Time</div>
               <div className="time-value">{clock.toLocaleString()}</div>
@@ -13217,7 +13226,11 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                       <Badge label={`SNAP ${rosterSummaryCounts.historical}`} tone={rosterSummaryCounts.historical > 0 ? "warn" : "good"} />
                       <Badge label={`CAND ${rosterSummaryCounts.candidate}`} tone="warn" />
                       <Badge label={`PAUSED ${rosterSummaryCounts.paused}`} tone="muted" />
-                      <Badge label={tempPaperMismatchActive ? "TEMP PAPER BLOCKED" : "TEMP PAPER CLEAR"} tone={tempPaperMismatchActive ? "danger" : "good"} />
+                      <Badge label={phase1GcReadyForWatch ? "GC PHASE-1 READY" : "GC PHASE-1 PENDING"} tone={phase1GcReadyForWatch ? "good" : "warn"} />
+                      <Badge
+                        label={tempPaperMismatchActive ? "TEMP PAPER LEGACY BLOCKED" : "TEMP PAPER CLEAR"}
+                        tone={tempPaperMismatchActive ? "warn" : "good"}
+                      />
                     </div>
                   </div>
                 </div>

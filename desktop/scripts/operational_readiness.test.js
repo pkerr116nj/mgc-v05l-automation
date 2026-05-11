@@ -242,6 +242,32 @@ test("D2: CLEAR temp-paper integrity does not block a healthy attached runtime",
   assert.equal(model.appUsableForSupervisedPaper, true);
 });
 
+test("D3: current GC Phase-1 readiness prevents legacy temp-paper mismatch from becoming the top-level blocker", () => {
+  const scenario = baseScenario();
+  scenario.temporaryPaperRuntimeIntegrity.mismatch_status = "MISMATCH";
+  scenario.temporaryPaperRuntimeIntegrity.temp_paper_blocked = true;
+  scenario.temporaryPaperRuntimeIntegrity.block_reason = "Enabled temporary paper lanes are not loaded in the running paper runtime.";
+  scenario.supervisedPaperOperability = {
+    app_usable_for_supervised_paper: false,
+    state: "PAPER_RUNTIME_BLOCKED",
+    unusable_reason_code: "temp_paper_runtime_mismatch",
+    unusable_reason: "Temp-paper runtime integrity is not yet matched.",
+    primary_next_action: "Restart Runtime + Temp Paper",
+  };
+  scenario.phase1GcReadiness = {
+    ready_for_guarded_paper_watch: true,
+    live_money_eligible: false,
+    classification: "GC_PHASE1_READY_FOR_GUARDED_PAPER_WATCH",
+  };
+
+  const model = deriveOperationalReadiness(scenario);
+
+  assert.equal(model.overallState, "READY");
+  assert.equal(model.appUsableForSupervisedPaper, true);
+  assert.equal(model.tempPaperBlocked, false);
+  assert.equal(model.primaryStateCode, "READY");
+});
+
 test("F: running runtime with entries halted is not usable and points to Resume Entries", () => {
   const scenario = baseScenario();
   scenario.supervisedPaperOperability = {

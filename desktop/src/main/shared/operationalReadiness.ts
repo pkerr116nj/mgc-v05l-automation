@@ -68,6 +68,7 @@ export interface OperationalReadinessInput {
   supervisedPaperOperability: JsonRecord | null | undefined;
   paperReadiness: JsonRecord | null | undefined;
   temporaryPaperRuntimeIntegrity: JsonRecord | null | undefined;
+  phase1GcReadiness?: JsonRecord | null | undefined;
   authReadyForPaperStartup: boolean;
 }
 
@@ -214,6 +215,10 @@ function paperRuntimeState(input: OperationalReadinessInput, dashboardAttached: 
 } {
   const paperReadiness = asRecord(input.paperReadiness);
   const integrity = asRecord(input.temporaryPaperRuntimeIntegrity);
+  const phase1GcReadiness = asRecord(input.phase1GcReadiness);
+  const phase1GcReadyForWatch =
+    phase1GcReadiness.ready_for_guarded_paper_watch === true &&
+    phase1GcReadiness.live_money_eligible !== true;
   const mismatchStatus = upper(integrity.mismatch_status);
   const explicitTempPaperBlocked = integrity.temp_paper_blocked;
   const tempPaperBlocked =
@@ -257,7 +262,7 @@ function paperRuntimeState(input: OperationalReadinessInput, dashboardAttached: 
     };
   }
 
-  if (tempPaperBlocked) {
+  if (tempPaperBlocked && !phase1GcReadyForWatch) {
     return {
       ready: false,
       state: "BLOCKED",
@@ -402,6 +407,10 @@ export function deriveOperationalReadiness(input: OperationalReadinessInput): Op
   const startup = asRecord(input.startup);
   const controlPlane = asRecord(input.startupControlPlane);
   const supervisedPaperOperability = asRecord(input.supervisedPaperOperability);
+  const phase1GcReadiness = asRecord(input.phase1GcReadiness);
+  const phase1GcReadyForWatch =
+    phase1GcReadiness.ready_for_guarded_paper_watch === true &&
+    phase1GcReadiness.live_money_eligible !== true;
   const attachedSnapshotBridge = lower(source.mode) === "attached_snapshot_bridge";
   const dependencyRow = primaryDependency(controlPlane);
   const attach = dashboardAttachState(input);
@@ -576,7 +585,8 @@ export function deriveOperationalReadiness(input: OperationalReadinessInput): Op
               description: "Re-check supervised paper usability after the current operator state changes.",
               kind: "refresh",
             };
-    return {
+    if (!contractTempPaperBlocked || !phase1GcReadyForWatch) {
+      return {
       overallState: contractState === "ATTACH_INCOMPLETE" ? "RECONCILING" : "ATTENTION_REQUIRED",
       severityLabel: "BLOCKING",
       tone: "danger",
@@ -602,7 +612,8 @@ export function deriveOperationalReadiness(input: OperationalReadinessInput): Op
       evidenceTarget,
       evidenceLabel,
       dependencyCounts: counts,
-    };
+      };
+    }
   }
 
   const paper = paperRuntimeState(input, attach.dashboardAttached);
