@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from mgc_v05l.execution_core.phase1_databento_live_runtime_candles import (
+    Phase1DatabentoLiveListenerConfig,
     Phase1DatabentoLiveRuntimeCandlesConfig,
     build_phase1_databento_live_runtime_candles,
+    run_phase1_databento_live_listener,
 )
 from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
     Phase1RuntimeDataReadinessConfig,
@@ -79,6 +81,61 @@ class SequentialRunner:
         return RecordingRunner({symbol: candles})(config)
 
 
+@dataclass
+class FakeOhlcvRecord:
+    symbol: str
+    ts_event: datetime
+    open: int = 100_000_000_000
+    high: int = 101_000_000_000
+    low: int = 99_000_000_000
+    close: int = 100_500_000_000
+    volume: int = 10
+
+
+@dataclass
+class FakeMappingRecord:
+    instrument_id: int
+    stype_in_symbol: str
+
+
+class FakeLiveClient:
+    def __init__(self, records: list[Any]) -> None:
+        self.records = records
+        self.callback: Any = None
+        self.exception_callback: Any = None
+        self.stream: Any = None
+        self.subscribe_kwargs: dict[str, Any] | None = None
+        self.events: list[str] = []
+
+    def add_callback(self, callback: Any, exception_callback: Any) -> None:
+        self.events.append("add_callback")
+        self.callback = callback
+        self.exception_callback = exception_callback
+
+    def add_stream(self, stream: Any, exception_callback: Any | None = None) -> None:
+        self.events.append("add_stream")
+        self.stream = stream
+
+    def subscribe(self, **kwargs: Any) -> None:
+        self.events.append("subscribe")
+        self.subscribe_kwargs = kwargs
+
+    def start(self) -> None:
+        self.events.append("start")
+        for record in self.records:
+            self.callback(record)
+
+    def block_for_close(self, timeout: float | None = None) -> None:
+        self.events.append("block_for_close")
+        raise TimeoutError()
+
+    def stop(self) -> None:
+        self.events.append("stop")
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+
+
 def _config(root: Path, **overrides: object) -> Phase1DatabentoLiveRuntimeCandlesConfig:
     values = {
         "repo_root": root,
@@ -108,6 +165,28 @@ def _live_candles(count: int = 10, *, end: datetime = NOW - timedelta(minutes=1)
             }
         )
     return rows
+
+
+def _listener_config(root: Path, **overrides: object) -> Phase1DatabentoLiveListenerConfig:
+    env_file = root / ".env.local"
+    env_file.write_text("DATABENTO_API_KEY=test-key\n", encoding="utf-8")
+    values = {
+        "repo_root": root,
+        "runtime_candle_root": Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data",
+        "report_dir": Path("outputs") / "reports" / "phase1_databento_live_runtime_candles",
+        "raw_dbn_root": Path("outputs") / "track_b_execution_core" / "phase1_databento_live_raw_dbn",
+        "symbols": ("GC",),
+        "env_file": env_file,
+        "run_seconds": 0.01,
+        "now": NOW,
+    }
+    values.update(overrides)
+    return Phase1DatabentoLiveListenerConfig(**values)
+
+
+def _live_records(count: int = 10, *, symbol: str = "GC", end: datetime = NOW - timedelta(minutes=1)) -> list[Any]:
+    start = end - timedelta(minutes=count - 1)
+    return [FakeOhlcvRecord(symbol=symbol, ts_event=start + timedelta(minutes=index)) for index in range(count)]
 
 
 def _write_existing_phase1_payloads(root: Path, symbol: str, *, generated_at: datetime = NOW) -> None:
@@ -412,6 +491,131 @@ def test_sunday_evening_globex_timestamp_is_accepted_as_asia_session(tmp_path: P
     )
     assert payload["sunday_session_label"] == "ASIA_EARLY"
     assert payload["sunday_globex_session_supported"] is True
+
+
+def test_live_listener_follows_databento_session_pattern_and_writes_raw_stream_path(tmp_path: Path) -> None:
+    client = FakeLiveClient(_live_records(10))
+
+    result = run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: NOW,
+    )
+
+    assert client.events[:4] == ["add_callback", "add_stream", "subscribe", "start"]
+    assert "block_for_close" in client.events
+    assert client.subscribe_kwargs == {
+        "dataset": "GLBX.MDP3",
+        "schema": "ohlcv-1m",
+        "symbols": ["GC.v.0"],
+        "stype_in": "continuous",
+    }
+    assert str(result.raw_dbn_path).endswith(".dbn")
+    assert "phase1_databento_live_raw_dbn" in str(result.raw_dbn_path)
+    assert result.status["databento_pattern"] == "db.Live + add_stream(raw DBN) + subscribe before start + start + block_for_close"
+    assert result.status["can_submit"] is False
+    assert result.status["live_money_eligible"] is False
+
+
+def test_live_listener_rolls_1m_3m_5m_artifacts_from_live_records(tmp_path: Path) -> None:
+    client = FakeLiveClient(_live_records(10))
+
+    result = run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: NOW,
+    )
+
+    assert result.status["realtime_feed_confirmed_count"] == 1
+    for timeframe in ("1m", "3m", "5m"):
+        path = (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "phase1_runtime_market_data"
+            / "GC"
+            / timeframe
+            / "latest_runtime_candles.json"
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["source"] == "DATABENTO_REALTIME_PHASE1"
+        assert payload["raw_dbn_evidence_path"].endswith(".dbn")
+        assert payload["realtime_feed_confirmed"] is True
+        assert payload["historical_seed_ready"] is False
+        assert payload["research_artifact_used"] is False
+        assert payload["archive_artifact_used"] is False
+        assert payload["can_submit"] is False
+        assert payload["live_money_eligible"] is False
+
+
+def test_live_listener_stale_sparse_data_fails_closed(tmp_path: Path) -> None:
+    client = FakeLiveClient(_live_records(1))
+
+    result = run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: NOW,
+    )
+
+    assert result.status["realtime_feed_confirmed_count"] == 0
+    payload = json.loads(
+        (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "phase1_runtime_market_data"
+            / "GC"
+            / "1m"
+            / "latest_runtime_candles.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert payload["realtime_feed_confirmed"] is False
+    assert payload["realtime_feed_block_reason"] == "INSUFFICIENT_LIVE_BARS"
+
+
+def test_live_listener_preserves_existing_confirmed_artifact_on_partial_update(tmp_path: Path) -> None:
+    _write_existing_phase1_payloads(tmp_path, "GC")
+    one_minute = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+        / "GC"
+        / "1m"
+        / "latest_runtime_candles.json"
+    )
+    original = one_minute.read_text(encoding="utf-8")
+    client = FakeLiveClient(_live_records(1))
+
+    run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: NOW,
+    )
+
+    assert one_minute.read_text(encoding="utf-8") == original
+
+
+def test_live_listener_uses_symbol_mapping_messages_for_multi_symbol_session(tmp_path: Path) -> None:
+    records = [
+        FakeMappingRecord(instrument_id=1, stype_in_symbol="GC.v.0"),
+        FakeMappingRecord(instrument_id=2, stype_in_symbol="NQ.v.0"),
+    ]
+    records.extend([FakeOhlcvRecord(symbol="", ts_event=row.ts_event, open=row.open, high=row.high, low=row.low, close=row.close, volume=row.volume) for row in _live_records(10)])
+    for record in records[2:]:
+        record.instrument_id = 1  # type: ignore[attr-defined]
+    client = FakeLiveClient(records)
+
+    result = run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path, symbols=("GC", "NQ")),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: NOW,
+    )
+
+    assert client.subscribe_kwargs["symbols"] == ["GC.v.0", "NQ.v.0"]
+    rows = {row["symbol"]: row for row in result.status["rows"]}
+    assert rows["GC"]["realtime_feed_confirmed"] is True
+    assert rows["NQ"]["realtime_feed_confirmed"] is False
 
 
 def test_no_broker_or_paper_proof_terms_in_phase1_live_module() -> None:
