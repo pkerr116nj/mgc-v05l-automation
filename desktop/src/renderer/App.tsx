@@ -1618,6 +1618,124 @@ function cadenceLabel(row: JsonRecord | null | undefined): string {
   return `${execution} exec | ${contexts} ctx`;
 }
 
+function restoredPaperRuntimeVerdict(row: JsonRecord): string {
+  const liveIntent = asRecord(row.latest_live_strategy_intent);
+  const blockedIntent = asRecord(row.latest_blocked_strategy_intent);
+  const status = String(row.strategy_status ?? row.current_strategy_status ?? "").trim().toUpperCase();
+  if (Object.keys(liveIntent).length > 0) {
+    return "SIGNAL";
+  }
+  if (Object.keys(blockedIntent).length > 0 || row.latest_blocked_strategy_intent_reason || row.fault_code) {
+    return "BLOCKED";
+  }
+  if (status.includes("SUPPRESSED")) {
+    return "SUPPRESSED";
+  }
+  if (status.includes("NOT_READY") || row.warmup_complete === false) {
+    return "NOT_READY";
+  }
+  if (status.includes("NO_SIGNAL")) {
+    return "NO_SIGNAL";
+  }
+  return status || "READY";
+}
+
+function restoredPaperRuntimeBlocker(row: JsonRecord): string {
+  return String(
+    row.latest_blocked_strategy_intent_reason
+      ?? row.eligibility_detail
+      ?? row.eligibility_reason
+      ?? row.fault_code
+      ?? row.halt_reason
+      ?? "None",
+  );
+}
+
+function restoredPaperRuntimeFreshness(row: JsonRecord): string {
+  const recovery = asRecord(row.market_data_recovery);
+  const lag = recovery.market_data_lag_seconds ?? "Unavailable";
+  const latest = recovery.latest_processed_bar_timestamp
+    ?? recovery.latest_observed_raw_bar_timestamp
+    ?? row.last_processed_bar_end_ts
+    ?? row.latest_completed_bar_end_ts;
+  const stale = recovery.stale === true ? "stale" : "fresh/within-grace";
+  return `${stale}; lag=${formatValue(lag)}; latest=${formatTimestamp(latest)}`;
+}
+
+function restoredPaperRuntimeCanSubmit(row: JsonRecord): boolean {
+  const liveIntent = asRecord(row.latest_live_strategy_intent);
+  return liveIntent.submit_allowed === true;
+}
+
+function restoredPaperRuntimeLaneRows(dashboard: JsonRecord): JsonRecord[] {
+  const paper = asRecord(dashboard.paper);
+  const rawOperatorStatus = asRecord(paper.raw_operator_status);
+  const configSource = String(rawOperatorStatus.paper_config_in_force_path ?? "paper runtime operator_status/config-in-force");
+  const lanes = asArray<JsonRecord>(rawOperatorStatus.lanes);
+  return lanes
+    .filter((row) => String(row.lane_id ?? "").trim())
+    .map((row) => ({
+      ...row,
+      strategy_id: String(row.lane_id ?? ""),
+      instrument: String(row.instrument ?? row.symbol ?? "UNKNOWN"),
+      package_source: String(row.package_label ?? row.source_family ?? row.runtime_kind ?? "UNKNOWN"),
+      config_source: configSource,
+      latest_verdict: restoredPaperRuntimeVerdict(row),
+      latest_blocker: restoredPaperRuntimeBlocker(row),
+      latest_input_freshness: restoredPaperRuntimeFreshness(row),
+      route_eligibility: row.eligible_now === true ? "ELIGIBLE_NOW" : `GATED: ${restoredPaperRuntimeBlocker(row)}`,
+      can_submit: restoredPaperRuntimeCanSubmit(row),
+      live_money_eligible: row.live_money_eligible === true,
+      enabled_active: row.entries_enabled === true ? "enabled / active runtime" : "disabled",
+      last_evaluated_timestamp: row.last_execution_bar_evaluated_at ?? row.last_processed_bar_end_ts,
+      last_evaluated_bar: row.last_execution_bar_id ?? row.last_processed_bar_end_ts,
+    }))
+    .sort((left, right) => (
+      `${String(left.instrument)}:${String(left.strategy_id)}`.localeCompare(`${String(right.instrument)}:${String(right.strategy_id)}`)
+    ));
+}
+
+function RestoredPaperRuntimeLaneTable(props: { rows: JsonRecord[] }) {
+  const summary = props.rows.reduce<Record<string, number>>((counts, row) => {
+    const instrument = String(row.instrument ?? "UNKNOWN");
+    counts[instrument] = (counts[instrument] ?? 0) + 1;
+    return counts;
+  }, {});
+  return (
+    <Section title="Restored Active PAPER Runtime Lanes" subtitle="Current Dev-root probationary paper operator_status lane truth; separate from GC Phase-1 preflight and legacy shadow diagnostics">
+      <div className="metric-grid compact">
+        <MetricCard label="Active Restored Lanes" value={formatValue(props.rows.length)} tone={props.rows.length === 24 ? "good" : "warn"} />
+        <MetricCard label="GC" value={formatValue(summary.GC ?? 0)} tone={(summary.GC ?? 0) === 7 ? "good" : "warn"} />
+        <MetricCard label="MGC" value={formatValue(summary.MGC ?? 0)} tone={(summary.MGC ?? 0) === 7 ? "good" : "warn"} />
+        <MetricCard label="MNQ" value={formatValue(summary.MNQ ?? 0)} tone={(summary.MNQ ?? 0) === 10 ? "good" : "warn"} />
+        <MetricCard label="Live Money Eligible" value={props.rows.some((row) => row.live_money_eligible === true) ? "Unsafe" : "False for all"} tone={props.rows.some((row) => row.live_money_eligible === true) ? "danger" : "good"} />
+        <MetricCard label="Can Submit Now" value={props.rows.filter((row) => row.can_submit === true).length} tone={props.rows.some((row) => row.can_submit === true) ? "warn" : "good"} />
+      </div>
+      <DataTable
+        rows={props.rows}
+        emptyLabel="No restored active PAPER runtime lanes are visible in operator_status yet."
+        rowKey={(row, index) => `${formatValue(row.strategy_id)}-${index}`}
+        columns={[
+          { key: "strategy_id", label: "Strategy ID", render: (row) => formatValue(row.strategy_id) },
+          { key: "instrument", label: "Instrument", render: (row) => formatValue(row.instrument) },
+          { key: "enabled_active", label: "Enabled / Active", render: (row) => <Badge label={formatValue(row.enabled_active)} tone={String(row.enabled_active).includes("enabled") ? "good" : "warn"} /> },
+          { key: "package_source", label: "Package / Source", render: (row) => formatValue(row.package_source) },
+          { key: "last_evaluated", label: "Last Evaluated / Bar", render: (row) => `${formatTimestamp(row.last_evaluated_timestamp)} / ${formatValue(row.last_evaluated_bar)}` },
+          { key: "latest_verdict", label: "Latest Verdict", render: (row) => <Badge label={formatValue(row.latest_verdict)} tone={statusTone(row.latest_verdict)} /> },
+          { key: "blocker", label: "Blocker / Reason", render: (row) => formatValue(row.latest_blocker) },
+          { key: "freshness", label: "Latest Input Freshness", render: (row) => formatValue(row.latest_input_freshness) },
+          { key: "route", label: "Route Eligibility", render: (row) => formatValue(row.route_eligibility) },
+          { key: "can_submit", label: "Can Submit", render: (row) => <Badge label={formatValue(row.can_submit)} tone={row.can_submit === true ? "warn" : "good"} /> },
+          { key: "live_money", label: "Live Money", render: (row) => <Badge label={formatValue(row.live_money_eligible)} tone={row.live_money_eligible === true ? "danger" : "good"} /> },
+        ]}
+      />
+      <div className="placeholder-note">
+        Config source: {formatValue(props.rows[0]?.config_source)}. A lane can submit only when a current signal reaches the guarded PAPER route and all route/broker/governance gates pass.
+      </div>
+    </Section>
+  );
+}
+
 function isAtpRow(row: JsonRecord | null | undefined): boolean {
   return /atp_companion/i.test(
     [
@@ -3124,6 +3242,7 @@ function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: Deskto
   const status = asRecord(props.trackB?.status);
   const dashboard = asRecord(props.dashboard);
   const trackBPaperTrading = asRecord(dashboard.track_b_paper_trading);
+  const restoredRuntimeLaneRows = restoredPaperRuntimeLaneRows(dashboard);
   const phase1GcReadiness = asRecord(trackBPaperTrading.phase1_gc_readiness);
   const phase1GcReadinessAvailable = Object.keys(phase1GcReadiness).length > 0;
   const phase1GcClassification = formatValue(phase1GcReadiness.classification ?? "GC_PHASE1_READINESS_NOT_PROVIDED");
@@ -3217,6 +3336,7 @@ function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: Deskto
     return (
       <>
         {phase1GcReadinessPanel}
+        <RestoredPaperRuntimeLaneTable rows={restoredRuntimeLaneRows} />
         <Section title="Track B Status" subtitle="Read-only view over sanctioned Track B artifact pointers">
           <div className={`status-banner ${malformed ? "warn" : "muted"}`}>
             <div className="status-banner-main">
@@ -3241,6 +3361,7 @@ function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: Deskto
   return (
     <>
       {phase1GcReadinessPanel}
+      <RestoredPaperRuntimeLaneTable rows={restoredRuntimeLaneRows} />
       <Section
         title={legacyShadowNonAuthoritativeForGc ? "Legacy Shadow Track B Status" : "Track B Status"}
         subtitle={legacyShadowNonAuthoritativeForGc
@@ -3646,7 +3767,9 @@ function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: Deskto
 
 function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: DesktopState["trackB"] | null }) {
   const status = asRecord(props.trackB?.status);
-  const rawTrading = asRecord(props.dashboard?.track_b_paper_trading);
+  const dashboard = asRecord(props.dashboard);
+  const rawTrading = asRecord(dashboard.track_b_paper_trading);
+  const restoredRuntimeLaneRows = restoredPaperRuntimeLaneRows(dashboard);
   const latestOutputPaths = asRecord(status.latest_output_paths);
   const trading = Object.keys(rawTrading).length
     ? rawTrading
@@ -3859,6 +3982,7 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
             <MetricCard label="Preflight Age" value={formatValue(phase1GcReadiness.age_seconds)} tone={phase1GcReadiness.stale === true ? "warn" : "good"} />
           </div>
         ) : null}
+        <RestoredPaperRuntimeLaneTable rows={restoredRuntimeLaneRows} />
         <div className="metric-grid compact">
           <MetricCard label="Broker Reconciled" value={formatValue(brokerReconciled)} tone={brokerReconciled ? "good" : "warn"} />
           <MetricCard label="Source" value={formatValue(trading.source)} />

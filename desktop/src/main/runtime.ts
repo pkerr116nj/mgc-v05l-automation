@@ -1888,6 +1888,8 @@ function compactPaperRawOperatorStatus(rawOperatorStatus: JsonRecord): JsonRecor
     processed_bars: rawOperatorStatus.processed_bars ?? null,
     latest_operator_control: asJsonRecord(rawOperatorStatus.latest_operator_control),
     health: asJsonRecord(rawOperatorStatus.health),
+    paper_config_in_force_path: rawOperatorStatus.paper_config_in_force_path ?? null,
+    enabled_lane_count: rawOperatorStatus.enabled_lane_count ?? null,
     active_lane_ids: Array.isArray(rawOperatorStatus.active_lane_ids) ? rawOperatorStatus.active_lane_ids : [],
     approved_long_entry_sources: Array.isArray(rawOperatorStatus.approved_long_entry_sources) ? rawOperatorStatus.approved_long_entry_sources : [],
     approved_short_entry_sources: Array.isArray(rawOperatorStatus.approved_short_entry_sources) ? rawOperatorStatus.approved_short_entry_sources : [],

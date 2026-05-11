@@ -241,6 +241,8 @@ function makeOversizedDashboardFixture(): Record<string, unknown> {
         rows: [{ lane_id: "gc_1x_all_lanes__asia_early_long" }],
       },
       raw_operator_status: {
+        paper_config_in_force_path: "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json",
+        enabled_lane_count: 44,
         lanes: Array.from({ length: 44 }, (_value, index) => ({
           lane_id: `lane-${index}`,
           explanation: "O".repeat(8_000),
@@ -2865,6 +2867,8 @@ test("compact startup state strips heavyweight analytics payloads from persisted
         rows: [{ lane_id: "lane-1" }],
       },
       raw_operator_status: {
+        paper_config_in_force_path: "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json",
+        enabled_lane_count: 1,
         lanes: [{ lane_id: "lane-1" }],
         active_lane_ids: ["lane-1"],
       },
@@ -2961,6 +2965,11 @@ test("compact startup state strips heavyweight analytics payloads from persisted
   assert.equal(strategyPerformance.trade_log_count, 2);
   assert.deepEqual(rawOperatorStatus.lanes, [{ lane_id: "lane-1" }]);
   assert.equal(rawOperatorStatus.lane_count, 1);
+  assert.equal(rawOperatorStatus.enabled_lane_count, 1);
+  assert.equal(
+    rawOperatorStatus.paper_config_in_force_path,
+    "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json",
+  );
   assert.deepEqual(signalIntentFillAudit.rows, [{ lane_id: "lane-1", audit_verdict: "SETUP_GATED" }]);
   assert.equal(signalIntentFillAudit.row_count, 1);
   assert.equal(Array.isArray(events.alerts), true);
@@ -3079,6 +3088,11 @@ test("renderer-bound desktop state stays under budget while preserving operator-
   assert.equal(String(compactTradeLog[499]?.exit_timestamp ?? ""), "2026-04-08T20:00:00.000Z");
   assert.equal("same_underlying_ambiguity_note" in (compactTradeLog[0] ?? {}), false);
   assert.equal((rawOperatorStatus.lanes as Array<unknown>).length, 44);
+  assert.equal(rawOperatorStatus.enabled_lane_count, 44);
+  assert.equal(
+    rawOperatorStatus.paper_config_in_force_path,
+    "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json",
+  );
   assert.equal((signalIntentFillAudit.rows as Array<unknown>).length, 44);
   assert.equal(transferMeta.compacted_for_startup, true);
   assert.equal(transferMeta.budget_bytes, DESKTOP_RENDERER_TRANSFER_BUDGET_BYTES);
