@@ -1845,6 +1845,9 @@ class OperatorDashboardService:
         trade_summary_path = ledger_root / "latest_track_b_paper_trade_summary.json"
         live_position_status_path = ledger_root / "latest_track_b_live_position_status.json"
         pnl_summary_path = ledger_root / "latest_track_b_pnl_summary.json"
+        broker_reconciled_trade_summary_path = ledger_root / "latest_track_b_broker_reconciled_paper_trade_summary.json"
+        broker_reconciled_live_position_status_path = ledger_root / "latest_track_b_broker_reconciled_live_position_status.json"
+        broker_reconciled_pnl_summary_path = ledger_root / "latest_track_b_broker_reconciled_pnl_summary.json"
         zero_activity_diagnostic_path = diagnostic_root / "latest_track_b_zero_activity_diagnostic.json"
         no_signal_attribution_rollup_path = diagnostic_root / "latest_track_b_no_signal_attribution_rollup.json"
         live_feed_freshness_diagnostic_path = diagnostic_root / "latest_track_b_live_feed_freshness_diagnostic.json"
@@ -1857,9 +1860,17 @@ class OperatorDashboardService:
             / "latest_track_b_operator_readiness_refresher_status.json"
         )
         broker_truth_refresh_status_path = reports_root / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json"
+        broker_reconciliation_report_path = (
+            reports_root
+            / "track_b_paper_broker_reconciliation"
+            / "latest_track_b_paper_broker_reconciliation.json"
+        )
         trade_summary = _load_json_file(trade_summary_path)
         live_position_status = _load_json_file(live_position_status_path)
         pnl_summary = _load_json_file(pnl_summary_path)
+        broker_reconciled_trade_summary = _load_json_file(broker_reconciled_trade_summary_path)
+        broker_reconciled_live_position_status = _load_json_file(broker_reconciled_live_position_status_path)
+        broker_reconciled_pnl_summary = _load_json_file(broker_reconciled_pnl_summary_path)
         zero_activity_diagnostic = _load_json_file(zero_activity_diagnostic_path)
         no_signal_attribution_rollup = _load_json_file(no_signal_attribution_rollup_path)
         live_feed_freshness_diagnostic = _load_json_file(live_feed_freshness_diagnostic_path)
@@ -1868,9 +1879,19 @@ class OperatorDashboardService:
         track_b_preflight = _load_json_file(track_b_preflight_path)
         operator_readiness_refresh_status = _load_json_file(operator_readiness_refresh_status_path)
         broker_truth_refresh_status = _load_json_file(broker_truth_refresh_status_path)
+        broker_reconciliation_report = _load_json_file(broker_reconciliation_report_path)
         trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
         live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
         pnl_summary = pnl_summary if isinstance(pnl_summary, dict) else {}
+        broker_reconciled_trade_summary = (
+            broker_reconciled_trade_summary if isinstance(broker_reconciled_trade_summary, dict) else {}
+        )
+        broker_reconciled_live_position_status = (
+            broker_reconciled_live_position_status if isinstance(broker_reconciled_live_position_status, dict) else {}
+        )
+        broker_reconciled_pnl_summary = (
+            broker_reconciled_pnl_summary if isinstance(broker_reconciled_pnl_summary, dict) else {}
+        )
         zero_activity_diagnostic = zero_activity_diagnostic if isinstance(zero_activity_diagnostic, dict) else {}
         no_signal_attribution_rollup = no_signal_attribution_rollup if isinstance(no_signal_attribution_rollup, dict) else {}
         live_feed_freshness_diagnostic = (
@@ -1887,6 +1908,23 @@ class OperatorDashboardService:
             operator_readiness_refresh_status if isinstance(operator_readiness_refresh_status, dict) else {}
         )
         broker_truth_refresh_status = broker_truth_refresh_status if isinstance(broker_truth_refresh_status, dict) else {}
+        broker_reconciliation_report = (
+            broker_reconciliation_report if isinstance(broker_reconciliation_report, dict) else {}
+        )
+        broker_reconciliation_applied = False
+        if _track_b_broker_reconciliation_overlay_ready(broker_reconciliation_report):
+            if (
+                broker_reconciled_trade_summary
+                and broker_reconciled_live_position_status
+                and broker_reconciled_pnl_summary
+            ):
+                trade_summary = broker_reconciled_trade_summary
+                live_position_status = broker_reconciled_live_position_status
+                pnl_summary = broker_reconciled_pnl_summary
+                trade_summary_path = broker_reconciled_trade_summary_path
+                live_position_status_path = broker_reconciled_live_position_status_path
+                pnl_summary_path = broker_reconciled_pnl_summary_path
+                broker_reconciliation_applied = True
         missing = [
             str(path)
             for path, payload in (
@@ -1957,7 +1995,13 @@ class OperatorDashboardService:
                 "operator_readiness_refresh_status": _track_b_paper_artifact_status(
                     operator_readiness_refresh_status_path
                 ),
+                "broker_reconciliation_report": _track_b_paper_artifact_status(broker_reconciliation_report_path),
             },
+            "broker_reconciliation_status": _compact_track_b_paper_broker_reconciliation_status(
+                broker_reconciliation_report,
+                broker_reconciliation_report_path,
+            ),
+            "broker_reconciliation_applied": broker_reconciliation_applied,
             "operator_readiness_refresh_status": _compact_track_b_operator_readiness_refresh_status(
                 operator_readiness_refresh_status,
                 operator_readiness_refresh_status_path,
@@ -17272,6 +17316,74 @@ def _compact_track_b_broker_truth_refresh_status(payload: dict[str, Any], path: 
         "open_order_count": payload.get("open_order_count"),
         "positions_snapshot_path": payload.get("positions_snapshot_path"),
         "open_orders_snapshot_path": payload.get("open_orders_snapshot_path"),
+        "live_money_eligible": payload.get("live_money_eligible") is True,
+        "submit_authority": payload.get("submit_authority") is True,
+        "paper_proof_invoked": payload.get("paper_proof_invoked") is True,
+    }
+
+
+def _track_b_broker_reconciliation_overlay_ready(payload: dict[str, Any]) -> bool:
+    if not payload:
+        return False
+    age_seconds = _dashboard_payload_age_seconds(payload.get("generated_at"))
+    try:
+        max_age_seconds = float(payload.get("max_age_seconds") or 120.0)
+    except (TypeError, ValueError):
+        max_age_seconds = 120.0
+    freshness_threshold_seconds = max(max_age_seconds * 1.5, 180.0)
+    return bool(
+        payload.get("classification") == "TRACK_B_PAPER_BROKER_RECONCILED"
+        and payload.get("broker_reconciled") is True
+        and payload.get("submit_authority") is False
+        and payload.get("paper_proof_invoked") is False
+        and payload.get("live_money_eligible") is False
+        and age_seconds is not None
+        and age_seconds <= freshness_threshold_seconds
+    )
+
+
+def _compact_track_b_paper_broker_reconciliation_status(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "path": str(path),
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_MISSING",
+            "broker_reconciled": False,
+            "fresh": False,
+            "live_money_eligible": False,
+            "submit_authority": False,
+            "paper_proof_invoked": False,
+        }
+    age_seconds = _dashboard_payload_age_seconds(payload.get("generated_at"))
+    try:
+        max_age_seconds = float(payload.get("max_age_seconds") or 120.0)
+    except (TypeError, ValueError):
+        max_age_seconds = 120.0
+    freshness_threshold_seconds = max(max_age_seconds * 1.5, 180.0)
+    fresh = bool(age_seconds is not None and age_seconds <= freshness_threshold_seconds)
+    return {
+        "available": True,
+        "path": str(path),
+        "generated_at": payload.get("generated_at"),
+        "age_seconds": age_seconds,
+        "freshness_threshold_seconds": freshness_threshold_seconds,
+        "fresh": fresh,
+        "classification": payload.get("classification") or "TRACK_B_PAPER_BROKER_RECONCILIATION_UNKNOWN",
+        "broker_reconciled": payload.get("broker_reconciled") is True,
+        "blockers": payload.get("blockers") if isinstance(payload.get("blockers"), list) else [],
+        "account": payload.get("account"),
+        "symbols": payload.get("symbols") if isinstance(payload.get("symbols"), list) else [],
+        "track_b_broker_position_count": payload.get("track_b_broker_position_count"),
+        "track_b_broker_open_order_count": payload.get("track_b_broker_open_order_count"),
+        "lifecycle_open_position_count": payload.get("lifecycle_open_position_count"),
+        "lifecycle_open_order_count": payload.get("lifecycle_open_order_count"),
+        "review_required_count": payload.get("review_required_count"),
+        "broker_truth_artifacts": payload.get("broker_truth_artifacts")
+        if isinstance(payload.get("broker_truth_artifacts"), dict)
+        else {},
+        "reconciled_artifacts": payload.get("reconciled_artifacts")
+        if isinstance(payload.get("reconciled_artifacts"), dict)
+        else {},
         "live_money_eligible": payload.get("live_money_eligible") is True,
         "submit_authority": payload.get("submit_authority") is True,
         "paper_proof_invoked": payload.get("paper_proof_invoked") is True,

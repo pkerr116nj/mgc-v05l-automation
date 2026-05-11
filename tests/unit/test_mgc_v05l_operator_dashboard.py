@@ -3383,6 +3383,7 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     assert payload["broker_truth_refresh_status"]["live_money_eligible"] is False
     assert payload["operator_readiness_refresh_status"]["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
     assert payload["operator_readiness_refresh_status"]["fresh"] is True
+
     assert payload["operator_readiness_refresh_status"]["last_success"] is True
     assert payload["operator_readiness_refresh_status"]["submit_authority"] is False
     assert payload["operator_readiness_refresh_status"]["paper_proof_invoked"] is False
@@ -3414,6 +3415,140 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     assert managed_readiness["mgc_ema_momentum_reclaim_long_v1"]["signal_to_intent_bridge_can_create_intent"] is False
     assert managed_readiness["mgc_ema_momentum_reclaim_long_v1"]["managed_exit_ready"] is False
     assert managed_readiness["mgc_ema_momentum_reclaim_long_v1"]["managed_paper_blocker"] == "managed exit policy missing"
+
+
+def test_track_b_paper_trading_payload_prefers_fresh_broker_reconciled_overlay(tmp_path: Path) -> None:
+    ledger_dir = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+    reconciliation_dir = tmp_path / "outputs" / "reports" / "track_b_paper_broker_reconciliation"
+    ledger_dir.mkdir(parents=True)
+    reconciliation_dir.mkdir(parents=True)
+    (ledger_dir / "latest_track_b_paper_trade_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "paper_trades_attempted_count": 2,
+                "completed_trade_count": 2,
+                "open_position_count": 0,
+                "review_required_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_live_position_status.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "open_position_count": 0,
+                "open_order_count": 0,
+                "positions_by_instrument": {},
+                "positions_by_strategy": {},
+                "broker_truth_warning": "Artifact-derived status is not broker truth until source=BROKER_RECONCILED.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_pnl_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "total_realized_pnl_today": "-93.0",
+                "total_realized_pnl_session": "-93.0",
+                "total_realized_pnl_week": "-94.0",
+                "total_unrealized_pnl": "0",
+                "review_required_count": 0,
+                "by_strategy": {},
+                "by_instrument": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_broker_reconciled_paper_trade_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "BROKER_RECONCILED",
+                "broker_reconciled": True,
+                "paper_trades_attempted_count": 2,
+                "completed_trade_count": 2,
+                "open_position_count": 0,
+                "review_required_count": 0,
+                "latest_trade_summary_path": str(
+                    ledger_dir / "latest_track_b_broker_reconciled_paper_trade_summary.json"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_broker_reconciled_live_position_status.json").write_text(
+        json.dumps(
+            {
+                "source": "BROKER_RECONCILED",
+                "broker_reconciled": True,
+                "open_position_count": 0,
+                "open_order_count": 0,
+                "positions_by_instrument": {},
+                "positions_by_strategy": {},
+                "broker_truth_warning": "Broker read-only truth agrees with Track B lifecycle flat state.",
+                "latest_live_position_status_path": str(
+                    ledger_dir / "latest_track_b_broker_reconciled_live_position_status.json"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_broker_reconciled_pnl_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "BROKER_RECONCILED",
+                "broker_reconciled": True,
+                "total_realized_pnl_today": "-93.0",
+                "total_realized_pnl_session": "-93.0",
+                "total_realized_pnl_week": "-94.0",
+                "total_unrealized_pnl": "0",
+                "review_required_count": 0,
+                "by_strategy": {},
+                "by_instrument": {},
+                "latest_pnl_summary_path": str(ledger_dir / "latest_track_b_broker_reconciled_pnl_summary.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (reconciliation_dir / "latest_track_b_paper_broker_reconciliation.json").write_text(
+        json.dumps(
+            {
+                "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "broker_reconciled": True,
+                "max_age_seconds": 120,
+                "track_b_broker_position_count": 0,
+                "track_b_broker_open_order_count": 0,
+                "lifecycle_open_position_count": 0,
+                "lifecycle_open_order_count": 0,
+                "review_required_count": 0,
+                "blockers": [],
+                "submit_authority": False,
+                "paper_proof_invoked": False,
+                "live_money_eligible": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
+
+    assert payload["source"] == "BROKER_RECONCILED"
+    assert payload["broker_reconciled"] is True
+    assert payload["broker_reconciliation_applied"] is True
+    assert payload["broker_reconciliation_status"]["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert payload["broker_reconciliation_status"]["broker_reconciled"] is True
+    assert payload["latest_live_position_status_path"].endswith(
+        "latest_track_b_broker_reconciled_live_position_status.json"
+    )
+    assert payload["broker_truth_warning"] == "Broker-reconciled PAPER lifecycle view."
+    assert payload["open_position_count"] == 0
+    assert payload["review_required_count"] == 0
 
 
 def test_track_b_paper_trading_payload_includes_compact_zero_activity_diagnostic(tmp_path: Path) -> None:

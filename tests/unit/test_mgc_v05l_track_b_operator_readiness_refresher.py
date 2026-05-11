@@ -22,11 +22,13 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
         "phase1_runtime_data_readiness",
         "phase1_ticker_readiness_matrix",
         "track_b_paper_preflight",
+        "track_b_paper_broker_reconciliation",
     ]
     assert "--mode monday-live" in flattened
     assert "phase1_runtime_data_readiness" in flattened
     assert "phase1_ticker_readiness_matrix" in flattened
     assert "track_b_paper_preflight.sh" in flattened
+    assert "track_b_paper_broker_reconciliation" in flattened
     assert "placeOrder" not in flattened
     assert "cancelOrder" not in flattened
     assert "reqGlobalCancel" not in flattened
@@ -46,7 +48,7 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
         runner=fake_runner,
     )
 
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
     assert payload["last_success"] is True
     assert payload["submit_authority"] is False
@@ -70,7 +72,8 @@ def test_refresh_once_fails_closed_when_a_refresh_command_fails(tmp_path: Path) 
     assert payload["last_success"] is False
     assert payload["last_success_at"] is None
     assert payload["submit_authority"] is False
-    assert payload["commands"][-1]["returncode"] == 1
+    assert payload["commands"][2]["name"] == "track_b_paper_preflight"
+    assert payload["commands"][2]["returncode"] == 1
 
 
 def test_missing_status_is_safe_and_non_authoritative(tmp_path: Path) -> None:

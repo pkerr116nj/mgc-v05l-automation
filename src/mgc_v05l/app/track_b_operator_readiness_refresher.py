@@ -156,6 +156,16 @@ def _refresh_commands(*, repo_root: Path, preflight_mode: str) -> list[tuple[str
                 preflight_mode,
             ],
         ),
+        (
+            "track_b_paper_broker_reconciliation",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.execution_core.track_b_paper_broker_reconciliation",
+                "--repo-root",
+                str(repo_root),
+            ],
+        ),
     ]
 
 
@@ -221,6 +231,13 @@ def _status_payload(
                 / "reports"
                 / "track_b_paper_preflight"
                 / "latest_track_b_paper_preflight.json"
+            ),
+            "track_b_paper_broker_reconciliation": str(
+                config.repo_root
+                / "outputs"
+                / "reports"
+                / "track_b_paper_broker_reconciliation"
+                / "latest_track_b_paper_broker_reconciliation.json"
             ),
         },
         "commands": [
