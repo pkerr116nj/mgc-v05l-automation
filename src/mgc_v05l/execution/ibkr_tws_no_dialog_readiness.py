@@ -160,9 +160,14 @@ def run_ibkr_tws_no_dialog_readiness_preflight(
                     else f"IBKR positions refresh did not complete within {config.timeout_seconds:.1f}s."
                 )
             )
-        positions = _build_positions_snapshot(client=runtime.client, selected_account_id=selected_account_id)
+        positions = _build_positions_snapshot(
+            config=_reconciliation_config_from_readiness(config),
+            client=runtime.client,
+            selected_account_id=selected_account_id,
+        )
         open_orders = _refresh_open_orders_snapshot(
             runtime=runtime,
+            config=_manual_submit_config_from_readiness(config),
             selected_account_id=selected_account_id,
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
@@ -394,6 +399,23 @@ def _build_runtime(
     )
     return _ReadinessRuntime(session=session, client=client, collector=collector, transport=transport)
 
+
+
+def _manual_submit_config_from_readiness(config: IbkrTwsNoDialogReadinessConfig) -> Any:
+    return type(
+        "ReadinessManualSubmitConfig",
+        (),
+        {
+            "repo_root": config.repo_root,
+            "mode": config.mode,
+            "host": config.host,
+            "port": config.port,
+            "client_id": config.client_id,
+            "account_id": config.account_id,
+            "symbol": config.symbol,
+            "expiry": config.contract_month,
+        },
+    )()
 
 def _reconciliation_config_from_readiness(config: IbkrTwsNoDialogReadinessConfig) -> Any:
     return type(

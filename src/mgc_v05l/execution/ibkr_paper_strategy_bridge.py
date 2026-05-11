@@ -537,12 +537,14 @@ def run_ibkr_paper_strategy_bridge(
         )
         positions = _refresh_positions_snapshot(
             runtime=runtime,
+            config=_position_like_config(config),
             selected_account_id=selected_account_id,
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
         )
         open_orders = _refresh_open_orders_snapshot(
             runtime=runtime,
+            config=_position_like_config(config),
             selected_account_id=selected_account_id,
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,

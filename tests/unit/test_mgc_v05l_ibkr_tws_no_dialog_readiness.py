@@ -107,6 +107,12 @@ def test_classify_readiness_blocked_when_working_mgc_exists() -> None:
 
 
 def test_run_preflight_reports_unverified_when_read_only_checks_pass(monkeypatch, tmp_path: Path) -> None:
+    captured_open_orders_config: dict[str, object] = {}
+
+    def _fake_refresh_open_orders_snapshot(**kwargs) -> dict[str, object]:
+        captured_open_orders_config["config"] = kwargs["config"]
+        return {"open_order_count": 0, "open_orders": []}
+
     monkeypatch.setattr(
         "mgc_v05l.execution.ibkr_tws_no_dialog_readiness._build_runtime",
         lambda **_: _runtime(),
@@ -132,7 +138,7 @@ def test_run_preflight_reports_unverified_when_read_only_checks_pass(monkeypatch
     )
     monkeypatch.setattr(
         "mgc_v05l.execution.ibkr_tws_no_dialog_readiness._refresh_open_orders_snapshot",
-        lambda **_: {"open_order_count": 0, "open_orders": []},
+        _fake_refresh_open_orders_snapshot,
     )
     monkeypatch.setattr("mgc_v05l.execution.ibkr_tws_no_dialog_readiness._build_callback_timeline", lambda runtime: [])
 
@@ -141,6 +147,9 @@ def test_run_preflight_reports_unverified_when_read_only_checks_pass(monkeypatch
     assert artifacts.classification == "TWS_NO_DIALOG_UNVERIFIED"
     assert artifacts.report["working_mgc_order_check"]["matching_working_order_count"] == 0
     assert artifacts.report["readiness_summary"]["code_preflight_ready_except_tws_no_dialog_uncertainty"] is True
+    assert getattr(captured_open_orders_config["config"], "host") == "127.0.0.1"
+    assert getattr(captured_open_orders_config["config"], "port") == 7497
+    assert getattr(captured_open_orders_config["config"], "account_id") == "DUM882026"
 
 
 def test_run_preflight_blocks_without_read_only(tmp_path: Path) -> None:

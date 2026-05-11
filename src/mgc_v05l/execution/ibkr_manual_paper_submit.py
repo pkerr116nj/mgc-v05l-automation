@@ -992,6 +992,7 @@ def run_ibkr_order_observation_diagnostic(
         )
         open_orders_snapshot = _refresh_open_orders_snapshot(
             runtime=runtime,
+            config=config,
             selected_account_id=context["selected_account_id"],
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
@@ -1005,6 +1006,7 @@ def run_ibkr_order_observation_diagnostic(
         )
         positions_after = _refresh_positions_snapshot(
             runtime=runtime,
+            config=config,
             selected_account_id=context["selected_account_id"],
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
@@ -2071,8 +2073,9 @@ def _collect_truth_and_preview_context(
         snapshot=snapshot,
         selected_account_id=selected_account_id,
     )
-    positions = _build_positions_snapshot(client=runtime.client, selected_account_id=selected_account_id)
-    open_orders_before = _build_open_orders_snapshot(client=runtime.client, selected_account_id=selected_account_id)
+    read_only_config = _read_only_config_from_submit(config)
+    positions = _build_positions_snapshot(config=read_only_config, client=runtime.client, selected_account_id=selected_account_id)
+    open_orders_before = _build_open_orders_snapshot(config=read_only_config, client=runtime.client, selected_account_id=selected_account_id)
     if open_orders_before.get("open_order_count"):
         expected_symbol = str(requested_order.get("symbol") or "").strip().upper()
         mgc_rows = [
@@ -2403,6 +2406,7 @@ def _request_market_data_snapshot(
 def _refresh_positions_snapshot(
     *,
     runtime: _SubmitRuntime,
+    config: IbkrManualPaperSubmitConfig,
     selected_account_id: str,
     timeout_seconds: float,
     sleep_fn: Callable[[float], None],
@@ -2425,7 +2429,11 @@ def _refresh_positions_snapshot(
                 else f"Position refresh did not complete within {timeout_seconds:.1f}s."
             )
         )
-    return _build_positions_snapshot(client=runtime.client, selected_account_id=selected_account_id)
+    return _build_positions_snapshot(
+        config=_read_only_config_from_submit(config),
+        client=runtime.client,
+        selected_account_id=selected_account_id,
+    )
 
 
 def _refresh_execution_truth(
@@ -2468,8 +2476,9 @@ def _refresh_execution_truth(
         )
     provider = IbkrExecutionProvider(config.repo_root, session=runtime.session, client=runtime.client)
     snapshot = provider.snapshot_state(force_refresh=True)
-    positions = _build_positions_snapshot(client=runtime.client, selected_account_id=selected_account_id)
-    open_orders = _build_open_orders_snapshot(client=runtime.client, selected_account_id=selected_account_id)
+    read_only_config = _read_only_config_from_submit(config)
+    positions = _build_positions_snapshot(config=read_only_config, client=runtime.client, selected_account_id=selected_account_id)
+    open_orders = _build_open_orders_snapshot(config=read_only_config, client=runtime.client, selected_account_id=selected_account_id)
     return {
         "provider_snapshot": snapshot,
         "positions": positions,
@@ -2638,6 +2647,7 @@ def _verify_close_position_flat(
     while time.monotonic() < deadline:
         last_positions = _refresh_positions_snapshot(
             runtime=runtime,
+            config=config,
             selected_account_id=selected_account_id,
             timeout_seconds=min(5.0, max(1.0, deadline - time.monotonic())),
             sleep_fn=sleep_fn,
@@ -2883,6 +2893,7 @@ def _execute_submit_cancel_lifecycle(
     pricing_context = dict(context.get("pricing_context") or {})
     refreshed_before_submit = _refresh_open_orders_snapshot(
         runtime=runtime,
+        config=config,
         selected_account_id=context["selected_account_id"],
         timeout_seconds=config.timeout_seconds,
         sleep_fn=sleep_fn,
@@ -2986,6 +2997,7 @@ def _execute_submit_cancel_lifecycle(
             }
         after_submit = _wait_for_submitted_order_visibility(
             runtime=runtime,
+            config=config,
             selected_account_id=context["selected_account_id"],
             order_id=order_id,
             timeout_seconds=config.timeout_seconds,
@@ -2994,6 +3006,7 @@ def _execute_submit_cancel_lifecycle(
     else:
         after_submit = _refresh_open_orders_snapshot(
             runtime=runtime,
+            config=config,
             selected_account_id=context["selected_account_id"],
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
@@ -3230,6 +3243,7 @@ def _cancel_and_verify_visible_order(
     )
     after_cancel = _wait_for_order_absence(
         runtime=runtime,
+        config=config,
         selected_account_id=selected_account_id,
         order_id=order_id,
         timeout_seconds=config.timeout_seconds,
@@ -3659,6 +3673,7 @@ def _find_open_order(snapshot: dict[str, Any], order_id: int) -> dict[str, Any] 
 def _refresh_open_orders_snapshot(
     *,
     runtime: _SubmitRuntime,
+    config: IbkrManualPaperSubmitConfig,
     selected_account_id: str,
     timeout_seconds: float,
     sleep_fn: Callable[[float], None],
@@ -3683,7 +3698,11 @@ def _refresh_open_orders_snapshot(
                 else f"Open-order refresh did not complete within {timeout_seconds:.1f}s."
             )
         )
-    return _build_open_orders_snapshot(client=runtime.client, selected_account_id=selected_account_id)
+    return _build_open_orders_snapshot(
+        config=_read_only_config_from_submit(config),
+        client=runtime.client,
+        selected_account_id=selected_account_id,
+    )
 
 
 def _build_callback_timeline(runtime: _SubmitRuntime) -> list[dict[str, Any]]:
@@ -3800,6 +3819,7 @@ def _diagnose_order_observation(
 def _wait_for_submitted_order_visibility(
     *,
     runtime: _SubmitRuntime,
+    config: IbkrManualPaperSubmitConfig,
     selected_account_id: str,
     order_id: int,
     timeout_seconds: float,
@@ -3811,6 +3831,7 @@ def _wait_for_submitted_order_visibility(
         remaining = max(1.0, min(5.0, deadline - time.monotonic()))
         latest_snapshot = _refresh_open_orders_snapshot(
             runtime=runtime,
+            config=config,
             selected_account_id=selected_account_id,
             timeout_seconds=remaining,
             sleep_fn=sleep_fn,
@@ -3824,6 +3845,7 @@ def _wait_for_submitted_order_visibility(
 def _wait_for_order_absence(
     *,
     runtime: _SubmitRuntime,
+    config: IbkrManualPaperSubmitConfig,
     selected_account_id: str,
     order_id: int,
     timeout_seconds: float,
@@ -3835,6 +3857,7 @@ def _wait_for_order_absence(
         remaining = max(1.0, min(5.0, deadline - time.monotonic()))
         latest_snapshot = _refresh_open_orders_snapshot(
             runtime=runtime,
+            config=config,
             selected_account_id=selected_account_id,
             timeout_seconds=remaining,
             sleep_fn=sleep_fn,

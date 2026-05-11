@@ -235,12 +235,14 @@ def run_ibkr_unattended_paper_rest_cancel(
         )
         positions_before = _refresh_positions_snapshot(
             runtime=runtime,
+            config=_manual_like_config(config),
             selected_account_id=selected_account_id,
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
         )
         open_order_before = _refresh_open_orders_snapshot(
             runtime=runtime,
+            config=_manual_like_config(config),
             selected_account_id=selected_account_id,
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
@@ -685,6 +687,7 @@ def _execute_unattended_rest_cancel_lifecycle(
 ) -> dict[str, Any]:
     refreshed_before_submit = _refresh_open_orders_snapshot(
         runtime=runtime,
+        config=_manual_like_config(config),
         selected_account_id=selected_account_id,
         timeout_seconds=config.timeout_seconds,
         sleep_fn=sleep_fn,
@@ -723,6 +726,7 @@ def _execute_unattended_rest_cancel_lifecycle(
     )
     after_submit = _wait_for_submitted_order_visibility(
         runtime=runtime,
+        config=_manual_like_config(config),
         selected_account_id=selected_account_id,
         order_id=order_id,
         timeout_seconds=config.observation_seconds,

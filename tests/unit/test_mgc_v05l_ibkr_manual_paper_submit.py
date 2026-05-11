@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,8 @@ from mgc_v05l.execution.ibkr_manual_paper_submit import (
     _execute_submit_cancel_lifecycle,
     _probe_delayed_quote_context,
     _qualified_contract_with_api_details,
+    _refresh_open_orders_snapshot,
+    _refresh_positions_snapshot,
     _submit_input_guardrails,
     artifact_stem_for_test_mode,
     IbkrManualPaperSubmitArtifacts,
@@ -754,6 +757,108 @@ def test_cancel_verification_logic_with_mocks() -> None:
 
     assert verified["verified"] is True
     assert not_verified["verified"] is False
+
+
+def test_broker_truth_refresh_helpers_pass_read_only_config(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Event:
+        def clear(self) -> None:
+            return None
+
+    class _Collector:
+        positions_ready = _Event()
+        open_orders_ready = _Event()
+
+        def reset_open_orders_ready(self) -> None:
+            return None
+
+        def latest_error(self) -> None:
+            return None
+
+    class _Client:
+        def request_positions(self) -> None:
+            return None
+
+        def request_open_orders(self) -> None:
+            return None
+
+        def record_event(self, *args, **kwargs) -> None:
+            return None
+
+    class _Transport:
+        def req_positions(self) -> None:
+            return None
+
+        def req_open_orders(self) -> None:
+            return None
+
+        def req_all_open_orders(self) -> None:
+            return None
+
+    runtime = SimpleNamespace(
+        client=_Client(),
+        collector=_Collector(),
+        transport=_Transport(),
+    )
+    monkeypatch.setattr("mgc_v05l.execution.ibkr_manual_paper_submit._wait_for_event", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._build_positions_snapshot",
+        lambda **kwargs: captured.setdefault("positions_config", kwargs["config"]) or {"position_count": 0},
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._build_open_orders_snapshot",
+        lambda **kwargs: captured.setdefault("open_orders_config", kwargs["config"]) or {"open_order_count": 0},
+    )
+
+    _refresh_positions_snapshot(
+        runtime=runtime,
+        config=_config(),
+        selected_account_id="DUM882026",
+        timeout_seconds=1.0,
+        sleep_fn=lambda _: None,
+    )
+    _refresh_open_orders_snapshot(
+        runtime=runtime,
+        config=_config(),
+        selected_account_id="DUM882026",
+        timeout_seconds=1.0,
+        sleep_fn=lambda _: None,
+    )
+
+    assert getattr(captured["positions_config"], "read_only") is True
+    assert getattr(captured["open_orders_config"], "read_only") is True
+    assert getattr(captured["positions_config"], "account_id") == "DUM882026"
+    assert getattr(captured["open_orders_config"], "host") == "127.0.0.1"
+    assert getattr(captured["open_orders_config"], "port") == 7497
+
+
+def test_broker_truth_refresh_call_sites_pass_config_keyword() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    call_names = {
+        "_build_positions_snapshot",
+        "_build_open_orders_snapshot",
+        "_refresh_positions_snapshot",
+        "_refresh_open_orders_snapshot",
+        "_wait_for_submitted_order_visibility",
+        "_wait_for_order_absence",
+    }
+    source_paths = [
+        repo_root / "src" / "mgc_v05l" / "execution" / "ibkr_manual_paper_submit.py",
+        repo_root / "src" / "mgc_v05l" / "execution" / "ibkr_paper_strategy_bridge.py",
+        repo_root / "src" / "mgc_v05l" / "execution" / "ibkr_tws_no_dialog_readiness.py",
+        repo_root / "src" / "mgc_v05l" / "execution" / "ibkr_unattended_paper_close.py",
+        repo_root / "src" / "mgc_v05l" / "execution" / "ibkr_unattended_paper_rest_cancel.py",
+    ]
+    missing_config: list[tuple[str, int, str]] = []
+    for source_path in source_paths:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in call_names:
+                if not any(keyword.arg == "config" for keyword in node.keywords):
+                    missing_config.append((source_path.name, node.lineno, node.func.id))
+
+    assert missing_config == []
 
 
 def test_manual_confirmation_wait_state_exists_only_in_manual_harness() -> None:
