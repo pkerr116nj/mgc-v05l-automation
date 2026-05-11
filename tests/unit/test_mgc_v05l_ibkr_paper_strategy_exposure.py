@@ -71,6 +71,9 @@ def _write_broker_positions_snapshot(
         json.dumps(
             {
                 "generated_at": generated_at,
+                "source": "IBKR_TWS_API_REQ_POSITIONS",
+                "request_method": "reqPositions",
+                "positions_complete": True,
                 "ok": True,
                 "selected_account_id": "DUM882026",
                 "positions": positions or [],
@@ -92,6 +95,9 @@ def _write_broker_open_orders_snapshot(
         json.dumps(
             {
                 "generated_at": generated_at,
+                "source": "IBKR_TWS_API_REQ_ALL_OPEN_ORDERS",
+                "request_method": "reqAllOpenOrders",
+                "open_orders_complete": True,
                 "ok": True,
                 "selected_account_id": "DUM882026",
                 "open_order_count": len(open_orders or []),
@@ -431,6 +437,31 @@ def test_blocks_mnq_entry_when_non_mgc_broker_truth_is_stale(tmp_path: Path) -> 
     assert broker_truth["open_orders_snapshot"]["path"].endswith("ibkr_open_orders_snapshot.json")
     assert broker_truth["required_freshness_threshold_seconds"] == 300.0
     assert broker_truth["account"] == "DUM882026"
+
+
+def test_blocks_non_mgc_entry_when_broker_truth_refresh_is_incomplete(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_1x_ny_early_core__us_early_long", "mnq_1x_ny_early_core__us_early_long")])
+    _write_broker_positions_snapshot(tmp_path)
+    _write_broker_open_orders_snapshot(tmp_path)
+    positions_path = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+    positions_payload = json.loads(positions_path.read_text(encoding="utf-8"))
+    positions_payload["positions_complete"] = False
+    positions_path.write_text(json.dumps(positions_payload), encoding="utf-8")
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_early_long",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "BROKER_TRUTH_STALE_OR_MISSING"
+    assert gate["broker_truth"]["positions_snapshot"]["reason"] == "positions_complete_false_or_missing"
 
 
 def test_honors_optional_aggregate_cap_when_configured(tmp_path: Path) -> None:

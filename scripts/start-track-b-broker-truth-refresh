@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common_env.sh"
+
+PID_FILE="${REPO_ROOT}/var/track_b_broker_truth_refresh_service.pid"
+LOG_FILE="${REPO_ROOT}/var/track_b_broker_truth_refresh_service.log"
+REFRESH_SECONDS="${TRACK_B_BROKER_TRUTH_REFRESH_SECONDS:-60}"
+CLIENT_ID="${TRACK_B_BROKER_TRUTH_REFRESH_CLIENT_ID:-9077}"
+
+ensure_dir "$(dirname "${PID_FILE}")"
+ensure_dir "$(dirname "${LOG_FILE}")"
+
+if [[ -f "${PID_FILE}" ]]; then
+  existing_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+  if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+    echo "Track B broker-truth read-only refresh service is already running with pid ${existing_pid}."
+    bash "${SCRIPT_DIR}/status-track-b-broker-truth-refresh"
+    exit 0
+  fi
+  rm -f "${PID_FILE}"
+fi
+
+service_pid="$(
+"${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${PYTHON_BIN}" "${LOG_FILE}" "${CLIENT_ID}" "${REFRESH_SECONDS}"
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+python_bin = sys.argv[2]
+log_file = Path(sys.argv[3])
+client_id = sys.argv[4]
+refresh_seconds = sys.argv[5]
+
+env = dict(os.environ)
+existing_pythonpath = env.get("PYTHONPATH", "")
+env["PYTHONPATH"] = f"{repo_root / 'src'}{':' + existing_pythonpath if existing_pythonpath else ''}"
+cmd = [
+    python_bin,
+    "-m",
+    "mgc_v05l.app.ibkr_broker_truth_refresher",
+    "--service",
+    "--mode", "PAPER",
+    "--host", "127.0.0.1",
+    "--port", "7497",
+    "--client-id", client_id,
+    "--account-id", "DUM882026",
+    "--read-only",
+    "--timeout-seconds", "8",
+    "--refresh-seconds", refresh_seconds,
+]
+log_file.parent.mkdir(parents=True, exist_ok=True)
+with log_file.open("ab") as log_handle, open(os.devnull, "rb") as devnull:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(repo_root),
+        env=env,
+        stdin=devnull,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+    )
+print(proc.pid)
+PY
+)"
+echo "${service_pid}" > "${PID_FILE}"
+echo "Started Track B broker-truth read-only refresh service with pid ${service_pid}."
+echo "Cadence seconds: ${REFRESH_SECONDS}"
+echo "Log file: ${LOG_FILE}"
+bash "${SCRIPT_DIR}/status-track-b-broker-truth-refresh"

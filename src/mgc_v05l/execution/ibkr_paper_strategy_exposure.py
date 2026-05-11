@@ -539,17 +539,21 @@ def _broker_net_position_for_symbol(
 
     positions_path = config.repo_root / config.broker_positions_snapshot_path
     positions_payload = _load_json(positions_path)
-    positions_fresh = _snapshot_freshness(
+    positions_fresh = _snapshot_freshness_with_requirements(
         payload=positions_payload,
         path=positions_path,
         max_age_seconds=float(config.broker_truth_max_age_seconds),
+        require_ok=True,
+        completeness_key="positions_complete",
     )
     open_orders_path = config.repo_root / config.broker_open_orders_snapshot_path
     open_orders_payload = _load_json(open_orders_path)
-    open_orders_fresh = _snapshot_freshness(
+    open_orders_fresh = _snapshot_freshness_with_requirements(
         payload=open_orders_payload,
         path=open_orders_path,
         max_age_seconds=float(config.broker_truth_max_age_seconds),
+        require_ok=True,
+        completeness_key="open_orders_complete",
     )
     if positions_fresh["fresh"] and open_orders_fresh["fresh"]:
         return (
@@ -603,6 +607,21 @@ def _broker_net_position_for_symbol(
 
 
 def _snapshot_freshness(*, payload: dict[str, Any], path: Path, max_age_seconds: float) -> dict[str, Any]:
+    return _snapshot_freshness_with_requirements(
+        payload=payload,
+        path=path,
+        max_age_seconds=max_age_seconds,
+    )
+
+
+def _snapshot_freshness_with_requirements(
+    *,
+    payload: dict[str, Any],
+    path: Path,
+    max_age_seconds: float,
+    require_ok: bool = False,
+    completeness_key: str | None = None,
+) -> dict[str, Any]:
     generated_at = str(payload.get("generated_at") or "").strip()
     if not payload or not generated_at:
         return {
@@ -627,6 +646,24 @@ def _snapshot_freshness(*, payload: dict[str, Any], path: Path, max_age_seconds:
     if generated_dt.tzinfo is None:
         generated_dt = generated_dt.replace(tzinfo=timezone.utc)
     age_seconds = max(0.0, (datetime.now(timezone.utc) - generated_dt.astimezone(timezone.utc)).total_seconds())
+    if require_ok and payload.get("ok") is not True:
+        return {
+            "fresh": False,
+            "path": str(path),
+            "generated_at": generated_at,
+            "age_seconds": age_seconds,
+            "max_age_seconds": float(max_age_seconds),
+            "reason": "snapshot_not_ok",
+        }
+    if completeness_key is not None and payload.get(completeness_key) is not True:
+        return {
+            "fresh": False,
+            "path": str(path),
+            "generated_at": generated_at,
+            "age_seconds": age_seconds,
+            "max_age_seconds": float(max_age_seconds),
+            "reason": f"{completeness_key}_false_or_missing",
+        }
     return {
         "fresh": age_seconds <= float(max_age_seconds),
         "path": str(path),

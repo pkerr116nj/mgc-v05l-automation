@@ -3307,6 +3307,7 @@ function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: Deskto
   const trackBPaperTrading = asRecord(dashboard.track_b_paper_trading);
   const restoredRuntimeLaneRows = restoredPaperRuntimeLaneRows(dashboard);
   const phase1GcReadiness = asRecord(trackBPaperTrading.phase1_gc_readiness);
+  const brokerTruthRefreshStatus = asRecord(trackBPaperTrading.broker_truth_refresh_status);
   const phase1GcReadinessAvailable = Object.keys(phase1GcReadiness).length > 0;
   const phase1GcClassification = formatValue(phase1GcReadiness.classification ?? "GC_PHASE1_READINESS_NOT_PROVIDED");
   const phase1GcReadyForWatch = phase1GcReadiness.ready_for_guarded_paper_watch === true && phase1GcReadiness.live_money_eligible !== true;
@@ -3425,6 +3426,33 @@ function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: Deskto
     <>
       {phase1GcReadinessPanel}
       <RestoredPaperRuntimeLaneTable rows={restoredRuntimeLaneRows} />
+      {brokerTruthRefreshStatus.available === true ? (
+        <Section title="IBKR Broker Truth Refresh" subtitle="Read-only position/open-order snapshot freshness; separate from lifecycle reconciliation">
+          <div className={`status-banner ${brokerTruthRefreshStatus.fresh === true ? "good" : "warn"}`}>
+            <div className="status-banner-main">
+              <div className="status-banner-title">{formatValue(brokerTruthRefreshStatus.classification)}</div>
+              <div className="status-banner-body">
+                Exposure gates require these read-only IBKR snapshots to be fresh and complete before PAPER submit eligibility can be evaluated.
+              </div>
+              <div className="status-banner-body secondary">{formatValue(brokerTruthRefreshStatus.last_error ?? brokerTruthRefreshStatus.path)}</div>
+            </div>
+          </div>
+          <div className="metric-grid compact">
+            <MetricCard label="Fresh" value={formatValue(brokerTruthRefreshStatus.fresh)} tone={brokerTruthRefreshStatus.fresh === true ? "good" : "warn"} />
+            <MetricCard label="Last Success" value={formatTimestamp(brokerTruthRefreshStatus.last_success_at)} />
+            <MetricCard label="Age" value={formatValue(brokerTruthRefreshStatus.age_seconds)} tone={brokerTruthRefreshStatus.fresh === true ? "good" : "warn"} />
+            <MetricCard label="Account" value={formatValue(brokerTruthRefreshStatus.account)} />
+            <MetricCard label="Host / Port" value={`${formatValue(brokerTruthRefreshStatus.host)}:${formatValue(brokerTruthRefreshStatus.port)}`} />
+            <MetricCard label="Client ID" value={formatValue(brokerTruthRefreshStatus.client_id)} />
+            <MetricCard label="Positions Complete" value={formatValue(brokerTruthRefreshStatus.positions_complete)} tone={brokerTruthRefreshStatus.positions_complete === true ? "good" : "warn"} />
+            <MetricCard label="Open Orders Complete" value={formatValue(brokerTruthRefreshStatus.open_orders_complete)} tone={brokerTruthRefreshStatus.open_orders_complete === true ? "good" : "warn"} />
+            <MetricCard label="Positions" value={formatValue(brokerTruthRefreshStatus.position_count)} />
+            <MetricCard label="Open Orders" value={formatValue(brokerTruthRefreshStatus.open_order_count)} tone={Number(brokerTruthRefreshStatus.open_order_count ?? 0) === 0 ? "good" : "warn"} />
+            <MetricCard label="Submit Authority" value={formatValue(brokerTruthRefreshStatus.submit_authority)} tone={brokerTruthRefreshStatus.submit_authority === true ? "danger" : "good"} />
+            <MetricCard label="Live Money" value={formatValue(brokerTruthRefreshStatus.live_money_eligible)} tone={brokerTruthRefreshStatus.live_money_eligible === true ? "danger" : "good"} />
+          </div>
+        </Section>
+      ) : null}
       <Section
         title={legacyShadowNonAuthoritativeForGc ? "Legacy Shadow Track B Status" : "Track B Status"}
         subtitle={legacyShadowNonAuthoritativeForGc
@@ -3881,6 +3909,7 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
   const instrumentRows = asArray<JsonRecord>(trading.instrument_performance);
   const zeroActivityDiagnostic = asRecord(trading.zero_activity_diagnostic);
   const phase1GcReadiness = asRecord(trading.phase1_gc_readiness);
+  const brokerTruthRefreshStatus = asRecord(trading.broker_truth_refresh_status);
   const noSignalAttribution = Object.keys(asRecord(trading.no_signal_attribution_rollup)).length
     ? asRecord(trading.no_signal_attribution_rollup)
     : asRecord(zeroActivityDiagnostic.no_signal_attribution_rollup);
@@ -4043,6 +4072,33 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
             <MetricCard label="Can Submit" value={formatValue(phase1GcReadiness.can_submit)} tone={phase1GcReadiness.can_submit === true ? "warn" : "good"} />
             <MetricCard label="Live Money" value={formatValue(phase1GcReadiness.live_money_eligible)} tone={phase1GcReadiness.live_money_eligible === true ? "danger" : "good"} />
             <MetricCard label="Preflight Age" value={formatValue(phase1GcReadiness.age_seconds)} tone={phase1GcReadiness.stale === true ? "warn" : "good"} />
+          </div>
+        ) : null}
+        {brokerTruthRefreshStatus.available === true ? (
+          <div className={`status-banner ${brokerTruthRefreshStatus.fresh === true ? "good" : "warn"}`}>
+            <div className="status-banner-main">
+              <div className="status-banner-title">{formatValue(brokerTruthRefreshStatus.classification)}</div>
+              <div className="status-banner-body">
+                Broker truth freshness is read-only IBKR position/open-order snapshot freshness, separate from artifact lifecycle reconciliation.
+              </div>
+              <div className="status-banner-body secondary">{formatValue(brokerTruthRefreshStatus.path)}</div>
+            </div>
+          </div>
+        ) : null}
+        {brokerTruthRefreshStatus.available === true ? (
+          <div className="metric-grid compact">
+            <MetricCard label="Broker Truth Fresh" value={formatValue(brokerTruthRefreshStatus.fresh)} tone={brokerTruthRefreshStatus.fresh === true ? "good" : "warn"} />
+            <MetricCard label="Last Success" value={formatTimestamp(brokerTruthRefreshStatus.last_success_at)} />
+            <MetricCard label="Truth Age" value={formatValue(brokerTruthRefreshStatus.age_seconds)} tone={brokerTruthRefreshStatus.fresh === true ? "good" : "warn"} />
+            <MetricCard label="Account" value={formatValue(brokerTruthRefreshStatus.account)} />
+            <MetricCard label="Host / Port" value={`${formatValue(brokerTruthRefreshStatus.host)}:${formatValue(brokerTruthRefreshStatus.port)}`} />
+            <MetricCard label="Client ID" value={formatValue(brokerTruthRefreshStatus.client_id)} />
+            <MetricCard label="Positions Complete" value={formatValue(brokerTruthRefreshStatus.positions_complete)} tone={brokerTruthRefreshStatus.positions_complete === true ? "good" : "warn"} />
+            <MetricCard label="Open Orders Complete" value={formatValue(brokerTruthRefreshStatus.open_orders_complete)} tone={brokerTruthRefreshStatus.open_orders_complete === true ? "good" : "warn"} />
+            <MetricCard label="Positions" value={formatValue(brokerTruthRefreshStatus.position_count)} />
+            <MetricCard label="Open Orders" value={formatValue(brokerTruthRefreshStatus.open_order_count)} tone={Number(brokerTruthRefreshStatus.open_order_count ?? 0) === 0 ? "good" : "warn"} />
+            <MetricCard label="Submit Authority" value={formatValue(brokerTruthRefreshStatus.submit_authority)} tone={brokerTruthRefreshStatus.submit_authority === true ? "danger" : "good"} />
+            <MetricCard label="Live Money" value={formatValue(brokerTruthRefreshStatus.live_money_eligible)} tone={brokerTruthRefreshStatus.live_money_eligible === true ? "danger" : "good"} />
           </div>
         ) : null}
         <RestoredPaperRuntimeLaneTable rows={restoredRuntimeLaneRows} />

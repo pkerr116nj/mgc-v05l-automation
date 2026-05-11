@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common_env.sh"
+
+PID_FILE="${REPO_ROOT}/var/track_b_broker_truth_refresh_service.pid"
+if [[ -f "${PID_FILE}" ]]; then
+  service_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+else
+  service_pid=""
+fi
+
+"${PYTHON_BIN}" -m mgc_v05l.app.ibkr_broker_truth_refresher --status
+if [[ -n "${service_pid}" ]] && kill -0 "${service_pid}" 2>/dev/null; then
+  echo "running=true pid=${service_pid}"
+else
+  echo "running=false"
+fi
