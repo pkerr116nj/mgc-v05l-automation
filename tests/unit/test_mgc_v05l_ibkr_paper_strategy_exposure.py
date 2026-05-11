@@ -80,6 +80,29 @@ def _write_broker_positions_snapshot(
     )
 
 
+def _write_broker_open_orders_snapshot(
+    tmp_path: Path,
+    *,
+    generated_at: str = "2999-01-01T00:00:00+00:00",
+    open_orders: list[dict[str, object]] | None = None,
+) -> None:
+    path = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at,
+                "ok": True,
+                "selected_account_id": "DUM882026",
+                "open_order_count": len(open_orders or []),
+                "has_open_orders": bool(open_orders),
+                "open_orders": open_orders or [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _position(strategy_id: str, *, qty: float = 1.0, side: str = "LONG", symbol: str = "MGC") -> dict[str, object]:
     return {
         "strategy_id": strategy_id,
@@ -180,6 +203,7 @@ def test_flat_mnq_sell_to_open_short_entry_is_allowed(tmp_path: Path) -> None:
         [_governance_row("mnq_1x_ny_early_core__us_early_short_reclaim_fail", "index_futures_ny_intraday_forced_core_v2__MNQ")],
     )
     _write_broker_positions_snapshot(tmp_path)
+    _write_broker_open_orders_snapshot(tmp_path)
 
     gate = evaluate_paper_strategy_exposure_gate(
         repo_root=tmp_path,
@@ -360,6 +384,7 @@ def test_blocks_mnq_entry_when_broker_position_is_not_strategy_owned(tmp_path: P
             }
         ],
     )
+    _write_broker_open_orders_snapshot(tmp_path)
 
     gate = evaluate_paper_strategy_exposure_gate(
         repo_root=tmp_path,
@@ -394,9 +419,18 @@ def test_blocks_mnq_entry_when_non_mgc_broker_truth_is_stale(tmp_path: Path) -> 
     )
 
     assert gate["submit_allowed"] is False
+    assert gate["classification"] == "BROKER_TRUTH_STALE_OR_MISSING"
     assert gate["blocker_classification"] == "BROKER_TRUTH_STALE_OR_MISSING"
     assert gate["review_required"] is True
     assert "broker_position_truth_stale_or_missing" in gate["block_reasons"]
+    assert gate["detail"] == "Fresh broker position and open-order truth is required before exposure ownership can be evaluated."
+    broker_truth = gate["broker_truth"]
+    assert broker_truth["symbol"] == "MNQ"
+    assert broker_truth["positions_snapshot"]["path"].endswith("ibkr_positions_snapshot.json")
+    assert broker_truth["positions_snapshot"]["generated_at"] == "2026-01-01T00:00:00+00:00"
+    assert broker_truth["open_orders_snapshot"]["path"].endswith("ibkr_open_orders_snapshot.json")
+    assert broker_truth["required_freshness_threshold_seconds"] == 300.0
+    assert broker_truth["account"] == "DUM882026"
 
 
 def test_honors_optional_aggregate_cap_when_configured(tmp_path: Path) -> None:

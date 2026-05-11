@@ -114,8 +114,12 @@ def _blocked_intent_classification(reason: str, submit_attempt: dict[str, object
             failed_gate_text,
         ]
     ).lower()
-    if "paper_strategy_exposure_gate" in failed_gate_text or "owning strategy" in text or "attributed exposure" in text:
-        return "BRIDGE_EXPOSURE_GATE_BLOCKED"
+    if (
+        "broker_position_truth_stale_or_missing" in text
+        or "broker truth" in text
+        or ("broker position" in text and "truth" in text)
+    ):
+        return "BROKER_TRUTH_STALE_OR_MISSING"
     if "paper_strategy_monitor_running" in failed_gate_text or "monitor_not_running" in text or "not running" in text or "health_stopped" in text or "stopped" in text:
         return "PAPER_MONITOR_NOT_HEALTHY"
     if (
@@ -127,6 +131,8 @@ def _blocked_intent_classification(reason: str, submit_attempt: dict[str, object
         return "ROUTE_HEALTH_STALE"
     if "bridge_allowed=false" in text or "bridge_allowed" in failed_gate_text:
         return "BRIDGE_AUTHORITY_BLOCKED"
+    if "paper_strategy_exposure_gate" in failed_gate_text or "owning strategy" in text or "attributed exposure" in text:
+        return "BRIDGE_EXPOSURE_GATE_BLOCKED"
     if "account" in failed_gate_text:
         return "ACCOUNT_MISMATCH"
     if "contract" in failed_gate_text or "local_symbol" in failed_gate_text or "expiry" in failed_gate_text or "execution target" in failed_gate_text:

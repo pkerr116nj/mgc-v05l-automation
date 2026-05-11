@@ -135,6 +135,24 @@ def test_write_ibkr_read_only_artifacts_serializes_required_reports(tmp_path: Pa
     assert "IBKR Read-Only Connection Report" in markdown
 
 
+def test_read_only_verifier_uses_api_aligned_non_mutating_position_and_order_requests() -> None:
+    source = Path("src/mgc_v05l/execution/ibkr_read_only_verifier.py").read_text(encoding="utf-8")
+
+    assert "reqPositions()" in source
+    assert "positionEnd" in source
+    assert "reqAllOpenOrders()" in source
+    assert "openOrderEnd" in source
+    assert "reqOpenOrders" not in source
+    assert "reqAutoOpenOrders" not in source
+    assert "placeOrder" not in source
+    assert "cancelOrder" not in source
+    assert "reqGlobalCancel" not in source
+    assert '"positions_complete": True' in source
+    assert '"open_orders_complete": True' in source
+    assert '"order_binding_requested": False' in source
+    assert '"auto_open_orders_requested": False' in source
+
+
 def test_partial_market_data_summary_is_rendered_clearly() -> None:
     markdown = render_ibkr_read_only_connection_report_markdown(
         {

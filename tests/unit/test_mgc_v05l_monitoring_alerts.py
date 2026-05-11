@@ -366,6 +366,23 @@ def test_blocked_intent_classification_uses_failed_bridge_gate_not_passed_notes(
     assert classification == "BRIDGE_EXPOSURE_GATE_BLOCKED"
 
 
+def test_blocked_intent_classification_keeps_broker_truth_stale_distinct_from_exposure_conflict() -> None:
+    classification = _blocked_intent_classification(
+        "BLOCKED_NOT_SENT_TO_BROKER: Fresh broker position and open-order truth is required before exposure ownership can be evaluated.",
+        {
+            "bridge_gate_trace": [
+                {
+                    "name": "paper_strategy_exposure_gate",
+                    "passed": False,
+                    "detail": "Fresh broker position and open-order truth is required before exposure ownership can be evaluated.",
+                },
+            ]
+        },
+    )
+
+    assert classification == "BROKER_TRUTH_STALE_OR_MISSING"
+
+
 def test_alert_dispatcher_deduplicates_and_resolves_stateful_alerts(tmp_path: Path) -> None:
     logger = StructuredLogger(tmp_path / "artifacts")
     dispatcher = AlertDispatcher(logger, source_subsystem="test")

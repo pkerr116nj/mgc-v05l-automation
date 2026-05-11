@@ -19,6 +19,7 @@ _DEFAULT_LEDGER_JSON = "paper_strategy_exposure_ledger.json"
 _DEFAULT_AGGREGATE_JSON = "paper_aggregate_exposure_state.json"
 _DEFAULT_AUDIT_JSONL = "paper_exposure_gate_audit.jsonl"
 _DEFAULT_BROKER_POSITIONS_SNAPSHOT = Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+_DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT = Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
 _DEFAULT_INDEX_EXPOSURE_SNAPSHOT = Path("outputs") / "reports" / "ibkr_mnq_nq_scope_support" / "paper_index_exposure_state.json"
 _SUPPORTED_ENTRY_ACTIONS = {"BUY"}
 _SUPPORTED_EXIT_ACTIONS = {"SELL", "EXIT"}
@@ -46,6 +47,7 @@ class IbkrPaperStrategyExposureConfig:
     allow_long_and_short_netting: bool = False
     allow_direct_strategy_flip: bool = False
     broker_positions_snapshot_path: Path = _DEFAULT_BROKER_POSITIONS_SNAPSHOT
+    broker_open_orders_snapshot_path: Path = _DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT
     index_exposure_snapshot_path: Path = _DEFAULT_INDEX_EXPOSURE_SNAPSHOT
     broker_truth_max_age_seconds: float = _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS
 
@@ -174,6 +176,7 @@ def evaluate_paper_strategy_exposure_gate(
     allow_long_and_short_netting: bool = False,
     allow_direct_strategy_flip: bool = False,
     broker_positions_snapshot_path: Path = _DEFAULT_BROKER_POSITIONS_SNAPSHOT,
+    broker_open_orders_snapshot_path: Path = _DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT,
     index_exposure_snapshot_path: Path = _DEFAULT_INDEX_EXPOSURE_SNAPSHOT,
     broker_truth_max_age_seconds: float = _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS,
 ) -> dict[str, Any]:
@@ -193,6 +196,7 @@ def evaluate_paper_strategy_exposure_gate(
             allow_long_and_short_netting=allow_long_and_short_netting,
             allow_direct_strategy_flip=allow_direct_strategy_flip,
             broker_positions_snapshot_path=broker_positions_snapshot_path,
+            broker_open_orders_snapshot_path=broker_open_orders_snapshot_path,
             index_exposure_snapshot_path=index_exposure_snapshot_path,
             broker_truth_max_age_seconds=broker_truth_max_age_seconds,
         )
@@ -437,7 +441,10 @@ def _evaluate_strategy_gate(
             block_reasons.append("strategy_stacking_disabled")
         if block_reasons:
             submit_allowed = False
-            if "configured_aggregate_contract_limit_exceeded" in block_reasons:
+            if "broker_position_truth_stale_or_missing" in block_reasons:
+                classification = "BROKER_TRUTH_STALE_OR_MISSING"
+                detail = "Fresh broker position and open-order truth is required before exposure ownership can be evaluated."
+            elif "configured_aggregate_contract_limit_exceeded" in block_reasons:
                 classification = "PAPER_EXPOSURE_BLOCKED_AGGREGATE_LIMIT"
                 detail = "The requested entry would exceed the explicit aggregate contract cap."
             else:
@@ -499,6 +506,7 @@ def _evaluate_strategy_gate(
         "max_per_strategy_mgc_contracts": float(config.max_per_strategy_mgc_contracts),
         "aggregate_broker_position": aggregate_state.get("broker_net_position"),
         "aggregate_strategy_position_sum": aggregate_state.get("strategy_attributed_position_sum"),
+        "broker_truth": aggregate_state.get("broker_truth"),
         "blocker_classification": (
             "BROKER_LEDGER_POSITION_MISMATCH"
             if any(reason in block_reasons for reason in {"ledger_broker_mismatch", "orphan_broker_position"})
@@ -536,14 +544,26 @@ def _broker_net_position_for_symbol(
         path=positions_path,
         max_age_seconds=float(config.broker_truth_max_age_seconds),
     )
-    if positions_fresh["fresh"]:
+    open_orders_path = config.repo_root / config.broker_open_orders_snapshot_path
+    open_orders_payload = _load_json(open_orders_path)
+    open_orders_fresh = _snapshot_freshness(
+        payload=open_orders_payload,
+        path=open_orders_path,
+        max_age_seconds=float(config.broker_truth_max_age_seconds),
+    )
+    if positions_fresh["fresh"] and open_orders_fresh["fresh"]:
         return (
             _net_position_from_rows(list(positions_payload.get("positions") or []), executable_symbol),
             {
-                **positions_fresh,
                 "truth_available": True,
-                "source": "ibkr_read_only_positions_snapshot",
+                "source": "ibkr_read_only_positions_and_open_orders_snapshot",
                 "symbol": executable_symbol,
+                "positions_snapshot": positions_fresh,
+                "open_orders_snapshot": open_orders_fresh,
+                "generated_at": positions_fresh.get("generated_at"),
+                "broker_refresh_timestamp": positions_fresh.get("generated_at"),
+                "account": positions_payload.get("selected_account_id") or open_orders_payload.get("selected_account_id"),
+                "required_freshness_threshold_seconds": float(config.broker_truth_max_age_seconds),
             },
         )
 
@@ -572,7 +592,11 @@ def _broker_net_position_for_symbol(
             "source": "missing_or_stale_non_mgc_broker_truth",
             "symbol": executable_symbol,
             "positions_snapshot": positions_fresh,
+            "open_orders_snapshot": open_orders_fresh,
             "index_exposure_snapshot": index_fresh,
+            "broker_refresh_timestamp": positions_fresh.get("generated_at"),
+            "account": positions_payload.get("selected_account_id") or open_orders_payload.get("selected_account_id"),
+            "required_freshness_threshold_seconds": float(config.broker_truth_max_age_seconds),
             "max_age_seconds": float(config.broker_truth_max_age_seconds),
         },
     )

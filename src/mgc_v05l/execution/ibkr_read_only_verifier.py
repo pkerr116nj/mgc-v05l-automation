@@ -603,10 +603,12 @@ def verify_ibkr_read_only_connection(
             selected_account_id=selected_account_id,
         )
         positions_snapshot = _build_positions_snapshot(
+            config=config,
             client=primary.client,
             selected_account_id=selected_account_id,
         )
         open_orders_snapshot = _build_open_orders_snapshot(
+            config=config,
             client=primary.client,
             selected_account_id=selected_account_id,
         )
@@ -768,14 +770,8 @@ def write_ibkr_read_only_artifacts(
         json.dumps(artifacts.account_truth_snapshot, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    (reports_dir / "ibkr_positions_snapshot.json").write_text(
-        json.dumps(artifacts.positions_snapshot, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    (reports_dir / "ibkr_open_orders_snapshot.json").write_text(
-        json.dumps(artifacts.open_orders_snapshot, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    _write_json_atomically(reports_dir / "ibkr_positions_snapshot.json", artifacts.positions_snapshot)
+    _write_json_atomically(reports_dir / "ibkr_open_orders_snapshot.json", artifacts.open_orders_snapshot)
     (reports_dir / "ibkr_contract_qualification_report.json").write_text(
         json.dumps(artifacts.contract_qualification_report, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -785,6 +781,12 @@ def write_ibkr_read_only_artifacts(
             json.dumps(artifacts.market_data_probe_report, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+
+
+def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path.replace(path)
 
 
 def render_ibkr_read_only_connection_report_markdown(report: dict[str, Any]) -> str:
@@ -1134,7 +1136,7 @@ def _build_account_truth_snapshot(
     }
 
 
-def _build_positions_snapshot(*, client: IbkrClient, selected_account_id: str) -> dict[str, Any]:
+def _build_positions_snapshot(*, config: IbkrReadOnlyVerificationConfig, client: IbkrClient, selected_account_id: str) -> dict[str, Any]:
     rows = []
     for position in client.positions():
         if position.account_id != selected_account_id:
@@ -1156,7 +1158,17 @@ def _build_positions_snapshot(*, client: IbkrClient, selected_account_id: str) -
         )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "IBKR_TWS_API_REQ_POSITIONS",
+        "request_method": "reqPositions",
+        "positions_complete": True,
+        "completion_callback": "positionEnd",
         "selected_account_id": selected_account_id,
+        "account": selected_account_id,
+        "client_id": int(config.client_id),
+        "host": config.host,
+        "port": int(config.port),
+        "mode": config.mode,
+        "read_only": bool(config.read_only),
         "position_count": len(rows),
         "is_flat_account": len(rows) == 0,
         "ok": True,
@@ -1164,7 +1176,7 @@ def _build_positions_snapshot(*, client: IbkrClient, selected_account_id: str) -
     }
 
 
-def _build_open_orders_snapshot(*, client: IbkrClient, selected_account_id: str) -> dict[str, Any]:
+def _build_open_orders_snapshot(*, config: IbkrReadOnlyVerificationConfig, client: IbkrClient, selected_account_id: str) -> dict[str, Any]:
     rows = []
     for order in client.open_orders():
         if order.account_id != selected_account_id:
@@ -1189,7 +1201,19 @@ def _build_open_orders_snapshot(*, client: IbkrClient, selected_account_id: str)
         )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "IBKR_TWS_API_REQ_ALL_OPEN_ORDERS",
+        "request_method": "reqAllOpenOrders",
+        "open_orders_complete": True,
+        "completion_callback": "openOrderEnd",
+        "order_binding_requested": False,
+        "auto_open_orders_requested": False,
         "selected_account_id": selected_account_id,
+        "account": selected_account_id,
+        "client_id": int(config.client_id),
+        "host": config.host,
+        "port": int(config.port),
+        "mode": config.mode,
+        "read_only": bool(config.read_only),
         "open_order_count": len(rows),
         "has_open_orders": len(rows) > 0,
         "ok": True,
