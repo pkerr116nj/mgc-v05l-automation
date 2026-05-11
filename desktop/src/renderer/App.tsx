@@ -3815,11 +3815,26 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
         />
       </Section>
 
-      <Section title="Zero Activity Diagnosis" subtitle="Bounded read-only explanation for no PAPER trades">
+      <Section
+        title={phase1GcReadyForWatch && zeroActivityClassification === "STALE_DIAGNOSTIC" ? "Legacy Zero Activity Diagnosis" : "Zero Activity Diagnosis"}
+        subtitle={
+          phase1GcReadyForWatch && zeroActivityClassification === "STALE_DIAGNOSTIC"
+            ? "Stale lifecycle diagnostic retained as evidence only; current GC Phase-1 preflight readiness is authoritative."
+            : "Bounded read-only explanation for no PAPER trades"
+        }
+      >
         <div className={`status-banner ${zeroActivityDiagnostic.available === false ? "warn" : statusTone(zeroActivityDiagnostic.diagnosis_classification)}`}>
           <div className="status-banner-main">
-            <div className="status-banner-title">{formatValue(zeroActivityDiagnostic.diagnosis_classification)}</div>
-            <div className="status-banner-body">{formatValue(zeroActivityDiagnostic.dominant_blocker ?? zeroActivityDiagnostic.recommended_next_action)}</div>
+            <div className="status-banner-title">
+              {phase1GcReadyForWatch && zeroActivityClassification === "STALE_DIAGNOSTIC"
+                ? "LEGACY_DIAGNOSTIC_STALE_NOT_AUTHORITATIVE"
+                : formatValue(zeroActivityDiagnostic.diagnosis_classification)}
+            </div>
+            <div className="status-banner-body">
+              {phase1GcReadyForWatch && zeroActivityClassification === "STALE_DIAGNOSTIC"
+                ? "This stale zero-activity diagnostic is preserved for evidence and is not the current Track B Paper readiness state."
+                : formatValue(zeroActivityDiagnostic.dominant_blocker ?? zeroActivityDiagnostic.recommended_next_action)}
+            </div>
           </div>
         </div>
         <div className="metric-grid compact">
