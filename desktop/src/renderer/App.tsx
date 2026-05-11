@@ -1667,6 +1667,67 @@ function restoredPaperRuntimeCanSubmit(row: JsonRecord): boolean {
   return liveIntent.submit_allowed === true;
 }
 
+function restoredPaperRuntimeSubmitAuthorityReason(row: JsonRecord): string {
+  const liveIntent = asRecord(row.latest_live_strategy_intent);
+  const blockedIntent = asRecord(row.latest_blocked_strategy_intent);
+  const nestedBlockedIntent = asRecord(liveIntent.blocked_strategy_intent);
+  const submitFailure = asRecord(liveIntent.submit_failure);
+  const liveIntentPresent = Object.keys(liveIntent).length > 0;
+  const blockedIntentPresent = Object.keys(blockedIntent).length > 0 || Object.keys(nestedBlockedIntent).length > 0;
+  const currentBarId = String(row.last_execution_bar_id ?? row.latest_completed_bar_id ?? "").trim();
+  const intentBarId = String(liveIntent.bar_id ?? blockedIntent.bar_id ?? nestedBlockedIntent.bar_id ?? "").trim();
+  const lastBlocker = String(
+    row.latest_blocked_strategy_intent_reason
+      ?? nestedBlockedIntent.exact_blocker_reason
+      ?? blockedIntent.exact_blocker_reason
+      ?? nestedBlockedIntent.bridge_detail
+      ?? blockedIntent.bridge_detail
+      ?? submitFailure.error
+      ?? liveIntent.submit_gate_blocker
+      ?? "",
+  ).trim();
+
+  if (restoredPaperRuntimeCanSubmit(row)) {
+    return "Current live intent has guarded PAPER submit authority.";
+  }
+  if (row.live_money_eligible === true) {
+    return "Blocked: live_money_eligible=true is not allowed for Track B PAPER.";
+  }
+  if (row.entries_enabled !== true) {
+    return "Entries are disabled for this restored runtime lane.";
+  }
+  if (liveIntentPresent && currentBarId && intentBarId && currentBarId !== intentBarId) {
+    return lastBlocker
+      ? `Latest signal/intent is stale (${intentBarId}; current ${currentBarId}); last submit blocker: ${lastBlocker}`
+      : `Latest signal/intent is stale (${intentBarId}; current ${currentBarId}); no current-bar submit authority.`;
+  }
+  if (lastBlocker) {
+    return blockedIntentPresent || liveIntentPresent
+      ? `Guarded route blocked: ${lastBlocker}`
+      : lastBlocker;
+  }
+  if (liveIntent.fill_confirmed === true) {
+    return "Latest intent is already fill-confirmed/complete; no new submit authority is present.";
+  }
+  if (liveIntent.submit_attempted === true) {
+    return "Latest intent already attempted submit; no new submit authority is present.";
+  }
+  if (liveIntent.submit_suppressed === true) {
+    return "Submit was suppressed by runtime gating; no guarded submit authority is present.";
+  }
+  if (liveIntentPresent) {
+    return "Live intent exists, but submit_allowed is not true in the lane payload.";
+  }
+  if (blockedIntentPresent) {
+    return "Blocked intent exists, but exact blocker detail was not published.";
+  }
+  if (row.eligible_now === true) {
+    return "Route/session eligible, but no current signal/candidate/live intent is present for this lane.";
+  }
+  const blocker = restoredPaperRuntimeBlocker(row);
+  return blocker === "None" ? "No current signal/candidate; submit authority absent." : `Lane is not route-eligible: ${blocker}`;
+}
+
 function restoredPaperRuntimeLaneRows(dashboard: JsonRecord): JsonRecord[] {
   const paper = asRecord(dashboard.paper);
   const rawOperatorStatus = asRecord(paper.raw_operator_status);
@@ -1685,6 +1746,7 @@ function restoredPaperRuntimeLaneRows(dashboard: JsonRecord): JsonRecord[] {
       latest_input_freshness: restoredPaperRuntimeFreshness(row),
       route_eligibility: row.eligible_now === true ? "ELIGIBLE_NOW" : `GATED: ${restoredPaperRuntimeBlocker(row)}`,
       can_submit: restoredPaperRuntimeCanSubmit(row),
+      submit_authority_reason: restoredPaperRuntimeSubmitAuthorityReason(row),
       live_money_eligible: row.live_money_eligible === true,
       enabled_active: row.entries_enabled === true ? "enabled / active runtime" : "disabled",
       last_evaluated_timestamp: row.last_execution_bar_evaluated_at ?? row.last_processed_bar_end_ts,
@@ -1726,6 +1788,7 @@ function RestoredPaperRuntimeLaneTable(props: { rows: JsonRecord[] }) {
           { key: "freshness", label: "Latest Input Freshness", render: (row) => formatValue(row.latest_input_freshness) },
           { key: "route", label: "Route Eligibility", render: (row) => formatValue(row.route_eligibility) },
           { key: "can_submit", label: "Can Submit", render: (row) => <Badge label={formatValue(row.can_submit)} tone={row.can_submit === true ? "warn" : "good"} /> },
+          { key: "submit_reason", label: "Submit Authority Reason", render: (row) => formatValue(row.submit_authority_reason) },
           { key: "live_money", label: "Live Money", render: (row) => <Badge label={formatValue(row.live_money_eligible)} tone={row.live_money_eligible === true ? "danger" : "good"} /> },
         ]}
       />
