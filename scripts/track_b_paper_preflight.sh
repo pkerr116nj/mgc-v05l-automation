@@ -306,19 +306,40 @@ try:
     matrix_rows = list(matrix_artifacts.rows)
     matrix_symbols = tuple(str(row.get("approved_phase1_symbol") or "") for row in matrix_rows)
     matrix_live_money_false = all(row.get("live_money_eligible") is False for row in matrix_rows)
+    allowed_guarded_candidate_submit_rows = [
+        row
+        for row in matrix_rows
+        if row.get("can_submit") is True
+        and str(row.get("approved_phase1_symbol") or "") == "GC"
+        and str(row.get("paper_candidate_strategy_id") or "")
+        == "gc_1x_asia_london_participation__asia_london_long_v5"
+        and row.get("paper_watch_ready") is True
+        and row.get("guarded_route_authorized") is True
+        and row.get("strategy_approved") is True
+        and row.get("live_money_eligible") is False
+    ]
+    unauthorized_can_submit_rows = [
+        row
+        for row in matrix_rows
+        if row.get("can_submit") is True and row not in allowed_guarded_candidate_submit_rows
+    ]
     add(
         "phase1_ticker_readiness_matrix_static",
         len(matrix_rows) == 10
-        and int(matrix_artifacts.report.get("can_submit_count", -1)) == 0
         and matrix_symbols == expected_phase1_symbols
-        and matrix_live_money_false,
+        and matrix_live_money_false
+        and not unauthorized_can_submit_rows,
         True,
         (
             f"row_count={len(matrix_rows)}; can_submit_count={matrix_artifacts.report.get('can_submit_count')}; "
+            f"authorized_gc_candidate_can_submit_count={len(allowed_guarded_candidate_submit_rows)}; "
+            f"unauthorized_can_submit_count={len(unauthorized_can_submit_rows)}; "
             f"symbols={list(matrix_symbols)}; live_money_eligible_false={matrix_live_money_false}"
         ),
         row_count=len(matrix_rows),
         can_submit_count=matrix_artifacts.report.get("can_submit_count"),
+        authorized_gc_candidate_can_submit_count=len(allowed_guarded_candidate_submit_rows),
+        unauthorized_can_submit_count=len(unauthorized_can_submit_rows),
         symbols=list(matrix_symbols),
     )
 except Exception as exc:
@@ -832,6 +853,8 @@ result = {
         if MODE == "weekend-static" and status == "WARN"
         else "Start PAPER watch"
         if status == "PASS"
+        else "Review nonblocking warnings; GC guarded PAPER watch is not blocked by required-symbol readiness"
+        if MODE == "monday-live" and status == "WARN" and not blocking
         else "Resolve blocking reasons before PAPER watch"
     ),
     "checks": checks,
