@@ -495,8 +495,7 @@ def _symbol_mapping_from_record(*, record: Any, symbols: Sequence[str]) -> tuple
         _record_field(record, "raw_symbol"),
         _record_field(record, "symbol"),
     ]
-    joined = " ".join(str(value or "") for value in text_fields).upper()
-    symbol = next((candidate for candidate in symbols if candidate in joined), None)
+    symbol = _match_phase1_symbol(text_fields=text_fields, symbols=symbols)
     instrument_id = _record_field(record, "instrument_id") or _record_field(record, "hd.instrument_id")
     if symbol is None or instrument_id in {None, ""}:
         return None
@@ -510,14 +509,29 @@ def _symbol_from_record(
     mapping: Mapping[str, str],
 ) -> str | None:
     for field_name in ("symbol", "raw_symbol", "stype_in_symbol"):
-        value = str(_record_field(record, field_name) or "").upper()
-        for symbol in symbols:
-            if value == symbol or value.startswith(f"{symbol}.") or symbol in value.split():
-                return symbol
+        symbol = _match_phase1_symbol(text_fields=(_record_field(record, field_name),), symbols=symbols)
+        if symbol is not None:
+            return symbol
     instrument_id = _record_field(record, "instrument_id") or _record_field(record, "hd.instrument_id")
     if instrument_id not in {None, ""} and str(instrument_id) in mapping:
         return mapping[str(instrument_id)]
     return symbols[0] if len(symbols) == 1 else None
+
+
+def _match_phase1_symbol(*, text_fields: Sequence[Any], symbols: Sequence[str]) -> str | None:
+    candidates = sorted((str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()), key=len, reverse=True)
+    normalized_fields = [str(value or "").strip().upper() for value in text_fields]
+    for value in normalized_fields:
+        if not value:
+            continue
+        for symbol in candidates:
+            if value == symbol or value.startswith(f"{symbol}.") or value in {f"{symbol}.V.0", f"{symbol}.C.0"}:
+                return symbol
+    joined = " ".join(normalized_fields)
+    for symbol in candidates:
+        if f"{symbol}.V." in joined or f"{symbol}.C." in joined or f" {symbol} " in f" {joined} ":
+            return symbol
+    return None
 
 
 def _record_field(record: Any, name: str) -> Any:

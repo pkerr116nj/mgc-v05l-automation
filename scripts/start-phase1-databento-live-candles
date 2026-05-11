@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common_env.sh"
+
+PID_FILE="${REPO_ROOT}/var/phase1_databento_live_candles_service.pid"
+CHILD_PID_FILE="${REPO_ROOT}/var/phase1_databento_live_candles_child.pid"
+LOG_FILE="${REPO_ROOT}/var/phase1_databento_live_candles_service.log"
+SUPERVISOR_STATUS_PATH="${REPO_ROOT}/outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_supervisor_status.json"
+SYMBOLS="${TRACK_B_PHASE1_LIVE_SYMBOLS:-GC,NQ,ES,MGC,MNQ,MES,ZT,ZF,ZN,ZB}"
+MIN_BARS="${TRACK_B_PHASE1_LIVE_MIN_BARS:-8}"
+ENV_FILE="${TRACK_B_DATABENTO_ENV_FILE:-${REPO_ROOT}/.env.local}"
+INTRADAY_REPLAY_START="${TRACK_B_PHASE1_LIVE_INTRADAY_REPLAY_START:-}"
+STALL_SECONDS="${TRACK_B_PHASE1_LIVE_STALL_SECONDS:-180}"
+POLL_SECONDS="${TRACK_B_PHASE1_LIVE_SUPERVISOR_POLL_SECONDS:-15}"
+
+ensure_dir "$(dirname "${PID_FILE}")"
+ensure_dir "$(dirname "${LOG_FILE}")"
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  echo "Databento env file not found: ${ENV_FILE}" >&2
+  exit 2
+fi
+
+if [[ -f "${PID_FILE}" ]]; then
+  existing_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+  if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+    echo "Phase-1 Databento live candle service is already running with pid ${existing_pid}."
+    bash "${SCRIPT_DIR}/status-phase1-databento-live-candles"
+    exit 0
+  fi
+  rm -f "${PID_FILE}"
+fi
+
+cmd=(
+  "${PYTHON_BIN}"
+  "-m"
+  "mgc_v05l.execution_core.phase1_databento_live_runtime_candles"
+  "--mode" "service"
+  "--repo-root" "${REPO_ROOT}"
+  "--symbols" "${SYMBOLS}"
+  "--env-file" "${ENV_FILE}"
+  "--min-bars" "${MIN_BARS}"
+)
+
+if [[ -n "${INTRADAY_REPLAY_START}" ]]; then
+  cmd+=("--intraday-replay-start" "${INTRADAY_REPLAY_START}")
+fi
+
+service_pid="$(
+"${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${LOG_FILE}" "${PID_FILE}" "${CHILD_PID_FILE}" "${SUPERVISOR_STATUS_PATH}" "${STALL_SECONDS}" "${POLL_SECONDS}" "${cmd[@]}"
+import datetime as dt
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+log_file = Path(sys.argv[2])
+pid_file = Path(sys.argv[3])
+child_pid_file = Path(sys.argv[4])
+supervisor_status_path = Path(sys.argv[5])
+stall_seconds = float(sys.argv[6])
+poll_seconds = float(sys.argv[7])
+cmd = sys.argv[8:]
+env = dict(os.environ)
+existing_pythonpath = env.get("PYTHONPATH", "")
+env["PYTHONPATH"] = f"{repo_root / 'src'}{':' + existing_pythonpath if existing_pythonpath else ''}"
+log_file.parent.mkdir(parents=True, exist_ok=True)
+supervisor_status_path.parent.mkdir(parents=True, exist_ok=True)
+
+supervisor = r'''
+import datetime as dt
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+log_file = Path(sys.argv[2])
+child_pid_file = Path(sys.argv[3])
+status_path = Path(sys.argv[4])
+supervisor_status_path = Path(sys.argv[5])
+stall_seconds = float(sys.argv[6])
+poll_seconds = float(sys.argv[7])
+cmd = sys.argv[8:]
+env = dict(os.environ)
+existing_pythonpath = env.get("PYTHONPATH", "")
+src_path = repo_root / "src"
+env["PYTHONPATH"] = f"{src_path}{':' + existing_pythonpath if existing_pythonpath else ''}"
+stopping = False
+child = None
+restart_count = 0
+
+def utc_now():
+    return dt.datetime.now(dt.timezone.utc)
+
+def parse_ts(value):
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+def write_status(classification, reason=None):
+    payload = {
+        "schema_version": "phase1_databento_live_supervisor_status_v1",
+        "generated_at": utc_now().isoformat(),
+        "classification": classification,
+        "reason": reason,
+        "repo_root": str(repo_root),
+        "service": "phase1_databento_live_candle_supervisor",
+        "child_pid": None if child is None else child.pid,
+        "restart_count": restart_count,
+        "stall_seconds": stall_seconds,
+        "poll_seconds": poll_seconds,
+        "submit_authority": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": False,
+        "command": cmd,
+    }
+    tmp = supervisor_status_path.with_name(f".{supervisor_status_path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(supervisor_status_path)
+
+def start_child(reason):
+    global child, restart_count
+    if child is not None and child.poll() is None:
+        return
+    restart_count += 1
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    with log_file.open("ab") as log_handle, open(os.devnull, "rb") as devnull:
+        child = subprocess.Popen(
+            cmd,
+            cwd=str(repo_root),
+            env=env,
+            stdin=devnull,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    child_pid_file.write_text(str(child.pid), encoding="utf-8")
+    write_status("PHASE1_DATABENTO_LIVE_SUPERVISOR_RUNNING", reason)
+
+def stop_child():
+    global child
+    if child is not None and child.poll() is None:
+        child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=10)
+    child = None
+
+def handle_stop(signum, frame):
+    global stopping
+    stopping = True
+    write_status("PHASE1_DATABENTO_LIVE_SUPERVISOR_STOPPING", f"signal={signum}")
+    stop_child()
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, handle_stop)
+signal.signal(signal.SIGINT, handle_stop)
+start_child("initial_start")
+while not stopping:
+    time.sleep(poll_seconds)
+    if child is None or child.poll() is not None:
+        start_child("child_exited")
+        continue
+    status = {}
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception:
+        status = {}
+    latest = parse_ts(status.get("latest_record_at")) or parse_ts(status.get("generated_at"))
+    if latest is None:
+        latest = dt.datetime.fromtimestamp(status_path.stat().st_mtime, dt.timezone.utc) if status_path.exists() else None
+    age = None if latest is None else max((utc_now() - latest).total_seconds(), 0.0)
+    if age is not None and age > stall_seconds:
+        stop_child()
+        start_child(f"listener_stalled_age_seconds={age:.3f}")
+    else:
+        write_status("PHASE1_DATABENTO_LIVE_SUPERVISOR_RUNNING", None)
+'''
+
+with log_file.open("ab") as log_handle, open(os.devnull, "rb") as devnull:
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            supervisor,
+            str(repo_root),
+            str(log_file),
+            str(child_pid_file),
+            str(repo_root / "outputs" / "reports" / "phase1_databento_live_runtime_candles" / "latest_phase1_databento_live_listener_status.json"),
+            str(supervisor_status_path),
+            str(stall_seconds),
+            str(poll_seconds),
+            *cmd,
+        ],
+        cwd=str(repo_root),
+        env=env,
+        stdin=devnull,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+    )
+print(proc.pid)
+PY
+)"
+
+echo "${service_pid}" > "${PID_FILE}"
+echo "Started Phase-1 Databento live candle supervisor with pid ${service_pid}."
+echo "Symbols: ${SYMBOLS}"
+echo "Minimum bars: ${MIN_BARS}"
+echo "Stall restart seconds: ${STALL_SECONDS}"
+echo "Log file: ${LOG_FILE}"
+bash "${SCRIPT_DIR}/status-phase1-databento-live-candles"

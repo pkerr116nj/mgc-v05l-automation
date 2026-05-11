@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common_env.sh"
+
+PID_FILE="${REPO_ROOT}/var/phase1_databento_live_candles_service.pid"
+CHILD_PID_FILE="${REPO_ROOT}/var/phase1_databento_live_candles_child.pid"
+STATUS_PATH="${REPO_ROOT}/outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_listener_status.json"
+SUPERVISOR_STATUS_PATH="${REPO_ROOT}/outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_supervisor_status.json"
+
+pid_is_running() {
+  local pid="$1"
+  [[ -n "${pid}" ]] || return 1
+  if kill -0 "${pid}" 2>/dev/null; then
+    return 0
+  fi
+  # Some sandboxed/operator shells cannot signal sibling processes even when
+  # they can read process state. Fall back to ps so status stays read-only.
+  ps -p "${pid}" >/dev/null 2>&1
+}
+
+status_is_fresh() {
+  local path="$1"
+  local max_age_seconds="${2:-90}"
+  [[ -f "${path}" ]] || return 1
+  "${PYTHON_BIN}" - "$path" "$max_age_seconds" <<'PY'
+import datetime as dt
+import json
+import sys
+
+path = sys.argv[1]
+max_age = float(sys.argv[2])
+try:
+    payload = json.load(open(path, encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+raw = payload.get("latest_record_at") or payload.get("generated_at")
+if not raw:
+    raise SystemExit(1)
+try:
+    ts = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(1)
+if ts.tzinfo is None:
+    ts = ts.replace(tzinfo=dt.timezone.utc)
+age = max((dt.datetime.now(dt.timezone.utc) - ts).total_seconds(), 0.0)
+raise SystemExit(0 if age <= max_age else 1)
+PY
+}
+
+if [[ -f "${SUPERVISOR_STATUS_PATH}" ]]; then
+  echo "supervisor_status:"
+  "${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), indent=2, sort_keys=True))' "${SUPERVISOR_STATUS_PATH}"
+else
+  echo "supervisor_status: {\"available\": false, \"classification\": \"PHASE1_DATABENTO_LIVE_SUPERVISOR_STATUS_MISSING\", \"path\": \"${SUPERVISOR_STATUS_PATH}\"}"
+fi
+
+if [[ -f "${STATUS_PATH}" ]]; then
+  echo "listener_status:"
+  "${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), indent=2, sort_keys=True))' "${STATUS_PATH}"
+else
+  echo "listener_status: {\"available\": false, \"classification\": \"PHASE1_DATABENTO_LIVE_LISTENER_STATUS_MISSING\", \"path\": \"${STATUS_PATH}\"}"
+fi
+
+if [[ -f "${PID_FILE}" ]]; then
+  service_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+else
+  service_pid=""
+fi
+
+if pid_is_running "${service_pid}" || status_is_fresh "${SUPERVISOR_STATUS_PATH}" 90; then
+  echo "supervisor_running=true pid=${service_pid}"
+else
+  echo "supervisor_running=false"
+fi
+
+if [[ -f "${CHILD_PID_FILE}" ]]; then
+  child_pid="$(cat "${CHILD_PID_FILE}" 2>/dev/null || true)"
+else
+  child_pid=""
+fi
+
+if pid_is_running "${child_pid}" || status_is_fresh "${STATUS_PATH}" 90; then
+  echo "listener_running=true pid=${child_pid}"
+else
+  echo "listener_running=false"
+fi

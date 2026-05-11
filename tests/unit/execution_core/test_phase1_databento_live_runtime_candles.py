@@ -618,6 +618,47 @@ def test_live_listener_uses_symbol_mapping_messages_for_multi_symbol_session(tmp
     assert rows["NQ"]["realtime_feed_confirmed"] is False
 
 
+def test_live_listener_symbol_mapping_distinguishes_micros_from_full_size_roots(tmp_path: Path) -> None:
+    records = [
+        FakeMappingRecord(instrument_id=1, stype_in_symbol="GC.v.0"),
+        FakeMappingRecord(instrument_id=2, stype_in_symbol="MGC.v.0"),
+        FakeMappingRecord(instrument_id=3, stype_in_symbol="NQ.v.0"),
+        FakeMappingRecord(instrument_id=4, stype_in_symbol="MNQ.v.0"),
+        FakeMappingRecord(instrument_id=5, stype_in_symbol="ES.v.0"),
+        FakeMappingRecord(instrument_id=6, stype_in_symbol="MES.v.0"),
+    ]
+    for instrument_id in range(1, 7):
+        for row in _live_records(10, symbol=""):
+            row.instrument_id = instrument_id  # type: ignore[attr-defined]
+            records.append(row)
+    client = FakeLiveClient(records)
+
+    result = run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path, symbols=("GC", "MGC", "NQ", "MNQ", "ES", "MES")),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: NOW,
+    )
+
+    rows = {row["symbol"]: row for row in result.status["rows"]}
+    assert set(rows) == {"GC", "MGC", "NQ", "MNQ", "ES", "MES"}
+    assert all(row["bar_count"] == 10 for row in rows.values())
+    assert all(row["realtime_feed_confirmed"] is True for row in rows.values())
+    for symbol in ("MGC", "MNQ", "MES"):
+        payload = json.loads(
+            (
+                tmp_path
+                / "outputs"
+                / "track_b_execution_core"
+                / "phase1_runtime_market_data"
+                / symbol
+                / "1m"
+                / "latest_runtime_candles.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert payload["symbol"] == symbol
+        assert payload["realtime_feed_confirmed"] is True
+
+
 def test_no_broker_or_paper_proof_terms_in_phase1_live_module() -> None:
     text = Path("src/mgc_v05l/execution_core/phase1_databento_live_runtime_candles.py").read_text(encoding="utf-8")
 
