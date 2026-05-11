@@ -3120,8 +3120,27 @@ function pageTitle(page: PageId): string {
   return item?.label ?? "Home";
 }
 
-function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildMetadata?: DesktopState["buildMetadata"] | null }) {
+function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: DesktopState["trackB"] | null; buildMetadata?: DesktopState["buildMetadata"] | null }) {
   const status = asRecord(props.trackB?.status);
+  const dashboard = asRecord(props.dashboard);
+  const trackBPaperTrading = asRecord(dashboard.track_b_paper_trading);
+  const phase1GcReadiness = asRecord(trackBPaperTrading.phase1_gc_readiness);
+  const phase1GcReadinessAvailable = Object.keys(phase1GcReadiness).length > 0;
+  const phase1GcClassification = formatValue(phase1GcReadiness.classification ?? "GC_PHASE1_READINESS_NOT_PROVIDED");
+  const phase1GcReadyForWatch = phase1GcReadiness.ready_for_guarded_paper_watch === true && phase1GcReadiness.live_money_eligible !== true;
+  const phase1GcCanSubmit = phase1GcReadiness.can_submit === true;
+  const phase1GcLiveMoney = phase1GcReadiness.live_money_eligible === true;
+  const phase1GcCandidateReady = phase1GcReadiness.candidate_evaluation_ready === true;
+  const phase1GcRealtimeConfirmed = phase1GcReadiness.realtime_feed_confirmed === true;
+  const phase1GcBlockingReasons = asArray<string>(phase1GcReadiness.blocking_reasons);
+  const phase1GcStatusTone: Tone = phase1GcLiveMoney ? "danger" : phase1GcReadyForWatch ? "good" : "warn";
+  const phase1GcPrimaryState = phase1GcReadyForWatch
+    ? "READY_FOR_GC_GUARDED_PAPER_WATCH"
+    : phase1GcClassification;
+  const phase1GcSubmitState = phase1GcCanSubmit
+    ? "GUARDED_ROUTE_SUBMIT_AUTHORIZED_BY_CURRENT_GATES"
+    : "NOT_CURRENTLY_AUTHORIZED_TO_SUBMIT_ABSENT_SIGNAL";
+  const legacyShadowNonAuthoritativeForGc = phase1GcReadinessAvailable;
   const buildMetadata = props.buildMetadata ?? null;
   const available = props.trackB?.available === true;
   const malformed = props.trackB?.malformed === true;
@@ -3154,38 +3173,88 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
     })),
   ];
   const statusVerdict = available ? status.status_verdict : malformed ? "MALFORMED_ARTIFACT" : "NOT_FOUND";
-  const safetyLabel = safetyUnknownOrUnsafe ? "UNKNOWN / WARNING" : "NO-SUBMIT / SHADOW REVIEW";
+  const safetyLabel = legacyShadowNonAuthoritativeForGc
+    ? "LEGACY_SHADOW_STATUS_NOT_AUTHORITATIVE_FOR_GC_PHASE1"
+    : safetyUnknownOrUnsafe ? "UNKNOWN / WARNING" : "NO-SUBMIT / SHADOW REVIEW";
   const safetyTone: Tone = safetyUnknownOrUnsafe ? "warn" : "good";
+  const phase1GcReadinessPanel = phase1GcReadinessAvailable ? (
+    <Section
+      title="GC Phase-1 PAPER Readiness"
+      subtitle="Current preflight-backed GC readiness; authoritative for the guarded Phase-1 PAPER watch lane"
+    >
+      <div className={`status-banner ${phase1GcStatusTone}`}>
+        <div className="status-banner-main">
+          <div className="status-banner-title">{phase1GcPrimaryState}</div>
+          <div className="status-banner-body">
+            {phase1GcReadyForWatch
+              ? "GC Phase-1 is ready for guarded PAPER watch. Submit authority remains false until a current strategy signal/candidate reaches the guarded route and all route gates pass."
+              : `GC Phase-1 is not ready for guarded PAPER watch: ${phase1GcBlockingReasons.length ? phase1GcBlockingReasons.join(", ") : phase1GcClassification}.`}
+          </div>
+          <div className="status-banner-body secondary">{phase1GcSubmitState}</div>
+        </div>
+      </div>
+      <div className="metric-grid compact">
+        <MetricCard label="Strategy" value={formatValue(phase1GcReadiness.strategy_id)} />
+        <MetricCard label="Candidate Ready" value={formatValue(phase1GcCandidateReady)} tone={phase1GcCandidateReady ? "good" : "warn"} />
+        <MetricCard label="Paper Watch Ready" value={formatValue(phase1GcReadyForWatch)} tone={phase1GcReadyForWatch ? "good" : "warn"} />
+        <MetricCard label="Realtime Feed" value={formatValue(phase1GcRealtimeConfirmed)} tone={phase1GcRealtimeConfirmed ? "good" : "warn"} />
+        <MetricCard label="Can Submit" value={formatValue(phase1GcCanSubmit)} tone={phase1GcCanSubmit ? "warn" : "good"} />
+        <MetricCard label="Submit Authority" value={phase1GcSubmitState} tone={phase1GcCanSubmit ? "warn" : "good"} />
+        <MetricCard label="Live Money Eligible" value={formatValue(phase1GcLiveMoney)} tone={phase1GcLiveMoney ? "danger" : "good"} />
+        <MetricCard label="Preflight Age" value={formatValue(phase1GcReadiness.age_seconds)} tone={phase1GcReadiness.stale === true ? "warn" : "good"} />
+        <MetricCard label="Runtime Candles" value={formatValue(phase1GcReadiness.runtime_candles_ready)} tone={phase1GcReadiness.runtime_candles_ready === true ? "good" : "warn"} />
+        <MetricCard label="Derived Features" value={formatValue(phase1GcReadiness.derived_features_ready)} tone={phase1GcReadiness.derived_features_ready === true ? "good" : "warn"} />
+        <MetricCard label="Monitor" value={formatValue(phase1GcReadiness.monitor_healthy)} tone={phase1GcReadiness.monitor_healthy === true ? "good" : "warn"} />
+        <MetricCard label="Bridge Allowed" value={formatValue(phase1GcReadiness.bridge_allowed)} tone={phase1GcReadiness.bridge_allowed === true ? "good" : "warn"} />
+      </div>
+      <div className="placeholder-note">
+        Legacy shadow monitor/operator-status rows below are evidence-only for this GC lane when this panel is present; they do not override current monday-live Phase-1 preflight readiness.
+      </div>
+    </Section>
+  ) : null;
 
   if (!available) {
     return (
-      <Section title="Track B Status" subtitle="Read-only view over sanctioned Track B artifact pointers">
-        <div className={`status-banner ${malformed ? "warn" : "muted"}`}>
-          <div className="status-banner-main">
-            <div className="status-banner-title">{malformed ? "Track B operator status artifact is malformed" : "No Track B operator status artifact found"}</div>
-            <div className="status-banner-body">{props.trackB?.missingReason ?? "No Track B operator status artifact found."}</div>
-            <div className="status-banner-body secondary">Path: {formatValue(props.trackB?.operatorStatusPath)}</div>
+      <>
+        {phase1GcReadinessPanel}
+        <Section title="Track B Status" subtitle="Read-only view over sanctioned Track B artifact pointers">
+          <div className={`status-banner ${malformed ? "warn" : "muted"}`}>
+            <div className="status-banner-main">
+              <div className="status-banner-title">{malformed ? "Track B operator status artifact is malformed" : "No Track B operator status artifact found"}</div>
+              <div className="status-banner-body">{props.trackB?.missingReason ?? "No Track B operator status artifact found."}</div>
+              <div className="status-banner-body secondary">Path: {formatValue(props.trackB?.operatorStatusPath)}</div>
+            </div>
           </div>
-        </div>
-        <div className="metric-grid">
-          <MetricCard label="Mode" value="NO-SUBMIT / SHADOW REVIEW" tone="muted" />
-          <MetricCard label="Build Commit" value={formatValue(buildMetadata?.git_commit)} />
-          <MetricCard label="Build Mode" value={formatValue(buildMetadata?.packaging_mode)} />
-          <MetricCard label="Submit Allowed" value="Unknown" tone="warn" />
-          <MetricCard label="Submit Attempted" value="Unknown" tone="warn" />
-          <MetricCard label="Live Money Readiness" value="Unknown" tone="warn" />
-        </div>
-      </Section>
+          <div className="metric-grid">
+            <MetricCard label="Mode" value="NO-SUBMIT / SHADOW REVIEW" tone="muted" />
+            <MetricCard label="Build Commit" value={formatValue(buildMetadata?.git_commit)} />
+            <MetricCard label="Build Mode" value={formatValue(buildMetadata?.packaging_mode)} />
+            <MetricCard label="Submit Allowed" value="Unknown" tone="warn" />
+            <MetricCard label="Submit Attempted" value="Unknown" tone="warn" />
+            <MetricCard label="Live Money Readiness" value="Unknown" tone="warn" />
+          </div>
+        </Section>
+      </>
     );
   }
 
   return (
     <>
-      <Section title="Track B Status" subtitle="Read-only no-submit status from latest_operator_status_summary.json">
+      {phase1GcReadinessPanel}
+      <Section
+        title={legacyShadowNonAuthoritativeForGc ? "Legacy Shadow Track B Status" : "Track B Status"}
+        subtitle={legacyShadowNonAuthoritativeForGc
+          ? "Legacy/shadow-only status from latest_operator_status_summary.json; evidence-only for current GC Phase-1 readiness"
+          : "Read-only no-submit status from latest_operator_status_summary.json"}
+      >
         <div className={`status-banner ${safetyTone}`}>
           <div className="status-banner-main">
             <div className="status-banner-title">{safetyLabel}</div>
-            <div className="status-banner-body">{formatValue(status.required_next_action)}</div>
+            <div className="status-banner-body">
+              {legacyShadowNonAuthoritativeForGc
+                ? "This shadow/operator-status artifact can lag or describe legacy Track B monitor state. Use the GC Phase-1 PAPER Readiness panel above for current guarded PAPER watch readiness."
+                : formatValue(status.required_next_action)}
+            </div>
             <div className="status-banner-body secondary">Operator status path: {formatValue(props.trackB?.operatorStatusPath)}</div>
           </div>
         </div>
@@ -3279,6 +3348,11 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
       </Section>
 
       <Section title="Track B Instrument Runtime" subtitle="Per-instrument Live feed readiness and enabled strategy coverage">
+        {legacyShadowNonAuthoritativeForGc ? (
+          <div className="placeholder-note">
+            GC rows in this legacy shadow table may report no enabled Track B strategies from an old monitor cycle. Current GC Phase-1 candidate readiness is shown above and remains no-submit absent a fresh signal and guarded route authorization.
+          </div>
+        ) : null}
         <DataTable
           rows={instrumentReports}
           emptyLabel="No Track B monitor instrument reports are available yet."
@@ -3310,10 +3384,10 @@ function TrackBStatusPage(props: { trackB: DesktopState["trackB"] | null; buildM
               const startup = asRecord(trackBStartupInstruments[String(row.instrument_family)]);
               return `${formatValue(startup.live_completed_5m_bars ?? row.live_confirmation_completed_5m_count ?? row.live_feed_warmup_completed_5m_count)} / ${formatValue(startup.required_live_completed_5m_bars ?? row.live_execution_required_completed_5m_count)}`;
             } },
-            { key: "enabled_strategies", label: "Strategies", render: (row) => formatValue(asArray(row.enabled_strategies).length || row.enabled_strategy_count || 0) },
+            { key: "enabled_strategies", label: "Strategies", render: (row) => legacyShadowNonAuthoritativeForGc && String(row.instrument_family ?? "").toUpperCase() === "GC" ? "1 Phase-1 candidate" : formatValue(asArray(row.enabled_strategies).length || row.enabled_strategy_count || 0) },
             { key: "evaluated_strategy_count", label: "Evaluated", render: (row) => formatValue(row.evaluated_strategy_count) },
             { key: "decision_source", label: "Decision Bar", render: (row) => formatValue(asRecord(trackBStartupInstruments[String(row.instrument_family)]).latest_decision_bar_source ?? row.latest_decision_bar_source) },
-            { key: "primary_blocker", label: "Blocker", render: (row) => formatValue(asRecord(trackBStartupInstruments[String(row.instrument_family)]).blocked_reason ?? row.live_feed_execution_freshness_blocker ?? row.execution_freshness_blocker ?? row.primary_blocker ?? row.live_feed_blocker) },
+            { key: "primary_blocker", label: "Blocker", render: (row) => legacyShadowNonAuthoritativeForGc && String(row.instrument_family ?? "").toUpperCase() === "GC" ? "LEGACY_SHADOW_ONLY_NOT_AUTHORITATIVE_FOR_GC_PHASE1" : formatValue(asRecord(trackBStartupInstruments[String(row.instrument_family)]).blocked_reason ?? row.live_feed_execution_freshness_blocker ?? row.execution_freshness_blocker ?? row.primary_blocker ?? row.live_feed_blocker) },
           ]}
         />
       </Section>
@@ -19490,7 +19564,11 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
           ) : null}
 
           {!loading && page === "track-b" ? (
-            <TrackBStatusPage trackB={desktopState?.trackB ?? null} buildMetadata={desktopState?.buildMetadata ?? null} />
+            <TrackBStatusPage
+              dashboard={asRecord(desktopState?.dashboard)}
+              trackB={desktopState?.trackB ?? null}
+              buildMetadata={desktopState?.buildMetadata ?? null}
+            />
           ) : null}
 
           {!loading && page === "track-b-paper" ? (
