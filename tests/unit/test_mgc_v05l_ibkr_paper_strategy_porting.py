@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mgc_v05l.execution.ibkr_paper_strategy_porting import (
     IbkrPaperStrategyPortingConfig,
+    lane_submit_bridge_adapter,
     run_ibkr_paper_strategy_porting,
     write_ibkr_paper_strategy_porting_artifacts,
 )
@@ -206,6 +207,25 @@ def _write_strategy_performance(tmp_path: Path) -> None:
         ]
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_restored_track_b_lanes_are_wired_for_ibkr_paper_submit() -> None:
+    expected_targets = {
+        "gc_1x_all_lanes__ny_early_short": "GC",
+        "mgc_1x_all_lanes__asia_early_long": "MGC",
+        "mgc_1x_all_lanes__asia_early_short": "MGC",
+        "mgc_1x_all_lanes__london_early_long": "MGC",
+        "mgc_1x_all_lanes__ny_early_short": "MGC",
+        "mgc_1x_all_lanes__us_midday_short": "MGC",
+    }
+
+    for lane_id, expected_symbol in expected_targets.items():
+        adapter = lane_submit_bridge_adapter(lane_id=lane_id)
+
+        assert adapter is not None
+        assert adapter["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+        assert adapter["source_instrument"] == expected_symbol
+        assert adapter["bridge_execution_target"]["symbol"] == expected_symbol
 
 
 def test_builds_inventory_and_intent_rows_for_live_paper_lanes(tmp_path: Path) -> None:

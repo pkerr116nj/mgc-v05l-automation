@@ -30,12 +30,18 @@ _GC_PHASE1_SUBMIT_LANE_IDS = (
     "gc_1x_all_lanes__asia_early_long",
     "gc_1x_all_lanes__asia_early_short",
     "gc_1x_all_lanes__london_early_long",
+    "gc_1x_all_lanes__ny_early_short",
     "gc_1x_all_lanes__us_early_short",
     "gc_1x_all_lanes__us_midday_short",
     "gc_1x_asia_london_participation__asia_london_long_v5",
     "gc_1x_asia_london_participation__asia_london_short_v2",
 )
 _MGC_PHASE1_SUBMIT_LANE_IDS = (
+    "mgc_1x_all_lanes__asia_early_long",
+    "mgc_1x_all_lanes__asia_early_short",
+    "mgc_1x_all_lanes__london_early_long",
+    "mgc_1x_all_lanes__ny_early_short",
+    "mgc_1x_all_lanes__us_midday_short",
     "mgc_1x_asia_london_participation__asia_london_long_v5",
     "mgc_1x_asia_london_participation__asia_london_short_v2",
     "ibkr_paper_route_canary",
