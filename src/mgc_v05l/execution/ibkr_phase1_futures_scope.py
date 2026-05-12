@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-_SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ", "ES", "MES", "ZT", "ZF", "ZN", "ZB"}
+_SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ", "ES", "MES", "ZT", "ZF", "ZN", "ZB", "PL"}
 _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
     "GC": "GC",
     "MGC": "MGC",
@@ -17,8 +17,10 @@ _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
     "ZF": "ZF",
     "ZN": "ZN",
     "ZB": "ZB",
+    "PL": "PL",
 }
 _FIXED_GOLD_CONTRACT_MONTH = "202606"
+_PLATINUM_CONTRACT_MONTHS = (1, 4, 7, 10)
 _RATES_TARGETS = {
     "ZT": {"multiplier": "2000", "friendly_name": "2-Year Treasury Note"},
     "ZF": {"multiplier": "1000", "friendly_name": "5-Year Treasury Note"},
@@ -34,6 +36,14 @@ def active_index_contract_month(now: date | datetime | None = None) -> str:
         if anchor.month <= month:
             return f"{anchor.year:04d}{month:02d}"
     return f"{anchor.year + 1:04d}03"
+
+
+def active_platinum_contract_month(now: date | datetime | None = None) -> str:
+    anchor = now.date() if isinstance(now, datetime) else (now or date.today())
+    for month in _PLATINUM_CONTRACT_MONTHS:
+        if anchor.month <= month:
+            return f"{anchor.year:04d}{month:02d}"
+    return f"{anchor.year + 1:04d}{_PLATINUM_CONTRACT_MONTHS[0]:02d}"
 
 
 def supported_phase1_source_instruments() -> set[str]:
@@ -156,6 +166,22 @@ def phase1_execution_target_for_symbol(
             "trading_class": normalized,
             "phase1_proxy_mode": "DIRECT",
             "contract_family": str(metadata["friendly_name"]),
+        }
+    if normalized == "PL":
+        resolved_month = contract_month or active_platinum_contract_month(now=now)
+        return {
+            "symbol": "PL",
+            "contract_month": resolved_month,
+            "expiry": None,
+            "con_id": None,
+            "local_symbol": None,
+            "friendly_label": f"PL {resolved_month}",
+            "exchange": "NYMEX",
+            "currency": "USD",
+            "multiplier": "50",
+            "trading_class": "PL",
+            "phase1_proxy_mode": "DIRECT",
+            "contract_family": "Platinum",
         }
     raise KeyError(f"Unsupported phase-1 execution symbol: {symbol}")
 

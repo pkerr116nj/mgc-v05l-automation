@@ -228,6 +228,43 @@ def test_restored_track_b_lanes_are_wired_for_ibkr_paper_submit() -> None:
         assert adapter["bridge_execution_target"]["symbol"] == expected_symbol
 
 
+def test_dormant_paper_config_lanes_are_wired_for_ibkr_paper_submit() -> None:
+    expected_targets = {
+        "atp_companion_v1_asia_us": "MGC",
+        "atp_companion_v1_asia_us_5m": "MGC",
+        "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only": "GC",
+        "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only_5m": "GC",
+        "atp_companion_v1_gc_asia_us": "GC",
+        "atp_companion_v1_gc_asia_us_5m": "GC",
+        "atp_companion_v1_gc_asia_us_loosened_backfill_20260416": "GC",
+        "atp_companion_v1_gc_asia_us_production_track": "GC",
+        "atp_companion_v1_gc_asia_us_production_track_5m": "GC",
+        "atp_companion_v1_gc_asia_us_production_track_selective_v1": "GC",
+        "atp_companion_v1_gc_asia_us_selective_v1": "GC",
+        "atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only": "MGC",
+        "atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only_5m": "MGC",
+        "atp_companion_v1_mgc_asia_promotion_edge_v1": "MGC",
+        "atp_companion_v1_pl_asia_us": "PL",
+        "atp_companion_v1_pl_asia_us_5m": "PL",
+        "atp_companion_v1_pl_asia_us_risk_shaped_v1": "PL",
+        "gc_1x_all_lanes__ny_late_short": "GC",
+        "gc_asia_early_normal_breakout_retest_hold_long": "GC",
+        "mgc_asia_early_normal_breakout_retest_hold_long": "MGC",
+        "mgc_asia_early_pause_resume_short": "MGC",
+        "mgc_us_late_pause_resume_long": "MGC",
+        "pl_us_late_pause_resume_long": "PL",
+    }
+
+    for lane_id, expected_symbol in expected_targets.items():
+        adapter = lane_submit_bridge_adapter(lane_id=lane_id)
+
+        assert adapter is not None
+        assert adapter["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+        assert adapter["source_instrument"] == expected_symbol
+        assert adapter["bridge_execution_target"]["symbol"] == expected_symbol
+        assert adapter["bridge_execution_target"]
+
+
 def test_builds_inventory_and_intent_rows_for_live_paper_lanes(tmp_path: Path) -> None:
     _write_monitor(tmp_path)
     _write_ledger(tmp_path)

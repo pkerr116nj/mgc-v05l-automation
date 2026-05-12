@@ -27,16 +27,32 @@ _INITIAL_EXECUTABLE_INSTRUMENT = "MGC"
 _ATP_LANE_ID = "atp_companion_v1_asia_us"
 _ATP_STRATEGY_ID = "ATP_COMPANION_V1_ASIA_US"
 _GC_PHASE1_SUBMIT_LANE_IDS = (
+    "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only",
+    "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only_5m",
+    "atp_companion_v1_gc_asia_us",
+    "atp_companion_v1_gc_asia_us_5m",
+    "atp_companion_v1_gc_asia_us_loosened_backfill_20260416",
+    "atp_companion_v1_gc_asia_us_production_track",
+    "atp_companion_v1_gc_asia_us_production_track_5m",
+    "atp_companion_v1_gc_asia_us_production_track_selective_v1",
+    "atp_companion_v1_gc_asia_us_selective_v1",
     "gc_1x_all_lanes__asia_early_long",
     "gc_1x_all_lanes__asia_early_short",
     "gc_1x_all_lanes__london_early_long",
     "gc_1x_all_lanes__ny_early_short",
+    "gc_1x_all_lanes__ny_late_short",
     "gc_1x_all_lanes__us_early_short",
     "gc_1x_all_lanes__us_midday_short",
     "gc_1x_asia_london_participation__asia_london_long_v5",
     "gc_1x_asia_london_participation__asia_london_short_v2",
+    "gc_asia_early_normal_breakout_retest_hold_long",
 )
 _MGC_PHASE1_SUBMIT_LANE_IDS = (
+    "atp_companion_v1_asia_us",
+    "atp_companion_v1_asia_us_5m",
+    "atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only",
+    "atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only_5m",
+    "atp_companion_v1_mgc_asia_promotion_edge_v1",
     "mgc_1x_all_lanes__asia_early_long",
     "mgc_1x_all_lanes__asia_early_short",
     "mgc_1x_all_lanes__london_early_long",
@@ -44,6 +60,9 @@ _MGC_PHASE1_SUBMIT_LANE_IDS = (
     "mgc_1x_all_lanes__us_midday_short",
     "mgc_1x_asia_london_participation__asia_london_long_v5",
     "mgc_1x_asia_london_participation__asia_london_short_v2",
+    "mgc_asia_early_normal_breakout_retest_hold_long",
+    "mgc_asia_early_pause_resume_short",
+    "mgc_us_late_pause_resume_long",
     "ibkr_paper_route_canary",
 )
 _NQ_PHASE1_SUBMIT_LANE_IDS = (
@@ -88,6 +107,12 @@ _MES_PHASE1_SUBMIT_LANE_IDS = (
     "mes_1x_ny_early_core__us_late_short_reclaim_fail",
     "mes_1x_ny_early_core__us_midday_long",
     "mes_1x_ny_early_core__us_midday_short_breakdown",
+)
+_PL_PHASE1_SUBMIT_LANE_IDS = (
+    "atp_companion_v1_pl_asia_us",
+    "atp_companion_v1_pl_asia_us_5m",
+    "atp_companion_v1_pl_asia_us_risk_shaped_v1",
+    "pl_us_late_pause_resume_long",
 )
 _NEXT_NON_ATP_SUBMIT_LANE_ID = "gc_1x_all_lanes__asia_early_long"
 _FIRST_NON_ATP_SUBMIT_LANE_ID = "gc_1x_asia_london_participation__asia_london_long_v5"
@@ -163,6 +188,16 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
         "bridge_proxy_mode": "MES_SIGNAL_DIRECT_PHASE1",
     }
     for lane_id in _MES_PHASE1_SUBMIT_LANE_IDS
+}
+_SUBMIT_CAPABLE_LANE_ADAPTERS |= {
+    lane_id: {
+        "lane_id": lane_id,
+        "source_instrument": "PL",
+        "bridge_execution_target": dict(phase1_execution_target_for_source("PL") or {}),
+        "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": "PL_SIGNAL_DIRECT_PHASE1",
+    }
+    for lane_id in _PL_PHASE1_SUBMIT_LANE_IDS
 }
 
 

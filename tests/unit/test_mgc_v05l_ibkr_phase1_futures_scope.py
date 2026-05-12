@@ -6,6 +6,7 @@ import pytest
 
 from mgc_v05l.execution.ibkr_phase1_futures_scope import (
     active_index_contract_month,
+    active_platinum_contract_month,
     phase1_execution_symbol_for_source,
     phase1_execution_target_for_symbol,
     phase1_execution_target_for_source,
@@ -20,6 +21,12 @@ def test_active_index_contract_month_uses_current_quarter() -> None:
     assert active_index_contract_month(date(2026, 12, 31)) == "202612"
 
 
+def test_active_platinum_contract_month_uses_pl_cycle() -> None:
+    assert active_platinum_contract_month(date(2026, 5, 12)) == "202607"
+    assert active_platinum_contract_month(date(2026, 10, 1)) == "202610"
+    assert active_platinum_contract_month(date(2026, 11, 1)) == "202701"
+
+
 def test_phase1_execution_symbols_cover_gold_and_index_pairs() -> None:
     assert phase1_execution_symbol_for_source("GC") == "GC"
     assert phase1_execution_symbol_for_source("MGC") == "MGC"
@@ -31,6 +38,7 @@ def test_phase1_execution_symbols_cover_gold_and_index_pairs() -> None:
     assert phase1_execution_symbol_for_source("ZF") == "ZF"
     assert phase1_execution_symbol_for_source("ZN") == "ZN"
     assert phase1_execution_symbol_for_source("ZB") == "ZB"
+    assert phase1_execution_symbol_for_source("PL") == "PL"
 
 
 def test_phase1_full_size_targets_are_direct_execution_targets() -> None:
@@ -89,6 +97,21 @@ def test_phase1_rates_targets_are_direct_cbot_execution_targets() -> None:
         assert target["trading_class"] == symbol
         assert target["phase1_proxy_mode"] == "DIRECT"
         assert target["contract_family"] == contract_family
+
+
+def test_phase1_platinum_target_is_direct_nymex_execution_target() -> None:
+    assert "PL" in supported_phase1_source_instruments()
+
+    target = phase1_execution_target_for_source("PL", now=date(2026, 5, 12))
+
+    assert target["symbol"] == "PL"
+    assert target["contract_month"] == "202607"
+    assert target["exchange"] == "NYMEX"
+    assert target["currency"] == "USD"
+    assert target["multiplier"] == "50"
+    assert target["trading_class"] == "PL"
+    assert target["phase1_proxy_mode"] == "DIRECT"
+    assert target["contract_family"] == "Platinum"
 
 
 def test_equities_unsupported_rates_and_unapproved_futures_fail_closed() -> None:
