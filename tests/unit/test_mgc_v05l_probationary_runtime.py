@@ -4973,6 +4973,66 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
     assert execution_engine.last_submit_attempt()["route_destination"] == "ibkr_paper_bridge_submit_capable"
 
 
+def test_submit_capable_pending_order_is_not_due_for_replay_fill(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_ORDER_WORKING",
+            report={"detail": "bridge working", "broker_order_id": "ibkr-runtime-entry-1"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        source_symbol="MGC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MGC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings.model_copy(update={"symbol": "MGC"}),
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    finalized_bar = _build_bar(datetime(2026, 5, 12, 5, 45, tzinfo=ZoneInfo("America/New_York")))
+    _seed_strategy_warmup(strategy_engine, finalized_bar)
+    forced_intent = OrderIntent(
+        order_intent_id=f"{finalized_bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
+        bar_id=finalized_bar.bar_id,
+        symbol="MGC",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=finalized_bar.end_ts,
+        reason_code="submit_capable_no_replay_fill_test",
+    )
+    strategy_engine._maybe_create_order_intent = lambda *args, **kwargs: forced_intent  # type: ignore[method-assign]
+    strategy_engine._resolve_long_entry_family = lambda *args, **kwargs: LongEntryFamily.K  # type: ignore[method-assign]
+
+    strategy_engine.process_bar(finalized_bar)
+    next_bar = _build_bar(datetime(2026, 5, 12, 5, 46, tzinfo=ZoneInfo("America/New_York")))
+
+    assert execution_engine.pending_executions()
+    assert execution_engine.pop_due_replay_fills(next_bar, settings) == []
+    assert repositories.fills.list_all() == []
+
+
+def test_safe_repair_reconciliation_counts_as_effectively_clean() -> None:
+    assert probationary_runtime_module._effective_reconciliation_clean(  # noqa: SLF001
+        {"clean": False, "classification": "safe_repair"}
+    )
+
+
 def test_submit_capable_lane_filled_bridge_result_persists_fill_not_blocked(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path)
     repositories = RepositorySet(build_engine(settings.database_url))

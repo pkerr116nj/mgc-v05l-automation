@@ -165,6 +165,11 @@ def test_matrix_distinguishes_full_size_micro_and_rates_contracts(tmp_path: Path
     assert rows["MNQ"]["multiplier"] == "2"
     assert rows["ES"]["multiplier"] == "50"
     assert rows["MES"]["multiplier"] == "5"
+    assert rows["PL"]["full_size_contract"] is True
+    assert rows["PL"]["micro_contract"] is False
+    assert rows["PL"]["rates_contract"] is False
+    assert rows["PL"]["exchange"] == "NYMEX"
+    assert rows["PL"]["multiplier"] == "50"
     for symbol in ("ZT", "ZF", "ZN", "ZB"):
         assert rows[symbol]["rates_contract"] is True
         assert rows[symbol]["exchange"] == "CBOT"

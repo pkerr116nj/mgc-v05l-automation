@@ -15,7 +15,7 @@ from mgc_v05l.execution.ibkr_phase1_futures_scope import (
     supported_phase1_source_instruments,
 )
 
-PHASE1_RUNTIME_TICKER_ORDER = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB")
+PHASE1_RUNTIME_TICKER_ORDER = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB", "PL")
 PHASE1_RUNTIME_TIMEFRAMES = ("1m", "3m", "5m")
 PHASE1_RUNTIME_DERIVED_FEATURES = (
     "close_to_close_pressure",

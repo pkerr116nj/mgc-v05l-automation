@@ -6696,7 +6696,7 @@ class ProbationaryPaperSupervisor:
                         )
                         continue
                     new_bars += lane_new_bars
-                    if not reconciliation["clean"]:
+                    if not _effective_reconciliation_clean(reconciliation):
                         reconciliation_clean = False
 
                 session_date = _resolve_probationary_supervisor_session_date(self._settings, self._lanes)

@@ -162,6 +162,8 @@ class ExecutionEngine:
 
     def pop_due_replay_fills(self, bar: Bar, settings: StrategySettings) -> list[PendingExecution]:
         """Return pending orders due under the baseline-parity next-bar-open replay-fill helper."""
+        if str(getattr(self._broker, "route_destination", "") or "") == "ibkr_paper_bridge_submit_capable":
+            return []
         if settings.replay_fill_policy != ReplayFillPolicy.NEXT_BAR_OPEN:
             raise ValueError(
                 "ExecutionEngine baseline-parity replay-fill helper only supports replay_fill_policy=NEXT_BAR_OPEN."

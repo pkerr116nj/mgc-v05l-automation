@@ -293,7 +293,7 @@ add(
     hit_count=len(proof_hits),
 )
 
-expected_phase1_symbols = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB")
+expected_phase1_symbols = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB", "PL")
 try:
     from mgc_v05l.app.phase1_ticker_readiness_matrix import (
         Phase1TickerReadinessMatrixConfig,
@@ -325,7 +325,7 @@ try:
     ]
     add(
         "phase1_ticker_readiness_matrix_static",
-        len(matrix_rows) == 10
+        len(matrix_rows) == 11
         and matrix_symbols == expected_phase1_symbols
         and matrix_live_money_false
         and not unauthorized_can_submit_rows,
@@ -419,7 +419,7 @@ try:
     runtime_data_rows = list(runtime_data_artifacts.rows)
     runtime_data_symbols = tuple(str(row.get("symbol") or "") for row in runtime_data_rows)
     runtime_data_symbol_check = (
-        len(runtime_data_rows) == 10
+        len(runtime_data_rows) == len(expected_phase1_symbols)
         and runtime_data_symbols == expected_phase1_symbols
         and int(runtime_data_artifacts.report.get("ready_ticker_count", -1)) >= 0
         and runtime_data_artifacts.report.get("research_artifact_used") is False
@@ -714,7 +714,7 @@ add(
     "read-only broker verification succeeded" if broker_available else ibkr["stderr"] or ibkr["stdout"],
 )
 
-phase1_broker_symbols = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB")
+phase1_broker_symbols = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB", "PL")
 positions_path = REPO_ROOT / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
 positions, positions_err = read_json(positions_path)
 flat_symbols: dict[str, Any] = {}
