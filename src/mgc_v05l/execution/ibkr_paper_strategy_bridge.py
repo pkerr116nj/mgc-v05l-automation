@@ -1107,6 +1107,18 @@ def _build_static_preflight_checks(
             else f"Paper strategy exposure attribution blocked submit: {', '.join(list(exposure_status.get('block_reasons') or [])) or 'unknown_reason'}"
         )
     )
+    governance_submit_allowed = bool(governance_status.get("submit_allowed")) or _governance_exit_override_allowed(
+        config=config,
+        intent=intent,
+        governance_status=governance_status,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
+        exposure_status=exposure_status,
+    )
+    if governance_submit_allowed and not bool(governance_status.get("submit_allowed")):
+        governance_detail = (
+            "Paper strategy governance entry-readiness blocker is bypassed for a supervised PAPER exit only; "
+            "Phase-1 broker reconciliation and owning-strategy exposure gates remain required."
+        )
     caller_path = str(config.caller_path or "").strip()
     deprecated_root_detail = _deprecated_submit_root_detail(Path(config.repo_root))
     return [
@@ -1255,7 +1267,7 @@ def _build_static_preflight_checks(
         ),
         _check(
             "paper_strategy_governance_submit_gate",
-            (not config.submit) or bool(governance_status.get("submit_allowed")),
+            (not config.submit) or governance_submit_allowed,
             True,
             governance_detail,
         ),
@@ -1266,6 +1278,37 @@ def _build_static_preflight_checks(
             exposure_detail,
         ),
     ]
+
+
+def _governance_exit_override_allowed(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    governance_status: dict[str, Any],
+    phase1_reconciliation_gate: dict[str, Any],
+    exposure_status: dict[str, Any],
+) -> bool:
+    if not config.submit:
+        return False
+    caller_path = str(config.caller_path or "").strip()
+    if caller_path not in _APPROVED_RUNTIME_CALLER_PATHS:
+        return False
+    metadata = dict(config.caller_metadata or {})
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
+    action = str(intent.action or config.action or "").strip().upper()
+    if intent_type not in {"SELL_TO_CLOSE", "BUY_TO_CLOSE"} and action != "EXIT":
+        return False
+    block_reasons = {str(reason).strip() for reason in governance_status.get("block_reasons") or [] if str(reason).strip()}
+    if not block_reasons or not block_reasons.issubset({"backend_or_source_not_live_ready"}):
+        return False
+    if not bool(phase1_reconciliation_gate.get("ready")):
+        return False
+    if not bool(exposure_status.get("submit_allowed")):
+        return False
+    selected = dict(governance_status.get("selected_strategy") or {})
+    if str(selected.get("strategy_status") or "").strip().upper() in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
+        return False
+    return True
 
 
 def _paper_strategy_monitor_authority_for_route(

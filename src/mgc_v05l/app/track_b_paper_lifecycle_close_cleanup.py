@@ -43,8 +43,8 @@ DEFAULT_EXIT_PERM_ID = 852752717
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "reports" / "track_b_paper_lifecycle_close_cleanup"
 DEFAULT_LANE_ROOT = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "lanes"
 DEFAULT_BROKER_TRUTH_ROOT = Path("outputs") / "reports" / "ibkr_read_only_verification"
-POINT_VALUE_BY_SYMBOL = {"MNQ": Decimal("2")}
-TICK_SIZE_BY_SYMBOL = {"MNQ": Decimal("0.25")}
+POINT_VALUE_BY_SYMBOL = {"MNQ": Decimal("2"), "PL": Decimal("50")}
+TICK_SIZE_BY_SYMBOL = {"MNQ": Decimal("0.25"), "PL": Decimal("0.1")}
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,8 @@ class LifecycleCloseCleanupConfig:
     lane_root: Path = DEFAULT_LANE_ROOT
     broker_truth_root: Path = DEFAULT_BROKER_TRUTH_ROOT
     ledger_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
+    exit_bridge_report_path: Path | None = None
+    allow_ledger_entry_evidence: bool = False
 
 
 @dataclass(frozen=True)
@@ -105,8 +107,18 @@ def run_track_b_paper_lifecycle_close_cleanup(
     broker_orders = _read_json(broker_orders_path)
 
     target = _select_target_open_row(config=config, rows=ledger_records, failures=failures)
-    entry_evidence = _select_entry_bridge_evidence(config=config, rows=bridge_rows, failures=failures)
+    entry_evidence = _select_entry_bridge_evidence(config=config, rows=bridge_rows, target=target, failures=failures)
     exit_evidence = _select_exit_bridge_evidence(config=config, rows=bridge_rows, failures=failures)
+    if exit_evidence is None and config.exit_bridge_report_path is not None:
+        before_fallback_failures = list(failures)
+        exit_evidence = _select_exit_bridge_report_evidence(config=config, failures=failures)
+        if exit_evidence is not None:
+            failures = [
+                failure
+                for failure in failures
+                if failure not in before_fallback_failures
+                or "matching SELL_TO_CLOSE bridge fill" not in failure
+            ]
     broker_flat_evidence = _broker_flat_evidence(
         config=config,
         positions_snapshot=broker_positions,
@@ -166,6 +178,7 @@ def run_track_b_paper_lifecycle_close_cleanup(
         },
         "bridge_evidence": {
             "path": str(bridge_results_path),
+            "exit_bridge_report_path": str(config.exit_bridge_report_path) if config.exit_bridge_report_path else None,
             "entry": entry_evidence,
             "exit": exit_evidence,
         },
@@ -258,6 +271,7 @@ def _select_entry_bridge_evidence(
     *,
     config: LifecycleCloseCleanupConfig,
     rows: Sequence[Mapping[str, Any]],
+    target: Mapping[str, Any] | None,
     failures: list[str],
 ) -> dict[str, Any] | None:
     matches = [
@@ -274,6 +288,30 @@ def _select_entry_bridge_evidence(
         and _same_time(row.get("fill_timestamp"), config.entry_fill_time)
     ]
     if len(matches) != 1:
+        if config.allow_ledger_entry_evidence and target is not None:
+            ledger_entry_checks = {
+                "strategy_id": str(target.get("strategy_id") or "") == config.strategy_id,
+                "symbol": str(target.get("instrument_family") or "").upper() == config.symbol,
+                "local_symbol": str(target.get("local_symbol") or "").upper() == config.local_symbol,
+                "con_id": _int(target.get("con_id")) == config.con_id,
+                "quantity": _decimal(target.get("quantity")) == config.quantity,
+                "entry_price": _decimal(target.get("entry_fill_price")) == config.entry_price,
+                "entry_fill_time": _same_time(target.get("entry_timestamp"), config.entry_fill_time),
+                "entry_broker_identity": isinstance(target.get("entry_broker_identity"), Mapping),
+            }
+            if all(ledger_entry_checks.values()):
+                return {
+                    "classification": "LEDGER_ENTRY_EVIDENCE_ACCEPTED",
+                    "source": "TRACK_B_COMPACT_LEDGER_ENTRY_BROKER_IDENTITY",
+                    "order_intent_id": config.entry_lifecycle_id.removeprefix("bridge_fill_"),
+                    "symbol": config.symbol,
+                    "local_symbol": config.local_symbol,
+                    "con_id": config.con_id,
+                    "quantity": _decimal_text(config.quantity),
+                    "fill_price": _decimal_text(config.entry_price),
+                    "fill_timestamp": _canonical_time(config.entry_fill_time),
+                    "entry_broker_identity": target.get("entry_broker_identity"),
+                }
         failures.append(f"Expected exactly one matching BUY_TO_OPEN bridge fill, found {len(matches)}.")
         return matches[0] if matches else None
     return matches[0]
@@ -308,6 +346,90 @@ def _select_exit_bridge_evidence(
     return matches[0]
 
 
+def _select_exit_bridge_report_evidence(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    failures: list[str],
+) -> dict[str, Any] | None:
+    report_path = config.repo_root / config.exit_bridge_report_path if config.exit_bridge_report_path and not config.exit_bridge_report_path.is_absolute() else config.exit_bridge_report_path
+    if report_path is None or not report_path.exists():
+        failures.append("Exit bridge report path is missing.")
+        return None
+    report = _read_json(report_path)
+    delegated = report.get("delegated_result") if isinstance(report.get("delegated_result"), Mapping) else {}
+    delegated_report = delegated.get("report") if isinstance(delegated.get("report"), Mapping) else {}
+    lifecycle = (
+        delegated_report.get("submit_cancel_lifecycle")
+        if isinstance(delegated_report.get("submit_cancel_lifecycle"), Mapping)
+        else {}
+    )
+    latest_status = lifecycle.get("latest_order_status") if isinstance(lifecycle.get("latest_order_status"), Mapping) else {}
+    fill_verification = lifecycle.get("fill_verification") if isinstance(lifecycle.get("fill_verification"), Mapping) else {}
+    close_verification = (
+        lifecycle.get("close_position_verification")
+        if isinstance(lifecycle.get("close_position_verification"), Mapping)
+        else {}
+    )
+    executions = fill_verification.get("executions_after_submit")
+    execution_matches = [
+        dict(row)
+        for row in (executions if isinstance(executions, list) else [])
+        if isinstance(row, Mapping)
+        and str(row.get("symbol") or "").upper() == config.symbol
+        and str(row.get("account_id") or "") == config.account_id
+        and _decimal(row.get("quantity")) == config.quantity
+        and _decimal(row.get("price")) == config.exit_price
+    ]
+    unique_by_exec_id: dict[str, dict[str, Any]] = {}
+    for row in execution_matches:
+        key = str(row.get("execution_id") or row.get("exec_id") or len(unique_by_exec_id))
+        unique_by_exec_id.setdefault(key, row)
+    execution_matches = list(unique_by_exec_id.values())
+    if str(report.get("classification") or "") != "PAPER_STRATEGY_ORDER_FILLED":
+        failures.append("Exit bridge report classification is not PAPER_STRATEGY_ORDER_FILLED.")
+    if str(delegated.get("classification") or "") != "PAPER_CLOSE_FILLED_FLAT":
+        failures.append("Delegated close report classification is not PAPER_CLOSE_FILLED_FLAT.")
+    if str(latest_status.get("status") or "").upper() != "FILLED":
+        failures.append("Exit bridge report latest order status is not Filled.")
+    if _int(latest_status.get("client_id")) != config.exit_client_id:
+        failures.append("Exit bridge report client id mismatch.")
+    if _int(latest_status.get("perm_id")) != config.exit_perm_id:
+        failures.append("Exit bridge report perm id mismatch.")
+    if _decimal(latest_status.get("filled")) != config.quantity:
+        failures.append("Exit bridge report filled quantity mismatch.")
+    if _decimal(latest_status.get("avg_fill_price")) != config.exit_price:
+        failures.append("Exit bridge report fill price mismatch.")
+    if len(execution_matches) != 1:
+        failures.append(f"Expected exactly one matching SELL_TO_CLOSE execution in bridge report, found {len(execution_matches)}.")
+        return execution_matches[0] if execution_matches else None
+    if not bool(fill_verification.get("verified")):
+        failures.append("Exit bridge report fill verification is not marked verified.")
+    if not bool(close_verification.get("verified")):
+        failures.append("Exit bridge report close-position verification is not marked verified.")
+    execution = execution_matches[0]
+    if not _same_time(execution.get("executed_at"), config.exit_fill_time):
+        failures.append("Exit bridge report execution fill time mismatch.")
+    return {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED_FROM_BRIDGE_REPORT",
+        "bridge_classification": report.get("classification"),
+        "source": "IBKR_PAPER_STRATEGY_BRIDGE_REPORT",
+        "source_path": str(report_path),
+        "order_intent_id": config.exit_intent_id,
+        "intent_type": "SELL_TO_CLOSE",
+        "action": config.exit_action,
+        "symbol": config.symbol,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "quantity": _decimal_text(config.quantity),
+        "broker_order_id": str(latest_status.get("order_id") or lifecycle.get("submitted_order_id") or ""),
+        "client_id": config.exit_client_id,
+        "perm_id": config.exit_perm_id,
+        "exec_id": execution.get("execution_id") or execution.get("exec_id"),
+        "fill_price": _decimal_text(config.exit_price),
+        "fill_timestamp": _canonical_time(config.exit_fill_time),
+    }
+
+
 def _broker_flat_evidence(
     *,
     config: LifecycleCloseCleanupConfig,
@@ -325,18 +447,18 @@ def _broker_flat_evidence(
     if not account_matches:
         failures.append("Broker truth account mismatch.")
     positions = positions_snapshot.get("positions") if isinstance(positions_snapshot.get("positions"), list) else []
-    mnq_rows = [
+    symbol_rows = [
         dict(row)
         for row in positions
         if str(row.get("symbol") or "").upper() == config.symbol
         and str(row.get("local_symbol") or row.get("localSymbol") or "").upper() == config.local_symbol
     ]
-    flat_rows = [row for row in mnq_rows if _decimal(row.get("quantity")) == Decimal("0")]
-    nonflat_rows = [row for row in mnq_rows if (_decimal(row.get("quantity")) or Decimal("0")) != Decimal("0")]
+    flat_rows = [row for row in symbol_rows if _decimal(row.get("quantity")) == Decimal("0")]
+    nonflat_rows = [row for row in symbol_rows if (_decimal(row.get("quantity")) or Decimal("0")) != Decimal("0")]
     if not flat_rows:
-        failures.append("Broker truth does not include the required flat MNQ row.")
+        failures.append(f"Broker truth does not include the required flat {config.symbol} row.")
     if nonflat_rows:
-        failures.append("Broker truth reports non-flat MNQ quantity.")
+        failures.append(f"Broker truth reports non-flat {config.symbol} quantity.")
     open_orders = orders_snapshot.get("open_orders")
     open_order_count = orders_snapshot.get("open_order_count")
     if open_order_count is None and isinstance(open_orders, list):
@@ -348,8 +470,8 @@ def _broker_flat_evidence(
         "open_orders_path_account": orders_snapshot.get("account") or orders_snapshot.get("selected_account_id"),
         "positions_generated_at": positions_snapshot.get("generated_at"),
         "open_orders_generated_at": orders_snapshot.get("generated_at"),
-        "matching_mnq_rows": mnq_rows,
-        "broker_mnq_qty_flat": bool(flat_rows) and not nonflat_rows,
+        "matching_symbol_rows": symbol_rows,
+        "broker_symbol_qty_flat": bool(flat_rows) and not nonflat_rows,
         "open_order_count": open_order_count,
         "open_orders_zero": _int(open_order_count) == 0,
     }
@@ -739,6 +861,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--broker-truth-root", default=str(DEFAULT_BROKER_TRUTH_ROOT))
     parser.add_argument("--lane-root", default=str(DEFAULT_LANE_ROOT))
     parser.add_argument("--ledger-root", default=str(DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT))
+    parser.add_argument("--exit-bridge-report-path", default=None)
+    parser.add_argument("--allow-ledger-entry-evidence", action="store_true")
     parser.add_argument("--allow-ambiguous-mnq-rows", action="store_true")
     parser.add_argument("--apply", action="store_true", help="Actually append lifecycle artifacts. Omit for dry-run.")
     return parser
@@ -781,6 +905,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             lane_root=Path(args.lane_root),
             broker_truth_root=Path(args.broker_truth_root),
             ledger_root=Path(args.ledger_root),
+            exit_bridge_report_path=Path(args.exit_bridge_report_path) if args.exit_bridge_report_path else None,
+            allow_ledger_entry_evidence=bool(args.allow_ledger_entry_evidence),
         )
     )
     print(json.dumps({"classification": result.classification, "audit_path": str(result.audit_path)}, indent=2))

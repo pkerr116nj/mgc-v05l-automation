@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from mgc_v05l.app.track_b_paper_lifecycle_close_cleanup import (
@@ -140,6 +141,24 @@ def test_reconciliation_clears_only_when_broker_truth_and_lifecycle_agree(tmp_pa
     assert report["track_b_broker_position_count"] == 0
 
 
+def test_pl_close_cleanup_accepts_supervised_bridge_report_exit_evidence(tmp_path: Path) -> None:
+    _write_pl_cleanup_fixture(tmp_path)
+
+    result = run_track_b_paper_lifecycle_close_cleanup(config=_pl_cleanup_config(tmp_path, apply=True), now=NOW)
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_APPLIED"
+    rows = _read_jsonl(_ledger_path(tmp_path))
+    assert len(rows) == 2
+    assert rows[-1]["instrument_family"] == "PL"
+    assert rows[-1]["final_position_status"] == "CLOSED_FLAT"
+    assert rows[-1]["exit_perm_id"] == 852752718
+    assert rows[-1]["exit_client_id"] == 11087
+    assert rows[-1]["exit_fill_price"] == "2167.9"
+    assert rows[-1]["realized_pnl"] == "1140"
+    report = reconcile_track_b_paper_broker_truth(config=_reconciliation_config(tmp_path), now=NOW)
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+
+
 def test_ambiguous_older_mnq_open_row_is_flagged_and_blocks_cleanup(tmp_path: Path) -> None:
     _write_cleanup_fixture(tmp_path, include_ambiguous_open=True)
 
@@ -151,6 +170,107 @@ def test_ambiguous_older_mnq_open_row_is_flagged_and_blocks_cleanup(tmp_path: Pa
     assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
     assert result.report["ledger"]["ambiguous_open_mnq_rows"][0]["classification"] == "STALE_AMBIGUOUS_OPEN_MNQ_ROW"
     assert len(_read_jsonl(_ledger_path(tmp_path))) == 2
+
+
+def _pl_cleanup_config(tmp_path: Path, *, apply: bool) -> LifecycleCloseCleanupConfig:
+    return LifecycleCloseCleanupConfig(
+        repo_root=tmp_path,
+        lane_id="atp_companion_v1_pl_asia_us",
+        strategy_id="atp_companion_v1__paper_pl_asia_us",
+        symbol="PL",
+        local_symbol="PLN6",
+        con_id=644855286,
+        side="LONG",
+        entry_lifecycle_id="bridge_fill_PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+        entry_fill_time="2026-05-13T00:57:24.570513+00:00",
+        entry_price=Decimal("2145.1"),
+        exit_intent_id="runtime-exit|1778681404272|SELL_TO_CLOSE",
+        exit_price=Decimal("2167.9"),
+        exit_fill_time="2026-05-13T14:10:22.193724+00:00",
+        exit_client_id=11087,
+        exit_perm_id=852752718,
+        exit_bridge_report_path=Path("outputs/reports/ibkr_runtime_route_dispatch/atp_companion_v1_pl_asia_us/ibkr_paper_strategy_bridge_report.json"),
+        allow_ledger_entry_evidence=True,
+        apply=apply,
+    )
+
+
+def _write_pl_cleanup_fixture(tmp_path: Path) -> None:
+    _write_jsonl(
+        _ledger_path(tmp_path),
+        [
+            {
+                "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+                "trade_id": "atp_companion_v1__paper_pl_asia_us:bridge_fill_PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+                "strategy_id": "atp_companion_v1__paper_pl_asia_us",
+                "lifecycle_id": "bridge_fill_PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+                "instrument_family": "PL",
+                "contract_key": "PL-202607",
+                "local_symbol": "PLN6",
+                "con_id": 644855286,
+                "side": "LONG",
+                "quantity": "1",
+                "entry_timestamp": "2026-05-13T00:57:24.570513+00:00",
+                "entry_fill_price": "2145.1",
+                "entry_order_id": "1",
+                "entry_perm_id": 1984099439,
+                "entry_client_id": 10905,
+                "entry_broker_identity": {
+                    "account_id": "DUM882026",
+                    "broker_order_id": "1",
+                    "client_id": 10905,
+                    "con_id": 644855286,
+                    "exec_id": "0000e1a7.6a06001d.01.01",
+                    "local_symbol": "PLN6",
+                    "perm_id": 1984099439,
+                },
+                "exit_fill_price": None,
+                "paper_lifecycle_type": "STRATEGY_MANAGED",
+                "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+                "final_position_status": "OPEN_MANAGED",
+                "broker_backed_position_confirmed": True,
+                "review_required": False,
+                "source": "TRACK_B_DIRECT_BRIDGE_FILL_ARTIFACT",
+            }
+        ],
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_runtime_route_dispatch/atp_companion_v1_pl_asia_us/ibkr_paper_strategy_bridge_report.json",
+        {
+            "classification": "PAPER_STRATEGY_ORDER_FILLED",
+            "delegated_result": {
+                "classification": "PAPER_CLOSE_FILLED_FLAT",
+                "report": {
+                    "submit_cancel_lifecycle": {
+                        "latest_order_status": {
+                            "status": "Filled",
+                            "order_id": 1,
+                            "client_id": 11087,
+                            "perm_id": 852752718,
+                            "filled": 1.0,
+                            "avg_fill_price": 2167.9,
+                        },
+                        "fill_verification": {
+                            "verified": True,
+                            "executions_after_submit": [
+                                {
+                                    "account_id": "DUM882026",
+                                    "broker_order_id": "1",
+                                    "executed_at": "2026-05-13T14:10:22.193724+00:00",
+                                    "execution_id": "0000e1a7.6a07098f.01.01",
+                                    "price": "2167.9",
+                                    "quantity": "1.0",
+                                    "symbol": "PL",
+                                }
+                            ],
+                        },
+                        "close_position_verification": {"verified": True, "exact_position_quantity": 0.0},
+                    }
+                },
+            },
+        },
+    )
+    _write_broker_truth_for_symbol(tmp_path, symbol="PL", local_symbol="PLN6", expiry="20260729", qty="0.0", multiplier="50")
 
 
 def _write_cleanup_fixture(
@@ -285,6 +405,27 @@ def _exit_bridge_row(*, con_id: int = 770561201) -> dict[str, object]:
 
 
 def _write_broker_truth(tmp_path: Path, *, broker_mnq_qty: str) -> None:
+    _write_broker_truth_for_symbol(
+        tmp_path,
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        expiry="20260618",
+        qty=broker_mnq_qty,
+        multiplier="2",
+        average_cost="0.0" if broker_mnq_qty == "0.0" else "57962.5",
+    )
+
+
+def _write_broker_truth_for_symbol(
+    tmp_path: Path,
+    *,
+    symbol: str,
+    local_symbol: str,
+    expiry: str,
+    qty: str,
+    multiplier: str,
+    average_cost: str = "0.0",
+) -> None:
     broker_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
     positions_path = broker_root / "ibkr_positions_snapshot.json"
     orders_path = broker_root / "ibkr_open_orders_snapshot.json"
@@ -321,13 +462,13 @@ def _write_broker_truth(tmp_path: Path, *, broker_mnq_qty: str) -> None:
             "positions": [
                 {
                     "account_id": "DUM882026",
-                    "symbol": "MNQ",
-                    "local_symbol": "MNQM6",
-                    "expiry": "20260618",
+                    "symbol": symbol,
+                    "local_symbol": local_symbol,
+                    "expiry": expiry,
                     "security_type": "FUT",
-                    "quantity": broker_mnq_qty,
-                    "average_cost": "0.0" if broker_mnq_qty == "0.0" else "57962.5",
-                    "multiplier": "2",
+                    "quantity": qty,
+                    "average_cost": average_cost,
+                    "multiplier": multiplier,
                 }
             ],
         },

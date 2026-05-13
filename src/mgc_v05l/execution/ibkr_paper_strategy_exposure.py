@@ -326,11 +326,10 @@ def _build_strategy_exposure_rows_from_phase1_reconciliation(
         state = _normalize_strategy_state(quantity=quantity, side=side, raw_state=side)
         signed_quantity = quantity if state == "LONG" else (-quantity if state == "SHORT" else 0.0)
         strategy_id = str(position.get("strategy_id") or "").strip()
-        lane_alias = strategy_id.split("__", 1)[1] if "__" in strategy_id else strategy_id
         rows.append(
             {
                 "strategy_id": strategy_id,
-                "strategy_aliases": list(dict.fromkeys([strategy_id, lane_alias])),
+                "strategy_aliases": _strategy_aliases_for_phase1_lifecycle_position(strategy_id),
                 "account_id": position.get("account_id"),
                 "symbol": position.get("track_b_root") or position.get("instrument_family"),
                 "contract_month": str(position.get("contract_key") or "").split("-", 1)[-1],
@@ -355,6 +354,20 @@ def _build_strategy_exposure_rows_from_phase1_reconciliation(
             }
         )
     return rows
+
+
+def _strategy_aliases_for_phase1_lifecycle_position(strategy_id: str) -> list[str]:
+    normalized = str(strategy_id or "").strip()
+    aliases: list[str] = []
+    if normalized:
+        aliases.append(normalized)
+    if "__" in normalized:
+        root, suffix = normalized.split("__", 1)
+        if suffix:
+            aliases.append(suffix)
+        if suffix.startswith("paper_") and root:
+            aliases.append(f"{root}_{suffix.removeprefix('paper_')}")
+    return list(dict.fromkeys(alias for alias in aliases if alias))
 
 
 def _build_aggregate_exposure_state(

@@ -274,18 +274,20 @@ def test_allows_owning_strategy_exit(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("symbol", "strategy_id", "lane_id", "local_symbol"),
+    ("symbol", "strategy_id", "lane_id", "bridge_strategy_id", "local_symbol"),
     [
         (
             "MNQ",
             "index_futures_ny_intraday_forced_core_v2__mnq_1x_ny_early_core__us_late_long",
             "mnq_1x_ny_early_core__us_late_long",
+            "index_futures_ny_intraday_forced_core_v2__MNQ",
             "MNQM6",
         ),
         (
             "PL",
             "atp_companion_v1__paper_pl_asia_us",
-            "paper_pl_asia_us",
+            "atp_companion_v1_pl_asia_us",
+            "active_trend_participation_engine__PL",
             "PLN6",
         ),
     ],
@@ -295,6 +297,7 @@ def test_allows_ticker_agnostic_owning_strategy_exit_from_phase1_reconciliation(
     symbol: str,
     strategy_id: str,
     lane_id: str,
+    bridge_strategy_id: str,
     local_symbol: str,
 ) -> None:
     _write_monitor(tmp_path, broker_quantity=0.0)
@@ -326,7 +329,7 @@ def test_allows_ticker_agnostic_owning_strategy_exit_from_phase1_reconciliation(
     gate = evaluate_paper_strategy_exposure_gate(
         repo_root=tmp_path,
         strategy_id=lane_id,
-        bridge_strategy_id="index_futures_ny_intraday_forced_core_v2__MNQ" if symbol == "MNQ" else strategy_id,
+        bridge_strategy_id=bridge_strategy_id,
         executable_symbol=symbol,
         action="SELL",
         intent_type="SELL_TO_CLOSE",

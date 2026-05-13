@@ -10125,8 +10125,10 @@ def _apply_probationary_supervisor_operator_control(
             _halt_probationary_lane(lane, now)
             flatten_state, _ = _flatten_probationary_lane(lane, now, "operator_flatten_and_halt")
             flatten_states[lane.spec.lane_id] = flatten_state
-        result["status"] = "flatten_pending" if any(state == "pending_fill" for state in flatten_states.values()) else "applied"
-        result["flatten_state"] = "pending_fill" if result["status"] == "flatten_pending" else "complete"
+        any_pending = any(state == "pending_fill" for state in flatten_states.values())
+        any_rejected = any(str(state).startswith("rejected") for state in flatten_states.values())
+        result["status"] = "flatten_pending" if any_pending else ("rejected" if any_rejected else "applied")
+        result["flatten_state"] = "pending_fill" if any_pending else ("rejected" if any_rejected else "complete")
         result["message"] = (
             (
                 f"Flatten intent submitted for lane {target_lane.spec.lane_id}; it remains halted until flat."
@@ -10134,6 +10136,12 @@ def _apply_probationary_supervisor_operator_control(
                 else "Flatten intent submitted; paper runtime remains halted until all lanes are flat."
             )
             if result["status"] == "flatten_pending"
+            else (
+                f"Flatten rejected for lane {target_lane.spec.lane_id}; inspect lane_flatten_states before retrying."
+                if target_lane is not None and result["status"] == "rejected"
+                else "Flatten rejected for one or more lanes; inspect lane_flatten_states before retrying."
+            )
+            if result["status"] == "rejected"
             else (
                 f"Lane {target_lane.spec.lane_id} halted and already flat."
                 if target_lane is not None

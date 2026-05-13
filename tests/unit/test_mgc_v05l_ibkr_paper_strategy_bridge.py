@@ -849,6 +849,124 @@ def test_phase1_reconciliation_blocked_overrides_legacy_monitor_submit_allowed(t
     assert "track_b_open_order_present" in phase1["detail"]
 
 
+def test_supervised_exit_can_bypass_entry_readiness_governance_block(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="atp_companion_v1_pl_asia_us",
+        symbol="PL",
+        contract_month="202607",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="atp_companion_v1_pl_asia_us",
+            source_instrument="PL",
+            executable_proxy="PL",
+            action="SELL",
+            intent_type="SELL_TO_CLOSE",
+            bridge_proxy_mode="PL_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-13T14:03:34+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={},
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+            "submit_allowed": False,
+            "block_reasons": ["backend_or_source_not_live_ready"],
+            "detail": "Paper strategy governance blocked submit: backend_or_source_not_live_ready",
+            "selected_strategy": {
+                "strategy_id": "atp_companion_v1_pl_asia_us",
+                "bridge_strategy_id": "active_trend_participation_engine__PL",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": False,
+                "submit_block_reasons": ["backend_or_source_not_live_ready"],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
+    assert governance_gate["passed"] is True
+    assert "supervised PAPER exit only" in governance_gate["detail"]
+
+
+def test_entry_cannot_bypass_backend_readiness_governance_block(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="atp_companion_v1_pl_asia_us",
+        symbol="PL",
+        contract_month="202607",
+        action="BUY",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="atp_companion_v1_pl_asia_us",
+            source_instrument="PL",
+            executable_proxy="PL",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+            bridge_proxy_mode="PL_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-13T14:03:34+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={},
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+            "submit_allowed": False,
+            "block_reasons": ["backend_or_source_not_live_ready"],
+            "selected_strategy": {
+                "strategy_id": "atp_companion_v1_pl_asia_us",
+                "bridge_strategy_id": "active_trend_participation_engine__PL",
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": False,
+                "submit_block_reasons": ["backend_or_source_not_live_ready"],
+            },
+        },
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")["passed"] is False
+
+
 def test_preflight_treats_missing_unscoped_legacy_monitor_as_diagnostic(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
