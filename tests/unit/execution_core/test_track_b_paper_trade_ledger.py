@@ -9,12 +9,67 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     reconcile_app_only_unfilled_managed_lifecycles,
     reconcile_ibkr_contract_rejected_managed_lifecycles,
     reconcile_manually_flattened_proof_lifecycle,
+    update_track_b_paper_trade_ledger_from_filled_bridge_result,
     update_track_b_paper_trade_ledger_from_runner_report,
 )
 
 
 def aware_now() -> datetime:
     return datetime(2026, 5, 5, 22, 30, tzinfo=timezone.utc)
+
+
+def test_updates_open_position_from_direct_bridge_fill_artifact(tmp_path: Path) -> None:
+    artifact_path = tmp_path / "filled_bridge_result_latest.json"
+    payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": "index_futures_ny_intraday_forced_core_v2__mnq_1x_ny_early_core__us_late_long",
+        "lane_id": "mnq_1x_ny_early_core__us_late_long",
+        "instrument": "MNQ",
+        "symbol": "MNQ",
+        "action": "BUY",
+        "quantity": 1,
+        "order_intent_id": "MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN",
+        "intent_type": "BUY_TO_OPEN",
+        "decision_bar_timestamp": "2026-05-12T17:34:00+00:00",
+        "broker_order_id": "1",
+        "account_id": "DUM882026",
+        "perm_id": 1984099439,
+        "client_id": 10905,
+        "exec_id": "0000e1a7.6a05a265.01.01",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "contract": {"symbol": "MNQ", "local_symbol": "MNQM6", "expiry": "202606", "multiplier": "2"},
+        "fill_price": "28981.25",
+        "fill_timestamp": "2026-05-12T19:05:26.191844+00:00",
+        "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "route_destination": "ibkr_paper_bridge_submit_capable",
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "review_required": False,
+    }
+    write_json(artifact_path, payload)
+
+    result = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=payload,
+        filled_bridge_result_json=artifact_path,
+        output_root=tmp_path / "ledger",
+        now=aware_now(),
+    )
+
+    assert result.trade_record_written is True
+    assert result.trade_record is not None
+    assert result.trade_record["source"] == "TRACK_B_DIRECT_BRIDGE_FILL_ARTIFACT"
+    assert result.trade_record["paper_lifecycle_type"] == "STRATEGY_MANAGED"
+    assert result.live_position_status["open_position_count"] == 1
+    position = result.live_position_status["positions_by_instrument"]["MNQ-202606"]
+    assert position["strategy_id"] == payload["strategy_id"]
+    assert position["side"] == "LONG"
+    assert position["quantity"] == "1"
+    assert position["local_symbol"] == "MNQM6"
+    assert position["con_id"] == 770561201
+    assert position["entry_perm_id"] == 1984099439
+    assert position["entry_client_id"] == 10905
+    assert position["entry_broker_identity"]["broker_order_id"] == "1"
 
 
 def write_json(path: Path, payload: dict[str, object]) -> Path:

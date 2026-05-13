@@ -17,6 +17,7 @@ from .ibkr_paper_strategy_porting import (
     lane_submit_bridge_adapter,
     run_ibkr_paper_strategy_porting,
 )
+from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from ..execution_core.phase1_gc_paper_candidate_registry import (
     is_phase1_gc_guarded_paper_eligible_strategy,
 )
@@ -105,6 +106,10 @@ def run_ibkr_paper_strategy_governance(
     _record_audit(audit_events, "governance_started", "Started IBKR paper strategy governance refresh.")
 
     monitor_status = load_paper_strategy_monitor_status(repo_root=config.repo_root)
+    phase1_reconciliation_gate = evaluate_phase1_broker_reconciliation_submit_gate(
+        repo_root=config.repo_root,
+        max_age_seconds=config.freshness_window_seconds,
+    )
     porting = run_ibkr_paper_strategy_porting(
         config=IbkrPaperStrategyPortingConfig(
             repo_root=config.repo_root,
@@ -152,6 +157,7 @@ def run_ibkr_paper_strategy_governance(
             tracked_details=tracked_details,
             ledger_positions=ledger_positions,
             monitor_status=monitor_status,
+            phase1_reconciliation_gate=phase1_reconciliation_gate,
             trade_stats=trade_stats_by_lane.get(str(inventory_row.get("strategy_id") or ""), {}),
             shared_strategy_id=shared_identity_map.get(str(inventory_row.get("strategy_id") or "")),
             global_monitor_owner="",
@@ -191,6 +197,7 @@ def run_ibkr_paper_strategy_governance(
             tracked_details=tracked_details,
             ledger_positions=ledger_positions,
             monitor_status=monitor_status,
+            phase1_reconciliation_gate=phase1_reconciliation_gate,
             trade_stats=trade_stats_by_lane.get(synthetic_lane_id, {}),
             shared_strategy_id=bridge_strategy_id,
             global_monitor_owner="",
@@ -221,6 +228,7 @@ def run_ibkr_paper_strategy_governance(
             tracked_details=tracked_details,
             ledger_positions=ledger_positions,
             monitor_status=monitor_status,
+            phase1_reconciliation_gate=phase1_reconciliation_gate,
             trade_stats=trade_stats_by_lane.get(lane_id, {}),
             shared_strategy_id=shared_identity_map.get(lane_id),
             global_monitor_owner="",
@@ -231,11 +239,16 @@ def run_ibkr_paper_strategy_governance(
     strategy_rows.sort(key=lambda row: (str(row.get("instrument") or ""), str(row.get("strategy_id") or "")))
     pause_rows.sort(key=lambda row: (str(row.get("instrument") or ""), str(row.get("strategy_id") or "")))
 
-    overall_classification = _overall_governance_classification(strategy_rows=strategy_rows, monitor_status=monitor_status)
+    overall_classification = _overall_governance_classification(
+        strategy_rows=strategy_rows,
+        monitor_status=monitor_status,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
+    )
     status_payload = _build_status_payload(
         now=now,
         classification=overall_classification,
         monitor_status=monitor_status,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
         strategy_rows=strategy_rows,
         config=config,
     )
@@ -244,6 +257,7 @@ def run_ibkr_paper_strategy_governance(
         classification=overall_classification,
         strategy_rows=strategy_rows,
         monitor_status=monitor_status,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
     )
     report = {
         "generated_at": now,
@@ -264,6 +278,7 @@ def run_ibkr_paper_strategy_governance(
                 "block_reasons",
             ]
         },
+        "phase1_broker_reconciliation_gate": phase1_reconciliation_gate,
         "strategy_count": len(strategy_rows),
         "status_counts": _count_by_key(strategy_rows, "strategy_status"),
         "routing_mode_counts": _count_by_key(strategy_rows, "current_routing_mode"),
@@ -487,6 +502,7 @@ def _build_governance_row(
     tracked_details: dict[str, Any],
     ledger_positions: list[dict[str, Any]],
     monitor_status: dict[str, Any],
+    phase1_reconciliation_gate: dict[str, Any],
     trade_stats: dict[str, Any],
     shared_strategy_id: str | None,
     global_monitor_owner: str,
@@ -564,6 +580,8 @@ def _build_governance_row(
             continue
         if normalized and normalized not in submit_block_reasons:
             submit_block_reasons.append(normalized)
+    if not bool(phase1_reconciliation_gate.get("ready")):
+        submit_block_reasons.append("phase1_broker_reconciliation_not_clear")
     if daily_order_count is not None and int(daily_order_count) >= int(config.daily_order_limit):
         submit_block_reasons.append("daily_order_limit_reached")
     if weekly_order_count is not None and int(weekly_order_count) >= int(config.weekly_order_limit):
@@ -688,6 +706,15 @@ def _build_governance_row(
         "monitor_health": monitor_status.get("health_classification"),
         "monitor_stale": monitor_status.get("stale"),
         "monitor_open_orders": monitor_status.get("open_order_count"),
+        "legacy_monitor_authority": "DIAGNOSTIC_ONLY_FOR_PHASE1_SUBMIT_AUTHORITY",
+        "phase1_broker_reconciliation_gate": {
+            "classification": phase1_reconciliation_gate.get("classification"),
+            "ready": phase1_reconciliation_gate.get("ready"),
+            "block_reasons": list(phase1_reconciliation_gate.get("block_reasons") or []),
+            "detail": phase1_reconciliation_gate.get("detail"),
+            "generated_at": phase1_reconciliation_gate.get("generated_at"),
+            "age_seconds": phase1_reconciliation_gate.get("age_seconds"),
+        },
         "broker_path_pnl": _format_decimal(broker_path_pnl),
         "internal_sim_pnl": _format_decimal(internal_sim_pnl),
         "diagnostic_only_pnl": _format_decimal(diagnostic_only_pnl),
@@ -1081,8 +1108,15 @@ def _summarize_trade_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _overall_governance_classification(*, strategy_rows: list[dict[str, Any]], monitor_status: dict[str, Any]) -> str:
+def _overall_governance_classification(
+    *,
+    strategy_rows: list[dict[str, Any]],
+    monitor_status: dict[str, Any],
+    phase1_reconciliation_gate: dict[str, Any],
+) -> str:
     if not strategy_rows:
+        return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"
+    if not bool(phase1_reconciliation_gate.get("ready")):
         return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"
     if bool(monitor_status.get("stale")) or str(monitor_status.get("health_classification") or "").upper() != "HEALTHY":
         return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"
@@ -1098,6 +1132,7 @@ def _build_status_payload(
     now: str,
     classification: str,
     monitor_status: dict[str, Any],
+    phase1_reconciliation_gate: dict[str, Any],
     strategy_rows: list[dict[str, Any]],
     config: IbkrPaperStrategyGovernanceConfig,
 ) -> dict[str, Any]:
@@ -1110,6 +1145,8 @@ def _build_status_payload(
         "monitor_stale": monitor_status.get("stale"),
         "monitor_submit_allowed": monitor_status.get("submit_allowed"),
         "monitor_block_reasons": list(monitor_status.get("block_reasons") or []),
+        "legacy_monitor_authority": "DIAGNOSTIC_ONLY_FOR_PHASE1_SUBMIT_AUTHORITY",
+        "phase1_broker_reconciliation_gate": phase1_reconciliation_gate,
         "strategies": strategy_rows,
         "summary": {
             "strategy_count": len(strategy_rows),
@@ -1127,6 +1164,7 @@ def _build_probation_dashboard(
     classification: str,
     strategy_rows: list[dict[str, Any]],
     monitor_status: dict[str, Any],
+    phase1_reconciliation_gate: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "generated_at": now,
@@ -1134,6 +1172,8 @@ def _build_probation_dashboard(
         "routing_policy_classification": _routing_policy_classification(strategy_rows),
         "paper_monitor_health": monitor_status.get("health_classification"),
         "paper_monitor_stale": monitor_status.get("stale"),
+        "legacy_monitor_authority": "DIAGNOSTIC_ONLY_FOR_PHASE1_SUBMIT_AUTHORITY",
+        "phase1_broker_reconciliation_gate": phase1_reconciliation_gate,
         "active_rows": [row for row in strategy_rows if row.get("strategy_status") in {"PROBATION_ACTIVE", "PROMISING", "DEGRADED"}],
         "blocked_rows": [row for row in strategy_rows if not row.get("submit_allowed")],
         "ibkr_routed_rows": [row for row in strategy_rows if row.get("current_routing_mode") == "IBKR_ROUTED"],

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from mgc_v05l.execution.ibkr_paper_strategy_exposure import (
     IbkrPaperStrategyExposureConfig,
     evaluate_paper_strategy_exposure_gate,
@@ -57,6 +59,48 @@ def _write_governance(tmp_path: Path, rows: list[dict[str, object]]) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_phase1_reconciliation(
+    tmp_path: Path,
+    *,
+    classification: str = "TRACK_B_PAPER_BROKER_RECONCILED",
+    broker_reconciled: bool = True,
+    review_required_count: int = 0,
+    open_order_count: int = 0,
+    block_reasons: list[str] | None = None,
+) -> None:
+    path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "classification": classification,
+                "broker_reconciled": broker_reconciled,
+                "review_required_count": review_required_count,
+                "track_b_broker_open_order_count": open_order_count,
+                "track_b_broker_position_count": 0,
+                "track_b_broker_positions": [],
+                "track_b_lifecycle_positions": [],
+                "live_money_eligible": False,
+                "blockers": [],
+                "block_reasons": block_reasons or [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _default_phase1_reconciliation(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(tmp_path)
 
 
 def _write_broker_positions_snapshot(
@@ -165,6 +209,33 @@ def test_allows_second_strategy_buy_when_another_strategy_is_already_long(tmp_pa
     assert gate["classification"] == "PAPER_EXPOSURE_STACK_ALLOWED"
     assert gate["submit_allowed"] is True
     assert gate["max_total_mgc_contracts"] == 20.0
+
+
+def test_phase1_reconciliation_blocked_overrides_legacy_monitor_submit_allowed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_phase1_reconciliation(
+        tmp_path,
+        classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        broker_reconciled=True,
+        review_required_count=1,
+        block_reasons=["review_required_present"],
+    )
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("gc_1x_all_lanes__asia_early_long", "gold_forced_session_baseline_v2__GC")])
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="gc_1x_all_lanes__asia_early_long",
+        bridge_strategy_id="gold_forced_session_baseline_v2__GC",
+        action="BUY",
+        quantity=1.0,
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_PHASE1_RECONCILIATION"
+    assert gate["submit_allowed"] is False
+    assert gate["blocker_classification"] == "PHASE1_BROKER_RECONCILIATION_NOT_CLEAR"
+    assert gate["review_required"] is True
+    assert "phase1_broker_reconciliation_not_clear" in gate["block_reasons"]
 
 
 def test_blocks_duplicate_buy_from_same_strategy_while_already_long(tmp_path: Path) -> None:

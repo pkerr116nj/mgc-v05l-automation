@@ -53,6 +53,7 @@ from ..execution.ibkr_paper_strategy_bridge import (
     write_ibkr_paper_strategy_bridge_artifacts,
 )
 from ..execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
+from ..execution.track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from ..execution.live_strategy_broker import LiveStrategyPilotBroker
 from ..execution.order_models import FillEvent, OrderIntent
 from ..execution.paper_broker import PaperBroker, PaperPosition
@@ -1238,6 +1239,158 @@ def _latest_fill_for_pending(
     return latest
 
 
+def _fill_price_from_broker_truth(
+    *,
+    status_payload: dict[str, Any],
+    broker_snapshot: dict[str, Any],
+) -> Decimal | None:
+    for candidate in (
+        status_payload.get("fill_price"),
+        status_payload.get("avg_fill_price"),
+        status_payload.get("last_fill_price"),
+        broker_snapshot.get("average_price"),
+    ):
+        if candidate in (None, ""):
+            continue
+        try:
+            return Decimal(str(candidate))
+        except Exception:
+            continue
+    return None
+
+
+def _persist_observed_broker_fill_or_review_required(
+    *,
+    repositories: RepositorySet,
+    strategy_engine: StrategyEngine,
+    execution_engine: ExecutionEngine,
+    structured_logger: StructuredLogger | ProbationaryLaneStructuredLogger,
+    pending: PendingExecution,
+    status_payload: dict[str, Any],
+    broker_snapshot: dict[str, Any],
+    observed_at: datetime,
+    base_payload: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Persist a broker-confirmed fill observed after submit, or fail closed.
+
+    Submit-capable IBKR PAPER lanes can return as working and later surface as
+    FILLED through broker truth. That fill must become lane lifecycle state; an
+    order-intent status update alone is not enough to safely manage exits.
+    """
+
+    try:
+        fill_timestamp = _parse_iso_datetime_or_none(
+            status_payload.get("fill_timestamp")
+            or status_payload.get("filled_at")
+            or status_payload.get("updated_at")
+            or broker_snapshot.get("last_fill_timestamp")
+        ) or observed_at
+        fill_price = _fill_price_from_broker_truth(
+            status_payload=status_payload,
+            broker_snapshot=broker_snapshot,
+        )
+        if pending.intent.is_entry and fill_price is None:
+            raise ValueError("broker-confirmed entry fill is missing fill_price/average_price")
+        fill_event = FillEvent(
+            order_intent_id=pending.intent.order_intent_id,
+            intent_type=pending.intent.intent_type,
+            order_status=OrderStatus.FILLED,
+            fill_timestamp=fill_timestamp,
+            fill_price=fill_price,
+            broker_order_id=pending.broker_order_id,
+            quantity=pending.intent.quantity,
+        )
+        strategy_engine.apply_fill(
+            fill_event=fill_event,
+            signal_bar_id=pending.signal_bar_id,
+            long_entry_family=pending.long_entry_family,
+            short_entry_family=pending.short_entry_family,
+            short_entry_source=pending.short_entry_source,
+        )
+        repositories.order_intents.save(
+            pending.intent,
+            order_status=OrderStatus.FILLED,
+            broker_order_id=pending.broker_order_id,
+            submitted_at=pending.submitted_at,
+            acknowledged_at=pending.acknowledged_at or fill_timestamp,
+            broker_order_status=OrderStatus.FILLED.value,
+            last_status_checked_at=observed_at,
+            retry_count=pending.retry_count,
+        )
+        execution_engine.clear_intent(pending.intent.order_intent_id)
+        persisted_bridge_payload: dict[str, Any] | None = None
+        persist_bridge_result = getattr(strategy_engine, "_persist_filled_bridge_result", None)
+        if callable(persist_bridge_result):
+            persisted_bridge_payload = dict(
+                persist_bridge_result(
+                    pending=pending,
+                    fill_event=fill_event,
+                    classification="PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+                    review_required=False,
+                )
+                or {}
+            )
+        event = {
+            **base_payload,
+            "event": "broker_confirmed_fill_persisted",
+            "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+            "fill_timestamp": fill_event.fill_timestamp.isoformat(),
+            "fill_price": str(fill_event.fill_price) if fill_event.fill_price is not None else None,
+            "persisted_bridge_result": persisted_bridge_payload,
+        }
+        _log_execution_watchdog_event(
+            repositories=repositories,
+            structured_logger=structured_logger,
+            occurred_at=observed_at,
+            payload=event,
+        )
+        return event, False
+    except Exception as exc:  # noqa: BLE001 - broker-confirmed fill must fail closed if lifecycle cannot persist.
+        repositories.order_intents.save(
+            pending.intent,
+            order_status=OrderStatus.FILLED,
+            broker_order_id=pending.broker_order_id,
+            submitted_at=pending.submitted_at,
+            acknowledged_at=pending.acknowledged_at or observed_at,
+            broker_order_status=OrderStatus.FILLED.value,
+            last_status_checked_at=observed_at,
+            timeout_classification="REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE",
+            timeout_status_updated_at=observed_at,
+            retry_count=pending.retry_count,
+        )
+        strategy_engine.force_fault(
+            observed_at,
+            f"REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE: {exc}",
+        )
+        persist_bridge_result = getattr(strategy_engine, "_persist_filled_bridge_result", None)
+        if callable(persist_bridge_result):
+            try:
+                persist_bridge_result(
+                    pending=pending,
+                    fill_event=None,
+                    classification="REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE",
+                    review_required=True,
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+        execution_engine.clear_intent(pending.intent.order_intent_id)
+        event = {
+            **base_payload,
+            "event": "broker_confirmed_fill_persistence_incomplete",
+            "classification": "REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE",
+            "error": str(exc),
+            "resulting_state": strategy_engine.state.strategy_status.value,
+        }
+        _log_execution_watchdog_event(
+            repositories=repositories,
+            structured_logger=structured_logger,
+            occurred_at=observed_at,
+            payload=event,
+        )
+        return event, True
+
+
 def _timeout_dedup_key_for_order(repositories: RepositorySet, *, order_intent_id: str, symbol: str, suffix: str) -> str:
     identity = repositories.runtime_identity
     lane_id = str(identity.get("lane_id") or "")
@@ -1391,6 +1544,62 @@ def _run_order_timeout_watchdog(
                 occurred_at=observed_at,
                 timeout_classification="broker_truth_unavailable",
             )
+            continue
+
+        if broker_order_status == OrderStatus.FILLED.value and latest_fill_row is None:
+            last_meaningful_event, review_required = _persist_observed_broker_fill_or_review_required(
+                repositories=repositories,
+                strategy_engine=strategy_engine,
+                execution_engine=execution_engine,
+                structured_logger=structured_logger,
+                pending=pending,
+                status_payload=dict(status_payload or {}),
+                broker_snapshot=dict(broker_snapshot or {}),
+                observed_at=observed_at,
+                base_payload=base_payload,
+            )
+            if review_required:
+                last_escalation = last_meaningful_event
+                active_issue_rows.append(
+                    {
+                        "order_intent_id": pending.intent.order_intent_id,
+                        "symbol": pending.intent.symbol,
+                        "classification": "REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE",
+                        "reason": last_meaningful_event.get("error"),
+                        "recommended_action": "Inspect filled bridge result and lifecycle persistence before resuming entries.",
+                        "lane_id": repositories.runtime_identity.get("lane_id"),
+                    }
+                )
+            else:
+                safe_repair_count += 1
+                _sync_timeout_condition_alert(
+                    alert_dispatcher=alert_dispatcher,
+                    repositories=repositories,
+                    pending=pending,
+                    occurred_at=observed_at,
+                    active=False,
+                    category="fill_timeout",
+                    severity="RECOVERY",
+                    title="Fill Persisted",
+                    message="Broker-confirmed fill was persisted into lane lifecycle state.",
+                    recommended_action="No action needed.",
+                    dedup_suffix="fill_timeout",
+                    payload=last_meaningful_event,
+                )
+                _sync_timeout_condition_alert(
+                    alert_dispatcher=alert_dispatcher,
+                    repositories=repositories,
+                    pending=pending,
+                    occurred_at=observed_at,
+                    active=False,
+                    category="missing_fill_ack",
+                    severity="RECOVERY",
+                    title="Missing Ack Resolved",
+                    message="Broker-confirmed fill resolved the pending order lifecycle.",
+                    recommended_action="No action needed.",
+                    dedup_suffix="ack_timeout",
+                    payload=last_meaningful_event,
+                )
             continue
 
         if latest_fill_row is not None:
@@ -3553,6 +3762,16 @@ class ProbationaryPaperLaneRuntime:
             execution_engine=self.execution_engine,
         )
         self._write_startup_phase_marker("restore_runtime_state_complete")
+        adoption = _maybe_adopt_ibkr_bridge_position_for_exit_management(
+            repositories=self.repositories,
+            strategy_engine=self.strategy_engine,
+            execution_engine=self.execution_engine,
+            lane_id=self.spec.lane_id,
+            repo_root=Path(__file__).resolve().parents[3],
+        )
+        if adoption is not None:
+            restore_adjustments.append("adopt_ibkr_bridge_position_for_exit_management")
+            self._write_startup_phase_marker("broker_position_adopted_for_exit_management", adoption=adoption)
         if (
             self.spec.lane_mode == PAPER_EXECUTION_CANARY_MODE
             and self.strategy_engine.state.operator_halt
@@ -3992,10 +4211,12 @@ class ProbationaryPaperLaneRuntime:
     def _paper_route_canary_global_gates_clear(self) -> bool:
         repo_root = Path(__file__).resolve().parents[3]
         monitor_status = _read_json(repo_root / "var" / "paper_strategy_monitor_runtime_status.json")
+        phase1_reconciliation_gate = evaluate_phase1_broker_reconciliation_submit_gate(repo_root=repo_root)
         bridge_adapter = lane_submit_bridge_adapter(lane_id=self.spec.lane_id) or {}
         return bool(
             str(monitor_status.get("health_classification") or "").upper() == "HEALTHY"
             and bool(monitor_status.get("submit_allowed")) is True
+            and bool(phase1_reconciliation_gate.get("ready")) is True
             and str(monitor_status.get("classification") or "").strip() == "PAPER_STRATEGY_MONITOR_ACTIVE"
             and str(monitor_status.get("account_id") or "").strip() == "DUM882026"
             and float(monitor_status.get("broker_position_quantity") or 0.0) == 0.0
@@ -10498,6 +10719,8 @@ class _IbkrPaperBridgeRuntimeBroker:
         self._order_status: dict[str, OrderStatus] = {}
         self._order_metadata: dict[str, dict[str, Any]] = {}
         self._last_fill_timestamp: datetime | None = None
+        self._last_broker_truth_snapshot: dict[str, Any] = {}
+        self._broker_truth_snapshot_injected = False
         self._last_submit_context: dict[str, Any] = {
             "lane_id": self._lane_id,
             "source_symbol": self._source_symbol,
@@ -10659,6 +10882,9 @@ class _IbkrPaperBridgeRuntimeBroker:
         }
 
     def get_open_orders(self) -> list[dict[str, Any]]:
+        broker_truth_snapshot = self._current_broker_truth_snapshot()
+        if broker_truth_snapshot:
+            return self._matching_broker_truth_open_orders(snapshot=broker_truth_snapshot)
         return [
             {
                 "broker_order_id": broker_order_id,
@@ -10669,6 +10895,38 @@ class _IbkrPaperBridgeRuntimeBroker:
         ]
 
     def get_position(self) -> dict[str, Any]:
+        broker_truth_snapshot = self._current_broker_truth_snapshot()
+        if broker_truth_snapshot:
+            broker_truth_position = self._matching_broker_truth_position(snapshot=broker_truth_snapshot)
+            if broker_truth_position is not None:
+                signed_quantity = _signed_ibkr_runtime_position_quantity(broker_truth_position)
+                if not self._broker_truth_position_is_lane_owned(
+                    position_row=broker_truth_position,
+                    signed_quantity=signed_quantity,
+                ):
+                    return {
+                        "symbol": self._target_symbol(),
+                        "quantity": 0,
+                        "average_price": None,
+                        "route_destination": self.route_destination,
+                        "broker_truth_source": "ibkr_read_only",
+                        "external_broker_position": dict(broker_truth_position),
+                        "external_broker_position_quantity": signed_quantity,
+                    }
+                return {
+                    **broker_truth_position,
+                    "quantity": signed_quantity,
+                    "average_price": _ibkr_runtime_average_price(broker_truth_position),
+                    "route_destination": self.route_destination,
+                    "broker_truth_source": "ibkr_read_only",
+                }
+            return {
+                "symbol": self._target_symbol(),
+                "quantity": 0,
+                "average_price": None,
+                "route_destination": self.route_destination,
+                "broker_truth_source": "ibkr_read_only",
+            }
         return {
             "quantity": self._position.quantity,
             "average_price": str(self._position.average_price) if self._position.average_price is not None else None,
@@ -10682,9 +10940,69 @@ class _IbkrPaperBridgeRuntimeBroker:
             "bridge_proxy_mode": self._bridge_adapter.get("bridge_proxy_mode"),
         }
 
+    def refresh_from_snapshot(self, payload: dict[str, Any]) -> None:
+        self._last_broker_truth_snapshot = dict(payload or {})
+        self._broker_truth_snapshot_injected = True
+
+    def load_snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        if self._last_broker_truth_snapshot and not force_refresh:
+            return dict(self._last_broker_truth_snapshot)
+        snapshot = _load_ibkr_runtime_read_only_truth_snapshot(self._repo_root)
+        self.refresh_from_snapshot(snapshot)
+        self._broker_truth_snapshot_injected = False
+        return dict(self._last_broker_truth_snapshot)
+
     def snapshot_state(self) -> dict[str, Any]:
+        broker_truth_snapshot = self._current_broker_truth_snapshot()
+        if broker_truth_snapshot:
+            health = dict(broker_truth_snapshot.get("health") or {})
+            reconciliation = dict(broker_truth_snapshot.get("reconciliation") or {})
+            position_row = self._matching_broker_truth_position(snapshot=broker_truth_snapshot)
+            open_orders = self._matching_broker_truth_open_orders(snapshot=broker_truth_snapshot)
+            signed_quantity = _signed_ibkr_runtime_position_quantity(position_row or {})
+            lane_owns_position = self._broker_truth_position_is_lane_owned(
+                position_row=position_row,
+                signed_quantity=signed_quantity,
+            )
+            lane_owns_orders = self._broker_truth_open_orders_are_lane_owned(open_orders)
+            visible_position_row = position_row if lane_owns_position else None
+            visible_open_orders = open_orders if lane_owns_orders else []
+            broker_reachable = _ibkr_runtime_health_ok(health, "broker_reachable")
+            account_selected = _ibkr_runtime_health_ok(health, "account_selected")
+            orders_fresh = _ibkr_runtime_health_ok(health, "orders_fresh")
+            positions_fresh = _ibkr_runtime_health_ok(health, "positions_fresh")
+            auth_ready = _ibkr_runtime_health_ok(health, "auth") or _ibkr_runtime_health_ok(health, "auth_healthy")
+            return {
+                "connected": self._connected and broker_reachable and account_selected and auth_ready,
+                "truth_complete": orders_fresh and positions_fresh,
+                "position_quantity": signed_quantity if lane_owns_position else 0,
+                "average_price": _ibkr_runtime_average_price(visible_position_row or {}),
+                "open_order_ids": [
+                    _ibkr_runtime_order_id(row)
+                    for row in visible_open_orders
+                    if _ibkr_runtime_order_id(row)
+                ],
+                "order_status": {
+                    _ibkr_runtime_order_id(row): str(row.get("status") or row.get("order_status") or "UNKNOWN").strip().upper()
+                    for row in visible_open_orders
+                    if _ibkr_runtime_order_id(row)
+                },
+                "order_metadata": {key: dict(value) for key, value in self._order_metadata.items()},
+                "last_fill_timestamp": _ibkr_runtime_latest_position_timestamp(visible_position_row or {})
+                or (self._last_fill_timestamp.isoformat() if self._last_fill_timestamp is not None else None),
+                "route_destination": self.route_destination,
+                "last_submit_context": dict(self._last_submit_context),
+                "broker_truth_source": "ibkr_read_only",
+                "broker_truth_status": broker_truth_snapshot.get("status"),
+                "broker_truth_reconciliation_status": reconciliation.get("status"),
+                "broker_truth_position": dict(visible_position_row or {}),
+                "external_broker_position": dict(position_row or {}) if position_row and not lane_owns_position else {},
+                "external_broker_position_quantity": signed_quantity if position_row and not lane_owns_position else 0,
+                "external_broker_open_orders": [dict(row) for row in open_orders] if open_orders and not lane_owns_orders else [],
+            }
         return {
             "connected": self._connected,
+            "truth_complete": False,
             "position_quantity": self._position.quantity,
             "average_price": str(self._position.average_price) if self._position.average_price is not None else None,
             "open_order_ids": list(self._open_order_ids),
@@ -10693,6 +11011,7 @@ class _IbkrPaperBridgeRuntimeBroker:
             "last_fill_timestamp": self._last_fill_timestamp.isoformat() if self._last_fill_timestamp is not None else None,
             "route_destination": self.route_destination,
             "last_submit_context": dict(self._last_submit_context),
+            "broker_truth_source": "runtime_memory_fallback",
         }
 
     def fill_order(self, order_intent: OrderIntent, fill_price: Decimal, fill_timestamp: datetime) -> FillEvent:
@@ -10704,6 +11023,95 @@ class _IbkrPaperBridgeRuntimeBroker:
 
     def last_bridge_report(self) -> dict[str, Any]:
         return dict(self._last_bridge_report)
+
+    def _bridge_target(self) -> dict[str, Any]:
+        return dict(self._bridge_adapter.get("bridge_execution_target") or {})
+
+    def _target_symbol(self) -> str:
+        target = self._bridge_target()
+        return str(target.get("symbol") or self._source_symbol).strip().upper()
+
+    def _matching_broker_truth_position(self, *, snapshot: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        payload = dict(snapshot or self._current_broker_truth_snapshot() or {})
+        portfolio = dict(payload.get("portfolio") or {})
+        rows = list(portfolio.get("positions") or payload.get("positions") or [])
+        for row in rows:
+            if isinstance(row, dict) and self._broker_truth_row_matches_target(row):
+                return dict(row)
+        return None
+
+    def _matching_broker_truth_open_orders(self, *, snapshot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        payload = dict(snapshot or self._current_broker_truth_snapshot() or {})
+        orders = dict(payload.get("orders") or {})
+        rows = list(orders.get("open_rows") or orders.get("open_orders") or payload.get("open_orders") or [])
+        return [dict(row) for row in rows if isinstance(row, dict) and self._broker_truth_row_matches_target(row)]
+
+    def _broker_truth_row_matches_target(self, row: dict[str, Any]) -> bool:
+        target = self._bridge_target()
+        row_symbol = str(row.get("symbol") or "").strip().upper()
+        if row_symbol != self._target_symbol():
+            return False
+        target_contract_month = str(target.get("contract_month") or "").strip()
+        target_expiry = str(target.get("expiry") or "").strip()
+        target_local_symbol = str(target.get("local_symbol") or "").strip().upper()
+        target_con_id = str(target.get("con_id") or target.get("conId") or "").strip()
+        row_contract_month = str(row.get("contract_month") or "").strip()
+        row_expiry = str(row.get("expiry") or "").strip()
+        row_local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+        row_con_id = str(row.get("con_id") or row.get("conId") or row.get("qualified_contract_identifier") or "").strip()
+        if target_con_id and row_con_id and target_con_id != row_con_id:
+            return False
+        if target_local_symbol and row_local_symbol and target_local_symbol != row_local_symbol:
+            return False
+        if target_expiry and row_expiry and target_expiry != row_expiry:
+            return False
+        if target_contract_month:
+            if row_contract_month and row_contract_month != target_contract_month:
+                return False
+            if row_expiry and not row_expiry.startswith(target_contract_month):
+                return False
+        return True
+
+    def _broker_truth_position_is_lane_owned(
+        self,
+        *,
+        position_row: dict[str, Any] | None,
+        signed_quantity: int,
+    ) -> bool:
+        if position_row is None or signed_quantity == 0:
+            return True
+        if self._broker_truth_snapshot_injected:
+            return True
+        memory_quantity = int(self._position.quantity or 0)
+        if memory_quantity != 0 and (memory_quantity > 0) == (signed_quantity > 0):
+            return True
+        intent_type = OrderIntentType.BUY_TO_OPEN if signed_quantity > 0 else OrderIntentType.SELL_TO_OPEN
+        return _latest_lane_bridge_delegation_evidence(
+            repo_root=self._repo_root,
+            lane_id=self._lane_id,
+            intent_type=intent_type,
+        ) is not None
+
+    def _broker_truth_open_orders_are_lane_owned(self, open_orders: Sequence[dict[str, Any]]) -> bool:
+        if not open_orders:
+            return True
+        if self._broker_truth_snapshot_injected:
+            return True
+        if self._open_order_ids:
+            return True
+        for intent_type in (OrderIntentType.BUY_TO_OPEN, OrderIntentType.SELL_TO_OPEN):
+            if _latest_lane_bridge_delegation_evidence(
+                repo_root=self._repo_root,
+                lane_id=self._lane_id,
+                intent_type=intent_type,
+            ) is not None:
+                return True
+        return False
+
+    def _current_broker_truth_snapshot(self) -> dict[str, Any]:
+        if self._broker_truth_snapshot_injected and self._last_broker_truth_snapshot:
+            return dict(self._last_broker_truth_snapshot)
+        return self.load_snapshot(force_refresh=True)
 
     def _record_midday_route_proof(
         self,
@@ -10789,6 +11197,315 @@ class _IbkrPaperBridgeRuntimeBroker:
         self._position = PaperPosition(quantity=next_quantity, average_price=average_price)
 
 
+_IBKR_RUNTIME_READ_ONLY_TRUTH_ROOT = Path("outputs") / "reports" / "ibkr_read_only_verification"
+_IBKR_RUNTIME_TRUTH_MAX_AGE = timedelta(minutes=5)
+
+
+def _load_ibkr_runtime_read_only_truth_snapshot(repo_root: Path) -> dict[str, Any]:
+    truth_root = Path(repo_root) / _IBKR_RUNTIME_READ_ONLY_TRUTH_ROOT
+    positions_payload = _load_json_mapping(truth_root / "ibkr_positions_snapshot.json")
+    open_orders_payload = _load_json_mapping(truth_root / "ibkr_open_orders_snapshot.json")
+    if not positions_payload and not open_orders_payload:
+        return {}
+    positions_ok = bool(positions_payload.get("ok"))
+    open_orders_ok = bool(open_orders_payload.get("ok"))
+    positions_fresh = positions_ok and _ibkr_runtime_snapshot_fresh(positions_payload)
+    open_orders_fresh = open_orders_ok and _ibkr_runtime_snapshot_fresh(open_orders_payload)
+    selected_account_id = (
+        positions_payload.get("selected_account_id")
+        or positions_payload.get("account")
+        or open_orders_payload.get("selected_account_id")
+        or open_orders_payload.get("account")
+    )
+    return {
+        "status": "ready" if positions_fresh and open_orders_fresh else "degraded",
+        "detail": "ibkr_read_only_verification_artifacts",
+        "connection": {"selected_account_id": selected_account_id},
+        "accounts": {"selected_account_id": selected_account_id},
+        "health": {
+            "broker_reachable": {
+                "ok": positions_ok and open_orders_ok,
+                "label": "BROKER REACHABLE" if positions_ok and open_orders_ok else "BROKER DEGRADED",
+            },
+            "auth": {
+                "ok": positions_ok and open_orders_ok,
+                "label": "AUTH READY" if positions_ok and open_orders_ok else "AUTH UNKNOWN",
+            },
+            "account_selected": {
+                "ok": bool(selected_account_id),
+                "label": "ACCOUNT SELECTED" if selected_account_id else "ACCOUNT UNKNOWN",
+            },
+            "orders_fresh": {
+                "ok": open_orders_fresh,
+                "label": "ORDERS FRESH" if open_orders_fresh else "ORDERS STALE",
+            },
+            "positions_fresh": {
+                "ok": positions_fresh,
+                "label": "POSITIONS FRESH" if positions_fresh else "POSITIONS STALE",
+            },
+        },
+        "reconciliation": {
+            "status": "clear" if positions_fresh and open_orders_fresh else "blocked",
+            "label": "CLEAR" if positions_fresh and open_orders_fresh else "BROKER TRUTH STALE",
+            "detail": "read-only IBKR position/order truth loaded from runtime artifacts",
+            "mismatch_count": 0 if positions_fresh and open_orders_fresh else None,
+        },
+        "orders": {
+            "open_rows": list(open_orders_payload.get("open_rows") or open_orders_payload.get("open_orders") or []),
+        },
+        "portfolio": {
+            "positions": list(positions_payload.get("positions") or []),
+        },
+        "positions_snapshot_generated_at": positions_payload.get("generated_at"),
+        "open_orders_snapshot_generated_at": open_orders_payload.get("generated_at"),
+    }
+
+
+def _load_json_mapping(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _ibkr_runtime_snapshot_fresh(payload: dict[str, Any]) -> bool:
+    generated_at = _parse_iso_datetime_or_none(payload.get("generated_at"))
+    if generated_at is None:
+        return True
+    return datetime.now(timezone.utc) - generated_at.astimezone(timezone.utc) <= _IBKR_RUNTIME_TRUTH_MAX_AGE
+
+
+def _ibkr_runtime_health_ok(health: dict[str, Any], name: str) -> bool:
+    value = health.get(name)
+    return isinstance(value, dict) and value.get("ok") is True
+
+
+def _signed_ibkr_runtime_position_quantity(position_row: dict[str, Any]) -> int:
+    side = str(position_row.get("side") or "").strip().upper()
+    raw_quantity = position_row.get("quantity") or position_row.get("position_quantity") or 0
+    try:
+        quantity = int(Decimal(str(raw_quantity)))
+    except Exception:
+        quantity = 0
+    if side == "SHORT":
+        return -abs(quantity)
+    if side == "LONG":
+        return abs(quantity)
+    return quantity
+
+
+def _ibkr_runtime_average_price(position_row: dict[str, Any]) -> str | None:
+    value = position_row.get("average_price")
+    if value in (None, ""):
+        value = position_row.get("average_cost")
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        price = Decimal(text)
+        multiplier = Decimal(str(position_row.get("multiplier") or ""))
+    except Exception:
+        return text
+    if multiplier > 1 and price > Decimal("10000"):
+        return str(price / multiplier)
+    return text
+
+
+def _ibkr_runtime_latest_position_timestamp(position_row: dict[str, Any]) -> str | None:
+    for key in ("updated_at", "fill_timestamp", "last_fill_timestamp", "timestamp"):
+        text = str(position_row.get(key) or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _ibkr_runtime_order_id(order_row: dict[str, Any]) -> str:
+    return str(
+        order_row.get("broker_order_id")
+        or order_row.get("order_id")
+        or order_row.get("perm_id")
+        or ""
+    ).strip()
+
+
+def _maybe_adopt_ibkr_bridge_position_for_exit_management(
+    *,
+    repositories: RepositorySet,
+    strategy_engine: StrategyEngine,
+    execution_engine: ExecutionEngine,
+    lane_id: str,
+    repo_root: Path,
+) -> dict[str, Any] | None:
+    broker = execution_engine.broker
+    if not isinstance(broker, _IbkrPaperBridgeRuntimeBroker):
+        return None
+    state = strategy_engine.state
+    if state.position_side is not PositionSide.FLAT or int(state.internal_position_qty) != 0 or state.open_broker_order_id:
+        return None
+    broker_snapshot = broker.snapshot_state()
+    if not broker_snapshot.get("connected") or not broker_snapshot.get("truth_complete"):
+        return None
+    signed_quantity = int(broker_snapshot.get("position_quantity") or 0)
+    if signed_quantity == 0 or broker_snapshot.get("open_order_ids"):
+        return None
+    intent_type = OrderIntentType.BUY_TO_OPEN if signed_quantity > 0 else OrderIntentType.SELL_TO_OPEN
+    intent_row = _latest_rejected_entry_intent_for_adoption(
+        repositories=repositories,
+        symbol=broker._target_symbol(),  # noqa: SLF001
+        intent_type=intent_type,
+    )
+    if intent_row is None:
+        return None
+    bridge_evidence = _latest_lane_bridge_delegation_evidence(repo_root=repo_root, lane_id=lane_id, intent_type=intent_type)
+    if bridge_evidence is None:
+        return None
+    fill_price = _adopted_broker_position_fill_price(dict(broker_snapshot.get("broker_truth_position") or {}))
+    if fill_price is None:
+        return None
+    fill_timestamp = (
+        _parse_iso_datetime_or_none(intent_row.get("created_at"))
+        or _parse_iso_datetime_or_none(broker_snapshot.get("last_fill_timestamp"))
+        or datetime.now(timezone.utc)
+    )
+    order_intent_id = str(intent_row.get("order_intent_id") or "").strip()
+    fill_event = FillEvent(
+        order_intent_id=order_intent_id,
+        intent_type=intent_type,
+        order_status=OrderStatus.FILLED,
+        fill_timestamp=fill_timestamp,
+        fill_price=fill_price,
+        broker_order_id=_adopted_broker_position_order_id(broker_snapshot),
+        quantity=abs(signed_quantity),
+    )
+    strategy_engine.apply_fill(
+        fill_event=fill_event,
+        signal_bar_id=str(intent_row.get("bar_id") or order_intent_id),
+        long_entry_family=LongEntryFamily.K if intent_type is OrderIntentType.BUY_TO_OPEN else LongEntryFamily.NONE,
+        short_entry_family=(
+            ShortEntryFamily.FAILED_MOVE_REVERSAL_SHORT
+            if intent_type is OrderIntentType.SELL_TO_OPEN
+            else ShortEntryFamily.NONE
+        ),
+        short_entry_source=(
+            str(intent_row.get("reason_code") or "").strip() or None
+            if intent_type is OrderIntentType.SELL_TO_OPEN
+            else None
+        ),
+    )
+    return {
+        "lane_id": lane_id,
+        "symbol": broker._target_symbol(),  # noqa: SLF001
+        "adopted_quantity": abs(signed_quantity),
+        "position_side": "LONG" if signed_quantity > 0 else "SHORT",
+        "entry_price": str(fill_price),
+        "fill_timestamp": fill_timestamp.isoformat(),
+        "source_order_intent_id": order_intent_id,
+        "source_bar_id": intent_row.get("bar_id"),
+        "broker_order_id": fill_event.broker_order_id,
+        "bridge_evidence": bridge_evidence,
+        "classification": "IBKR_BRIDGE_POSITION_ADOPTED_FOR_EXIT_MANAGEMENT",
+    }
+
+
+def _latest_rejected_entry_intent_for_adoption(
+    *,
+    repositories: RepositorySet,
+    symbol: str,
+    intent_type: OrderIntentType,
+) -> dict[str, Any] | None:
+    target_symbol = str(symbol or "").strip().upper()
+    candidates = []
+    for row in repositories.order_intents.list_all():
+        if str(row.get("symbol") or row.get("instrument") or "").strip().upper() != target_symbol:
+            continue
+        if str(row.get("intent_type") or "").strip().upper() != intent_type.value:
+            continue
+        if str(row.get("order_status") or "").strip().upper() not in {"REJECTED", "PENDING", "ACKNOWLEDGED"}:
+            continue
+        candidates.append(dict(row))
+    return max(candidates, key=lambda row: str(row.get("created_at") or ""), default=None)
+
+
+def _latest_lane_bridge_delegation_evidence(
+    *,
+    repo_root: Path,
+    lane_id: str,
+    intent_type: OrderIntentType,
+) -> dict[str, Any] | None:
+    audit_path = (
+        Path(repo_root)
+        / "outputs"
+        / "reports"
+        / "ibkr_runtime_route_dispatch"
+        / str(lane_id)
+        / "ibkr_paper_strategy_bridge_audit.jsonl"
+    )
+    try:
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+    intent_action = "BUY" if intent_type is OrderIntentType.BUY_TO_OPEN else "SELL"
+    saw_intent_ready = False
+    latest_delegated: dict[str, Any] | None = None
+    for line in lines[-200:]:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type") or "").strip()
+        caller = dict(event.get("caller_metadata") or {})
+        if caller and str(caller.get("intent_type") or "").strip().upper() != intent_type.value:
+            continue
+        if caller and str(caller.get("intent_action") or "").strip().upper() != intent_action:
+            continue
+        if event_type == "intent_ready":
+            saw_intent_ready = True
+        if event_type == "delegated_manual_harness_completed":
+            latest_delegated = event
+    if latest_delegated is None or not saw_intent_ready:
+        return None
+    return {
+        "audit_path": str(audit_path),
+        "event_type": latest_delegated.get("event_type"),
+        "delegated_classification": latest_delegated.get("delegated_classification"),
+        "observed_at": latest_delegated.get("observed_at"),
+    }
+
+
+def _adopted_broker_position_fill_price(position_row: dict[str, Any]) -> Decimal | None:
+    value = _ibkr_runtime_average_price(position_row)
+    if value is None:
+        return None
+    try:
+        price = Decimal(str(value))
+    except Exception:
+        return None
+    multiplier = None
+    try:
+        multiplier = Decimal(str(position_row.get("multiplier") or ""))
+    except Exception:
+        multiplier = None
+    if multiplier is not None and multiplier > 1 and price > Decimal("10000"):
+        return price / multiplier
+    return price
+
+
+def _adopted_broker_position_order_id(broker_snapshot: dict[str, Any]) -> str:
+    position = dict(broker_snapshot.get("broker_truth_position") or {})
+    for key in ("broker_order_id", "order_id", "perm_id", "execution_id"):
+        text = str(position.get(key) or "").strip()
+        if text:
+            return text
+    symbol = str(position.get("symbol") or "").strip().upper() or "UNKNOWN"
+    local_symbol = str(position.get("local_symbol") or "").strip().upper() or "UNKNOWN"
+    return f"adopted-broker-truth-{symbol}-{local_symbol}"
+
+
 def _runtime_bridge_config_for_lane(
     *,
     repo_root: Path,
@@ -10866,6 +11583,7 @@ def _extract_bridge_broker_order_id(report: dict[str, Any]) -> str | None:
 
 
 def _extract_bridge_fill_price(report: dict[str, Any]) -> Decimal | None:
+    selected_execution = _select_bridge_execution(report, broker_order_id=_extract_bridge_broker_order_id(report))
     candidates = [
         _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "average_fill_price"),
         _nested_get(report, "delegated_result", "report", "lifecycle", "average_fill_price"),
@@ -10876,6 +11594,8 @@ def _extract_bridge_fill_price(report: dict[str, Any]) -> Decimal | None:
         _nested_get(report, "delegated_result", "report", "lifecycle", "latest_order_status", "avg_fill_price"),
         _nested_get(report, "delegated_result", "report", "lifecycle", "latest_order_status", "last_fill_price"),
     ]
+    if selected_execution:
+        candidates.append(selected_execution.get("price"))
     executions = list(_nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "executions_after_submit") or [])
     for execution in executions:
         if isinstance(execution, dict):
@@ -10891,6 +11611,7 @@ def _extract_bridge_fill_price(report: dict[str, Any]) -> Decimal | None:
 
 
 def _extract_bridge_fill_timestamp(report: dict[str, Any]) -> datetime | None:
+    selected_execution = _select_bridge_execution(report, broker_order_id=_extract_bridge_broker_order_id(report))
     candidates = [
         _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "fill_timestamp"),
         _nested_get(report, "delegated_result", "report", "lifecycle", "fill_timestamp"),
@@ -10899,6 +11620,8 @@ def _extract_bridge_fill_timestamp(report: dict[str, Any]) -> datetime | None:
         _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "latest_order_status", "updated_at"),
         _nested_get(report, "delegated_result", "report", "lifecycle", "latest_order_status", "updated_at"),
     ]
+    if selected_execution:
+        candidates.append(selected_execution.get("executed_at"))
     executions = list(_nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "executions_after_submit") or [])
     for execution in executions:
         if isinstance(execution, dict):
@@ -10916,9 +11639,11 @@ def _extract_bridge_order_metadata(report: dict[str, Any], *, broker_order_id: s
         for row in list(_nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "executions_after_submit") or [])
         if isinstance(row, dict)
     ]
-    first_execution = executions[0] if executions else {}
+    selected_execution = _select_bridge_execution(report, broker_order_id=broker_order_id, executions=executions)
     contract = dict(
         _nested_get(report, "delegated_result", "report", "preview_payload", "contract")
+        or _nested_get(report, "exact_contract_report", "exact_contract")
+        or _nested_get(report, "qualified_contract_report", "qualified_contract")
         or _nested_get(report, "exact_contract")
         or {}
     )
@@ -10936,15 +11661,92 @@ def _extract_bridge_order_metadata(report: dict[str, Any], *, broker_order_id: s
             _nested_get(report, "delegated_result", "report", "connection_check", "client_id"),
             _nested_get(report, "delegated_result", "report", "preview_payload", "environment", "client_id"),
         ),
-        "execution_id": _first_present(first_execution.get("execution_id"), first_execution.get("exec_id")),
+        "execution_id": _first_present(selected_execution.get("execution_id"), selected_execution.get("exec_id")),
         "local_symbol": _first_present(contract.get("local_symbol"), contract.get("localSymbol")),
         "con_id": _first_present(contract.get("qualified_contract_identifier"), contract.get("con_id"), contract.get("conId")),
-        "contract": contract,
+        "account_id": _first_present(selected_execution.get("account_id"), report.get("selected_account_id")),
+        "contract": _normalize_bridge_contract_metadata(contract),
         "fill_price": str(fill_price) if fill_price is not None else None,
         "fill_timestamp": fill_timestamp.isoformat() if fill_timestamp is not None else None,
         "executions": executions,
     }
     return {key: value for key, value in metadata.items() if value not in (None, "", [])}
+
+
+def _select_bridge_execution(
+    report: dict[str, Any],
+    *,
+    broker_order_id: str | None,
+    executions: Sequence[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    execution_rows = [
+        dict(row)
+        for row in (
+            executions
+            if executions is not None
+            else list(_nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle", "executions_after_submit") or [])
+        )
+        if isinstance(row, dict)
+    ]
+    if not execution_rows:
+        return {}
+    contract = dict(
+        _nested_get(report, "delegated_result", "report", "preview_payload", "contract")
+        or _nested_get(report, "exact_contract_report", "exact_contract")
+        or _nested_get(report, "qualified_contract_report", "qualified_contract")
+        or _nested_get(report, "exact_contract")
+        or {}
+    )
+    target_symbol = str(
+        contract.get("symbol")
+        or contract.get("broker_symbol")
+        or contract.get("internal_symbol")
+        or _nested_get(report, "intent", "symbol")
+        or ""
+    ).strip().upper()
+    target_local_symbol = str(contract.get("local_symbol") or contract.get("localSymbol") or "").strip().upper()
+    normalized_order_id = str(broker_order_id or "").strip()
+
+    def _order_matches(row: dict[str, Any]) -> bool:
+        if not normalized_order_id:
+            return True
+        return str(row.get("broker_order_id") or row.get("order_id") or "").strip() == normalized_order_id
+
+    def _contract_matches(row: dict[str, Any]) -> bool:
+        row_symbol = str(row.get("symbol") or "").strip().upper()
+        row_local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+        if target_symbol and row_symbol and row_symbol != target_symbol:
+            return False
+        if target_local_symbol and row_local_symbol and row_local_symbol != target_local_symbol:
+            return False
+        return True
+
+    for row in execution_rows:
+        if _order_matches(row) and _contract_matches(row):
+            return dict(row)
+    for row in execution_rows:
+        if _contract_matches(row):
+            return dict(row)
+    for row in execution_rows:
+        if _order_matches(row):
+            return dict(row)
+    return dict(execution_rows[0])
+
+
+def _normalize_bridge_contract_metadata(contract: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(contract or {})
+    if "symbol" not in normalized and normalized.get("broker_symbol"):
+        normalized["symbol"] = normalized.get("broker_symbol")
+    if "local_symbol" not in normalized and normalized.get("localSymbol"):
+        normalized["local_symbol"] = normalized.get("localSymbol")
+    if "con_id" not in normalized and normalized.get("conId"):
+        normalized["con_id"] = normalized.get("conId")
+    if "qualified_contract_identifier" not in normalized and normalized.get("con_id"):
+        normalized["qualified_contract_identifier"] = normalized.get("con_id")
+    metadata = normalized.get("metadata") if isinstance(normalized.get("metadata"), dict) else {}
+    if "contract_month" not in normalized and metadata.get("contract_month"):
+        normalized["contract_month"] = metadata.get("contract_month")
+    return normalized
 
 
 def _first_present(*candidates: Any) -> Any:

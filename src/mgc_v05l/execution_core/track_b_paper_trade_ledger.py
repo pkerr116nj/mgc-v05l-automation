@@ -521,6 +521,68 @@ def update_track_b_paper_trade_ledger_from_runner_report(
     )
 
 
+def update_track_b_paper_trade_ledger_from_filled_bridge_result(
+    *,
+    filled_bridge_result: Mapping[str, Any],
+    filled_bridge_result_json: Path | None = None,
+    output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    now: datetime | None = None,
+) -> TrackBPaperTradeLedgerResult:
+    """Append a compact open-position row from a direct IBKR bridge fill artifact.
+
+    The restored paper runtime can route entries through the guarded bridge
+    without invoking the Track B managed lifecycle runner. This read-model
+    update keeps the compact lifecycle ledger aligned with already-persisted
+    bridge fill evidence; it never connects to or mutates a broker.
+    """
+
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    ledger_jsonl = root / "track_b_paper_trade_ledger.jsonl"
+    trade_summary_json = root / "latest_track_b_paper_trade_summary.json"
+    live_position_status_json = root / "latest_track_b_live_position_status.json"
+    pnl_summary_json = root / "latest_track_b_pnl_summary.json"
+    ledger_jsonl.touch(exist_ok=True)
+
+    existing_records = _read_ledger_records(ledger_jsonl)
+    trade_record = _trade_record_from_filled_bridge_result(
+        filled_bridge_result=filled_bridge_result,
+        filled_bridge_result_json=filled_bridge_result_json,
+        now=actual_now,
+    )
+    wrote = False
+    if trade_record is not None and _should_append_trade_record(existing_records, trade_record):
+        with ledger_jsonl.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(to_jsonable(trade_record), sort_keys=True) + "\n")
+        existing_records.append(trade_record)
+        wrote = True
+
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=existing_records,
+        ledger_jsonl=ledger_jsonl,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        now=actual_now,
+    )
+    _write_json(trade_summary_json, summaries["trade_summary"])
+    _write_json(live_position_status_json, summaries["live_position_status"])
+    _write_json(pnl_summary_json, summaries["pnl_summary"])
+    return TrackBPaperTradeLedgerResult(
+        ledger_jsonl=ledger_jsonl,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        trade_record_written=wrote,
+        trade_record=trade_record,
+        trade_summary=summaries["trade_summary"],
+        live_position_status=summaries["live_position_status"],
+        pnl_summary=summaries["pnl_summary"],
+    )
+
+
 def _should_append_trade_record(
     existing_records: Iterable[Mapping[str, Any]],
     trade_record: Mapping[str, Any],
@@ -589,6 +651,8 @@ def build_track_b_paper_trade_summaries(
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= year_start
     ]
     open_records = [item for item in latest_trade_records if _is_open_position_record(item)]
+    positions_by_instrument = _positions_by(latest_trade_records, "contract_key", actual_now)
+    positions_by_strategy = _positions_by(latest_trade_records, "strategy_id", actual_now)
     review_required = [item for item in latest_trade_records if item.get("review_required") is True and not _is_manual_flat_reviewed(item)]
     managed_records = [item for item in latest_trade_records if _is_meaningful_managed_trade_record(item)]
     broker_backed_records = [item for item in latest_trade_records if _is_broker_backed_trade_record(item)]
@@ -623,7 +687,8 @@ def build_track_b_paper_trade_summaries(
             1 for item in latest_trade_records if _is_app_only_position_from_unfilled_entry(item)
         ),
         "pending_or_unfilled_lifecycle_count": sum(1 for item in latest_trade_records if _is_unfilled_lifecycle_attempt(item)),
-        "open_position_count": len(open_records),
+        "open_position_count": len(positions_by_instrument),
+        "open_position_record_count": len(open_records),
         "review_required_count": len(review_required),
         "paper_trades_attempted_count": len(broker_backed_records),
         "proof_canary_excluded_from_meaningful_strategy_counts": True,
@@ -646,9 +711,10 @@ def build_track_b_paper_trade_summaries(
         "account_id": _first(records, "account_id"),
         "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
         "broker_reconciled": False,
-        "positions_by_instrument": _positions_by(latest_trade_records, "contract_key", actual_now),
-        "positions_by_strategy": _positions_by(latest_trade_records, "strategy_id", actual_now),
-        "open_position_count": len(open_records),
+        "positions_by_instrument": positions_by_instrument,
+        "positions_by_strategy": positions_by_strategy,
+        "open_position_count": len(positions_by_instrument),
+        "open_position_record_count": len(open_records),
         "open_order_count": 0,
         "total_unrealized_pnl": "0",
         "realized_pnl_today": _sum_decimal(today_records, "realized_pnl"),
@@ -907,6 +973,119 @@ def _managed_trade_record_from_runner_report(
         "source": "TRACK_B_STRATEGY_MANAGED_LIFECYCLE",
         "broker_reconciled": bool(lifecycle_report.get("broker_reconciled")),
     }
+
+
+def _trade_record_from_filled_bridge_result(
+    *,
+    filled_bridge_result: Mapping[str, Any],
+    filled_bridge_result_json: Path | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    classification = str(filled_bridge_result.get("classification") or "")
+    if classification != "PAPER_STRATEGY_ORDER_FILLED_PERSISTED":
+        return None
+    if filled_bridge_result.get("paper_proof_invoked") is True:
+        return None
+    if filled_bridge_result.get("live_money_readiness") is True:
+        return None
+    intent_type = str(filled_bridge_result.get("intent_type") or "").upper()
+    action = str(filled_bridge_result.get("action") or filled_bridge_result.get("side") or "").upper()
+    if intent_type not in {"BUY_TO_OPEN", "SELL_TO_OPEN"}:
+        return None
+    side = "LONG" if intent_type == "BUY_TO_OPEN" or action == "BUY" else "SHORT"
+    symbol = str(filled_bridge_result.get("instrument") or filled_bridge_result.get("symbol") or "").upper()
+    if not symbol:
+        return None
+    order_intent_id = str(filled_bridge_result.get("order_intent_id") or "").strip()
+    lifecycle_id = f"bridge_fill_{order_intent_id}" if order_intent_id else f"bridge_fill_{filled_bridge_result.get('broker_order_id')}"
+    strategy_id = str(filled_bridge_result.get("strategy_id") or filled_bridge_result.get("lane_id") or "UNKNOWN")
+    contract = filled_bridge_result.get("contract") if isinstance(filled_bridge_result.get("contract"), Mapping) else {}
+    quantity = _decimal(filled_bridge_result.get("quantity"))
+    entry_fill_price = _decimal(filled_bridge_result.get("fill_price"))
+    return {
+        "ledger_schema_version": LEDGER_SCHEMA_VERSION,
+        "trade_id": f"{strategy_id}:{lifecycle_id}",
+        "lifecycle_id": lifecycle_id,
+        "signal_id": order_intent_id or lifecycle_id,
+        "strategy_id": strategy_id,
+        "instrument_family": symbol,
+        "contract_key": _contract_key_from_bridge_result(filled_bridge_result, contract),
+        "local_symbol": filled_bridge_result.get("local_symbol") or contract.get("local_symbol"),
+        "con_id": filled_bridge_result.get("con_id") or contract.get("qualified_contract_identifier"),
+        "account_id": filled_bridge_result.get("account_id"),
+        "monitor_mode": "PAPER",
+        "runtime_decision_source": "IBKR_PAPER_BRIDGE_FILL_ARTIFACT",
+        "signal_timestamp": filled_bridge_result.get("decision_bar_timestamp"),
+        "entry_timestamp": filled_bridge_result.get("fill_timestamp") or filled_bridge_result.get("created_at"),
+        "exit_timestamp": None,
+        "side": side,
+        "order_action": action or ("BUY" if side == "LONG" else "SELL"),
+        "quantity": _decimal_text(quantity),
+        "entry_order_id": filled_bridge_result.get("broker_order_id"),
+        "entry_perm_id": filled_bridge_result.get("perm_id"),
+        "entry_client_id": filled_bridge_result.get("client_id"),
+        "entry_exec_id": filled_bridge_result.get("exec_id") or filled_bridge_result.get("execution_id"),
+        "entry_broker_identity": {
+            "account_id": filled_bridge_result.get("account_id"),
+            "broker_order_id": filled_bridge_result.get("broker_order_id"),
+            "perm_id": filled_bridge_result.get("perm_id"),
+            "client_id": filled_bridge_result.get("client_id"),
+            "exec_id": filled_bridge_result.get("exec_id") or filled_bridge_result.get("execution_id"),
+            "con_id": filled_bridge_result.get("con_id") or contract.get("qualified_contract_identifier"),
+            "local_symbol": filled_bridge_result.get("local_symbol") or contract.get("local_symbol"),
+        },
+        "exit_order_id": None,
+        "entry_limit_price": None,
+        "entry_fill_price": _decimal_text(entry_fill_price),
+        "exit_limit_price": None,
+        "exit_fill_price": None,
+        "realized_pnl": None,
+        "pnl_currency": "USD",
+        "ticks_pnl": None,
+        "points_pnl": None,
+        "commissions": None,
+        "slippage_vs_reference": None,
+        "strategy_verdict": "TRACK_B_STRATEGY_PAPER_RUNNER_DIRECT_BRIDGE_FILLED",
+        "paper_lifecycle_type": "STRATEGY_MANAGED",
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "paper_proof_classification": None,
+        "managed_exit_policy_id": filled_bridge_result.get("managed_exit_policy_id"),
+        "entry_submit_attempted": True,
+        "entry_fill_confirmed": True,
+        "broker_backed_position_confirmed": True,
+        "app_only_no_broker_transmission": False,
+        "transmission_classification": "BROKER_BACKED_POSITION_CONFIRMED",
+        "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "final_position_status": "OPEN_MANAGED",
+        "review_required": bool(filled_bridge_result.get("review_required")) or False,
+        "paper_lifecycle_report_path": None,
+        "decision_journal_record_id": None,
+        "decision_journal_record_path": None,
+        "monitor_report_path": None,
+        "strategy_paper_runner_report_path": str(filled_bridge_result_json) if filled_bridge_result_json else None,
+        "filled_bridge_result_path": str(filled_bridge_result_json) if filled_bridge_result_json else None,
+        "route_destination": filled_bridge_result.get("route_destination"),
+        "bridge_classification": filled_bridge_result.get("bridge_classification"),
+        "created_at": now.isoformat(),
+        "source": "TRACK_B_DIRECT_BRIDGE_FILL_ARTIFACT",
+        "broker_reconciled": False,
+    }
+
+
+def _contract_key_from_bridge_result(
+    filled_bridge_result: Mapping[str, Any],
+    contract: Mapping[str, Any],
+) -> str | None:
+    symbol = str(filled_bridge_result.get("instrument") or filled_bridge_result.get("symbol") or contract.get("symbol") or "").upper()
+    expiry = str(contract.get("expiry") or filled_bridge_result.get("contract_month") or "").strip()
+    if symbol and expiry:
+        return f"{symbol}-{expiry[:6]}"
+    local_symbol = str(filled_bridge_result.get("local_symbol") or contract.get("local_symbol") or "").upper()
+    if symbol and local_symbol.startswith(symbol):
+        suffix = local_symbol[len(symbol) :]
+        if suffix:
+            return f"{symbol}-{suffix}"
+    return symbol or None
 
 
 def _latest_lifecycle_record(records: Iterable[Mapping[str, Any]], lifecycle_id: str) -> dict[str, Any] | None:
@@ -1745,6 +1924,14 @@ def _positions_by(records: Iterable[Mapping[str, Any]], key: str, now: datetime)
             "instrument_family": item.get("instrument_family"),
             "contract_key": item.get("contract_key"),
             "local_symbol": item.get("local_symbol"),
+            "con_id": item.get("con_id"),
+            "account_id": item.get("account_id"),
+            "entry_order_id": item.get("entry_order_id"),
+            "entry_perm_id": item.get("entry_perm_id"),
+            "entry_client_id": item.get("entry_client_id"),
+            "entry_exec_id": item.get("entry_exec_id"),
+            "entry_broker_identity": item.get("entry_broker_identity"),
+            "side": item.get("side"),
             "quantity": _decimal_text(quantity),
             "avg_entry_price": item.get("entry_fill_price"),
             "latest_mark_price": None,

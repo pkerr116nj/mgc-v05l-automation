@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
     IbkrPaperStrategyBridgeConfig,
     IbkrPaperStrategyOrderIntent,
@@ -109,6 +111,48 @@ def _write_runtime_files(
         json.dumps({"positions": ledger_positions or [], "orphan_positions": []}),
         encoding="utf-8",
     )
+
+
+def _write_phase1_reconciliation(
+    tmp_path: Path,
+    *,
+    classification: str = "TRACK_B_PAPER_BROKER_RECONCILED",
+    broker_reconciled: bool = True,
+    review_required_count: int = 0,
+    open_order_count: int = 0,
+    block_reasons: list[str] | None = None,
+) -> None:
+    path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "classification": classification,
+                "broker_reconciled": broker_reconciled,
+                "review_required_count": review_required_count,
+                "track_b_broker_open_order_count": open_order_count,
+                "track_b_broker_position_count": 0,
+                "track_b_broker_positions": [],
+                "track_b_lifecycle_positions": [],
+                "live_money_eligible": False,
+                "blockers": [],
+                "block_reasons": block_reasons or [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _default_phase1_reconciliation(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(tmp_path)
 
 
 def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfig:
@@ -702,7 +746,110 @@ def test_submit_is_blocked_when_paper_strategy_monitor_disallows_submit(tmp_path
     assert "Paper runtime is stale" in json.dumps(artifacts.report)
 
 
-def test_preflight_blocks_when_monitor_runtime_is_missing(tmp_path: Path) -> None:
+def test_scope_obsolete_legacy_monitor_cannot_authorize_submit_without_phase1_reconciliation(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(
+        tmp_path,
+        classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        broker_reconciled=False,
+        review_required_count=1,
+        block_reasons=["review_required_present"],
+    )
+    _write_runtime_files(tmp_path)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_asia_london_participation__asia_london_long_v6",
+        symbol="MNQ",
+        contract_month="202606",
+        reason="MNQ_ASIA_LONDON_CANDIDATE_PAPER_INTENT",
+        risk_tags=("MNQ_ASIA_LONDON_CANDIDATE", "PAPER_ONLY"),
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_asia_london_participation__asia_london_long_v6",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        submit=True,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-29T16:00:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    monitor_status = load_paper_strategy_monitor_status(repo_root=tmp_path)
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status=monitor_status,
+        governance_status=_healthy_lane_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert next(row for row in checks if row["name"] == "paper_strategy_submit_gate")["passed"] is True
+    phase1 = next(row for row in checks if row["name"] == "phase1_broker_reconciliation_submit_gate")
+    assert phase1["passed"] is False
+    assert "review_required_present" in phase1["detail"]
+
+
+def test_phase1_reconciliation_blocked_overrides_legacy_monitor_submit_allowed(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(
+        tmp_path,
+        classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        broker_reconciled=True,
+        open_order_count=1,
+        block_reasons=["track_b_open_order_present"],
+    )
+    _write_runtime_files(tmp_path)
+    config = _config(
+        tmp_path,
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(strategy_id="ATP_COMPANION_V1_ASIA_US"),
+        submit=True,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-04-29T16:00:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status=load_paper_strategy_monitor_status(repo_root=tmp_path),
+        governance_status=_healthy_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert next(row for row in checks if row["name"] == "paper_strategy_submit_gate")["passed"] is True
+    phase1 = next(row for row in checks if row["name"] == "phase1_broker_reconciliation_submit_gate")
+    assert phase1["passed"] is False
+    assert "track_b_open_order_present" in phase1["detail"]
+
+
+def test_preflight_treats_missing_unscoped_legacy_monitor_as_diagnostic(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
         submit=True,
@@ -734,8 +881,11 @@ def test_preflight_blocks_when_monitor_runtime_is_missing(tmp_path: Path) -> Non
         exposure_status={},
     )
 
-    failure = next(row for row in checks if row["name"] == "paper_strategy_monitor_runtime_present")
-    assert failure["passed"] is False
+    monitor_gate = next(row for row in checks if row["name"] == "paper_strategy_monitor_runtime_present")
+    assert monitor_gate["passed"] is True
+    assert "diagnostic for this route" in monitor_gate["detail"]
+    phase1_gate = next(row for row in checks if row["name"] == "phase1_broker_reconciliation_submit_gate")
+    assert phase1_gate["passed"] is True
 
 
 def test_preflight_passes_healthy_monitor_gate(tmp_path: Path) -> None:
@@ -1013,7 +1163,7 @@ def test_supervised_runtime_preflight_allows_clean_flat_state_even_if_monitor_su
 
     gate = next(row for row in checks if row["name"] == "paper_strategy_submit_gate")
     assert gate["passed"] is True
-    assert "informational only" in gate["detail"]
+    assert "Legacy paper strategy monitor is diagnostic for this route" in gate["detail"]
 
 
 def test_supervised_runtime_preflight_allows_preserved_atp_detail_with_live_monitor_field_names(tmp_path: Path) -> None:
@@ -1087,7 +1237,7 @@ def test_supervised_runtime_preflight_allows_preserved_atp_detail_with_live_moni
 
     gate = next(row for row in checks if row["name"] == "paper_strategy_submit_gate")
     assert gate["passed"] is True
-    assert "informational only" in gate["detail"]
+    assert "Legacy paper strategy monitor is diagnostic for this route" in gate["detail"]
 
 
 def test_preflight_blocks_dirty_broker_ledger_state(tmp_path: Path) -> None:
@@ -1126,11 +1276,12 @@ def test_preflight_blocks_dirty_broker_ledger_state(tmp_path: Path) -> None:
         environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
         caller_gate={"passed": True, "detail": "approved runtime caller"},
         monitor_status={
+            "strategy_id": "gc_1x_all_lanes__us_midday_short",
             "monitor_running": True,
             "submit_allowed": False,
             "health_classification": "HEALTHY",
             "account_id": "DUM882026",
-            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "exact_contract": {"symbol": "GC", "expiry": "202606", "con_id": None, "local_symbol": None},
             "block_reasons": ["ledger_broker_mismatch"],
             "detail": "Broker and paper ledger disagree.",
         },
@@ -1345,7 +1496,7 @@ def test_preflight_blocks_live_metadata_for_current_supervised_paper_route(tmp_p
     assert failure["passed"] is False
 
 
-def test_preflight_blocks_when_monitor_contract_mismatches(tmp_path: Path) -> None:
+def test_preflight_treats_contract_mismatched_legacy_monitor_as_diagnostic(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
         submit=True,
@@ -1373,6 +1524,7 @@ def test_preflight_blocks_when_monitor_contract_mismatches(tmp_path: Path) -> No
         environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
         caller_gate={"passed": True, "detail": "manual cli"},
         monitor_status={
+            "strategy_id": "ATP_COMPANION_V1_ASIA_US",
             "monitor_running": True,
             "submit_allowed": True,
             "health_classification": "HEALTHY",
@@ -1384,8 +1536,9 @@ def test_preflight_blocks_when_monitor_contract_mismatches(tmp_path: Path) -> No
         exposure_status=_healthy_exposure(),
     )
 
-    failure = next(row for row in checks if row["name"] == "paper_strategy_monitor_contract_match")
-    assert failure["passed"] is False
+    monitor_gate = next(row for row in checks if row["name"] == "paper_strategy_monitor_contract_match")
+    assert monitor_gate["passed"] is True
+    assert "diagnostic for this route" in monitor_gate["detail"]
 
 
 def test_preflight_blocks_when_governance_status_is_paused(tmp_path: Path) -> None:
@@ -1855,11 +2008,12 @@ def test_runtime_caller_still_blocks_when_monitor_health_fails(tmp_path: Path) -
         environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
         caller_gate={"passed": True, "detail": "approved runtime caller"},
         monitor_status={
+            "strategy_id": "gc_1x_all_lanes__us_midday_short",
             "monitor_running": True,
             "submit_allowed": False,
             "health_classification": "STALE",
             "account_id": "DUM882026",
-            "exact_contract": {"symbol": "MGC", "expiry": "20260626", "con_id": 712565978, "local_symbol": "MGCM6"},
+            "exact_contract": {"symbol": "GC", "expiry": "202606", "con_id": None, "local_symbol": None},
             "block_reasons": ["paper_runtime_stale"],
         },
         governance_status={

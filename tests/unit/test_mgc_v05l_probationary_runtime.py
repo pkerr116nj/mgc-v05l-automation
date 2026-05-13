@@ -63,7 +63,7 @@ from mgc_v05l.app.probationary_runtime import (
     simulate_atpe_exit_policy_on_bars,
     submit_probationary_operator_control,
 )
-from mgc_v05l.domain.enums import LongEntryFamily, OrderIntentType, OrderStatus, PositionSide, StrategyStatus
+from mgc_v05l.domain.enums import LongEntryFamily, OrderIntentType, OrderStatus, PositionSide, ShortEntryFamily, StrategyStatus
 from mgc_v05l.config_models import RuntimeMode, load_settings_from_files
 from mgc_v05l.config_models.settings import EnvironmentMode, ExecutionTimeframeRole
 from mgc_v05l.execution.execution_engine import ExecutionEngine
@@ -4973,6 +4973,299 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
     assert execution_engine.last_submit_attempt()["route_destination"] == "ibkr_paper_bridge_submit_capable"
 
 
+def test_submit_capable_broker_reconciles_against_ibkr_position_truth(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": "GC"})
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="gc_1x_all_lanes__london_early_long",
+        source_symbol="GC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "GC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "positions": [
+                    {
+                        "symbol": "GC",
+                        "security_type": "FUT",
+                        "expiry": "20260626",
+                        "local_symbol": "GCM6",
+                        "quantity": "1.0",
+                        "average_cost": "470332.52",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "open_orders": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    audit_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "ibkr_runtime_route_dispatch"
+        / "gc_1x_all_lanes__london_early_long"
+        / "ibkr_paper_strategy_bridge_audit.jsonl"
+    )
+    audit_path.parent.mkdir(parents=True)
+    audit_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"event_type": "intent_ready", "caller_metadata": {"intent_type": "BUY_TO_OPEN", "intent_action": "BUY"}}),
+                json.dumps(
+                    {
+                        "event_type": "delegated_manual_harness_completed",
+                        "caller_metadata": {"intent_type": "BUY_TO_OPEN", "intent_action": "BUY"},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+
+    broker_state = broker.snapshot_state()
+    reconciliation = _reconcile_paper_runtime(
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        trigger="unit_test_ibkr_position_truth",
+        apply_repairs=False,
+        occurred_at=datetime(2026, 5, 12, 11, 5, tzinfo=timezone.utc),
+    )
+
+    assert broker_state["broker_truth_source"] == "ibkr_read_only"
+    assert broker_state["position_quantity"] == 1
+    assert broker_state["average_price"] == "470332.52"
+    assert reconciliation["classification"] == "unsafe_ambiguity"
+    assert "broker_position_quantity_mismatch" in reconciliation["mismatches"]
+    assert "broker_position_side_mismatch" in reconciliation["mismatches"]
+    assert reconciliation["freeze_new_entries"] is True
+    assert strategy_engine.state.position_side is PositionSide.FLAT
+
+
+def test_submit_capable_broker_position_adoption_restores_exit_managed_state(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": "GC"})
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+    lane_id = "gc_1x_asia_london_participation__asia_london_long_v5"
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol="GC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "GC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    created_at = datetime(2026, 5, 11, 23, 8, tzinfo=timezone.utc)
+    entry_intent = OrderIntent(
+        order_intent_id="GC|1m|2026-05-11T23:08:00Z|BUY_TO_OPEN",
+        bar_id="GC|1m|2026-05-11T23:08:00Z",
+        symbol="GC",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=created_at,
+        reason_code="gcAsiaLondonLongV5",
+    )
+    repositories.order_intents.save(entry_intent, order_status=OrderStatus.REJECTED, broker_order_id=None)
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "positions": [
+                    {
+                        "symbol": "GC",
+                        "security_type": "FUT",
+                        "expiry": "20260626",
+                        "local_symbol": "GCM6",
+                        "multiplier": "100",
+                        "quantity": "1.0",
+                        "average_cost": "470332.52",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps({"ok": True, "generated_at": generated_at, "selected_account_id": "DUM882026", "open_orders": []}),
+        encoding="utf-8",
+    )
+    audit_path = tmp_path / "outputs" / "reports" / "ibkr_runtime_route_dispatch" / lane_id / "ibkr_paper_strategy_bridge_audit.jsonl"
+    audit_path.parent.mkdir(parents=True)
+    audit_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event_type": "intent_ready",
+                        "observed_at": "2026-05-11T23:08:51+00:00",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event_type": "delegated_manual_harness_completed",
+                        "observed_at": "2026-05-11T23:09:10+00:00",
+                        "delegated_classification": "PAPER_ORDER_SUBMITTED_NOT_FILLED_CANCELLED",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+
+    adoption = probationary_runtime_module._maybe_adopt_ibkr_bridge_position_for_exit_management(  # noqa: SLF001
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        lane_id=lane_id,
+        repo_root=tmp_path,
+    )
+
+    assert adoption is not None
+    assert adoption["classification"] == "IBKR_BRIDGE_POSITION_ADOPTED_FOR_EXIT_MANAGEMENT"
+    assert strategy_engine.state.position_side is PositionSide.LONG
+    assert strategy_engine.state.internal_position_qty == 1
+    assert strategy_engine.state.broker_position_qty == 1
+    assert strategy_engine.state.entry_price == Decimal("4703.3252")
+    assert strategy_engine.state.entry_bar_id == entry_intent.bar_id
+    assert repositories.fills.list_all()[0]["broker_order_id"] == "adopted-broker-truth-GC-GCM6"
+
+
+def test_submit_capable_non_owner_lane_treats_ibkr_position_as_external(tmp_path: Path) -> None:
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="gc_1x_all_lanes__asia_early_long",
+        source_symbol="GC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "GC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    generated_at = datetime.now(timezone.utc).isoformat()
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "positions": [
+                    {
+                        "symbol": "GC",
+                        "security_type": "FUT",
+                        "expiry": "20260626",
+                        "local_symbol": "GCM6",
+                        "quantity": "1.0",
+                        "average_cost": "470332.52",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps({"ok": True, "generated_at": generated_at, "selected_account_id": "DUM882026", "open_orders": []}),
+        encoding="utf-8",
+    )
+
+    snapshot = broker.snapshot_state()
+
+    assert snapshot["position_quantity"] == 0
+    assert snapshot["external_broker_position_quantity"] == 1
+    assert broker.get_position()["quantity"] == 0
+
+
+def test_submit_capable_broker_truth_flat_overrides_memory_fallback(tmp_path: Path) -> None:
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="gc_1x_all_lanes__london_early_long",
+        source_symbol="GC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "GC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    broker._position = probationary_runtime_module.PaperPosition(quantity=1, average_price=Decimal("4700.0"))  # noqa: SLF001
+    broker._open_order_ids = ["stale-local-order"]  # noqa: SLF001
+    broker._order_status = {"stale-local-order": OrderStatus.ACKNOWLEDGED}  # noqa: SLF001
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps({"ok": True, "generated_at": generated_at, "selected_account_id": "DUM882026", "positions": []}),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps({"ok": True, "generated_at": generated_at, "selected_account_id": "DUM882026", "open_orders": []}),
+        encoding="utf-8",
+    )
+
+    assert broker.get_position()["quantity"] == 0
+    assert broker.get_open_orders() == []
+    assert broker.snapshot_state()["position_quantity"] == 0
+    assert broker.snapshot_state()["open_order_ids"] == []
+
+
 def test_submit_capable_pending_order_is_not_due_for_replay_fill(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path)
     repositories = RepositorySet(build_engine(settings.database_url))
@@ -5025,6 +5318,301 @@ def test_submit_capable_pending_order_is_not_due_for_replay_fill(tmp_path: Path)
     assert execution_engine.pending_executions()
     assert execution_engine.pop_due_replay_fills(next_bar, settings) == []
     assert repositories.fills.list_all() == []
+
+
+def test_submit_capable_watchdog_persists_observed_pl_bridge_fill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane_id = "atp_companion_v1_pl_asia_us"
+    identity = {
+        "standalone_strategy_id": "atp_companion_v1__paper_pl_asia_us",
+        "strategy_family": "active_trend_participation_engine",
+        "instrument": "PL",
+        "lane_id": lane_id,
+    }
+    settings = _build_probationary_settings(tmp_path).model_copy(
+        update={
+            "symbol": "PL",
+            "probationary_paper_lane_id": lane_id,
+            "order_lifecycle_watchdog_interval_seconds": 1,
+            "order_fill_timeout_seconds": 60,
+        }
+    )
+    monkeypatch.chdir(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url), runtime_identity=identity)
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="pl_fill_persist_test")
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol="PL",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "PL_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "PL",
+                "contract_month": "202607",
+                "expiry": "20260729",
+                "con_id": 644855286,
+                "local_symbol": "PLN6",
+            },
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked by watchdog"),
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    created_at = datetime(2026, 5, 13, 0, 41, tzinfo=timezone.utc)
+    fill_timestamp = datetime(2026, 5, 13, 0, 57, 24, 470589, tzinfo=timezone.utc)
+    intent = OrderIntent(
+        order_intent_id="PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+        bar_id="PL|1m|2026-05-13T00:41:00Z",
+        symbol="PL",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=created_at,
+        reason_code="trend_participation.atp_v1_long_pullback_continuation.long.base",
+    )
+    execution_engine.restore_pending_execution(
+        probationary_runtime_module.PendingExecution(
+            intent=intent,
+            broker_order_id="1",
+            submitted_at=created_at,
+            acknowledged_at=created_at,
+            broker_order_status=OrderStatus.ACKNOWLEDGED.value,
+            last_status_checked_at=created_at,
+            retry_count=0,
+            signal_bar_id=intent.bar_id,
+            long_entry_family=LongEntryFamily.K,
+            short_entry_family=ShortEntryFamily.NONE,
+            short_entry_source=None,
+            submit_attempt_id="submit-PL-1",
+        )
+    )
+    broker._position = probationary_runtime_module.PaperPosition(quantity=1, average_price=Decimal("2145.1"))  # noqa: SLF001
+    broker._order_status["1"] = OrderStatus.FILLED  # noqa: SLF001
+    broker._last_fill_timestamp = fill_timestamp  # noqa: SLF001
+    broker._order_metadata["1"] = {  # noqa: SLF001
+        "broker_order_id": "1",
+        "perm_id": 1984099439,
+        "client_id": 10905,
+        "execution_id": "0000e1a7.6a06001d.01.01",
+        "account_id": "DUM882026",
+        "local_symbol": "PLN6",
+        "con_id": 644855286,
+        "fill_price": "2145.1",
+        "fill_timestamp": fill_timestamp.isoformat(),
+        "contract": {
+            "symbol": "PL",
+            "local_symbol": "PLN6",
+            "expiry": "20260729",
+            "qualified_contract_identifier": 644855286,
+            "multiplier": "50",
+        },
+    }
+
+    watchdog_status, latest_event, _ = probationary_runtime_module._run_order_timeout_watchdog(  # noqa: SLF001
+        settings=settings,
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        watchdog_status=None,
+        occurred_at=fill_timestamp + timedelta(seconds=1),
+    )
+
+    fills = repositories.fills.list_all()
+    intents = repositories.order_intents.list_all()
+    assert latest_event is not None
+    assert latest_event["classification"] == "PAPER_STRATEGY_ORDER_FILLED_PERSISTED"
+    assert watchdog_status["safe_repair_count"] == 1
+    assert len(fills) == 1
+    assert fills[0]["order_intent_id"] == intent.order_intent_id
+    assert fills[0]["broker_order_id"] == "1"
+    assert fills[0]["fill_price"] == "2145.1"
+    assert intents[0]["order_status"] == OrderStatus.FILLED.value
+    assert intents[0]["broker_order_status"] == OrderStatus.FILLED.value
+    assert execution_engine.pending_executions() == []
+    assert strategy_engine.state.position_side is PositionSide.LONG
+    assert strategy_engine.state.internal_position_qty == 1
+    live_position_status = json.loads(
+        (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "paper_trade_ledger"
+            / "latest_track_b_live_position_status.json"
+        ).read_text(encoding="utf-8")
+    )
+    position = live_position_status["positions_by_instrument"]["PL-202607"]
+    assert position["local_symbol"] == "PLN6"
+    assert position["con_id"] == 644855286
+
+
+def test_submit_capable_watchdog_marks_filled_but_not_persisted_review_required(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane_id = "atp_companion_v1_pl_asia_us"
+    identity = {
+        "standalone_strategy_id": "atp_companion_v1__paper_pl_asia_us",
+        "strategy_family": "active_trend_participation_engine",
+        "instrument": "PL",
+        "lane_id": lane_id,
+    }
+    settings = _build_probationary_settings(tmp_path).model_copy(
+        update={
+            "symbol": "PL",
+            "probationary_paper_lane_id": lane_id,
+            "order_lifecycle_watchdog_interval_seconds": 1,
+        }
+    )
+    monkeypatch.chdir(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url), runtime_identity=identity)
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="pl_fill_review_test")
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol="PL",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "PL_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "PL", "contract_month": "202607"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked by watchdog"),
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    created_at = datetime(2026, 5, 13, 0, 41, tzinfo=timezone.utc)
+    observed_at = datetime(2026, 5, 13, 0, 57, 25, tzinfo=timezone.utc)
+    intent = OrderIntent(
+        order_intent_id="PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+        bar_id="PL|1m|2026-05-13T00:41:00Z",
+        symbol="PL",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=created_at,
+        reason_code="trend_participation.atp_v1_long_pullback_continuation.long.base",
+    )
+    execution_engine.restore_pending_execution(
+        probationary_runtime_module.PendingExecution(
+            intent=intent,
+            broker_order_id="1",
+            submitted_at=created_at,
+            acknowledged_at=created_at,
+            broker_order_status=OrderStatus.ACKNOWLEDGED.value,
+            last_status_checked_at=created_at,
+            retry_count=0,
+            signal_bar_id=intent.bar_id,
+            long_entry_family=LongEntryFamily.K,
+            short_entry_family=ShortEntryFamily.NONE,
+            short_entry_source=None,
+            submit_attempt_id="submit-PL-1",
+        )
+    )
+    broker._position = probationary_runtime_module.PaperPosition(quantity=1, average_price=None)  # noqa: SLF001
+    broker._order_status["1"] = OrderStatus.FILLED  # noqa: SLF001
+    broker._order_metadata["1"] = {"broker_order_id": "1", "perm_id": 1984099439, "client_id": 10905}  # noqa: SLF001
+
+    watchdog_status, latest_event, _ = probationary_runtime_module._run_order_timeout_watchdog(  # noqa: SLF001
+        settings=settings,
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        watchdog_status=None,
+        occurred_at=observed_at,
+    )
+
+    intents = repositories.order_intents.list_all()
+    assert latest_event is not None
+    assert latest_event["classification"] == "REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE"
+    assert "missing fill_price" in latest_event["error"]
+    assert watchdog_status["active_issue_count"] == 1
+    assert repositories.fills.list_all() == []
+    assert intents[0]["order_status"] == OrderStatus.FILLED.value
+    assert intents[0]["broker_order_status"] == OrderStatus.FILLED.value
+    assert intents[0]["timeout_classification"] == "REVIEW_REQUIRED_FILLED_BUT_PERSISTENCE_INCOMPLETE"
+    assert execution_engine.pending_executions() == []
+    assert strategy_engine.state.strategy_status is StrategyStatus.FAULT
+    assert strategy_engine.state.entries_enabled is False
+
+
+def test_bridge_metadata_selection_uses_contract_identity_when_order_id_collides() -> None:
+    report = {
+        "exact_contract_report": {
+            "exact_contract": {
+                "broker_symbol": "PL",
+                "con_id": 644855286,
+                "expiry": "20260729",
+                "local_symbol": "PLN6",
+                "multiplier": "50",
+            }
+        },
+        "delegated_result": {
+            "report": {
+                "submit_cancel_lifecycle": {
+                    "submitted_order_id": 1,
+                    "latest_order_status": {
+                        "order_id": 1,
+                        "perm_id": 1984099439,
+                        "client_id": 10905,
+                        "status": "Filled",
+                    },
+                    "executions_after_submit": [
+                        {
+                            "account_id": "DUM882026",
+                            "broker_order_id": "1",
+                            "execution_id": "gc-exec",
+                            "price": "4703.3",
+                            "quantity": "1.0",
+                            "symbol": "GC",
+                        },
+                        {
+                            "account_id": "DUM882026",
+                            "broker_order_id": "1",
+                            "execution_id": "mnq-exec",
+                            "price": "28981.25",
+                            "quantity": "1.0",
+                            "symbol": "MNQ",
+                        },
+                        {
+                            "account_id": "DUM882026",
+                            "broker_order_id": "1",
+                            "executed_at": "2026-05-13T00:57:24.470589+00:00",
+                            "execution_id": "0000e1a7.6a06001d.01.01",
+                            "price": "2145.1",
+                            "quantity": "1.0",
+                            "symbol": "PL",
+                        },
+                    ],
+                }
+            }
+        },
+    }
+
+    metadata = probationary_runtime_module._extract_bridge_order_metadata(report, broker_order_id="1")  # noqa: SLF001
+
+    assert metadata["execution_id"] == "0000e1a7.6a06001d.01.01"
+    assert metadata["account_id"] == "DUM882026"
+    assert metadata["local_symbol"] == "PLN6"
+    assert metadata["con_id"] == 644855286
+    assert metadata["fill_price"] == "2145.1"
 
 
 def test_safe_repair_reconciliation_counts_as_effectively_clean() -> None:

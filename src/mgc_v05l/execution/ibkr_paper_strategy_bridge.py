@@ -50,6 +50,7 @@ from .ibkr_position_reconciliation import (
     _collect_managed_account_context,
 )
 from .ibkr_read_only_verifier import _wait_for_connection_ready, IbkrReadOnlyApiTransportConfig
+from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
@@ -1077,12 +1078,19 @@ def _build_static_preflight_checks(
     expected_label = _phase1_target_detail_label(expected_target)
     lane_adapter = dict(expected_target.get("lane_adapter") or {})
     runtime_route = _authorized_supervised_runtime_route_check(config=config, intent=intent)
+    phase1_reconciliation_gate = evaluate_phase1_broker_reconciliation_submit_gate(repo_root=config.repo_root)
     monitor_contract_matches = _monitor_exact_contract_matches_target(
         monitor_exact_contract=monitor_exact_contract,
         target=expected_target,
     )
+    monitor_authority = _paper_strategy_monitor_authority_for_route(
+        monitor_status=monitor_status,
+        expected_target=expected_target,
+        strategy_id=intent.strategy_id,
+    )
     monitor_contract_gate_required = (not config.submit) or not bool(runtime_route.get("passed"))
     monitor_detail = _paper_strategy_monitor_submit_gate_detail(monitor_status)
+    monitor_authority_detail = str(monitor_authority.get("detail") or "")
     governance_detail = str(
         governance_status.get("detail")
         or (
@@ -1146,34 +1154,54 @@ def _build_static_preflight_checks(
         _check("kill_switch_inactive", not Path(config.kill_switch_path).exists(), True, f"Kill-switch path {config.kill_switch_path} must not exist."),
         _check(
             "paper_strategy_monitor_runtime_present",
-            (not config.submit) or bool(monitor_status),
+            (not config.submit) or (not bool(monitor_authority.get("authoritative"))) or bool(monitor_status),
             True,
-            "Submit-capable paper strategy orders require a live paper strategy monitor runtime status file.",
+            (
+                "Scoped legacy paper monitor runtime status is present."
+                if bool(monitor_authority.get("authoritative"))
+                else monitor_authority_detail
+            ),
         ),
         _check(
             "paper_strategy_monitor_running",
-            (not config.submit) or bool(monitor_status.get("monitor_running")),
+            (not config.submit) or (not bool(monitor_authority.get("authoritative"))) or bool(monitor_status.get("monitor_running")),
             True,
-            "Submit-capable paper strategy orders require the paper strategy monitor service to be actively running.",
+            (
+                "Scoped legacy paper monitor service is actively running."
+                if bool(monitor_authority.get("authoritative"))
+                else monitor_authority_detail
+            ),
         ),
         _check(
             "paper_strategy_monitor_health",
-            (not config.submit) or monitor_health == "HEALTHY",
+            (not config.submit) or (not bool(monitor_authority.get("authoritative"))) or monitor_health == "HEALTHY",
             True,
-            f"Submit-capable paper strategy orders require a HEALTHY paper strategy monitor, not {monitor_health or 'UNKNOWN'}.",
+            (
+                f"Scoped legacy paper strategy monitor health is {monitor_health or 'UNKNOWN'}."
+                if bool(monitor_authority.get("authoritative"))
+                else monitor_authority_detail
+            ),
         ),
         _check(
             "paper_strategy_monitor_account_match",
-            (not config.submit) or monitor_account_matches,
+            (not config.submit) or (not bool(monitor_authority.get("authoritative"))) or monitor_account_matches,
             True,
-            "Submit-capable paper strategy orders require the live monitor account to match DUM882026.",
+            (
+                "Scoped legacy paper strategy monitor account matches DUM882026."
+                if bool(monitor_authority.get("authoritative"))
+                else monitor_authority_detail
+            ),
         ),
         _check(
             "paper_strategy_monitor_contract_match",
-            (not config.submit) or ((not monitor_contract_gate_required) or monitor_contract_matches),
+            (not config.submit)
+            or (not bool(monitor_authority.get("authoritative")))
+            or ((not monitor_contract_gate_required) or monitor_contract_matches),
             True,
             (
-                f"Submit-capable paper strategy orders require the live monitor exact contract to match the approved phase-1 execution target {expected_label}."
+                monitor_authority_detail
+                if not bool(monitor_authority.get("authoritative"))
+                else f"Submit-capable paper strategy orders require the live monitor exact contract to match the approved phase-1 execution target {expected_label}."
                 if monitor_contract_gate_required
                 else f"Approved supervised PAPER route resolved executable target {expected_label}; stale global monitor exact-contract snapshots do not veto current route preflight."
             ),
@@ -1194,9 +1222,17 @@ def _build_static_preflight_checks(
         ),
         _check(
             "paper_strategy_submit_gate",
-            (not config.submit) or _paper_strategy_monitor_submit_gate_passed(monitor_status),
+            (not config.submit)
+            or (not bool(monitor_authority.get("authoritative")))
+            or _paper_strategy_monitor_submit_gate_passed(monitor_status),
             True,
-            monitor_detail,
+            monitor_detail if bool(monitor_authority.get("authoritative")) else monitor_authority_detail,
+        ),
+        _check(
+            "phase1_broker_reconciliation_submit_gate",
+            (not config.submit) or bool(phase1_reconciliation_gate.get("ready")),
+            True,
+            str(phase1_reconciliation_gate.get("detail") or "Current Phase-1 broker reconciliation is required."),
         ),
         _check(
             "paper_strategy_governance_runtime_present",
@@ -1230,6 +1266,32 @@ def _build_static_preflight_checks(
             exposure_detail,
         ),
     ]
+
+
+def _paper_strategy_monitor_authority_for_route(
+    *,
+    monitor_status: dict[str, Any],
+    expected_target: dict[str, Any],
+    strategy_id: str,
+) -> dict[str, Any]:
+    exact_contract = dict(monitor_status.get("exact_contract") or {})
+    scoped = (
+        bool(monitor_status)
+        and str(monitor_status.get("strategy_id") or "").strip() == str(strategy_id or "").strip()
+        and _monitor_exact_contract_matches_target(monitor_exact_contract=exact_contract, target=expected_target)
+    )
+    if scoped:
+        return {
+            "authoritative": True,
+            "detail": "Legacy paper strategy monitor is scoped to this exact route and may participate as an additional gate.",
+        }
+    return {
+        "authoritative": False,
+        "detail": (
+            "Legacy paper strategy monitor is diagnostic for this route; current Phase-1 broker reconciliation "
+            "is the authoritative open-position/open-order/review-required gate."
+        ),
+    }
 
 
 def _paper_strategy_monitor_submit_gate_passed(monitor_status: dict[str, Any]) -> bool:

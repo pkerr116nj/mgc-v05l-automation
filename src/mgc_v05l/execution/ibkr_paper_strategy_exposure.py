@@ -10,6 +10,7 @@ from typing import Any
 
 from .ibkr_paper_strategy_governance import load_paper_strategy_governance_status
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
+from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 
 _DEFAULT_OUTPUT_DIR = Path("outputs") / "reports" / "paper_strategy_exposure"
 _DEFAULT_LEDGER_PATH = Path("var") / "paper_strategy_position_ledger.json"
@@ -76,6 +77,10 @@ def run_ibkr_paper_strategy_exposure(
     audit_events: list[dict[str, Any]] = []
     now = _utc_now()
     monitor_status = load_paper_strategy_monitor_status(repo_root=config.repo_root)
+    phase1_reconciliation_gate = evaluate_phase1_broker_reconciliation_submit_gate(
+        repo_root=config.repo_root,
+        max_age_seconds=config.broker_truth_max_age_seconds,
+    )
     governance_status = load_paper_strategy_governance_status(
         repo_root=config.repo_root,
         strategy_id=config.bridge_strategy_id or config.strategy_id,
@@ -86,6 +91,7 @@ def run_ibkr_paper_strategy_exposure(
         config=config,
         monitor_status=monitor_status,
         governance_status=governance_status,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
         strategy_rows=strategy_exposure_rows,
     )
     selected_strategy_gate = _evaluate_strategy_gate(
@@ -130,6 +136,7 @@ def run_ibkr_paper_strategy_exposure(
             "submit_allowed": governance_status.get("submit_allowed"),
             "block_reasons": governance_status.get("block_reasons"),
         },
+        "phase1_broker_reconciliation_gate": phase1_reconciliation_gate,
         "strategy_exposure_ledger": {
             "strategy_count": len(strategy_exposure_rows),
             "rows": strategy_exposure_rows,
@@ -308,6 +315,7 @@ def _build_aggregate_exposure_state(
     config: IbkrPaperStrategyExposureConfig,
     monitor_status: dict[str, Any],
     governance_status: dict[str, Any],
+    phase1_reconciliation_gate: dict[str, Any],
     strategy_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     executable_symbol = str(config.executable_symbol or "MGC").strip().upper()
@@ -340,7 +348,9 @@ def _build_aggregate_exposure_state(
     elif abs(difference) > 1e-9:
         discrepancy_classification = "LEDGER_BROKER_MISMATCH"
     classification = "PAPER_EXPOSURE_ATTRIBUTION_READY"
-    if discrepancy_classification == "BROKER_TRUTH_STALE_OR_MISSING":
+    if not bool(phase1_reconciliation_gate.get("ready")):
+        classification = "PAPER_EXPOSURE_BLOCKED_PHASE1_RECONCILIATION"
+    elif discrepancy_classification == "BROKER_TRUTH_STALE_OR_MISSING":
         classification = "PAPER_EXPOSURE_BLOCKED_BROKER_TRUTH_STALE"
     elif discrepancy_classification == "ORPHAN_BROKER_POSITION":
         classification = "PAPER_EXPOSURE_BLOCKED_ORPHAN_POSITION"
@@ -370,6 +380,15 @@ def _build_aggregate_exposure_state(
         "orphan_positions": orphan_rows,
         "ledger_only_positions": ledger_only_rows,
         "strategy_open_orders": strategy_open_orders,
+        "legacy_monitor_authority": "DIAGNOSTIC_ONLY_FOR_PHASE1_SUBMIT_AUTHORITY",
+        "phase1_broker_reconciliation_gate": {
+            "classification": phase1_reconciliation_gate.get("classification"),
+            "ready": phase1_reconciliation_gate.get("ready"),
+            "block_reasons": list(phase1_reconciliation_gate.get("block_reasons") or []),
+            "detail": phase1_reconciliation_gate.get("detail"),
+            "generated_at": phase1_reconciliation_gate.get("generated_at"),
+            "age_seconds": phase1_reconciliation_gate.get("age_seconds"),
+        },
         "allow_stacking": bool(config.allow_stacking),
         "max_total_mgc_contracts": config.max_total_mgc_contracts,
         "max_total_gc_equivalent": float(config.max_total_gc_equivalent),
@@ -409,6 +428,9 @@ def _evaluate_strategy_gate(
         strategy_state = "SHORT"
 
     block_reasons: list[str] = []
+    phase1_gate = dict(aggregate_state.get("phase1_broker_reconciliation_gate") or {})
+    if not bool(phase1_gate.get("ready")):
+        block_reasons.append("phase1_broker_reconciliation_not_clear")
     aggregate_discrepancy = str(aggregate_state.get("discrepancy_classification") or "CLEAN")
     if aggregate_discrepancy == "BROKER_TRUTH_STALE_OR_MISSING":
         block_reasons.append("broker_position_truth_stale_or_missing")
@@ -423,6 +445,9 @@ def _evaluate_strategy_gate(
 
     classification = str(aggregate_state.get("classification") or "PAPER_EXPOSURE_ATTRIBUTION_READY")
     detail = "Exposure attribution is visible and no explicit exposure conflict is present."
+    if "phase1_broker_reconciliation_not_clear" in block_reasons:
+        classification = "PAPER_EXPOSURE_BLOCKED_PHASE1_RECONCILIATION"
+        detail = "Current Phase-1 broker reconciliation is required before exposure can authorize submit."
     submit_allowed = not block_reasons
     stacking_observed = False
 
@@ -441,7 +466,10 @@ def _evaluate_strategy_gate(
             block_reasons.append("strategy_stacking_disabled")
         if block_reasons:
             submit_allowed = False
-            if "broker_position_truth_stale_or_missing" in block_reasons:
+            if "phase1_broker_reconciliation_not_clear" in block_reasons:
+                classification = "PAPER_EXPOSURE_BLOCKED_PHASE1_RECONCILIATION"
+                detail = "Current Phase-1 broker reconciliation is required before exposure can authorize submit."
+            elif "broker_position_truth_stale_or_missing" in block_reasons:
                 classification = "BROKER_TRUTH_STALE_OR_MISSING"
                 detail = "Fresh broker position and open-order truth is required before exposure ownership can be evaluated."
             elif "configured_aggregate_contract_limit_exceeded" in block_reasons:
@@ -474,8 +502,12 @@ def _evaluate_strategy_gate(
             block_reasons.append("broker_position_does_not_support_requested_exit")
         if block_reasons:
             submit_allowed = False
-            classification = "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
-            detail = "The requested exit does not align with the owning strategy’s attributed exposure."
+            if "phase1_broker_reconciliation_not_clear" in block_reasons:
+                classification = "PAPER_EXPOSURE_BLOCKED_PHASE1_RECONCILIATION"
+                detail = "Current Phase-1 broker reconciliation is required before exposure can authorize submit."
+            else:
+                classification = "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
+                detail = "The requested exit does not align with the owning strategy’s attributed exposure."
         else:
             classification = "PAPER_EXPOSURE_EXIT_ALLOWED"
             detail = "The owning strategy may reduce its attributed exposure."
@@ -508,13 +540,20 @@ def _evaluate_strategy_gate(
         "aggregate_strategy_position_sum": aggregate_state.get("strategy_attributed_position_sum"),
         "broker_truth": aggregate_state.get("broker_truth"),
         "blocker_classification": (
-            "BROKER_LEDGER_POSITION_MISMATCH"
+            "PHASE1_BROKER_RECONCILIATION_NOT_CLEAR"
+            if "phase1_broker_reconciliation_not_clear" in block_reasons
+            else "BROKER_LEDGER_POSITION_MISMATCH"
             if any(reason in block_reasons for reason in {"ledger_broker_mismatch", "orphan_broker_position"})
             else ("BROKER_TRUTH_STALE_OR_MISSING" if "broker_position_truth_stale_or_missing" in block_reasons else None)
         ),
         "review_required": any(
             reason in block_reasons
-            for reason in {"ledger_broker_mismatch", "orphan_broker_position", "broker_position_truth_stale_or_missing"}
+            for reason in {
+                "ledger_broker_mismatch",
+                "orphan_broker_position",
+                "broker_position_truth_stale_or_missing",
+                "phase1_broker_reconciliation_not_clear",
+            }
         ),
     }
 

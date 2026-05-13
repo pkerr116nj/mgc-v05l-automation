@@ -103,7 +103,7 @@ def reconcile_track_b_paper_broker_truth(
         now=actual_now,
         blockers=blockers,
     )
-    lifecycle_blockers = _validate_lifecycle_flat(
+    lifecycle_blockers = _validate_lifecycle_read_model(
         trade_summary=trade_summary,
         live_position_status=live_position_status,
         pnl_summary=pnl_summary,
@@ -111,14 +111,15 @@ def reconcile_track_b_paper_broker_truth(
     blockers.extend(lifecycle_blockers)
     track_b_positions = _track_b_broker_positions(positions_snapshot, config.symbols)
     track_b_open_orders = _track_b_broker_open_orders(open_orders_snapshot, config.symbols)
-    if track_b_positions:
-        blockers.append(
-            {
-                "code": "TRACK_B_BROKER_POSITION_PRESENT",
-                "detail": "IBKR broker truth reports one or more Track B futures positions.",
-                "positions": track_b_positions,
-            }
-        )
+    lifecycle_positions = _track_b_lifecycle_positions(live_position_status, config.symbols)
+    position_match_report = _broker_lifecycle_position_match(
+        broker_positions=track_b_positions,
+        lifecycle_positions=lifecycle_positions,
+        symbols=config.symbols,
+    )
+    broker_cost_basis_adjustments = _broker_cost_basis_adjustments_from_match_report(position_match_report)
+    if position_match_report["matched"] is not True:
+        blockers.append(position_match_report["blocker"])
     if track_b_open_orders:
         blockers.append(
             {
@@ -161,6 +162,9 @@ def reconcile_track_b_paper_broker_truth(
         "track_b_broker_open_order_count": len(track_b_open_orders),
         "track_b_broker_positions": track_b_positions,
         "track_b_broker_open_orders": track_b_open_orders,
+        "track_b_lifecycle_positions": lifecycle_positions,
+        "position_match_report": position_match_report,
+        "broker_cost_basis_adjustments": broker_cost_basis_adjustments,
         "lifecycle_open_position_count": _int_value(live_position_status.get("open_position_count")),
         "lifecycle_open_order_count": _int_value(live_position_status.get("open_order_count")),
         "review_required_count": _max_int(
@@ -180,6 +184,7 @@ def reconcile_track_b_paper_broker_truth(
             report=report,
             positions_path=positions_path,
             open_orders_path=open_orders_path,
+            broker_positions=track_b_positions,
         )
     _write_json_atomic(config.report_path, report)
     return report
@@ -297,7 +302,7 @@ def _validate_snapshot(
         )
 
 
-def _validate_lifecycle_flat(
+def _validate_lifecycle_read_model(
     *,
     trade_summary: Mapping[str, Any],
     live_position_status: Mapping[str, Any],
@@ -310,14 +315,14 @@ def _validate_lifecycle_flat(
         blockers.append({"code": "LIFECYCLE_POSITION_STATUS_MISSING"})
     if not pnl_summary:
         blockers.append({"code": "LIFECYCLE_PNL_SUMMARY_MISSING"})
-    if _int_value(live_position_status.get("open_position_count")) != 0:
-        blockers.append({"code": "LIFECYCLE_OPEN_POSITION_PRESENT", "count": live_position_status.get("open_position_count")})
     if _int_value(live_position_status.get("open_order_count")) != 0:
         blockers.append({"code": "LIFECYCLE_OPEN_ORDER_PRESENT", "count": live_position_status.get("open_order_count")})
-    if live_position_status.get("positions_by_instrument") not in ({}, None):
-        blockers.append({"code": "LIFECYCLE_POSITIONS_BY_INSTRUMENT_NOT_FLAT"})
-    if live_position_status.get("positions_by_strategy") not in ({}, None):
-        blockers.append({"code": "LIFECYCLE_POSITIONS_BY_STRATEGY_NOT_FLAT"})
+    positions_by_instrument = live_position_status.get("positions_by_instrument")
+    if positions_by_instrument not in ({}, None) and not isinstance(positions_by_instrument, Mapping):
+        blockers.append({"code": "LIFECYCLE_POSITIONS_BY_INSTRUMENT_INVALID"})
+    positions_by_strategy = live_position_status.get("positions_by_strategy")
+    if positions_by_strategy not in ({}, None) and not isinstance(positions_by_strategy, Mapping):
+        blockers.append({"code": "LIFECYCLE_POSITIONS_BY_STRATEGY_INVALID"})
     review_required_count = _max_int(
         trade_summary.get("review_required_count"),
         pnl_summary.get("review_required_count"),
@@ -338,7 +343,20 @@ def _write_reconciled_summaries(
     report: Mapping[str, Any],
     positions_path: Path,
     open_orders_path: Path,
+    broker_positions: Sequence[Mapping[str, Any]],
 ) -> None:
+    broker_position_count = len(broker_positions)
+    reconciled_state = "BROKER_AND_LIFECYCLE_OPEN_MATCHED" if broker_position_count else "BROKER_AND_LIFECYCLE_FLAT"
+    broker_cost_basis_adjustments = [
+        dict(item)
+        for item in report.get("broker_cost_basis_adjustments", [])
+        if isinstance(item, Mapping)
+    ]
+    broker_truth_warning = (
+        "Broker read-only truth agrees with Track B lifecycle open-position state."
+        if broker_position_count
+        else "Broker read-only truth agrees with Track B lifecycle flat state."
+    )
     common = {
         "source": "BROKER_RECONCILED",
         "broker_reconciled": True,
@@ -361,7 +379,7 @@ def _write_reconciled_summaries(
             "latest_trade_summary_path": str(config.reconciled_trade_summary_path),
             "latest_live_position_status_path": str(config.reconciled_live_position_status_path),
             "latest_pnl_summary_path": str(config.reconciled_pnl_summary_path),
-            "broker_truth_warning": "Broker read-only truth agrees with Track B lifecycle flat state.",
+            "broker_truth_warning": broker_truth_warning,
         }
     )
     reconciled_positions = dict(live_position_status)
@@ -371,10 +389,12 @@ def _write_reconciled_summaries(
             "as_of": now.isoformat(),
             "account_id": config.account,
             "latest_live_position_status_path": str(config.reconciled_live_position_status_path),
-            "broker_truth_warning": "Broker read-only truth agrees with Track B lifecycle flat state.",
-            "broker_track_b_position_count": 0,
+            "broker_truth_warning": broker_truth_warning,
+            "broker_track_b_position_count": broker_position_count,
             "broker_track_b_open_order_count": 0,
-            "broker_reconciled_state": "BROKER_AND_LIFECYCLE_FLAT",
+            "broker_reconciled_state": reconciled_state,
+            "broker_track_b_positions": [dict(item) for item in broker_positions],
+            "broker_cost_basis_adjustments": broker_cost_basis_adjustments,
         }
     )
     reconciled_pnl = dict(pnl_summary)
@@ -388,6 +408,192 @@ def _write_reconciled_summaries(
     _write_json_atomic(config.reconciled_trade_summary_path, reconciled_trade)
     _write_json_atomic(config.reconciled_live_position_status_path, reconciled_positions)
     _write_json_atomic(config.reconciled_pnl_summary_path, reconciled_pnl)
+
+
+def _track_b_lifecycle_positions(live_position_status: Mapping[str, Any], symbols: Sequence[str]) -> list[dict[str, Any]]:
+    rows = live_position_status.get("positions_by_instrument")
+    if not isinstance(rows, Mapping):
+        return []
+    matches: list[dict[str, Any]] = []
+    for key, value in rows.items():
+        if not isinstance(value, Mapping):
+            continue
+        item = dict(value)
+        item.setdefault("position_key", key)
+        root = _track_b_root(item, symbols)
+        if root is None:
+            root = _track_b_root({"instrument": key, "contract_key": key}, symbols)
+        if root is None:
+            continue
+        qty = _decimal_value(item.get("quantity"))
+        if qty is None or qty == 0:
+            continue
+        item["track_b_root"] = root
+        matches.append(item)
+    return matches
+
+
+def _broker_lifecycle_position_match(
+    *,
+    broker_positions: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    symbols: Sequence[str],
+) -> dict[str, Any]:
+    if not broker_positions and not lifecycle_positions:
+        return {"matched": True, "state": "BROKER_AND_LIFECYCLE_FLAT", "matches": []}
+    count_mismatch = len(broker_positions) != len(lifecycle_positions)
+
+    unmatched_lifecycle = [dict(item) for item in lifecycle_positions]
+    matches: list[dict[str, Any]] = []
+    mismatches: list[dict[str, Any]] = []
+    for broker_position in broker_positions:
+        broker_root = _track_b_root(broker_position, symbols)
+        broker_qty = _decimal_value(broker_position.get("quantity"))
+        match_index = None
+        match_detail: dict[str, Any] | None = None
+        for index, lifecycle_position in enumerate(unmatched_lifecycle):
+            lifecycle_root = _track_b_root(lifecycle_position, symbols)
+            lifecycle_qty = _decimal_value(lifecycle_position.get("quantity"))
+            lifecycle_signed_qty = _signed_lifecycle_quantity(lifecycle_position, lifecycle_qty)
+            root_matches = broker_root is not None and broker_root == lifecycle_root
+            local_matches = _local_symbols_compatible(broker_position, lifecycle_position)
+            quantity_matches = broker_qty is not None and lifecycle_signed_qty is not None and broker_qty == lifecycle_signed_qty
+            if root_matches and local_matches and quantity_matches:
+                match_index = index
+                match_detail = {
+                    "root": broker_root,
+                    "broker_local_symbol": broker_position.get("local_symbol") or broker_position.get("localSymbol"),
+                    "lifecycle_local_symbol": lifecycle_position.get("local_symbol") or lifecycle_position.get("localSymbol"),
+                    "quantity": str(broker_qty),
+                    "broker_position": dict(broker_position),
+                    "lifecycle_position": dict(lifecycle_position),
+                }
+                cost_basis_adjustment = _broker_cost_basis_adjustment(
+                    broker_position=broker_position,
+                    lifecycle_position=lifecycle_position,
+                    signed_quantity=broker_qty,
+                    root=broker_root,
+                )
+                if cost_basis_adjustment is not None:
+                    match_detail["broker_cost_basis_adjustment"] = cost_basis_adjustment
+                break
+        if match_index is None or match_detail is None:
+            mismatches.append({"broker_position": dict(broker_position), "unmatched_lifecycle_positions": unmatched_lifecycle})
+            continue
+        matches.append(match_detail)
+        unmatched_lifecycle.pop(match_index)
+
+    if count_mismatch or mismatches or unmatched_lifecycle:
+        blocker_code = (
+            "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH"
+            if count_mismatch
+            else "TRACK_B_BROKER_LIFECYCLE_POSITION_DETAIL_MISMATCH"
+        )
+        state = "BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" if count_mismatch else "BROKER_LIFECYCLE_POSITION_DETAIL_MISMATCH"
+        detail = (
+            "IBKR broker truth and Track B lifecycle report different Track B open-position counts."
+            if count_mismatch
+            else "IBKR broker truth open positions do not exactly match Track B lifecycle open positions."
+        )
+        return {
+            "matched": False,
+            "state": state,
+            "broker": [dict(item) for item in broker_positions],
+            "lifecycle": [dict(item) for item in lifecycle_positions],
+            "matches": matches,
+            "mismatches": mismatches,
+            "unmatched_lifecycle_positions": unmatched_lifecycle,
+            "blocker": {
+                "code": blocker_code,
+                "detail": detail,
+                "broker_position_count": len(broker_positions),
+                "lifecycle_position_count": len(lifecycle_positions),
+                "broker_positions": [dict(item) for item in broker_positions],
+                "lifecycle_positions": [dict(item) for item in lifecycle_positions],
+                "matches": matches,
+                "mismatches": mismatches,
+                "unmatched_lifecycle_positions": unmatched_lifecycle,
+            },
+        }
+    return {"matched": True, "state": "BROKER_AND_LIFECYCLE_OPEN_MATCHED", "matches": matches}
+
+
+def _broker_cost_basis_adjustments_from_match_report(match_report: Mapping[str, Any]) -> list[dict[str, Any]]:
+    matches = match_report.get("matches")
+    if not isinstance(matches, list):
+        return []
+    adjustments: list[dict[str, Any]] = []
+    for match in matches:
+        if not isinstance(match, Mapping):
+            continue
+        adjustment = match.get("broker_cost_basis_adjustment")
+        if isinstance(adjustment, Mapping):
+            adjustments.append(dict(adjustment))
+    return adjustments
+
+
+def _broker_cost_basis_adjustment(
+    *,
+    broker_position: Mapping[str, Any],
+    lifecycle_position: Mapping[str, Any],
+    signed_quantity: Decimal | None,
+    root: str | None,
+) -> dict[str, Any] | None:
+    broker_average = _broker_average_price(broker_position)
+    lifecycle_average = _decimal_value(
+        lifecycle_position.get("avg_entry_price")
+        or lifecycle_position.get("average_entry_price")
+        or lifecycle_position.get("entry_price")
+    )
+    quantity = abs(signed_quantity) if signed_quantity is not None else _decimal_value(lifecycle_position.get("quantity"))
+    if broker_average is None or lifecycle_average is None or quantity is None or quantity == 0:
+        return None
+    broker_minus_lifecycle = broker_average - lifecycle_average
+    total_points = broker_minus_lifecycle * quantity
+    return {
+        "source": "IBKR_AVERAGE_PRICE_MINUS_TRACK_B_LIFECYCLE_ENTRY_PRICE",
+        "root": root,
+        "broker_local_symbol": broker_position.get("local_symbol") or broker_position.get("localSymbol"),
+        "lifecycle_local_symbol": lifecycle_position.get("local_symbol") or lifecycle_position.get("localSymbol"),
+        "quantity": str(quantity),
+        "lifecycle_average_entry_price": str(lifecycle_average),
+        "broker_average_price": str(broker_average),
+        "broker_minus_lifecycle_points_per_contract": str(broker_minus_lifecycle),
+        "broker_minus_lifecycle_points_total": str(total_points),
+        "absolute_points_per_contract": str(abs(broker_minus_lifecycle)),
+        "absolute_points_total": str(abs(total_points)),
+        "note": "Captured for broker fee/cost-basis tracking only; IBKR broker truth remains authoritative for live PAPER position state.",
+    }
+
+
+def _broker_average_price(position: Mapping[str, Any]) -> Decimal | None:
+    average_price = _decimal_value(position.get("average_price") or position.get("avg_entry_price"))
+    if average_price is not None:
+        return average_price
+    average_cost = _decimal_value(position.get("average_cost"))
+    multiplier = _decimal_value(position.get("multiplier"))
+    if average_cost is None:
+        return None
+    if multiplier is None or multiplier == 0:
+        return average_cost
+    return average_cost / multiplier
+
+
+def _signed_lifecycle_quantity(position: Mapping[str, Any], quantity: Decimal | None) -> Decimal | None:
+    if quantity is None:
+        return None
+    side = str(position.get("side") or position.get("position_side") or "").strip().upper()
+    if side == "SHORT" and quantity > 0:
+        return -quantity
+    return quantity
+
+
+def _local_symbols_compatible(broker_position: Mapping[str, Any], lifecycle_position: Mapping[str, Any]) -> bool:
+    broker_local = str(broker_position.get("local_symbol") or broker_position.get("localSymbol") or "").strip().upper()
+    lifecycle_local = str(lifecycle_position.get("local_symbol") or lifecycle_position.get("localSymbol") or "").strip().upper()
+    if broker_local and lifecycle_local:
+        return broker_local == lifecycle_local
+    return True
 
 
 def _track_b_broker_positions(snapshot: Mapping[str, Any], symbols: Sequence[str]) -> list[dict[str, Any]]:
@@ -432,6 +638,7 @@ def _track_b_root(row: Mapping[str, Any], symbols: Sequence[str]) -> str | None:
         row.get("symbol"),
         row.get("root"),
         row.get("instrument"),
+        row.get("contract_key"),
         row.get("local_symbol"),
         row.get("localSymbol"),
     )

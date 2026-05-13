@@ -81,3 +81,8 @@ def test_dashboard_reads_live_ibkr_strategy_monitor_runtime_files(tmp_path: Path
     assert payload["position_quantity"] == 1.0
     assert payload["unrealized_pnl"] == 256.03
     assert payload["broker_ledger_match"] == "MATCH"
+    assert payload["submit_allowed"] is True
+    assert payload["submit_authority"] is False
+    assert payload["legacy_monitor_authority"] == "DIAGNOSTIC_ONLY_FOR_PHASE1_SUBMIT_AUTHORITY"
+    assert payload["phase1_broker_reconciliation_authoritative"] is True
+    assert payload["phase1_broker_reconciliation_gate"]["ready"] is False

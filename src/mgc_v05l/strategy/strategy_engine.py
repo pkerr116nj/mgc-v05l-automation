@@ -715,7 +715,11 @@ class StrategyEngine:
 
     def force_fault(self, occurred_at: datetime, fault_code: str) -> StrategyState:
         """Fail closed and persist an explicit runtime fault."""
-        self._state = transition_to_fault(self._state, occurred_at, fault_code)
+        self._state = transition_to_fault(
+            replace(self._state, entries_enabled=False, updated_at=occurred_at),
+            occurred_at,
+            fault_code,
+        )
         if self._alert_dispatcher is not None:
             self._alert_dispatcher.emit(
                 severity="BLOCKING",
@@ -2035,6 +2039,7 @@ class StrategyEngine:
             "decision_bar_timestamp": pending.intent.created_at.isoformat(),
             "bar_id": pending.intent.bar_id,
             "broker_order_id": pending.broker_order_id,
+            "account_id": status_payload.get("account_id") or submit_attempt.get("account_id"),
             "perm_id": status_payload.get("perm_id") or submit_attempt.get("perm_id"),
             "client_id": status_payload.get("client_id") or submit_attempt.get("client_id"),
             "exec_id": status_payload.get("execution_id") or submit_attempt.get("execution_id"),
@@ -2062,6 +2067,16 @@ class StrategyEngine:
                 self._structured_logger.log_filled_bridge_result(payload)
             if hasattr(self._structured_logger, "write_filled_bridge_result_state"):
                 self._structured_logger.write_filled_bridge_result_state(payload)
+        try:
+            from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
+                update_track_b_paper_trade_ledger_from_filled_bridge_result,
+            )
+
+            update_track_b_paper_trade_ledger_from_filled_bridge_result(filled_bridge_result=payload)
+            payload["paper_trade_ledger_update_attempted"] = True
+        except Exception as exc:  # noqa: BLE001 - compact ledger update must not become submit authority.
+            payload["paper_trade_ledger_update_attempted"] = True
+            payload["paper_trade_ledger_update_error"] = str(exc)
         self._latest_live_intent_summary = {
             **self._latest_live_intent_summary,
             "filled_bridge_result": payload,

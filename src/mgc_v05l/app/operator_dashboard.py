@@ -46,6 +46,7 @@ from ..execution_core.track_b_strategy_registry import (
     get_track_b_strategy_registry,
 )
 from ..execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
+from ..execution.track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from ..market_data import (
     SchwabAuthError,
     SchwabOAuthClient,
@@ -8288,6 +8289,7 @@ class OperatorDashboardService:
 
     def _paper_ibkr_strategy_monitor_payload(self, *, generated_at: str) -> dict[str, Any]:
         runtime_status = load_paper_strategy_monitor_status(repo_root=self._repo_root)
+        phase1_reconciliation_gate = evaluate_phase1_broker_reconciliation_submit_gate(repo_root=self._repo_root)
         heartbeat = _load_json_file(self._paper_ibkr_strategy_monitor_heartbeat_path)
         ledger = _load_json_file(self._paper_ibkr_strategy_monitor_ledger_path)
         pnl_snapshot = _load_json_file(self._paper_ibkr_strategy_monitor_pnl_path)
@@ -8313,6 +8315,10 @@ class OperatorDashboardService:
             "health": runtime_status.get("health_classification") or runtime_status.get("monitor_health"),
             "stale": runtime_status.get("stale"),
             "submit_allowed": runtime_status.get("submit_allowed"),
+            "submit_authority": False,
+            "legacy_monitor_authority": "DIAGNOSTIC_ONLY_FOR_PHASE1_SUBMIT_AUTHORITY",
+            "phase1_broker_reconciliation_authoritative": True,
+            "phase1_broker_reconciliation_gate": phase1_reconciliation_gate,
             "block_reasons": block_reasons,
             "block_reason_summary": ", ".join(block_reasons) if block_reasons else None,
             "last_poll_time": runtime_status.get("last_poll_time"),

@@ -63,8 +63,114 @@ def test_blocks_when_track_b_broker_position_exists_but_lifecycle_is_flat(tmp_pa
 
     assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
     assert report["broker_reconciled"] is False
-    assert any(blocker["code"] == "TRACK_B_BROKER_POSITION_PRESENT" for blocker in report["blockers"])
+    assert any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
     assert not config.reconciled_live_position_status_path.exists()
+
+
+def test_count_mismatch_still_reports_cost_basis_for_matched_positions(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "index_futures_ny_intraday_forced_core_v2__mnq_1x_ny_early_core__us_late_long",
+            "lifecycle_id": "bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN",
+            "instrument_family": "MNQ",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "side": "LONG",
+            "quantity": "1",
+            "avg_entry_price": "28981.25",
+        },
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "PL",
+                "local_symbol": "PLN6",
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "107257.52",
+                "multiplier": "50",
+            },
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "57963.12",
+                "multiplier": "2",
+            },
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["position_match_report"]["state"] == "BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH"
+    assert report["position_match_report"]["matches"][0]["root"] == "MNQ"
+    assert report["broker_cost_basis_adjustments"][0]["broker_minus_lifecycle_points_per_contract"] == "0.31"
+    assert any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
+
+
+def test_reconciles_matching_track_b_broker_and_lifecycle_open_position(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "index_futures_ny_intraday_forced_core_v2__mnq_1x_ny_early_core__us_late_long",
+            "lifecycle_id": "bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN",
+            "instrument_family": "MNQ",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "side": "LONG",
+            "quantity": "1",
+            "avg_entry_price": "28981.25",
+        },
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "57963.12",
+                "multiplier": "2",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["position_match_report"]["state"] == "BROKER_AND_LIFECYCLE_OPEN_MATCHED"
+    assert report["broker_cost_basis_adjustments"] == [
+        {
+            "source": "IBKR_AVERAGE_PRICE_MINUS_TRACK_B_LIFECYCLE_ENTRY_PRICE",
+            "root": "MNQ",
+            "broker_local_symbol": "MNQM6",
+            "lifecycle_local_symbol": "MNQM6",
+            "quantity": "1",
+            "lifecycle_average_entry_price": "28981.25",
+            "broker_average_price": "28981.56",
+            "broker_minus_lifecycle_points_per_contract": "0.31",
+            "broker_minus_lifecycle_points_total": "0.31",
+            "absolute_points_per_contract": "0.31",
+            "absolute_points_total": "0.31",
+            "note": "Captured for broker fee/cost-basis tracking only; IBKR broker truth remains authoritative for live PAPER position state.",
+        }
+    ]
+    reconciled_position = json.loads(config.reconciled_live_position_status_path.read_text(encoding="utf-8"))
+    assert reconciled_position["broker_reconciled_state"] == "BROKER_AND_LIFECYCLE_OPEN_MATCHED"
+    assert reconciled_position["open_position_count"] == 1
+    assert reconciled_position["broker_track_b_position_count"] == 1
+    assert reconciled_position["broker_cost_basis_adjustments"] == report["broker_cost_basis_adjustments"]
+    assert reconciled_position["live_money_eligible"] is False
+    assert reconciled_position["paper_proof_invoked"] is False
 
 
 def test_blocks_when_track_b_open_order_exists(tmp_path: Path) -> None:
@@ -110,7 +216,39 @@ def test_blocks_when_lifecycle_reports_review_required(tmp_path: Path) -> None:
     assert report["broker_reconciled"] is False
 
 
-def _write_base_artifacts(tmp_path: Path, *, review_required_count: int = 0) -> ReconciliationConfig:
+def test_blocks_when_bridge_fill_persistence_is_review_required(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path, review_required_count=1)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "PL",
+                "local_symbol": "PLN6",
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "107257.52",
+                "multiplier": "50",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    codes = {blocker["code"] for blocker in report["blockers"]}
+    assert "LIFECYCLE_REVIEW_REQUIRED_PRESENT" in codes
+    assert "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" in codes
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["broker_reconciled"] is False
+    assert not config.reconciled_live_position_status_path.exists()
+
+
+def _write_base_artifacts(
+    tmp_path: Path,
+    *,
+    review_required_count: int = 0,
+    open_position: dict[str, object] | None = None,
+) -> ReconciliationConfig:
     ledger_root = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
     broker_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
     report_path = tmp_path / "outputs" / "reports" / "track_b_paper_broker_reconciliation" / "latest.json"
@@ -129,7 +267,7 @@ def _write_base_artifacts(tmp_path: Path, *, review_required_count: int = 0) -> 
             "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
             "broker_reconciled": False,
             "paper_trades_attempted_count": 2,
-            "open_position_count": 0,
+            "open_position_count": 1 if open_position else 0,
             "review_required_count": review_required_count,
             "recent_trades": [],
         },
@@ -139,10 +277,10 @@ def _write_base_artifacts(tmp_path: Path, *, review_required_count: int = 0) -> 
         {
             "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
             "broker_reconciled": False,
-            "open_position_count": 0,
+            "open_position_count": 1 if open_position else 0,
             "open_order_count": 0,
-            "positions_by_instrument": {},
-            "positions_by_strategy": {},
+            "positions_by_instrument": {str(open_position["contract_key"]): open_position} if open_position else {},
+            "positions_by_strategy": {str(open_position["strategy_id"]): open_position} if open_position else {},
             "review_required_positions": [],
         },
     )
