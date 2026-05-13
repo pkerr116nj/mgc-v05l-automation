@@ -69,7 +69,7 @@ from mgc_v05l.config_models.settings import EnvironmentMode, ExecutionTimeframeR
 from mgc_v05l.execution.execution_engine import ExecutionEngine
 from mgc_v05l.execution.live_strategy_broker import LiveStrategyPilotBroker
 from mgc_v05l.execution.order_models import FillEvent
-from mgc_v05l.execution.paper_broker import PaperBroker
+from mgc_v05l.execution.paper_broker import PaperBroker, PaperPosition
 from mgc_v05l.domain.models import Bar, SignalPacket
 from mgc_v05l.execution.order_models import OrderIntent
 from mgc_v05l.market_data.live_feed import LivePollingService, _latest_completed_bar_end
@@ -4973,6 +4973,227 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
     assert execution_engine.last_submit_attempt()["route_destination"] == "ibkr_paper_bridge_submit_capable"
 
 
+def test_submit_capable_lane_records_cancelled_unfilled_exit_as_terminal_order(tmp_path: Path) -> None:
+    bridge_calls: list[dict[str, object]] = []
+
+    def fake_bridge_runner(*, config):
+        bridge_calls.append({"strategy_id": config.strategy_id, "symbol": config.symbol, "action": config.action})
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED",
+            report={
+                "detail": "Exit order submitted, did not fill, and was cancelled.",
+                "delegated_result": {
+                    "classification": "PAPER_CLOSE_NOT_FILLED_CANCELLED",
+                    "report": {
+                        "submit_cancel_lifecycle": {
+                            "status": "fill_timeout_cancelled",
+                            "submitted_order_id": 1,
+                            "submitted_perm_id": 852752715,
+                            "latest_order_status": {
+                                "order_id": 1,
+                                "perm_id": 852752715,
+                                "client_id": 11138,
+                                "status": "Cancelled",
+                            },
+                        }
+                    },
+                },
+            },
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mnq_1x_ny_early_core__us_late_long",
+        source_symbol="MNQ",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    exit_intent = OrderIntent(
+        order_intent_id="MNQ|1m|2026-05-13T10:15:00Z|SELL_TO_CLOSE",
+        bar_id="MNQ|1m|2026-05-13T10:15:00Z",
+        symbol="MNQ",
+        intent_type=OrderIntentType.SELL_TO_CLOSE,
+        quantity=1,
+        created_at=datetime(2026, 5, 13, 10, 15, tzinfo=timezone.utc),
+        reason_code="segment_overrun",
+    )
+
+    pending = execution_engine.submit_intent(exit_intent)
+
+    assert pending is not None
+    assert pending.broker_order_id == "1"
+    assert pending.broker_order_status == OrderStatus.CANCELLED.value
+    assert broker.get_order_status("1")["status"] == OrderStatus.CANCELLED.value
+    assert broker.get_open_orders() == []
+    assert execution_engine.last_submit_failure() is None
+    assert execution_engine.last_submit_attempt()["bridge_classification"] == "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED"
+    assert bridge_calls == [{"strategy_id": "mnq_1x_ny_early_core__us_late_long", "symbol": "MNQ", "action": "SELL"}]
+
+
+def test_submit_capable_filled_exit_uses_bridge_verified_truth_until_refresher_catches_up(tmp_path: Path) -> None:
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    stale_at = "2026-05-13T10:59:44.812339+00:00"
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": stale_at,
+                "selected_account_id": "DUM882026",
+                "positions": [
+                    {
+                        "account_id": "DUM882026",
+                        "symbol": "MNQ",
+                        "local_symbol": "MNQM6",
+                        "expiry": "20260618",
+                        "security_type": "FUT",
+                        "quantity": "1.0",
+                        "average_cost": "57963.12",
+                        "multiplier": "2",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": stale_at,
+                "selected_account_id": "DUM882026",
+                "open_orders": [
+                    {
+                        "account_id": "DUM882026",
+                        "symbol": "MNQ",
+                        "local_symbol": "MNQM6",
+                        "expiry": "20260618",
+                        "security_type": "FUT",
+                        "order_id": 1,
+                        "status": "Submitted",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_ORDER_FILLED",
+            report={
+                "detail": "close filled",
+                "delegated_result": {
+                    "report": {
+                        "preview_payload": {
+                            "contract": {
+                                "symbol": "MNQ",
+                                "local_symbol": "MNQM6",
+                                "qualified_contract_identifier": 770561201,
+                                "expiry": "202606",
+                            },
+                        },
+                        "submit_cancel_lifecycle": {
+                            "submitted_order_id": 1,
+                            "submitted_perm_id": 852752717,
+                            "latest_order_status": {
+                                "order_id": 1,
+                                "perm_id": 852752717,
+                                "client_id": 10877,
+                                "status": "Filled",
+                                "avg_fill_price": 29389.5,
+                                "updated_at": "2026-05-13T11:00:38.198088+00:00",
+                            },
+                            "fill_verification": {
+                                "open_order_after_submit": {
+                                    "ok": True,
+                                    "selected_account_id": "DUM882026",
+                                    "generated_at": "2026-05-13T11:00:38.598987+00:00",
+                                    "open_orders": [],
+                                },
+                            },
+                            "close_position_verification": {
+                                "positions_after_close_fill": {
+                                    "ok": True,
+                                    "selected_account_id": "DUM882026",
+                                    "generated_at": "2026-05-13T11:00:38.713132+00:00",
+                                    "positions": [
+                                        {
+                                            "account_id": "DUM882026",
+                                            "symbol": "MNQ",
+                                            "local_symbol": "MNQM6",
+                                            "expiry": "20260618",
+                                            "security_type": "FUT",
+                                            "quantity": "0.0",
+                                            "average_cost": "0.0",
+                                            "multiplier": "2",
+                                        }
+                                    ],
+                                }
+                            },
+                            "executions_after_submit": [
+                                {
+                                    "account_id": "DUM882026",
+                                    "broker_order_id": "1",
+                                    "execution_id": "0000e1a7.6a0695c5.01.01",
+                                    "price": "29389.5",
+                                    "quantity": "1.0",
+                                    "executed_at": "2026-05-13T11:00:38.195601+00:00",
+                                    "symbol": "MNQ",
+                                }
+                            ],
+                        },
+                    }
+                },
+            },
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mnq_1x_ny_early_core__us_late_long",
+        source_symbol="MNQ",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    broker.connect()
+    broker.restore_state(
+        position=PaperPosition(quantity=1, average_price=Decimal("28981.56")),
+        open_order_ids=[],
+        order_status={},
+        last_fill_timestamp=None,
+    )
+    exit_intent = OrderIntent(
+        order_intent_id="MNQ|1m|2026-05-13T10:59:00Z|SELL_TO_CLOSE",
+        bar_id="MNQ|1m|2026-05-13T10:59:00Z",
+        symbol="MNQ",
+        intent_type=OrderIntentType.SELL_TO_CLOSE,
+        quantity=1,
+        created_at=datetime(2026, 5, 13, 10, 59, tzinfo=timezone.utc),
+        reason_code="segment_overrun",
+    )
+
+    broker_order_id = broker.submit_order(exit_intent)
+    snapshot = broker.snapshot_state()
+
+    assert broker_order_id == "1"
+    assert snapshot["position_quantity"] == 0
+    assert snapshot["open_order_ids"] == []
+    assert snapshot["order_status"] == {}
+    assert snapshot["broker_truth_source"] == "ibkr_read_only"
+    assert snapshot["broker_truth_position"]["quantity"] == "0.0"
+
+
 def test_submit_capable_broker_reconciles_against_ibkr_position_truth(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": "GC"})
     repositories = RepositorySet(build_engine(settings.database_url))
@@ -5182,6 +5403,246 @@ def test_submit_capable_broker_position_adoption_restores_exit_managed_state(tmp
     assert strategy_engine.state.entry_price == Decimal("4703.3252")
     assert strategy_engine.state.entry_bar_id == entry_intent.bar_id
     assert repositories.fills.list_all()[0]["broker_order_id"] == "adopted-broker-truth-GC-GCM6"
+
+
+@pytest.mark.parametrize(
+    ("symbol", "lane_id", "contract_month", "expiry", "local_symbol", "multiplier", "average_cost", "entry_price"),
+    [
+        (
+            "MNQ",
+            "mnq_1x_ny_early_core__us_late_long",
+            "202606",
+            "20260618",
+            "MNQM6",
+            "2",
+            "57963.12",
+            Decimal("28981.56"),
+        ),
+        (
+            "PL",
+            "atp_companion_v1_pl_asia_us",
+            "202607",
+            "20260729",
+            "PLN6",
+            "50",
+            "50000.00",
+            Decimal("1000.00"),
+        ),
+    ],
+)
+def test_submit_capable_reconciliation_is_ticker_agnostic_for_managed_carried_positions(
+    tmp_path: Path,
+    symbol: str,
+    lane_id: str,
+    contract_month: str,
+    expiry: str,
+    local_symbol: str,
+    multiplier: str,
+    average_cost: str,
+    entry_price: Decimal,
+) -> None:
+    settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": symbol})
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol=symbol,
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": f"{symbol}_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": symbol, "contract_month": contract_month, "local_symbol": local_symbol},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        strategy_status=StrategyStatus.RECONCILING,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=entry_price,
+        long_entry_family=LongEntryFamily.K,
+        entries_enabled=False,
+        reconcile_required=True,
+        fault_code="reconciliation_unsafe_ambiguity",
+    )
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "positions": [
+                    {
+                        "symbol": symbol,
+                        "security_type": "FUT",
+                        "expiry": expiry,
+                        "local_symbol": local_symbol,
+                        "multiplier": multiplier,
+                        "quantity": "1.0",
+                        "average_cost": average_cost,
+                        "updated_at": generated_at,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps({"ok": True, "generated_at": generated_at, "selected_account_id": "DUM882026", "open_orders": []}),
+        encoding="utf-8",
+    )
+
+    _restore_paper_runtime_state(
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+    )
+    snapshot = broker.snapshot_state()
+    payload = _reconcile_paper_runtime(
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        trigger="startup",
+        apply_repairs=True,
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    assert snapshot["broker_truth_source"] == "ibkr_read_only"
+    assert snapshot["position_quantity"] == 1
+    assert snapshot["external_broker_position_quantity"] == 0
+    assert payload["classification"] == "clean"
+    assert payload["mismatches"] == []
+    assert strategy_engine.state.strategy_status is StrategyStatus.IN_LONG_K
+    assert strategy_engine.state.reconcile_required is False
+    assert strategy_engine.state.fault_code is None
+
+
+def test_submit_capable_startup_syncs_broker_filled_pending_order_before_reconciliation(tmp_path: Path) -> None:
+    symbol = "PL"
+    lane_id = "atp_companion_v1_pl_asia_us"
+    identity = {
+        "standalone_strategy_id": "atp_companion_v1__paper_pl_asia_us",
+        "strategy_family": "active_trend_participation_engine",
+        "instrument": symbol,
+        "lane_id": lane_id,
+    }
+    settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": symbol})
+    repositories = RepositorySet(build_engine(settings.database_url), runtime_identity=identity)
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="probationary_route_fix_test")
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol=symbol,
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "PL_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "PL", "contract_month": "202607", "local_symbol": "PLN6"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        runtime_identity=identity,
+    )
+    created_at = datetime(2026, 5, 13, 0, 41, tzinfo=timezone.utc)
+    intent = OrderIntent(
+        order_intent_id="PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+        bar_id="PL|1m|2026-05-13T00:41:00Z",
+        symbol=symbol,
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=created_at,
+        reason_code="trend_participation.atp_v1_long_pullback_continuation.long.base",
+    )
+    repositories.order_intents.save(
+        intent,
+        order_status=OrderStatus.ACKNOWLEDGED,
+        broker_order_id="1",
+        submitted_at=created_at,
+        acknowledged_at=created_at,
+        broker_order_status=OrderStatus.FILLED.value,
+        last_status_checked_at=created_at,
+    )
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "positions": [
+                    {
+                        "symbol": "PL",
+                        "security_type": "FUT",
+                        "expiry": "20260729",
+                        "local_symbol": "PLN6",
+                        "multiplier": "50",
+                        "quantity": "1.0",
+                        "average_cost": "107257.52",
+                        "updated_at": generated_at,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps({"ok": True, "generated_at": generated_at, "selected_account_id": "DUM882026", "open_orders": []}),
+        encoding="utf-8",
+    )
+
+    _restore_paper_runtime_state(
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+    )
+    fill_sync = probationary_runtime_module._run_live_strategy_fill_sync(  # noqa: SLF001
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        observed_at=datetime.now(timezone.utc),
+    )
+    payload = _reconcile_paper_runtime(
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        trigger="startup",
+        apply_repairs=True,
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    assert fill_sync["applied_fill_count"] == 1
+    assert repositories.fills.list_all()[0]["order_intent_id"] == intent.order_intent_id
+    assert repositories.order_intents.list_all()[0]["order_status"] == OrderStatus.FILLED.value
+    assert execution_engine.pending_executions() == []
+    assert strategy_engine.state.position_side is PositionSide.LONG
+    assert strategy_engine.state.internal_position_qty == 1
+    assert payload["classification"] == "clean"
+    assert payload["mismatches"] == []
 
 
 def test_submit_capable_non_owner_lane_treats_ibkr_position_as_external(tmp_path: Path) -> None:
@@ -8615,9 +9076,27 @@ def test_load_open_order_intent_rows_excludes_filled_and_closed_rows(tmp_path: P
         created_at=now,
         reason_code="test_cancelled",
     )
+    broker_cancelled_intent = OrderIntent(
+        order_intent_id="broker-cancelled-intent",
+        bar_id="bar-broker-cancelled",
+        symbol="GC",
+        intent_type=OrderIntentType.SELL_TO_CLOSE,
+        quantity=1,
+        created_at=now,
+        reason_code="test_broker_cancelled",
+    )
     lane.repositories.order_intents.save(open_intent, OrderStatus.PENDING)
     lane.repositories.order_intents.save(filled_intent, OrderStatus.PENDING)
     lane.repositories.order_intents.save(cancelled_intent, OrderStatus.CANCELLED)
+    lane.repositories.order_intents.save(
+        broker_cancelled_intent,
+        OrderStatus.ACKNOWLEDGED,
+        broker_order_id="broker-cancelled-1",
+        broker_order_status="CANCELLED",
+        submitted_at=now,
+        acknowledged_at=now,
+        last_status_checked_at=now,
+    )
     lane.repositories.fills.save(
         FillEvent(
             order_intent_id="filled-intent",

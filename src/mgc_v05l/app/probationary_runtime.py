@@ -1496,6 +1496,7 @@ def _run_order_timeout_watchdog(
     for pending in list(execution_engine.pending_executions()):
         status_payload = execution_engine.broker.get_order_status(pending.broker_order_id) or {}
         broker_order_status = str(status_payload.get("status") or pending.broker_order_status or "").strip().upper() or None
+        prior_broker_order_status = str(pending.broker_order_status or "").strip().upper()
         pending = execution_engine.observe_pending_status(
             pending.intent.order_intent_id,
             broker_order_status=broker_order_status,
@@ -1514,6 +1515,10 @@ def _run_order_timeout_watchdog(
         ack_reference = pending.acknowledged_at or pending.submitted_at
         age_since_ack = max((observed_at - ack_reference).total_seconds(), 0.0)
         broker_has_open_order = pending.broker_order_id in broker_open_order_ids
+        broker_terminal_status_explicit = (
+            prior_broker_order_status in {OrderStatus.REJECTED.value, OrderStatus.CANCELLED.value, "CANCELED", "EXPIRED"}
+            or pending.broker_order_id in dict(broker_snapshot.get("order_status") or {})
+        )
 
         base_payload = {
             "event_type": "order_timeout_watchdog",
@@ -1636,9 +1641,9 @@ def _run_order_timeout_watchdog(
 
         if (
             broker_order_status in {OrderStatus.REJECTED.value, OrderStatus.CANCELLED.value, "CANCELED", "EXPIRED"}
+            and broker_terminal_status_explicit
             and not broker_has_open_order
-            and broker_position_quantity == 0
-            and state.position_side == PositionSide.FLAT
+            and broker_position_quantity == _strategy_state_to_signed_quantity(strategy_engine.state)
         ):
             _persist_pending_execution_row(
                 repositories=repositories,
@@ -1648,6 +1653,16 @@ def _run_order_timeout_watchdog(
                 order_status=OrderStatus.CANCELLED if broker_order_status in {OrderStatus.CANCELLED.value, "CANCELED", "EXPIRED"} else OrderStatus.REJECTED,
             )
             execution_engine.clear_intent(pending.intent.order_intent_id)
+            if strategy_engine.state.open_broker_order_id == pending.broker_order_id:
+                strategy_engine._state = replace(  # noqa: SLF001
+                    strategy_engine.state,
+                    open_broker_order_id=None,
+                    reconcile_required=False,
+                    fault_code=None if strategy_engine.state.strategy_status is not StrategyStatus.FAULT else strategy_engine.state.fault_code,
+                    updated_at=observed_at,
+                )
+                strategy_engine._persist_state(strategy_engine.state, transition_label="terminal_non_fill_confirmed")  # noqa: SLF001
+            safe_repair_count += 1
             last_meaningful_event = {
                 **base_payload,
                 "timeout_classification": "terminal_non_fill_confirmed",
@@ -3762,6 +3777,16 @@ class ProbationaryPaperLaneRuntime:
             execution_engine=self.execution_engine,
         )
         self._write_startup_phase_marker("restore_runtime_state_complete")
+        if isinstance(self.execution_engine.broker, _IbkrPaperBridgeRuntimeBroker):
+            fill_sync = _run_live_strategy_fill_sync(
+                repositories=self.repositories,
+                strategy_engine=self.strategy_engine,
+                execution_engine=self.execution_engine,
+                observed_at=restore_started_at,
+            )
+            if int(fill_sync.get("applied_fill_count") or 0) > 0:
+                restore_adjustments.append("sync_ibkr_broker_fills_before_startup_reconciliation")
+                self._write_startup_phase_marker("broker_fills_synced_before_startup_reconciliation", fill_sync=fill_sync)
         adoption = _maybe_adopt_ibkr_bridge_position_for_exit_management(
             repositories=self.repositories,
             strategy_engine=self.strategy_engine,
@@ -10721,6 +10746,7 @@ class _IbkrPaperBridgeRuntimeBroker:
         self._last_fill_timestamp: datetime | None = None
         self._last_broker_truth_snapshot: dict[str, Any] = {}
         self._broker_truth_snapshot_injected = False
+        self._broker_truth_snapshot_injected_until: datetime | None = None
         self._last_submit_context: dict[str, Any] = {
             "lane_id": self._lane_id,
             "source_symbol": self._source_symbol,
@@ -10784,28 +10810,40 @@ class _IbkrPaperBridgeRuntimeBroker:
                 "bridge_detail": report.get("detail"),
                 "bridge_gate_trace": list(report.get("preflight_checks") or []),
             }
-            if artifacts.classification not in {"PAPER_STRATEGY_ORDER_FILLED", "PAPER_STRATEGY_ORDER_WORKING"}:
+            if artifacts.classification not in {
+                "PAPER_STRATEGY_ORDER_FILLED",
+                "PAPER_STRATEGY_ORDER_WORKING",
+                "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED",
+            }:
                 detail = str(report.get("detail") or artifacts.classification or "bridge_blocked")
                 raise RuntimeError(f"{IBKR_RUNTIME_ROUTE_MISS_BLOCKED_PREFIX}: {detail}")
             broker_order_id = _extract_bridge_broker_order_id(report)
             if not broker_order_id:
                 raise RuntimeError("IBKR paper bridge returned a successful classification without a broker_order_id.")
             order_metadata = _extract_bridge_order_metadata(report, broker_order_id=broker_order_id)
-            status = (
-                OrderStatus.FILLED
-                if artifacts.classification == "PAPER_STRATEGY_ORDER_FILLED"
-                else OrderStatus.ACKNOWLEDGED
-            )
+            if artifacts.classification == "PAPER_STRATEGY_ORDER_FILLED":
+                status = OrderStatus.FILLED
+            elif artifacts.classification == "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED":
+                status = OrderStatus.CANCELLED
+            else:
+                status = OrderStatus.ACKNOWLEDGED
             self._order_status[broker_order_id] = status
             self._order_metadata[broker_order_id] = order_metadata
             if status is OrderStatus.ACKNOWLEDGED:
                 self._open_order_ids = [broker_order_id]
-            else:
+            elif status is OrderStatus.FILLED:
                 self._open_order_ids = []
                 fill_price = _extract_bridge_fill_price(report)
                 self._apply_filled_position(order_intent=order_intent, fill_price=fill_price)
                 fill_timestamp = _extract_bridge_fill_timestamp(report)
                 self._last_fill_timestamp = fill_timestamp or order_intent.created_at
+            else:
+                self._open_order_ids = []
+            bridge_truth_snapshot = _bridge_verified_truth_snapshot(report)
+            if bridge_truth_snapshot:
+                self._last_broker_truth_snapshot = bridge_truth_snapshot
+                self._broker_truth_snapshot_injected = True
+                self._broker_truth_snapshot_injected_until = datetime.now(timezone.utc) + timedelta(seconds=120)
             self._last_submit_context = {
                 **self._last_submit_context,
                 "broker_order_id": broker_order_id,
@@ -10940,9 +10978,24 @@ class _IbkrPaperBridgeRuntimeBroker:
             "bridge_proxy_mode": self._bridge_adapter.get("bridge_proxy_mode"),
         }
 
+    def restore_state(
+        self,
+        *,
+        position: PaperPosition,
+        open_order_ids: list[str],
+        order_status: dict[str, OrderStatus],
+        last_fill_timestamp: datetime | None = None,
+    ) -> None:
+        """Restore lane-owned lifecycle state before reconciling against broker truth."""
+        self._position = position
+        self._open_order_ids = list(open_order_ids)
+        self._order_status = dict(order_status)
+        self._last_fill_timestamp = last_fill_timestamp
+
     def refresh_from_snapshot(self, payload: dict[str, Any]) -> None:
         self._last_broker_truth_snapshot = dict(payload or {})
         self._broker_truth_snapshot_injected = True
+        self._broker_truth_snapshot_injected_until = None
 
     def load_snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
         if self._last_broker_truth_snapshot and not force_refresh:
@@ -10950,6 +11003,7 @@ class _IbkrPaperBridgeRuntimeBroker:
         snapshot = _load_ibkr_runtime_read_only_truth_snapshot(self._repo_root)
         self.refresh_from_snapshot(snapshot)
         self._broker_truth_snapshot_injected = False
+        self._broker_truth_snapshot_injected_until = None
         return dict(self._last_broker_truth_snapshot)
 
     def snapshot_state(self) -> dict[str, Any]:
@@ -11110,7 +11164,24 @@ class _IbkrPaperBridgeRuntimeBroker:
 
     def _current_broker_truth_snapshot(self) -> dict[str, Any]:
         if self._broker_truth_snapshot_injected and self._last_broker_truth_snapshot:
-            return dict(self._last_broker_truth_snapshot)
+            external_snapshot = _load_ibkr_runtime_read_only_truth_snapshot(self._repo_root)
+            injected_generated_at = _ibkr_runtime_truth_snapshot_generated_at(self._last_broker_truth_snapshot)
+            external_generated_at = _ibkr_runtime_truth_snapshot_generated_at(external_snapshot)
+            if (
+                external_snapshot
+                and injected_generated_at is not None
+                and external_generated_at is not None
+                and external_generated_at >= injected_generated_at
+            ):
+                self._last_broker_truth_snapshot = dict(external_snapshot)
+                self._broker_truth_snapshot_injected = False
+                self._broker_truth_snapshot_injected_until = None
+                return dict(self._last_broker_truth_snapshot)
+            if (
+                self._broker_truth_snapshot_injected_until is None
+                or datetime.now(timezone.utc) <= self._broker_truth_snapshot_injected_until
+            ):
+                return dict(self._last_broker_truth_snapshot)
         return self.load_snapshot(force_refresh=True)
 
     def _record_midday_route_proof(
@@ -11259,6 +11330,82 @@ def _load_ibkr_runtime_read_only_truth_snapshot(repo_root: Path) -> dict[str, An
         "positions_snapshot_generated_at": positions_payload.get("generated_at"),
         "open_orders_snapshot_generated_at": open_orders_payload.get("generated_at"),
     }
+
+
+def _bridge_verified_truth_snapshot(report: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = dict(
+        _nested_get(report, "delegated_result", "report", "submit_cancel_lifecycle")
+        or _nested_get(report, "delegated_result", "report", "lifecycle")
+        or {}
+    )
+    positions_payload = _first_mapping(
+        _nested_get(lifecycle, "close_position_verification", "positions_after_close_fill"),
+        _nested_get(lifecycle, "fill_verification", "positions_after_submit"),
+        lifecycle.get("positions_after_submit"),
+    )
+    open_orders_payload = _first_mapping(
+        lifecycle.get("open_order_after_cancel"),
+        _nested_get(lifecycle, "fill_verification", "open_order_after_submit"),
+        lifecycle.get("open_order_after_submit"),
+    )
+    positions = list((positions_payload or {}).get("positions") or [])
+    open_orders = list((open_orders_payload or {}).get("open_rows") or (open_orders_payload or {}).get("open_orders") or [])
+    if positions_payload is None and open_orders_payload is None:
+        return {}
+    selected_account_id = (
+        (positions_payload or {}).get("selected_account_id")
+        or (positions_payload or {}).get("account")
+        or (open_orders_payload or {}).get("selected_account_id")
+        or (open_orders_payload or {}).get("account")
+    )
+    generated_at = _first_present(
+        (positions_payload or {}).get("generated_at"),
+        (open_orders_payload or {}).get("generated_at"),
+        _nested_get(lifecycle, "latest_order_status", "updated_at"),
+        datetime.now(timezone.utc).isoformat(),
+    )
+    return {
+        "status": "ready",
+        "detail": "ibkr_paper_bridge_verified_truth",
+        "generated_at": generated_at,
+        "connection": {"selected_account_id": selected_account_id},
+        "accounts": {"selected_account_id": selected_account_id},
+        "health": {
+            "broker_reachable": {"ok": True, "label": "BROKER REACHABLE"},
+            "auth": {"ok": True, "label": "AUTH READY"},
+            "account_selected": {"ok": bool(selected_account_id), "label": "ACCOUNT SELECTED" if selected_account_id else "ACCOUNT UNKNOWN"},
+            "orders_fresh": {"ok": open_orders_payload is not None, "label": "ORDERS FRESH"},
+            "positions_fresh": {"ok": positions_payload is not None, "label": "POSITIONS FRESH"},
+        },
+        "reconciliation": {
+            "status": "clear",
+            "label": "CLEAR",
+            "detail": "broker truth verified by submit-capable IBKR PAPER bridge result",
+            "mismatch_count": 0,
+        },
+        "orders": {"open_rows": open_orders},
+        "portfolio": {"positions": positions},
+        "positions_snapshot_generated_at": (positions_payload or {}).get("generated_at"),
+        "open_orders_snapshot_generated_at": (open_orders_payload or {}).get("generated_at"),
+    }
+
+
+def _first_mapping(*values: object) -> dict[str, Any] | None:
+    for value in values:
+        if isinstance(value, dict):
+            return dict(value)
+    return None
+
+
+def _ibkr_runtime_truth_snapshot_generated_at(payload: dict[str, Any]) -> datetime | None:
+    candidates = (
+        payload.get("generated_at"),
+        payload.get("positions_snapshot_generated_at"),
+        payload.get("open_orders_snapshot_generated_at"),
+    )
+    parsed = [_parse_iso_datetime_or_none(value) for value in candidates]
+    parsed = [value.astimezone(timezone.utc) for value in parsed if value is not None]
+    return max(parsed) if parsed else None
 
 
 def _load_json_mapping(path: Path) -> dict[str, Any]:
@@ -16477,7 +16624,19 @@ def _load_open_order_intent_rows(repositories: RepositorySet) -> list[dict[str, 
             for row in connection.execute(filled_statement).all()
             if row.order_intent_id is not None
         }
-    return [dict(row) for row in intent_rows if str(row["order_intent_id"]) not in filled_order_intent_ids]
+    rows: list[dict[str, Any]] = []
+    for row in intent_rows:
+        if str(row["order_intent_id"]) in filled_order_intent_ids:
+            continue
+        broker_status = str(row.get("broker_order_status") or "").strip().upper()
+        if _is_terminal_broker_order_status(broker_status) and broker_status != OrderStatus.FILLED.value:
+            continue
+        rows.append(dict(row))
+    return rows
+
+
+def _is_terminal_broker_order_status(status: object) -> bool:
+    return str(status or "").strip().upper() in {"CANCELLED", "CANCELED", "REJECTED", "FILLED", "EXPIRED"}
 
 
 def _restore_validation_state_snapshot(
@@ -16712,7 +16871,7 @@ def _restore_paper_runtime_state(
     execution_engine: ExecutionEngine,
 ) -> None:
     broker = execution_engine.broker
-    if not isinstance(broker, PaperBroker):
+    if not isinstance(broker, (PaperBroker, _IbkrPaperBridgeRuntimeBroker)):
         return
 
     state = strategy_engine.state
@@ -16722,10 +16881,32 @@ def _restore_paper_runtime_state(
         execution_engine.restore_pending_execution(pending)
 
     position_quantity = _strategy_state_to_signed_quantity(state)
+    terminal_statuses = {
+        OrderStatus.FILLED.value,
+        OrderStatus.CANCELLED.value,
+        OrderStatus.REJECTED.value,
+        "CANCELED",
+        "EXPIRED",
+    }
+    restored_order_status: dict[str, OrderStatus] = {}
+    restored_open_order_ids: list[str] = []
+    for pending in pending_executions:
+        status_text = str(pending.broker_order_status or "").strip().upper()
+        status = OrderStatus.ACKNOWLEDGED
+        if status_text in {item.value for item in OrderStatus}:
+            status = OrderStatus(status_text)
+        restored_order_status[pending.broker_order_id] = status
+        if status_text not in terminal_statuses:
+            restored_open_order_ids.append(pending.broker_order_id)
+        elif status_text == OrderStatus.FILLED.value and position_quantity == 0:
+            if pending.intent.intent_type is OrderIntentType.BUY_TO_OPEN:
+                position_quantity += int(pending.intent.quantity)
+            elif pending.intent.intent_type is OrderIntentType.SELL_TO_OPEN:
+                position_quantity -= int(pending.intent.quantity)
     broker.restore_state(
         position=PaperPosition(quantity=position_quantity, average_price=state.entry_price),
-        open_order_ids=[pending.broker_order_id for pending in pending_executions],
-        order_status={pending.broker_order_id: OrderStatus.ACKNOWLEDGED for pending in pending_executions},
+        open_order_ids=restored_open_order_ids,
+        order_status=restored_order_status,
         last_fill_timestamp=_latest_fill_timestamp_from_rows(repositories.fills.list_all()),
     )
 

@@ -47,6 +47,7 @@ PNL_SCHEMA_VERSION = "track_b_pnl_summary_v1"
 MANUALLY_FLATTENED_REVIEWED = "MANUALLY_FLATTENED_REVIEWED"
 APP_ONLY_UNFILLED_REVIEWED = "APP_ONLY_UNFILLED_REVIEWED"
 IBKR_CONTRACT_REJECTED_REVIEWED = "IBKR_CONTRACT_REJECTED_REVIEWED"
+VOID_MALFORMED_STALE_ARTIFACT = "VOID_MALFORMED_STALE_ARTIFACT"
 POINT_VALUE_BY_FAMILY = {
     "MGC": Decimal("10"),
     "GC": Decimal("100"),
@@ -1516,7 +1517,18 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
         if _is_reconciliation_record(item)
         and item.get("new_artifact_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
     }
-    if not reconciled_lifecycle_ids and not app_only_reviewed_lifecycle_ids and not ibkr_rejected_reviewed_lifecycle_ids:
+    voided_malformed_lifecycle_ids = {
+        str(item.get("lifecycle_id"))
+        for item in records
+        if _is_reconciliation_record(item)
+        and item.get("new_artifact_classification") == VOID_MALFORMED_STALE_ARTIFACT
+    }
+    if (
+        not reconciled_lifecycle_ids
+        and not app_only_reviewed_lifecycle_ids
+        and not ibkr_rejected_reviewed_lifecycle_ids
+        and not voided_malformed_lifecycle_ids
+    ):
         return records
     normalized: list[dict[str, Any]] = []
     for item in records:
@@ -1557,6 +1569,20 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
             row["paper_lifecycle_classification"] = IBKR_CONTRACT_REJECTED_REVIEWED
             row["final_position_status"] = IBKR_CONTRACT_REJECTED_REVIEWED
             row["final_broker_state_classification"] = IBKR_CONTRACT_REJECTED_REVIEWED
+        if (
+            not _is_reconciliation_record(row)
+            and str(row.get("lifecycle_id") or "") in voided_malformed_lifecycle_ids
+            and row.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        ):
+            row["artifact_reconciliation_classification"] = VOID_MALFORMED_STALE_ARTIFACT
+            row["malformed_stale_artifact_voided"] = True
+            row["review_required"] = False
+            row["broker_backed_position_confirmed"] = False
+            row["entry_fill_confirmed"] = False
+            row["prior_paper_lifecycle_classification"] = row.get("paper_lifecycle_classification")
+            row["paper_lifecycle_classification"] = VOID_MALFORMED_STALE_ARTIFACT
+            row["final_position_status"] = VOID_MALFORMED_STALE_ARTIFACT
+            row["final_broker_state_classification"] = VOID_MALFORMED_STALE_ARTIFACT
         normalized.append(row)
     return normalized
 
@@ -1792,6 +1818,9 @@ def _is_manual_flat_reviewed(item: Mapping[str, Any]) -> bool:
         or item.get("artifact_reconciliation_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
         or item.get("new_artifact_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
         or item.get("ibkr_contract_rejected_reviewed") is True
+        or item.get("artifact_reconciliation_classification") == VOID_MALFORMED_STALE_ARTIFACT
+        or item.get("new_artifact_classification") == VOID_MALFORMED_STALE_ARTIFACT
+        or item.get("malformed_stale_artifact_voided") is True
     )
 
 

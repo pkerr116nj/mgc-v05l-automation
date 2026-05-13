@@ -13,7 +13,15 @@ from sqlalchemy.exc import OperationalError
 
 from mgc_v05l.config_models import load_settings_from_files
 from mgc_v05l.app.probationary_runtime import _run_order_timeout_watchdog, _run_reconciliation_heartbeat
-from mgc_v05l.domain.enums import LongEntryFamily, OrderIntentType, OrderStatus, PositionSide, StrategyStatus
+from mgc_v05l.domain.enums import (
+    LongEntryFamily,
+    OrderIntentType,
+    OrderStatus,
+    PositionSide,
+    ShortEntryFamily,
+    StrategyStatus,
+)
+from mgc_v05l.domain.models import StrategyEntryLeg
 from mgc_v05l.execution.execution_engine import ExecutionEngine, PendingExecution
 from mgc_v05l.execution.order_models import FillEvent, OrderIntent
 from mgc_v05l.execution.paper_broker import PaperBroker, PaperPosition
@@ -105,6 +113,207 @@ def test_startup_reconciliation_clean_when_internal_and_broker_are_aligned(tmp_p
     with repositories.engine.begin() as connection:
         rows = connection.execute(select(reconciliation_events_table)).mappings().all()
     assert len(rows) == 1
+
+
+def test_clean_flat_reconciliation_clears_stale_in_position_metadata(tmp_path: Path) -> None:
+    _, _, strategy_engine, execution_engine = _build_runtime(tmp_path)
+    now = datetime.now(timezone.utc)
+    entry_timestamp = now - timedelta(minutes=9)
+    stale_leg = StrategyEntryLeg(
+        leg_id="stale-leg",
+        order_intent_id="stale-intent",
+        quantity=1,
+        entry_price=Decimal("4700.0"),
+        entry_timestamp=entry_timestamp,
+        signal_bar_id="stale-bar",
+        position_side=PositionSide.LONG,
+        long_entry_family=LongEntryFamily.K,
+    )
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        strategy_status=StrategyStatus.FAULT,
+        position_side=PositionSide.FLAT,
+        internal_position_qty=0,
+        broker_position_qty=0,
+        entry_price=Decimal("4700.0"),
+        entry_timestamp=entry_timestamp,
+        entry_bar_id="stale-bar",
+        long_entry_family=LongEntryFamily.K,
+        bars_in_trade=9,
+        long_be_armed=True,
+        open_broker_order_id=None,
+        open_entry_legs=(stale_leg,),
+        entries_enabled=False,
+        reconcile_required=True,
+        fault_code="long_entry_family must be NONE while flat; bars_in_trade must be 0 while flat",
+    )
+    execution_engine.broker.restore_state(
+        position=PaperPosition(quantity=0, average_price=None),
+        open_order_ids=[],
+        order_status={},
+        last_fill_timestamp=None,
+    )
+
+    payload = strategy_engine.apply_reconciliation(
+        occurred_at=now,
+        trigger="scheduled_heartbeat",
+        execution_engine=execution_engine,
+    )
+
+    assert payload["classification"] == "clean"
+    assert strategy_engine.state.strategy_status is StrategyStatus.READY
+    assert strategy_engine.state.position_side is PositionSide.FLAT
+    assert strategy_engine.state.entry_price is None
+    assert strategy_engine.state.entry_timestamp is None
+    assert strategy_engine.state.entry_bar_id is None
+    assert strategy_engine.state.long_entry_family is LongEntryFamily.NONE
+    assert strategy_engine.state.short_entry_family is ShortEntryFamily.NONE
+    assert strategy_engine.state.bars_in_trade == 0
+    assert strategy_engine.state.long_be_armed is False
+    assert strategy_engine.state.open_entry_legs == ()
+    assert strategy_engine.state.fault_code is None
+    assert strategy_engine.state.reconcile_required is False
+
+
+def test_clean_reconciliation_restores_open_long_status_from_reconciling(tmp_path: Path) -> None:
+    _, _, strategy_engine, execution_engine = _build_runtime(tmp_path)
+    now = datetime.now(timezone.utc)
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        strategy_status=StrategyStatus.RECONCILING,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("4703.3252"),
+        long_entry_family=LongEntryFamily.K,
+        entries_enabled=False,
+        reconcile_required=True,
+        fault_code="reconciliation_fill_ack_uncertainty",
+    )
+    execution_engine.broker.restore_state(
+        position=PaperPosition(quantity=1, average_price=Decimal("4703.3252")),
+        open_order_ids=[],
+        order_status={},
+        last_fill_timestamp=None,
+    )
+
+    payload = strategy_engine.apply_reconciliation(
+        occurred_at=now,
+        trigger="startup",
+        execution_engine=execution_engine,
+    )
+
+    assert payload["classification"] == "clean"
+    assert strategy_engine.state.strategy_status is StrategyStatus.IN_LONG_K
+    assert strategy_engine.state.reconcile_required is False
+    assert strategy_engine.state.fault_code is None
+    assert strategy_engine.state.entries_enabled is True
+
+
+def test_reconciliation_clears_stale_open_order_marker_when_open_position_matches_broker(tmp_path: Path) -> None:
+    _, _, strategy_engine, execution_engine = _build_runtime(tmp_path)
+    now = datetime.now(timezone.utc)
+    entry_timestamp = now - timedelta(minutes=12)
+    entry_leg = StrategyEntryLeg(
+        leg_id="leg-1",
+        order_intent_id="entry-intent",
+        quantity=1,
+        entry_price=Decimal("28981.56"),
+        entry_timestamp=entry_timestamp,
+        signal_bar_id="entry-bar",
+        position_side=PositionSide.LONG,
+        long_entry_family=LongEntryFamily.K,
+    )
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        strategy_status=StrategyStatus.RECONCILING,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("28981.56"),
+        entry_timestamp=entry_timestamp,
+        entry_bar_id="entry-bar",
+        long_entry_family=LongEntryFamily.K,
+        open_entry_legs=(entry_leg,),
+        open_broker_order_id="cancelled-exit-order",
+        entries_enabled=False,
+        reconcile_required=True,
+        fault_code="reconciliation_open_order_uncertainty",
+    )
+    execution_engine.broker.restore_state(
+        position=PaperPosition(quantity=1, average_price=Decimal("28981.56")),
+        open_order_ids=[],
+        order_status={},
+        last_fill_timestamp=now,
+    )
+
+    payload = strategy_engine.apply_reconciliation(
+        occurred_at=now,
+        trigger="startup",
+        execution_engine=execution_engine,
+    )
+
+    assert payload["classification"] == "safe_repair"
+    assert payload["repair_actions"] == ["clear_stale_open_order_markers"]
+    assert strategy_engine.state.strategy_status is StrategyStatus.IN_LONG_K
+    assert strategy_engine.state.open_broker_order_id is None
+    assert strategy_engine.state.position_side is PositionSide.LONG
+    assert strategy_engine.state.internal_position_qty == 1
+    assert strategy_engine.state.broker_position_qty == 1
+    assert strategy_engine.state.reconcile_required is False
+    assert strategy_engine.state.fault_code is None
+
+
+def test_reconciliation_accepts_broker_cost_basis_as_authoritative_for_open_position(tmp_path: Path) -> None:
+    _, _, strategy_engine, execution_engine = _build_runtime(tmp_path)
+    now = datetime.now(timezone.utc)
+    entry_timestamp = now - timedelta(minutes=5)
+    entry_leg = StrategyEntryLeg(
+        leg_id="leg-1",
+        order_intent_id="intent-1",
+        quantity=1,
+        entry_price=Decimal("28981.25"),
+        entry_timestamp=entry_timestamp,
+        signal_bar_id="bar-1",
+        position_side=PositionSide.LONG,
+        long_entry_family=LongEntryFamily.K,
+    )
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        strategy_status=StrategyStatus.RECONCILING,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("28981.25"),
+        entry_timestamp=entry_timestamp,
+        entry_bar_id="bar-1",
+        long_entry_family=LongEntryFamily.K,
+        open_entry_legs=(entry_leg,),
+        entries_enabled=False,
+        reconcile_required=True,
+        fault_code="reconciliation_fill_ack_uncertainty",
+    )
+    execution_engine.broker.restore_state(
+        position=PaperPosition(quantity=1, average_price=Decimal("28981.56")),
+        open_order_ids=[],
+        order_status={},
+        last_fill_timestamp=now,
+    )
+
+    payload = strategy_engine.apply_reconciliation(
+        occurred_at=now,
+        trigger="startup",
+        execution_engine=execution_engine,
+    )
+
+    assert payload["classification"] == "safe_repair"
+    assert payload["repair_actions"] == ["sync_entry_price_from_broker_average_price"]
+    assert payload["broker_cost_basis_adjustment"]["broker_minus_internal_points_per_contract"] == "0.31"
+    assert strategy_engine.state.strategy_status is StrategyStatus.IN_LONG_K
+    assert strategy_engine.state.entry_price == Decimal("28981.56")
+    assert strategy_engine.state.open_entry_legs[0].entry_price == Decimal("28981.56")
+    assert strategy_engine.state.reconcile_required is False
+    assert strategy_engine.state.fault_code is None
 
 
 def test_reconciliation_tolerates_transient_repository_lock_during_event_persist(tmp_path: Path) -> None:
@@ -701,6 +910,97 @@ def test_order_timeout_watchdog_stale_pending_flat_no_open_order_safely_cleans_u
     assert execution_engine.pending_executions() == []
     saved_row = repositories.order_intents.list_all()[0]
     assert saved_row["order_status"] == OrderStatus.CANCELLED.value
+    assert strategy_engine.state.open_broker_order_id is None
+
+
+def test_order_timeout_watchdog_clears_cancelled_unfilled_exit_without_flattening_position(tmp_path: Path) -> None:
+    settings, repositories, logger, dispatcher, strategy_engine, execution_engine = _build_watchdog_runtime(tmp_path)
+    now = datetime.now(timezone.utc)
+    entry_timestamp = now - timedelta(hours=2)
+    intent = OrderIntent(
+        order_intent_id="exit-intent-cancelled",
+        bar_id="bar-exit-cancelled",
+        symbol="MGC",
+        intent_type=OrderIntentType.SELL_TO_CLOSE,
+        quantity=1,
+        created_at=now - timedelta(minutes=2),
+        reason_code="segment_overrun",
+    )
+    pending = PendingExecution(
+        intent=intent,
+        broker_order_id="broker-cancelled-exit",
+        submitted_at=intent.created_at,
+        acknowledged_at=intent.created_at,
+        broker_order_status=OrderStatus.CANCELLED.value,
+        last_status_checked_at=intent.created_at,
+        retry_count=0,
+        signal_bar_id=None,
+        long_entry_family=LongEntryFamily.NONE,
+        short_entry_family=ShortEntryFamily.NONE,
+        short_entry_source=None,
+    )
+    entry_leg = StrategyEntryLeg(
+        leg_id="entry-leg",
+        order_intent_id="entry-intent",
+        quantity=1,
+        entry_price=Decimal("100"),
+        entry_timestamp=entry_timestamp,
+        signal_bar_id="entry-bar",
+        position_side=PositionSide.LONG,
+        long_entry_family=LongEntryFamily.K,
+    )
+    execution_engine.restore_pending_execution(pending)
+    repositories.order_intents.save(
+        intent,
+        order_status=OrderStatus.ACKNOWLEDGED,
+        broker_order_id=pending.broker_order_id,
+        submitted_at=pending.submitted_at,
+        acknowledged_at=pending.acknowledged_at,
+        broker_order_status=pending.broker_order_status,
+        last_status_checked_at=pending.last_status_checked_at,
+        retry_count=0,
+    )
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        strategy_status=StrategyStatus.IN_LONG_K,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("100"),
+        entry_timestamp=entry_timestamp,
+        entry_bar_id="entry-bar",
+        long_entry_family=LongEntryFamily.K,
+        open_entry_legs=(entry_leg,),
+        open_broker_order_id=pending.broker_order_id,
+    )
+    execution_engine.broker.restore_state(
+        position=PaperPosition(quantity=1, average_price=Decimal("100")),
+        open_order_ids=[],
+        order_status={pending.broker_order_id: OrderStatus.CANCELLED},
+        last_fill_timestamp=None,
+    )
+
+    status, event, _ = _run_order_timeout_watchdog(
+        settings=settings,
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+        structured_logger=logger,
+        alert_dispatcher=dispatcher,
+        watchdog_status=None,
+        occurred_at=now,
+    )
+
+    assert status["status"] == "SAFE_REPAIR"
+    assert event is not None
+    assert event["timeout_classification"] == "terminal_non_fill_confirmed"
+    assert execution_engine.pending_executions() == []
+    saved_row = repositories.order_intents.list_all()[0]
+    assert saved_row["order_status"] == OrderStatus.CANCELLED.value
+    assert saved_row["broker_order_status"] == OrderStatus.CANCELLED.value
+    assert strategy_engine.state.strategy_status is StrategyStatus.IN_LONG_K
+    assert strategy_engine.state.position_side is PositionSide.LONG
+    assert strategy_engine.state.internal_position_qty == 1
     assert strategy_engine.state.open_broker_order_id is None
 
 

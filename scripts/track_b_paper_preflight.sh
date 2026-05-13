@@ -131,6 +131,42 @@ def parse_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def current_age_seconds(value: Any) -> float | None:
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return None
+    return max((datetime.now(timezone.utc) - parsed).total_seconds(), 0.0)
+
+
+def decimalish(value: Any) -> str:
+    text = str(value if value is not None else "0").strip()
+    try:
+        from decimal import Decimal
+
+        return str(Decimal(text).normalize())
+    except Exception:
+        return text
+
+
+def position_root(row: dict[str, Any]) -> str:
+    return str(row.get("track_b_root") or row.get("symbol") or row.get("contract_symbol") or "").upper()
+
+
+def position_quantity(row: dict[str, Any]) -> str:
+    return decimalish(row.get("quantity") if row.get("quantity") is not None else row.get("position"))
+
+
+def infer_lane_symbol(row: dict[str, Any]) -> str:
+    direct = str(row.get("symbol") or row.get("instrument") or "").strip().upper()
+    if direct:
+        return direct
+    lane_id = str(row.get("lane_id") or row.get("strategy_id") or "").strip().lower()
+    for candidate in ("mnq", "mgc", "gc", "pl", "nq", "es", "mes", "zt", "zf", "zn", "zb"):
+        if lane_id == candidate or lane_id.startswith(f"{candidate}_") or f"_{candidate}_" in lane_id:
+            return candidate.upper()
+    return ""
+
+
 checks: list[dict[str, Any]] = []
 warnings: list[str] = []
 blocking: list[str] = []
@@ -595,15 +631,22 @@ readiness_path = REPO_ROOT / "outputs/operator_dashboard/paper_readiness_snapsho
 readiness, readiness_err = read_json(readiness_path)
 paper_trade_allowed = None
 market_data_stale_count = None
+paper_runtime_running = None
 if isinstance(readiness, dict):
     paper_trade_allowed = readiness.get("paper_trade_allowed")
     market_data_stale_count = readiness.get("market_data_stale_count")
+    paper_runtime_running = readiness.get("runtime_running")
 stale_is_blocking = MODE == "monday-live"
+paper_trade_allowed_blocks = stale_is_blocking and paper_runtime_running is not False
 add(
     "paper_trade_allowed_true",
     paper_trade_allowed is True,
-    stale_is_blocking,
-    f"paper_trade_allowed={paper_trade_allowed}" if readiness_err is None else readiness_err,
+    paper_trade_allowed_blocks,
+    (
+        f"paper_trade_allowed={paper_trade_allowed}; runtime_running={paper_runtime_running}"
+        if readiness_err is None
+        else readiness_err
+    ),
 )
 add(
     "market_data_not_stale",
@@ -612,9 +655,56 @@ add(
     f"market_data_stale_count={market_data_stale_count}" if readiness_err is None else readiness_err,
 )
 
+phase1_reconciliation_path = (
+    REPO_ROOT
+    / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+)
+phase1_reconciliation, phase1_reconciliation_err = read_json(phase1_reconciliation_path)
+phase1_reconciliation_age = None
+phase1_reconciliation_max_age = 120.0
+phase1_reconciliation_green = False
+reconciled_quantities_by_symbol: dict[str, list[str]] = {}
+if isinstance(phase1_reconciliation, dict):
+    try:
+        phase1_reconciliation_max_age = float(phase1_reconciliation.get("max_age_seconds") or 120.0)
+    except Exception:
+        phase1_reconciliation_max_age = 120.0
+    phase1_reconciliation_age = current_age_seconds(phase1_reconciliation.get("generated_at"))
+    phase1_reconciliation_green = (
+        phase1_reconciliation.get("classification") == "TRACK_B_PAPER_BROKER_RECONCILED"
+        and phase1_reconciliation.get("broker_reconciled") is True
+        and int(phase1_reconciliation.get("track_b_broker_open_order_count") or 0) == 0
+        and int(phase1_reconciliation.get("review_required_count") or 0) == 0
+        and phase1_reconciliation_age is not None
+        and phase1_reconciliation_age <= phase1_reconciliation_max_age
+    )
+    for row in phase1_reconciliation.get("track_b_broker_positions") or []:
+        if not isinstance(row, dict):
+            continue
+        root = position_root(row)
+        if not root:
+            continue
+        reconciled_quantities_by_symbol.setdefault(root, []).append(position_quantity(row))
+for quantities in reconciled_quantities_by_symbol.values():
+    quantities.sort()
+add(
+    "phase1_broker_reconciliation_green_for_managed_positions",
+    phase1_reconciliation_green,
+    MODE == "monday-live",
+    (
+        f"classification={phase1_reconciliation.get('classification') if isinstance(phase1_reconciliation, dict) else None}; "
+        f"age_seconds={phase1_reconciliation_age}; max_age_seconds={phase1_reconciliation_max_age}; "
+        f"matched_positions={reconciled_quantities_by_symbol}"
+    )
+    if phase1_reconciliation_err is None
+    else phase1_reconciliation_err,
+    path=str(phase1_reconciliation_path),
+    age_seconds=phase1_reconciliation_age,
+)
+
 monitor_path = REPO_ROOT / "outputs/reports/paper_strategy_monitor/paper_strategy_monitor_runtime_status.json"
 monitor, monitor_err = read_json(monitor_path)
-monitor_required = MODE == "monday-live"
+monitor_required = False
 if MODE == "monday-live" and isinstance(monitor, dict):
     bridge_allowed_value = monitor.get("bridge_allowed")
     if bridge_allowed_value is None:
@@ -659,15 +749,35 @@ if isinstance(operator_status, dict):
     status = operator_status.get("strategy_status")
     entries_enabled = operator_status.get("entries_enabled")
     position_side = operator_status.get("position_side")
-    lanes_ready_flat = True
+    phase1_lanes_ready_or_managing_reconciled_positions = True
+    managed_position_symbols: set[str] = set()
     for lane in lane_rows:
         lane_id = str(lane.get("lane_id") or lane.get("strategy_id") or "")
-        if "mnq_" not in lane_id.lower():
-            continue
         lane_status = lane.get("strategy_status") or lane.get("status")
         lane_side = lane.get("position_side")
-        if lane_status not in ("READY", "RUNNING", "RUNNING_MULTI_LANE") or lane_side != "FLAT":
-            lanes_ready_flat = False
+        lane_symbol = infer_lane_symbol(lane)
+        lane_qty = decimalish(lane.get("broker_position_qty") or lane.get("internal_position_qty") or 0)
+        lane_open_order_count = int(lane.get("open_order_count") or 0)
+        lane_fault = lane.get("fault_code")
+        lane_flat_ready = lane_status in ("READY", "RUNNING", "RUNNING_MULTI_LANE") and lane_side == "FLAT"
+        lane_has_position = lane_side in ("LONG", "SHORT") or lane_qty not in ("0", "0.0")
+        if lane_has_position and lane_symbol:
+            managed_position_symbols.add(lane_symbol)
+        lane_managing_reconciled_position = (
+            phase1_reconciliation_green
+            and lane_symbol in reconciled_quantities_by_symbol
+            and lane_qty in reconciled_quantities_by_symbol.get(lane_symbol, [])
+            and lane_side in ("LONG", "SHORT")
+            and lane_open_order_count == 0
+            and lane_fault in (None, "", "reconciliation_unsafe_ambiguity")
+            and (
+                lane_status in ("READY", "RUNNING", "RUNNING_MULTI_LANE", "RECONCILING")
+                or str(lane_status or "").startswith("IN_")
+                or str(lane_status or "").startswith("RUNNING_")
+            )
+        )
+        if lane_has_position and not lane_managing_reconciled_position:
+            phase1_lanes_ready_or_managing_reconciled_positions = False
     add(
         "strategies_evaluating",
         bool(active_lane_ids) and status in ("RUNNING_MULTI_LANE", "RUNNING", "READY"),
@@ -675,10 +785,22 @@ if isinstance(operator_status, dict):
         f"status={status}, active_lane_count={len(active_lane_ids)}",
     )
     add(
-        "mnq_lanes_ready_flat",
-        lanes_ready_flat and position_side == "FLAT",
+        "phase1_lanes_ready_or_managing_reconciled_positions",
+        phase1_lanes_ready_or_managing_reconciled_positions
+        and (
+            position_side == "FLAT"
+            or (
+                phase1_reconciliation_green
+                and managed_position_symbols
+                and managed_position_symbols.issubset(set(reconciled_quantities_by_symbol))
+            )
+        ),
         strategies_required,
-        f"aggregate_position_side={position_side}, entries_enabled={entries_enabled}",
+        (
+            f"aggregate_position_side={position_side}, entries_enabled={entries_enabled}, "
+            f"managed_position_symbols={sorted(managed_position_symbols)}, "
+            f"reconciled_symbols={sorted(reconciled_quantities_by_symbol)}"
+        ),
     )
 else:
     add("operator_status_available", False, strategies_required, operator_err or "operator status missing")
@@ -737,11 +859,23 @@ for symbol in phase1_broker_symbols:
             except Exception:
                 qtys.append(row.get("quantity"))
     flat_symbols[symbol] = qtys
+    current_qtys = sorted(decimalish(qty) for qty in qtys)
+    reconciled_qtys = reconciled_quantities_by_symbol.get(symbol, [])
+    flat_or_reconciled = all(q == 0 for q in qtys) or (
+        phase1_reconciliation_green
+        and bool(current_qtys)
+        and current_qtys == reconciled_qtys
+    )
     add(
-        f"broker_{symbol.lower()}_flat_if_connected",
-        (not broker_available and MODE == "weekend-static") or all(q == 0 for q in qtys),
+        f"broker_{symbol.lower()}_flat_or_reconciled_if_connected",
+        (not broker_available and MODE == "weekend-static") or flat_or_reconciled,
         broker_required,
-        f"{symbol} quantities={qtys}" if broker_available else "broker read-only unavailable in weekend mode",
+        (
+            f"{symbol} quantities={qtys}; reconciled_quantities={reconciled_qtys}; "
+            f"phase1_reconciliation_green={phase1_reconciliation_green}"
+        )
+        if broker_available
+        else "broker read-only unavailable in weekend mode",
     )
 
 open_orders_path = REPO_ROOT / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json"

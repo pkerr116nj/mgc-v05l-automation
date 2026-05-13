@@ -1,0 +1,791 @@
+"""Supervised PAPER-only lifecycle close cleanup for proven bridge exits.
+
+This command is intentionally offline. It consumes already-written broker
+truth, bridge-fill, and compact-ledger artifacts to close a stale local
+lifecycle row only when the broker is already flat and the exit fill identity is
+exact. It never connects to IBKR and dry-run is the default.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
+    DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    LEDGER_SCHEMA_VERSION,
+    build_track_b_paper_trade_summaries,
+)
+
+
+PAPER_ACCOUNT_ID = "DUM882026"
+DEFAULT_LANE_ID = "mnq_1x_ny_early_core__us_late_long"
+DEFAULT_STRATEGY_ID = "index_futures_ny_intraday_forced_core_v2__mnq_1x_ny_early_core__us_late_long"
+DEFAULT_SYMBOL = "MNQ"
+DEFAULT_LOCAL_SYMBOL = "MNQM6"
+DEFAULT_CON_ID = 770561201
+DEFAULT_SIDE = "LONG"
+DEFAULT_QUANTITY = Decimal("1")
+DEFAULT_ENTRY_LIFECYCLE_ID = "bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN"
+DEFAULT_ENTRY_FILL_TIME = "2026-05-12T19:05:26.191844Z"
+DEFAULT_ENTRY_PRICE = Decimal("28981.25")
+DEFAULT_EXIT_INTENT_ID = "MNQ|1m|2026-05-13T10:59:00Z|SELL_TO_CLOSE"
+DEFAULT_EXIT_ACTION = "SELL"
+DEFAULT_EXIT_PRICE = Decimal("29389.5")
+DEFAULT_EXIT_FILL_TIME = "2026-05-13T11:00:38.198088Z"
+DEFAULT_EXIT_CLIENT_ID = 10877
+DEFAULT_EXIT_PERM_ID = 852752717
+DEFAULT_OUTPUT_ROOT = Path("outputs") / "reports" / "track_b_paper_lifecycle_close_cleanup"
+DEFAULT_LANE_ROOT = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "lanes"
+DEFAULT_BROKER_TRUTH_ROOT = Path("outputs") / "reports" / "ibkr_read_only_verification"
+POINT_VALUE_BY_SYMBOL = {"MNQ": Decimal("2")}
+TICK_SIZE_BY_SYMBOL = {"MNQ": Decimal("0.25")}
+
+
+@dataclass(frozen=True)
+class LifecycleCloseCleanupConfig:
+    repo_root: Path
+    lane_id: str = DEFAULT_LANE_ID
+    strategy_id: str = DEFAULT_STRATEGY_ID
+    account_id: str = PAPER_ACCOUNT_ID
+    symbol: str = DEFAULT_SYMBOL
+    local_symbol: str = DEFAULT_LOCAL_SYMBOL
+    con_id: int = DEFAULT_CON_ID
+    side: str = DEFAULT_SIDE
+    quantity: Decimal = DEFAULT_QUANTITY
+    entry_lifecycle_id: str = DEFAULT_ENTRY_LIFECYCLE_ID
+    entry_fill_time: str = DEFAULT_ENTRY_FILL_TIME
+    entry_price: Decimal = DEFAULT_ENTRY_PRICE
+    exit_intent_id: str = DEFAULT_EXIT_INTENT_ID
+    exit_action: str = DEFAULT_EXIT_ACTION
+    exit_price: Decimal = DEFAULT_EXIT_PRICE
+    exit_fill_time: str = DEFAULT_EXIT_FILL_TIME
+    exit_client_id: int = DEFAULT_EXIT_CLIENT_ID
+    exit_perm_id: int = DEFAULT_EXIT_PERM_ID
+    apply: bool = False
+    refuse_on_ambiguous_mnq_rows: bool = True
+    output_root: Path = DEFAULT_OUTPUT_ROOT
+    lane_root: Path = DEFAULT_LANE_ROOT
+    broker_truth_root: Path = DEFAULT_BROKER_TRUTH_ROOT
+    ledger_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
+
+
+@dataclass(frozen=True)
+class LifecycleCloseCleanupResult:
+    classification: str
+    report: dict[str, Any]
+    audit_path: Path
+    latest_audit_path: Path
+
+
+def run_track_b_paper_lifecycle_close_cleanup(
+    *, config: LifecycleCloseCleanupConfig, now: datetime | None = None
+) -> LifecycleCloseCleanupResult:
+    actual_now = now or datetime.now(UTC)
+    if actual_now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    mode = "APPLY" if config.apply else "DRY_RUN"
+    repo_root = config.repo_root
+    failures: list[str] = []
+
+    ledger_jsonl = repo_root / config.ledger_root / "track_b_paper_trade_ledger.jsonl"
+    lane_dir = repo_root / config.lane_root / config.lane_id
+    bridge_results_path = lane_dir / "filled_bridge_results.jsonl"
+    broker_positions_path = repo_root / config.broker_truth_root / "ibkr_positions_snapshot.json"
+    broker_orders_path = repo_root / config.broker_truth_root / "ibkr_open_orders_snapshot.json"
+
+    ledger_records = _read_jsonl(ledger_jsonl)
+    bridge_rows = _read_jsonl(bridge_results_path)
+    broker_positions = _read_json(broker_positions_path)
+    broker_orders = _read_json(broker_orders_path)
+
+    target = _select_target_open_row(config=config, rows=ledger_records, failures=failures)
+    entry_evidence = _select_entry_bridge_evidence(config=config, rows=bridge_rows, failures=failures)
+    exit_evidence = _select_exit_bridge_evidence(config=config, rows=bridge_rows, failures=failures)
+    broker_flat_evidence = _broker_flat_evidence(
+        config=config,
+        positions_snapshot=broker_positions,
+        orders_snapshot=broker_orders,
+        failures=failures,
+    )
+    ambiguous_rows = _ambiguous_open_mnq_rows(config=config, rows=ledger_records, target=target)
+    if ambiguous_rows and config.refuse_on_ambiguous_mnq_rows:
+        failures.append("Additional open MNQ lifecycle row has incomplete/non-matching identity evidence.")
+
+    close_record = _build_close_record(config=config, target=target, exit_evidence=exit_evidence, now=actual_now)
+    already_applied = _already_has_matching_close(config=config, rows=ledger_records)
+    simulated_records = list(ledger_records)
+    if close_record is not None and not already_applied:
+        simulated_records.append(close_record)
+    summaries = _build_summaries(
+        records=simulated_records,
+        ledger_jsonl=ledger_jsonl,
+        output_root=repo_root / config.ledger_root,
+        now=actual_now,
+    )
+    reconciliation_prediction = _reconciliation_prediction(
+        config=config,
+        live_position_status=summaries["live_position_status"],
+        positions_snapshot=broker_positions,
+        orders_snapshot=broker_orders,
+    )
+    valid = not failures
+    if valid and already_applied:
+        classification = "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_ALREADY_APPLIED"
+    elif valid and config.apply:
+        classification = "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_APPLIED"
+    elif valid:
+        classification = "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_DRY_RUN_READY"
+    else:
+        classification = "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+
+    report: dict[str, Any] = {
+        "classification": classification,
+        "mode": mode,
+        "generated_at": actual_now.isoformat(),
+        "paper_only": True,
+        "live_money_eligible": False,
+        "submit_attempted": False,
+        "cancel_attempted": False,
+        "close_order_attempted": False,
+        "place_order_attempted": False,
+        "paper_proof_invoked": False,
+        "broker_mutated": False,
+        "failures": failures,
+        "expected_identity": _expected_identity(config),
+        "ledger": {
+            "path": str(ledger_jsonl),
+            "target_open_row": target,
+            "already_applied": already_applied,
+            "ambiguous_open_mnq_rows": ambiguous_rows,
+        },
+        "bridge_evidence": {
+            "path": str(bridge_results_path),
+            "entry": entry_evidence,
+            "exit": exit_evidence,
+        },
+        "broker_flat_evidence": broker_flat_evidence,
+        "write_plan": {
+            "would_append_close_record": valid and not already_applied,
+            "would_update_compact_summaries": valid,
+            "rows_that_would_change": [] if target is None else [_row_identity(target)],
+            "ledger_path": str(ledger_jsonl),
+            "summary_paths": {
+                "trade_summary": str(repo_root / config.ledger_root / "latest_track_b_paper_trade_summary.json"),
+                "live_position_status": str(repo_root / config.ledger_root / "latest_track_b_live_position_status.json"),
+                "pnl_summary": str(repo_root / config.ledger_root / "latest_track_b_pnl_summary.json"),
+            },
+        },
+        "close_record": close_record if valid else None,
+        "post_cleanup_prediction": {
+            "trade_summary": _summary_compact(summaries["trade_summary"]),
+            "live_position_status": _position_compact(summaries["live_position_status"]),
+            "reconciliation_would_clear": reconciliation_prediction["would_clear"],
+            "reconciliation_prediction": reconciliation_prediction,
+        },
+    }
+    audit_path = _write_audit(repo_root, config.output_root, report, actual_now=actual_now)
+    report["audit_path"] = str(audit_path)
+    latest_audit_path = _write_latest_audit(repo_root, config.output_root, report)
+
+    if valid and config.apply and close_record is not None and not already_applied:
+        ledger_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        with ledger_jsonl.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_jsonable(close_record), sort_keys=True) + "\n")
+        _write_summaries(summaries=summaries, output_root=repo_root / config.ledger_root)
+        post_report = dict(report)
+        post_report["classification"] = "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_APPLIED"
+        post_report["post_apply"] = {
+            "close_record_written": True,
+            "compact_summaries_updated": True,
+            "reconciliation_would_clear": reconciliation_prediction["would_clear"],
+        }
+        post_report["audit_path"] = str(audit_path)
+        audit_path = _write_audit(repo_root, config.output_root, post_report, actual_now=actual_now, suffix="post")
+        latest_audit_path = _write_latest_audit(repo_root, config.output_root, post_report)
+        report = post_report
+    elif valid and config.apply and already_applied:
+        _write_summaries(summaries=summaries, output_root=repo_root / config.ledger_root)
+
+    return LifecycleCloseCleanupResult(
+        classification=classification,
+        report=report,
+        audit_path=audit_path,
+        latest_audit_path=latest_audit_path,
+    )
+
+
+def _select_target_open_row(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    rows: Sequence[Mapping[str, Any]],
+    failures: list[str],
+) -> dict[str, Any] | None:
+    matches = [
+        dict(row)
+        for row in rows
+        if str(row.get("lifecycle_id") or "") == config.entry_lifecycle_id
+        and str(row.get("final_position_status") or "") == "OPEN_MANAGED"
+    ]
+    if not matches:
+        failures.append("Target OPEN_MANAGED entry lifecycle id is missing from compact ledger.")
+        return None
+    latest = matches[-1]
+    checks = {
+        "strategy_id": str(latest.get("strategy_id") or "") == config.strategy_id,
+        "symbol": str(latest.get("instrument_family") or "").upper() == config.symbol,
+        "local_symbol": str(latest.get("local_symbol") or "").upper() == config.local_symbol,
+        "con_id": _int(latest.get("con_id")) == config.con_id,
+        "side": str(latest.get("side") or "").upper() == config.side,
+        "quantity": _decimal(latest.get("quantity")) == config.quantity,
+        "entry_fill_time": _same_time(latest.get("entry_timestamp"), config.entry_fill_time),
+        "entry_price": _decimal(latest.get("entry_fill_price")) == config.entry_price,
+        "open_managed": str(latest.get("final_position_status") or "") == "OPEN_MANAGED",
+        "no_exit_fill": latest.get("exit_fill_price") in {None, ""},
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        failures.append(f"Target compact ledger row identity mismatch: {', '.join(failed)}.")
+    return latest
+
+
+def _select_entry_bridge_evidence(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    rows: Sequence[Mapping[str, Any]],
+    failures: list[str],
+) -> dict[str, Any] | None:
+    matches = [
+        dict(row)
+        for row in rows
+        if str(row.get("order_intent_id") or "") == config.entry_lifecycle_id.removeprefix("bridge_fill_")
+        and str(row.get("intent_type") or "").upper() == "BUY_TO_OPEN"
+        and str(row.get("action") or "").upper() == "BUY"
+        and str(row.get("symbol") or row.get("instrument") or "").upper() == config.symbol
+        and str(row.get("local_symbol") or _nested(row, "contract", "local_symbol") or "").upper() == config.local_symbol
+        and _int(row.get("con_id") or _nested(row, "contract", "qualified_contract_identifier")) == config.con_id
+        and _decimal(row.get("quantity")) == config.quantity
+        and _decimal(row.get("fill_price")) == config.entry_price
+        and _same_time(row.get("fill_timestamp"), config.entry_fill_time)
+    ]
+    if len(matches) != 1:
+        failures.append(f"Expected exactly one matching BUY_TO_OPEN bridge fill, found {len(matches)}.")
+        return matches[0] if matches else None
+    return matches[0]
+
+
+def _select_exit_bridge_evidence(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    rows: Sequence[Mapping[str, Any]],
+    failures: list[str],
+) -> dict[str, Any] | None:
+    matches = [
+        dict(row)
+        for row in rows
+        if str(row.get("order_intent_id") or "") == config.exit_intent_id
+        and str(row.get("intent_type") or "").upper() == "SELL_TO_CLOSE"
+        and str(row.get("action") or "").upper() == config.exit_action
+        and str(row.get("symbol") or row.get("instrument") or "").upper() == config.symbol
+        and str(row.get("local_symbol") or _nested(row, "contract", "local_symbol") or "").upper() == config.local_symbol
+        and _int(row.get("con_id") or _nested(row, "contract", "qualified_contract_identifier")) == config.con_id
+        and _decimal(row.get("quantity")) == config.quantity
+        and _decimal(row.get("fill_price")) == config.exit_price
+        and _same_time(row.get("fill_timestamp"), config.exit_fill_time)
+        and _int(row.get("client_id")) == config.exit_client_id
+        and _int(row.get("perm_id")) == config.exit_perm_id
+        and str(row.get("classification") or "") == "PAPER_STRATEGY_ORDER_FILLED_PERSISTED"
+        and str(row.get("bridge_classification") or "") == "PAPER_STRATEGY_ORDER_FILLED"
+    ]
+    if len(matches) != 1:
+        failures.append(f"Expected exactly one matching SELL_TO_CLOSE bridge fill, found {len(matches)}.")
+        return matches[0] if matches else None
+    return matches[0]
+
+
+def _broker_flat_evidence(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    positions_snapshot: Mapping[str, Any],
+    orders_snapshot: Mapping[str, Any],
+    failures: list[str],
+) -> dict[str, Any]:
+    if not positions_snapshot:
+        failures.append("Missing broker positions snapshot.")
+    if not orders_snapshot:
+        failures.append("Missing broker open-orders snapshot.")
+    account_matches = str(
+        positions_snapshot.get("account") or positions_snapshot.get("selected_account_id") or ""
+    ) == config.account_id and str(orders_snapshot.get("account") or orders_snapshot.get("selected_account_id") or "") == config.account_id
+    if not account_matches:
+        failures.append("Broker truth account mismatch.")
+    positions = positions_snapshot.get("positions") if isinstance(positions_snapshot.get("positions"), list) else []
+    mnq_rows = [
+        dict(row)
+        for row in positions
+        if str(row.get("symbol") or "").upper() == config.symbol
+        and str(row.get("local_symbol") or row.get("localSymbol") or "").upper() == config.local_symbol
+    ]
+    flat_rows = [row for row in mnq_rows if _decimal(row.get("quantity")) == Decimal("0")]
+    nonflat_rows = [row for row in mnq_rows if (_decimal(row.get("quantity")) or Decimal("0")) != Decimal("0")]
+    if not flat_rows:
+        failures.append("Broker truth does not include the required flat MNQ row.")
+    if nonflat_rows:
+        failures.append("Broker truth reports non-flat MNQ quantity.")
+    open_orders = orders_snapshot.get("open_orders")
+    open_order_count = orders_snapshot.get("open_order_count")
+    if open_order_count is None and isinstance(open_orders, list):
+        open_order_count = len(open_orders)
+    if _int(open_order_count) != 0:
+        failures.append("Broker truth open orders are not zero.")
+    return {
+        "positions_path_account": positions_snapshot.get("account") or positions_snapshot.get("selected_account_id"),
+        "open_orders_path_account": orders_snapshot.get("account") or orders_snapshot.get("selected_account_id"),
+        "positions_generated_at": positions_snapshot.get("generated_at"),
+        "open_orders_generated_at": orders_snapshot.get("generated_at"),
+        "matching_mnq_rows": mnq_rows,
+        "broker_mnq_qty_flat": bool(flat_rows) and not nonflat_rows,
+        "open_order_count": open_order_count,
+        "open_orders_zero": _int(open_order_count) == 0,
+    }
+
+
+def _ambiguous_open_mnq_rows(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    rows: Sequence[Mapping[str, Any]],
+    target: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    latest_by_lifecycle: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        lifecycle_id = str(row.get("lifecycle_id") or "")
+        if not lifecycle_id:
+            continue
+        latest_by_lifecycle[lifecycle_id] = dict(row)
+    ambiguous: list[dict[str, Any]] = []
+    for row in latest_by_lifecycle.values():
+        if target is not None and str(row.get("lifecycle_id") or "") == str(target.get("lifecycle_id") or ""):
+            continue
+        if str(row.get("instrument_family") or "").upper() != config.symbol:
+            continue
+        if str(row.get("local_symbol") or "").upper() != config.local_symbol:
+            continue
+        if _int(row.get("con_id")) != config.con_id:
+            continue
+        if not _is_open_managed(row):
+            continue
+        ambiguous.append(
+            {
+                **_row_identity(row),
+                "classification": "STALE_AMBIGUOUS_OPEN_MNQ_ROW",
+                "reason": "Open MNQ row shares contract identity but does not match the requested entry lifecycle/entry price/entry fill time.",
+            }
+        )
+    return ambiguous
+
+
+def _build_close_record(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    target: Mapping[str, Any] | None,
+    exit_evidence: Mapping[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    if target is None or exit_evidence is None:
+        return None
+    quantity = _decimal(target.get("quantity")) or config.quantity
+    entry = _decimal(target.get("entry_fill_price")) or config.entry_price
+    exit_price = _decimal(exit_evidence.get("fill_price")) or config.exit_price
+    points = exit_price - entry if config.side == "LONG" else entry - exit_price
+    realized = points * quantity * POINT_VALUE_BY_SYMBOL[config.symbol]
+    ticks = points / TICK_SIZE_BY_SYMBOL[config.symbol]
+    row = dict(target)
+    row.update(
+        {
+            "ledger_schema_version": LEDGER_SCHEMA_VERSION,
+            "exit_timestamp": _canonical_time(config.exit_fill_time),
+            "exit_fill_time": _canonical_time(config.exit_fill_time),
+            "exit_fill_price": _decimal_text(exit_price),
+            "exit_price": _decimal_text(exit_price),
+            "exit_order_id": str(exit_evidence.get("broker_order_id") or ""),
+            "exit_perm_id": config.exit_perm_id,
+            "exit_client_id": config.exit_client_id,
+            "exit_exec_id": exit_evidence.get("exec_id") or exit_evidence.get("execution_id"),
+            "exit_intent_id": config.exit_intent_id,
+            "exit_action": config.exit_action,
+            "exit_broker_identity": {
+                "account_id": config.account_id,
+                "broker_order_id": str(exit_evidence.get("broker_order_id") or ""),
+                "client_id": config.exit_client_id,
+                "perm_id": config.exit_perm_id,
+                "con_id": config.con_id,
+                "local_symbol": config.local_symbol,
+            },
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+            "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+            "final_position_status": "CLOSED_FLAT",
+            "realized_pnl": _decimal_text(realized),
+            "points_pnl": _decimal_text(points),
+            "ticks_pnl": _decimal_text(ticks),
+            "review_required": False,
+            "broker_reconciled": False,
+            "close_reconciliation_source": "VERIFIED_SELL_TO_CLOSE_BRIDGE_FILL_AND_BROKER_FLAT_TRUTH",
+            "close_reconciliation_applied_at": now.isoformat(),
+            "broker_mutation_attempted_by_cleanup": False,
+            "submit_attempted_by_cleanup": False,
+            "cancel_attempted_by_cleanup": False,
+            "place_order_attempted_by_cleanup": False,
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+            "source": target.get("source") or "TRACK_B_DIRECT_BRIDGE_FILL_ARTIFACT",
+            "created_at": now.isoformat(),
+        }
+    )
+    return row
+
+
+def _already_has_matching_close(config: LifecycleCloseCleanupConfig, rows: Sequence[Mapping[str, Any]]) -> bool:
+    for row in rows:
+        if str(row.get("lifecycle_id") or "") != config.entry_lifecycle_id:
+            continue
+        if str(row.get("final_position_status") or "") != "CLOSED_FLAT":
+            continue
+        if str(row.get("exit_intent_id") or "") != config.exit_intent_id:
+            continue
+        if _decimal(row.get("exit_fill_price")) != config.exit_price:
+            continue
+        if not _same_time(row.get("exit_timestamp") or row.get("exit_fill_time"), config.exit_fill_time):
+            continue
+        return True
+    return False
+
+
+def _build_summaries(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    ledger_jsonl: Path,
+    output_root: Path,
+    now: datetime,
+) -> dict[str, dict[str, Any]]:
+    return build_track_b_paper_trade_summaries(
+        ledger_records=records,
+        ledger_jsonl=ledger_jsonl,
+        trade_summary_json=output_root / "latest_track_b_paper_trade_summary.json",
+        live_position_status_json=output_root / "latest_track_b_live_position_status.json",
+        pnl_summary_json=output_root / "latest_track_b_pnl_summary.json",
+        now=now,
+    )
+
+
+def _write_summaries(*, summaries: Mapping[str, Mapping[str, Any]], output_root: Path) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
+    for key, filename in (
+        ("trade_summary", "latest_track_b_paper_trade_summary.json"),
+        ("live_position_status", "latest_track_b_live_position_status.json"),
+        ("pnl_summary", "latest_track_b_pnl_summary.json"),
+    ):
+        (output_root / filename).write_text(
+            json.dumps(_jsonable(dict(summaries[key])), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _reconciliation_prediction(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    live_position_status: Mapping[str, Any],
+    positions_snapshot: Mapping[str, Any],
+    orders_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    lifecycle_positions = [
+        dict(row)
+        for row in (live_position_status.get("positions_by_instrument") or {}).values()
+        if isinstance(row, Mapping)
+        and str(row.get("instrument_family") or "").upper() in {config.symbol, "PL", "GC", "MGC", "NQ", "ES", "MES"}
+    ]
+    broker_positions = [
+        dict(row)
+        for row in positions_snapshot.get("positions", [])
+        if isinstance(row, Mapping)
+        and str(row.get("symbol") or "").upper() in {config.symbol, "PL", "GC", "MGC", "NQ", "ES", "MES"}
+        and (_decimal(row.get("quantity")) or Decimal("0")) != Decimal("0")
+    ]
+    open_order_count = _int(orders_snapshot.get("open_order_count"))
+    if open_order_count is None and isinstance(orders_snapshot.get("open_orders"), list):
+        open_order_count = len(orders_snapshot.get("open_orders") or [])
+    would_clear = len(lifecycle_positions) == len(broker_positions) and open_order_count == 0
+    return {
+        "would_clear": would_clear,
+        "lifecycle_open_position_count": len(lifecycle_positions),
+        "broker_open_position_count": len(broker_positions),
+        "broker_open_order_count": open_order_count,
+        "lifecycle_positions": lifecycle_positions,
+        "broker_positions": broker_positions,
+        "note": "Count-level prediction only; the normal broker reconciliation remains authoritative after apply.",
+    }
+
+
+def _is_open_managed(row: Mapping[str, Any]) -> bool:
+    return (
+        str(row.get("final_position_status") or "") == "OPEN_MANAGED"
+        and row.get("entry_fill_price") not in {None, ""}
+        and row.get("exit_fill_price") in {None, ""}
+    )
+
+
+def _expected_identity(config: LifecycleCloseCleanupConfig) -> dict[str, Any]:
+    return {
+        "account_id": config.account_id,
+        "symbol": config.symbol,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "side": config.side,
+        "quantity": _decimal_text(config.quantity),
+        "entry_lifecycle_id": config.entry_lifecycle_id,
+        "entry_fill_time": _canonical_time(config.entry_fill_time),
+        "entry_price": _decimal_text(config.entry_price),
+        "exit_intent_id": config.exit_intent_id,
+        "exit_action": config.exit_action,
+        "exit_fill_price": _decimal_text(config.exit_price),
+        "exit_fill_time": _canonical_time(config.exit_fill_time),
+        "exit_client_id": config.exit_client_id,
+        "exit_perm_id": config.exit_perm_id,
+    }
+
+
+def _row_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "trade_id": row.get("trade_id"),
+        "strategy_id": row.get("strategy_id"),
+        "lifecycle_id": row.get("lifecycle_id"),
+        "instrument_family": row.get("instrument_family"),
+        "contract_key": row.get("contract_key"),
+        "local_symbol": row.get("local_symbol"),
+        "con_id": row.get("con_id"),
+        "side": row.get("side"),
+        "quantity": row.get("quantity"),
+        "entry_timestamp": row.get("entry_timestamp"),
+        "entry_fill_price": row.get("entry_fill_price"),
+        "final_position_status": row.get("final_position_status"),
+    }
+
+
+def _summary_compact(summary: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "open_position_count": summary.get("open_position_count"),
+        "open_position_record_count": summary.get("open_position_record_count"),
+        "completed_trade_count": summary.get("completed_trade_count"),
+        "review_required_count": summary.get("review_required_count"),
+        "total_realized_pnl_today": summary.get("total_realized_pnl_today"),
+    }
+
+
+def _position_compact(status: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "open_position_count": status.get("open_position_count"),
+        "open_order_count": status.get("open_order_count"),
+        "positions_by_instrument": status.get("positions_by_instrument"),
+        "positions_by_strategy_keys": sorted((status.get("positions_by_strategy") or {}).keys()),
+    }
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def _write_audit(
+    repo_root: Path,
+    output_root: Path,
+    report: Mapping[str, Any],
+    *,
+    actual_now: datetime,
+    suffix: str | None = None,
+) -> Path:
+    root = repo_root / output_root
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = actual_now.strftime("%Y%m%dT%H%M%S%fZ")
+    suffix_text = f"_{suffix}" if suffix else ""
+    path = root / f"track_b_paper_lifecycle_close_cleanup_{stamp}{suffix_text}.json"
+    path.write_text(json.dumps(_jsonable(dict(report)), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_latest_audit(repo_root: Path, output_root: Path, report: Mapping[str, Any]) -> Path:
+    root = repo_root / output_root
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "latest_track_b_paper_lifecycle_close_cleanup_audit.json"
+    path.write_text(json.dumps(_jsonable(dict(report)), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _nested(payload: Mapping[str, Any], *keys: str) -> Any:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _canonical_time(value: object) -> str:
+    raw = str(value or "")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(raw)
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _same_time(left: object, right: object) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return _canonical_time(left) == _canonical_time(right)
+    except ValueError:
+        return False
+
+
+def _decimal(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _decimal_text(value: Any) -> str | None:
+    decimal_value = _decimal(value)
+    if decimal_value is None:
+        return None
+    return format(decimal_value.normalize(), "f")
+
+
+def _int(value: Any) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return _decimal_text(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="track-b-paper-lifecycle-close-cleanup",
+        description="Supervised offline PAPER lifecycle close cleanup for a proven bridge exit.",
+    )
+    parser.add_argument("--repo-root", default=".", help="Repository root containing Track B artifacts.")
+    parser.add_argument("--lane-id", default=DEFAULT_LANE_ID)
+    parser.add_argument("--strategy-id", default=DEFAULT_STRATEGY_ID)
+    parser.add_argument("--account-id", default=PAPER_ACCOUNT_ID)
+    parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
+    parser.add_argument("--local-symbol", default=DEFAULT_LOCAL_SYMBOL)
+    parser.add_argument("--con-id", type=int, default=DEFAULT_CON_ID)
+    parser.add_argument("--side", default=DEFAULT_SIDE)
+    parser.add_argument("--quantity", default=str(DEFAULT_QUANTITY))
+    parser.add_argument("--entry-lifecycle-id", default=DEFAULT_ENTRY_LIFECYCLE_ID)
+    parser.add_argument("--entry-fill-time", default=DEFAULT_ENTRY_FILL_TIME)
+    parser.add_argument("--entry-price", default=str(DEFAULT_ENTRY_PRICE))
+    parser.add_argument("--exit-intent-id", default=DEFAULT_EXIT_INTENT_ID)
+    parser.add_argument("--exit-action", default=DEFAULT_EXIT_ACTION)
+    parser.add_argument("--exit-price", default=str(DEFAULT_EXIT_PRICE))
+    parser.add_argument("--exit-fill-time", default=DEFAULT_EXIT_FILL_TIME)
+    parser.add_argument("--exit-client-id", type=int, default=DEFAULT_EXIT_CLIENT_ID)
+    parser.add_argument("--exit-perm-id", type=int, default=DEFAULT_EXIT_PERM_ID)
+    parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    parser.add_argument("--broker-truth-root", default=str(DEFAULT_BROKER_TRUTH_ROOT))
+    parser.add_argument("--lane-root", default=str(DEFAULT_LANE_ROOT))
+    parser.add_argument("--ledger-root", default=str(DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT))
+    parser.add_argument("--allow-ambiguous-mnq-rows", action="store_true")
+    parser.add_argument("--apply", action="store_true", help="Actually append lifecycle artifacts. Omit for dry-run.")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    quantity = _decimal(args.quantity)
+    entry_price = _decimal(args.entry_price)
+    exit_price = _decimal(args.exit_price)
+    if quantity is None:
+        raise SystemExit("--quantity must be decimal")
+    if entry_price is None:
+        raise SystemExit("--entry-price must be decimal")
+    if exit_price is None:
+        raise SystemExit("--exit-price must be decimal")
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=LifecycleCloseCleanupConfig(
+            repo_root=Path(args.repo_root).expanduser().resolve(),
+            lane_id=str(args.lane_id),
+            strategy_id=str(args.strategy_id),
+            account_id=str(args.account_id),
+            symbol=str(args.symbol).upper(),
+            local_symbol=str(args.local_symbol).upper(),
+            con_id=int(args.con_id),
+            side=str(args.side).upper(),
+            quantity=quantity,
+            entry_lifecycle_id=str(args.entry_lifecycle_id),
+            entry_fill_time=str(args.entry_fill_time),
+            entry_price=entry_price,
+            exit_intent_id=str(args.exit_intent_id),
+            exit_action=str(args.exit_action).upper(),
+            exit_price=exit_price,
+            exit_fill_time=str(args.exit_fill_time),
+            exit_client_id=int(args.exit_client_id),
+            exit_perm_id=int(args.exit_perm_id),
+            apply=bool(args.apply),
+            refuse_on_ambiguous_mnq_rows=not bool(args.allow_ambiguous_mnq_rows),
+            output_root=Path(args.output_root),
+            lane_root=Path(args.lane_root),
+            broker_truth_root=Path(args.broker_truth_root),
+            ledger_root=Path(args.ledger_root),
+        )
+    )
+    print(json.dumps({"classification": result.classification, "audit_path": str(result.audit_path)}, indent=2))
+    return 0 if result.classification != "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

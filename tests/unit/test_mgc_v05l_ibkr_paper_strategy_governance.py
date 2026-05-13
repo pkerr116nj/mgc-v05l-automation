@@ -391,6 +391,34 @@ def test_governance_blocks_submit_when_phase1_reconciliation_blocked_even_if_mon
     assert artifacts.report["phase1_broker_reconciliation_gate"]["ready"] is False
 
 
+def test_governance_ignores_stale_legacy_monitor_when_phase1_reconciliation_is_clean(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        health_classification="DISCONNECTED",
+        stale=True,
+        submit_allowed=False,
+        block_reasons=[
+            "monitor_disconnected",
+            "paper_strategy_monitor_not_running",
+            "paper_strategy_monitor_runtime_stale",
+        ],
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["phase1_broker_reconciliation_gate"]["ready"] is True
+    assert nq["legacy_monitor_authority"] == "DIAGNOSTIC_ONLY_FOR_PHASE1_SUBMIT_AUTHORITY"
+    assert nq["submit_allowed"] is True
+    assert "paper_monitor_stale" not in nq["submit_block_reasons"]
+    assert "paper_monitor_not_healthy" not in nq["submit_block_reasons"]
+    assert "monitor_disconnected" not in nq["submit_block_reasons"]
+
+
 def test_gc_phase1_candidate_is_marked_paper_approved_without_live_money(tmp_path: Path) -> None:
     _write_monitor(tmp_path, broker_position_quantity=0.0, ledger_position_quantity=0.0)
     _write_ledger(tmp_path)

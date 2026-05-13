@@ -24,6 +24,7 @@ RECONCILIATION_SAFE_CLASSES = {
 RECONCILIATION_REPAIR_CLEAR_STALE_OPEN_ORDER = "clear_stale_open_order_markers"
 RECONCILIATION_REPAIR_CONFIRM_FLAT = "confirm_flat_from_broker_fill"
 RECONCILIATION_REPAIR_SYNC_BROKER_QTY = "sync_internal_broker_position_qty"
+RECONCILIATION_REPAIR_SYNC_BROKER_AVG_PRICE = "sync_entry_price_from_broker_average_price"
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,7 @@ class ReconciliationOutcome:
     state_hint: str = "unchanged"
 
     def to_payload(self, *, occurred_at: str) -> dict[str, Any]:
+        cost_basis_adjustment = self._broker_cost_basis_adjustment()
         return {
             "occurred_at": occurred_at,
             "trigger": self.trigger,
@@ -135,9 +137,35 @@ class ReconciliationOutcome:
             "strategy_open_broker_order_id": self.internal_snapshot.open_broker_order_id,
             "broker_position_quantity": self.broker_snapshot.position_quantity,
             "broker_average_price": self.broker_snapshot.average_price,
+            "broker_cost_basis_adjustment": cost_basis_adjustment,
             "broker_open_order_ids": list(self.broker_snapshot.open_order_ids),
             "persisted_open_order_ids": list(self.internal_snapshot.persisted_open_order_ids),
             "pending_execution_open_order_ids": list(self.internal_snapshot.pending_execution_open_order_ids),
+        }
+
+    def _broker_cost_basis_adjustment(self) -> dict[str, Any] | None:
+        if self.internal_snapshot.average_price is None or self.broker_snapshot.average_price is None:
+            return None
+        if self.internal_snapshot.expected_signed_quantity == 0 or self.broker_snapshot.position_quantity == 0:
+            return None
+        try:
+            internal_average = Decimal(self.internal_snapshot.average_price)
+            broker_average = Decimal(self.broker_snapshot.average_price)
+        except Exception:
+            return None
+        quantity = Decimal(str(abs(self.broker_snapshot.position_quantity)))
+        broker_minus_internal = broker_average - internal_average
+        total_points = broker_minus_internal * quantity
+        return {
+            "source": "IBKR_AVERAGE_PRICE_MINUS_INTERNAL_FILL_PRICE",
+            "internal_average_price": str(internal_average),
+            "broker_average_price": str(broker_average),
+            "broker_minus_internal_points_per_contract": str(broker_minus_internal),
+            "broker_minus_internal_points_total": str(total_points),
+            "absolute_points_per_contract": str(abs(broker_minus_internal)),
+            "absolute_points_total": str(abs(total_points)),
+            "quantity": str(quantity),
+            "note": "Captured for broker cost-basis/fees tracking; broker average price remains authoritative for live PAPER position state.",
         }
 
 
@@ -278,6 +306,31 @@ class ReconciliationCoordinator:
             )
 
         if (
+            broker.position_quantity == internal.expected_signed_quantity
+            and not broker_open_order_ids
+            and internal.open_broker_order_id is not None
+            and not persisted_open_order_ids
+            and not pending_execution_open_order_ids
+        ):
+            repair_actions.append(RECONCILIATION_REPAIR_CLEAR_STALE_OPEN_ORDER)
+            notes.append("Broker quantity matches internal position and no broker open order remains, so stale strategy open-order marker can be cleared safely.")
+            return ReconciliationOutcome(
+                trigger=trigger,
+                classification=RECONCILIATION_CLASS_SAFE_REPAIR,
+                mismatches=tuple(mismatches),
+                repair_actions=tuple(repair_actions),
+                recommended_action="Safe cleanup will clear the stale strategy open-order marker while preserving the open position.",
+                notes=tuple(notes),
+                freeze_new_entries=False,
+                requires_review=False,
+                requires_fault=False,
+                clean=False,
+                internal_snapshot=internal,
+                broker_snapshot=broker,
+                state_hint="ready",
+            )
+
+        if (
             broker.position_quantity == 0
             and not broker_open_order_ids
             and internal.expected_signed_quantity != 0
@@ -292,6 +345,31 @@ class ReconciliationCoordinator:
                 mismatches=tuple(mismatches),
                 repair_actions=tuple(repair_actions),
                 recommended_action="Safe flat repair will clear the internal position and return to READY if nothing else is blocking.",
+                notes=tuple(notes),
+                freeze_new_entries=False,
+                requires_review=False,
+                requires_fault=False,
+                clean=False,
+                internal_snapshot=internal,
+                broker_snapshot=broker,
+                state_hint="ready",
+            )
+
+        if (
+            not qty_mismatch
+            and not side_mismatch
+            and not open_order_uncertainty
+            and avg_price_mismatch
+            and broker.average_price is not None
+        ):
+            repair_actions.append(RECONCILIATION_REPAIR_SYNC_BROKER_AVG_PRICE)
+            notes.append("Broker quantity and side are aligned; broker average price is authoritative for the open PAPER position.")
+            return ReconciliationOutcome(
+                trigger=trigger,
+                classification=RECONCILIATION_CLASS_SAFE_REPAIR,
+                mismatches=tuple(mismatches),
+                repair_actions=tuple(repair_actions),
+                recommended_action="Safe cleanup will sync internal entry price from broker average price.",
                 notes=tuple(notes),
                 freeze_new_entries=False,
                 requires_review=False,

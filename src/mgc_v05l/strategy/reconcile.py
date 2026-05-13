@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy.exc import OperationalError
 
-from ..domain.enums import PositionSide, StrategyStatus
+from ..domain.enums import LongEntryFamily, PositionSide, ShortEntryFamily, StrategyStatus
 from ..domain.models import StrategyState
 from ..execution.execution_engine import ExecutionEngine
 from ..execution.reconciliation import (
@@ -20,6 +21,7 @@ from ..execution.reconciliation import (
     RECONCILIATION_CLASS_SAFE_REPAIR,
     RECONCILIATION_REPAIR_CLEAR_STALE_OPEN_ORDER,
     RECONCILIATION_REPAIR_CONFIRM_FLAT,
+    RECONCILIATION_REPAIR_SYNC_BROKER_AVG_PRICE,
     RECONCILIATION_REPAIR_SYNC_BROKER_QTY,
     ReconciliationCoordinator,
     ReconciliationOutcome,
@@ -120,7 +122,11 @@ class StrategyReconciler:
     ) -> ReconciliationOutcome:
         persisted_open_order_ids = self._load_persisted_open_order_ids()
         pending_execution_open_order_ids = tuple(
-            sorted(pending.broker_order_id for pending in execution_engine.pending_executions())
+            sorted(
+                pending.broker_order_id
+                for pending in execution_engine.pending_executions()
+                if not _is_terminal_order_status(pending.broker_order_status)
+            )
         )
         broker_snapshot = execution_engine.broker.snapshot_state()
         internal_snapshot = InternalReconciliationSnapshot(
@@ -173,7 +179,7 @@ class StrategyReconciler:
                 StrategyStatus.DISABLED,
                 StrategyStatus.READY,
             }:
-                base = replace(
+                base = _normalize_confirmed_flat_state(
                     state,
                     broker_position_qty=abs(outcome.broker_snapshot.position_quantity),
                     entries_enabled=not state.operator_halt,
@@ -181,6 +187,21 @@ class StrategyReconciler:
                     fault_code=None,
                 )
                 return transition_to_ready(base, occurred_at)
+            if state.position_side != PositionSide.FLAT and state.strategy_status in {
+                StrategyStatus.RECONCILING,
+                StrategyStatus.FAULT,
+                StrategyStatus.DISABLED,
+                StrategyStatus.READY,
+            }:
+                return replace(
+                    state,
+                    strategy_status=self._clean_open_position_status(state),
+                    broker_position_qty=abs(outcome.broker_snapshot.position_quantity),
+                    entries_enabled=not state.operator_halt,
+                    reconcile_required=False,
+                    fault_code=None,
+                    updated_at=occurred_at,
+                )
             return replace(
                 state,
                 broker_position_qty=abs(outcome.broker_snapshot.position_quantity),
@@ -195,32 +216,40 @@ class StrategyReconciler:
                 if repair == RECONCILIATION_REPAIR_CLEAR_STALE_OPEN_ORDER:
                     repaired = replace(repaired, open_broker_order_id=None)
                 elif repair == RECONCILIATION_REPAIR_CONFIRM_FLAT:
-                    repaired = replace(
+                    repaired = _normalize_confirmed_flat_state(
                         repaired,
-                        strategy_status=StrategyStatus.READY,
-                        position_side=PositionSide.FLAT,
-                        internal_position_qty=0,
-                        broker_position_qty=0,
-                        entry_price=None,
-                        entry_timestamp=None,
-                        entry_bar_id=None,
-                        open_broker_order_id=None,
-                        open_entry_legs=(),
                     )
                 elif repair == RECONCILIATION_REPAIR_SYNC_BROKER_QTY:
                     repaired = replace(repaired, broker_position_qty=abs(outcome.broker_snapshot.position_quantity))
+                elif repair == RECONCILIATION_REPAIR_SYNC_BROKER_AVG_PRICE:
+                    broker_average_price = self._decimal_or_none(outcome.broker_snapshot.average_price)
+                    if broker_average_price is not None:
+                        repaired = replace(
+                            repaired,
+                            entry_price=broker_average_price,
+                            open_entry_legs=tuple(
+                                replace(leg, entry_price=broker_average_price) for leg in repaired.open_entry_legs
+                            ),
+                        )
             repaired = replace(
                 repaired,
                 entries_enabled=not repaired.operator_halt,
                 reconcile_required=False,
                 fault_code=None,
             )
-            if repaired.position_side == PositionSide.FLAT or repaired.strategy_status in {
+            if repaired.position_side == PositionSide.FLAT:
+                return transition_to_ready(repaired, occurred_at)
+            if repaired.strategy_status in {
                 StrategyStatus.RECONCILING,
                 StrategyStatus.FAULT,
                 StrategyStatus.DISABLED,
+                StrategyStatus.READY,
             }:
-                return transition_to_ready(repaired, occurred_at)
+                return replace(
+                    repaired,
+                    strategy_status=self._clean_open_position_status(repaired),
+                    updated_at=occurred_at,
+                )
             return replace(repaired, updated_at=occurred_at)
 
         degraded = replace(
@@ -353,7 +382,7 @@ class StrategyReconciler:
             row.get("broker_order_id") or f"paper-{row['order_intent_id']}"
             for row in intent_rows
             if row["order_intent_id"] not in fill_intent_ids
-            and row.get("order_status") not in {"CANCELLED", "REJECTED", "FILLED"}
+            and not _is_terminal_order_row(row)
         ]
         return tuple(sorted(str(order_id) for order_id in open_ids))
 
@@ -382,12 +411,64 @@ class StrategyReconciler:
             return PositionSide.SHORT.value
         return PositionSide.FLAT.value
 
+    def _clean_open_position_status(self, state: StrategyState) -> StrategyStatus:
+        if state.position_side is PositionSide.SHORT:
+            return StrategyStatus.IN_SHORT_K
+        if state.long_entry_family.value == "VWAP":
+            return StrategyStatus.IN_LONG_VWAP
+        return StrategyStatus.IN_LONG_K
+
     def _normalize_optional_text(self, value: object) -> str | None:
         if value is None:
             return None
         text = str(value).strip()
         return text or None
 
+    def _decimal_or_none(self, value: object) -> Decimal | None:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+
 
 def _is_transient_sqlite_lock_error(error: OperationalError) -> bool:
     return "database is locked" in str(error).lower()
+
+
+def _is_terminal_order_row(row: dict[str, Any]) -> bool:
+    return _is_terminal_order_status(row.get("order_status")) or _is_terminal_order_status(
+        row.get("broker_order_status")
+    )
+
+
+def _is_terminal_order_status(status: object) -> bool:
+    return str(status or "").strip().upper() in {"CANCELLED", "CANCELED", "REJECTED", "FILLED", "EXPIRED"}
+
+
+def _normalize_confirmed_flat_state(state: StrategyState, **overrides: Any) -> StrategyState:
+    """Clear stale in-position metadata after broker/internal flat is confirmed."""
+    values = {
+        "strategy_status": StrategyStatus.READY,
+        "position_side": PositionSide.FLAT,
+        "internal_position_qty": 0,
+        "broker_position_qty": 0,
+        "entry_price": None,
+        "entry_timestamp": None,
+        "entry_bar_id": None,
+        "long_entry_family": LongEntryFamily.NONE,
+        "short_entry_family": ShortEntryFamily.NONE,
+        "short_entry_source": None,
+        "additive_short_max_favorable_excursion": Decimal("0"),
+        "additive_short_peak_threshold_reached": False,
+        "additive_short_giveback_from_peak": Decimal("0"),
+        "bars_in_trade": 0,
+        "long_be_armed": False,
+        "short_be_armed": False,
+        "open_broker_order_id": None,
+        "open_entry_legs": (),
+    }
+    values.update(overrides)
+    return replace(state, **values)

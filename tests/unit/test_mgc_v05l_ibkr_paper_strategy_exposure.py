@@ -69,6 +69,7 @@ def _write_phase1_reconciliation(
     review_required_count: int = 0,
     open_order_count: int = 0,
     block_reasons: list[str] | None = None,
+    lifecycle_positions: list[dict[str, object]] | None = None,
 ) -> None:
     path = (
         tmp_path
@@ -88,7 +89,7 @@ def _write_phase1_reconciliation(
                 "track_b_broker_open_order_count": open_order_count,
                 "track_b_broker_position_count": 0,
                 "track_b_broker_positions": [],
-                "track_b_lifecycle_positions": [],
+                "track_b_lifecycle_positions": lifecycle_positions or [],
                 "live_money_eligible": False,
                 "blockers": [],
                 "block_reasons": block_reasons or [],
@@ -270,6 +271,72 @@ def test_allows_owning_strategy_exit(tmp_path: Path) -> None:
 
     assert gate["classification"] == "PAPER_EXPOSURE_EXIT_ALLOWED"
     assert gate["submit_allowed"] is True
+
+
+@pytest.mark.parametrize(
+    ("symbol", "strategy_id", "lane_id", "local_symbol"),
+    [
+        (
+            "MNQ",
+            "index_futures_ny_intraday_forced_core_v2__mnq_1x_ny_early_core__us_late_long",
+            "mnq_1x_ny_early_core__us_late_long",
+            "MNQM6",
+        ),
+        (
+            "PL",
+            "atp_companion_v1__paper_pl_asia_us",
+            "paper_pl_asia_us",
+            "PLN6",
+        ),
+    ],
+)
+def test_allows_ticker_agnostic_owning_strategy_exit_from_phase1_reconciliation(
+    tmp_path: Path,
+    symbol: str,
+    strategy_id: str,
+    lane_id: str,
+    local_symbol: str,
+) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row(lane_id, strategy_id)])
+    _write_phase1_reconciliation(
+        tmp_path,
+        lifecycle_positions=[
+            {
+                "strategy_id": strategy_id,
+                "track_b_root": symbol,
+                "instrument_family": symbol,
+                "contract_key": f"{symbol}-202606",
+                "local_symbol": local_symbol,
+                "quantity": "1",
+                "side": "LONG",
+                "avg_entry_price": "100",
+                "entry_order_id": "1",
+                "lifecycle_id": f"bridge_fill_{symbol}",
+            }
+        ],
+    )
+    _write_broker_positions_snapshot(
+        tmp_path,
+        positions=[{"symbol": symbol, "local_symbol": local_symbol, "quantity": "1.0"}],
+    )
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id=lane_id,
+        bridge_strategy_id="index_futures_ny_intraday_forced_core_v2__MNQ" if symbol == "MNQ" else strategy_id,
+        executable_symbol=symbol,
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_EXIT_ALLOWED"
+    assert gate["submit_allowed"] is True
+    assert gate["owned_strategy_quantity"] == 1.0
+    assert gate["aggregate_broker_position"] == 1.0
 
 
 def test_flat_mnq_sell_to_open_short_entry_is_allowed(tmp_path: Path) -> None:

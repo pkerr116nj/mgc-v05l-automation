@@ -567,19 +567,6 @@ def _build_governance_row(
     if "broker_ledger_mismatch" in inventory_blockers:
         pause_reasons.append("broker_ledger_mismatch")
         reconciliation_error_count += 1
-    if bool(monitor_status.get("stale")):
-        submit_block_reasons.append("paper_monitor_stale")
-    if str(monitor_status.get("health_classification") or "").upper() != "HEALTHY":
-        submit_block_reasons.append("paper_monitor_not_healthy")
-    if int(monitor_status.get("open_order_count") or 0) != 0:
-        submit_block_reasons.append("conflicting_open_order_present")
-        open_order_ambiguity_count += 1
-    for reason in list(monitor_status.get("block_reasons") or []):
-        normalized = str(reason or "").strip()
-        if normalized in _BACKEND_SOURCE_MONITOR_BLOCK_REASONS:
-            continue
-        if normalized and normalized not in submit_block_reasons:
-            submit_block_reasons.append(normalized)
     if not bool(phase1_reconciliation_gate.get("ready")):
         submit_block_reasons.append("phase1_broker_reconciliation_not_clear")
     if daily_order_count is not None and int(daily_order_count) >= int(config.daily_order_limit):
@@ -1117,8 +1104,6 @@ def _overall_governance_classification(
     if not strategy_rows:
         return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"
     if not bool(phase1_reconciliation_gate.get("ready")):
-        return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"
-    if bool(monitor_status.get("stale")) or str(monitor_status.get("health_classification") or "").upper() != "HEALTHY":
         return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"
     if any(str(row.get("strategy_status") or "").upper() == "PAUSED" for row in strategy_rows):
         return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"

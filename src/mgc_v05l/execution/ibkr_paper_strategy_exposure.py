@@ -86,7 +86,9 @@ def run_ibkr_paper_strategy_exposure(
         strategy_id=config.bridge_strategy_id or config.strategy_id,
     )
     raw_ledger = _load_json(config.repo_root / config.ledger_path)
-    strategy_exposure_rows = _build_strategy_exposure_rows(raw_ledger)
+    strategy_exposure_rows = _build_strategy_exposure_rows_from_phase1_reconciliation(
+        phase1_reconciliation_gate
+    ) or _build_strategy_exposure_rows(raw_ledger)
     aggregate_state = _build_aggregate_exposure_state(
         config=config,
         monitor_status=monitor_status,
@@ -310,6 +312,51 @@ def _build_strategy_exposure_rows(ledger: dict[str, Any]) -> list[dict[str, Any]
     return rows
 
 
+def _build_strategy_exposure_rows_from_phase1_reconciliation(
+    phase1_reconciliation_gate: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not bool(phase1_reconciliation_gate.get("ready")):
+        return []
+    rows: list[dict[str, Any]] = []
+    for position in list(phase1_reconciliation_gate.get("track_b_lifecycle_positions") or []):
+        quantity = float(position.get("quantity") or 0.0)
+        if quantity <= 0.0:
+            continue
+        side = str(position.get("side") or "").strip().upper()
+        state = _normalize_strategy_state(quantity=quantity, side=side, raw_state=side)
+        signed_quantity = quantity if state == "LONG" else (-quantity if state == "SHORT" else 0.0)
+        strategy_id = str(position.get("strategy_id") or "").strip()
+        lane_alias = strategy_id.split("__", 1)[1] if "__" in strategy_id else strategy_id
+        rows.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_aliases": list(dict.fromkeys([strategy_id, lane_alias])),
+                "account_id": position.get("account_id"),
+                "symbol": position.get("track_b_root") or position.get("instrument_family"),
+                "contract_month": str(position.get("contract_key") or "").split("-", 1)[-1],
+                "expiry": position.get("expiry"),
+                "con_id": position.get("con_id"),
+                "local_symbol": position.get("local_symbol"),
+                "direction": state,
+                "quantity": quantity,
+                "signed_quantity": signed_quantity,
+                "average_entry_price": position.get("avg_entry_price"),
+                "realized_pnl": position.get("realized_pnl_today"),
+                "unrealized_pnl": position.get("unrealized_pnl"),
+                "order_id": position.get("entry_order_id"),
+                "perm_id": position.get("entry_perm_id"),
+                "execution_id": position.get("entry_exec_id"),
+                "entry_timestamp": position.get("as_of"),
+                "source_intent_id": position.get("lifecycle_id"),
+                "state": state if quantity > 0.0 else "FLAT",
+                "open_orders": [],
+                "pnl_source": "phase1_broker_reconciliation",
+                "last_reconciliation_timestamp": phase1_reconciliation_gate.get("generated_at"),
+            }
+        )
+    return rows
+
+
 def _build_aggregate_exposure_state(
     *,
     config: IbkrPaperStrategyExposureConfig,
@@ -414,11 +461,13 @@ def _evaluate_strategy_gate(
     quantity = float(config.quantity or 0.0)
     identifiers = {requested_strategy, requested_bridge_strategy}
     identifiers.discard("")
-    owned_rows = [
-        dict(row)
-        for row in strategy_rows
-        if str(row.get("strategy_id") or "").strip() in identifiers
-    ]
+    owned_rows = []
+    for row in strategy_rows:
+        row_identifiers = {str(row.get("strategy_id") or "").strip()}
+        row_identifiers.update(str(alias or "").strip() for alias in list(row.get("strategy_aliases") or []))
+        row_identifiers.discard("")
+        if row_identifiers.intersection(identifiers):
+            owned_rows.append(dict(row))
     owned_signed_quantity = round(sum(float(row.get("signed_quantity") or 0.0) for row in owned_rows), 8)
     owned_quantity = round(abs(owned_signed_quantity), 8)
     strategy_state = "FLAT"
@@ -564,18 +613,6 @@ def _broker_net_position_for_symbol(
     monitor_status: dict[str, Any],
     executable_symbol: str,
 ) -> tuple[float, dict[str, Any]]:
-    if executable_symbol == "MGC":
-        return (
-            float(monitor_status.get("broker_position_quantity") or 0.0),
-            {
-                "truth_available": True,
-                "source": "paper_strategy_monitor_runtime_status",
-                "symbol": executable_symbol,
-                "generated_at": monitor_status.get("last_successful_broker_refresh"),
-                "max_age_seconds": float(config.broker_truth_max_age_seconds),
-            },
-        )
-
     positions_path = config.repo_root / config.broker_positions_snapshot_path
     positions_payload = _load_json(positions_path)
     positions_fresh = _snapshot_freshness_with_requirements(
@@ -607,6 +644,18 @@ def _broker_net_position_for_symbol(
                 "broker_refresh_timestamp": positions_fresh.get("generated_at"),
                 "account": positions_payload.get("selected_account_id") or open_orders_payload.get("selected_account_id"),
                 "required_freshness_threshold_seconds": float(config.broker_truth_max_age_seconds),
+            },
+        )
+
+    if executable_symbol == "MGC":
+        return (
+            float(monitor_status.get("broker_position_quantity") or 0.0),
+            {
+                "truth_available": True,
+                "source": "paper_strategy_monitor_runtime_status",
+                "symbol": executable_symbol,
+                "generated_at": monitor_status.get("last_successful_broker_refresh"),
+                "max_age_seconds": float(config.broker_truth_max_age_seconds),
             },
         )
 
