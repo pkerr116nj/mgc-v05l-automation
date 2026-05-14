@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mgc_v05l.app.track_b_paper_leak_test import (
@@ -9,6 +12,7 @@ from mgc_v05l.app.track_b_paper_leak_test import (
     build_plan_only_report,
     build_single_lane_apply_report,
     build_single_lane_dry_run_report,
+    build_leak_test_authorization,
     report_to_dict,
 )
 
@@ -113,6 +117,75 @@ def _reader_for(stages: dict[str, dict[str, object]]):
     return _reader
 
 
+def _ready_precheck(_repo_root, _lane, _safety):
+    return {"classification": "LEAK_TEST_PRECHECK_READY", "ready": True, "blockers": ()}
+
+
+def _stale_precheck(_repo_root, _lane, _safety):
+    return {
+        "classification": "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY",
+        "ready": False,
+        "blockers": ("backend_readiness_artifact_stale",),
+    }
+
+
+def _market_stale_precheck(_repo_root, _lane, _safety):
+    return {
+        "classification": "LEAK_TEST_MARKET_DATA_MICRO_STALE_RETRYABLE",
+        "ready": False,
+        "blockers": ("market_data_micro_stale_retryable",),
+    }
+
+
+def _authorization_path(tmp_path: Path, *, lane_id: str = LANE_ID, mutate: dict[str, object] | None = None, expired: bool = False) -> Path:
+    report = build_single_lane_dry_run_report(
+        repo_root=REPO_ROOT,
+        lane_id=lane_id,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+    )
+    lane = _lane(report, lane_id)
+    created = datetime.now(timezone.utc) - (timedelta(seconds=30) if expired else timedelta(seconds=0))
+    auth = build_leak_test_authorization(
+        repo_root=REPO_ROOT,
+        lane=lane,
+        safety=report.safety,
+        action="BUY",
+        ttl_seconds=1 if expired else 600,
+        now=created,
+    )
+    if mutate:
+        auth.update(mutate)
+    path = tmp_path / "leak_test_authorization.json"
+    path.write_text(json.dumps(auth, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _auth_digest(payload: dict[str, object]) -> str:
+    fields = (
+        "artifact_type",
+        "account_id",
+        "mode",
+        "lane_id",
+        "strategy_id",
+        "symbol",
+        "local_symbol",
+        "expiry",
+        "con_id",
+        "action",
+        "exit_action",
+        "qty",
+        "repo_root",
+        "git_head",
+        "created_at",
+        "expires_at",
+        "safety_snapshot",
+    )
+    critical = {field: payload.get(field) for field in fields}
+    return hashlib.sha256(json.dumps(critical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
 def test_plan_mode_lists_guarded_lanes_without_broker_mutation() -> None:
     report = build_plan_only_report(
         repo_root=REPO_ROOT,
@@ -152,6 +225,37 @@ def test_dry_run_performs_no_broker_mutation() -> None:
     assert report.result_classification == "LEAK_TEST_DRY_RUN_READY"
     assert report.mutation_performed is False
     assert report.lanes[0].safe_to_test is True
+
+
+def test_dry_run_writes_authorization_artifact_with_digest(tmp_path: Path) -> None:
+    auth_path = tmp_path / "auth.json"
+    report = build_single_lane_dry_run_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        write_authorization=True,
+        authorization_output_path=auth_path,
+    )
+
+    payload = json.loads(auth_path.read_text(encoding="utf-8"))
+    assert report.result_classification == "LEAK_TEST_DRY_RUN_READY"
+    assert report.mutation_performed is False
+    assert report.authorization_artifact is not None
+    assert payload["artifact_type"] == "TRACK_B_PAPER_LEAK_TEST_AUTHORIZATION"
+    assert payload["account_id"] == "DUM882026"
+    assert payload["mode"] == "PAPER"
+    assert payload["lane_id"] == LANE_ID
+    assert payload["symbol"] == "MNQ"
+    assert payload["local_symbol"] == "MNQM6"
+    assert payload["expiry"] == "202606"
+    assert payload["action"] == "BUY"
+    assert payload["exit_action"] == "SELL"
+    assert payload["qty"] == 1
+    assert payload["safety_snapshot"]["live_money_eligible"] is False
+    assert payload["safety_snapshot"]["paper_proof_invoked"] is False
+    assert len(payload["digest"]) == 64
 
 
 def test_apply_refuses_when_broker_lifecycle_not_reconciled() -> None:
@@ -376,14 +480,130 @@ def test_apply_dry_run_mutates_nothing() -> None:
     assert report.apply_result.dry_run is True
 
 
-def test_apply_blocked_entry_returns_safe_classification() -> None:
+def test_apply_missing_authorization_blocks_before_bridge() -> None:
+    def _must_not_run(_config):
+        raise AssertionError("guarded route must not be invoked without leak-test authorization")
+
     report = build_single_lane_apply_report(
         repo_root=REPO_ROOT,
         lane_id=LANE_ID,
         reconciliation=_clean_flat_reconciliation(),
         operator_status=_operator_status(),
         runtime_command=_runtime_command(),
+        guarded_route_runner=_must_not_run,
+        readiness_checker=_ready_precheck,
+    )
+
+    assert report.result_classification == "LEAK_TEST_AUTHORIZATION_MISSING"
+    assert report.mutation_performed is False
+    assert report.apply_result is not None
+    assert report.apply_result.authorization_status == "LEAK_TEST_AUTHORIZATION_MISSING"
+
+
+def test_apply_refuses_expired_authorization_before_bridge(tmp_path: Path) -> None:
+    def _must_not_run(_config):
+        raise AssertionError("guarded route must not be invoked with expired authorization")
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path, expired=True),
+        guarded_route_runner=_must_not_run,
+        readiness_checker=_ready_precheck,
+    )
+
+    assert report.result_classification == "LEAK_TEST_AUTHORIZATION_EXPIRED"
+    assert report.mutation_performed is False
+
+
+def test_apply_refuses_authorization_digest_mismatch_before_bridge(tmp_path: Path) -> None:
+    path = _authorization_path(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["symbol"] = "GC"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=path,
+        guarded_route_runner=lambda _config: (_ for _ in ()).throw(AssertionError("guarded route must not run")),
+        readiness_checker=_ready_precheck,
+    )
+
+    assert report.result_classification == "LEAK_TEST_AUTHORIZATION_DIGEST_MISMATCH"
+    assert report.mutation_performed is False
+
+
+def test_apply_refuses_authorization_identity_mismatch_before_bridge(tmp_path: Path) -> None:
+    path = _authorization_path(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["account_id"] = "DU123456"
+    payload["digest"] = _auth_digest(payload)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=path,
+        guarded_route_runner=lambda _config: (_ for _ in ()).throw(AssertionError("guarded route must not run")),
+        readiness_checker=_ready_precheck,
+    )
+
+    assert report.result_classification == "LEAK_TEST_AUTHORIZATION_IDENTITY_MISMATCH"
+    assert report.mutation_performed is False
+
+
+def test_apply_refuses_stale_governance_before_bridge(tmp_path: Path) -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=lambda _config: (_ for _ in ()).throw(AssertionError("guarded route must not run")),
+        readiness_checker=_stale_precheck,
+    )
+
+    assert report.result_classification == "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY"
+    assert report.mutation_performed is False
+
+
+def test_apply_retry_blocks_micro_stale_market_data_before_bridge(tmp_path: Path) -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=lambda _config: (_ for _ in ()).throw(AssertionError("guarded route must not run")),
+        readiness_checker=_market_stale_precheck,
+    )
+
+    assert report.result_classification == "LEAK_TEST_MARKET_DATA_MICRO_STALE_RETRYABLE"
+    assert report.mutation_performed is False
+
+
+def test_apply_blocked_entry_returns_safe_classification(tmp_path: Path) -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
         guarded_route_runner=lambda _config: _bridge_result("PAPER_STRATEGY_INTENT_BLOCKED", status="blocked"),
+        readiness_checker=_ready_precheck,
     )
 
     assert report.result_classification == "LEAK_TEST_PASS_BLOCKED_SAFELY"
@@ -393,7 +613,7 @@ def test_apply_blocked_entry_returns_safe_classification() -> None:
     assert report.apply_result.entry.classification == "BLOCKED"
 
 
-def test_apply_filled_entry_and_filled_exit_returns_full_round_trip_pass() -> None:
+def test_apply_filled_entry_and_filled_exit_returns_full_round_trip_pass(tmp_path: Path) -> None:
     calls = []
 
     def _runner(config):
@@ -406,7 +626,9 @@ def test_apply_filled_entry_and_filled_exit_returns_full_round_trip_pass() -> No
         reconciliation=_clean_flat_reconciliation(),
         operator_status=_operator_status(),
         runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
         guarded_route_runner=_runner,
+        readiness_checker=_ready_precheck,
         reconciliation_reader=_reader_for(
             {
                 "after_entry": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),
@@ -419,6 +641,8 @@ def test_apply_filled_entry_and_filled_exit_returns_full_round_trip_pass() -> No
     assert report.result_classification == "LEAK_TEST_PASS_FULL_ROUND_TRIP"
     assert report.mutation_performed is True
     assert len(calls) == 2
+    assert calls[0].caller_path == "track_b_paper_leak_test_apply"
+    assert calls[0].leak_test_authorization_path is not None
     assert calls[0].caller_metadata["intent_type"] == "BUY_TO_OPEN"
     assert calls[1].caller_metadata["intent_type"] == "SELL_TO_CLOSE"
     assert report.apply_result is not None
@@ -426,14 +650,16 @@ def test_apply_filled_entry_and_filled_exit_returns_full_round_trip_pass() -> No
     assert report.apply_result.lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
 
 
-def test_apply_entry_fill_lifecycle_gap_reports_failure() -> None:
+def test_apply_entry_fill_lifecycle_gap_reports_failure(tmp_path: Path) -> None:
     report = build_single_lane_apply_report(
         repo_root=REPO_ROOT,
         lane_id=LANE_ID,
         reconciliation=_clean_flat_reconciliation(),
         operator_status=_operator_status(),
         runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
         guarded_route_runner=lambda _config: _bridge_result("PAPER_STRATEGY_ORDER_FILLED"),
+        readiness_checker=_ready_precheck,
         reconciliation_reader=_reader_for({"after_entry": _clean_flat_reconciliation()}),
         max_wait_seconds=0,
     )
@@ -443,14 +669,16 @@ def test_apply_entry_fill_lifecycle_gap_reports_failure() -> None:
     assert report.apply_result.lifecycle_open_result == "LIFECYCLE_OPEN_GAP"
 
 
-def test_apply_exit_fill_lifecycle_gap_reports_failure() -> None:
+def test_apply_exit_fill_lifecycle_gap_reports_failure(tmp_path: Path) -> None:
     report = build_single_lane_apply_report(
         repo_root=REPO_ROOT,
         lane_id=LANE_ID,
         reconciliation=_clean_flat_reconciliation(),
         operator_status=_operator_status(),
         runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
         guarded_route_runner=lambda _config: _bridge_result("PAPER_STRATEGY_ORDER_FILLED"),
+        readiness_checker=_ready_precheck,
         reconciliation_reader=_reader_for(
             {
                 "after_entry": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),

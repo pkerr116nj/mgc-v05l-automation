@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -235,6 +236,68 @@ def _approved_runtime_metadata(
     if runtime_cwd is not None:
         payload["runtime_cwd"] = runtime_cwd
     return payload
+
+
+def _leak_auth_digest(payload: dict[str, object]) -> str:
+    fields = (
+        "artifact_type",
+        "account_id",
+        "mode",
+        "lane_id",
+        "strategy_id",
+        "symbol",
+        "local_symbol",
+        "expiry",
+        "con_id",
+        "action",
+        "exit_action",
+        "qty",
+        "repo_root",
+        "git_head",
+        "created_at",
+        "expires_at",
+        "safety_snapshot",
+    )
+    critical = {field: payload.get(field) for field in fields}
+    return hashlib.sha256(json.dumps(critical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def _write_leak_authorization(tmp_path: Path, *, action: str = "BUY") -> tuple[Path, str]:
+    now = datetime.now(timezone.utc)
+    payload: dict[str, object] = {
+        "artifact_type": "TRACK_B_PAPER_LEAK_TEST_AUTHORIZATION",
+        "account_id": "DUM882026",
+        "mode": "PAPER",
+        "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+        "strategy_id": "asia_london_participation_core_v1__GC",
+        "symbol": "GC",
+        "local_symbol": "GCM6",
+        "expiry": "202606",
+        "con_id": None,
+        "action": action,
+        "exit_action": "SELL" if action == "BUY" else "BUY",
+        "qty": 1,
+        "repo_root": str(tmp_path),
+        "git_head": None,
+        "created_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=10)).isoformat(),
+        "safety_snapshot": {
+            "reconciliation_classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "positions_count": 0,
+            "lifecycle_positions_count": 0,
+            "open_orders_count": 0,
+            "review_required_count": 0,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    payload["digest"] = _leak_auth_digest(payload)
+    path = tmp_path / "leak_authorization.json"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return path, str(payload["digest"])
 
 
 def _intent_from_config(config: IbkrPaperStrategyBridgeConfig) -> IbkrPaperStrategyOrderIntent:
@@ -1186,6 +1249,78 @@ def test_submit_requires_manual_harness_bundle(tmp_path: Path) -> None:
 
     assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
     assert "manual-harness frozen preview" in json.dumps(artifacts.report)
+
+
+def test_leak_test_caller_requires_valid_authorization(tmp_path: Path) -> None:
+    _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            symbol="GC",
+            contract_month="202606",
+            submit=True,
+            caller_path="track_b_paper_leak_test_apply",
+            caller_metadata={
+                "caller_type": "track_b_paper_leak_test",
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "strategy_id": "asia_london_participation_core_v1__GC",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "intent_type": "BUY_TO_OPEN",
+                "intent_action": "BUY",
+                "account_id": "DUM882026",
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "local_symbol": "GCM6",
+                "paper_only": True,
+                "live_money_eligible": False,
+            },
+        )
+    )
+
+    checks = {row["name"]: row for row in artifacts.report["preflight_checks"]}
+    assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
+    assert checks["approved_paper_caller_path"]["passed"] is True
+    assert checks["leak_test_authorization"]["passed"] is False
+    assert checks["manual_harness_bundle_present_for_submit"]["passed"] is False
+
+
+def test_leak_test_caller_with_valid_authorization_satisfies_manual_bundle_gate(tmp_path: Path) -> None:
+    auth_path, digest = _write_leak_authorization(tmp_path)
+    _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            symbol="GC",
+            contract_month="202606",
+            submit=True,
+            caller_path="track_b_paper_leak_test_apply",
+            leak_test_authorization_path=auth_path,
+            leak_test_authorization_digest=digest,
+            caller_metadata={
+                "caller_type": "track_b_paper_leak_test",
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "strategy_id": "asia_london_participation_core_v1__GC",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "intent_type": "BUY_TO_OPEN",
+                "intent_action": "BUY",
+                "account_id": "DUM882026",
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "local_symbol": "GCM6",
+                "paper_only": True,
+                "live_money_eligible": False,
+            },
+        )
+    )
+
+    checks = {row["name"]: row for row in artifacts.report["preflight_checks"]}
+    assert checks["approved_paper_caller_path"]["passed"] is True
+    assert checks["leak_test_authorization"]["passed"] is True
+    assert checks["manual_harness_bundle_present_for_submit"]["passed"] is True
 
 
 def test_submit_is_blocked_when_paper_strategy_monitor_disallows_submit(tmp_path: Path) -> None:

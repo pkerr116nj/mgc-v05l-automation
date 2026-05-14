@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import os
 import threading
@@ -129,7 +130,28 @@ _APPROVED_RUNTIME_CALLER_PATHS = {
     "supervised_paper_runtime_bridge",
     "ibkr_paper_strategy_executor",
 }
-_APPROVED_CALLER_PATHS = {"manual_strategy_bridge_cli", *_APPROVED_RUNTIME_CALLER_PATHS}
+_LEAK_TEST_CALLER_PATH = "track_b_paper_leak_test_apply"
+_LEAK_TEST_AUTHORIZATION_ARTIFACT_TYPE = "TRACK_B_PAPER_LEAK_TEST_AUTHORIZATION"
+_LEAK_TEST_AUTHORIZATION_DIGEST_FIELDS = (
+    "artifact_type",
+    "account_id",
+    "mode",
+    "lane_id",
+    "strategy_id",
+    "symbol",
+    "local_symbol",
+    "expiry",
+    "con_id",
+    "action",
+    "exit_action",
+    "qty",
+    "repo_root",
+    "git_head",
+    "created_at",
+    "expires_at",
+    "safety_snapshot",
+)
+_APPROVED_CALLER_PATHS = {"manual_strategy_bridge_cli", _LEAK_TEST_CALLER_PATH, *_APPROVED_RUNTIME_CALLER_PATHS}
 _APPROVED_RUNTIME_CALLER_TYPES = {
     "supervised_paper_runtime",
     "supervised_paper_executor",
@@ -225,6 +247,8 @@ class IbkrPaperStrategyBridgeConfig:
     approval_phrase: str | None = None
     manual_frozen_preview_path: Path | None = None
     caller_metadata: dict[str, Any] | None = None
+    leak_test_authorization_path: Path | None = None
+    leak_test_authorization_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1033,6 +1057,121 @@ def _runtime_caller_metadata_check(
     )
 
 
+def _leak_test_authorization_digest_payload(authorization: dict[str, Any]) -> dict[str, Any]:
+    return {field: authorization.get(field) for field in _LEAK_TEST_AUTHORIZATION_DIGEST_FIELDS}
+
+
+def _leak_test_authorization_digest(authorization: dict[str, Any]) -> str:
+    payload = json.dumps(
+        _leak_test_authorization_digest_payload(authorization),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _load_leak_test_authorization(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _leak_test_authorization_check(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> dict[str, Any]:
+    caller_path = str(config.caller_path or "").strip()
+    if caller_path != _LEAK_TEST_CALLER_PATH:
+        return _check(
+            "leak_test_authorization",
+            True,
+            True,
+            "Leak-test authorization is only required for the dedicated leak-test caller path.",
+        )
+    authorization = _load_leak_test_authorization(config.leak_test_authorization_path)
+    if not authorization:
+        return _check(
+            "leak_test_authorization",
+            False,
+            True,
+            "Dedicated leak-test bridge callers require a readable leak-test authorization artifact.",
+        )
+    expected_digest = _leak_test_authorization_digest(authorization)
+    supplied_digest = str(config.leak_test_authorization_digest or "").strip()
+    artifact_digest = str(authorization.get("digest") or "").strip()
+    if not supplied_digest or supplied_digest != artifact_digest or artifact_digest != expected_digest:
+        return _check(
+            "leak_test_authorization",
+            False,
+            True,
+            "Dedicated leak-test bridge caller authorization digest is missing or mismatched.",
+        )
+    expires_at = _parse_iso_datetime(authorization.get("expires_at"))
+    if expires_at is None or expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return _check(
+            "leak_test_authorization",
+            False,
+            True,
+            "Dedicated leak-test bridge caller authorization is expired.",
+        )
+    metadata = dict(config.caller_metadata or {})
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
+    expected_action = authorization.get("exit_action") if intent_type.endswith("_TO_CLOSE") else authorization.get("action")
+    expected = {
+        "artifact_type": _LEAK_TEST_AUTHORIZATION_ARTIFACT_TYPE,
+        "account_id": _EXPECTED_ACCOUNT_ID,
+        "mode": _EXPECTED_MODE,
+        "lane_id": config.strategy_id,
+        "symbol": str(config.symbol or intent.symbol or "").strip().upper(),
+        "expiry": str(config.contract_month or intent.contract_month or "").strip(),
+        "action": expected_action,
+        "qty": 1,
+        "repo_root": str(config.repo_root),
+    }
+    mismatches = [key for key, value in expected.items() if authorization.get(key) != value]
+    if float(authorization.get("qty") or 0) != float(config.quantity or intent.quantity or 0):
+        mismatches.append("quantity")
+    if str(authorization.get("local_symbol") or "") != str(metadata.get("local_symbol") or ""):
+        mismatches.append("local_symbol")
+    if mismatches:
+        return _check(
+            "leak_test_authorization",
+            False,
+            True,
+            f"Dedicated leak-test bridge caller authorization identity mismatch: {', '.join(mismatches)}.",
+        )
+    safety = dict(authorization.get("safety_snapshot") or {})
+    if safety.get("live_money_eligible") is not False or safety.get("paper_proof_invoked") is not False:
+        return _check(
+            "leak_test_authorization",
+            False,
+            True,
+            "Dedicated leak-test bridge caller authorization safety snapshot is not PAPER-only safe.",
+        )
+    return _check(
+        "leak_test_authorization",
+        True,
+        True,
+        "Dedicated leak-test bridge caller supplied a valid lane-specific authorization artifact.",
+    )
+
+
 def _authorized_supervised_runtime_route_check(
     *,
     config: IbkrPaperStrategyBridgeConfig,
@@ -1256,6 +1395,7 @@ def _build_static_preflight_checks(
     expected_label = _phase1_target_detail_label(expected_target)
     lane_adapter = dict(expected_target.get("lane_adapter") or {})
     runtime_route = _authorized_supervised_runtime_route_check(config=config, intent=intent)
+    leak_test_authorization = _leak_test_authorization_check(config=config, intent=intent)
     phase1_reconciliation_gate = evaluate_phase1_broker_reconciliation_submit_gate(repo_root=config.repo_root)
     monitor_contract_matches = _monitor_exact_contract_matches_target(
         monitor_exact_contract=monitor_exact_contract,
@@ -1298,10 +1438,12 @@ def _build_static_preflight_checks(
             "Phase-1 broker reconciliation and owning-strategy exposure gates remain required."
         )
     caller_path = str(config.caller_path or "").strip()
+    leak_test_authorized = caller_path == _LEAK_TEST_CALLER_PATH and bool(leak_test_authorization.get("passed"))
     deprecated_root_detail = _deprecated_submit_root_detail(Path(config.repo_root))
     return [
         _check("approved_paper_caller_path", caller_gate["passed"], True, caller_gate["detail"]),
         dict(runtime_route.get("metadata_check") or _runtime_caller_metadata_check(config=config, intent=intent)),
+        leak_test_authorization,
         _check(
             "deprecated_submit_root_block",
             (not config.submit) or deprecated_root_detail is None,
@@ -1398,7 +1540,7 @@ def _build_static_preflight_checks(
         ),
         _check(
             "manual_harness_bundle_present_for_submit",
-            (not config.submit) or caller_path in _APPROVED_RUNTIME_CALLER_PATHS or (
+            (not config.submit) or caller_path in _APPROVED_RUNTIME_CALLER_PATHS or leak_test_authorized or (
                 config.manual_frozen_preview_path is not None
                 and config.approval_digest is not None
                 and config.approval_phrase is not None
@@ -1407,6 +1549,8 @@ def _build_static_preflight_checks(
             (
                 "Approved supervised paper runtime callers may submit through the bridge without a manual frozen preview bundle."
                 if caller_path in _APPROVED_RUNTIME_CALLER_PATHS
+                else "Dedicated leak-test caller supplied a valid short-lived authorization; the bridge will prepare and record an internal frozen preview bundle."
+                if leak_test_authorized
                 else "Bridge submit requires a manual-harness frozen preview path plus the exact approval digest and approval phrase."
             ),
         ),
@@ -1592,8 +1736,12 @@ def _delegate_to_manual_harness(
     approval_phrase = config.approval_phrase
     runtime_route = _authorized_supervised_runtime_route_check(config=config, intent=intent)
     supervised_runtime_route = bool(runtime_route.get("passed"))
+    caller_path = str(config.caller_path or "").strip()
+    leak_test_route = caller_path == _LEAK_TEST_CALLER_PATH and bool(
+        _leak_test_authorization_check(config=config, intent=intent).get("passed")
+    )
     if manual_frozen_preview_path is None or approval_digest is None or approval_phrase is None:
-        if not supervised_runtime_route:
+        if not supervised_runtime_route and not leak_test_route:
             raise IbkrPaperStrategyBridgeError(
                 "Bridge submit delegation requires a previously generated manual-harness frozen preview plus the exact approval digest and approval phrase."
             )
@@ -1609,7 +1757,7 @@ def _delegate_to_manual_harness(
         approval_phrase = str(prepared.get("expected_approval_phrase") or "")
         if not manual_frozen_preview_path.exists() or not approval_digest or not approval_phrase:
             raise IbkrPaperStrategyBridgeError(
-                "Approved supervised PAPER runtime route could not prepare a valid internal frozen preview bundle."
+                "Approved supervised PAPER runtime/leak-test route could not prepare a valid internal frozen preview bundle."
             )
     test_mode = "PAPER_FILL_TEST" if intent.action == "BUY" else "PAPER_CLOSE_TEST"
     delegated_output_dir = (Path(config.output_dir) / "delegated_manual_harness") if config.output_dir is not None else None
