@@ -51,6 +51,10 @@ class IbkrPaperStrategyExposureConfig:
     broker_open_orders_snapshot_path: Path = _DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT
     index_exposure_snapshot_path: Path = _DEFAULT_INDEX_EXPOSURE_SNAPSHOT
     broker_truth_max_age_seconds: float = _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS
+    account_id: str | None = None
+    con_id: int | None = None
+    local_symbol: str | None = None
+    lifecycle_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +192,10 @@ def evaluate_paper_strategy_exposure_gate(
     broker_open_orders_snapshot_path: Path = _DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT,
     index_exposure_snapshot_path: Path = _DEFAULT_INDEX_EXPOSURE_SNAPSHOT,
     broker_truth_max_age_seconds: float = _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS,
+    account_id: str | None = None,
+    con_id: int | None = None,
+    local_symbol: str | None = None,
+    lifecycle_id: str | None = None,
 ) -> dict[str, Any]:
     artifacts = run_ibkr_paper_strategy_exposure(
         config=IbkrPaperStrategyExposureConfig(
@@ -208,6 +216,10 @@ def evaluate_paper_strategy_exposure_gate(
             broker_open_orders_snapshot_path=broker_open_orders_snapshot_path,
             index_exposure_snapshot_path=index_exposure_snapshot_path,
             broker_truth_max_age_seconds=broker_truth_max_age_seconds,
+            account_id=account_id,
+            con_id=con_id,
+            local_symbol=local_symbol,
+            lifecycle_id=lifecycle_id,
         )
     )
     return dict(artifacts.report.get("selected_strategy_gate") or {})
@@ -347,6 +359,7 @@ def _build_strategy_exposure_rows_from_phase1_reconciliation(
                 "execution_id": position.get("entry_exec_id"),
                 "entry_timestamp": position.get("as_of"),
                 "source_intent_id": position.get("lifecycle_id"),
+                "lifecycle_id": position.get("lifecycle_id"),
                 "state": state if quantity > 0.0 else "FLAT",
                 "open_orders": [],
                 "pnl_source": "phase1_broker_reconciliation",
@@ -367,6 +380,8 @@ def _strategy_aliases_for_phase1_lifecycle_position(strategy_id: str) -> list[st
             aliases.append(suffix)
         if suffix.startswith("paper_") and root:
             aliases.append(f"{root}_{suffix.removeprefix('paper_')}")
+        if root.endswith("_turn") and suffix:
+            aliases.append(root.removesuffix("_turn"))
     return list(dict.fromkeys(alias for alias in aliases if alias))
 
 
@@ -481,7 +496,19 @@ def _evaluate_strategy_gate(
         row_identifiers.discard("")
         if row_identifiers.intersection(identifiers):
             owned_rows.append(dict(row))
-    owned_signed_quantity = round(sum(float(row.get("signed_quantity") or 0.0) for row in owned_rows), 8)
+    exit_identity_requested = semantics.operation == "CLOSE" and any(
+        item not in (None, "")
+        for item in (config.account_id, config.con_id, config.local_symbol, config.lifecycle_id)
+    )
+    identity_filtered_owned_rows = _filter_owned_rows_for_requested_exit_identity(
+        owned_rows=owned_rows,
+        account_id=config.account_id,
+        con_id=config.con_id,
+        local_symbol=config.local_symbol,
+        lifecycle_id=config.lifecycle_id,
+    )
+    owned_rows_for_quantity = identity_filtered_owned_rows if exit_identity_requested else owned_rows
+    owned_signed_quantity = round(sum(float(row.get("signed_quantity") or 0.0) for row in owned_rows_for_quantity), 8)
     owned_quantity = round(abs(owned_signed_quantity), 8)
     strategy_state = "FLAT"
     if owned_signed_quantity > 0.0:
@@ -551,6 +578,8 @@ def _evaluate_strategy_gate(
                 else "The strategy may open short exposure from flat."
             )
     elif semantics.operation == "CLOSE":
+        if exit_identity_requested and not identity_filtered_owned_rows:
+            block_reasons.append("exit_identity_mismatch")
         if semantics.direction == "LONG" and strategy_state != "LONG":
             block_reasons.append("non_owning_strategy_exit_forbidden")
         if semantics.direction == "SHORT" and strategy_state != "SHORT":
@@ -591,6 +620,8 @@ def _evaluate_strategy_gate(
         "quantity": quantity,
         "strategy_state": strategy_state,
         "owned_strategy_quantity": owned_quantity,
+        "owned_strategy_position_count": len(owned_rows_for_quantity),
+        "exit_identity_requested": exit_identity_requested,
         "submit_allowed": submit_allowed and not block_reasons,
         "block_reasons": list(dict.fromkeys(block_reasons)),
         "detail": detail,
@@ -618,6 +649,34 @@ def _evaluate_strategy_gate(
             }
         ),
     }
+
+
+def _filter_owned_rows_for_requested_exit_identity(
+    *,
+    owned_rows: list[dict[str, Any]],
+    account_id: str | None,
+    con_id: int | None,
+    local_symbol: str | None,
+    lifecycle_id: str | None,
+) -> list[dict[str, Any]]:
+    requested_account = str(account_id or "").strip()
+    requested_con_id = str(con_id or "").strip()
+    requested_local_symbol = str(local_symbol or "").strip().upper()
+    requested_lifecycle_id = str(lifecycle_id or "").strip()
+    filtered: list[dict[str, Any]] = []
+    for row in owned_rows:
+        row_account = str(row.get("account_id") or "").strip()
+        if requested_account and row_account and row_account != requested_account:
+            continue
+        if requested_con_id and str(row.get("con_id") or "").strip() != requested_con_id:
+            continue
+        if requested_local_symbol and str(row.get("local_symbol") or "").strip().upper() != requested_local_symbol:
+            continue
+        row_lifecycle_id = str(row.get("lifecycle_id") or row.get("source_intent_id") or "").strip()
+        if requested_lifecycle_id and row_lifecycle_id != requested_lifecycle_id:
+            continue
+        filtered.append(dict(row))
+    return filtered
 
 
 def _broker_net_position_for_symbol(

@@ -352,7 +352,7 @@ def _select_exit_bridge_evidence(
         for row in rows
         if str(row.get("order_intent_id") or "") == config.exit_intent_id
         and str(row.get("intent_type") or "").upper() == "SELL_TO_CLOSE"
-        and str(row.get("action") or "").upper() == config.exit_action
+        and _exit_action_matches(row.get("action"), config.exit_action)
         and str(row.get("symbol") or row.get("instrument") or "").upper() == config.symbol
         and str(row.get("local_symbol") or _nested(row, "contract", "local_symbol") or "").upper() == config.local_symbol
         and _int(row.get("con_id") or _nested(row, "contract", "qualified_contract_identifier")) == config.con_id
@@ -380,6 +380,14 @@ def _select_exit_bridge_report_evidence(
         failures.append("Exit bridge report path is missing.")
         return None
     report = _read_json(report_path)
+    direct_evidence = _direct_filled_bridge_exit_evidence_from_report(
+        config=config,
+        report=report,
+        report_path=report_path,
+        failures=failures,
+    )
+    if direct_evidence is not None:
+        return direct_evidence
     delegated = report.get("delegated_result") if isinstance(report.get("delegated_result"), Mapping) else {}
     delegated_report = delegated.get("report") if isinstance(delegated.get("report"), Mapping) else {}
     lifecycle = (
@@ -449,6 +457,50 @@ def _select_exit_bridge_report_evidence(
         "client_id": config.exit_client_id,
         "perm_id": config.exit_perm_id,
         "exec_id": execution.get("execution_id") or execution.get("exec_id"),
+        "fill_price": _decimal_text(config.exit_price),
+        "fill_timestamp": _canonical_time(config.exit_fill_time),
+    }
+
+
+def _direct_filled_bridge_exit_evidence_from_report(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    report: Mapping[str, Any],
+    report_path: Path,
+    failures: list[str],
+) -> dict[str, Any] | None:
+    if str(report.get("artifact_type") or "") != "filled_bridge_result":
+        return None
+    checks = {
+        "classification": str(report.get("classification") or "") == "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "bridge_classification": str(report.get("bridge_classification") or "") == "PAPER_STRATEGY_ORDER_FILLED",
+        "intent_type": str(report.get("intent_type") or "").upper() == "SELL_TO_CLOSE",
+        "order_intent_id": str(report.get("order_intent_id") or "") == config.exit_intent_id,
+        "action": _exit_action_matches(report.get("action") or report.get("side"), config.exit_action),
+        "symbol": str(report.get("symbol") or report.get("instrument") or "").upper() == config.symbol,
+        "local_symbol": str(report.get("local_symbol") or _nested(report, "contract", "local_symbol") or "").upper()
+        == config.local_symbol,
+        "con_id": _int(report.get("con_id") or _nested(report, "contract", "qualified_contract_identifier")) == config.con_id,
+        "quantity": _decimal(report.get("quantity")) == config.quantity,
+        "fill_price": _decimal(report.get("fill_price")) == config.exit_price,
+        "fill_timestamp": _same_time(report.get("fill_timestamp"), config.exit_fill_time),
+        "client_id": _int(report.get("client_id")) == config.exit_client_id,
+        "perm_id": _int(report.get("perm_id")) == config.exit_perm_id,
+        "broker_flat": _decimal(report.get("broker_position_qty")) == Decimal("0")
+        and _decimal(report.get("internal_position_qty")) == Decimal("0"),
+    }
+    if not all(checks.values()):
+        failures.append(
+            "Direct filled-bridge close artifact did not match expected exit identity: "
+            + ", ".join(name for name, passed in checks.items() if not passed)
+        )
+        return None
+    return {
+        **dict(report),
+        "source": "DIRECT_FILLED_BRIDGE_CLOSE_ARTIFACT",
+        "source_path": str(report_path),
+        "broker_order_id": str(report.get("broker_order_id") or ""),
+        "exec_id": report.get("exec_id") or report.get("execution_id"),
         "fill_price": _decimal_text(config.exit_price),
         "fill_timestamp": _canonical_time(config.exit_fill_time),
     }
@@ -601,14 +653,28 @@ def _already_has_matching_close(config: LifecycleCloseCleanupConfig, rows: Seque
             continue
         if str(row.get("final_position_status") or "") != "CLOSED_FLAT":
             continue
-        if str(row.get("exit_intent_id") or "") != config.exit_intent_id:
-            continue
         if _decimal(row.get("exit_fill_price")) != config.exit_price:
             continue
         if not _same_time(row.get("exit_timestamp") or row.get("exit_fill_time"), config.exit_fill_time):
             continue
-        return True
+        row_exit_intent_id = str(row.get("exit_intent_id") or "")
+        if row_exit_intent_id == config.exit_intent_id:
+            return True
+        if row_exit_intent_id:
+            continue
+        row_perm_id = _int(row.get("exit_perm_id") or _nested(row, "exit_broker_identity", "perm_id"))
+        row_client_id = _int(row.get("exit_client_id") or _nested(row, "exit_broker_identity", "client_id"))
+        if row_perm_id == config.exit_perm_id and row_client_id == config.exit_client_id:
+            return True
     return False
+
+
+def _exit_action_matches(value: object, expected: str) -> bool:
+    actual_action = str(value or "").strip().upper()
+    expected_action = str(expected or "").strip().upper()
+    if actual_action == expected_action:
+        return True
+    return expected_action == "SELL_TO_CLOSE" and actual_action == "SELL"
 
 
 def _build_summaries(

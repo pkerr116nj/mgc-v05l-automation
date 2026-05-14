@@ -7,7 +7,9 @@ from pathlib import Path
 
 from mgc_v05l.app.track_b_paper_lifecycle_close_cleanup import (
     DEFAULT_ENTRY_LIFECYCLE_ID,
+    DEFAULT_EXIT_CLIENT_ID,
     DEFAULT_EXIT_INTENT_ID,
+    DEFAULT_EXIT_PERM_ID,
     LifecycleCloseCleanupConfig,
     POINT_VALUE_BY_SYMBOL,
     TICK_SIZE_BY_SYMBOL,
@@ -94,6 +96,33 @@ def test_apply_closes_stale_mnq_row(tmp_path: Path) -> None:
     assert status["open_position_count"] == 0
 
 
+def test_cleanup_accepts_direct_filled_bridge_close_artifact(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path, include_exit=False)
+    report_path = (
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "lanes"
+        / "mnq_1x_ny_early_core__us_late_long"
+        / "filled_bridge_result_latest.json"
+    )
+    _write_json(report_path, {**_exit_bridge_row(), "artifact_type": "filled_bridge_result"})
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=LifecycleCloseCleanupConfig(
+            repo_root=tmp_path,
+            exit_action="SELL_TO_CLOSE",
+            exit_bridge_report_path=report_path.relative_to(tmp_path),
+        ),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_DRY_RUN_READY"
+    assert result.report["bridge_evidence"]["exit"]["source"] == "DIRECT_FILLED_BRIDGE_CLOSE_ARTIFACT"
+    assert result.report["post_cleanup_prediction"]["reconciliation_would_clear"] is True
+
+
 def test_second_apply_is_idempotent(tmp_path: Path) -> None:
     _write_cleanup_fixture(tmp_path)
     config = LifecycleCloseCleanupConfig(repo_root=tmp_path, apply=True)
@@ -103,6 +132,34 @@ def test_second_apply_is_idempotent(tmp_path: Path) -> None:
 
     assert first.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_APPLIED"
     assert second.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_ALREADY_APPLIED"
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 2
+
+
+def test_apply_noops_when_runtime_already_persisted_close_without_cleanup_intent(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+    runtime_close_row = dict(_open_mnq_ledger_row())
+    runtime_close_row.update(
+        {
+            "exit_timestamp": "2026-05-13T11:00:38.198088+00:00",
+            "exit_fill_time": "2026-05-13T11:00:38.198088+00:00",
+            "exit_fill_price": "29389.5",
+            "exit_price": "29389.5",
+            "exit_perm_id": DEFAULT_EXIT_PERM_ID,
+            "exit_client_id": DEFAULT_EXIT_CLIENT_ID,
+            "final_position_status": "CLOSED_FLAT",
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+            "realized_pnl": None,
+            "review_required": False,
+        }
+    )
+    _write_jsonl(_ledger_path(tmp_path), [_open_mnq_ledger_row(), runtime_close_row])
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=LifecycleCloseCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_ALREADY_APPLIED"
     assert len(_read_jsonl(_ledger_path(tmp_path))) == 2
 
 

@@ -11744,6 +11744,8 @@ def _runtime_bridge_config_for_lane(
             "host": "127.0.0.1",
             "port": 7497,
             "account_id": "DUM882026",
+            "runtime_pid": os.getpid(),
+            "runtime_cwd": str(Path.cwd()),
             "route_destination": str(bridge_adapter.get("current_order_destination") or "legacy_app_paper_runtime"),
             "bridge_proxy_mode": str(bridge_adapter.get("bridge_proxy_mode") or ""),
             "intent_action": action,

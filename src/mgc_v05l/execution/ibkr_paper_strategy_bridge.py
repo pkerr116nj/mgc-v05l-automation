@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import threading
 import time
 import uuid
@@ -488,6 +489,16 @@ def run_ibkr_paper_strategy_bridge(
         intent_type=str((config.caller_metadata or {}).get("intent_type") or "").strip().upper() or None,
         quantity=config.quantity,
         executable_symbol=config.symbol,
+        account_id=str((config.caller_metadata or {}).get("account_id") or config.account_id or "").strip() or None,
+        con_id=_int_or_none((config.caller_metadata or {}).get("con_id")),
+        local_symbol=str((config.caller_metadata or {}).get("local_symbol") or "").strip() or None,
+        lifecycle_id=str(
+            (config.caller_metadata or {}).get("lifecycle_id")
+            or (config.caller_metadata or {}).get("position_lifecycle_id")
+            or (config.caller_metadata or {}).get("managed_lifecycle_id")
+            or ""
+        ).strip()
+        or None,
     )
     bridge_audit_history = _load_bridge_audit_history(config.output_dir)
     runtime: _Runtime | None = None
@@ -1091,6 +1102,15 @@ def _build_intent(config: IbkrPaperStrategyBridgeConfig) -> IbkrPaperStrategyOrd
     )
 
 
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _build_preflight_checks(
     *,
     config: IbkrPaperStrategyBridgeConfig,
@@ -1463,10 +1483,26 @@ def _governance_exit_override_allowed(
         return False
     if not bool(exposure_status.get("submit_allowed")):
         return False
+    if not _runtime_exit_override_identity_is_current(config=config):
+        return False
     selected = dict(governance_status.get("selected_strategy") or {})
     if str(selected.get("strategy_status") or "").strip().upper() in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
         return False
     return True
+
+
+def _runtime_exit_override_identity_is_current(*, config: IbkrPaperStrategyBridgeConfig) -> bool:
+    metadata = dict(config.caller_metadata or {})
+    runtime_pid = _int_or_none(metadata.get("runtime_pid") or metadata.get("source_runtime_pid"))
+    if runtime_pid is None or runtime_pid != os.getpid():
+        return False
+    runtime_cwd = str(metadata.get("runtime_cwd") or metadata.get("source_runtime_cwd") or "").strip()
+    if not runtime_cwd:
+        return False
+    try:
+        return Path(runtime_cwd).resolve() == Path(config.repo_root).resolve()
+    except OSError:
+        return False
 
 
 def _paper_strategy_monitor_authority_for_route(

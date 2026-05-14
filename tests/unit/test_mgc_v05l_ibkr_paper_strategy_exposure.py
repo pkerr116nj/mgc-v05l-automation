@@ -370,6 +370,108 @@ def test_flat_mnq_sell_to_open_short_entry_is_allowed(tmp_path: Path) -> None:
     assert gate["block_reasons"] == []
 
 
+def test_pl_lane_can_exit_turn_owner_from_clean_phase1_reconciliation(tmp_path: Path) -> None:
+    lifecycle_id = "bridge_fill_PL|1m|2026-05-14T17:52:00Z|BUY_TO_OPEN"
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(
+        tmp_path,
+        [_governance_row("pl_us_late_pause_resume_long", "pl_us_late_pause_resume_long__PL")],
+    )
+    _write_phase1_reconciliation(
+        tmp_path,
+        lifecycle_positions=[
+            {
+                "account_id": "DUM882026",
+                "strategy_id": "pl_us_late_pause_resume_long_turn__PL",
+                "track_b_root": "PL",
+                "instrument_family": "PL",
+                "contract_key": "PL-202607",
+                "local_symbol": "PLN6",
+                "con_id": 644855286,
+                "quantity": "1",
+                "side": "LONG",
+                "avg_entry_price": "2086.2",
+                "entry_order_id": "1",
+                "lifecycle_id": lifecycle_id,
+            }
+        ],
+    )
+    _write_broker_positions_snapshot(
+        tmp_path,
+        positions=[{"symbol": "PL", "local_symbol": "PLN6", "con_id": 644855286, "quantity": "1.0"}],
+    )
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="pl_us_late_pause_resume_long",
+        bridge_strategy_id="pl_us_late_pause_resume_long__PL",
+        executable_symbol="PL",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+        account_id="DUM882026",
+        con_id=644855286,
+        local_symbol="PLN6",
+        lifecycle_id=lifecycle_id,
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_EXIT_ALLOWED"
+    assert gate["submit_allowed"] is True
+    assert gate["owned_strategy_quantity"] == 1.0
+    assert gate["exit_identity_requested"] is True
+
+
+def test_pl_exit_blocks_when_exact_identity_does_not_match_phase1_owner(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(
+        tmp_path,
+        [_governance_row("pl_us_late_pause_resume_long", "pl_us_late_pause_resume_long__PL")],
+    )
+    _write_phase1_reconciliation(
+        tmp_path,
+        lifecycle_positions=[
+            {
+                "account_id": "DUM882026",
+                "strategy_id": "pl_us_late_pause_resume_long_turn__PL",
+                "track_b_root": "PL",
+                "instrument_family": "PL",
+                "contract_key": "PL-202607",
+                "local_symbol": "PLN6",
+                "con_id": 644855286,
+                "quantity": "1",
+                "side": "LONG",
+                "avg_entry_price": "2086.2",
+                "lifecycle_id": "bridge_fill_PL|1m|2026-05-14T17:52:00Z|BUY_TO_OPEN",
+            }
+        ],
+    )
+    _write_broker_positions_snapshot(
+        tmp_path,
+        positions=[{"symbol": "PL", "local_symbol": "PLN6", "con_id": 644855286, "quantity": "1.0"}],
+    )
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="pl_us_late_pause_resume_long",
+        bridge_strategy_id="pl_us_late_pause_resume_long__PL",
+        executable_symbol="PL",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+        account_id="DUM882026",
+        con_id=999999,
+        local_symbol="PLN6",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "exit_identity_mismatch" in gate["block_reasons"]
+    assert "non_owning_strategy_exit_forbidden" in gate["block_reasons"]
+
+
 def test_flat_sell_to_close_blocks(tmp_path: Path) -> None:
     _write_monitor(tmp_path, broker_quantity=0.0)
     _write_ledger(tmp_path, [])
