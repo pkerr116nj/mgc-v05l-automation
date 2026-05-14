@@ -8845,6 +8845,212 @@ def test_paper_runtime_recovery_auto_starts_stopped_runtime_when_safe(
     assert result["action"] == "auto-start-paper"
 
 
+def _write_track_b_paper_reconciliation(
+    repo_root: Path,
+    *,
+    classification: str = "TRACK_B_PAPER_BROKER_RECONCILED",
+    broker_reconciled: bool = True,
+    broker_positions: int = 0,
+    broker_orders: int = 0,
+    lifecycle_positions: int = 0,
+    lifecycle_orders: int = 0,
+    review_required: int = 0,
+    live_money_eligible: bool = False,
+    submit_authority: bool = False,
+    paper_proof_invoked: bool = False,
+) -> Path:
+    path = (
+        repo_root
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "max_age_seconds": 120,
+                "classification": classification,
+                "broker_reconciled": broker_reconciled,
+                "track_b_broker_position_count": broker_positions,
+                "track_b_broker_open_order_count": broker_orders,
+                "lifecycle_open_position_count": lifecycle_positions,
+                "lifecycle_open_order_count": lifecycle_orders,
+                "review_required_count": review_required,
+                "live_money_eligible": live_money_eligible,
+                "submit_authority": submit_authority,
+                "paper_proof_invoked": paper_proof_invoked,
+                "blockers": [],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_paper_runtime_recovery_auto_starts_after_clean_supervised_flatten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_track_b_paper_reconciliation(tmp_path)
+    pre_paper = {
+        "running": False,
+        "readiness": {"runtime_phase": "STOPPED"},
+        "entry_eligibility": {"primary_blocking_reason": "RUNTIME_STOPPED"},
+        "operator_state": {
+            "last_control_action": "flatten_and_halt",
+            "last_control_status": "applied",
+            "flatten_state": "complete",
+        },
+        "status": {"session_date": "2026-03-26"},
+        "non_approved_lanes": {"rows": []},
+    }
+    post_paper = {"running": True, "status": {"session_date": "2026-03-26"}}
+
+    monkeypatch.setattr(
+        service,
+        "_paper_start_command_with_enabled_temp_paper",
+        lambda snapshot: (["bash", "scripts/run_probationary_paper_soak.sh", "--background"], {"unresolved_lane_ids": []}),
+    )
+    monkeypatch.setattr(
+        operator_dashboard_module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout="started", stderr=""),
+    )
+    monkeypatch.setattr(service, "_runtime_snapshot", lambda runtime_name: post_paper)
+
+    payload, refreshed_paper, result = service._paper_runtime_recovery_payload(
+        paper=pre_paper,
+        auth_status={"runtime_ready": True},
+        carry_forward={"active": False},
+        pre_session_review={"required": False, "completed": True},
+        closeout_state={"unresolved_open_intents": 0},
+    )
+
+    assert payload["status"] == "AUTO_RESTART_SUCCEEDED"
+    assert payload["manual_action_required"] is False
+    assert payload["post_flatten_recovery"]["phase"] == "FLAT_RECONCILED"
+    assert payload["post_flatten_recovery"]["live_money_eligible"] is False
+    assert payload["post_flatten_recovery"]["paper_proof_invoked"] is False
+    assert refreshed_paper == post_paper
+    assert result is not None
+    assert result["action"] == "auto-start-paper"
+    assert "paper_proof" not in " ".join(result["command"])
+
+
+def test_paper_runtime_recovery_keeps_emergency_halt_sticky(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = OperatorDashboardService(tmp_path)
+
+    def _unexpected_start(*args, **kwargs):
+        raise AssertionError("emergency halt must not auto-restart")
+
+    monkeypatch.setattr(service, "_paper_start_command_with_enabled_temp_paper", _unexpected_start)
+
+    payload, refreshed_paper, result = service._paper_runtime_recovery_payload(
+        paper={
+            "running": False,
+            "readiness": {"runtime_phase": "STOPPED"},
+            "entry_eligibility": {"primary_blocking_reason": "RUNTIME_STOPPED"},
+            "operator_state": {"last_control_action": "EMERGENCY_HALT_OPERATOR_LOCKOUT"},
+            "status": {"session_date": "2026-03-26"},
+            "non_approved_lanes": {"rows": []},
+        },
+        auth_status={"runtime_ready": True},
+        carry_forward={"active": False},
+        pre_session_review={"required": False, "completed": True},
+        closeout_state={"unresolved_open_intents": 0},
+    )
+
+    assert payload["status"] == "EMERGENCY_HALT_OPERATOR_LOCKOUT"
+    assert payload["reason_code"] == "EMERGENCY_HALT_OPERATOR_LOCKOUT"
+    assert payload["manual_action_required"] is True
+    assert refreshed_paper is None
+    assert result is None
+
+
+def test_paper_runtime_recovery_waits_when_post_flatten_broker_state_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+
+    def _unexpected_start(*args, **kwargs):
+        raise AssertionError("unknown post-flatten broker state must fail closed")
+
+    monkeypatch.setattr(service, "_paper_start_command_with_enabled_temp_paper", _unexpected_start)
+
+    payload, refreshed_paper, result = service._paper_runtime_recovery_payload(
+        paper={
+            "running": False,
+            "readiness": {"runtime_phase": "STOPPED"},
+            "entry_eligibility": {"primary_blocking_reason": "RUNTIME_STOPPED"},
+            "operator_state": {
+                "last_control_action": "flatten_and_halt",
+                "last_control_status": "applied",
+                "flatten_state": "complete",
+            },
+            "status": {"session_date": "2026-03-26"},
+            "non_approved_lanes": {"rows": []},
+        },
+        auth_status={"runtime_ready": True},
+        carry_forward={"active": False},
+        pre_session_review={"required": False, "completed": True},
+        closeout_state={"unresolved_open_intents": 0},
+    )
+
+    assert payload["status"] == "VERIFYING_FLAT"
+    assert payload["manual_action_required"] is False
+    assert payload["auto_restart_eligible"] is True
+    assert payload["auto_restart_allowed"] is False
+    assert payload["post_flatten_recovery"]["reason_code"] == "BROKER_RECONCILIATION_MISSING"
+    assert refreshed_paper is None
+    assert result is None
+
+
+def test_paper_runtime_recovery_blocks_after_rejected_supervised_flatten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(tmp_path)
+    _write_track_b_paper_reconciliation(tmp_path)
+
+    def _unexpected_start(*args, **kwargs):
+        raise AssertionError("rejected supervised flatten must not auto-restart")
+
+    monkeypatch.setattr(service, "_paper_start_command_with_enabled_temp_paper", _unexpected_start)
+
+    payload, refreshed_paper, result = service._paper_runtime_recovery_payload(
+        paper={
+            "running": False,
+            "readiness": {"runtime_phase": "STOPPED"},
+            "entry_eligibility": {"primary_blocking_reason": "RUNTIME_STOPPED"},
+            "operator_state": {
+                "last_control_action": "flatten_and_halt",
+                "last_control_status": "rejected",
+                "flatten_state": "rejected_open_order_uncertainty",
+            },
+            "status": {"session_date": "2026-03-26"},
+            "non_approved_lanes": {"rows": []},
+        },
+        auth_status={"runtime_ready": True},
+        carry_forward={"active": False},
+        pre_session_review={"required": False, "completed": True},
+        closeout_state={"unresolved_open_intents": 0},
+    )
+
+    assert payload["status"] == "FLATTEN_FAILED_REVIEW_REQUIRED"
+    assert payload["manual_action_required"] is True
+    assert payload["post_flatten_recovery"]["phase"] == "FLAT_RECONCILED"
+    assert refreshed_paper is None
+    assert result is None
+
+
 def test_paper_runtime_recovery_requires_manual_action_when_stopped_runtime_is_not_safe(tmp_path: Path) -> None:
     service = OperatorDashboardService(tmp_path)
     payload, refreshed_paper, result = service._paper_runtime_recovery_payload(
@@ -9506,6 +9712,85 @@ def test_startup_control_plane_does_not_block_ibkr_databento_route_on_schwab_sid
     assert market_row["state"] == "READY"
     assert market_row["reason_code"] == "market_data_runtime_attached"
     assert payload["launch_allowed"] is True
+
+
+def test_startup_control_plane_distinguishes_post_flatten_recovery_from_emergency_lockout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorDashboardService(Path.cwd())
+    service._server_info = SimpleNamespace(
+        pid=1,
+        url="http://127.0.0.1:8790/",
+        info_file="dashboard.json",
+        instance_id="test-instance",
+    )
+    with service._dashboard_probe_lock:
+        service._dashboard_probe["api_dashboard_responding"] = True
+        service._dashboard_probe["operator_surface_loadable"] = True
+    monkeypatch.setattr(
+        service,
+        "_auth_recovery_state",
+        lambda auth_status: {
+            "runtime_ready": True,
+            "reason": "Auth ready.",
+            "auto_recovery_active": False,
+            "recommended_action": "No action needed",
+            "manual_action_required": False,
+        },
+    )
+
+    base_paper = {
+        "running": False,
+        "readiness": {
+            "runtime_running": False,
+            "heartbeat_reconciliation_summary": {},
+            "order_timeout_watchdog_summary": {},
+            "restore_validation_summary": {},
+        },
+        "status": {
+            "entries_enabled": True,
+            "operator_halt": False,
+            "reconciliation_semantics": "CLEAR",
+        },
+        "entry_eligibility": {},
+    }
+    recovery_payload = service._startup_control_plane_payload(
+        generated_at="2026-04-10T11:00:00+00:00",
+        auth_status={"source": "test_fixture"},
+        market_context={"feed_state": "LIVE", "note": "Live."},
+        paper={
+            **base_paper,
+            "runtime_recovery": {
+                "status": "VERIFYING_FLAT",
+                "auto_restart_eligible": True,
+                "operator_message": "Paper runtime stopped; verifying flat post-flatten reconciliation.",
+                "next_action": "Wait for broker reconciliation refresh",
+            },
+        },
+    )
+    emergency_payload = service._startup_control_plane_payload(
+        generated_at="2026-04-10T11:00:00+00:00",
+        auth_status={"source": "test_fixture"},
+        market_context={"feed_state": "LIVE", "note": "Live."},
+        paper={
+            **base_paper,
+            "runtime_recovery": {
+                "status": "EMERGENCY_HALT_OPERATOR_LOCKOUT",
+                "manual_action_required": True,
+                "operator_message": "Paper runtime stopped after an explicit emergency halt/operator lockout.",
+                "next_action": "Start Runtime",
+            },
+        },
+    )
+
+    recovery_row = next(row for row in recovery_payload["dependencies"] if row["key"] == "paper_runtime")
+    emergency_row = next(row for row in emergency_payload["dependencies"] if row["key"] == "paper_runtime")
+    assert recovery_row["state"] == "WARMING"
+    assert recovery_row["manual_intervention_required"] is False
+    assert recovery_row["clears_automatically"] is True
+    assert emergency_row["state"] == "BLOCKED"
+    assert emergency_row["manual_intervention_required"] is True
+    assert emergency_row["reason_code"] == "paper_runtime_emergency_halt_operator_lockout"
 
 
 def test_start_paper_precheck_does_not_require_schwab_auth_for_ibkr_databento_route(

@@ -14422,6 +14422,73 @@ class OperatorDashboardService:
     def _write_paper_runtime_recovery_state(self, payload: dict[str, Any]) -> None:
         _write_json_file(self._paper_runtime_recovery_path, payload)
 
+    def _track_b_post_flatten_reconciliation_state(self) -> dict[str, Any]:
+        path = (
+            self._repo_root
+            / "outputs"
+            / "reports"
+            / "track_b_paper_broker_reconciliation"
+            / "latest_track_b_paper_broker_reconciliation.json"
+        )
+        payload = _load_json_file(path)
+        if not isinstance(payload, dict) or not payload:
+            return {
+                "ready": False,
+                "phase": "VERIFYING_FLAT",
+                "reason_code": "BROKER_RECONCILIATION_MISSING",
+                "reason": "Track B PAPER broker reconciliation artifact is missing.",
+                "path": str(path),
+            }
+        compact = _compact_track_b_paper_broker_reconciliation_status(payload, path)
+        flat_counts = {
+            "track_b_broker_position_count": _int_or_none(compact.get("track_b_broker_position_count")),
+            "track_b_broker_open_order_count": _int_or_none(compact.get("track_b_broker_open_order_count")),
+            "lifecycle_open_position_count": _int_or_none(compact.get("lifecycle_open_position_count")),
+            "lifecycle_open_order_count": _int_or_none(compact.get("lifecycle_open_order_count")),
+            "review_required_count": _int_or_none(compact.get("review_required_count")),
+        }
+        blockers = compact.get("blockers") if isinstance(compact.get("blockers"), list) else []
+        failures: list[str] = []
+        if compact.get("classification") != "TRACK_B_PAPER_BROKER_RECONCILED":
+            failures.append(f"classification={compact.get('classification')}")
+        if compact.get("broker_reconciled") is not True:
+            failures.append("broker_reconciled=false")
+        if compact.get("fresh") is not True:
+            failures.append("broker_reconciliation_stale")
+        if compact.get("live_money_eligible") is True:
+            failures.append("live_money_eligible=true")
+        if compact.get("submit_authority") is True:
+            failures.append("submit_authority=true")
+        if compact.get("paper_proof_invoked") is True:
+            failures.append("paper_proof_invoked=true")
+        if blockers:
+            failures.append(f"blocker_count={len(blockers)}")
+        for key, value in flat_counts.items():
+            if value != 0:
+                failures.append(f"{key}={value if value is not None else 'unknown'}")
+        if failures:
+            return {
+                "ready": False,
+                "phase": "VERIFYING_FLAT",
+                "reason_code": "POST_FLATTEN_RECONCILIATION_NOT_CLEAR",
+                "reason": "; ".join(failures),
+                "path": str(path),
+                "broker_reconciliation_status": compact,
+                **flat_counts,
+            }
+        return {
+            "ready": True,
+            "phase": "FLAT_RECONCILED",
+            "reason_code": "POST_FLATTEN_RECONCILED",
+            "reason": "Broker truth, lifecycle, open orders, and review-required counts are clean after supervised PAPER flatten.",
+            "path": str(path),
+            "broker_reconciliation_status": compact,
+            **flat_counts,
+            "live_money_eligible": False,
+            "submit_authority": False,
+            "paper_proof_invoked": False,
+        }
+
     def _paper_runtime_supervisor_policy(self) -> dict[str, int]:
         settings = self._dashboard_base_settings()
         return {
@@ -14613,6 +14680,10 @@ class OperatorDashboardService:
             policy=policy,
             recent_events=self._paper_runtime_supervisor_events(),
         )
+        post_flatten_recovery = current_state.get("post_flatten_recovery")
+        if isinstance(post_flatten_recovery, dict):
+            payload["post_flatten_recovery"] = post_flatten_recovery
+            payload["control_plane_phase"] = post_flatten_recovery.get("phase")
         self._write_paper_runtime_recovery_state(payload)
         return payload
 
@@ -14681,6 +14752,13 @@ class OperatorDashboardService:
         base_state["restart_backoff_until"] = restart_backoff_until
         base_state["last_runtime_stop_detected_at"] = last_runtime_stop_detected_at
         base_state["last_restart_result"] = last_restart_result
+        post_flatten_recovery: dict[str, Any] | None = None
+
+        def _annotate_post_flatten_recovery(payload: dict[str, Any]) -> dict[str, Any]:
+            if post_flatten_recovery:
+                payload["post_flatten_recovery"] = post_flatten_recovery
+                payload["control_plane_phase"] = post_flatten_recovery.get("phase")
+            return payload
 
         if paper.get("running"):
             payload = self._paper_runtime_supervisor_fields(
@@ -14705,7 +14783,7 @@ class OperatorDashboardService:
                 policy=policy,
                 recent_events=self._paper_runtime_supervisor_events(),
             )
-            self._write_paper_runtime_recovery_state(payload)
+            self._write_paper_runtime_recovery_state(_annotate_post_flatten_recovery(payload))
             return payload, None, None
 
         if runtime_phase not in {"STOPPED", "STOPPING"}:
@@ -14731,7 +14809,7 @@ class OperatorDashboardService:
                 policy=policy,
                 recent_events=self._paper_runtime_supervisor_events(),
             )
-            self._write_paper_runtime_recovery_state(payload)
+            self._write_paper_runtime_recovery_state(_annotate_post_flatten_recovery(payload))
             return payload, None, None
 
         if not last_runtime_stop_detected_at:
@@ -14781,7 +14859,121 @@ class OperatorDashboardService:
                 None,
             )
 
-        if operator_state.get("last_control_action") in {"flatten_and_halt", "stop_after_cycle", "stop-paper"} or operator_state.get("halt_reason"):
+        last_control_action = str(operator_state.get("last_control_action") or "").strip().lower()
+        last_control_status = str(operator_state.get("last_control_status") or "").strip().lower()
+        flatten_state = str(operator_state.get("flatten_state") or "").strip().lower()
+        halt_reason = str(operator_state.get("halt_reason") or "").strip().lower()
+        emergency_lockout_values = {
+            "emergency_halt",
+            "emergency_halt_operator_lockout",
+            "operator_emergency_halt",
+            "operator_emergency_lockout",
+        }
+        emergency_lockout = bool(
+            operator_state.get("emergency_halt")
+            or operator_state.get("operator_lockout")
+            or last_control_action in emergency_lockout_values
+            or halt_reason in emergency_lockout_values
+        )
+        normal_supervised_flatten = bool(
+            not emergency_lockout
+            and (last_control_action == "flatten_and_halt" or halt_reason == "operator_flatten_and_halt")
+        )
+        flatten_terminal = last_control_status in {"applied", "complete", "completed"} or flatten_state in {
+            "complete",
+            "completed",
+            "flat_reconciled",
+        }
+        if emergency_lockout:
+            return (
+                self._paper_runtime_recovery_manual_payload(
+                    status="EMERGENCY_HALT_OPERATOR_LOCKOUT",
+                    reason_code="EMERGENCY_HALT_OPERATOR_LOCKOUT",
+                    reason="an explicit emergency halt/operator lockout is active",
+                    next_action="Start Runtime",
+                    detail=(
+                        "Paper runtime stopped after an explicit emergency halt/operator lockout. "
+                        "This state is intentionally sticky and will not auto-restart."
+                    ),
+                    current_state=base_state,
+                    policy=policy,
+                ),
+                None,
+                None,
+            )
+
+        if normal_supervised_flatten:
+            post_flatten_recovery = self._track_b_post_flatten_reconciliation_state()
+            base_state["post_flatten_recovery"] = post_flatten_recovery
+            if last_control_status == "rejected" or flatten_state.startswith("rejected"):
+                return (
+                    self._paper_runtime_recovery_manual_payload(
+                        status="FLATTEN_FAILED_REVIEW_REQUIRED",
+                        reason_code="POST_FLATTEN_REVIEW_REQUIRED",
+                        reason="the supervised flatten control was rejected or failed",
+                        next_action="Review broker reconciliation",
+                        detail="Paper runtime stopped after a failed supervised flatten; fail closed until broker/lifecycle state is reviewed.",
+                        current_state=base_state,
+                        policy=policy,
+                    ),
+                    None,
+                    None,
+                )
+            if not flatten_terminal:
+                payload = self._paper_runtime_supervisor_fields(
+                    status="FLATTENING",
+                    reason_code="POST_FLATTEN_PENDING",
+                    reason="supervised PAPER flatten is still pending confirmation",
+                    detail="Paper runtime stopped while supervised flatten is still pending; waiting for flatness confirmation.",
+                    operator_message="Paper runtime stopped; supervised flatten is still pending confirmation.",
+                    next_action="Wait for broker reconciliation refresh",
+                    manual_action_required=False,
+                    auto_restart_eligible=True,
+                    auto_restart_allowed=False,
+                    attempted_at=current_state.get("attempted_at"),
+                    succeeded_at=current_state.get("succeeded_at"),
+                    failed_at=current_state.get("failed_at"),
+                    output=current_state.get("output"),
+                    last_runtime_stop_detected_at=last_runtime_stop_detected_at,
+                    last_restart_result=last_restart_result,
+                    restart_attempt_history=restart_attempt_history,
+                    restart_suppressed_until=restart_suppressed_until,
+                    restart_backoff_until=restart_backoff_until,
+                    policy=policy,
+                    recent_events=self._paper_runtime_supervisor_events(),
+                )
+                self._write_paper_runtime_recovery_state(_annotate_post_flatten_recovery(payload))
+                return payload, None, None
+            if not post_flatten_recovery.get("ready"):
+                payload = self._paper_runtime_supervisor_fields(
+                    status="VERIFYING_FLAT",
+                    reason_code=str(post_flatten_recovery.get("reason_code") or "POST_FLATTEN_RECONCILIATION_NOT_CLEAR"),
+                    reason=str(post_flatten_recovery.get("reason") or "post-flatten broker/lifecycle state is not clean yet"),
+                    detail=(
+                        "Paper runtime stopped after supervised flatten; waiting for broker/lifecycle reconciliation "
+                        "to confirm flat state before restarting."
+                    ),
+                    operator_message="Paper runtime stopped; verifying flat post-flatten reconciliation.",
+                    next_action="Wait for broker reconciliation refresh",
+                    manual_action_required=False,
+                    auto_restart_eligible=True,
+                    auto_restart_allowed=False,
+                    attempted_at=current_state.get("attempted_at"),
+                    succeeded_at=current_state.get("succeeded_at"),
+                    failed_at=current_state.get("failed_at"),
+                    output=current_state.get("output"),
+                    last_runtime_stop_detected_at=last_runtime_stop_detected_at,
+                    last_restart_result=last_restart_result,
+                    restart_attempt_history=restart_attempt_history,
+                    restart_suppressed_until=restart_suppressed_until,
+                    restart_backoff_until=restart_backoff_until,
+                    policy=policy,
+                    recent_events=self._paper_runtime_supervisor_events(),
+                )
+                self._write_paper_runtime_recovery_state(_annotate_post_flatten_recovery(payload))
+                return payload, None, None
+
+        if last_control_action in {"stop_after_cycle", "stop-paper"} or (halt_reason and not normal_supervised_flatten):
             return (
                 self._paper_runtime_recovery_manual_payload(
                     status="STOPPED_MANUAL_REQUIRED",
@@ -14958,7 +15150,7 @@ class OperatorDashboardService:
             policy=policy,
             recent_events=self._paper_runtime_supervisor_events(),
         )
-        self._write_paper_runtime_recovery_state(in_progress_payload)
+        self._write_paper_runtime_recovery_state(_annotate_post_flatten_recovery(in_progress_payload))
 
         completed = subprocess.run(
             command,
@@ -15079,7 +15271,7 @@ class OperatorDashboardService:
                 policy=policy,
                 recent_events=self._paper_runtime_supervisor_events(),
             )
-            self._write_paper_runtime_recovery_state(payload)
+            self._write_paper_runtime_recovery_state(_annotate_post_flatten_recovery(payload))
             return payload, None, result
 
         refreshed_paper = self._runtime_snapshot("paper")
@@ -15117,7 +15309,7 @@ class OperatorDashboardService:
                 policy=policy,
                 recent_events=self._paper_runtime_supervisor_events(),
             )
-            self._write_paper_runtime_recovery_state(payload)
+            self._write_paper_runtime_recovery_state(_annotate_post_flatten_recovery(payload))
             return payload, refreshed_paper, result
 
         backoff_until = (now + timedelta(seconds=int(policy["restart_backoff_seconds"]))).isoformat()
@@ -15143,7 +15335,7 @@ class OperatorDashboardService:
             policy=policy,
             recent_events=self._paper_runtime_supervisor_events(),
         )
-        self._write_paper_runtime_recovery_state(payload)
+        self._write_paper_runtime_recovery_state(_annotate_post_flatten_recovery(payload))
         return payload, refreshed_paper, result
 
     def _paper_session_continuity(
