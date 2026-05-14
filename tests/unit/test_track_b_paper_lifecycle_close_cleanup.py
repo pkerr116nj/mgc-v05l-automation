@@ -9,6 +9,8 @@ from mgc_v05l.app.track_b_paper_lifecycle_close_cleanup import (
     DEFAULT_ENTRY_LIFECYCLE_ID,
     DEFAULT_EXIT_INTENT_ID,
     LifecycleCloseCleanupConfig,
+    POINT_VALUE_BY_SYMBOL,
+    TICK_SIZE_BY_SYMBOL,
     run_track_b_paper_lifecycle_close_cleanup,
 )
 from mgc_v05l.execution_core.track_b_paper_broker_reconciliation import (
@@ -19,6 +21,38 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import build_track_b_pap
 
 
 NOW = datetime(2026, 5, 13, 11, 45, tzinfo=timezone.utc)
+
+
+def test_cleanup_supports_maintained_futures_point_values_and_ticks() -> None:
+    expected_point_values = {
+        "GC": Decimal("100"),
+        "NQ": Decimal("20"),
+        "ES": Decimal("50"),
+        "MGC": Decimal("10"),
+        "MNQ": Decimal("2"),
+        "MES": Decimal("5"),
+        "ZT": Decimal("2000"),
+        "ZF": Decimal("1000"),
+        "ZN": Decimal("1000"),
+        "ZB": Decimal("1000"),
+        "PL": Decimal("50"),
+    }
+    expected_tick_sizes = {
+        "GC": Decimal("0.1"),
+        "NQ": Decimal("0.25"),
+        "ES": Decimal("0.25"),
+        "MGC": Decimal("0.1"),
+        "MNQ": Decimal("0.25"),
+        "MES": Decimal("0.25"),
+        "ZT": Decimal("0.00390625"),
+        "ZF": Decimal("0.0078125"),
+        "ZN": Decimal("0.015625"),
+        "ZB": Decimal("0.03125"),
+        "PL": Decimal("0.1"),
+    }
+
+    assert POINT_VALUE_BY_SYMBOL == expected_point_values
+    assert TICK_SIZE_BY_SYMBOL == expected_tick_sizes
 
 
 def test_dry_run_detects_stale_mnq_row_and_would_close_it(tmp_path: Path) -> None:

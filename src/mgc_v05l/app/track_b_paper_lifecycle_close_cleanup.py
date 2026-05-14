@@ -43,8 +43,32 @@ DEFAULT_EXIT_PERM_ID = 852752717
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "reports" / "track_b_paper_lifecycle_close_cleanup"
 DEFAULT_LANE_ROOT = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "lanes"
 DEFAULT_BROKER_TRUTH_ROOT = Path("outputs") / "reports" / "ibkr_read_only_verification"
-POINT_VALUE_BY_SYMBOL = {"MNQ": Decimal("2"), "PL": Decimal("50")}
-TICK_SIZE_BY_SYMBOL = {"MNQ": Decimal("0.25"), "PL": Decimal("0.1")}
+POINT_VALUE_BY_SYMBOL = {
+    "GC": Decimal("100"),
+    "NQ": Decimal("20"),
+    "ES": Decimal("50"),
+    "MGC": Decimal("10"),
+    "MNQ": Decimal("2"),
+    "MES": Decimal("5"),
+    "ZT": Decimal("2000"),
+    "ZF": Decimal("1000"),
+    "ZN": Decimal("1000"),
+    "ZB": Decimal("1000"),
+    "PL": Decimal("50"),
+}
+TICK_SIZE_BY_SYMBOL = {
+    "GC": Decimal("0.1"),
+    "NQ": Decimal("0.25"),
+    "ES": Decimal("0.25"),
+    "MGC": Decimal("0.1"),
+    "MNQ": Decimal("0.25"),
+    "MES": Decimal("0.25"),
+    "ZT": Decimal("0.00390625"),
+    "ZF": Decimal("0.0078125"),
+    "ZN": Decimal("0.015625"),
+    "ZB": Decimal("0.03125"),
+    "PL": Decimal("0.1"),
+}
 
 
 @dataclass(frozen=True)
