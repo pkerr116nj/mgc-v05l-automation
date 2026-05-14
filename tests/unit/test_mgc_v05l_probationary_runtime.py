@@ -52,6 +52,9 @@ from mgc_v05l.app.probationary_runtime import (
     build_probationary_paper_runner,
     _build_exit_parity_summary,
     _load_open_order_intent_rows,
+    _process_running,
+    _track_b_reconciled_open_position_restore_plan_from_report,
+    _write_current_probationary_runtime_pidfile,
     _run_probationary_live_timing_validation,
     _paper_soak_validation_bars,
     run_probationary_paper_soak_validation,
@@ -907,9 +910,9 @@ def _live_strategy_truth_snapshot_from_broker(
     )
 
 
-def _build_standard_lane_restart_fixture(tmp_path: Path):
+def _build_standard_lane_restart_fixture(tmp_path: Path, *, lane_id: str = "mgc_us_late_pause_resume_long"):
     settings = _build_probationary_paper_settings(tmp_path)
-    spec = next(spec for spec in _load_probationary_paper_lane_specs(settings) if spec.lane_id == "mgc_us_late_pause_resume_long")
+    spec = next(spec for spec in _load_probationary_paper_lane_specs(settings) if spec.lane_id == lane_id)
     lane_settings = _build_probationary_paper_lane_settings(settings, spec)
     repositories = RepositorySet(build_engine(lane_settings.database_url))
     lane_logger = StructuredLogger(lane_settings.probationary_artifacts_path)
@@ -3156,6 +3159,197 @@ def test_restore_startup_stale_pending_marker_safely_cleans_up(tmp_path: Path, m
     assert payload["safe_cleanup_applied"] is True
     assert restart_engine.state.open_broker_order_id is None
     assert restart_engine.state.reconcile_required is False
+
+
+def _clean_pl_track_b_reconciliation_report(**overrides: object) -> dict[str, object]:
+    report: dict[str, object] = {
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+        "broker_reconciled": True,
+        "review_required_count": 0,
+        "track_b_broker_open_order_count": 0,
+        "lifecycle_open_order_count": 0,
+        "track_b_broker_position_count": 1,
+        "lifecycle_open_position_count": 1,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "blockers": [],
+        "position_match_report": {
+            "state": "BROKER_AND_LIFECYCLE_OPEN_MATCHED",
+            "matched": True,
+            "matches": [
+                {
+                    "root": "PL",
+                    "quantity": "1.0",
+                    "broker_local_symbol": "PLN6",
+                    "lifecycle_local_symbol": "PLN6",
+                    "broker_position": {
+                        "account_id": "DUM882026",
+                        "average_cost": "104312.52",
+                        "expiry": "20260729",
+                        "local_symbol": "PLN6",
+                        "multiplier": "50",
+                        "quantity": "1.0",
+                        "symbol": "PL",
+                        "track_b_root": "PL",
+                        "updated_at": "2026-05-14T18:05:57.382753+00:00",
+                    },
+                    "lifecycle_position": {
+                        "account_id": None,
+                        "as_of": "2026-05-14T18:06:05.665293+00:00",
+                        "avg_entry_price": "2086.2",
+                        "con_id": 644855286,
+                        "contract_key": "PL-202607",
+                        "entry_broker_identity": {
+                            "account_id": None,
+                            "broker_order_id": "1",
+                            "client_id": 11047,
+                            "con_id": 644855286,
+                            "exec_id": "0000e1a7.6a0ad9a2.01.01",
+                            "local_symbol": "PLN6",
+                            "perm_id": 984273950,
+                        },
+                        "entry_client_id": 11047,
+                        "entry_exec_id": "0000e1a7.6a0ad9a2.01.01",
+                        "entry_order_id": "1",
+                        "entry_perm_id": 984273950,
+                        "instrument_family": "PL",
+                        "lifecycle_id": "bridge_fill_PL|1m|2026-05-14T17:52:00Z|BUY_TO_OPEN",
+                        "local_symbol": "PLN6",
+                        "open_order_count": 0,
+                        "position_key": "PL-202607",
+                        "quantity": "1",
+                        "review_required": False,
+                        "side": "LONG",
+                        "strategy_id": "pl_us_late_pause_resume_long_turn__PL",
+                        "track_b_root": "PL",
+                    },
+                }
+            ],
+        },
+    }
+    for dotted_key, value in overrides.items():
+        if dotted_key == "lifecycle_con_id":
+            report["position_match_report"]["matches"][0]["lifecycle_position"]["con_id"] = value  # type: ignore[index]
+        elif dotted_key == "lifecycle_quantity":
+            report["position_match_report"]["matches"][0]["lifecycle_position"]["quantity"] = value  # type: ignore[index]
+        elif dotted_key == "broker_quantity":
+            report["position_match_report"]["matches"][0]["broker_position"]["quantity"] = value  # type: ignore[index]
+        elif dotted_key == "lifecycle_side":
+            report["position_match_report"]["matches"][0]["lifecycle_position"]["side"] = value  # type: ignore[index]
+        elif dotted_key == "open_orders":
+            report["track_b_broker_open_order_count"] = value
+        else:
+            report[dotted_key] = value
+    return report
+
+
+def test_track_b_restore_plan_requires_clean_exact_reconciliation() -> None:
+    plan = _track_b_reconciled_open_position_restore_plan_from_report(
+        _clean_pl_track_b_reconciliation_report(),
+        lane_id="pl_us_late_pause_resume_long",
+        symbol="PL",
+    )
+    assert plan is not None
+    assert plan.con_id == 644855286
+    assert plan.quantity == 1
+    assert plan.side is PositionSide.LONG
+    assert plan.entry_price == Decimal("2086.2")
+
+    assert (
+        _track_b_reconciled_open_position_restore_plan_from_report(
+            _clean_pl_track_b_reconciliation_report(open_orders=1),
+            lane_id="pl_us_late_pause_resume_long",
+            symbol="PL",
+        )
+        is None
+    )
+    assert (
+        _track_b_reconciled_open_position_restore_plan_from_report(
+            _clean_pl_track_b_reconciliation_report(broker_quantity="2.0"),
+            lane_id="pl_us_late_pause_resume_long",
+            symbol="PL",
+        )
+        is None
+    )
+    assert (
+        _track_b_reconciled_open_position_restore_plan_from_report(
+            _clean_pl_track_b_reconciliation_report(live_money_eligible=True),
+            lane_id="pl_us_late_pause_resume_long",
+            symbol="PL",
+        )
+        is None
+    )
+
+
+def test_restore_startup_accepts_clean_track_b_matched_open_position(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings, _spec, _lane_settings, repositories, lane_logger, build_runtime = _build_standard_lane_restart_fixture(
+        tmp_path,
+        lane_id="pl_us_late_pause_resume_long",
+    )
+    fill_ts = datetime(2026, 5, 14, 17, 52, 40, 510439, tzinfo=timezone.utc)
+    intent = OrderIntent(
+        order_intent_id="PL|1m|2026-05-14T17:52:00Z|BUY_TO_OPEN",
+        bar_id="PL|1m|2026-05-14T17:52:00Z",
+        symbol="PL",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=fill_ts,
+        reason_code="usLatePauseResumeLongTurn",
+    )
+    repositories.order_intents.save(intent, order_status=OrderStatus.FILLED, broker_order_id="1")
+    repositories.fills.save(
+        FillEvent(
+            order_intent_id=intent.order_intent_id,
+            intent_type=OrderIntentType.BUY_TO_OPEN,
+            order_status=OrderStatus.FILLED,
+            fill_timestamp=fill_ts,
+            fill_price=Decimal("2086.2"),
+            broker_order_id="1",
+        )
+    )
+    lane_runtime, restart_engine, _restart_execution_engine = build_runtime()
+    plan = _track_b_reconciled_open_position_restore_plan_from_report(
+        _clean_pl_track_b_reconciliation_report(),
+        lane_id="pl_us_late_pause_resume_long",
+        symbol="PL",
+    )
+    assert plan is not None
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_load_track_b_reconciled_open_position_restore_plan",
+        lambda **_kwargs: plan,
+    )
+
+    startup_fault = lane_runtime.restore_startup()
+    payload = json.loads((lane_logger.artifact_dir / "restore_validation_latest.json").read_text(encoding="utf-8"))
+
+    assert startup_fault is None
+    assert payload["restore_result"] == "MANAGING_EXISTING_OPEN_POSITION"
+    assert payload["manual_action_required"] is False
+    assert restart_engine.state.strategy_status is StrategyStatus.IN_LONG_K
+    assert restart_engine.state.position_side is PositionSide.LONG
+    assert restart_engine.state.internal_position_qty == 1
+    assert restart_engine.state.broker_position_qty == 1
+    assert restart_engine.state.reconcile_required is False
+    assert restart_engine.state.fault_code is None
+    assert len(restart_engine.state.open_entry_legs) == 1
+
+
+def test_runtime_pidfile_replaces_dead_stale_pid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    artifact_dir = tmp_path / "paper_artifacts" / "lanes" / "pl_us_late_pause_resume_long"
+    stale_pidfile = tmp_path / "paper_artifacts" / "runtime" / "probationary_paper.pid"
+    stale_pidfile.parent.mkdir(parents=True, exist_ok=True)
+    stale_pidfile.write_text("999999\n", encoding="utf-8")
+    monkeypatch.setattr(probationary_runtime_module, "_process_running", lambda pid: False)
+
+    status = _write_current_probationary_runtime_pidfile(artifact_dir, pid=12345)
+
+    assert stale_pidfile.read_text(encoding="utf-8") == "12345\n"
+    assert status["previous_pid"] == 999999
+    assert status["stale_pidfile_replaced"] is True
+    assert _process_running(-1) is False
 
 
 def test_restore_startup_unresolved_mismatch_escalates_to_reconciling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

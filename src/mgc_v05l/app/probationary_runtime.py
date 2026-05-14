@@ -44,7 +44,7 @@ from ..domain.enums import (
     StrategyStatus,
 )
 from ..domain.exceptions import DeterminismError
-from ..domain.models import Bar, HealthSnapshot
+from ..domain.models import Bar, HealthSnapshot, StrategyEntryLeg
 from ..execution.execution_engine import ExecutionEngine, PendingExecution
 from ..execution.ibkr_paper_strategy_bridge import (
     IbkrPaperStrategyBridgeConfig,
@@ -458,6 +458,9 @@ APPROVED_QUANT_POINT_VALUES: dict[str, Decimal] = {
     "6E": Decimal("125000"),
     "6J": Decimal("12500000"),
 }
+TRACK_B_PAPER_RECONCILED_CLASSIFICATION = "TRACK_B_PAPER_BROKER_RECONCILED"
+TRACK_B_RECONCILED_RESTORE_ADJUSTMENT = "restore_open_position_from_clean_track_b_broker_reconciliation"
+TRACK_B_RECONCILED_RESTORE_RESULT = "MANAGING_EXISTING_OPEN_POSITION"
 
 
 def _atp_us_late_overlay_abort_reasons(
@@ -3722,11 +3725,15 @@ class ProbationaryPaperLaneRuntime:
         }
 
     def _write_startup_phase_marker(self, phase: str, **extras: Any) -> None:
+        pidfile_status = _write_current_probationary_runtime_pidfile(self.structured_logger.artifact_dir)
         payload = {
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "lane_id": self.spec.lane_id,
             "display_name": self.spec.display_name,
             "phase": phase,
+            "pid": os.getpid(),
+            "cwd": str(Path.cwd()),
+            "pidfile": pidfile_status,
             **extras,
         }
         path = self.structured_logger.artifact_dir / "startup_phase.json"
@@ -3797,6 +3804,35 @@ class ProbationaryPaperLaneRuntime:
         if adoption is not None:
             restore_adjustments.append("adopt_ibkr_bridge_position_for_exit_management")
             self._write_startup_phase_marker("broker_position_adopted_for_exit_management", adoption=adoption)
+        track_b_restore = None
+        if (
+            self.strategy_engine.state.reconcile_required
+            or self.strategy_engine.state.strategy_status is StrategyStatus.RECONCILING
+            or self.strategy_engine.state.position_side is PositionSide.FLAT
+            or self.strategy_engine.state.fault_code == "reconciliation_fill_ack_uncertainty"
+        ):
+            track_b_plan = _load_track_b_reconciled_open_position_restore_plan(
+                repo_root=Path(__file__).resolve().parents[3],
+                lane_id=self.spec.lane_id,
+                symbol=self.spec.symbol,
+                expected_strategy_ids=(
+                    self.spec.standalone_strategy_id,
+                    self.spec.strategy_identity_root,
+                    self.spec.shared_strategy_identity,
+                ),
+            )
+            if track_b_plan is not None:
+                track_b_restore = _restore_open_position_from_track_b_reconciliation(
+                    repositories=self.repositories,
+                    strategy_engine=self.strategy_engine,
+                    execution_engine=self.execution_engine,
+                    plan=track_b_plan,
+                )
+                restore_adjustments.append(TRACK_B_RECONCILED_RESTORE_ADJUSTMENT)
+                self._write_startup_phase_marker(
+                    "restored_open_position_from_clean_track_b_broker_reconciliation",
+                    track_b_restore=track_b_restore,
+                )
         if (
             self.spec.lane_mode == PAPER_EXECUTION_CANARY_MODE
             and self.strategy_engine.state.operator_halt
@@ -16673,6 +16709,352 @@ def _is_terminal_broker_order_status(status: object) -> bool:
     return str(status or "").strip().upper() in {"CANCELLED", "CANCELED", "REJECTED", "FILLED", "EXPIRED"}
 
 
+def _probationary_runtime_pidfile_for_artifact_dir(artifact_dir: Path) -> Path:
+    if artifact_dir.parent.name == "lanes":
+        return artifact_dir.parent.parent / "runtime" / "probationary_paper.pid"
+    return artifact_dir / "runtime" / "probationary_paper.pid"
+
+
+def _process_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _write_current_probationary_runtime_pidfile(artifact_dir: Path, *, pid: int | None = None) -> dict[str, Any]:
+    current_pid = int(pid or os.getpid())
+    pidfile_path = _probationary_runtime_pidfile_for_artifact_dir(artifact_dir)
+    previous_pid: int | None = None
+    try:
+        previous_text = pidfile_path.read_text(encoding="utf-8").strip()
+        previous_pid = int(previous_text) if previous_text else None
+    except (OSError, ValueError):
+        previous_pid = None
+    previous_running = _process_running(previous_pid) if previous_pid is not None else None
+    pidfile_path.parent.mkdir(parents=True, exist_ok=True)
+    pidfile_path.write_text(f"{current_pid}\n", encoding="utf-8")
+    return {
+        "path": str(pidfile_path),
+        "current_pid": current_pid,
+        "previous_pid": previous_pid,
+        "previous_pid_running": previous_running,
+        "stale_pidfile_replaced": previous_pid is not None and previous_pid != current_pid and previous_running is False,
+    }
+
+
+@dataclass(frozen=True)
+class _TrackBReconciledOpenPositionRestorePlan:
+    lifecycle_id: str
+    order_intent_id: str
+    signal_bar_id: str
+    strategy_id: str | None
+    lane_id: str
+    symbol: str
+    local_symbol: str | None
+    expiry: str | None
+    con_id: int | None
+    account_id: str | None
+    side: PositionSide
+    quantity: int
+    entry_price: Decimal
+    fill_timestamp: datetime
+    broker_order_id: str | None = None
+    client_id: int | None = None
+    perm_id: int | None = None
+    exec_id: str | None = None
+
+
+def _parse_track_b_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _decimal_from_any(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except Exception:
+        return None
+
+
+def _int_from_any(value: object) -> int | None:
+    decimal_value = _decimal_from_any(value)
+    if decimal_value is None:
+        return None
+    try:
+        return int(decimal_value)
+    except Exception:
+        return None
+
+
+def _strategy_id_matches_lane(strategy_id: object, lane_id: str, expected_strategy_ids: Sequence[str]) -> bool:
+    text = str(strategy_id or "").strip()
+    if not text:
+        return False
+    expected = {str(item).strip() for item in expected_strategy_ids if str(item).strip()}
+    expected.add(str(lane_id).strip())
+    if text in expected:
+        return True
+    return bool(lane_id and text.startswith(f"{lane_id}_"))
+
+
+def _lifecycle_signal_bar_id(lifecycle_id: str) -> str:
+    parts = lifecycle_id.split("|")
+    if len(parts) >= 3:
+        return "|".join(parts[:3])
+    return lifecycle_id
+
+
+def _track_b_restore_report_is_clean(report: dict[str, Any]) -> bool:
+    classification = str(report.get("classification") or "").strip()
+    if classification != TRACK_B_PAPER_RECONCILED_CLASSIFICATION:
+        return False
+    if report.get("broker_reconciled") is not True:
+        return False
+    if bool(report.get("live_money_eligible")):
+        return False
+    if bool(report.get("paper_proof_invoked")):
+        return False
+    numeric_zero_fields = (
+        "review_required_count",
+        "track_b_broker_open_order_count",
+        "lifecycle_open_order_count",
+    )
+    for field_name in numeric_zero_fields:
+        if report.get(field_name) is None:
+            return False
+        if int(_decimal_from_any(report.get(field_name)) or Decimal("0")) != 0:
+            return False
+    if report.get("blockers"):
+        return False
+    return True
+
+
+def _track_b_reconciled_open_position_restore_plan_from_report(
+    report: dict[str, Any],
+    *,
+    lane_id: str,
+    symbol: str,
+    expected_strategy_ids: Sequence[str] = (),
+) -> _TrackBReconciledOpenPositionRestorePlan | None:
+    if not _track_b_restore_report_is_clean(report):
+        return None
+    match_report = report.get("position_match_report") if isinstance(report.get("position_match_report"), dict) else {}
+    if str(match_report.get("state") or "") != "BROKER_AND_LIFECYCLE_OPEN_MATCHED":
+        return None
+    matches = match_report.get("matches") if isinstance(match_report.get("matches"), list) else []
+    normalized_symbol = str(symbol or "").strip().upper()
+    for row in matches:
+        if not isinstance(row, dict):
+            continue
+        broker_position = row.get("broker_position") if isinstance(row.get("broker_position"), dict) else {}
+        lifecycle_position = row.get("lifecycle_position") if isinstance(row.get("lifecycle_position"), dict) else {}
+        lifecycle_root = str(lifecycle_position.get("track_b_root") or lifecycle_position.get("instrument_family") or "").upper()
+        broker_root = str(broker_position.get("track_b_root") or broker_position.get("symbol") or row.get("root") or "").upper()
+        if normalized_symbol and {lifecycle_root, broker_root} - {normalized_symbol}:
+            continue
+        strategy_id = lifecycle_position.get("strategy_id")
+        if not _strategy_id_matches_lane(strategy_id, lane_id, expected_strategy_ids):
+            continue
+        side_text = str(lifecycle_position.get("side") or "").strip().upper()
+        if side_text not in {"LONG", "SHORT"}:
+            continue
+        side = PositionSide.LONG if side_text == "LONG" else PositionSide.SHORT
+        lifecycle_quantity = _decimal_from_any(lifecycle_position.get("quantity"))
+        broker_quantity = _decimal_from_any(broker_position.get("quantity"))
+        match_quantity = _decimal_from_any(row.get("quantity"))
+        if lifecycle_quantity is None or broker_quantity is None or match_quantity is None:
+            continue
+        expected_signed_quantity = lifecycle_quantity if side is PositionSide.LONG else -lifecycle_quantity
+        if broker_quantity != expected_signed_quantity or match_quantity != lifecycle_quantity:
+            continue
+        quantity = int(abs(lifecycle_quantity))
+        if quantity <= 0:
+            continue
+        lifecycle_local_symbol = str(lifecycle_position.get("local_symbol") or "").strip()
+        broker_local_symbol = str(broker_position.get("local_symbol") or "").strip()
+        if lifecycle_local_symbol and broker_local_symbol and lifecycle_local_symbol != broker_local_symbol:
+            continue
+        lifecycle_expiry = str(lifecycle_position.get("contract_key") or lifecycle_position.get("expiry") or "").strip()
+        broker_expiry = str(broker_position.get("expiry") or "").strip()
+        con_id = _int_from_any(lifecycle_position.get("con_id"))
+        broker_con_id = _int_from_any(broker_position.get("con_id"))
+        if broker_con_id is not None and con_id is not None and broker_con_id != con_id:
+            continue
+        entry_price = _decimal_from_any(lifecycle_position.get("avg_entry_price"))
+        if entry_price is None:
+            continue
+        lifecycle_id = str(lifecycle_position.get("lifecycle_id") or "").strip()
+        if not lifecycle_id:
+            continue
+        identity = lifecycle_position.get("entry_broker_identity")
+        if not isinstance(identity, dict):
+            identity = {}
+        fill_timestamp = (
+            _parse_track_b_timestamp(lifecycle_position.get("entry_fill_time"))
+            or _parse_track_b_timestamp(identity.get("fill_timestamp"))
+            or _parse_track_b_timestamp(lifecycle_position.get("as_of"))
+            or datetime.now(timezone.utc)
+        )
+        return _TrackBReconciledOpenPositionRestorePlan(
+            lifecycle_id=lifecycle_id,
+            order_intent_id=lifecycle_id.replace("bridge_fill_", "", 1),
+            signal_bar_id=_lifecycle_signal_bar_id(lifecycle_id.replace("bridge_fill_", "", 1)),
+            strategy_id=str(strategy_id) if strategy_id is not None else None,
+            lane_id=lane_id,
+            symbol=normalized_symbol,
+            local_symbol=lifecycle_local_symbol or broker_local_symbol or None,
+            expiry=broker_expiry or lifecycle_expiry or None,
+            con_id=con_id,
+            account_id=str(broker_position.get("account_id") or lifecycle_position.get("account_id") or "").strip() or None,
+            side=side,
+            quantity=quantity,
+            entry_price=entry_price,
+            fill_timestamp=fill_timestamp,
+            broker_order_id=str(identity.get("broker_order_id") or lifecycle_position.get("entry_order_id") or "").strip()
+            or None,
+            client_id=_int_from_any(identity.get("client_id") or lifecycle_position.get("entry_client_id")),
+            perm_id=_int_from_any(identity.get("perm_id") or lifecycle_position.get("entry_perm_id")),
+            exec_id=str(identity.get("exec_id") or lifecycle_position.get("entry_exec_id") or "").strip() or None,
+        )
+    return None
+
+
+def _load_track_b_reconciled_open_position_restore_plan(
+    *,
+    repo_root: Path,
+    lane_id: str,
+    symbol: str,
+    expected_strategy_ids: Sequence[str] = (),
+) -> _TrackBReconciledOpenPositionRestorePlan | None:
+    path = (
+        repo_root
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(report, dict):
+        return None
+    return _track_b_reconciled_open_position_restore_plan_from_report(
+        report,
+        lane_id=lane_id,
+        symbol=symbol,
+        expected_strategy_ids=expected_strategy_ids,
+    )
+
+
+def _restore_open_position_from_track_b_reconciliation(
+    *,
+    repositories: RepositorySet,
+    strategy_engine: StrategyEngine,
+    execution_engine: ExecutionEngine,
+    plan: _TrackBReconciledOpenPositionRestorePlan,
+) -> dict[str, Any]:
+    fill_rows = repositories.fills.list_all()
+    matching_fill = max(
+        (
+            row
+            for row in fill_rows
+            if str(row.get("order_intent_id") or "") in {plan.order_intent_id, plan.lifecycle_id}
+        ),
+        key=lambda row: str(row.get("fill_timestamp") or ""),
+        default=None,
+    )
+    fill_timestamp = _parse_track_b_timestamp((matching_fill or {}).get("fill_timestamp")) or plan.fill_timestamp
+    fill_price = _decimal_from_any((matching_fill or {}).get("fill_price")) or plan.entry_price
+    broker_order_id = str((matching_fill or {}).get("broker_order_id") or plan.broker_order_id or "").strip() or None
+    long_entry_family = LongEntryFamily.K if plan.side is PositionSide.LONG else LongEntryFamily.NONE
+    short_entry_family = ShortEntryFamily.FAILED_MOVE_REVERSAL_SHORT if plan.side is PositionSide.SHORT else ShortEntryFamily.NONE
+    leg = StrategyEntryLeg(
+        leg_id=f"{plan.order_intent_id}:track_b_reconciled_restore",
+        order_intent_id=plan.order_intent_id,
+        quantity=plan.quantity,
+        entry_price=fill_price,
+        entry_timestamp=fill_timestamp,
+        signal_bar_id=plan.signal_bar_id,
+        position_side=plan.side,
+        long_entry_family=long_entry_family,
+        short_entry_family=short_entry_family,
+    )
+    signed_quantity = plan.quantity if plan.side is PositionSide.LONG else -plan.quantity
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        strategy_status=StrategyStatus.IN_LONG_K if plan.side is PositionSide.LONG else StrategyStatus.IN_SHORT_K,
+        position_side=plan.side,
+        broker_position_qty=signed_quantity,
+        internal_position_qty=signed_quantity,
+        entry_price=fill_price,
+        entry_timestamp=fill_timestamp,
+        entry_bar_id=plan.signal_bar_id,
+        long_entry_family=long_entry_family,
+        short_entry_family=short_entry_family,
+        bars_in_trade=0,
+        last_order_intent_id=plan.order_intent_id,
+        open_broker_order_id=None,
+        entries_enabled=not strategy_engine.state.operator_halt,
+        exits_enabled=True,
+        reconcile_required=False,
+        fault_code=None,
+        updated_at=datetime.now(timezone.utc),
+        open_entry_legs=(leg,),
+    )
+    strategy_engine._persist_state(  # noqa: SLF001
+        strategy_engine.state,
+        transition_label=TRACK_B_RECONCILED_RESTORE_ADJUSTMENT,
+    )
+    broker = execution_engine.broker
+    if isinstance(broker, (PaperBroker, _IbkrPaperBridgeRuntimeBroker)):
+        broker.restore_state(
+            position=PaperPosition(quantity=signed_quantity, average_price=fill_price),
+            open_order_ids=[],
+            order_status={},
+            last_fill_timestamp=fill_timestamp,
+        )
+    return {
+        "lifecycle_id": plan.lifecycle_id,
+        "order_intent_id": plan.order_intent_id,
+        "strategy_id": plan.strategy_id,
+        "lane_id": plan.lane_id,
+        "symbol": plan.symbol,
+        "local_symbol": plan.local_symbol,
+        "expiry": plan.expiry,
+        "con_id": plan.con_id,
+        "account_id": plan.account_id,
+        "side": plan.side.value,
+        "quantity": plan.quantity,
+        "entry_price": str(fill_price),
+        "fill_timestamp": fill_timestamp.isoformat(),
+        "broker_order_id": broker_order_id,
+        "client_id": plan.client_id,
+        "perm_id": plan.perm_id,
+        "exec_id": plan.exec_id,
+        "source": TRACK_B_PAPER_RECONCILED_CLASSIFICATION,
+    }
+
+
 def _restore_validation_state_snapshot(
     *,
     repositories: RepositorySet,
@@ -16748,6 +17130,8 @@ def _restore_validation_result_label(
         return "FAULT"
     if strategy_engine.state.reconcile_required or strategy_engine.state.strategy_status is StrategyStatus.RECONCILING:
         return "RECONCILING"
+    if TRACK_B_RECONCILED_RESTORE_ADJUSTMENT in set(restore_adjustments):
+        return TRACK_B_RECONCILED_RESTORE_RESULT
     if classification == RECONCILIATION_CLASS_SAFE_REPAIR or restore_adjustments:
         return "SAFE_CLEANUP_READY"
     return "READY"
@@ -16803,7 +17187,9 @@ def _record_restore_validation(
         "safe_cleanup_applied": bool(safe_cleanup_actions),
         "safe_cleanup_actions": safe_cleanup_actions,
         "recommended_action": reconciliation.get("recommended_action") or (
-            "No action needed." if result_label in {"READY", "SAFE_CLEANUP_READY"} else "Inspect restore state before resuming entries."
+            "No action needed."
+            if result_label in {"READY", "SAFE_CLEANUP_READY", TRACK_B_RECONCILED_RESTORE_RESULT}
+            else "Inspect restore state before resuming entries."
         ),
         "manual_action_required": result_label in {"RECONCILING", "FAULT"},
         "unresolved_restore_issue": result_label in {"RECONCILING", "FAULT"},
@@ -16870,6 +17256,18 @@ def _record_restore_validation(
             payload=payload,
             dedup_key=dedup_key,
             recommended_action="No action needed; safe cleanup was applied automatically.",
+        )
+    elif result_label == TRACK_B_RECONCILED_RESTORE_RESULT:
+        alert_dispatcher.sync_condition(
+            code="paper_restore_managing_existing_open_position",
+            active=False,
+            severity="RECOVERY",
+            category="runtime_recovery",
+            title="Existing Open Position Restored",
+            message=f"{scope_label} accepted clean Track B broker/lifecycle reconciliation and resumed managing the open position.",
+            payload=payload,
+            dedup_key=dedup_key,
+            recommended_action="No action needed; runtime is managing the existing PAPER position.",
         )
     elif result_label == "RECONCILING":
         alert_dispatcher.sync_condition(
