@@ -10822,6 +10822,7 @@ class _IbkrPaperBridgeRuntimeBroker:
                 "bridge_classification": artifacts.classification,
                 "bridge_detail": report.get("detail"),
                 "bridge_gate_trace": list(report.get("preflight_checks") or []),
+                "exit_attempt_policy": dict(report.get("exit_attempt_policy") or {}),
             }
             if artifacts.classification not in {
                 "PAPER_STRATEGY_ORDER_FILLED",
@@ -11711,9 +11712,29 @@ def _runtime_bridge_config_for_lane(
             "bridge_proxy_mode": str(bridge_adapter.get("bridge_proxy_mode") or ""),
             "intent_action": action,
             "intent_type": order_intent.intent_type.value,
+            **_runtime_bridge_entry_execution_metadata(bridge_adapter),
         },
         output_dir=repo_root / "outputs" / "reports" / "ibkr_runtime_route_dispatch" / str(lane_id),
     )
+
+
+def _runtime_bridge_entry_execution_metadata(bridge_adapter: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {
+        "entry_execution_intent",
+        "entry_execution_policy",
+        "entry_working_window_seconds",
+        "entry_fill_timeout_seconds",
+        "entry_pullback_offset_points",
+        "entry_pullback_offset_ticks",
+        "entry_chase_cap_points",
+        "entry_chase_cap_ticks",
+        "entry_execution_note",
+    }
+    return {
+        key: bridge_adapter[key]
+        for key in allowed_keys
+        if key in bridge_adapter and bridge_adapter[key] not in (None, "")
+    }
 
 
 def _runtime_bridge_action_and_limit_model(intent_type: OrderIntentType) -> tuple[str, str]:

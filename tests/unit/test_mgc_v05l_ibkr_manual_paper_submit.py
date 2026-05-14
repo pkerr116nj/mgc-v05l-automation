@@ -12,6 +12,7 @@ from mgc_v05l.execution.ibkr_manual_paper_submit import (
     _CLOSE_TEST_MODE,
     _FILL_TEST_MODE,
     _MANUAL_CONFIRMATION_WAIT_STATE,
+    _build_delayed_quote_pricing_context,
     _classify_submit_lifecycle,
     _configure_minimal_futures_limit_order,
     _detect_order_rejection,
@@ -510,6 +511,60 @@ def test_close_mode_derives_marketable_limit_below_delayed_bid() -> None:
     )
 
     assert limit_price == 4608.4
+
+
+def test_runtime_execution_pricing_context_makes_delayed_quote_diagnostic_only() -> None:
+    config = _config(
+        test_mode=_FILL_TEST_MODE,
+        limit_price=29752.25,
+        execution_pricing_context={
+            "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+            "runtime_last_or_close": 29752.0,
+            "runtime_candle_timestamp": "2026-05-14T12:25:00+00:00",
+            "runtime_data_age_seconds": 30.0,
+            "broker_quote_type": "delayed",
+            "delayed_ask": 29714.0,
+            "marketable_by_runtime_context": True,
+            "marketable_by_delayed_quote": True,
+            "live_money_eligible": False,
+        },
+    )
+    pricing_context = _build_delayed_quote_pricing_context(
+        config=config,
+        requested_order={
+            "symbol": "MNQ",
+            "expiry": "202606",
+            "action": "BUY",
+            "quantity": 1.0,
+            "order_type": "LMT",
+            "limit_price": 29752.25,
+            "time_in_force": "DAY",
+        },
+        context={
+            "quote_context": _quote_context(
+                updated_at="2026-05-14T12:25:20+00:00",
+                bid_price=29713.5,
+                ask_price=29714.0,
+                last_price=29713.75,
+            ),
+            "contract_report": {"api_contract_details": [{"min_tick": 0.25}]},
+        },
+    )
+
+    checks = _delayed_quote_pricing_guardrails(pricing_context)
+
+    assert pricing_context["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing_context["reference_price"] == 29752.0
+    assert pricing_context["reference_price_source"] == "runtime_last_or_close"
+    assert pricing_context["distance_ticks"] == 1.0
+    delayed_quote_available = next(row for row in checks if row["name"] == "delayed_quote_available")
+    delayed_quote_fresh = next(row for row in checks if row["name"] == "delayed_quote_fresh")
+    runtime_source = next(row for row in checks if row["name"] == "runtime_execution_price_source")
+    marketable = next(row for row in checks if row["name"] == "marketable_limit_intended_to_fill")
+    assert delayed_quote_available["blocking"] is False
+    assert delayed_quote_fresh["blocking"] is False
+    assert runtime_source["passed"] is True
+    assert marketable["passed"] is True
 
 
 def test_exact_contract_position_quantity_matches_local_symbol_and_expiry() -> None:
@@ -1333,7 +1388,8 @@ def _config(
     test_mode: str = "PAPER_RESTING_TEST",
     output_dir: Path | None = None,
     frozen_preview_path: Path | None = None,
-    fill_timeout_seconds: float = 8.0,
+    fill_timeout_seconds: float = 60.0,
+    execution_pricing_context: dict[str, object] | None = None,
 ) -> IbkrManualPaperSubmitConfig:
     return IbkrManualPaperSubmitConfig(
         repo_root=Path("."),
@@ -1357,6 +1413,7 @@ def _config(
         approval_phrase=approval_phrase,
         output_dir=output_dir,
         frozen_preview_path=frozen_preview_path,
+        execution_pricing_context=execution_pricing_context,
     )
 
 

@@ -51,6 +51,7 @@ from .ibkr_position_reconciliation import (
 )
 from .ibkr_read_only_verifier import _wait_for_connection_ready, IbkrReadOnlyApiTransportConfig
 from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
+from ..execution_core.track_b_exit_safety import ExitAttemptPolicy, classify_exit_attempt_policy
 
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
@@ -82,6 +83,44 @@ _ALLOWED_LIMIT_PRICE_MODELS = {
     "DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
     "DELAYED_BID_MINUS_1T_RESTING_BUY",
 }
+_ENTRY_MARKETABLE_LIMIT_MODELS = {
+    "DELAYED_ASK_PLUS_1T_MARKETABLE_BUY",
+    "DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+}
+_ENTRY_POLICY_PASSIVE_LIMIT = "PASSIVE_LIMIT"
+_ENTRY_POLICY_MARKETABLE_RUNTIME = "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE"
+_ENTRY_POLICY_AGGRESSIVE_WITH_CAP = "AGGRESSIVE_ENTRY_LIMIT_WITH_CAP"
+_ENTRY_POLICY_BLOCK_IF_ONLY_DELAYED = "BLOCK_IF_ONLY_DELAYED_QUOTE"
+_ENTRY_INTENT_PARTICIPATE_NOW = "PARTICIPATE_NOW"
+_ENTRY_INTENT_RESTING_PULLBACK_LIMIT = "RESTING_PULLBACK_LIMIT"
+_ENTRY_INTENT_DYNAMIC_LIMIT_WITH_CHASE_CAP = "DYNAMIC_LIMIT_WITH_CHASE_CAP"
+_ENTRY_INTENT_PASSIVE_ONLY = "PASSIVE_ONLY"
+_ENTRY_EXECUTION_INTENTS = {
+    _ENTRY_INTENT_PARTICIPATE_NOW,
+    _ENTRY_INTENT_RESTING_PULLBACK_LIMIT,
+    _ENTRY_INTENT_DYNAMIC_LIMIT_WITH_CHASE_CAP,
+    _ENTRY_INTENT_PASSIVE_ONLY,
+}
+_ENTRY_RUNTIME_PRICE_SOURCE = "RUNTIME_DATABENTO_1M_CLOSE"
+_ENTRY_DELAYED_DIAGNOSTIC_SOURCE = "IBKR_DELAYED_DIAGNOSTIC_ONLY"
+_ENTRY_STRATEGY_DEFINED_LIMIT_SOURCE = "STRATEGY_DEFINED_ENTRY_LIMIT"
+_ENTRY_RESTING_RUNTIME_PULLBACK_SOURCE = "RUNTIME_DATABENTO_1M_PULLBACK_LIMIT"
+_ENTRY_RUNTIME_CANDLE_MAX_AGE_SECONDS = 180.0
+_ENTRY_RUNTIME_LIMIT_OFFSET_TICKS = 1.0
+_ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS = 2.0
+_ENTRY_MAX_LIMIT_OFFSET_TICKS = 4.0
+_ENTRY_PARTICIPATE_TIMEOUT_SECONDS = 60.0
+_ENTRY_DYNAMIC_TIMEOUT_SECONDS = 180.0
+_ENTRY_RESTING_TIMEOUT_SECONDS = 300.0
+_ENTRY_PASSIVE_TIMEOUT_SECONDS = 300.0
+_ENTRY_RUNTIME_CANDLE_PATH = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "phase1_runtime_market_data"
+    / "{symbol}"
+    / "1m"
+    / "latest_runtime_candles.json"
+)
 _SCHEMA_ACTIONS = {"BUY", "SELL", "HOLD", "EXIT", "NO_ACTION"}
 _ARTIFACT_STEM = "ibkr_paper_strategy_bridge"
 _APPROVED_RUNTIME_CALLER_PATHS = {
@@ -450,6 +489,7 @@ def run_ibkr_paper_strategy_bridge(
         quantity=config.quantity,
         executable_symbol=config.symbol,
     )
+    bridge_audit_history = _load_bridge_audit_history(config.output_dir)
     runtime: _Runtime | None = None
     _record_bridge_audit(
         audit_events,
@@ -575,6 +615,27 @@ def run_ibkr_paper_strategy_bridge(
             positions_snapshot=positions,
             contract_report={"qualified_contract": qualified_contract_report.get("qualified_contract") or {}},
         )
+        phase1_gate = evaluate_phase1_broker_reconciliation_submit_gate(repo_root=config.repo_root)
+        exit_attempt_policy = _exit_attempt_policy_for_bridge(
+            config=config,
+            intent=intent,
+            history_events=bridge_audit_history,
+            current_position_quantity=current_position_quantity,
+            open_orders=open_orders,
+            phase1_gate=phase1_gate,
+        )
+        entry_attempt_memory = _build_entry_attempt_memory(
+            history_events=bridge_audit_history,
+            config=config,
+            intent=intent,
+        )
+        entry_execution_pricing = _entry_execution_pricing_for_bridge(
+            config=config,
+            intent=intent,
+            quote_context=quote_context,
+            qualified_contract_report=qualified_contract_report,
+            entry_attempt_memory=entry_attempt_memory,
+        )
         dynamic_checks = _build_preflight_checks(
             config=config,
             intent=intent,
@@ -585,6 +646,8 @@ def run_ibkr_paper_strategy_bridge(
             exact_contract_report=exact_contract_report,
             qualified_contract_report=qualified_contract_report,
             audit_events=audit_events,
+            exit_attempt_policy=exit_attempt_policy,
+            entry_execution_pricing=entry_execution_pricing,
         )
         preflight_checks = [*static_checks, *dynamic_checks]
         blocking_failures = [row for row in preflight_checks if row.get("blocking") and not row.get("passed")]
@@ -619,6 +682,9 @@ def run_ibkr_paper_strategy_bridge(
                 preflight_checks=preflight_checks,
                 prepared_submit_bundle=None,
                 delegated_result=None,
+                exit_attempt_policy=exit_attempt_policy,
+                entry_attempt_memory=entry_attempt_memory,
+                entry_execution_pricing=entry_execution_pricing,
                 callback_timeline_event_count=len(_build_callback_timeline(runtime)),
                 errors=list(runtime.collector.errors),
             )
@@ -635,7 +701,12 @@ def run_ibkr_paper_strategy_bridge(
             extra={"current_position_quantity": current_position_quantity},
         )
         if config.prepare_manual_submit_bundle:
-            prepared_submit_bundle = _prepare_manual_submit_bundle(config=config, intent=intent)
+            prepared_submit_bundle = _prepare_manual_submit_bundle(
+                config=config,
+                intent=intent,
+                exit_attempt_policy=exit_attempt_policy,
+                entry_execution_pricing=entry_execution_pricing,
+            )
             _record_bridge_audit(
                 audit_events,
                 event_type="manual_submit_bundle_prepared",
@@ -644,12 +715,15 @@ def run_ibkr_paper_strategy_bridge(
                 extra={
                     "bundle_path": prepared_submit_bundle.get("frozen_preview_path"),
                     "preview_digest": prepared_submit_bundle.get("preview_digest"),
+                    "entry_execution_pricing": entry_execution_pricing,
                 },
             )
         if config.submit:
             delegated_result = _delegate_to_manual_harness(
                 config=config,
                 intent=intent,
+                exit_attempt_policy=exit_attempt_policy,
+                entry_execution_pricing=entry_execution_pricing,
             )
             classification = _map_delegate_classification(delegated_result)
             _record_bridge_audit(
@@ -657,7 +731,14 @@ def run_ibkr_paper_strategy_bridge(
                 event_type="delegated_manual_harness_completed",
                 detail="Paper strategy bridge delegated to the proven manual paper harness.",
                 config=config,
-                extra={"delegated_classification": delegated_result.get("classification")},
+                extra={
+                    "delegated_classification": delegated_result.get("classification"),
+                    "exit_attempt_policy": exit_attempt_policy.to_json_dict(),
+                    "entry_attempt_memory": entry_attempt_memory,
+                    "entry_execution_pricing": entry_execution_pricing,
+                    "caller_metadata": dict(config.caller_metadata or {}),
+                    "intent": intent.to_dict(),
+                },
             )
         report = _build_report(
             config=config,
@@ -680,6 +761,9 @@ def run_ibkr_paper_strategy_bridge(
             preflight_checks=preflight_checks,
             prepared_submit_bundle=prepared_submit_bundle,
             delegated_result=delegated_result,
+            exit_attempt_policy=exit_attempt_policy,
+            entry_attempt_memory=entry_attempt_memory,
+            entry_execution_pricing=entry_execution_pricing,
             callback_timeline_event_count=len(_build_callback_timeline(runtime)),
             errors=list(runtime.collector.errors),
         )
@@ -779,6 +863,8 @@ def render_ibkr_paper_strategy_bridge_markdown(report: dict[str, Any]) -> str:
     classification = str(report.get("classification") or "")
     if classification == "PAPER_STRATEGY_BRIDGE_READY":
         lines.append("- manual operator preflight passed and the paper strategy lane is ready for explicit operator-controlled submit through the shared IBKR paper bridge.")
+    elif classification == "PAPER_STRATEGY_ENTRY_MISSED_CANCELLED_ACCEPTED":
+        lines.append("- a passive/resting entry window ended without a fill; this is recorded as an accepted miss rather than a strategy execution failure.")
     elif classification == "PAPER_STRATEGY_INTENT_BLOCKED":
         lines.append("- preflight failed closed. Review the failing guardrails before attempting any paper submit.")
     else:
@@ -1016,14 +1102,40 @@ def _build_preflight_checks(
     exact_contract_report: dict[str, Any],
     qualified_contract_report: dict[str, Any],
     audit_events: list[dict[str, Any]],
+    exit_attempt_policy: ExitAttemptPolicy | None = None,
+    entry_execution_pricing: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    if exit_attempt_policy is None:
+        exit_attempt_policy = classify_exit_attempt_policy(
+            history_events=[],
+            lifecycle_id=None,
+            intent_type=str((config.caller_metadata or {}).get("intent_type") or "").strip().upper() or None,
+            action=intent.action,
+            hard_exit=False,
+            broker_position_quantity=current_position_quantity,
+            broker_reconciled=True,
+            open_order_count=int(open_orders.get("open_order_count") or 0),
+        )
+    pricing = dict(entry_execution_pricing or {})
+    runtime_pricing_source = (
+        str(pricing.get("execution_price_source") or "").strip().upper() == _ENTRY_RUNTIME_PRICE_SOURCE
+    )
     expected_target = _bridge_phase1_target(config=config, intent=intent)
     expected_label = _phase1_target_detail_label(expected_target)
     checks = [
         _check("account_match", selected_account_id == config.account_id == _EXPECTED_ACCOUNT_ID, True, "Paper bridge account must match DUM882026 exactly."),
         _check("daily_order_cap", _submitted_order_count(audit_events) < int(config.daily_order_cap), True, f"Daily bridge order cap is {config.daily_order_cap}."),
         _check("no_working_orders", int(open_orders.get("open_order_count") or 0) == 0, True, "No working broker order is allowed before a strategy bridge intent can submit."),
-        _check("delayed_quote_freshness", _quote_is_fresh(quote_context), True, "A fresh delayed quote is required before strategy bridge submit is allowed."),
+        _check(
+            "delayed_quote_freshness",
+            runtime_pricing_source or _quote_is_fresh(quote_context),
+            not runtime_pricing_source,
+            (
+                "Delayed broker quote freshness is diagnostic because runtime/Databento supplied the execution price."
+                if runtime_pricing_source
+                else "A fresh delayed quote is required before strategy bridge submit is allowed when no runtime execution price is selected."
+            ),
+        ),
         _check(
             "exact_qualified_contract",
             _qualified_contract_is_exact(qualified_contract_report, expected_target=expected_target),
@@ -1032,7 +1144,57 @@ def _build_preflight_checks(
         ),
         _check("strategy_allowed_state", True, True, "The bridge remains manual-only and the shadow ledger stays separate from broker execution."),
     ]
-    if intent.action == "BUY":
+    if _is_close_intent(config=config, intent=intent):
+        checks.append(
+            _check(
+                "broker_position_present_for_close",
+                not exit_attempt_policy.broker_flat,
+                True,
+                (
+                    "Broker truth shows an exact contract position available for this close intent."
+                    if not exit_attempt_policy.broker_flat
+                    else "Broker truth reports the exact contract already flat; no close order may be submitted."
+                ),
+            )
+        )
+        checks.append(
+            _check(
+                "broker_lifecycle_reconciled_for_exit",
+                not exit_attempt_policy.broker_lifecycle_mismatch,
+                True,
+                (
+                    "Broker/lifecycle reconciliation is clean for this close intent."
+                    if not exit_attempt_policy.broker_lifecycle_mismatch
+                    else "Broker/lifecycle reconciliation is not clean; close submission fails closed."
+                ),
+            )
+        )
+        checks.append(
+            _check(
+                "exit_attempt_policy_allows_submit",
+                not exit_attempt_policy.block_submit,
+                True,
+                exit_attempt_policy.block_reason
+                or f"Exit execution policy {exit_attempt_policy.execution_policy} allows guarded PAPER submit.",
+            )
+        )
+    else:
+        pricing = dict(entry_execution_pricing or {})
+        checks.append(
+            _check(
+                "entry_execution_price_source",
+                not bool(pricing.get("block_submit")),
+                True,
+                (
+                    str(pricing.get("block_reason") or "")
+                    or (
+                        f"Entry execution pricing uses {pricing.get('execution_price_source')} with runtime freshness diagnostics."
+                        if pricing
+                        else "Entry execution pricing is not required for this legacy preview-only route."
+                    )
+                ),
+            )
+        )
         checks.append(
             _check(
                 "position_gate_buy_to_open",
@@ -1041,21 +1203,17 @@ def _build_preflight_checks(
                 "BUY intents are governed by per-strategy exposure attribution; aggregate broker flat is not required when stacking is explicitly allowed.",
             )
         )
-    else:
-        checks.append(
-            _check(
-                "position_gate_sell_to_close",
-                True,
-                True,
-                "SELL and EXIT intents are governed by per-strategy exposure attribution; aggregate broker quantity alone is not treated as ownership proof.",
-            )
-        )
     _record_bridge_audit(
         audit_events,
         event_type="preflight_evaluated",
         detail="Paper strategy bridge preflight guardrails evaluated.",
         config=config,
-        extra={"checks": checks, "current_position_quantity": current_position_quantity, "exact_contract": exact_contract_report.get("exact_contract")},
+        extra={
+            "checks": checks,
+            "current_position_quantity": current_position_quantity,
+            "exact_contract": exact_contract_report.get("exact_contract"),
+            "entry_execution_pricing": entry_execution_pricing,
+        },
     )
     return checks
 
@@ -1390,6 +1548,8 @@ def _delegate_to_manual_harness(
     *,
     config: IbkrPaperStrategyBridgeConfig,
     intent: IbkrPaperStrategyOrderIntent,
+    exit_attempt_policy: ExitAttemptPolicy,
+    entry_execution_pricing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manual_frozen_preview_path = config.manual_frozen_preview_path
     approval_digest = config.approval_digest
@@ -1404,6 +1564,8 @@ def _delegate_to_manual_harness(
         prepared = _prepare_manual_submit_bundle(
             config=config,
             intent=intent,
+            exit_attempt_policy=exit_attempt_policy,
+            entry_execution_pricing=entry_execution_pricing,
             stack_provider=(lambda: []),
         )
         manual_frozen_preview_path = Path(str(prepared.get("frozen_preview_path") or ""))
@@ -1416,6 +1578,15 @@ def _delegate_to_manual_harness(
     test_mode = "PAPER_FILL_TEST" if intent.action == "BUY" else "PAPER_CLOSE_TEST"
     delegated_output_dir = (Path(config.output_dir) / "delegated_manual_harness") if config.output_dir is not None else None
     expected_target = _bridge_phase1_target(config=config, intent=intent)
+    limit_override = _entry_limit_override(entry_execution_pricing)
+    fill_timeout_seconds = _bridge_fill_timeout_seconds(
+        exit_attempt_policy=exit_attempt_policy,
+        entry_execution_pricing=entry_execution_pricing,
+    )
+    limit_offset_ticks = _bridge_limit_offset_ticks(
+        exit_attempt_policy=exit_attempt_policy,
+        entry_execution_pricing=entry_execution_pricing,
+    )
     manual_config = IbkrManualPaperSubmitConfig(
         repo_root=config.repo_root,
         mode=config.mode,
@@ -1428,13 +1599,13 @@ def _delegate_to_manual_harness(
         action=intent.action,
         quantity=float(intent.quantity),
         order_type=_EXPECTED_ORDER_TYPE,
-        limit_price=None,
+        limit_price=limit_override,
         time_in_force=_EXPECTED_TIF,
         test_mode=test_mode,
         timeout_seconds=float(config.timeout_seconds),
-        fill_timeout_seconds=8.0,
-        post_approval_observation_seconds=15.0,
-        fill_limit_offset_ticks=1.0,
+        fill_timeout_seconds=fill_timeout_seconds,
+        post_approval_observation_seconds=75.0,
+        fill_limit_offset_ticks=limit_offset_ticks,
         manual_confirmation_timeout_seconds=90.0,
         caller_path="manual_cli",
         submit=True,
@@ -1443,6 +1614,7 @@ def _delegate_to_manual_harness(
         output_dir=delegated_output_dir,
         frozen_preview_path=Path(manual_frozen_preview_path),
         diagnostic_dry_run=False,
+        execution_pricing_context=entry_execution_pricing if limit_override is not None else None,
     )
     manual_confirmation_fn = _supervised_runtime_manual_confirmation if supervised_runtime_route else None
     delegated = run_ibkr_manual_paper_submit_test(
@@ -1454,6 +1626,8 @@ def _delegate_to_manual_harness(
         "classification": delegated.classification,
         "detail": delegated.report.get("lifecycle", {}).get("detail"),
         "report": delegated.report,
+        "exit_attempt_policy": exit_attempt_policy.to_json_dict(),
+        "entry_execution_pricing": entry_execution_pricing,
     }
 
 
@@ -1482,6 +1656,8 @@ def _supervised_runtime_manual_confirmation(
 def _map_delegate_classification(delegated_result: dict[str, Any] | None) -> str:
     if not isinstance(delegated_result, dict):
         return "PAPER_STRATEGY_BRIDGE_READY"
+    entry_execution_pricing = dict(delegated_result.get("entry_execution_pricing") or {})
+    entry_intent = str(entry_execution_pricing.get("entry_execution_intent") or "").strip().upper()
     delegated_classification = str(delegated_result.get("classification") or "").strip().upper()
     delegated_report = dict(delegated_result.get("report") or {})
     delegated_lifecycle = dict(
@@ -1492,6 +1668,14 @@ def _map_delegate_classification(delegated_result: dict[str, Any] | None) -> str
     delegated_status = str(delegated_lifecycle.get("status") or "").strip().lower()
     if delegated_classification.endswith("_PASSED") or delegated_status in {"filled", "filled_flat", "passed"}:
         return "PAPER_STRATEGY_ORDER_FILLED"
+    if "NOT_FILLED_CANCELLED" in delegated_classification or delegated_status in {
+        "fill_timeout_cancelled",
+        "partial_fill_cancelled",
+        "manual_confirmation_timeout_order_cancelled",
+    }:
+        if entry_intent in {_ENTRY_INTENT_RESTING_PULLBACK_LIMIT, _ENTRY_INTENT_PASSIVE_ONLY}:
+            return "PAPER_STRATEGY_ENTRY_MISSED_CANCELLED_ACCEPTED"
+        return "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED"
     if "REJECTED" in delegated_classification:
         return "PAPER_STRATEGY_ORDER_REJECTED"
     if "WORKING" in delegated_classification or delegated_status in {"working_submitted", "submitted"}:
@@ -1533,6 +1717,9 @@ def _build_report(
     preflight_checks: list[dict[str, Any]],
     prepared_submit_bundle: dict[str, Any] | None,
     delegated_result: dict[str, Any] | None,
+    exit_attempt_policy: ExitAttemptPolicy,
+    entry_attempt_memory: dict[str, Any],
+    entry_execution_pricing: dict[str, Any],
     callback_timeline_event_count: int,
     errors: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -1570,6 +1757,9 @@ def _build_report(
         },
         "current_position_quantity": current_position_quantity,
         "preflight_checks": preflight_checks,
+        "exit_attempt_policy": exit_attempt_policy.to_json_dict(),
+        "entry_attempt_memory": entry_attempt_memory,
+        "entry_execution_pricing": entry_execution_pricing,
         "prepared_submit_bundle": prepared_submit_bundle,
         "delegated_result": delegated_result,
         "callback_timeline_event_count": callback_timeline_event_count,
@@ -1597,19 +1787,673 @@ def _submitted_order_count(audit_events: list[dict[str, Any]]) -> int:
     return sum(1 for row in audit_events if str(row.get("event_type") or "").strip() == "delegated_manual_harness_completed")
 
 
+def _load_bridge_audit_history(output_dir: Path | None) -> list[dict[str, Any]]:
+    if output_dir is None:
+        return []
+    path = Path(output_dir) / f"{_ARTIFACT_STEM}_audit.jsonl"
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    row = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
+def _exit_attempt_policy_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    history_events: list[dict[str, Any]],
+    current_position_quantity: float | None,
+    open_orders: dict[str, Any],
+    phase1_gate: dict[str, Any],
+) -> ExitAttemptPolicy:
+    metadata = dict(config.caller_metadata or {})
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
+    lifecycle_id = str(
+        metadata.get("lifecycle_id")
+        or metadata.get("position_lifecycle_id")
+        or metadata.get("managed_lifecycle_id")
+        or ""
+    ).strip() or None
+    hard_exit = _hard_exit_from_metadata(config=config, metadata=metadata)
+    discretionary_exit = _bool_or_none(metadata.get("discretionary_exit"))
+    return classify_exit_attempt_policy(
+        history_events=history_events,
+        lifecycle_id=lifecycle_id,
+        intent_type=intent_type,
+        action=intent.action,
+        hard_exit=hard_exit,
+        discretionary_exit=discretionary_exit,
+        broker_position_quantity=current_position_quantity,
+        broker_reconciled=bool(phase1_gate.get("ready")),
+        open_order_count=int(open_orders.get("open_order_count") or 0),
+    )
+
+
+def _build_entry_attempt_memory(
+    *,
+    history_events: list[dict[str, Any]],
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> dict[str, Any]:
+    if not _is_entry_intent(config=config, intent=intent):
+        return {
+            "entry_attempt_count": 0,
+            "not_filled_cancelled_count": 0,
+            "last_cancel_reason": None,
+            "same_setup_retry_count": 0,
+            "working_order_duplicate_block": False,
+        }
+    metadata = dict(config.caller_metadata or {})
+    lane_id = str(metadata.get("lane_id") or config.strategy_id or intent.strategy_id or "").strip()
+    setup_family = str(
+        metadata.get("signal_family")
+        or metadata.get("setup_family")
+        or metadata.get("entry_family")
+        or config.reason
+        or ""
+    ).strip()
+    attempted: list[dict[str, Any]] = []
+    cancelled: list[dict[str, Any]] = []
+    same_setup = 0
+    for row in history_events:
+        if str(row.get("event_type") or "").strip() != "delegated_manual_harness_completed":
+            continue
+        row_intent = dict(row.get("intent") or {})
+        row_metadata = dict(row.get("caller_metadata") or {})
+        row_strategy = str(row_intent.get("strategy_id") or row.get("strategy_id") or "").strip()
+        row_lane = str(row_metadata.get("lane_id") or row_strategy or "").strip()
+        row_intent_type = str(row_metadata.get("intent_type") or "").strip().upper()
+        if row_strategy != intent.strategy_id or row_lane != lane_id:
+            continue
+        if row_intent_type not in {"BUY_TO_OPEN", "SELL_TO_OPEN", ""}:
+            continue
+        row_action = str(row_intent.get("action") or row.get("action") or "").strip().upper()
+        if row_action != intent.action:
+            continue
+        attempted.append(dict(row))
+        row_setup = str(
+            row_metadata.get("signal_family")
+            or row_metadata.get("setup_family")
+            or row_metadata.get("entry_family")
+            or row_intent.get("reason")
+            or ""
+        ).strip()
+        if setup_family and row_setup == setup_family:
+            same_setup += 1
+        classification = str(row.get("delegated_classification") or "").strip().upper()
+        if "NOT_FILLED_CANCELLED" in classification:
+            cancelled.append(dict(row))
+    last_cancel = cancelled[-1] if cancelled else {}
+    return {
+        "strategy_id": intent.strategy_id,
+        "lane_id": lane_id,
+        "entry_family": setup_family or None,
+        "entry_attempt_count": len(attempted),
+        "not_filled_cancelled_count": len(cancelled),
+        "last_cancel_reason": (
+            str(last_cancel.get("delegated_classification") or "").strip() or None
+        ),
+        "same_setup_retry_count": same_setup,
+        "working_order_duplicate_block": False,
+    }
+
+
+def _entry_execution_pricing_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    quote_context: dict[str, Any],
+    qualified_contract_report: dict[str, Any],
+    entry_attempt_memory: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if not _is_entry_intent(config=config, intent=intent):
+        return {
+            "is_entry": False,
+            "execution_policy": "NOT_ENTRY",
+            "block_submit": False,
+            "block_reason": None,
+            "live_money_eligible": False,
+            "entry_attempt_memory": dict(entry_attempt_memory or {}),
+        }
+    now = now or datetime.now(timezone.utc)
+    policy = _entry_execution_policy(config=config, intent=intent)
+    min_tick = _qualified_contract_min_tick(qualified_contract_report) or 0.25
+    action = str(intent.action or "").strip().upper()
+    delayed_bid = _float_or_none(quote_context.get("bid_price"))
+    delayed_ask = _float_or_none(quote_context.get("ask_price"))
+    delayed_last = _float_or_none(quote_context.get("last_price"))
+    delayed_reference = delayed_ask if action == "BUY" else delayed_bid
+    if delayed_reference is None:
+        delayed_reference = delayed_last
+    delayed_quote_limit = None
+    if delayed_reference is not None:
+        offset = _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS * float(min_tick)
+        delayed_quote_limit = (
+            float(delayed_reference) + offset
+            if action == "BUY"
+            else float(delayed_reference) - offset
+        )
+        delayed_quote_limit = _round_price_to_tick(delayed_quote_limit, float(min_tick))
+    runtime_snapshot = _load_entry_runtime_market_snapshot(
+        repo_root=config.repo_root,
+        symbol=str(intent.symbol or config.symbol or "").strip().upper(),
+        now=now,
+    )
+    runtime_price = _float_or_none(runtime_snapshot.get("runtime_last_or_close"))
+    runtime_fresh = bool(runtime_snapshot.get("runtime_data_fresh")) and runtime_price is not None
+    marketable_policy = policy in {
+        _ENTRY_POLICY_MARKETABLE_RUNTIME,
+        _ENTRY_POLICY_AGGRESSIVE_WITH_CAP,
+        _ENTRY_POLICY_BLOCK_IF_ONLY_DELAYED,
+    }
+    entry_intent = _entry_execution_intent(config=config, intent=intent)
+    strategy_limit_price = _strategy_entry_limit_price(config=config)
+    pullback_offset_points = _strategy_entry_pullback_offset_points(config=config, min_tick=float(min_tick))
+    fill_timeout_seconds = _entry_fill_timeout_seconds(config=config, entry_intent=entry_intent)
+    selected_limit = None
+    execution_price_source = None
+    block_submit = False
+    block_reason = None
+    limit_offset_ticks = _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS
+    if policy == _ENTRY_POLICY_AGGRESSIVE_WITH_CAP:
+        limit_offset_ticks = min(_ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS, _ENTRY_MAX_LIMIT_OFFSET_TICKS)
+    if entry_intent in {_ENTRY_INTENT_RESTING_PULLBACK_LIMIT, _ENTRY_INTENT_PASSIVE_ONLY}:
+        if strategy_limit_price is not None:
+            selected_limit = _round_price_to_tick(float(strategy_limit_price), float(min_tick))
+            execution_price_source = _ENTRY_STRATEGY_DEFINED_LIMIT_SOURCE
+        elif runtime_fresh and pullback_offset_points is not None:
+            selected_limit = (
+                float(runtime_price) - float(pullback_offset_points)
+                if action == "BUY"
+                else float(runtime_price) + float(pullback_offset_points)
+            )
+            selected_limit = _round_price_to_tick(selected_limit, float(min_tick))
+            execution_price_source = _ENTRY_RESTING_RUNTIME_PULLBACK_SOURCE
+        elif entry_intent == _ENTRY_INTENT_RESTING_PULLBACK_LIMIT:
+            block_submit = True
+            block_reason = "RESTING_ENTRY_LIMIT_NOT_DEFINED"
+            execution_price_source = "UNKNOWN"
+        else:
+            block_submit = True
+            block_reason = "PASSIVE_ENTRY_LIMIT_NOT_DEFINED"
+            execution_price_source = "UNKNOWN"
+    elif marketable_policy and runtime_fresh:
+        selected_limit = (
+            float(runtime_price) + limit_offset_ticks * float(min_tick)
+            if action == "BUY"
+            else float(runtime_price) - limit_offset_ticks * float(min_tick)
+        )
+        selected_limit = _round_price_to_tick(selected_limit, float(min_tick))
+        execution_price_source = _ENTRY_RUNTIME_PRICE_SOURCE
+    elif marketable_policy:
+        block_submit = True
+        block_reason = "DELAYED_QUOTE_NOT_EXECUTION_SAFE"
+        execution_price_source = _ENTRY_DELAYED_DIAGNOSTIC_SOURCE
+    elif delayed_quote_limit is not None:
+        execution_price_source = "IBKR_DELAYED_PASSIVE_DIAGNOSTIC"
+    else:
+        execution_price_source = "UNKNOWN"
+    selected_limit_vs_runtime = (
+        None
+        if selected_limit is None or runtime_price is None
+        else _signed_limit_distance(action=action, limit_price=selected_limit, reference_price=runtime_price)
+    )
+    selected_limit_vs_delayed_ask = (
+        None
+        if selected_limit is None or delayed_ask is None
+        else float(selected_limit) - float(delayed_ask)
+    )
+    delayed_limit_vs_runtime = (
+        None
+        if delayed_quote_limit is None or runtime_price is None
+        else _signed_limit_distance(action=action, limit_price=delayed_quote_limit, reference_price=runtime_price)
+    )
+    delayed_limit_vs_delayed_ask = (
+        None
+        if delayed_quote_limit is None or delayed_ask is None
+        else float(delayed_quote_limit) - float(delayed_ask)
+    )
+    marketable_by_runtime = (
+        selected_limit_vs_runtime is not None and float(selected_limit_vs_runtime) >= 0.0
+    )
+    marketable_by_delayed = (
+        (selected_limit_vs_delayed_ask is not None and float(selected_limit_vs_delayed_ask) >= 0.0)
+        if action == "BUY"
+        else (
+            delayed_bid is not None
+            and selected_limit is not None
+            and float(delayed_bid) - float(selected_limit) >= 0.0
+        )
+    )
+    delayed_candidate_marketable_by_runtime = (
+        delayed_limit_vs_runtime is not None and float(delayed_limit_vs_runtime) >= 0.0
+    )
+    delayed_candidate_marketable_by_delayed = (
+        (delayed_limit_vs_delayed_ask is not None and float(delayed_limit_vs_delayed_ask) >= 0.0)
+        if action == "BUY"
+        else (
+            delayed_bid is not None
+            and delayed_quote_limit is not None
+            and float(delayed_bid) - float(delayed_quote_limit) >= 0.0
+        )
+    )
+    return {
+        "is_entry": True,
+        "entry_execution_intent": entry_intent,
+        "execution_policy": policy,
+        "execution_price_source": execution_price_source,
+        "broker_quote_type": _broker_quote_type(quote_context),
+        "delayed_bid": delayed_bid,
+        "delayed_ask": delayed_ask,
+        "delayed_last": delayed_last,
+        "runtime_last_or_close": runtime_price,
+        "runtime_candle_timestamp": runtime_snapshot.get("runtime_candle_timestamp"),
+        "runtime_data_age_seconds": runtime_snapshot.get("runtime_data_age_seconds"),
+        "runtime_data_fresh": runtime_fresh,
+        "runtime_source_artifact_path": runtime_snapshot.get("source_artifact_path"),
+        "limit_price": selected_limit,
+        "strategy_defined_limit_price": strategy_limit_price,
+        "pullback_offset_points": pullback_offset_points,
+        "limit_vs_runtime_price_points": selected_limit_vs_runtime,
+        "limit_vs_broker_delayed_ask_points": selected_limit_vs_delayed_ask,
+        "marketable_by_runtime_context": marketable_by_runtime,
+        "marketable_by_delayed_quote": marketable_by_delayed,
+        "delayed_quote_limit_price": delayed_quote_limit,
+        "delayed_quote_limit_vs_runtime_price_points": delayed_limit_vs_runtime,
+        "delayed_quote_limit_vs_broker_delayed_ask_points": delayed_limit_vs_delayed_ask,
+        "delayed_quote_limit_marketable_by_runtime_context": delayed_candidate_marketable_by_runtime,
+        "delayed_quote_limit_marketable_by_delayed_quote": delayed_candidate_marketable_by_delayed,
+        "limit_offset_ticks": limit_offset_ticks if selected_limit is not None else None,
+        "max_limit_offset_ticks": _ENTRY_MAX_LIMIT_OFFSET_TICKS,
+        "fill_timeout_seconds": fill_timeout_seconds,
+        "working_window_seconds": fill_timeout_seconds,
+        "cancel_on": _entry_cancel_reasons(entry_intent),
+        "passive_miss_is_failure": entry_intent not in {
+            _ENTRY_INTENT_RESTING_PULLBACK_LIMIT,
+            _ENTRY_INTENT_PASSIVE_ONLY,
+        },
+        "replace_policy": (
+            "recompute_or_replace_only_while_setup_valid_with_max_chase_budget"
+            if entry_intent == _ENTRY_INTENT_DYNAMIC_LIMIT_WITH_CHASE_CAP
+            else None
+        ),
+        "block_submit": block_submit,
+        "block_reason": block_reason,
+        "live_money_eligible": False,
+        "entry_attempt_memory": dict(entry_attempt_memory or {}),
+    }
+
+
+def _is_close_intent(*, config: IbkrPaperStrategyBridgeConfig, intent: IbkrPaperStrategyOrderIntent) -> bool:
+    metadata = dict(config.caller_metadata or {})
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
+    action = str(intent.action or "").strip().upper()
+    if intent_type in {"SELL_TO_CLOSE", "BUY_TO_CLOSE"}:
+        return True
+    if intent_type in {"BUY_TO_OPEN", "SELL_TO_OPEN"}:
+        return False
+    return action in {"EXIT"} or (action == "SELL" and intent_type == "")
+
+
+def _is_entry_intent(*, config: IbkrPaperStrategyBridgeConfig, intent: IbkrPaperStrategyOrderIntent) -> bool:
+    metadata = dict(config.caller_metadata or {})
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
+    action = str(intent.action or "").strip().upper()
+    if intent_type in {"BUY_TO_OPEN", "SELL_TO_OPEN"}:
+        return True
+    if intent_type in {"SELL_TO_CLOSE", "BUY_TO_CLOSE"}:
+        return False
+    return action == "BUY"
+
+
+def _entry_execution_policy(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> str:
+    metadata = dict(config.caller_metadata or {})
+    lane_adapter = lane_submit_bridge_adapter(lane_id=intent.strategy_id)
+    policy = str(
+        metadata.get("entry_execution_policy")
+        or metadata.get("entry_order_policy")
+        or (dict(lane_adapter or {}).get("entry_execution_policy") if lane_adapter else "")
+        or ""
+    ).strip().upper()
+    if policy in {
+        _ENTRY_POLICY_PASSIVE_LIMIT,
+        _ENTRY_POLICY_MARKETABLE_RUNTIME,
+        _ENTRY_POLICY_AGGRESSIVE_WITH_CAP,
+        _ENTRY_POLICY_BLOCK_IF_ONLY_DELAYED,
+    }:
+        return policy
+    entry_intent = _entry_execution_intent(config=config, intent=intent)
+    if entry_intent == _ENTRY_INTENT_PARTICIPATE_NOW:
+        return _ENTRY_POLICY_MARKETABLE_RUNTIME
+    if entry_intent == _ENTRY_INTENT_DYNAMIC_LIMIT_WITH_CHASE_CAP:
+        return _ENTRY_POLICY_AGGRESSIVE_WITH_CAP
+    if entry_intent in {_ENTRY_INTENT_RESTING_PULLBACK_LIMIT, _ENTRY_INTENT_PASSIVE_ONLY}:
+        return _ENTRY_POLICY_PASSIVE_LIMIT
+    if str(intent.limit_price_model or "").strip().upper() in _ENTRY_MARKETABLE_LIMIT_MODELS:
+        return _ENTRY_POLICY_MARKETABLE_RUNTIME
+    return _ENTRY_POLICY_PASSIVE_LIMIT
+
+
+def _entry_execution_intent(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> str:
+    metadata = dict(config.caller_metadata or {})
+    lane_adapter = lane_submit_bridge_adapter(lane_id=intent.strategy_id)
+    value = str(
+        metadata.get("entry_execution_intent")
+        or metadata.get("entry_intent")
+        or (dict(lane_adapter or {}).get("entry_execution_intent") if lane_adapter else "")
+        or ""
+    ).strip().upper()
+    if value in _ENTRY_EXECUTION_INTENTS:
+        return value
+    if _entry_has_resting_price_metadata(config=config):
+        return _ENTRY_INTENT_RESTING_PULLBACK_LIMIT
+    if str(intent.limit_price_model or "").strip().upper() in _ENTRY_MARKETABLE_LIMIT_MODELS:
+        return _ENTRY_INTENT_PARTICIPATE_NOW
+    return _ENTRY_INTENT_PASSIVE_ONLY
+
+
+def _entry_has_resting_price_metadata(*, config: IbkrPaperStrategyBridgeConfig) -> bool:
+    metadata = dict(config.caller_metadata or {})
+    return any(
+        _float_or_none(metadata.get(key)) is not None
+        for key in (
+            "strategy_entry_limit_price",
+            "entry_limit_price",
+            "open_limit_price",
+            "limit_price",
+            "entry_pullback_offset_points",
+            "entry_pullback_offset_ticks",
+        )
+    )
+
+
+def _strategy_entry_limit_price(*, config: IbkrPaperStrategyBridgeConfig) -> float | None:
+    metadata = dict(config.caller_metadata or {})
+    for key in (
+        "strategy_entry_limit_price",
+        "entry_limit_price",
+        "open_limit_price",
+        "limit_price",
+    ):
+        value = _float_or_none(metadata.get(key))
+        if value is not None and value > 0.0:
+            return value
+    return None
+
+
+def _strategy_entry_pullback_offset_points(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    min_tick: float,
+) -> float | None:
+    metadata = dict(config.caller_metadata or {})
+    point_offset = _float_or_none(metadata.get("entry_pullback_offset_points"))
+    if point_offset is not None and point_offset > 0.0:
+        return point_offset
+    tick_offset = _float_or_none(metadata.get("entry_pullback_offset_ticks"))
+    if tick_offset is not None and tick_offset > 0.0:
+        return float(tick_offset) * float(min_tick)
+    return None
+
+
+def _entry_fill_timeout_seconds(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    entry_intent: str,
+) -> float:
+    metadata = dict(config.caller_metadata or {})
+    explicit = _float_or_none(
+        metadata.get("entry_working_window_seconds")
+        or metadata.get("entry_fill_timeout_seconds")
+        or metadata.get("signal_validity_seconds")
+    )
+    if explicit is not None and explicit > 0:
+        return float(explicit)
+    if entry_intent == _ENTRY_INTENT_PARTICIPATE_NOW:
+        return _ENTRY_PARTICIPATE_TIMEOUT_SECONDS
+    if entry_intent == _ENTRY_INTENT_DYNAMIC_LIMIT_WITH_CHASE_CAP:
+        return _ENTRY_DYNAMIC_TIMEOUT_SECONDS
+    if entry_intent == _ENTRY_INTENT_RESTING_PULLBACK_LIMIT:
+        return _ENTRY_RESTING_TIMEOUT_SECONDS
+    if entry_intent == _ENTRY_INTENT_PASSIVE_ONLY:
+        return _ENTRY_PASSIVE_TIMEOUT_SECONDS
+    return _ENTRY_PARTICIPATE_TIMEOUT_SECONDS
+
+
+def _entry_cancel_reasons(entry_intent: str) -> list[str]:
+    reasons = [
+        "signal_invalidated",
+        "session_or_regime_changed",
+        "broker_lifecycle_mismatch",
+        "severe_stale_data",
+        "open_order_risk",
+    ]
+    if entry_intent == _ENTRY_INTENT_DYNAMIC_LIMIT_WITH_CHASE_CAP:
+        reasons.append("max_chase_budget_exhausted")
+    if entry_intent == _ENTRY_INTENT_PARTICIPATE_NOW:
+        reasons.append("short_participation_timeout")
+    else:
+        reasons.append("working_window_expired")
+    return reasons
+
+
+def _entry_limit_override(entry_execution_pricing: dict[str, Any] | None) -> float | None:
+    pricing = dict(entry_execution_pricing or {})
+    if bool(pricing.get("block_submit")):
+        return None
+    if str(pricing.get("execution_price_source") or "").strip().upper() not in {
+        _ENTRY_RUNTIME_PRICE_SOURCE,
+        _ENTRY_STRATEGY_DEFINED_LIMIT_SOURCE,
+        _ENTRY_RESTING_RUNTIME_PULLBACK_SOURCE,
+    }:
+        return None
+    return _float_or_none(pricing.get("limit_price"))
+
+
+def _qualified_contract_min_tick(qualified_contract_report: dict[str, Any]) -> float | None:
+    details = list(qualified_contract_report.get("api_contract_details") or [])
+    if details:
+        tick = _float_or_none(dict(details[0]).get("min_tick"))
+        if tick is not None:
+            return tick
+    contract = dict(qualified_contract_report.get("qualified_contract") or {})
+    return _float_or_none(contract.get("min_tick"))
+
+
+def _load_entry_runtime_market_snapshot(
+    *,
+    repo_root: Path,
+    symbol: str,
+    now: datetime,
+) -> dict[str, Any]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    path = Path(repo_root) / Path(str(_ENTRY_RUNTIME_CANDLE_PATH).format(symbol=normalized_symbol))
+    if not path.exists():
+        return {
+            "source_artifact_path": str(path),
+            "runtime_last_or_close": None,
+            "runtime_candle_timestamp": None,
+            "runtime_data_age_seconds": None,
+            "runtime_data_fresh": False,
+            "detail": "Runtime 1m candle artifact is missing.",
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "source_artifact_path": str(path),
+            "runtime_last_or_close": None,
+            "runtime_candle_timestamp": None,
+            "runtime_data_age_seconds": None,
+            "runtime_data_fresh": False,
+            "detail": f"Runtime 1m candle artifact could not be read: {exc}",
+        }
+    bars = [dict(row) for row in list(payload.get("bars") or []) if isinstance(row, dict)]
+    latest_bar = bars[-1] if bars else {}
+    candle_ts = (
+        latest_bar.get("bar_end")
+        or payload.get("last_completed_bar_ts")
+        or payload.get("last_candle_timestamp")
+        or latest_bar.get("timestamp")
+        or latest_bar.get("bar_start")
+        or payload.get("generated_at")
+    )
+    parsed_ts = _parse_datetime(candle_ts)
+    if parsed_ts is not None and parsed_ts.tzinfo is None:
+        parsed_ts = parsed_ts.replace(tzinfo=timezone.utc)
+    age_seconds = (
+        max(0.0, (now - parsed_ts).total_seconds())
+        if parsed_ts is not None
+        else None
+    )
+    runtime_price = _float_or_none(
+        latest_bar.get("last")
+        if latest_bar.get("last") is not None
+        else latest_bar.get("close")
+        if latest_bar.get("close") is not None
+        else payload.get("last")
+        if payload.get("last") is not None
+        else payload.get("close")
+    )
+    return {
+        "source_artifact_path": str(path),
+        "runtime_last_or_close": runtime_price,
+        "runtime_candle_timestamp": None if candle_ts is None else str(candle_ts),
+        "runtime_data_age_seconds": age_seconds,
+        "runtime_data_fresh": bool(age_seconds is not None and age_seconds <= _ENTRY_RUNTIME_CANDLE_MAX_AGE_SECONDS),
+        "generated_at": payload.get("generated_at"),
+        "source": payload.get("source") or payload.get("source_id") or "DATABENTO_LIVE_RUNTIME",
+        "timeframe": payload.get("timeframe") or "1m",
+    }
+
+
+def _broker_quote_type(quote_context: dict[str, Any]) -> str:
+    label = str(quote_context.get("quote_source_label") or "").strip().upper()
+    if label in {"DELAYED", "DELAYED_FROZEN", "FROZEN"}:
+        return "delayed"
+    if label == "LIVE":
+        return "live"
+    return "unknown"
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _round_price_to_tick(price: float, min_tick: float) -> float:
+    if min_tick <= 0.0:
+        return float(price)
+    ticks = round(float(price) / float(min_tick))
+    return round(ticks * float(min_tick), 8)
+
+
+def _signed_limit_distance(*, action: str, limit_price: float, reference_price: float) -> float:
+    normalized_action = str(action or "").strip().upper()
+    if normalized_action == "SELL":
+        return float(reference_price) - float(limit_price)
+    return float(limit_price) - float(reference_price)
+
+
+def _hard_exit_from_metadata(*, config: IbkrPaperStrategyBridgeConfig, metadata: dict[str, Any]) -> bool:
+    explicit = _bool_or_none(metadata.get("hard_exit"))
+    if explicit is not None:
+        return explicit
+    reason_text = " ".join(
+        [
+            str(config.reason or ""),
+            str(metadata.get("exit_reason") or ""),
+            str(metadata.get("exit_family") or ""),
+            " ".join(str(tag or "") for tag in config.risk_tags),
+        ]
+    ).upper()
+    return any(token in reason_text for token in ("HARD", "STOP", "PROTECTIVE", "FORCED_SESSION"))
+
+
+def _bool_or_none(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return None
+
+
 def _manual_harness_client_id(client_id: int) -> int:
     return int(client_id) + _MANUAL_HARNESS_CLIENT_ID_OFFSET
+
+
+def _bridge_fill_timeout_seconds(
+    *,
+    exit_attempt_policy: ExitAttemptPolicy,
+    entry_execution_pricing: dict[str, Any] | None,
+) -> float:
+    pricing = dict(entry_execution_pricing or {})
+    if bool(pricing.get("is_entry")):
+        return float(pricing.get("fill_timeout_seconds") or _ENTRY_PARTICIPATE_TIMEOUT_SECONDS)
+    return float(exit_attempt_policy.fill_timeout_seconds)
+
+
+def _bridge_limit_offset_ticks(
+    *,
+    exit_attempt_policy: ExitAttemptPolicy,
+    entry_execution_pricing: dict[str, Any] | None,
+) -> float:
+    pricing = dict(entry_execution_pricing or {})
+    if bool(pricing.get("is_entry")):
+        return float(pricing.get("limit_offset_ticks") or _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS)
+    return float(exit_attempt_policy.limit_offset_ticks)
 
 
 def _prepare_manual_submit_bundle(
     *,
     config: IbkrPaperStrategyBridgeConfig,
     intent: IbkrPaperStrategyOrderIntent,
+    exit_attempt_policy: ExitAttemptPolicy,
+    entry_execution_pricing: dict[str, Any] | None = None,
     stack_provider: Callable[[], list[Any]] = inspect.stack,
 ) -> dict[str, Any]:
     test_mode = _intent_test_mode(intent)
     delegated_output_dir = (Path(config.output_dir) / "prepared_manual_harness") if config.output_dir is not None else None
     expected_target = _bridge_phase1_target(config=config, intent=intent)
+    limit_override = _entry_limit_override(entry_execution_pricing)
+    fill_timeout_seconds = _bridge_fill_timeout_seconds(
+        exit_attempt_policy=exit_attempt_policy,
+        entry_execution_pricing=entry_execution_pricing,
+    )
+    limit_offset_ticks = _bridge_limit_offset_ticks(
+        exit_attempt_policy=exit_attempt_policy,
+        entry_execution_pricing=entry_execution_pricing,
+    )
     manual_config = IbkrManualPaperSubmitConfig(
         repo_root=config.repo_root,
         mode=config.mode,
@@ -1622,19 +2466,20 @@ def _prepare_manual_submit_bundle(
         action=intent.action,
         quantity=float(intent.quantity),
         order_type=_EXPECTED_ORDER_TYPE,
-        limit_price=None,
+        limit_price=limit_override,
         time_in_force=_EXPECTED_TIF,
         test_mode=test_mode,
         timeout_seconds=float(config.timeout_seconds),
-        fill_timeout_seconds=8.0,
-        post_approval_observation_seconds=15.0,
-        fill_limit_offset_ticks=1.0,
+        fill_timeout_seconds=fill_timeout_seconds,
+        post_approval_observation_seconds=75.0,
+        fill_limit_offset_ticks=limit_offset_ticks,
         manual_confirmation_timeout_seconds=90.0,
         caller_path="manual_cli",
         submit=False,
         output_dir=delegated_output_dir,
         frozen_preview_path=None,
         diagnostic_dry_run=False,
+        execution_pricing_context=entry_execution_pricing if limit_override is not None else None,
     )
     artifacts = run_ibkr_manual_paper_submit_test(config=manual_config, stack_provider=stack_provider)
     if delegated_output_dir is not None:
@@ -1653,6 +2498,8 @@ def _prepare_manual_submit_bundle(
         "frozen_preview_path": None if frozen_preview_path is None else str(frozen_preview_path),
         "preview_digest": preview_digest,
         "expected_approval_phrase": expected_phrase,
+        "exit_attempt_policy": exit_attempt_policy.to_json_dict(),
+        "entry_execution_pricing": entry_execution_pricing,
     }
 
 
@@ -1733,6 +2580,11 @@ def _record_bridge_audit(
             "host": config.host,
             "port": config.port,
             "client_id": config.client_id,
+            "strategy_id": config.strategy_id,
+            "symbol": config.symbol,
+            "contract_month": config.contract_month,
+            "action": config.action,
+            "caller_metadata": dict(config.caller_metadata or {}),
             "detail": detail,
             **dict(extra or {}),
         }

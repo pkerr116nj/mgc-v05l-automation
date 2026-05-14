@@ -200,6 +200,25 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
     for lane_id in _PL_PHASE1_SUBMIT_LANE_IDS
 }
 
+for lane_id in (
+    *_NQ_PHASE1_SUBMIT_LANE_IDS,
+    *_MNQ_PHASE1_SUBMIT_LANE_IDS,
+    *_ES_PHASE1_SUBMIT_LANE_IDS,
+    *_MES_PHASE1_SUBMIT_LANE_IDS,
+):
+    adapter = _SUBMIT_CAPABLE_LANE_ADAPTERS.get(lane_id)
+    if adapter is not None and "_ny_early_core__" in lane_id:
+        adapter.update(
+            {
+                "entry_execution_intent": "PARTICIPATE_NOW",
+                "entry_working_window_seconds": 60,
+                "entry_execution_note": (
+                    "Index forced-session core lanes currently emit immediate participation signals; "
+                    "no strategy-defined pullback/resting limit is present in the runtime intent."
+                ),
+            }
+        )
+
 
 @dataclass(frozen=True)
 class IbkrPaperStrategyPortingConfig:

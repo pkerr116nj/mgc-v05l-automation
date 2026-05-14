@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +11,11 @@ import pytest
 from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
     IbkrPaperStrategyBridgeConfig,
     IbkrPaperStrategyOrderIntent,
+    _build_entry_attempt_memory,
+    _build_preflight_checks,
     _build_static_preflight_checks,
+    _entry_execution_pricing_for_bridge,
+    _map_delegate_classification,
     _quote_is_fresh,
     evaluate_strategy_bridge_caller,
     render_ibkr_paper_strategy_bridge_markdown,
@@ -21,6 +26,7 @@ from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
 )
 from mgc_v05l.execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from mgc_v05l.execution.ibkr_paper_order_preview import evaluate_paper_preview_environment_lock
+from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
 
 
 def _healthy_governance() -> dict[str, object]:
@@ -36,6 +42,21 @@ def _healthy_governance() -> dict[str, object]:
             "submit_block_reasons": [],
         },
     }
+
+
+def test_cancelled_close_delegate_maps_to_terminal_non_fill_classification() -> None:
+    delegated = {
+        "classification": "PAPER_CLOSE_NOT_FILLED_CANCELLED",
+        "report": {
+            "submit_cancel_lifecycle": {
+                "status": "fill_timeout_cancelled",
+                "submitted_order_id": 1,
+                "latest_order_status": {"status": "Cancelled"},
+            }
+        },
+    }
+
+    assert _map_delegate_classification(delegated) == "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED"
 
 
 def _healthy_lane_governance() -> dict[str, object]:
@@ -207,6 +228,455 @@ def _approved_runtime_metadata(
         "intent_action": action,
         "intent_type": intent_type,
     }
+
+
+def _intent_from_config(config: IbkrPaperStrategyBridgeConfig) -> IbkrPaperStrategyOrderIntent:
+    return IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-14T12:26:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+
+def _write_runtime_1m_candle(
+    repo_root: Path,
+    *,
+    symbol: str,
+    close: float,
+    bar_end: str = "2026-05-14T12:25:00+00:00",
+) -> Path:
+    path = (
+        repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+        / symbol
+        / "1m"
+        / "latest_runtime_candles.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "generated_at": bar_end,
+                "source": "DATABENTO_LIVE_RUNTIME",
+                "symbol": symbol,
+                "timeframe": "1m",
+                "bars": [
+                    {
+                        "bar_start": "2026-05-14T12:24:00+00:00",
+                        "bar_end": bar_end,
+                        "open": close - 2.0,
+                        "high": close + 1.0,
+                        "low": close - 3.0,
+                        "close": close,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _quote_context(*, bid: float = 29713.5, ask: float = 29714.0, last: float = 29713.75) -> dict[str, object]:
+    return {
+        "quote_source_label": "DELAYED",
+        "updated_at": "2026-05-14T12:25:20+00:00",
+        "bid_price": bid,
+        "ask_price": ask,
+        "last_price": last,
+    }
+
+
+def _qualified_contract_report(*, min_tick: float = 0.25) -> dict[str, object]:
+    return {
+        "ok": True,
+        "qualified_contract": {
+            "symbol": "MNQ",
+            "expiry": "202606",
+            "con_id": 770561201,
+            "local_symbol": "MNQM6",
+            "min_tick": min_tick,
+        },
+        "api_contract_details": [{"min_tick": min_tick, "multiplier": "2"}],
+    }
+
+
+def test_entry_pricing_prefers_fresh_runtime_candle_when_delayed_ask_is_too_low(tmp_path: Path) -> None:
+    runtime_path = _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_midday_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_midday_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29714.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["limit_price"] == 29752.25
+    assert pricing["runtime_last_or_close"] == 29752.0
+    assert pricing["marketable_by_runtime_context"] is True
+    assert pricing["delayed_quote_limit_price"] == 29714.25
+    assert pricing["delayed_quote_limit_marketable_by_delayed_quote"] is True
+    assert pricing["delayed_quote_limit_marketable_by_runtime_context"] is False
+    assert pricing["limit_vs_runtime_price_points"] == 0.25
+    assert pricing["limit_vs_broker_delayed_ask_points"] == 38.25
+    assert pricing["runtime_source_artifact_path"] == str(runtime_path)
+    assert pricing["live_money_eligible"] is False
+
+
+def test_entry_pricing_blocks_marketable_entry_when_only_delayed_quote_is_available(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_midday_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_midday_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29714.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["execution_price_source"] == "IBKR_DELAYED_DIAGNOSTIC_ONLY"
+    assert pricing["block_submit"] is True
+    assert pricing["block_reason"] == "DELAYED_QUOTE_NOT_EXECUTION_SAFE"
+    assert pricing["delayed_quote_limit_marketable_by_delayed_quote"] is True
+    assert pricing["marketable_by_runtime_context"] is False
+    assert pricing["live_money_eligible"] is False
+
+
+def test_resting_pullback_entry_uses_strategy_defined_limit_and_longer_window(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="custom_pullback_lane",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="custom_pullback_lane",
+                source_instrument="MNQ",
+                executable_proxy="MNQ",
+            ),
+            "entry_execution_intent": "RESTING_PULLBACK_LIMIT",
+            "entry_limit_price": "29751.0",
+        },
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29752.25),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["entry_execution_intent"] == "RESTING_PULLBACK_LIMIT"
+    assert pricing["execution_policy"] == "PASSIVE_LIMIT"
+    assert pricing["execution_price_source"] == "STRATEGY_DEFINED_ENTRY_LIMIT"
+    assert pricing["limit_price"] == 29751.0
+    assert pricing["fill_timeout_seconds"] == 300.0
+    assert pricing["passive_miss_is_failure"] is False
+    assert pricing["block_submit"] is False
+
+
+def test_resting_pullback_entry_can_derive_limit_from_runtime_offset(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="custom_pullback_lane",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="custom_pullback_lane",
+                source_instrument="MNQ",
+                executable_proxy="MNQ",
+            ),
+            "entry_execution_intent": "RESTING_PULLBACK_LIMIT",
+            "entry_pullback_offset_points": "1.0",
+            "entry_working_window_seconds": "240",
+        },
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29752.25),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_PULLBACK_LIMIT"
+    assert pricing["limit_price"] == 29751.0
+    assert pricing["pullback_offset_points"] == 1.0
+    assert pricing["fill_timeout_seconds"] == 240.0
+    assert "working_window_expired" in pricing["cancel_on"]
+
+
+def test_resting_pullback_intent_can_be_inferred_from_explicit_offset(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="custom_pullback_lane",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="custom_pullback_lane",
+                source_instrument="MNQ",
+                executable_proxy="MNQ",
+            ),
+            "entry_pullback_offset_points": "1.0",
+        },
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29752.25),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["entry_execution_intent"] == "RESTING_PULLBACK_LIMIT"
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_PULLBACK_LIMIT"
+    assert pricing["limit_price"] == 29751.0
+
+
+def test_retest_lane_name_does_not_silently_infer_resting_without_price_metadata(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="GC", close=3350.0)
+    config = _config(
+        tmp_path,
+        strategy_id="gc_asia_early_normal_breakout_retest_hold_long",
+        symbol="GC",
+        contract_month="202606",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="gc_asia_early_normal_breakout_retest_hold_long",
+            source_instrument="GC",
+            executable_proxy="GC",
+        ),
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=3349.0),
+        qualified_contract_report=_qualified_contract_report(min_tick=0.1),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["entry_execution_intent"] == "PARTICIPATE_NOW"
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["block_submit"] is False
+
+
+def test_resting_pullback_entry_blocks_without_strategy_limit_or_offset(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="custom_pullback_lane",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="custom_pullback_lane",
+                source_instrument="MNQ",
+                executable_proxy="MNQ",
+            ),
+            "entry_execution_intent": "RESTING_PULLBACK_LIMIT",
+        },
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29752.25),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["block_submit"] is True
+    assert pricing["block_reason"] == "RESTING_ENTRY_LIMIT_NOT_DEFINED"
+
+
+def test_passive_only_entry_blocks_without_strategy_limit_or_offset(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="custom_passive_lane",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="custom_passive_lane",
+                source_instrument="MNQ",
+                executable_proxy="MNQ",
+            ),
+            "entry_execution_intent": "PASSIVE_ONLY",
+        },
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29752.25),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["block_submit"] is True
+    assert pricing["block_reason"] == "PASSIVE_ENTRY_LIMIT_NOT_DEFINED"
+    assert pricing["live_money_eligible"] is False
+
+
+def test_passive_entry_miss_maps_to_accepted_not_failure() -> None:
+    delegated = {
+        "classification": "PAPER_ORDER_SUBMITTED_NOT_FILLED_CANCELLED",
+        "report": {"submit_cancel_lifecycle": {"status": "fill_timeout_cancelled"}},
+        "entry_execution_pricing": {
+            "is_entry": True,
+            "entry_execution_intent": "PASSIVE_ONLY",
+        },
+    }
+
+    assert _map_delegate_classification(delegated) == "PAPER_STRATEGY_ENTRY_MISSED_CANCELLED_ACCEPTED"
+
+
+def test_mnq_midday_long_declares_participate_now_entry_intent() -> None:
+    adapter = lane_submit_bridge_adapter(lane_id="mnq_1x_ny_early_core__us_midday_long")
+
+    assert adapter is not None
+    assert adapter["entry_execution_intent"] == "PARTICIPATE_NOW"
+    assert adapter["entry_working_window_seconds"] == 60
+
+
+def test_entry_execution_pricing_failure_is_a_blocking_preflight_check(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        caller_metadata=_approved_runtime_metadata(strategy_id="ATP_COMPANION_V1_ASIA_US"),
+    )
+    pricing = {
+        "is_entry": True,
+        "execution_price_source": "IBKR_DELAYED_DIAGNOSTIC_ONLY",
+        "block_submit": True,
+        "block_reason": "DELAYED_QUOTE_NOT_EXECUTION_SAFE",
+    }
+    checks = _build_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=0.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.1),
+        audit_events=[],
+        entry_execution_pricing=pricing,
+    )
+
+    failure = next(row for row in checks if row["name"] == "entry_execution_price_source")
+    assert failure["passed"] is False
+    assert failure["blocking"] is True
+    assert failure["detail"] == "DELAYED_QUOTE_NOT_EXECUTION_SAFE"
+
+
+def test_entry_attempt_memory_counts_repeated_not_filled_cancelled_attempts(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_midday_long",
+        symbol="MNQ",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_midday_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+        ),
+    )
+    intent = _intent_from_config(config)
+    history = [
+        {
+            "event_type": "delegated_manual_harness_completed",
+            "delegated_classification": "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED",
+            "intent": {**intent.to_dict(), "reason": config.reason},
+            "caller_metadata": dict(config.caller_metadata or {}),
+        },
+        {
+            "event_type": "delegated_manual_harness_completed",
+            "delegated_classification": "PAPER_STRATEGY_ORDER_FILLED",
+            "intent": {**intent.to_dict(), "reason": config.reason},
+            "caller_metadata": dict(config.caller_metadata or {}),
+        },
+    ]
+
+    memory = _build_entry_attempt_memory(history_events=history, config=config, intent=intent)
+
+    assert memory["entry_attempt_count"] == 2
+    assert memory["not_filled_cancelled_count"] == 1
+    assert memory["last_cancel_reason"] == "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED"
+    assert memory["same_setup_retry_count"] == 2
+
+
+def test_working_order_still_blocks_duplicate_entry_even_with_runtime_pricing(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_midday_long",
+        symbol="MNQ",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_midday_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+        ),
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    checks = _build_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 1},
+        current_position_quantity=0.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(),
+        audit_events=[],
+        entry_execution_pricing=pricing,
+    )
+
+    duplicate_guard = next(row for row in checks if row["name"] == "no_working_orders")
+    assert duplicate_guard["passed"] is False
+    assert duplicate_guard["blocking"] is True
 
 
 def test_schema_contains_required_fields() -> None:

@@ -75,7 +75,7 @@ _MANUAL_CONFIRMATION_WAIT_STATE = "SUBMIT_SENT_AWAITING_TWS_MANUAL_CONFIRMATION"
 _DEFAULT_DELAYED_QUOTE_MAX_AGE_SECONDS = 30.0
 _DEFAULT_NEAR_MARKET_MAX_DISTANCE_TICKS = 50.0
 _DEFAULT_FILL_LIMIT_OFFSET_TICKS = 1.0
-_DEFAULT_FILL_TIMEOUT_SECONDS = 8.0
+_DEFAULT_FILL_TIMEOUT_SECONDS = 60.0
 _TICK_COMPARISON_EPSILON = 1e-9
 _RESTING_TEST_MODE = "PAPER_RESTING_TEST"
 _FILL_TEST_MODE = "PAPER_FILL_TEST"
@@ -133,7 +133,8 @@ class IbkrManualPaperSubmitConfig:
     output_dir: Path | None = None
     frozen_preview_path: Path | None = None
     diagnostic_dry_run: bool = False
-    post_approval_observation_seconds: float = 15.0
+    post_approval_observation_seconds: float = 75.0
+    execution_pricing_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1693,14 +1694,25 @@ def _build_delayed_quote_pricing_context(
     context: dict[str, Any],
 ) -> dict[str, Any]:
     quote_context = dict(context.get("quote_context") or {})
+    execution_pricing_context = dict(config.execution_pricing_context or {})
     contract_report = dict(context.get("contract_report") or {})
     contract_details = dict(contract_report.get("api_contract_details", [{}])[0] if contract_report.get("api_contract_details") else {})
     min_tick = _coerce_float(contract_details.get("min_tick"))
     limit_price = _coerce_float(requested_order.get("limit_price"))
     normalized_mode = str(config.test_mode).upper()
     normalized_action = str(requested_order.get("action") or "").strip().upper()
+    runtime_reference_price = _coerce_float(execution_pricing_context.get("runtime_last_or_close"))
+    execution_price_source = str(execution_pricing_context.get("execution_price_source") or "").strip().upper()
+    runtime_price_source = execution_price_source in {
+        "RUNTIME_DATABENTO_1M_CLOSE",
+        "RUNTIME_DATABENTO_1M_LAST_OR_CLOSE",
+        "RUNTIME_DATABENTO_CANDLE",
+    }
     if normalized_mode == _FILL_TEST_MODE:
-        reference_price, reference_source = _select_fill_reference_price(quote_context)
+        if runtime_price_source and runtime_reference_price is not None:
+            reference_price, reference_source = runtime_reference_price, "runtime_last_or_close"
+        else:
+            reference_price, reference_source = _select_fill_reference_price(quote_context)
         price_relation = "above_reference"
         distance_from_reference_price = (
             None
@@ -1710,7 +1722,10 @@ def _build_delayed_quote_pricing_context(
         pricing_label = _MARKETABLE_LIMIT_LABEL
         intended_to_fill = True
     elif normalized_mode == _CLOSE_TEST_MODE or normalized_action == "SELL":
-        reference_price, reference_source = _select_close_reference_price(quote_context)
+        if runtime_price_source and runtime_reference_price is not None:
+            reference_price, reference_source = runtime_reference_price, "runtime_last_or_close"
+        else:
+            reference_price, reference_source = _select_close_reference_price(quote_context)
         price_relation = "below_reference"
         distance_from_reference_price = (
             None
@@ -1741,6 +1756,8 @@ def _build_delayed_quote_pricing_context(
         else float(distance_from_reference_price) / float(min_tick)
     )
     return {
+        "execution_price_source": execution_pricing_context.get("execution_price_source"),
+        "execution_pricing_context": execution_pricing_context or None,
         "quote_snapshot": {
             "source_label": quote_context.get("quote_source_label"),
             "updated_at": quote_context.get("updated_at"),
@@ -1772,28 +1789,58 @@ def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[d
     distance_from_reference_price = pricing_context.get("distance_from_reference_price")
     distance_ticks = pricing_context.get("distance_ticks")
     max_distance_ticks = pricing_context.get("max_distance_ticks")
+    execution_context = dict(pricing_context.get("execution_pricing_context") or {})
+    execution_source = str(pricing_context.get("execution_price_source") or execution_context.get("execution_price_source") or "").strip().upper()
+    runtime_price_source = execution_source in {
+        "RUNTIME_DATABENTO_1M_CLOSE",
+        "RUNTIME_DATABENTO_1M_LAST_OR_CLOSE",
+        "RUNTIME_DATABENTO_CANDLE",
+    }
     checks = [
         _guardrail_check(
             "delayed_quote_available",
             passed=delayed_quote_available and pricing_context.get("reference_price") is not None,
-            blocking=True,
-            detail="The first manual paper submit/cancel test requires a delayed bid or last quote snapshot. If delayed quote data is unavailable, fail closed rather than guessing a price.",
+            blocking=not runtime_price_source,
+            detail=(
+                "Delayed broker quote is present for diagnostics; runtime market data is the execution pricing source."
+                if runtime_price_source
+                else "The first manual paper submit/cancel test requires a delayed bid or last quote snapshot. If delayed quote data is unavailable, fail closed rather than guessing a price."
+            ),
         ),
         _guardrail_check(
             "delayed_quote_fresh",
             passed=quote_age_seconds is not None and float(quote_age_seconds) <= float(pricing_context.get("max_quote_age_seconds") or 0.0),
-            blocking=True,
+            blocking=not runtime_price_source,
             detail=(
-                "The delayed quote snapshot must be fresh before preview. If the delayed quote is stale, fail closed rather than guessing a price."
+                "Delayed broker quote freshness is diagnostic because runtime market data is the execution pricing source."
+                if runtime_price_source
+                else "The delayed quote snapshot must be fresh before preview. If the delayed quote is stale, fail closed rather than guessing a price."
             ),
         ),
     ]
-    if pricing_context.get("intended_to_fill"):
-        detail = (
-            "For PAPER_FILL_TEST BUY 1 MGC 202606 LMT DAY, the chosen limit must be slightly above the delayed ask/last so it is a marketable limit intended to fill in paper, while remaining near-market rather than far away."
-            if str(pricing_context.get("pricing_label") or "").strip().upper() != _CLOSE_MARKETABLE_LIMIT_LABEL
-            else "For PAPER_CLOSE_TEST SELL 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the delayed bid/last so it is a marketable limit intended to fill in paper while remaining near-market rather than far away."
+    if runtime_price_source:
+        checks.append(
+            _guardrail_check(
+                "runtime_execution_price_source",
+                passed=pricing_context.get("reference_price") is not None,
+                blocking=True,
+                detail="Runtime/Databento market data supplied the execution-safe PAPER limit reference.",
+            )
         )
+    if pricing_context.get("intended_to_fill"):
+        pricing_label = str(pricing_context.get("pricing_label") or "").strip().upper()
+        if pricing_label == _CLOSE_MARKETABLE_LIMIT_LABEL:
+            detail = (
+                "For PAPER_CLOSE_TEST SELL 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the runtime reference so it is a marketable limit intended to fill in paper while remaining near-market rather than far away."
+                if runtime_price_source
+                else "For PAPER_CLOSE_TEST SELL 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the delayed bid/last so it is a marketable limit intended to fill in paper while remaining near-market rather than far away."
+            )
+        else:
+            detail = (
+                "For PAPER_FILL_TEST BUY 1 MGC 202606 LMT DAY, the chosen limit must be slightly above the runtime reference so it is a marketable limit intended to fill in paper, while remaining near-market rather than far away."
+                if runtime_price_source
+                else "For PAPER_FILL_TEST BUY 1 MGC 202606 LMT DAY, the chosen limit must be slightly above the delayed ask/last so it is a marketable limit intended to fill in paper, while remaining near-market rather than far away."
+            )
         checks.append(
             _guardrail_check(
                 "marketable_limit_intended_to_fill",
