@@ -93,7 +93,9 @@ RESULT_CLASSIFICATIONS = (
     "LEAK_TEST_AUTHORIZATION_IDENTITY_MISMATCH",
     "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY",
     "LEAK_TEST_PRECHECK_MARKET_DATA_STALE",
+    "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE",
     "LEAK_TEST_MARKET_DATA_MICRO_STALE_RETRYABLE",
+    "LEAK_TEST_PRECHECK_READY",
 )
 LEAK_TEST_OUTPUT_ROOT = Path("outputs") / "reports" / "track_b_paper_leak_test"
 PORTFOLIO_STATE_PATH = Path("outputs") / "reports" / "track_b_portfolio" / "latest_track_b_portfolio_state.json"
@@ -1182,6 +1184,49 @@ def _lane_market_data_micro_stale(row: Mapping[str, Any], *, safety: LeakTestSaf
     )
 
 
+def _lane_market_data_stale(row: Mapping[str, Any]) -> bool:
+    return (
+        bool(row.get("market_data_stale"))
+        or str(row.get("bar_state") or "").strip().upper() == "MARKET_DATA_STALE"
+        or str(row.get("tradability_status") or "").strip().upper() == "MARKET_DATA_STALE"
+    )
+
+
+def _lane_market_data_age_seconds(row: Mapping[str, Any]) -> float | None:
+    for key in ("observed_bar_arrival_age_seconds", "latest_bar_age_seconds", "market_data_lag_seconds"):
+        if row.get(key) is not None:
+            value = _float_value(row.get(key), -1.0)
+            if value >= 0:
+                return value
+    return None
+
+
+def _lane_required_timeframe(row: Mapping[str, Any], lane: LeakTestLanePlan) -> str | None:
+    for key in ("execution_timeframe", "artifact_timeframe", "resolved_execution_timeframe", "structural_signal_timeframe"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    text = f"{lane.lane_id} {lane.display_name}".lower()
+    for timeframe in ("1m", "3m", "5m"):
+        if timeframe in text:
+            return timeframe
+    return None
+
+
+def _market_data_stale_summary(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "lane_id": row.get("lane_id") or row.get("strategy_id"),
+        "strategy_id": row.get("strategy_id"),
+        "symbol": row.get("symbol") or row.get("instrument"),
+        "bar_state": row.get("bar_state"),
+        "tradability_status": row.get("tradability_status"),
+        "expected_completed_bar_end_ts": row.get("expected_completed_bar_end_ts"),
+        "observed_completed_bar_end_ts": row.get("observed_completed_bar_end_ts"),
+        "market_data_lag_seconds": row.get("market_data_lag_seconds"),
+        "observed_bar_arrival_age_seconds": row.get("observed_bar_arrival_age_seconds"),
+    }
+
+
 def _pre_apply_readiness_check(
     *,
     repo_root: Path,
@@ -1233,29 +1278,40 @@ def _pre_apply_readiness_check(
     lane_rows = [
         row
         for row in list(paper_readiness.get("lane_eligibility_rows") or [])
-        if isinstance(row, Mapping) and (row.get("lane_id") == lane.lane_id or row.get("strategy_id") == lane.lane_id)
+        if isinstance(row, Mapping)
+        and (row.get("lane_id") == lane.lane_id or row.get("strategy_id") in {lane.lane_id, lane.strategy_id})
     ]
+    all_lane_rows = [row for row in list(paper_readiness.get("lane_eligibility_rows") or []) if isinstance(row, Mapping)]
     lane_row = dict(lane_rows[0]) if lane_rows else {}
     market_data_stale_count = _int_value(paper_readiness.get("market_data_stale_count"))
+    selected_lane_stale = _lane_market_data_stale(lane_row)
+    selected_lane_micro_stale = selected_lane_stale and _lane_market_data_micro_stale(lane_row, safety=safety)
+    unrelated_stale_rows = [
+        dict(row)
+        for row in all_lane_rows
+        if _lane_market_data_stale(row)
+        and str(row.get("lane_id") or row.get("strategy_id") or "") not in {lane.lane_id, lane.strategy_id}
+    ]
+    selected_lane_data_fresh = bool(lane_row) and not selected_lane_stale and bool(lane_row.get("data_fresh", True))
     listener_running = bool(listener) and listener.get("live_money_eligible") is False
     supervisor_running = str(supervisor.get("classification") or "").upper().endswith("_RUNNING")
-    micro_stale = (
-        market_data_stale_count > 0
-        and listener_running
-        and supervisor_running
-        and _lane_market_data_micro_stale(lane_row, safety=safety)
-    )
     blockers: list[str] = []
+    warnings: list[str] = []
     classification = "LEAK_TEST_PRECHECK_READY"
     if required_stale:
         blockers.append("backend_readiness_artifact_stale")
         classification = "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY"
-    elif market_data_stale_count > 0 and micro_stale:
-        blockers.append("market_data_micro_stale_retryable")
+    elif not lane_row:
+        blockers.append("selected_lane_market_data_unavailable")
+        classification = "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE"
+    elif selected_lane_micro_stale and listener_running and supervisor_running:
+        blockers.append("selected_lane_market_data_micro_stale_retryable")
         classification = "LEAK_TEST_MARKET_DATA_MICRO_STALE_RETRYABLE"
-    elif market_data_stale_count > 0:
-        blockers.append("source_market_data_stale")
-        classification = "LEAK_TEST_PRECHECK_MARKET_DATA_STALE"
+    elif selected_lane_stale:
+        blockers.append("selected_lane_market_data_stale")
+        classification = "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE"
+    elif market_data_stale_count > 0 and unrelated_stale_rows:
+        warnings.append("unrelated_market_data_stale")
     if not safety.broker_reconciled or safety.classification != RECONCILED_CLASSIFICATION:
         blockers.append("broker_lifecycle_not_reconciled")
         classification = "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY"
@@ -1275,8 +1331,15 @@ def _pre_apply_readiness_check(
         "classification": classification,
         "ready": classification == "LEAK_TEST_PRECHECK_READY",
         "blockers": tuple(dict.fromkeys(blockers)),
+        "warnings": tuple(dict.fromkeys(warnings)),
         "artifacts": artifacts,
+        "market_data_scope": "SELECTED_LANE",
         "market_data_stale_count": market_data_stale_count,
+        "selected_lane_market_data_fresh": selected_lane_data_fresh,
+        "selected_lane_market_data_age_seconds": _lane_market_data_age_seconds(lane_row),
+        "selected_lane_required_timeframe": _lane_required_timeframe(lane_row, lane),
+        "unrelated_market_data_stale_count": len(unrelated_stale_rows),
+        "unrelated_market_data_stale_lanes": tuple(_market_data_stale_summary(row) for row in unrelated_stale_rows),
         "bar_authority_unavailable_count": _int_value(paper_readiness.get("bar_authority_unavailable_count")),
         "blocking_fault_count": _int_value(paper_readiness.get("blocking_fault_count")),
         "runtime_running": bool(paper_readiness.get("runtime_running")),
@@ -1542,6 +1605,7 @@ def build_single_lane_apply_report(
     runtime_command: str | None = None,
     exposure_policy: LeakTestExposurePolicy | None = None,
     dry_run: bool = False,
+    precheck_only: bool = False,
     max_wait_seconds: float = 90.0,
     force_exit_after_entry: bool = True,
     authorization_path: Path | None = None,
@@ -1667,6 +1731,17 @@ def build_single_lane_apply_report(
                 reconciliation_after_exit = reconciliation_reader(repo_root, "pre_apply_readiness_blocked")
                 exit_policy = None
                 exit_reason = None
+            elif precheck_only:
+                classification = "LEAK_TEST_PRECHECK_READY"
+                entry_result = _empty_order_result("entry", "PRECHECK_ONLY", "Precheck-only did not invoke the guarded PAPER route.")
+                mutation_performed = False
+                lifecycle_open_result = None
+                reconciliation_after_entry = None
+                exit_result = None
+                lifecycle_close_result = None
+                reconciliation_after_exit = reconciliation_reader(repo_root, "precheck_only")
+                exit_policy = None
+                exit_reason = None
             else:
                 entry_config = _bridge_config_for_apply(
                     repo_root=repo_root,
@@ -1697,7 +1772,9 @@ def build_single_lane_apply_report(
             "LEAK_TEST_AUTHORIZATION_IDENTITY_MISMATCH",
             "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY",
             "LEAK_TEST_PRECHECK_MARKET_DATA_STALE",
+            "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE",
             "LEAK_TEST_MARKET_DATA_MICRO_STALE_RETRYABLE",
+            "LEAK_TEST_PRECHECK_READY",
         }:
             pass
         elif entry_result.classification == "BLOCKED":
@@ -1852,6 +1929,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lane-id", default="")
     parser.add_argument("--max-wait-seconds", type=float, default=90.0)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--precheck-only", action="store_true")
     parser.add_argument("--write-authorization", action="store_true")
     parser.add_argument("--authorization-path", type=Path, default=None)
     parser.add_argument("--authorization-ttl-seconds", type=float, default=600.0)
@@ -1880,6 +1958,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repo_root=repo_root,
             lane_id=str(args.lane_id),
             dry_run=bool(args.dry_run),
+            precheck_only=bool(args.precheck_only),
             max_wait_seconds=float(args.max_wait_seconds),
             force_exit_after_entry=bool(args.force_exit_after_entry),
             authorization_path=args.authorization_path,
